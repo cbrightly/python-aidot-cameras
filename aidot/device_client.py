@@ -2039,6 +2039,22 @@ class DeviceClient(object):
                         or item.get("id") == self.device_id
                     ):
                         return item
+                # No exact match found — log which device IDs were present so
+                # the caller can diagnose why the lookup failed.  Falling back
+                # to data[0] will return the wrong camera's userId, which
+                # produces incorrect MQTT subscription topics and prevents
+                # getIceConfigResp (TURN credentials) from being received.
+                _found_ids = [
+                    item.get("deviceId") or item.get("devId") or item.get("id")
+                    for item in data[:10] if isinstance(item, dict)
+                ]
+                _LOGGER.warning(
+                    "batchGetDeviceUserInfo: no item matched device_id=%r"
+                    " — falling back to data[0].  Device IDs in response: %s"
+                    "  (wrong userId will cause broken MQTT topics and missing"
+                    " TURN credentials)",
+                    self.device_id, _found_ids,
+                )
                 return data[0] if data else None
         except Exception as exc:
             _LOGGER.error("async_get_device_user_info failed for %s: %s",
@@ -2580,6 +2596,16 @@ class DeviceClient(object):
                 )
                 _numeric_uid_raw = None
         numeric_user_id = str(_numeric_uid_raw) if _numeric_uid_raw is not None else None
+        if numeric_user_id is None:
+            _LOGGER.warning(
+                "async_open_webrtc_stream: no numeric userId from batchGetDeviceUserInfo"
+                " for %s — user_info_keys=%s.  Camera firmware may reject WebRTC offers"
+                " without a matching userId, and getIceConfigResp may not be routed to"
+                " us (TURN credentials unavailable, ICE will likely fail over segmented"
+                " networks).",
+                self.device_id,
+                sorted((_cam_user_info or {}).keys()),
+            )
 
         # Also extract the camera's local IP address from batchGetDeviceUserInfo if present.
         # Used to pre-seed cam_ip_q in the role-reversal ICE wait loop as a fallback when
@@ -3161,9 +3187,19 @@ class DeviceClient(object):
                 f" {[s.urls for s in _ice_servers[1:]]}"
             )
         else:
+            # No TURN credentials from getIceConfigResp.  Add the Arnoo STUN
+            # server as a secondary STUN source — the official AiDot app uses
+            # stun:3.230.182.123:3478, so adding it increases the chance that
+            # srflx candidates are gathered via the same path the camera expects.
+            # IMPORTANT: srflx (STUN) candidates alone cannot bypass network
+            # segmentation.  If the camera is on a different subnet, TURN relay
+            # credentials are required and ICE will still fail without them.
+            _arnoo_stun = "stun:3.230.182.123:3478"
+            _ice_servers.append(RTCIceServer(urls=[_arnoo_stun]))
             _status(
-                f"ICE servers: STUN={_stun_url}"
-                f"  (no TURN — getIceConfigReq timed out or no credentials)"
+                f"ICE servers: STUN={_stun_url} + {_arnoo_stun}"
+                f"  (no TURN — getIceConfigReq timed out or no credentials;"
+                f" TURN relay is required for cameras behind network segmentation)"
             )
         pc = RTCPeerConnection(
             configuration=RTCConfiguration(iceServers=_ice_servers)
