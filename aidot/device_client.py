@@ -3469,6 +3469,20 @@ class DeviceClient(object):
         _patched_mlines = [ln for ln in _offer_sdp.splitlines() if ln.startswith("m=")]
         _status("Offer m-sections (patched): %s" % " | ".join(_patched_mlines))
 
+        # Build IceServerList from available _ice_servers for inclusion in
+        # webrtcReq.  The browser always sends IceServerList; without it some
+        # camera firmware (e.g. LK.IPC.A001064) does not activate its ICE
+        # agent and never sends STUN probes, causing ICE to time out.
+        _ice_server_list = []
+        for _srv in _ice_servers:
+            _uris = _srv.urls if isinstance(_srv.urls, list) else [_srv.urls]
+            _entry: dict = {"Uris": _uris}
+            if getattr(_srv, "username", None):
+                _entry["Username"] = _srv.username
+            if getattr(_srv, "credential", None):
+                _entry["Password"] = _srv.credential
+            _ice_server_list.append(_entry)
+
         webrtc_req_payload = json.dumps({
             "method":  "webrtcReq",
             "service": "IPC",
@@ -3478,16 +3492,27 @@ class DeviceClient(object):
             "tst":     int(time.time() * 1000),
             **( {"userId": _numeric_uid_raw} if _numeric_uid_raw is not None else {} ),
             "payload": {
+                # Legacy flat fields — older firmware parses payload.peerid directly.
                 "peerid":  peer_id,
                 "devId":   device_id,
                 "offer":   {"type": pc.localDescription.type,
                              "sdp":  _offer_sdp},
                 "trackId": 0,
                 "dstAddr": user_id,
+                # Browser-style nested fields — newer firmware (e.g. A001064)
+                # parses payload.wPayload.peerid / payload.wPayload.offer and
+                # requires IceServerList to activate its ICE agent.
+                "wPayload": {
+                    "peerid": peer_id,
+                    "offer":  {"type": pc.localDescription.type,
+                                "sdp":  _offer_sdp},
+                },
+                "IceServerList": _ice_server_list,
             },
         })
         outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
-        _status(f"webrtcReq sent  peerid={peer_id}")
+        _status(f"webrtcReq sent  peerid={peer_id}"
+                f"  IceServerList×{len(_ice_server_list)}")
 
         # Re-send getDevAttrReq now that the camera is confirmed awake
         # (it responded to livePlayReq).  The first getDevAttrReq was sent
@@ -4238,6 +4263,10 @@ class DeviceClient(object):
         # the ports to ffmpeg.  Non-ICE cameras start streaming SRTP straight
         # away; any early SRTP packets landing on the reservation sockets are
         # discarded, but the camera keeps streaming once ffmpeg is bound.
+        # Minimal IceServerList for SDES path — TURN not available here but
+        # sending at least the STUN entry matches browser behaviour and may
+        # activate the camera's ICE agent (required by e.g. LK.IPC.A001064).
+        _sdes_ice_server_list = [{"Uris": ["stun:stun.l.google.com:19302"]}]
         _webrtc_req_sdes_payload = json.dumps({
             "method":  "webrtcReq",
             "service": "IPC",
@@ -4247,11 +4276,18 @@ class DeviceClient(object):
             "tst":     int(time.time() * 1000),
             **( {"userId": numeric_uid_raw} if numeric_uid_raw is not None else {} ),
             "payload": {
+                # Legacy flat fields — older firmware parses payload.peerid directly.
                 "peerid":  peer_id,
                 "devId":   device_id,
                 "offer":   {"type": "offer", "sdp": sdes_offer_sdp},
                 "trackId": 0,
                 "dstAddr": user_id,
+                # Browser-style nested fields for newer firmware.
+                "wPayload": {
+                    "peerid": peer_id,
+                    "offer":  {"type": "offer", "sdp": sdes_offer_sdp},
+                },
+                "IceServerList": _sdes_ice_server_list,
             },
         })
         outgoing_q.put_nowait((webrtc_req_topic, _webrtc_req_sdes_payload))
