@@ -3979,6 +3979,7 @@ class DeviceClient(object):
         deadline = time.monotonic() + timeout
         _last_ice_log = time.monotonic()
         _devattr_midloop_sent = False  # guard: send getDevAttrReq once at half-timeout
+        _second_ans_processed = False  # guard: process second_answer_fut candidates once
         while not connected_ev.is_set() and time.monotonic() < deadline:
             # Drain incoming ICE candidates from the camera
             while True:
@@ -4038,6 +4039,49 @@ class DeviceClient(object):
                             _LOGGER.debug(
                                 "addIceCandidate (cam-IP synth) error: %s", _synth_exc
                             )
+            # Process camera's real second webrtcResp SDP for ICE candidates.
+            # For LK.IPC.A001064 (role-reversal), the camera's counter-offer echoes
+            # our SDP (so _rr_cam_ports has OUR ports, not camera's).  The camera's
+            # real second webrtcResp (captured in second_answer_fut) typically
+            # contains the camera's actual a=candidate: host lines with its real
+            # ICE port.  Without this, aiortc probes wrong ports forever and ICE
+            # times out.
+            if not _second_ans_processed and second_answer_fut.done():
+                _second_ans_processed = True
+                try:
+                    _sa_result = second_answer_fut.result()
+                    _sa_sdp = (_sa_result or {}).get("sdp", "")
+                    if _sa_sdp:
+                        import re as _re3
+                        _sa_midx = -1
+                        _sa_smid = "0"
+                        for _sa_ln in _re3.split(r'\r?\n', _sa_sdp):
+                            if _sa_ln.startswith('m='):
+                                _sa_midx += 1
+                                _sa_smid = str(_sa_midx)
+                            elif _sa_ln.startswith('a=candidate:'):
+                                _sa_cand = _sa_ln[len('a=candidate:'):]
+                                _sa_cand = _re3.sub(
+                                    r'\s+generation\s+\d+.*$', '', _sa_cand
+                                ).strip()
+                                try:
+                                    _sa_ice = candidate_from_sdp(_sa_cand)
+                                    _sa_ice.sdpMid = _sa_smid
+                                    _sa_ice.sdpMLineIndex = max(_sa_midx, 0)
+                                    await pc.addIceCandidate(_sa_ice)
+                                    _status(
+                                        f"addIceCandidate (2nd-answer SDP):"
+                                        f" {_sa_cand[:80]}"
+                                    )
+                                except Exception as _sa_ce:
+                                    _LOGGER.debug(
+                                        "addIceCandidate (2nd-answer SDP) error: %s",
+                                        _sa_ce,
+                                    )
+                    else:
+                        _status("second_answer_fut resolved but SDP is empty")
+                except Exception as _sa_exc:
+                    _LOGGER.debug("second_answer_fut result() error: %s", _sa_exc)
             # Periodic ICE state heartbeat so we know the loop is alive.
             if time.monotonic() - _last_ice_log >= 5.0:
                 _status(
