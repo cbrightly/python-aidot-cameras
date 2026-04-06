@@ -2038,6 +2038,10 @@ class DeviceClient(object):
                         or item.get("devId") == self.device_id
                         or item.get("id") == self.device_id
                     ):
+                        _LOGGER.debug(
+                            "batchGetDeviceUserInfo matched device %s: keys=%s",
+                            self.device_id, sorted(item.keys()),
+                        )
                         return item
                 # No exact match found — log which device IDs were present so
                 # the caller can diagnose why the lookup failed.  Falling back
@@ -2798,6 +2802,17 @@ class DeviceClient(object):
                         loop.call_soon_threadsafe(
                             camera_offer_fut.set_result, cam_offer
                         )
+                # Extract IceServerList from the camera's webrtcReq echo and
+                # seed ice_config_fut so RTCPeerConnection can use TURN servers
+                # that the Arnoo broker provides alongside the SDP.  The list
+                # uses 'Uris' (capital U) and may include TURN entries with 'id'
+                # and 'token' credentials for relay allocation.
+                _req_ice_list = inner.get("IceServerList") or []
+                if _req_ice_list and not ice_config_fut.done():
+                    loop.call_soon_threadsafe(
+                        ice_config_fut.set_result,
+                        {"IceServerList": _req_ice_list},
+                    )
                 loop.call_soon_threadsafe(
                     lambda m=method, p=inner, t=topic: _status(
                         f"camera replied  topic={t}  method={m!r}  payload={p!r}"
@@ -3158,6 +3173,20 @@ class DeviceClient(object):
                         _ice_servers.append(
                             RTCIceServer(urls=_uris, username=_uid, credential=_cred)
                         )
+                # Camera IceServerList format (from webrtcReq echo):
+                # [{Uris: ['stun:...', 'turn:...'], id: '...', token: '...'}]
+                # Uses capital 'Uris' key and may carry TURN credentials.
+                for _entry in (_ice_data.get("IceServerList") or []):
+                    _uris = (_entry.get("Uris") or _entry.get("uris")
+                             or _entry.get("dnsUris") or [])
+                    if isinstance(_uris, str):
+                        _uris = [_uris]
+                    _uid  = str(_entry.get("id") or _entry.get("username") or "")
+                    _cred = str(_entry.get("token") or _entry.get("credential") or "")
+                    if _uris:
+                        _ice_servers.append(
+                            RTCIceServer(urls=_uris, username=_uid, credential=_cred)
+                        )
                 if len(_ice_servers) > 1:
                     _status(
                         f"Using TURN servers from getIceConfigResp:"
@@ -3187,19 +3216,21 @@ class DeviceClient(object):
                 f" {[s.urls for s in _ice_servers[1:]]}"
             )
         else:
-            # No TURN credentials from getIceConfigResp.  Add the Arnoo STUN
-            # server as a secondary STUN source — the official AiDot app uses
-            # stun:3.230.182.123:3478, so adding it increases the chance that
-            # srflx candidates are gathered via the same path the camera expects.
-            # IMPORTANT: srflx (STUN) candidates alone cannot bypass network
-            # segmentation.  If the camera is on a different subnet, TURN relay
-            # credentials are required and ICE will still fail without them.
+            # No TURN credentials from getIceConfigResp.  Use the same ICE
+            # server configuration the official AiDot web app uses — both the
+            # Arnoo STUN and TURN servers in a single entry, without explicit
+            # credentials.  webrtc_internals captures from the browser app show:
+            #   {"iceServers":[{"urls":["stun:3.230.182.123:3478",
+            #                          "turn:3.230.182.123:5349"]}]}
+            # and ALL candidates are relay type, confirming the TURN server is
+            # required and accepts connections from authenticated Arnoo users.
+            # Adding both URLs in one RTCIceServer entry exactly mirrors the app.
             _arnoo_stun = "stun:3.230.182.123:3478"
-            _ice_servers.append(RTCIceServer(urls=[_arnoo_stun]))
+            _arnoo_turn = "turn:3.230.182.123:5349"
+            _ice_servers.append(RTCIceServer(urls=[_arnoo_stun, _arnoo_turn]))
             _status(
-                f"ICE servers: STUN={_stun_url} + {_arnoo_stun}"
-                f"  (no TURN — getIceConfigReq timed out or no credentials;"
-                f" TURN relay is required for cameras behind network segmentation)"
+                f"ICE servers: STUN={_stun_url} + {_arnoo_stun} + {_arnoo_turn}"
+                f"  (no getIceConfigResp; using Arnoo STUN+TURN as per AiDot app)"
             )
         pc = RTCPeerConnection(
             configuration=RTCConfiguration(iceServers=_ice_servers)
