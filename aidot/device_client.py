@@ -3893,7 +3893,7 @@ class DeviceClient(object):
                     "devId":   device_id,
                     "answer":  {"type": "answer", "sdp": _rr_answer_sdp},
                     "trackId": 0,
-                    "dstAddr": user_id,
+                    "dstAddr": device_id,
                 },
             })
             outgoing_q.put_nowait((_webrtc_resp_topic, _webrtc_resp_payload))
@@ -3931,6 +3931,11 @@ class DeviceClient(object):
                     # Convert SDP attribute form (a=candidate:...) to MQTT form
                     # (candidate:...) — the leading "a=" is an SDP-layer decoration.
                     _rr_cand_str = 'candidate:' + _rr_ln.split('a=candidate:', 1)[-1]
+                    _rr_cand_obj = {
+                        "candidate":     _rr_cand_str,
+                        "sdpMid":        str(_rr_cur_midx),
+                        "sdpMLineIndex": _rr_cur_midx,
+                    }
                     outgoing_q.put_nowait((_rr_ice_topic, json.dumps({
                         "method":  "iceCandidateReq",
                         "service": "IPC",
@@ -3940,14 +3945,14 @@ class DeviceClient(object):
                         "tst":     int(time.time() * 1000),
                         **( {"userId": _numeric_uid_raw} if _numeric_uid_raw is not None else {} ),
                         "payload": {
+                            "dstAddr": device_id,
+                            "wPayload": {
+                                "peerid":    peer_id,
+                                "candidate": _rr_cand_obj,
+                            },
                             "peerid":    peer_id,
                             "devId":     device_id,
-                            "candidate": {
-                                "candidate":     _rr_cand_str,
-                                "sdpMid":        str(_rr_cur_midx),
-                                "sdpMLineIndex": _rr_cur_midx,
-                            },
-                            "dstAddr": user_id,
+                            "candidate": _rr_cand_obj,
                         },
                     })))
                     _rr_cand_count += 1
