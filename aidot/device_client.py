@@ -3187,51 +3187,48 @@ class DeviceClient(object):
                         _ice_servers.append(
                             RTCIceServer(urls=_uris, username=_uid, credential=_cred)
                         )
+                _has_turn_in_resp = any(
+                    any(u.startswith(("turn:", "turns:"))
+                        for u in (srv.urls if isinstance(srv.urls, list) else [srv.urls]))
+                    for srv in _ice_servers[1:]
+                )
                 if len(_ice_servers) > 1:
                     _status(
-                        f"Using TURN servers from getIceConfigResp:"
+                        f"ICE config from getIceConfigResp"
+                        f" ({'TURN' if _has_turn_in_resp else 'STUN-only'}):"
                         f" {[s.urls for s in _ice_servers[1:]]}"
                     )
                 else:
                     _LOGGER.warning(
-                        "getIceConfigResp received but no TURN servers extracted."
+                        "getIceConfigResp received but no ICE servers extracted."
                         " ice_data keys=%s", list(_ice_data.keys())[:20]
                     )
             except Exception as _ice_exc:
                 _LOGGER.warning(
                     "Failed to parse getIceConfigResp ICE config: %s", _ice_exc
                 )
-        # Log the ICE server configuration so every test run shows which
-        # STUN/TURN servers will be used.  STUN[0] is always the Google
-        # public STUN server used for srflx candidate discovery.  TURN
-        # servers (indices 1+) come from getIceConfigResp and are needed
-        # when the camera is behind NAT and unreachable via host candidates.
+                _has_turn_in_resp = False
+        else:
+            _has_turn_in_resp = False
+        # Always ensure a TURN relay is available.  getIceConfigResp often returns
+        # only STUN (e.g. when ice_config_fut is seeded from the camera's webrtcReq
+        # echo which carries only Google STUN).  Without relay, ICE fails for cameras
+        # that are on a different network segment or behind strict NAT.  The Arnoo
+        # TURN server (confirmed from browser webrtc_internals — ALL candidates are
+        # relay type) accepts connections without explicit per-session credentials.
+        _arnoo_stun = "stun:3.230.182.123:3478"
+        _arnoo_turn = "turn:3.230.182.123:5349"
+        if not _has_turn_in_resp:
+            _ice_servers.append(RTCIceServer(urls=[_arnoo_stun, _arnoo_turn]))
+        # Log the final ICE server configuration.
         _stun_url = (_ice_servers[0].urls[0]
                      if _ice_servers and _ice_servers[0].urls
                      else "none")
-        if len(_ice_servers) > 1:
-            _status(
-                f"ICE servers: STUN={_stun_url}"
-                f"  TURN×{len(_ice_servers)-1}:"
-                f" {[s.urls for s in _ice_servers[1:]]}"
-            )
-        else:
-            # No TURN credentials from getIceConfigResp.  Use the same ICE
-            # server configuration the official AiDot web app uses — both the
-            # Arnoo STUN and TURN servers in a single entry, without explicit
-            # credentials.  webrtc_internals captures from the browser app show:
-            #   {"iceServers":[{"urls":["stun:3.230.182.123:3478",
-            #                          "turn:3.230.182.123:5349"]}]}
-            # and ALL candidates are relay type, confirming the TURN server is
-            # required and accepts connections from authenticated Arnoo users.
-            # Adding both URLs in one RTCIceServer entry exactly mirrors the app.
-            _arnoo_stun = "stun:3.230.182.123:3478"
-            _arnoo_turn = "turn:3.230.182.123:5349"
-            _ice_servers.append(RTCIceServer(urls=[_arnoo_stun, _arnoo_turn]))
-            _status(
-                f"ICE servers: STUN={_stun_url} + {_arnoo_stun} + {_arnoo_turn}"
-                f"  (no getIceConfigResp; using Arnoo STUN+TURN as per AiDot app)"
-            )
+        _turn_entries = [s.urls for s in _ice_servers[1:]]
+        _status(
+            f"ICE servers: STUN={_stun_url}"
+            f"  relay×{len(_turn_entries)}: {_turn_entries}"
+        )
         pc = RTCPeerConnection(
             configuration=RTCConfiguration(iceServers=_ice_servers)
         )
@@ -3576,10 +3573,12 @@ class DeviceClient(object):
                 "offer":   {"type": pc.localDescription.type,
                              "sdp":  _offer_sdp},
                 "trackId": 0,
-                # dstAddr routes the offer to the target device (device ID, not user
-                # ID).  Web app omits this entirely; using device_id is safer than
-                # user_id which the camera firmware would not recognise as a device.
-                "dstAddr": device_id,
+                # dstAddr matches the SDES webrtcReq format (user_id).  The broker
+                # uses the MQTT topic path (iot/v1/s/{userId}/IPC/webrtcReq) for
+                # camera routing, not this field; but camera firmware may use it to
+                # route the webrtcResp — wrong value causes response to be silently
+                # discarded or routed to the wrong endpoint.
+                "dstAddr": user_id,
             },
         })
         outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
