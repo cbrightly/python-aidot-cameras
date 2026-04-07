@@ -2851,9 +2851,13 @@ class DeviceClient(object):
                 # Camera acting as WebRTC offerer (role reversal observed on
                 # LK.IPC.A001064).  Set camera_offer_fut so the DTLS path can
                 # respond with a proper webrtcResp answer.
-                resp_pid  = inner.get("peerid")
-                cam_offer = inner.get("offer") or {}
-                if (cam_offer.get("sdp")
+                resp_pid   = inner.get("peerid")
+                cam_offer  = inner.get("offer") or {}
+                src_addr   = inner.get("srcAddr") or msg.get("srcAddr") or ""
+                own_prefix = f"{terminal_idx}.{user_id}"
+                is_echo    = src_addr.startswith(own_prefix) or src_addr == own_prefix
+                if (not is_echo
+                        and cam_offer.get("sdp")
                         and (resp_pid == peer_id
                              or inner.get("devId") == device_id
                              or inner.get("dstAddr") == user_id)):
@@ -2861,17 +2865,16 @@ class DeviceClient(object):
                         loop.call_soon_threadsafe(
                             camera_offer_fut.set_result, cam_offer
                         )
-                # Extract IceServerList from the camera's webrtcReq echo and
-                # seed ice_config_fut so RTCPeerConnection can use TURN servers
-                # that the Arnoo broker provides alongside the SDP.  The list
-                # uses 'Uris' (capital U) and may include TURN entries with 'id'
-                # and 'token' credentials for relay allocation.
-                _req_ice_list = inner.get("IceServerList") or []
-                if _req_ice_list and not ice_config_fut.done():
-                    loop.call_soon_threadsafe(
-                        ice_config_fut.set_result,
-                        {"IceServerList": _req_ice_list},
-                    )
+                # Extract IceServerList from the camera's webrtcReq and seed
+                # ice_config_fut so RTCPeerConnection can use TURN servers.
+                # Only process when not an echo — we sent those servers ourselves.
+                if not is_echo:
+                    _req_ice_list = inner.get("IceServerList") or []
+                    if _req_ice_list and not ice_config_fut.done():
+                        loop.call_soon_threadsafe(
+                            ice_config_fut.set_result,
+                            {"IceServerList": _req_ice_list},
+                        )
                 loop.call_soon_threadsafe(
                     lambda m=method, p=inner, t=topic: _status(
                         f"camera replied  topic={t}  method={m!r}  payload={p!r}"
@@ -3260,8 +3263,10 @@ class DeviceClient(object):
                     if isinstance(_uris, str):
                         _uris = [_uris]
                     _uris = _sanitize_ice_uris(_uris)
-                    _uid  = str(_entry.get("id") or _entry.get("username") or "")
-                    _cred = str(_entry.get("token") or _entry.get("credential") or "")
+                    _uid  = str(_entry.get("id") or _entry.get("username")
+                               or _entry.get("Username") or "")
+                    _cred = str(_entry.get("token") or _entry.get("credential")
+                                or _entry.get("Password") or "")
                     if _uris:
                         _ice_servers.append(
                             RTCIceServer(urls=_uris, username=_uid, credential=_cred)
