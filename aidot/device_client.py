@@ -2431,8 +2431,8 @@ class DeviceClient(object):
                     inner = (msg.get("payload") or msg.get("data") or msg)
                     if isinstance(inner, dict) and ("app" in inner or "dev" in inner):
                         result["data"] = inner
-                    elif isinstance(inner, dict):
-                        result["data"] = msg
+                    elif isinstance(inner, dict) and "data" not in result:
+                        result["data"] = inner
                 except Exception:
                     result["data"] = raw
 
@@ -2451,6 +2451,49 @@ class DeviceClient(object):
                 device_id,
             )
         return result.get("data")
+
+    async def async_get_ice_config_http(self) -> Optional[dict]:
+        """Fetch ICE config via HTTP (primary path used by official app).
+
+        Calls ``/v29/api/webrtc/iceConfig?forceRefresh=0`` with a Bearer token.
+        Returns a dict with ``app`` / ``dev`` keys on success, or ``None``.
+        """
+        import aiohttp
+
+        region = self._region
+        token = (
+            self._user_info.get("accessToken")
+            or self._user_info.get("accesstoken")
+        )
+
+        if not region or not token:
+            _LOGGER.warning(
+                "async_get_ice_config_http: missing region or access token"
+            )
+            return None
+
+        url = (
+            f"https://prod-{region}-api.arnoo.com"
+            f"/v29/api/webrtc/iceConfig?forceRefresh=0"
+        )
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status != 200:
+                        _LOGGER.warning(
+                            "async_get_ice_config_http: HTTP %s from %s",
+                            resp.status, url,
+                        )
+                        return None
+                    return await resp.json()
+        except Exception as exc:
+            _LOGGER.warning("async_get_ice_config_http failed: %s", exc)
+            return None
 
     @staticmethod
     def generate_webrtc_peer_id(
@@ -2679,6 +2722,22 @@ class DeviceClient(object):
         webrtc_req_topic = f"iot/v1/s/{user_id}/IPC/webrtcReq"
         ice_cand_topic   = f"iot/v1/s/{user_id}/IPC/iceCandidateReq"
         live_play_topic  = f"iot/v1/s/{user_id}/IPC/livePlayReq"
+
+        # ------------------------------------------------------------------ #
+        # HTTP-first ICE config pre-fetch (matches official app behaviour)
+        # ------------------------------------------------------------------ #
+        # Try the HTTP endpoint before starting MQTT so TURN credentials are
+        # available immediately when RTCPeerConnection is created, without
+        # waiting for the 3–12 s MQTT wake cycle.  Skipped on DTLS-fallback
+        # retries (_skip_ice_config=True) and when the caller already supplied
+        # _ice_config from a prior attempt.
+        _http_ice_config: Optional[dict] = None
+        if not _skip_ice_config and _ice_config is None:
+            _http_ice_config = await self.async_get_ice_config_http()
+            if _http_ice_config:
+                _status("ICE config fetched via HTTP (primary path)")
+            else:
+                _status("HTTP ICE config unavailable — will use MQTT path")
 
         # ------------------------------------------------------------------ #
         # MQTT ↔ asyncio bridge
@@ -3001,11 +3060,17 @@ class DeviceClient(object):
             outgoing_q.put_nowait(
                 (f"iot/v1/s/{user_id}/IPC/getIceConfigReq", _ice_req_payload)
             )
-            # If the caller pre-loaded ICE config from a prior attempt, seed the
-            # future immediately so RTCPeerConnection picks up TURN servers.
-            if _ice_config is not None and not ice_config_fut.done():
-                loop.call_soon_threadsafe(ice_config_fut.set_result, _ice_config)
+            # Seed ice_config_fut from pre-loaded config (caller-supplied or
+            # HTTP pre-fetch) so RTCPeerConnection picks up TURN servers.
+            _effective_ice = _ice_config or _http_ice_config
+            if _effective_ice is not None and not ice_config_fut.done():
+                loop.call_soon_threadsafe(ice_config_fut.set_result, _effective_ice)
         else:
+            # Seed ice_config_fut from HTTP pre-fetch if available, so TURN
+            # credentials are ready before the camera even wakes.
+            _effective_ice = _ice_config or _http_ice_config
+            if _effective_ice is not None and not ice_config_fut.done():
+                loop.call_soon_threadsafe(ice_config_fut.set_result, _effective_ice)
             outgoing_q.put_nowait(
                 (f"iot/v1/s/{user_id}/IPC/getIceConfigReq", _ice_req_payload)
             )
