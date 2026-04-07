@@ -4461,7 +4461,7 @@ class DeviceClient(object):
                     "devId":   device_id,
                     "answer":  {"type": "answer", "sdp": sdes_offer_sdp},
                     "trackId": 0,
-                    "dstAddr": user_id,
+                    "dstAddr": device_id,
                 },
             })
             outgoing_q.put_nowait((_webrtc_resp_sdes_topic, _webrtc_resp_sdes))
@@ -4479,6 +4479,14 @@ class DeviceClient(object):
         # messages is safe for all camera models.
         _ice_cand_topic_sdes = f"iot/v1/s/{user_id}/IPC/iceCandidateReq"
         for _ice_mid, _ice_port in (("0", audio_port), ("1", video_port)):
+            _sdes_cand_obj = {
+                "candidate":     (
+                    f"candidate:1 1 udp 2130706431"
+                    f" {local_ip} {_ice_port} typ host"
+                ),
+                "sdpMid":        _ice_mid,
+                "sdpMLineIndex": int(_ice_mid),
+            }
             _ice_cand_msg = json.dumps({
                 "method":  "iceCandidateReq",
                 "service": "IPC",
@@ -4488,17 +4496,21 @@ class DeviceClient(object):
                 "tst":     int(time.time() * 1000),
                 **( {"userId": numeric_uid_raw} if numeric_uid_raw is not None else {} ),
                 "payload": {
+                    # dstAddr routes to the camera device, not the user account.
+                    # HAR captures confirm payload.dstAddr = deviceId on every
+                    # iceCandidateReq; using user_id causes silent drops by firmware.
+                    "dstAddr": device_id,
+                    # wPayload is the nested format required by newer firmware
+                    # (e.g. LK.IPC.A001064) that parses wPayload.candidate instead
+                    # of the flat payload.candidate field.
+                    "wPayload": {
+                        "peerid":    peer_id,
+                        "candidate": _sdes_cand_obj,
+                    },
+                    # Flat legacy fields retained for older firmware compatibility.
                     "peerid":    peer_id,
                     "devId":     device_id,
-                    "candidate": {
-                        "candidate":     (
-                            f"candidate:1 1 udp 2130706431"
-                            f" {local_ip} {_ice_port} typ host"
-                        ),
-                        "sdpMid":        _ice_mid,
-                        "sdpMLineIndex": int(_ice_mid),
-                    },
-                    "dstAddr": user_id,
+                    "candidate": _sdes_cand_obj,
                 },
             })
             outgoing_q.put_nowait((_ice_cand_topic_sdes, _ice_cand_msg))
