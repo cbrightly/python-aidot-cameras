@@ -2807,10 +2807,10 @@ class DeviceClient(object):
                 if resp_pid == peer_id:
                     pass  # exact peerid match — accept (fast path)
                 elif (inner.get("devId") == device_id
-                        or inner.get("dstAddr") == user_id):
+                        and inner.get("dstAddr") == user_id):
                     # Camera replied with its own stable session peerid rather than
-                    # echoing back our peerid.  Accept the SDP answer as long as
-                    # devId or dstAddr identifies this session unambiguously.
+                    # echoing back our peerid.  Accept only if BOTH devId and dstAddr
+                    # match — dstAddr alone matches every message to our account.
                     loop.call_soon_threadsafe(
                         lambda rp=resp_pid: _status(
                             f"webrtcResp accepted (camera peerid) —"
@@ -3190,6 +3190,16 @@ class DeviceClient(object):
         # aiortc peer connection (DTLS-SRTP path)
         # ------------------------------------------------------------------ #
         from aiortc import RTCConfiguration, RTCIceServer
+
+        def _sanitize_ice_uris(uris):
+            """Remove ?transport= from stun: URIs — invalid per RFC 7064."""
+            result = []
+            for u in uris:
+                if isinstance(u, str) and u.startswith("stun:") and "?" in u:
+                    u = u.split("?")[0]
+                result.append(u)
+            return result
+
         _ice_servers = [RTCIceServer(urls=["stun:stun.l.google.com:19302"])]
         if ice_config_fut.done():
             try:
@@ -3218,7 +3228,9 @@ class DeviceClient(object):
 
                 # Arnoo app-side list: [{uris, id, token}, ...]
                 for _entry in (_ice_data.get("app") or []):
-                    _uris = _entry.get("uris") or _entry.get("dnsUris") or []
+                    _uris = _sanitize_ice_uris(
+                        _entry.get("uris") or _entry.get("dnsUris") or []
+                    )
                     _uid  = str(_entry.get("id") or "")
                     _cred = str(_entry.get("token") or "")
                     if _uris:
@@ -3232,6 +3244,7 @@ class DeviceClient(object):
                              or _entry.get("dnsUris") or [])
                     if isinstance(_uris, str):
                         _uris = [_uris]
+                    _uris = _sanitize_ice_uris(_uris)
                     _uid  = str(_entry.get("username") or _entry.get("id") or "")
                     _cred = str(_entry.get("credential") or _entry.get("token") or "")
                     if _uris:
@@ -3246,6 +3259,7 @@ class DeviceClient(object):
                              or _entry.get("dnsUris") or [])
                     if isinstance(_uris, str):
                         _uris = [_uris]
+                    _uris = _sanitize_ice_uris(_uris)
                     _uid  = str(_entry.get("id") or _entry.get("username") or "")
                     _cred = str(_entry.get("token") or _entry.get("credential") or "")
                     if _uris:
