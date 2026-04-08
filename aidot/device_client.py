@@ -2682,6 +2682,18 @@ class DeviceClient(object):
                 sorted((self._raw_device or {}).keys()),
             )
 
+        # Extract the camera's userUuid from batchGetDeviceUserInfo.
+        # Some camera firmware (e.g. LK.IPC.A001064) publishes its real
+        # webrtcResp/webrtcReq to MQTT topics keyed by the camera's own
+        # userUuid rather than the app user's UUID.  If we don't subscribe
+        # to those topics, the camera's answer (with its actual ICE candidates)
+        # is silently dropped and we fall into the broken echo-only path.
+        _cam_user_uuid: str | None = ((_cam_user_info or {}).get("userUuid") or None)
+        _LOGGER.debug(
+            "batchGetDeviceUserInfo: device=%s  userId=%s  userUuid=%s",
+            self.device_id, _numeric_uid_raw, _cam_user_uuid,
+        )
+
         # Respect isDTLS='0': those cameras cannot do DTLS, so falling back
         # after an SDES timeout would only hang the stream (~30 s with zero
         # frames).  For cameras where isDTLS is absent or non-zero, allow DTLS
@@ -2716,6 +2728,23 @@ class DeviceClient(object):
                 f"iot/v1/cb/{numeric_user_id}/#",
                 f"lds/v1/c/{numeric_user_id}/#",
             ]
+        # Subscribe to topics keyed by the camera's userUuid (from batchGetDeviceUserInfo).
+        # Certain firmware versions route webrtcResp / webrtcReq on topics containing the
+        # camera's own UUID rather than the app user's UUID.  Without this subscription we
+        # only see broker echoes of our own messages; the camera's real answer (carrying its
+        # actual ICE candidates) is silently dropped, forcing the broken echo-only ICE path.
+        _known_ids = {user_id, device_id, numeric_user_id or ""}
+        if _cam_user_uuid and _cam_user_uuid not in _known_ids:
+            sub_topics += [
+                f"iot/v1/c/{_cam_user_uuid}/#",
+                f"iot/v1/cb/{_cam_user_uuid}/#",
+                f"lds/v1/c/{_cam_user_uuid}/#",
+            ]
+            _LOGGER.info(
+                "async_open_webrtc_stream: subscribing to camera userUuid topics"
+                " for %s (userUuid=%s)",
+                self.device_id, _cam_user_uuid,
+            )
         # iOS app telemetry (2025-03-23) confirms ALL IPC publish topics use
         # the userId path.  The broker routes to the specific camera using the
         # ``devId`` field inside the JSON payload, NOT the MQTT topic path.
