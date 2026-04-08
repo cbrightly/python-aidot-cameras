@@ -4048,6 +4048,15 @@ class DeviceClient(object):
                     "answer":  {"type": "answer", "sdp": _rr_answer_sdp},
                     "trackId": 0,
                     "dstAddr": device_id,
+                    # wPayload mirrors the webrtcReq format.  Newer firmware
+                    # (e.g. LK.IPC.A001064) parses wPayload.answer.sdp to
+                    # extract our ICE credentials and candidates; without this
+                    # the camera cannot form valid STUN binding requests and
+                    # never initiates ICE connectivity checks → ICE closed.
+                    "wPayload": {
+                        "peerid": peer_id,
+                        "answer": {"type": "answer", "sdp": _rr_answer_sdp},
+                    },
                 },
             })
             outgoing_q.put_nowait((_webrtc_resp_topic, _webrtc_resp_payload))
@@ -4623,6 +4632,15 @@ class DeviceClient(object):
                     "answer":  {"type": "answer", "sdp": sdes_offer_sdp},
                     "trackId": 0,
                     "dstAddr": device_id,
+                    # wPayload mirrors the webrtcReq format.  Newer firmware
+                    # (e.g. LK.IPC.A001064) parses wPayload.answer.sdp to
+                    # extract our ICE credentials; without this field the
+                    # camera cannot form valid STUN binding requests and never
+                    # initiates ICE connectivity checks → 0 frames.
+                    "wPayload": {
+                        "peerid": peer_id,
+                        "answer": {"type": "answer", "sdp": sdes_offer_sdp},
+                    },
                 },
             })
             outgoing_q.put_nowait((_webrtc_resp_sdes_topic, _webrtc_resp_sdes))
