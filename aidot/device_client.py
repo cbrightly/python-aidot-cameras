@@ -2729,7 +2729,8 @@ class DeviceClient(object):
         outgoing_q:       _q_mod.Queue    = _q_mod.Queue()
         answer_fut:        asyncio.Future = loop.create_future()
         second_answer_fut: asyncio.Future = loop.create_future()   # captures discarded broker-echo camera's real webrtcResp
-        camera_offer_fut:  asyncio.Future = loop.create_future()  # set when camera sends webrtcReq (role-reversal)
+        camera_offer_fut:     asyncio.Future = loop.create_future()  # set when camera sends webrtcReq (role-reversal)
+        webrtc_req_echo_fut:  asyncio.Future = loop.create_future()  # set when broker echoes our own webrtcReq back (is_echo=True)
         ice_config_fut:    asyncio.Future = loop.create_future()  # TURN credentials from getIceConfigResp
         ice_q:            asyncio.Queue   = asyncio.Queue()
         cam_ip_q:         asyncio.Queue   = asyncio.Queue()  # camera IP from setDevAttrNotif
@@ -2856,8 +2857,14 @@ class DeviceClient(object):
                 src_addr   = inner.get("srcAddr") or msg.get("srcAddr") or ""
                 own_prefix = f"{terminal_idx}.{user_id}"
                 is_echo    = src_addr.startswith(own_prefix) or src_addr == own_prefix
-                if (not is_echo
-                        and cam_offer.get("sdp")
+                if is_echo:
+                    # Broker echoes our own webrtcReq back with our srcAddr.
+                    # Signal the SDES path so it can send webrtcResp to the camera.
+                    if not webrtc_req_echo_fut.done():
+                        loop.call_soon_threadsafe(
+                            webrtc_req_echo_fut.set_result, cam_offer
+                        )
+                elif (cam_offer.get("sdp")
                         and (resp_pid == peer_id
                              or inner.get("devId") == device_id
                              or inner.get("dstAddr") == user_id)):
@@ -3150,6 +3157,7 @@ class DeviceClient(object):
                     outgoing_q=outgoing_q,
                     answer_fut=answer_fut,
                     camera_offer_fut=camera_offer_fut,
+                    webrtc_req_echo_fut=webrtc_req_echo_fut,
                     loop=loop,
                     timeout=timeout,
                     output_path=output_path,
@@ -4302,6 +4310,7 @@ class DeviceClient(object):
         outgoing_q,
         answer_fut,
         camera_offer_fut,
+        webrtc_req_echo_fut=None,
         loop,
         timeout: float,
         output_path: Optional[str],
@@ -4523,10 +4532,16 @@ class DeviceClient(object):
         # It will not start streaming until it receives a webrtcResp from us.
         # Check for the echo within 2 s so the webrtcResp is sent while our
         # reservation sockets are still open (camera's ICE may arrive next).
+        #
+        # NOTE: webrtc_req_echo_fut (not camera_offer_fut) is the correct future
+        # here.  camera_offer_fut is only set for non-echo (role-reversal) messages
+        # where is_echo=False.  The broker echo carries our own srcAddr prefix so
+        # is_echo=True, which is exactly what webrtc_req_echo_fut signals.
+        _echo_fut = webrtc_req_echo_fut if webrtc_req_echo_fut is not None else camera_offer_fut
         _cam_echo_received = False
         try:
             await _asyncio.wait_for(
-                _asyncio.shield(camera_offer_fut), timeout=2.0
+                _asyncio.shield(_echo_fut), timeout=2.0
             )
             _cam_echo_received = True
             _status("camera webrtcReq echo received — sending webrtcResp to trigger streaming")
@@ -4785,7 +4800,13 @@ class DeviceClient(object):
             outgoing_q.put_nowait(None)   # stop MQTT thread
             raise DeviceClient._SdesNoAnswerError()
 
-        dest = output_path or "/dev/null"
+        if output_path:
+            dest_args = ["-c", "copy", output_path]
+        else:
+            # -c copy /dev/null fails: "Unable to find a suitable output format
+            # for '/dev/null'".  Use the null muxer instead so ffmpeg stays
+            # alive and receives the SRTP stream without writing anything.
+            dest_args = ["-f", "null", "/dev/null"]
         cmd = [
             "ffmpeg", "-y",
             "-loglevel", "warning",
@@ -4797,8 +4818,7 @@ class DeviceClient(object):
             "-analyzeduration", "100000000",
             "-probesize", "10000000",
             "-i", sdp_path,
-            "-c", "copy",
-            dest,
+            *dest_args,
         ]
         _LOGGER.info("SDES ffmpeg cmd: %s", " ".join(cmd))
         try:
