@@ -3770,14 +3770,48 @@ class DeviceClient(object):
         # Some firmware (e.g. LK.IPC.A001064) responds to our offer by sending back
         # its own webrtcReq (counter-offer) instead of a webrtcResp answer.
         #
+        # Also include webrtc_req_echo_fut: for "echo-only" cameras (e.g.
+        # LK.IPC.A001064) the broker echo of our webrtcReq is the camera's ONLY
+        # signal — no separate webrtcResp or non-echo webrtcReq ever arrives.
+        # If only the echo fires we do a brief secondary wait; if still no real
+        # response we synthesise camera_offer_fut from the echo SDP so the
+        # existing role-reversal path can proceed (it already handles mirrored
+        # ICE credentials — see comment below at "Observed behaviour").
+        #
         # Note: _patch_answer_mid2_for_aiortc is no longer needed.  With 3-section
         # SDP the camera's answer mid:1=H264 video and mid:2=datachannel — aiortc
         # accepts both without patching.
         _rr_done, _rr_pending = await asyncio.wait(
-            {answer_fut, camera_offer_fut},
+            {answer_fut, camera_offer_fut, webrtc_req_echo_fut},
             timeout=timeout,
             return_when=asyncio.FIRST_COMPLETED,
         )
+
+        # Echo-reversal path: echo arrived but no proper response yet.
+        # Give the camera a brief secondary window to send its real reply.
+        if (webrtc_req_echo_fut in _rr_done
+                and answer_fut not in _rr_done
+                and camera_offer_fut not in _rr_done):
+            _status("webrtcReq echo received — waiting briefly for camera webrtcResp...")
+            _rr_done2, _rr_pending2 = await asyncio.wait(
+                _rr_pending,   # {answer_fut, camera_offer_fut}
+                timeout=6.0,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if _rr_done2:
+                # Real response arrived — proceed normally
+                _rr_done, _rr_pending = _rr_done2, _rr_pending2
+            else:
+                # Echo-only camera (e.g. LK.IPC.A001064): use echo SDP as
+                # the camera's counter-offer so the role-reversal path fires.
+                _status(
+                    "echo-reversal: no real webrtcResp after echo"
+                    " — using echo SDP as camera offer (role-reversal)"
+                )
+                camera_offer_fut.set_result(webrtc_req_echo_fut.result())
+                _rr_done    = {camera_offer_fut}
+                _rr_pending = _rr_pending2   # answer_fut cancelled below; camera_offer_fut cancel is no-op
+
         for _f in _rr_pending:
             _f.cancel()
 
