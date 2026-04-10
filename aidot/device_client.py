@@ -4967,27 +4967,33 @@ class DeviceClient(object):
                 except OSError:
                     continue
                 if (len(_pkt) >= 20
-                        and _pkt[:2] == b'\x00\x01'
                         and _pkt[4:8] == _STUN_MAGIC):
+                    # Any STUN packet (Binding Request, Success/Error Response)
+                    # identified by the magic cookie.  The NAT hole-punch to the
+                    # TURN server elicits a STUN Error Response (first 2 bytes
+                    # b'\x01\x11') which the old check (b'\x00\x01' only) would
+                    # misclassify as SRTP, causing the window to exit immediately.
                     _stun_seen = True
-                    _tid = _pkt[8:20]
-                    try:
-                        _ip_parts = [int(x) for x in _src[0].split('.')]
-                        _xip = bytes(
-                            a ^ b for a, b in zip(
-                                _struct.pack('!4B', *_ip_parts), _STUN_MAGIC
+                    if _pkt[:2] == b'\x00\x01':
+                        # Binding Request — reply with Binding Success Response
+                        _tid = _pkt[8:20]
+                        try:
+                            _ip_parts = [int(x) for x in _src[0].split('.')]
+                            _xip = bytes(
+                                a ^ b for a, b in zip(
+                                    _struct.pack('!4B', *_ip_parts), _STUN_MAGIC
+                                )
                             )
-                        )
-                        _xport = (_src[1] ^ 0x2112) & 0xFFFF
-                        _xma = (b'\x00\x20\x00\x08\x00\x01'
-                                + _struct.pack('!H', _xport) + _xip)
-                        _resp = (b'\x01\x01'
-                                 + _struct.pack('!H', len(_xma))
-                                 + _STUN_MAGIC + _tid + _xma)
-                        _sock.sendto(_resp, _src)
-                        _stun_count += 1
-                    except Exception:
-                        pass
+                            _xport = (_src[1] ^ 0x2112) & 0xFFFF
+                            _xma = (b'\x00\x20\x00\x08\x00\x01'
+                                    + _struct.pack('!H', _xport) + _xip)
+                            _resp = (b'\x01\x01'
+                                     + _struct.pack('!H', len(_xma))
+                                     + _STUN_MAGIC + _tid + _xma)
+                            _sock.sendto(_resp, _src)
+                            _stun_count += 1
+                        except Exception:
+                            pass
                 else:
                     # Non-STUN packet = SRTP arriving — ICE is done, hand off to ffmpeg now
                     _srtp_detected = True
