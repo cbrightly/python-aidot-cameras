@@ -4705,12 +4705,18 @@ class DeviceClient(object):
         # ffmpeg_sdp uses only audio_port/video_port and srtp_key_* — all known
         # from the allocation step above; the camera's webrtcResp is not needed.
         # c=IN IP4 0.0.0.0 tells ffmpeg to bind locally (listen mode).
+        # Use RTP/SAVP (plain SRTP, RFC 3711) rather than RTP/SAVPF for the
+        # ffmpeg receiver SDP.  ffmpeg's SDP demuxer does not recognise the
+        # SAVPF feedback profile (RFC 4585) as a valid SRTP profile and fails
+        # with "Could not find codec parameters" when SAVPF is used.  The
+        # camera-facing offer SDP still uses RTP/SAVPF as required by the
+        # firmware; only this local file (read by ffmpeg) needs SAVP.
         ffmpeg_sdp = (
             "v=0\r\n"
             f"o=- {ts} {ts} IN IP4 0.0.0.0\r\n"
             "s=aidot-sdes-rx\r\n"
             "t=0 0\r\n"
-            f"m=audio {audio_port} RTP/SAVPF 0 8\r\n"
+            f"m=audio {audio_port} RTP/SAVP 0 8\r\n"
             "c=IN IP4 0.0.0.0\r\n"
             f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
             "a=rtpmap:0 PCMU/8000\r\n"
@@ -4718,7 +4724,7 @@ class DeviceClient(object):
             # a=rtcp-mux prevents ffmpeg from trying to bind audio_port+1 for
             # RTCP (a separate socket that is never needed here).
             "a=rtcp-mux\r\n"
-            f"m=video {video_port} RTP/SAVPF 96 97\r\n"
+            f"m=video {video_port} RTP/SAVP 96 97\r\n"
             "c=IN IP4 0.0.0.0\r\n"
             f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
             "a=rtpmap:96 H264/90000\r\n"
@@ -5203,6 +5209,12 @@ class DeviceClient(object):
             raise DeviceClient._SdesNoAnswerError()
 
         if output_path:
+            # Ensure the output directory exists before ffmpeg tries to open the
+            # file.  ffmpeg fails with "No such file or directory" if the parent
+            # directory is missing.
+            out_dir = os.path.dirname(output_path)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
             dest_args = ["-c", "copy", output_path]
         else:
             # -c copy /dev/null fails: "Unable to find a suitable output format
