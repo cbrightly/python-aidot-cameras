@@ -2775,6 +2775,7 @@ class DeviceClient(object):
         cam_ip_q:         asyncio.Queue   = asyncio.Queue()  # camera IP from setDevAttrNotif
         camera_ready_ev:  asyncio.Event   = asyncio.Event()  # set when camera is on MQTT
         liveplay_echo_ev: asyncio.Event   = asyncio.Event()  # set when livePlayReq echo arrives
+        camera_reconnect_ev: asyncio.Event = asyncio.Event() # set when camera sends device/connect
 
         # Gate: block asyncio until MQTT is connected + subscribed
         import threading as _threading
@@ -3012,6 +3013,18 @@ class DeviceClient(object):
                     )
                     if msg and not ice_config_fut.done():
                         loop.call_soon_threadsafe(ice_config_fut.set_result, msg)
+            elif method == "connect":
+                # Camera re-connected (quickConn cycle after WebRTC signaling).
+                # Signal the ICE wait loop so it can re-send webrtcResp + ICE
+                # candidates — the camera may have reset its WebRTC session state
+                # and needs fresh signaling to continue ICE connectivity checks.
+                if inner.get("devId") == device_id:
+                    loop.call_soon_threadsafe(camera_reconnect_ev.set)
+                loop.call_soon_threadsafe(
+                    lambda m=method, p=inner, t=topic: _status(
+                        f"camera replied  topic={t}  method={m!r}  payload={p!r}"
+                    )
+                )
             else:
                 loop.call_soon_threadsafe(
                     lambda m=method, p=inner, t=topic: _status(
@@ -3280,17 +3293,26 @@ class DeviceClient(object):
                     return d
                 _ice_data = _unwrap(_ice_data)
 
-                # Arnoo app-side list: [{uris, id, token}, ...]
-                for _entry in (_ice_data.get("app") or []):
-                    _uris = _sanitize_ice_uris(
-                        _entry.get("uris") or _entry.get("dnsUris") or []
-                    )
-                    _uid  = str(_entry.get("id") or "")
-                    _cred = str(_entry.get("token") or "")
-                    if _uris:
-                        _ice_servers.append(
-                            RTCIceServer(urls=_uris, username=_uid, credential=_cred)
+                # Arnoo app/dev lists: [{uris/Uris/dnsUris, id/Username, token/Password}, ...]
+                # app = user-level TURN entries; dev = per-device TURN entries.
+                # The camera needs its device-specific credential (dev entry, Username=deviceId)
+                # to allocate a TURN relay when direct / srflx connectivity is unavailable.
+                # Both sections must be extracted and included in the webrtcReq IceServerList
+                # so the camera receives those credentials and can initiate ICE via TURN.
+                for _sect in ("app", "dev"):
+                    for _entry in (_ice_data.get(_sect) or []):
+                        _uris = _sanitize_ice_uris(
+                            _entry.get("uris") or _entry.get("Uris")
+                            or _entry.get("dnsUris") or []
                         )
+                        _uid  = str(_entry.get("id") or _entry.get("Username")
+                                    or _entry.get("username") or "")
+                        _cred = str(_entry.get("token") or _entry.get("Password")
+                                    or _entry.get("credential") or "")
+                        if _uris:
+                            _ice_servers.append(
+                                RTCIceServer(urls=_uris, username=_uid, credential=_cred)
+                            )
                 # Standard W3C / plain iceServers list
                 for _entry in (_ice_data.get("iceServers")
                                or _ice_data.get("turnServers") or []):
@@ -3872,6 +3894,13 @@ class DeviceClient(object):
         # Populated in the role-reversal path below; consumed in the ICE wait loop.
         _rr_cam_ports: list = []  # list of (sdpMid, sdpMLineIndex, port)
 
+        # Stored webrtcResp + ICE candidate payloads for reconnect re-send.
+        # Set in the role-reversal block; consumed in the ICE wait loop when the
+        # camera sends device/connect (quickConn reconnect) during ICE checking.
+        _rr_webrtc_resp_topic:   str  = ""
+        _rr_webrtc_resp_payload: str  = ""
+        _rr_ice_payloads:        list = []  # list of (topic, json_str) tuples
+
         if camera_offer_fut in _rr_done and answer_fut not in _rr_done:
             # ---- ROLE REVERSAL path (e.g. LK.IPC.A001064) ---------------------- #
             # Camera sent webrtcReq (its offer) instead of webrtcResp.
@@ -4100,6 +4129,9 @@ class DeviceClient(object):
                 },
             })
             outgoing_q.put_nowait((_webrtc_resp_topic, _webrtc_resp_payload))
+            # Save for potential reconnect re-send in the ICE wait loop.
+            _rr_webrtc_resp_topic   = _webrtc_resp_topic
+            _rr_webrtc_resp_payload = _webrtc_resp_payload
             _status(f"webrtcResp sent (role-reversal answer, setup={_rr_setup_val})")
 
             # Re-announce ALL our gathered ICE candidates (host + srflx/prflx) after
@@ -4139,7 +4171,7 @@ class DeviceClient(object):
                         "sdpMid":        str(_rr_cur_midx),
                         "sdpMLineIndex": _rr_cur_midx,
                     }
-                    outgoing_q.put_nowait((_rr_ice_topic, json.dumps({
+                    _rr_ice_json = json.dumps({
                         "method":  "iceCandidateReq",
                         "service": "IPC",
                         "devId":   device_id,
@@ -4157,7 +4189,9 @@ class DeviceClient(object):
                             "devId":     device_id,
                             "candidate": _rr_cand_obj,
                         },
-                    })))
+                    })
+                    outgoing_q.put_nowait((_rr_ice_topic, _rr_ice_json))
+                    _rr_ice_payloads.append((_rr_ice_topic, _rr_ice_json))
                     _rr_cand_count += 1
             _status(
                 f"iceCandidateReq sent (role-reversal, post-webrtcResp,"
@@ -4236,6 +4270,7 @@ class DeviceClient(object):
         _last_ice_log = time.monotonic()
         _devattr_midloop_sent = False  # guard: send getDevAttrReq once at half-timeout
         _second_ans_processed = False  # guard: process second_answer_fut candidates once
+        _reconnect_resent     = False  # guard: re-send webrtcResp+ICE once on reconnect
         while not connected_ev.is_set() and time.monotonic() < deadline:
             # Drain incoming ICE candidates from the camera
             while True:
@@ -4370,6 +4405,25 @@ class DeviceClient(object):
                 ))
                 _devattr_midloop_sent = True
                 _status("getDevAttrReq re-sent (mid-loop, waiting for camera IP)")
+            # Re-send webrtcResp + ICE candidates if camera reconnected during ICE.
+            # LK.IPC.A001064 performs a quickConn MQTT reconnect after receiving
+            # our signaling; the reconnect resets its WebRTC session so we must
+            # re-deliver the answer and candidates after the camera comes back online.
+            # Guard: only for echo-only role-reversal cameras (_rr_webrtc_resp_payload
+            # is empty for all other paths) and at most once per session.
+            if (camera_reconnect_ev.is_set()
+                    and not _reconnect_resent
+                    and _rr_webrtc_resp_payload):
+                _reconnect_resent = True
+                camera_reconnect_ev.clear()
+                _status(
+                    "camera reconnected during ICE"
+                    " — re-sending webrtcResp + ICE candidates"
+                )
+                await asyncio.sleep(0.3)  # let camera stabilize before re-send
+                outgoing_q.put_nowait((_rr_webrtc_resp_topic, _rr_webrtc_resp_payload))
+                for _rr_ice_p in _rr_ice_payloads:
+                    outgoing_q.put_nowait(_rr_ice_p)
             await asyncio.sleep(0.1)
 
         if pc.connectionState not in ("connected", "completed"):
