@@ -3206,6 +3206,10 @@ class DeviceClient(object):
                     numeric_uid_raw=_numeric_uid_raw,
                     dtls_fallback_ok=_dtls_fallback_ok,
                     second_answer_fut=second_answer_fut,
+                    ice_config=(
+                        ice_config_fut.result() if ice_config_fut.done()
+                        else _http_ice_config
+                    ),
                 )
             except DeviceClient._SdesNoAnswerError:
                 # Camera reported enableSdes='1' but did not respond to our SDES
@@ -4428,6 +4432,7 @@ class DeviceClient(object):
         numeric_uid_raw=None,
         dtls_fallback_ok: bool = True,
         second_answer_fut=None,
+        ice_config: "Optional[dict]" = None,
     ) -> "SdesSession":
         """SDES-SRTP streaming path using a hand-crafted SDP offer and ffmpeg.
 
@@ -4467,6 +4472,65 @@ class DeviceClient(object):
         with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as _s:
             _s.connect(("8.8.8.8", 80))
             local_ip = _s.getsockname()[0]
+
+        # Determine server-reflexive (public) IP from cached getServerUrlConfig.
+        # The Arnoo broker records our outbound IP in the "ip" field; this is the
+        # same address that aiortc discovers via STUN and exposes as srflx
+        # candidates.  Adding it to the SDES offer lets cameras that cannot route
+        # to our LAN IP (WAN cameras, different subnet) send STUN probes to our
+        # public address, which the router NATs to our reservation sockets.
+        _public_ip: Optional[str] = None
+        try:
+            _raw_srv = (self._smarthome_auth or {}).get("raw") or {}
+            _cand_pub = str(_raw_srv.get("ip") or "").strip()
+            if _cand_pub and _cand_pub != local_ip:
+                # Accept any valid IPv4 that differs from our LAN address.
+                _p = _cand_pub.split(".")
+                if len(_p) == 4 and all(x.isdigit() and 0 <= int(x) <= 255 for x in _p):
+                    _public_ip = _cand_pub
+        except Exception:
+            pass
+
+        # Build TURN server list for _sdes_ice_server_list from ice_config if
+        # available.  The camera's ICE agent uses these to gather its own relay
+        # candidates; a relay path is the last resort when direct and srflx
+        # connectivity both fail (e.g. symmetric NAT or strict firewall).
+        _sdes_turn_entries: list = []
+        try:
+            if ice_config:
+                # Unwrap common envelope shapes (mirrors DTLS path normalisation).
+                _ic = ice_config
+                for _k in ("data", "payload", "result"):
+                    if isinstance(_ic, dict) and _k in _ic and isinstance(_ic[_k], dict):
+                        _ic = _ic[_k]
+                        break
+                # Arnoo format: {app: [{uris, id, token}], dev: [...]}
+                for _sect in ("app", "dev"):
+                    for _entry in (_ic.get(_sect) or []):
+                        _uris = _entry.get("uris") or _entry.get("Uris") or []
+                        _user = (_entry.get("id") or _entry.get("Username")
+                                 or _entry.get("username") or "")
+                        _cred = (_entry.get("token") or _entry.get("Password")
+                                 or _entry.get("password") or "")
+                        if any("turn:" in str(u) for u in _uris):
+                            _sdes_turn_entries.append({
+                                "Uris":     _uris,
+                                "Username": _user,
+                                "Password": str(_cred),
+                            })
+                # W3C format: {iceServers: [{urls, username, credential}]}
+                for _entry in (_ic.get("iceServers") or []):
+                    _uris = _entry.get("urls") or _entry.get("uris") or []
+                    if isinstance(_uris, str):
+                        _uris = [_uris]
+                    if any("turn:" in str(u) for u in _uris):
+                        _sdes_turn_entries.append({
+                            "Uris":     _uris,
+                            "Username": _entry.get("username") or "",
+                            "Password": _entry.get("credential") or "",
+                        })
+        except Exception:
+            pass
 
         # --- Build SDES SDP offer ------------------------------------------ #
         # AES_CM_128_HMAC_SHA1_80: 16-byte key + 14-byte salt = 30 bytes.
@@ -4508,8 +4572,16 @@ class DeviceClient(object):
             f"a=ice-ufrag:{_ufrag_a}\r\n"
             f"a=ice-pwd:{_pwd_a}\r\n"
             f"a=candidate:1 1 udp 2130706431 {local_ip} {audio_port} typ host\r\n"
+            # srflx (server-reflexive / public IP) candidate — allows cameras
+            # on WAN or a different subnet to probe us at our outward-facing IP.
+            # Priority 1694498815 = standard ICE srflx priority for UDP+IPv4.
+            + (
+                f"a=candidate:2 1 udp 1694498815 {_public_ip} {audio_port}"
+                f" typ srflx raddr {local_ip} rport {audio_port}\r\n"
+                if _public_ip else ""
+            )
             # video m-section
-            f"m=video {video_port} RTP/SAVPF 96 97\r\n"
+            + f"m=video {video_port} RTP/SAVPF 96 97\r\n"
             f"c=IN IP4 {local_ip}\r\n"
             "a=recvonly\r\n"
             "a=mid:1\r\n"
@@ -4525,11 +4597,17 @@ class DeviceClient(object):
             f"a=ice-ufrag:{_ufrag_v}\r\n"
             f"a=ice-pwd:{_pwd_v}\r\n"
             f"a=candidate:1 1 udp 2130706431 {local_ip} {video_port} typ host\r\n"
+            + (
+                f"a=candidate:2 1 udp 1694498815 {_public_ip} {video_port}"
+                f" typ srflx raddr {local_ip} rport {video_port}\r\n"
+                if _public_ip else ""
+            )
         )
 
         _status(
             f"SDP offer (SDES)  local={local_ip}"
-            f"  audio={audio_port}  video={video_port}"
+            + (f"  srflx={_public_ip}" if _public_ip else "")
+            + f"  audio={audio_port}  video={video_port}"
         )
 
         # Send livePlayReq before the SDP offer to arm the camera's stream.
@@ -4605,10 +4683,12 @@ class DeviceClient(object):
         # the ports to ffmpeg.  Non-ICE cameras start streaming SRTP straight
         # away; any early SRTP packets landing on the reservation sockets are
         # discarded, but the camera keeps streaming once ffmpeg is bound.
-        # Minimal IceServerList for SDES path — TURN not available here but
-        # sending at least the STUN entry matches browser behaviour and may
-        # activate the camera's ICE agent (required by e.g. LK.IPC.A001064).
+        # IceServerList for SDES path.  Always include STUN so the camera's ICE
+        # agent can gather its own srflx candidate.  Append any TURN entries from
+        # ice_config so the camera can allocate a relay and probe our srflx/host
+        # candidates when direct connectivity fails (e.g. symmetric NAT).
         _sdes_ice_server_list = [{"Uris": ["stun:stun.l.google.com:19302"]}]
+        _sdes_ice_server_list.extend(_sdes_turn_entries)
         _webrtc_req_sdes_payload = json.dumps({
             "method":  "webrtcReq",
             "service": "IPC",
@@ -4693,16 +4773,15 @@ class DeviceClient(object):
         # and begin streaming immediately from the SDP exchange, so sending these
         # messages is safe for all camera models.
         _ice_cand_topic_sdes = f"iot/v1/s/{user_id}/IPC/iceCandidateReq"
-        for _ice_mid, _ice_port in (("0", audio_port), ("1", video_port)):
-            _sdes_cand_obj = {
-                "candidate":     (
-                    f"candidate:1 1 udp 2130706431"
-                    f" {local_ip} {_ice_port} typ host"
-                ),
-                "sdpMid":        _ice_mid,
-                "sdpMLineIndex": int(_ice_mid),
+
+        def _send_sdes_ice_cand(cand_str: str, mid: str) -> None:
+            """Publish a single trickle-ICE candidate via MQTT."""
+            _cand_obj = {
+                "candidate":     cand_str,
+                "sdpMid":        mid,
+                "sdpMLineIndex": int(mid),
             }
-            _ice_cand_msg = json.dumps({
+            _msg = json.dumps({
                 "method":  "iceCandidateReq",
                 "service": "IPC",
                 "devId":   device_id,
@@ -4720,17 +4799,34 @@ class DeviceClient(object):
                     # of the flat payload.candidate field.
                     "wPayload": {
                         "peerid":    peer_id,
-                        "candidate": _sdes_cand_obj,
+                        "candidate": _cand_obj,
                     },
                     # Flat legacy fields retained for older firmware compatibility.
                     "peerid":    peer_id,
                     "devId":     device_id,
-                    "candidate": _sdes_cand_obj,
+                    "candidate": _cand_obj,
                 },
             })
-            outgoing_q.put_nowait((_ice_cand_topic_sdes, _ice_cand_msg))
+            outgoing_q.put_nowait((_ice_cand_topic_sdes, _msg))
+
+        for _ice_mid, _ice_port in (("0", audio_port), ("1", video_port)):
+            # Host candidate (LAN IP)
+            _send_sdes_ice_cand(
+                f"candidate:1 1 udp 2130706431 {local_ip} {_ice_port} typ host",
+                _ice_mid,
+            )
+            # srflx candidate (public IP) — announced separately so the camera
+            # triggers a new ICE check to our public address even if it already
+            # processed the SDP host candidate.
+            if _public_ip:
+                _send_sdes_ice_cand(
+                    f"candidate:2 1 udp 1694498815 {_public_ip} {_ice_port}"
+                    f" typ srflx raddr {local_ip} rport {_ice_port}",
+                    _ice_mid,
+                )
         _status(
             f"iceCandidateReq sent  audio={audio_port}  video={video_port}"
+            + (f"  srflx={_public_ip}" if _public_ip else "")
         )
 
         # --- ICE STUN responder (runs while reservation sockets are still open) #
