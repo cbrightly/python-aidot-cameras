@@ -3205,7 +3205,6 @@ class DeviceClient(object):
                     peer_id=peer_id,
                     user_id=user_id,
                     device_id=device_id,
-                    terminal_idx=terminal_idx,
                     outgoing_q=outgoing_q,
                     answer_fut=answer_fut,
                     camera_offer_fut=camera_offer_fut,
@@ -4473,7 +4472,6 @@ class DeviceClient(object):
         peer_id: str,
         user_id: str,
         device_id: str,
-        terminal_idx: str,
         outgoing_q,
         answer_fut,
         camera_offer_fut,
@@ -5073,9 +5071,10 @@ class DeviceClient(object):
                     except OSError:
                         continue
                     if (len(_pkt_r) >= 20
-                            and _pkt_r[:2] == b'\x00\x01'
                             and _pkt_r[4:8] == _STUN_MAGIC):
                         _stun_seen = True
+                        if _pkt_r[:2] != b'\x00\x01':
+                            continue
                         _tid_r = _pkt_r[8:20]
                         try:
                             _ip_r = [int(x) for x in _src_r[0].split('.')]
@@ -5194,15 +5193,16 @@ class DeviceClient(object):
         # despite reporting enableSdes='1' in its device properties.
         # Detect this by checking: echo-reversal received (_cam_echo_received)
         # AND no STUN in the ICE window AND no early SRTP.
-        # Note: dtls_fallback_ok is NOT checked here.  _cam_echo_received=True
+        # dtls_fallback_ok is also checked: _cam_echo_received=True
         # only for cameras that mirror our webrtcReq (e.g. A001064); non-echo
         # SDES cameras (e.g. A001513) have _cam_echo_received=False and are
-        # never affected.  For echo-reversal cameras that send no STUN/SRTP the
-        # SDES path is definitively broken so the isDTLS='0' property (which is
-        # unreliable for A001064) should not prevent the DTLS retry.
+        # never affected.  For isDTLS=0 cameras skip this fallback entirely —
+        # DTLS is not supported so the SDES path must proceed to ffmpeg even
+        # without a confirmed STUN/SRTP handshake in the ICE window.
         if (_cam_echo_received
                 and _stun_count == 0
-                and not _srtp_detected):
+                and not _srtp_detected
+                and dtls_fallback_ok):
             _status(
                 "echo-reversal camera: no STUN or SRTP received in ICE window"
                 " — camera likely requires DTLS; falling back"
