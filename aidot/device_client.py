@@ -1633,6 +1633,16 @@ class DeviceClient(object):
                 )
                 _LOGGER.warning("getServerUrlConfig data=%s", data)
 
+            # Always forward the broker-observed public IP into _smarthome_auth.raw
+            # so _open_sdes_stream can build srflx candidates for WAN cameras.
+            # When Strategy 1 auth (mqttPassword in login_info) fires first it sets
+            # raw={"source": ...} with no "ip" key; without this patch _public_ip
+            # stays None, no srflx candidate is advertised, and cameras on WAN
+            # (or a different subnet) can never reach our reservation sockets.
+            _raw_ref = (self._smarthome_auth or {}).get("raw")
+            if data.get("ip") and isinstance(_raw_ref, dict) and "ip" not in _raw_ref:
+                _raw_ref["ip"] = data["ip"]
+
             return self._mqtt_url
 
         except Exception as exc:
