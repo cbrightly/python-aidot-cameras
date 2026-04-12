@@ -4805,6 +4805,23 @@ class DeviceClient(object):
             )
             _cam_echo_received = True
             _status("camera webrtcReq echo received — sending webrtcResp to trigger streaming")
+            # Seed _sdes_turn_entries from the echo's IceServerList if the HTTP
+            # ice_config fetch returned nothing (empty list).  The echo carries
+            # our userId TURN credentials — extract them so the hole-punch and
+            # any future relay allocation use the correct server/port.
+            if not _sdes_turn_entries:
+                try:
+                    _echo_payload = _echo_fut.result() if (_echo_fut is not None and _echo_fut.done()) else {}
+                    for _e in (_echo_payload.get("IceServerList") or []):
+                        _e_uris = _e.get("Uris") or []
+                        if any("turn:" in str(u) for u in _e_uris):
+                            _sdes_turn_entries.append({
+                                "Uris":     _e_uris,
+                                "Username": _e.get("Username") or "",
+                                "Password": str(_e.get("Password") or ""),
+                            })
+                except Exception:
+                    pass
             _webrtc_resp_sdes_topic = f"iot/v1/s/{user_id}/IPC/webrtcResp"
             _webrtc_resp_sdes = json.dumps({
                 "method":  "webrtcResp",
@@ -4912,8 +4929,12 @@ class DeviceClient(object):
         try:
             if _sdes_turn_entries:
                 import re as _re_hp
-                _hp_uri = str(
-                    (_sdes_turn_entries[0].get("Uris") or [""])[0]
+                # Find the first TURN URI in the entry (not just Uris[0], which
+                # may be a stun: URI that the regex won't match).
+                _hp_uri = next(
+                    (str(u) for u in (_sdes_turn_entries[0].get("Uris") or [])
+                     if "turn:" in str(u)),
+                    ""
                 )
                 _m_hp = _re_hp.search(r'turns?:([^:?]+)(?::(\d+))?', _hp_uri)
                 if _m_hp:
@@ -4927,9 +4948,19 @@ class DeviceClient(object):
                 _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port))
             except Exception:
                 pass
+        # Punch to TURN allocation port (5349) as well so port-restricted NAT
+        # allows traffic from either TURN port (3478 STUN or 5349 allocation).
+        _hp_port2 = 5349
+        if _hp_port != _hp_port2:
+            for _hp_sock in (_audio_sock, _video_sock):
+                try:
+                    _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port2))
+                except Exception:
+                    pass
         _status(
             f"NAT hole-punch: sent from audio={audio_port}"
             f" video={video_port} → {_hp_host}:{_hp_port}"
+            + (f" and :{_hp_port2}" if _hp_port != _hp_port2 else "")
         )
 
         # --- ICE STUN responder (runs while reservation sockets are still open) #
@@ -4944,7 +4975,7 @@ class DeviceClient(object):
         _stun_count = 0
         _stun_seen = False
         _srtp_detected = False
-        _stun_max = 8.0 if _cam_echo_received else 2.5
+        _stun_max = 20.0 if _cam_echo_received else 2.5
         _idle_limit = 1.5      # exit after ICE silence once first STUN seen
         _pre_stun_idle = 0.5   # exit early if no packet at all (non-ICE camera)
         _stun_deadline = time.monotonic() + _stun_max
@@ -4974,6 +5005,10 @@ class DeviceClient(object):
                     _pkt, _src = _sock.recvfrom(2048)
                 except OSError:
                     continue
+                _LOGGER.debug(
+                    "STUN window: %d bytes from %s:%d, first4=%s",
+                    len(_pkt), _src[0], _src[1], _pkt[:4].hex()
+                )
                 if (len(_pkt) >= 20
                         and _pkt[4:8] == _STUN_MAGIC):
                     # Any STUN packet (Binding Request, Success/Error Response)
@@ -5015,6 +5050,8 @@ class DeviceClient(object):
                 pass
         if _stun_count:
             _status(f"ICE: responded to {_stun_count} STUN binding request(s)")
+        elif not _srtp_detected:
+            _status("ICE: 0 packets received in STUN window (NAT may be blocking camera probes)")
         if _srtp_detected:
             _status("SRTP detected — exiting STUN window, handing off to ffmpeg")
 
@@ -5189,12 +5226,135 @@ class DeviceClient(object):
             except Exception as _sdp_exc:
                 _LOGGER.warning("_open_sdes_stream: could not rewrite SDP: %s", _sdp_exc)
 
-        # --- Release reservation sockets so ffmpeg can bind exclusively ------ #
-        for _rsock in (_audio_sock, _video_sock):
+        # --- Bridge thread: keep reservation sockets open for ICE + SRTP ----- #
+        # The camera's ICE agent sends STUN Binding Requests to audio_port and
+        # video_port AFTER this point.  If we close those sockets and let ffmpeg
+        # bind them, ffmpeg cannot respond to STUN → ICE fails → camera never
+        # sends SRTP → 0-byte output file.
+        #
+        # Fix: allocate fresh loopback ports for ffmpeg, rewrite the SDP to point
+        # at those ports, and keep the original sockets alive in a bridge thread
+        # that:
+        #   • responds to STUN Binding Requests on the original sockets
+        #   • forwards all non-STUN packets (SRTP) to ffmpeg's loopback ports
+        # When the session ends, SdesSession.stop() closes the original sockets,
+        # which causes the bridge thread's select() to raise and it exits cleanly.
+        import threading as _threading_br, socket as _socket_br
+
+        def _alloc_lo_port():
+            _s = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
             try:
-                _rsock.close()
-            except Exception:
-                pass
+                _s.bind(('127.0.0.1', 0))
+                return _s.getsockname()[1]
+            finally:
+                _s.close()
+
+        _lo_audio_port = _alloc_lo_port()
+        _lo_video_port = _alloc_lo_port()
+
+        # Rewrite SDP to point ffmpeg at the loopback ports.
+        _ts_br = int(time.time())
+        _br_sdp = (
+            "v=0\r\n"
+            f"o=- {_ts_br} {_ts_br} IN IP4 0.0.0.0\r\n"
+            "s=aidot-sdes-rx\r\n"
+            "t=0 0\r\n"
+            f"m=audio {_lo_audio_port} RTP/SAVP 0 8\r\n"
+            "c=IN IP4 127.0.0.1\r\n"
+            f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
+            "a=rtpmap:0 PCMU/8000\r\n"
+            "a=rtpmap:8 PCMA/8000\r\n"
+            "a=rtcp-mux\r\n"
+            f"m=video {_lo_video_port} RTP/SAVP 96 97\r\n"
+            "c=IN IP4 127.0.0.1\r\n"
+            f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
+            "a=rtpmap:96 H264/90000\r\n"
+            "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
+            "profile-level-id=42e01f\r\n"
+            "a=rtpmap:97 H265/90000\r\n"
+            "a=fmtp:97 level-id=93\r\n"
+            "a=rtcp-mux\r\n"
+        )
+        try:
+            with open(sdp_path, "w") as _br_sdp_f:
+                _br_sdp_f.write(_br_sdp)
+        except Exception as _br_sdp_exc:
+            _LOGGER.warning("bridge: could not rewrite SDP: %s", _br_sdp_exc)
+
+        def _bridge_fn():
+            _STUN_MAGIC_BR = b'\x21\x12\xa4\x42'
+            import struct as _st_br, select as _sel_br
+            _lo_a = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
+            _lo_v = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
+            try:
+                while True:
+                    try:
+                        _rl, _, _ = _sel_br.select(
+                            [_audio_sock, _video_sock], [], [], 0.5
+                        )
+                    except Exception:
+                        break
+                    for _bs in _rl:
+                        try:
+                            _bpkt, _bsrc = _bs.recvfrom(4096)
+                        except OSError:
+                            continue
+                        if (len(_bpkt) >= 20
+                                and _bpkt[4:8] == _STUN_MAGIC_BR
+                                and _bpkt[:2] == b'\x00\x01'):
+                            # STUN Binding Request — send Binding Success Response
+                            try:
+                                _btid = _bpkt[8:20]
+                                _bip = [int(x) for x in _bsrc[0].split('.')]
+                                _bxip = bytes(
+                                    a ^ b for a, b in zip(
+                                        _st_br.pack('!4B', *_bip), _STUN_MAGIC_BR
+                                    )
+                                )
+                                _bxport = (_bsrc[1] ^ 0x2112) & 0xFFFF
+                                _bxma = (b'\x00\x20\x00\x08\x00\x01'
+                                         + _st_br.pack('!H', _bxport) + _bxip)
+                                _bresp = (b'\x01\x01'
+                                          + _st_br.pack('!H', len(_bxma))
+                                          + _STUN_MAGIC_BR + _btid + _bxma)
+                                _bs.sendto(_bresp, _bsrc)
+                                _LOGGER.debug(
+                                    "bridge: STUN resp → %s:%d", _bsrc[0], _bsrc[1]
+                                )
+                            except Exception:
+                                pass
+                        elif len(_bpkt) >= 20 and _bpkt[4:8] == _STUN_MAGIC_BR:
+                            pass  # other STUN (keepalives etc.) — ignore
+                        else:
+                            # Non-STUN packet — forward SRTP to ffmpeg loopback port
+                            _btgt = (
+                                _lo_audio_port if _bs is _audio_sock
+                                else _lo_video_port
+                            )
+                            try:
+                                (_lo_a if _bs is _audio_sock else _lo_v).sendto(
+                                    _bpkt, ('127.0.0.1', _btgt)
+                                )
+                            except Exception:
+                                pass
+            finally:
+                try:
+                    _lo_a.close()
+                except Exception:
+                    pass
+                try:
+                    _lo_v.close()
+                except Exception:
+                    pass
+
+        _bridge_thread = _threading_br.Thread(
+            target=_bridge_fn, daemon=True, name="sdes-bridge"
+        )
+        _bridge_thread.start()
+        _status(
+            f"bridge thread started — camera sockets audio={audio_port}"
+            f" video={video_port} → ffmpeg loopback {_lo_audio_port}/{_lo_video_port}"
+        )
 
         # --- DTLS fallback: echo-reversal camera did not do ICE or SRTP ----- #
         # LK.IPC.A001064 echoes our webrtcReq offer and webrtcResp answer back
@@ -5217,6 +5377,12 @@ class DeviceClient(object):
                 "echo-reversal camera: no STUN or SRTP received in ICE window"
                 " — camera likely requires DTLS; falling back"
             )
+            # Stop bridge thread by closing its sockets before we raise.
+            for _rsock in (_audio_sock, _video_sock):
+                try:
+                    _rsock.close()
+                except Exception:
+                    pass
             try:
                 os.unlink(sdp_path)
             except Exception:
@@ -5259,6 +5425,11 @@ class DeviceClient(object):
             )
         except FileNotFoundError:
             # ffmpeg is not installed — clean up and surface a clear error.
+            for _rsock in (_audio_sock, _video_sock):
+                try:
+                    _rsock.close()
+                except Exception:
+                    pass
             try:
                 os.unlink(sdp_path)
             except Exception:
@@ -5296,7 +5467,7 @@ class DeviceClient(object):
         _bind_deadline = _t0 + 3.0
         _bound = False
         while time.monotonic() < _bind_deadline:
-            if _udp_port_bound(audio_port) and _udp_port_bound(video_port):
+            if _udp_port_bound(_lo_audio_port) and _udp_port_bound(_lo_video_port):
                 _bound = True
                 break
             await asyncio.sleep(0.05)
@@ -5304,8 +5475,8 @@ class DeviceClient(object):
         _bind_ms = int((time.monotonic() - _t0) * 1000)
         if _bound:
             _status(
-                f"SDES ffmpeg ready — audio={audio_port} video={video_port}"
-                f" bound in {_bind_ms} ms  (pid={proc.pid})"
+                f"SDES ffmpeg ready — loopback audio={_lo_audio_port}"
+                f" video={_lo_video_port} bound in {_bind_ms} ms  (pid={proc.pid})"
             )
         else:
             # /proc/net/udp unavailable or ffmpeg very slow — use fixed delay
@@ -5391,14 +5562,14 @@ class DeviceClient(object):
                             f"o=- {_ts2} {_ts2} IN IP4 0.0.0.0\r\n"
                             "s=aidot-sdes-rx\r\n"
                             "t=0 0\r\n"
-                            f"m=audio {audio_port} RTP/SAVPF 0 8\r\n"
-                            "c=IN IP4 0.0.0.0\r\n"
+                            f"m=audio {_lo_audio_port} RTP/SAVP 0 8\r\n"
+                            "c=IN IP4 127.0.0.1\r\n"
                             f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
                             "a=rtpmap:0 PCMU/8000\r\n"
                             "a=rtpmap:8 PCMA/8000\r\n"
                             "a=rtcp-mux\r\n"
-                            f"m=video {video_port} RTP/SAVPF 96 97\r\n"
-                            "c=IN IP4 0.0.0.0\r\n"
+                            f"m=video {_lo_video_port} RTP/SAVP 96 97\r\n"
+                            "c=IN IP4 127.0.0.1\r\n"
                             f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
                             "a=rtpmap:96 H264/90000\r\n"
                             "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
@@ -5438,6 +5609,11 @@ class DeviceClient(object):
                     proc.wait(timeout=2)
                 except Exception:
                     proc.kill()
+                for _rsock in (_audio_sock, _video_sock):
+                    try:
+                        _rsock.close()
+                    except Exception:
+                        pass
                 try:
                     os.unlink(sdp_path)
                 except Exception:
@@ -5462,8 +5638,8 @@ class DeviceClient(object):
             sdp_path=sdp_path,
             outgoing_q=outgoing_q,
             mqtt_fut=mqtt_fut,
-            audio_sock=None,   # already closed above
-            video_sock=None,
+            audio_sock=_audio_sock,   # bridge thread keeps these open; stop() closes them
+            video_sock=_video_sock,
         )
 
     # -- Existing methods (unchanged) ---------------------------------------- #
