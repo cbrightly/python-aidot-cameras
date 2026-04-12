@@ -4898,6 +4898,169 @@ class DeviceClient(object):
             })
             outgoing_q.put_nowait((_ice_cand_topic_sdes, _msg))
 
+        # --- TURN relay allocation: give camera a reachable relay candidate ---- #
+        # Camera probes sent via TURN arrive as Data Indications (type 0x0017) on
+        # the existing NAT mapping for 3.230.182.123:5349 (the TURN control port
+        # opened by the hole-punch below).  Allocating our relay and advertising a
+        # relay candidate lets ICE succeed even through port-restricted NAT.
+        _relay_addrs: dict = {}  # sock → (relay_ip, relay_port, realm, nonce, t_host, t_port, key)
+
+        def _turn_allocate_udp(_ta_sock, _ta_host, _ta_port, _ta_user, _ta_pass):
+            """RFC 5766 TURN relay allocation with long-term credential auth.
+            Returns (relay_ip, relay_port, realm, nonce) or None on failure."""
+            import hashlib as _ha, hmac as _hm, struct as _st_ta, select as _sl_ta
+
+            _MAGIC_TA = b'\x21\x12\xa4\x42'
+
+            def _a(_t, _v):
+                _p = (-len(_v)) % 4
+                return _st_ta.pack('!HH', _t, len(_v)) + _v + b'\x00' * _p
+
+            def _mi_ta(_k, _m):
+                # Patch Length to include the MI attribute (4 hdr + 20 digest = 24)
+                _patched = _m[:2] + _st_ta.pack('!H', len(_m) - 20 + 24) + _m[4:]
+                return _hm.new(_k, _patched, _ha.sha1).digest()
+
+            # Step 1: unauthenticated Allocate → get REALM and NONCE from 401
+            _tid1 = os.urandom(12)
+            _b1 = _a(0x0019, b'\x00\x00\x00\x11')  # REQUESTED-TRANSPORT = UDP(17)
+            _r1 = b'\x00\x03' + _st_ta.pack('!H', len(_b1)) + _MAGIC_TA + _tid1 + _b1
+            try:
+                _ta_sock.sendto(_r1, (_ta_host, _ta_port))
+            except Exception:
+                return None
+            _rs1, _, _ = _sl_ta.select([_ta_sock], [], [], 2.0)
+            if not _rs1:
+                return None
+            try:
+                _rsp1, _ = _ta_sock.recvfrom(2048)
+            except OSError:
+                return None
+            _realm_ta = _nonce_ta = b''
+            _o = 20
+            while _o + 4 <= len(_rsp1):
+                _at, _al = _st_ta.unpack_from('!HH', _rsp1, _o)
+                _av = _rsp1[_o + 4:_o + 4 + _al]
+                _o += 4 + _al + (-_al % 4)
+                if _at == 0x0014:
+                    _realm_ta = _av
+                elif _at == 0x0015:
+                    _nonce_ta = _av
+            if not _realm_ta or not _nonce_ta:
+                return None
+
+            # Step 2: authenticated Allocate
+            _tid2 = os.urandom(12)
+            _key_ta = _ha.md5(_ta_user + b':' + _realm_ta + b':' + _ta_pass).digest()
+            _b2 = (
+                _a(0x0006, _ta_user)                  # USERNAME
+                + _a(0x0014, _realm_ta)               # REALM
+                + _a(0x0015, _nonce_ta)               # NONCE
+                + _a(0x0019, b'\x00\x00\x00\x11')     # REQUESTED-TRANSPORT = UDP
+            )
+            _h2 = b'\x00\x03' + _st_ta.pack('!H', len(_b2) + 24) + _MAGIC_TA + _tid2
+            _b2 += _a(0x0008, _mi_ta(_key_ta, _h2 + _b2))  # MESSAGE-INTEGRITY
+            _r2 = b'\x00\x03' + _st_ta.pack('!H', len(_b2)) + _MAGIC_TA + _tid2 + _b2
+            try:
+                _ta_sock.sendto(_r2, (_ta_host, _ta_port))
+            except Exception:
+                return None
+            _rs2, _, _ = _sl_ta.select([_ta_sock], [], [], 2.0)
+            if not _rs2:
+                return None
+            try:
+                _rsp2, _ = _ta_sock.recvfrom(2048)
+            except OSError:
+                return None
+            if _rsp2[:2] != b'\x01\x03':  # Allocate Success = 0x0103
+                _LOGGER.debug("TURN allocate failed, response type=%s", _rsp2[:2].hex())
+                return None
+
+            # Parse XOR-RELAYED-ADDRESS (0x0016)
+            _o = 20
+            while _o + 4 <= len(_rsp2):
+                _at, _al = _st_ta.unpack_from('!HH', _rsp2, _o)
+                _av = _rsp2[_o + 4:_o + 4 + _al]
+                _o += 4 + _al + (-_al % 4)
+                if _at == 0x0016 and _al >= 8:  # XOR-RELAYED-ADDRESS
+                    _xp = _st_ta.unpack_from('!H', _av, 2)[0] ^ 0x2112
+                    _xb = bytes(a ^ b for a, b in zip(_av[4:8], _MAGIC_TA))
+                    _r_ip_ta = '.'.join(str(b) for b in _xb)
+                    # CreatePermission for TURN server IP so Data Indications arrive
+                    # when camera uses the same relay server (same IP, dynamic port).
+                    _perm_xip = bytes(
+                        a ^ b for a, b in zip(
+                            bytes(int(x) for x in _ta_host.split('.')), _MAGIC_TA
+                        )
+                    )
+                    _perm_xpa = b'\x00\x01' + _st_ta.pack('!H', 0x2112) + _perm_xip
+                    _bp = (
+                        _a(0x0006, _ta_user)
+                        + _a(0x0014, _realm_ta)
+                        + _a(0x0015, _nonce_ta)
+                        + _a(0x0012, _perm_xpa)   # XOR-PEER-ADDRESS (not CHANNEL-NUMBER)
+                    )
+                    _tp = os.urandom(12)
+                    _hp = (b'\x00\x08' + _st_ta.pack('!H', len(_bp) + 24)
+                           + _MAGIC_TA + _tp)
+                    _bp += _a(0x0008, _mi_ta(_key_ta, _hp + _bp))
+                    _cp = (b'\x00\x08' + _st_ta.pack('!H', len(_bp))
+                           + _MAGIC_TA + _tp + _bp)
+                    try:
+                        _ta_sock.sendto(_cp, (_ta_host, _ta_port))
+                    except Exception:
+                        pass
+                    return _r_ip_ta, _xp, _realm_ta, _nonce_ta
+            return None
+
+        try:
+            import re as _re_relay, hashlib as _hlk
+            _our_turn_entry = None
+            for _te in _sdes_turn_entries:
+                if _te.get("Username") == user_id:
+                    _our_turn_entry = _te
+                    break
+            if _our_turn_entry is None and _sdes_turn_entries:
+                _our_turn_entry = _sdes_turn_entries[0]
+            if _our_turn_entry:
+                _t_uri_r = next(
+                    (str(u) for u in (_our_turn_entry.get("Uris") or [])
+                     if "turn:" in str(u)),
+                    ""
+                )
+                _tm_r = _re_relay.search(r'turns?:([^:?]+)(?::(\d+))?', _t_uri_r)
+                if _tm_r:
+                    _t_host_r = _tm_r.group(1)
+                    _t_port_r = int(_tm_r.group(2) or 5349)
+                    _t_user_r = (_our_turn_entry.get("Username") or "").encode()
+                    _t_pass_r = str(_our_turn_entry.get("Password") or "").encode()
+                    for _alloc_sock in (_audio_sock, _video_sock):
+                        _alloc_res = _turn_allocate_udp(
+                            _alloc_sock, _t_host_r, _t_port_r,
+                            _t_user_r, _t_pass_r,
+                        )
+                        if _alloc_res:
+                            _r_ip, _r_port, _r_realm, _r_nonce = _alloc_res
+                            _r_key = _hlk.md5(
+                                _t_user_r + b':' + _r_realm + b':' + _t_pass_r
+                            ).digest()
+                            _relay_addrs[_alloc_sock] = (
+                                _r_ip, _r_port, _r_realm, _r_nonce,
+                                _t_host_r, _t_port_r, _r_key,
+                            )
+                            _status(
+                                f"TURN relay allocated: "
+                                f"{'audio' if _alloc_sock is _audio_sock else 'video'}"
+                                f" → {_r_ip}:{_r_port}"
+                            )
+                        else:
+                            _LOGGER.warning(
+                                "TURN allocation failed for %s socket",
+                                "audio" if _alloc_sock is _audio_sock else "video",
+                            )
+        except Exception as _relay_exc:
+            _LOGGER.warning("TURN relay allocation error: %s", _relay_exc)
+
         for _ice_mid, _ice_port in (("0", audio_port), ("1", video_port)):
             # Host candidate (LAN IP)
             _send_sdes_ice_cand(
@@ -4913,9 +5076,21 @@ class DeviceClient(object):
                     f" typ srflx raddr {local_ip} rport {_ice_port}",
                     _ice_mid,
                 )
+            # relay candidate — advertised so the camera can probe us via TURN
+            # when direct and srflx paths are blocked (port-restricted NAT).
+            _relay_sock = _audio_sock if _ice_mid == "0" else _video_sock
+            if _relay_sock in _relay_addrs:
+                _ri = _relay_addrs[_relay_sock]
+                _send_sdes_ice_cand(
+                    f"candidate:3 1 udp 16777215 {_ri[0]} {_ri[1]}"
+                    f" typ relay raddr {local_ip} rport {_ice_port}",
+                    _ice_mid,
+                )
         _status(
             f"iceCandidateReq sent  audio={audio_port}  video={video_port}"
             + (f"  srflx={_public_ip}" if _public_ip else "")
+            + (f"  relay={_relay_addrs[_audio_sock][0]}"
+               if _audio_sock in _relay_addrs else "")
         )
 
         # --- NAT hole-punch: create outbound UDP mapping before STUN window --- #
@@ -5009,31 +5184,88 @@ class DeviceClient(object):
                     "STUN window: %d bytes from %s:%d, first4=%s",
                     len(_pkt), _src[0], _src[1], _pkt[:4].hex()
                 )
+                # --- TURN Data Indication (type 0x0017): strip wrapper --------- #
+                # Camera ICE probes routed via TURN arrive as Data Indications from
+                # 3.230.182.123:5349 (the control channel, already NAT-mapped).
+                # Strip the TURN envelope to get the inner STUN Binding Request so
+                # we can respond correctly via a TURN Send Indication.
+                _turn_peer_ip_sw: "Optional[str]" = None
+                _turn_peer_port_sw: "Optional[int]" = None
                 if (len(_pkt) >= 20
+                        and _pkt[:2] == b'\x00\x17'
                         and _pkt[4:8] == _STUN_MAGIC):
-                    # Any STUN packet (Binding Request, Success/Error Response)
-                    # identified by the magic cookie.  The NAT hole-punch to the
-                    # TURN server elicits a STUN Error Response (first 2 bytes
-                    # b'\x01\x11') which the old check (b'\x00\x01' only) would
-                    # misclassify as SRTP, causing the window to exit immediately.
-                    _stun_seen = True
+                    _sw_off = 20
+                    _sw_inner = None
+                    while _sw_off + 4 <= len(_pkt):
+                        _sw_at, _sw_al = _struct.unpack_from('!HH', _pkt, _sw_off)
+                        _sw_av = _pkt[_sw_off + 4:_sw_off + 4 + _sw_al]
+                        _sw_off += 4 + _sw_al + (-_sw_al % 4)
+                        if _sw_at == 0x0012 and _sw_al >= 8:  # XOR-PEER-ADDRESS
+                            _sw_xp = _struct.unpack_from('!H', _sw_av, 2)[0] ^ 0x2112
+                            _sw_xb = bytes(
+                                a ^ b for a, b in zip(_sw_av[4:8], _STUN_MAGIC)
+                            )
+                            _turn_peer_ip_sw = '.'.join(str(b) for b in _sw_xb)
+                            _turn_peer_port_sw = _sw_xp
+                        elif _sw_at == 0x0013:  # DATA
+                            _sw_inner = _sw_av
+                    if _sw_inner:
+                        _pkt = _sw_inner  # process inner payload
+
+                if (len(_pkt) >= 20 and _pkt[4:8] == _STUN_MAGIC):
+                    # STUN packet — only Binding Requests (0x0001) indicate that
+                    # ICE is active.  Error/Success responses (e.g. hole-punch
+                    # replies) must NOT set _stun_seen or they'd trigger the 1.5s
+                    # idle-exit prematurely, before camera probes arrive.
                     if _pkt[:2] == b'\x00\x01':
                         # Binding Request — reply with Binding Success Response
+                        _stun_seen = True
                         _tid = _pkt[8:20]
                         try:
-                            _ip_parts = [int(x) for x in _src[0].split('.')]
+                            # Use TURN peer address for XOR-MAPPED-ADDRESS when
+                            # request arrived via TURN Data Indication.
+                            _resp_src_ip = _turn_peer_ip_sw or _src[0]
+                            _resp_src_port = _turn_peer_port_sw or _src[1]
+                            _ip_parts = [int(x) for x in _resp_src_ip.split('.')]
                             _xip = bytes(
                                 a ^ b for a, b in zip(
                                     _struct.pack('!4B', *_ip_parts), _STUN_MAGIC
                                 )
                             )
-                            _xport = (_src[1] ^ 0x2112) & 0xFFFF
+                            _xport = (_resp_src_port ^ 0x2112) & 0xFFFF
                             _xma = (b'\x00\x20\x00\x08\x00\x01'
                                     + _struct.pack('!H', _xport) + _xip)
                             _resp = (b'\x01\x01'
                                      + _struct.pack('!H', len(_xma))
                                      + _STUN_MAGIC + _tid + _xma)
-                            _sock.sendto(_resp, _src)
+                            if _turn_peer_ip_sw and _sock in _relay_addrs:
+                                # Arrived via TURN — respond via Send Indication
+                                _ri_sw = _relay_addrs[_sock]
+                                _t_host_sw, _t_port_sw = _ri_sw[4], _ri_sw[5]
+                                _si_pip = bytes(
+                                    int(x) for x in _turn_peer_ip_sw.split('.')
+                                )
+                                _si_xip = bytes(
+                                    a ^ b for a, b in zip(_si_pip, _STUN_MAGIC)
+                                )
+                                _si_xport = (_turn_peer_port_sw ^ 0x2112) & 0xFFFF
+                                _si_xpa = (b'\x00\x01'
+                                           + _struct.pack('!H', _si_xport)
+                                           + _si_xip)
+
+                                def _si_a(_t, _v):
+                                    _p = (-len(_v)) % 4
+                                    return (_struct.pack('!HH', _t, len(_v))
+                                            + _v + b'\x00' * _p)
+
+                                _si_body = _si_a(0x0012, _si_xpa) + _si_a(0x0013, _resp)
+                                _send_ind = (b'\x00\x16'
+                                             + _struct.pack('!H', len(_si_body))
+                                             + _STUN_MAGIC + os.urandom(12)
+                                             + _si_body)
+                                _sock.sendto(_send_ind, (_t_host_sw, _t_port_sw))
+                            else:
+                                _sock.sendto(_resp, _src)
                             _stun_count += 1
                         except Exception:
                             pass
@@ -5092,6 +5324,14 @@ class DeviceClient(object):
                         f" typ srflx raddr {local_ip} rport {_ice_port_r}",
                         _ice_mid_r,
                     )
+                _relay_sock_r = _audio_sock if _ice_mid_r == "0" else _video_sock
+                if _relay_sock_r in _relay_addrs:
+                    _ri_r = _relay_addrs[_relay_sock_r]
+                    _send_sdes_ice_cand(
+                        f"candidate:3 1 udp 16777215 {_ri_r[0]} {_ri_r[1]}"
+                        f" typ relay raddr {local_ip} rport {_ice_port_r}",
+                        _ice_mid_r,
+                    )
             # Refresh NAT mapping so router allows new inbound STUN from camera
             for _hp_sock_r in (_audio_sock, _video_sock):
                 try:
@@ -5119,9 +5359,9 @@ class DeviceClient(object):
                         continue
                     if (len(_pkt_r) >= 20
                             and _pkt_r[4:8] == _STUN_MAGIC):
-                        _stun_seen = True
                         if _pkt_r[:2] != b'\x00\x01':
-                            continue
+                            continue   # not a Binding Request; don't trigger idle-exit
+                        _stun_seen = True
                         _tid_r = _pkt_r[8:20]
                         try:
                             _ip_r = [int(x) for x in _src_r[0].split('.')]
@@ -5299,28 +5539,102 @@ class DeviceClient(object):
                             _bpkt, _bsrc = _bs.recvfrom(4096)
                         except OSError:
                             continue
+                        # --- TURN Data Indication: strip wrapper before dispatch --- #
+                        # Camera SRTP and late ICE probes may arrive wrapped in
+                        # TURN Data Indications (type 0x0017) on the TURN control
+                        # channel (3.230.182.123:5349).  Strip to get the inner
+                        # payload, record the peer address for response routing.
+                        _br_turn_peer_ip = None
+                        _br_turn_peer_port = None
+                        if (len(_bpkt) >= 20
+                                and _bpkt[:2] == b'\x00\x17'
+                                and _bpkt[4:8] == _STUN_MAGIC_BR):
+                            _br_off = 20
+                            _br_inner = None
+                            while _br_off + 4 <= len(_bpkt):
+                                _br_at, _br_al = _st_br.unpack_from(
+                                    '!HH', _bpkt, _br_off)
+                                _br_av = _bpkt[_br_off + 4:_br_off + 4 + _br_al]
+                                _br_off += 4 + _br_al + (-_br_al % 4)
+                                if _br_at == 0x0012 and _br_al >= 8:  # XOR-PEER-ADDRESS
+                                    _br_xp = (_st_br.unpack_from(
+                                        '!H', _br_av, 2)[0] ^ 0x2112)
+                                    _br_xb = bytes(
+                                        a ^ b for a, b in zip(
+                                            _br_av[4:8], _STUN_MAGIC_BR)
+                                    )
+                                    _br_turn_peer_ip = '.'.join(
+                                        str(b) for b in _br_xb)
+                                    _br_turn_peer_port = _br_xp
+                                elif _br_at == 0x0013:  # DATA
+                                    _br_inner = _br_av
+                            if _br_inner:
+                                _bpkt = _br_inner
+
                         if (len(_bpkt) >= 20
                                 and _bpkt[4:8] == _STUN_MAGIC_BR
                                 and _bpkt[:2] == b'\x00\x01'):
                             # STUN Binding Request — send Binding Success Response
                             try:
                                 _btid = _bpkt[8:20]
-                                _bip = [int(x) for x in _bsrc[0].split('.')]
+                                # Use TURN peer address when arrived via relay
+                                _bresp_ip = _br_turn_peer_ip or _bsrc[0]
+                                _bresp_port = _br_turn_peer_port or _bsrc[1]
+                                _bip = [int(x) for x in _bresp_ip.split('.')]
                                 _bxip = bytes(
                                     a ^ b for a, b in zip(
                                         _st_br.pack('!4B', *_bip), _STUN_MAGIC_BR
                                     )
                                 )
-                                _bxport = (_bsrc[1] ^ 0x2112) & 0xFFFF
+                                _bxport = (_bresp_port ^ 0x2112) & 0xFFFF
                                 _bxma = (b'\x00\x20\x00\x08\x00\x01'
                                          + _st_br.pack('!H', _bxport) + _bxip)
                                 _bresp = (b'\x01\x01'
                                           + _st_br.pack('!H', len(_bxma))
                                           + _STUN_MAGIC_BR + _btid + _bxma)
-                                _bs.sendto(_bresp, _bsrc)
-                                _LOGGER.debug(
-                                    "bridge: STUN resp → %s:%d", _bsrc[0], _bsrc[1]
-                                )
+                                if _br_turn_peer_ip and _bs in _relay_addrs:
+                                    # Arrived via TURN — respond via Send Indication
+                                    _bri = _relay_addrs[_bs]
+                                    _br_t_host, _br_t_port = _bri[4], _bri[5]
+                                    _br_pip = bytes(
+                                        int(x) for x in _br_turn_peer_ip.split('.')
+                                    )
+                                    _br_xip2 = bytes(
+                                        a ^ b for a, b in zip(
+                                            _br_pip, _STUN_MAGIC_BR)
+                                    )
+                                    _br_xport2 = (
+                                        _br_turn_peer_port ^ 0x2112) & 0xFFFF
+                                    _br_xpa = (b'\x00\x01'
+                                               + _st_br.pack('!H', _br_xport2)
+                                               + _br_xip2)
+
+                                    def _br_a(_t, _v):
+                                        _p = (-len(_v)) % 4
+                                        return (_st_br.pack('!HH', _t, len(_v))
+                                                + _v + b'\x00' * _p)
+
+                                    _br_si_body = (
+                                        _br_a(0x0012, _br_xpa)
+                                        + _br_a(0x0013, _bresp)
+                                    )
+                                    _br_send_ind = (
+                                        b'\x00\x16'
+                                        + _st_br.pack('!H', len(_br_si_body))
+                                        + _STUN_MAGIC_BR + os.urandom(12)
+                                        + _br_si_body
+                                    )
+                                    _bs.sendto(_br_send_ind, (_br_t_host, _br_t_port))
+                                    _LOGGER.debug(
+                                        "bridge: STUN resp via TURN → %s:%d",
+                                        _br_turn_peer_ip, _br_turn_peer_port,
+                                    )
+                                else:
+                                    _bs.sendto(_bresp, _bsrc)
+                                    _LOGGER.debug(
+                                        "bridge: STUN resp → %s:%d",
+                                        _bsrc[0], _bsrc[1],
+                                    )
                             except Exception:
                                 pass
                         elif len(_bpkt) >= 20 and _bpkt[4:8] == _STUN_MAGIC_BR:
