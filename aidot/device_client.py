@@ -4929,12 +4929,23 @@ class DeviceClient(object):
                 _ta_sock.sendto(_r1, (_ta_host, _ta_port))
             except Exception:
                 return None
-            _rs1, _, _ = _sl_ta.select([_ta_sock], [], [], 2.0)
-            if not _rs1:
-                return None
-            try:
-                _rsp1, _ = _ta_sock.recvfrom(2048)
-            except OSError:
+            # Loop until we get a response whose TID matches our request (discard
+            # stale packets from previous exchanges that may linger in the buffer).
+            _rsp1 = None
+            _dl1 = _sl_ta.time() + 2.0
+            while _sl_ta.time() < _dl1:
+                _rem = _dl1 - _sl_ta.time()
+                _rs1, _, _ = _sl_ta.select([_ta_sock], [], [], min(_rem, 0.5))
+                if not _rs1:
+                    continue
+                try:
+                    _cand1, _ = _ta_sock.recvfrom(2048)
+                except OSError:
+                    break
+                if len(_cand1) >= 20 and _cand1[8:20] == _tid1:
+                    _rsp1 = _cand1
+                    break
+            if _rsp1 is None:
                 return None
             _realm_ta = _nonce_ta = b''
             _o = 20
@@ -4947,7 +4958,11 @@ class DeviceClient(object):
                 elif _at == 0x0015:
                     _nonce_ta = _av
             if not _realm_ta or not _nonce_ta:
+                _LOGGER.debug("TURN alloc step1: no realm/nonce in response type=%s",
+                              _rsp1[:2].hex())
                 return None
+            _LOGGER.debug("TURN alloc step1 challenge: realm=%r nonce_len=%d",
+                          _realm_ta.decode(errors='replace'), len(_nonce_ta))
 
             # Step 2: authenticated Allocate
             _tid2 = os.urandom(12)
@@ -4965,15 +4980,38 @@ class DeviceClient(object):
                 _ta_sock.sendto(_r2, (_ta_host, _ta_port))
             except Exception:
                 return None
-            _rs2, _, _ = _sl_ta.select([_ta_sock], [], [], 2.0)
-            if not _rs2:
-                return None
-            try:
-                _rsp2, _ = _ta_sock.recvfrom(2048)
-            except OSError:
+            # Same TID-matching loop — if step 1's 401 was still in the buffer,
+            # a bare recvfrom would consume it and report failure on a good alloc.
+            _rsp2 = None
+            _dl2 = _sl_ta.time() + 2.0
+            while _sl_ta.time() < _dl2:
+                _rem = _dl2 - _sl_ta.time()
+                _rs2, _, _ = _sl_ta.select([_ta_sock], [], [], min(_rem, 0.5))
+                if not _rs2:
+                    continue
+                try:
+                    _cand2, _ = _ta_sock.recvfrom(2048)
+                except OSError:
+                    break
+                if len(_cand2) >= 20 and _cand2[8:20] == _tid2:
+                    _rsp2 = _cand2
+                    break
+            if _rsp2 is None:
                 return None
             if _rsp2[:2] != b'\x01\x03':  # Allocate Success = 0x0103
-                _LOGGER.debug("TURN allocate failed, response type=%s", _rsp2[:2].hex())
+                # Parse ERROR-CODE (0x0009) for diagnostics
+                _ec2 = 0
+                _o_ec = 20
+                while _o_ec + 4 <= len(_rsp2):
+                    _at_ec, _al_ec = _st_ta.unpack_from('!HH', _rsp2, _o_ec)
+                    _av_ec = _rsp2[_o_ec + 4:_o_ec + 4 + _al_ec]
+                    _o_ec += 4 + _al_ec + (-_al_ec % 4)
+                    if _at_ec == 0x0009 and _al_ec >= 4:
+                        _ec2 = (_av_ec[2] & 0x07) * 100 + _av_ec[3]
+                _LOGGER.debug(
+                    "TURN alloc step2 error_code=%d realm=%r response_type=%s",
+                    _ec2, _realm_ta.decode(errors='replace'), _rsp2[:2].hex(),
+                )
                 return None
 
             # Parse XOR-RELAYED-ADDRESS (0x0016)
