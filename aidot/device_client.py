@@ -4465,13 +4465,13 @@ class DeviceClient(object):
                 ))
                 _devattr_midloop_sent = True
                 _status("getDevAttrReq re-sent (mid-loop, waiting for camera IP)")
-            # Re-send ICE candidates if camera reconnected during ICE.
+            # Re-send webrtcResp + ICE candidates if camera reconnected during ICE.
             # LK.IPC.A001064 performs a quickConn MQTT reconnect after receiving
-            # our signaling; the reconnect resets its WebRTC session so we must
-            # re-deliver ICE candidates after the camera comes back online.
-            # NOTE: do NOT re-send webrtcResp — that triggers another quickConn,
-            # creating an infinite reconnect loop.  ICE candidates alone are
-            # sufficient to resume connectivity checks.
+            # our webrtcResp; the reconnect resets its ICE agent so it no longer
+            # has our ICE credentials or candidates.  We must re-send webrtcResp
+            # first (to restore credentials/fingerprint) then ICE candidates.
+            # ICE candidates alone are not sufficient — without webrtcResp the
+            # camera has no credentials to validate STUN, so it never probes us.
             # Guard: only for echo-only role-reversal cameras (_rr_ice_payloads
             # is empty for all other paths) and at most 3 times per session.
             if (camera_reconnect_ev.is_set()
@@ -4480,10 +4480,12 @@ class DeviceClient(object):
                 _reconnect_resent_count += 1
                 camera_reconnect_ev.clear()
                 _status(
-                    "camera reconnected during ICE"
-                    " — re-sending ICE candidates only (not webrtcResp)"
+                    f"camera reconnected during ICE (retry {_reconnect_resent_count})"
+                    " — re-sending webrtcResp + ICE candidates"
                 )
-                await asyncio.sleep(1.5)  # let camera stabilize before re-send
+                await asyncio.sleep(1.5)  # let camera re-subscribe before re-send
+                if _rr_webrtc_resp_topic and _rr_webrtc_resp_payload:
+                    outgoing_q.put_nowait((_rr_webrtc_resp_topic, _rr_webrtc_resp_payload))
                 for _rr_ice_p in _rr_ice_payloads:
                     outgoing_q.put_nowait(_rr_ice_p)
             await asyncio.sleep(0.1)
