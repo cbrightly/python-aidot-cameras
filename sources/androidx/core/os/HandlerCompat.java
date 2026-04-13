@@ -1,0 +1,137 @@
+package androidx.core.os;
+
+import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.Message;
+import android.util.Log;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.annotation.RequiresApi;
+import java.lang.reflect.InvocationTargetException;
+
+public final class HandlerCompat {
+    private static final String TAG = "HandlerCompat";
+
+    @NonNull
+    public static Handler createAsync(@NonNull Looper looper) {
+        int i = Build.VERSION.SDK_INT;
+        if (i >= 28) {
+            return Api28Impl.createAsync(looper);
+        }
+        if (i >= 17) {
+            Class<Handler> cls = Handler.class;
+            try {
+                return cls.getDeclaredConstructor(new Class[]{Looper.class, Handler.Callback.class, Boolean.TYPE}).newInstance(new Object[]{looper, null, true});
+            } catch (IllegalAccessException | InstantiationException | NoSuchMethodException wrappedException) {
+                Log.w(TAG, "Unable to invoke Handler(Looper, Callback, boolean) constructor", wrappedException);
+            } catch (InvocationTargetException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof RuntimeException) {
+                    throw ((RuntimeException) cause);
+                } else if (cause instanceof Error) {
+                    throw ((Error) cause);
+                } else {
+                    throw new RuntimeException(cause);
+                }
+            }
+        }
+        return new Handler(looper);
+    }
+
+    @NonNull
+    public static Handler createAsync(@NonNull Looper looper, @NonNull Handler.Callback callback) {
+        int i = Build.VERSION.SDK_INT;
+        if (i >= 28) {
+            return Api28Impl.createAsync(looper, callback);
+        }
+        if (i >= 17) {
+            Class<Handler> cls = Handler.class;
+            try {
+                return cls.getDeclaredConstructor(new Class[]{Looper.class, Handler.Callback.class, Boolean.TYPE}).newInstance(new Object[]{looper, callback, true});
+            } catch (IllegalAccessException | InstantiationException | NoSuchMethodException wrappedException) {
+                Log.w(TAG, "Unable to invoke Handler(Looper, Callback, boolean) constructor", wrappedException);
+            } catch (InvocationTargetException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof RuntimeException) {
+                    throw ((RuntimeException) cause);
+                } else if (cause instanceof Error) {
+                    throw ((Error) cause);
+                } else {
+                    throw new RuntimeException(cause);
+                }
+            }
+        }
+        return new Handler(looper, callback);
+    }
+
+    public static boolean postDelayed(@NonNull Handler handler, @NonNull Runnable r, @Nullable Object token, long delayMillis) {
+        if (Build.VERSION.SDK_INT >= 28) {
+            return Api28Impl.postDelayed(handler, r, token, delayMillis);
+        }
+        Message message = Message.obtain(handler, r);
+        message.obj = token;
+        return handler.sendMessageDelayed(message, delayMillis);
+    }
+
+    @RequiresApi(16)
+    public static boolean hasCallbacks(@NonNull Handler handler, @NonNull Runnable r) {
+        Exception wrappedException = null;
+        int i = Build.VERSION.SDK_INT;
+        if (i >= 29) {
+            return Api29Impl.hasCallbacks(handler, r);
+        }
+        if (i >= 16) {
+            try {
+                return ((Boolean) Handler.class.getMethod("hasCallbacks", new Class[]{Runnable.class}).invoke(handler, new Object[]{r})).booleanValue();
+            } catch (InvocationTargetException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof RuntimeException) {
+                    throw ((RuntimeException) cause);
+                } else if (cause instanceof Error) {
+                    throw ((Error) cause);
+                } else {
+                    throw new RuntimeException(cause);
+                }
+            } catch (IllegalAccessException e2) {
+                wrappedException = e2;
+            } catch (NoSuchMethodException e3) {
+                wrappedException = e3;
+            } catch (NullPointerException e4) {
+                wrappedException = e4;
+            }
+        }
+        throw new UnsupportedOperationException("Failed to call Handler.hasCallbacks(), but there is no safe failure mode for this method. Raising exception.", wrappedException);
+    }
+
+    private HandlerCompat() {
+    }
+
+    @RequiresApi(29)
+    public static class Api29Impl {
+        private Api29Impl() {
+        }
+
+        public static boolean hasCallbacks(Handler handler, Runnable r) {
+            return handler.hasCallbacks(r);
+        }
+    }
+
+    @RequiresApi(28)
+    public static class Api28Impl {
+        private Api28Impl() {
+        }
+
+        public static Handler createAsync(Looper looper) {
+            return Handler.createAsync(looper);
+        }
+
+        public static Handler createAsync(Looper looper, Handler.Callback callback) {
+            return Handler.createAsync(looper, callback);
+        }
+
+        public static boolean postDelayed(Handler handler, Runnable r, Object token, long delayMillis) {
+            return handler.postDelayed(r, token, delayMillis);
+        }
+    }
+}

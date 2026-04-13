@@ -1,0 +1,88 @@
+package org.spongycastle.asn1.ua;
+
+import org.spongycastle.asn1.ASN1ObjectIdentifier;
+
+public interface UAObjectIdentifiers {
+    public static final ASN1ObjectIdentifier A;
+    public static final ASN1ObjectIdentifier B;
+    public static final ASN1ObjectIdentifier C;
+    public static final ASN1ObjectIdentifier D;
+    public static final ASN1ObjectIdentifier E;
+    public static final ASN1ObjectIdentifier F;
+    public static final ASN1ObjectIdentifier G;
+    public static final ASN1ObjectIdentifier H;
+    public static final ASN1ObjectIdentifier I;
+    public static final ASN1ObjectIdentifier J;
+    public static final ASN1ObjectIdentifier K;
+    public static final ASN1ObjectIdentifier L;
+    public static final ASN1ObjectIdentifier M;
+    public static final ASN1ObjectIdentifier a;
+    public static final ASN1ObjectIdentifier b;
+    public static final ASN1ObjectIdentifier c;
+    public static final ASN1ObjectIdentifier d;
+    public static final ASN1ObjectIdentifier e;
+    public static final ASN1ObjectIdentifier f;
+    public static final ASN1ObjectIdentifier g;
+    public static final ASN1ObjectIdentifier h;
+    public static final ASN1ObjectIdentifier i;
+    public static final ASN1ObjectIdentifier j;
+    public static final ASN1ObjectIdentifier k;
+    public static final ASN1ObjectIdentifier l;
+    public static final ASN1ObjectIdentifier m;
+    public static final ASN1ObjectIdentifier n;
+    public static final ASN1ObjectIdentifier o;
+    public static final ASN1ObjectIdentifier p;
+    public static final ASN1ObjectIdentifier q;
+    public static final ASN1ObjectIdentifier r;
+    public static final ASN1ObjectIdentifier s;
+    public static final ASN1ObjectIdentifier t;
+    public static final ASN1ObjectIdentifier u;
+    public static final ASN1ObjectIdentifier v;
+    public static final ASN1ObjectIdentifier w;
+    public static final ASN1ObjectIdentifier x;
+    public static final ASN1ObjectIdentifier y;
+    public static final ASN1ObjectIdentifier z;
+
+    static {
+        ASN1ObjectIdentifier aSN1ObjectIdentifier = new ASN1ObjectIdentifier("1.2.804.2.1.1.1");
+        a = aSN1ObjectIdentifier;
+        b = aSN1ObjectIdentifier.o("1.3.1.1");
+        c = aSN1ObjectIdentifier.o("1.3.1.1.1.1");
+        d = aSN1ObjectIdentifier.o("1.2.2.1");
+        e = aSN1ObjectIdentifier.o("1.2.2.2");
+        f = aSN1ObjectIdentifier.o("1.2.2.3");
+        g = aSN1ObjectIdentifier.o("1.2.2.4");
+        h = aSN1ObjectIdentifier.o("1.2.2.5");
+        i = aSN1ObjectIdentifier.o("1.2.2.6");
+        j = aSN1ObjectIdentifier.o("1.1.3.1.1");
+        k = aSN1ObjectIdentifier.o("1.1.3.1.2");
+        l = aSN1ObjectIdentifier.o("1.1.3.1.3");
+        m = aSN1ObjectIdentifier.o("1.1.3.2.1");
+        n = aSN1ObjectIdentifier.o("1.1.3.2.2");
+        o = aSN1ObjectIdentifier.o("1.1.3.2.3");
+        p = aSN1ObjectIdentifier.o("1.1.3.3.1");
+        q = aSN1ObjectIdentifier.o("1.1.3.3.2");
+        r = aSN1ObjectIdentifier.o("1.1.3.3.3");
+        s = aSN1ObjectIdentifier.o("1.1.3.4.1");
+        t = aSN1ObjectIdentifier.o("1.1.3.4.2");
+        u = aSN1ObjectIdentifier.o("1.1.3.4.3");
+        v = aSN1ObjectIdentifier.o("1.1.3.5.1");
+        w = aSN1ObjectIdentifier.o("1.1.3.5.2");
+        x = aSN1ObjectIdentifier.o("1.1.3.5.3");
+        y = aSN1ObjectIdentifier.o("1.1.3.6.1");
+        z = aSN1ObjectIdentifier.o("1.1.3.6.2");
+        A = aSN1ObjectIdentifier.o("1.1.3.6.3");
+        B = aSN1ObjectIdentifier.o("1.1.3.7.1");
+        C = aSN1ObjectIdentifier.o("1.1.3.7.2");
+        D = aSN1ObjectIdentifier.o("1.1.3.7.3");
+        E = aSN1ObjectIdentifier.o("1.1.3.8.1");
+        F = aSN1ObjectIdentifier.o("1.1.3.8.2");
+        G = aSN1ObjectIdentifier.o("1.1.3.8.3");
+        H = aSN1ObjectIdentifier.o("1.1.3.9.1");
+        I = aSN1ObjectIdentifier.o("1.1.3.9.2");
+        J = aSN1ObjectIdentifier.o("1.1.3.9.3");
+        K = aSN1ObjectIdentifier.o("1.1.3.10.1");
+        L = aSN1ObjectIdentifier.o("1.1.3.10.2");
+        M = aSN1ObjectIdentifier.o("1.1.3.10.3");
+    }
+}

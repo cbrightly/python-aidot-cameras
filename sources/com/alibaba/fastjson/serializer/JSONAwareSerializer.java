@@ -1,0 +1,17 @@
+package com.alibaba.fastjson.serializer;
+
+import com.alibaba.fastjson.JSONAware;
+import java.lang.reflect.Type;
+
+public class JSONAwareSerializer implements ObjectSerializer {
+    public static JSONAwareSerializer instance = new JSONAwareSerializer();
+
+    public void write(JSONSerializer serializer, Object object, Object fieldName, Type fieldType, int features) {
+        SerializeWriter out = serializer.out;
+        if (object == null) {
+            out.writeNull();
+        } else {
+            out.write(((JSONAware) object).toJSONString());
+        }
+    }
+}

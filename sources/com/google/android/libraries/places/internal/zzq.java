@@ -1,0 +1,12 @@
+package com.google.android.libraries.places.internal;
+
+/* compiled from: com.google.android.libraries.places:places@@3.1.0 */
+public final class zzq extends zzafw implements zzahi {
+    private zzq() {
+        super(zzs.zzb);
+    }
+
+    /* synthetic */ zzq(zza zza) {
+        super(zzs.zzb);
+    }
+}

@@ -1,0 +1,17 @@
+package com.leedarson.newui.report_repos;
+
+import com.leedarson.smartcamera.kvswebrtc.beans.WebRtcServiceStateChangeLogBean;
+import io.reactivex.functions.e;
+
+/* compiled from: lambda */
+public final /* synthetic */ class h implements e {
+    public final /* synthetic */ k c;
+
+    public /* synthetic */ h(k kVar) {
+        this.c = kVar;
+    }
+
+    public final void accept(Object obj) {
+        this.c.c((WebRtcServiceStateChangeLogBean) obj);
+    }
+}

@@ -1,0 +1,45 @@
+package org.webrtc;
+
+import org.webrtc.VideoEncoder;
+
+public abstract class WrappedNativeVideoEncoder implements VideoEncoder {
+    public abstract long createNativeVideoEncoder();
+
+    public /* synthetic */ VideoEncoder.EncoderInfo getEncoderInfo() {
+        return v0.b(this);
+    }
+
+    public /* synthetic */ VideoEncoder.ResolutionBitrateLimits[] getResolutionBitrateLimits() {
+        return v0.c(this);
+    }
+
+    public abstract boolean isHardwareEncoder();
+
+    public /* synthetic */ VideoCodecStatus setRates(VideoEncoder.RateControlParameters rateControlParameters) {
+        return v0.e(this, rateControlParameters);
+    }
+
+    public final VideoCodecStatus initEncode(VideoEncoder.Settings settings, VideoEncoder.Callback encodeCallback) {
+        throw new UnsupportedOperationException("Not implemented.");
+    }
+
+    public final VideoCodecStatus release() {
+        throw new UnsupportedOperationException("Not implemented.");
+    }
+
+    public final VideoCodecStatus encode(VideoFrame frame, VideoEncoder.EncodeInfo info) {
+        throw new UnsupportedOperationException("Not implemented.");
+    }
+
+    public final VideoCodecStatus setRateAllocation(VideoEncoder.BitrateAllocation allocation, int framerate) {
+        throw new UnsupportedOperationException("Not implemented.");
+    }
+
+    public final VideoEncoder.ScalingSettings getScalingSettings() {
+        throw new UnsupportedOperationException("Not implemented.");
+    }
+
+    public final String getImplementationName() {
+        throw new UnsupportedOperationException("Not implemented.");
+    }
+}

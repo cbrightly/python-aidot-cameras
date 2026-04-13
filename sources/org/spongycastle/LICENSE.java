@@ -1,0 +1,7 @@
+package org.spongycastle;
+
+import org.spongycastle.util.Strings;
+
+public class LICENSE {
+    public static String a = ("Copyright (c) 2000-2017 The Legion of the Bouncy Castle Inc. (http://www.bouncycastle.org) " + Strings.d() + Strings.d() + "Permission is hereby granted, free of charge, to any person obtaining a copy of this software " + Strings.d() + "and associated documentation files (the \"Software\"), to deal in the Software without restriction, " + Strings.d() + "including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, " + Strings.d() + "and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so," + Strings.d() + "subject to the following conditions:" + Strings.d() + Strings.d() + "The above copyright notice and this permission notice shall be included in all copies or substantial" + Strings.d() + "portions of the Software." + Strings.d() + Strings.d() + "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED," + Strings.d() + "INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR" + Strings.d() + "PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE" + Strings.d() + "LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR" + Strings.d() + "OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER" + Strings.d() + "DEALINGS IN THE SOFTWARE.");
+}

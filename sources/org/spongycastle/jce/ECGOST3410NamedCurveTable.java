@@ -1,0 +1,23 @@
+package org.spongycastle.jce;
+
+import org.spongycastle.asn1.ASN1ObjectIdentifier;
+import org.spongycastle.asn1.cryptopro.ECGOST3410NamedCurves;
+import org.spongycastle.crypto.params.ECDomainParameters;
+import org.spongycastle.jce.spec.ECNamedCurveParameterSpec;
+
+public class ECGOST3410NamedCurveTable {
+    public static ECNamedCurveParameterSpec a(String name) {
+        ECDomainParameters ecP = ECGOST3410NamedCurves.a(name);
+        if (ecP == null) {
+            try {
+                ecP = ECGOST3410NamedCurves.b(new ASN1ObjectIdentifier(name));
+            } catch (IllegalArgumentException e) {
+                return null;
+            }
+        }
+        if (ecP == null) {
+            return null;
+        }
+        return new ECNamedCurveParameterSpec(name, ecP.a(), ecP.b(), ecP.d(), ecP.c(), ecP.e());
+    }
+}

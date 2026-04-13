@@ -1,0 +1,31 @@
+package com.google.android.gms.vision.clearcut;
+
+import android.content.Context;
+import androidx.annotation.Keep;
+import androidx.annotation.RecentlyNonNull;
+import com.google.android.gms.internal.vision.zze;
+import com.google.android.gms.internal.vision.zzfi;
+import com.google.android.gms.internal.vision.zzi;
+import com.google.android.gms.vision.L;
+import java.util.concurrent.ExecutorService;
+
+@Keep
+/* compiled from: com.google.android.gms:play-services-vision-common@@19.1.3 */
+public class DynamiteClearcutLogger {
+    private static final ExecutorService zza = zze.zza().zza(2, zzi.zza);
+    private zzb zzb = new zzb(0.03333333333333333d);
+    /* access modifiers changed from: private */
+    public VisionClearcutLogger zzc;
+
+    public DynamiteClearcutLogger(@RecentlyNonNull Context context) {
+        this.zzc = new VisionClearcutLogger(context);
+    }
+
+    public final void zza(int i, zzfi.zzo zzo) {
+        if (i != 3 || this.zzb.zza()) {
+            zza.execute(new zza(this, i, zzo));
+        } else {
+            L.v("Skipping image analysis log due to rate limiting", new Object[0]);
+        }
+    }
+}

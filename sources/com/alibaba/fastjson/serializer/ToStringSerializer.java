@@ -1,0 +1,16 @@
+package com.alibaba.fastjson.serializer;
+
+import java.lang.reflect.Type;
+
+public class ToStringSerializer implements ObjectSerializer {
+    public static final ToStringSerializer instance = new ToStringSerializer();
+
+    public void write(JSONSerializer serializer, Object object, Object fieldName, Type fieldType, int features) {
+        SerializeWriter out = serializer.out;
+        if (object == null) {
+            out.writeNull();
+        } else {
+            out.writeString(object.toString());
+        }
+    }
+}

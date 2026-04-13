@@ -1,0 +1,177 @@
+package org.spongycastle.jce;
+
+import java.io.IOException;
+import java.util.HashSet;
+import java.util.Hashtable;
+import java.util.Set;
+import org.spongycastle.asn1.ASN1Integer;
+import org.spongycastle.asn1.ASN1ObjectIdentifier;
+import org.spongycastle.asn1.DERNull;
+import org.spongycastle.asn1.cryptopro.CryptoProObjectIdentifiers;
+import org.spongycastle.asn1.nist.NISTObjectIdentifiers;
+import org.spongycastle.asn1.oiw.OIWObjectIdentifiers;
+import org.spongycastle.asn1.pkcs.CertificationRequest;
+import org.spongycastle.asn1.pkcs.PKCSObjectIdentifiers;
+import org.spongycastle.asn1.pkcs.RSASSAPSSparams;
+import org.spongycastle.asn1.teletrust.TeleTrusTObjectIdentifiers;
+import org.spongycastle.asn1.x509.AlgorithmIdentifier;
+import org.spongycastle.asn1.x9.X9ObjectIdentifiers;
+
+public class PKCS10CertificationRequest extends CertificationRequest {
+    private static Set p0 = new HashSet();
+    private static Hashtable q = new Hashtable();
+    private static Hashtable x = new Hashtable();
+    private static Hashtable y = new Hashtable();
+    private static Hashtable z = new Hashtable();
+
+    static {
+        q.put("MD2WITHRSAENCRYPTION", new ASN1ObjectIdentifier("1.2.840.113549.1.1.2"));
+        q.put("MD2WITHRSA", new ASN1ObjectIdentifier("1.2.840.113549.1.1.2"));
+        q.put("MD5WITHRSAENCRYPTION", new ASN1ObjectIdentifier("1.2.840.113549.1.1.4"));
+        q.put("MD5WITHRSA", new ASN1ObjectIdentifier("1.2.840.113549.1.1.4"));
+        q.put("RSAWITHMD5", new ASN1ObjectIdentifier("1.2.840.113549.1.1.4"));
+        q.put("SHA1WITHRSAENCRYPTION", new ASN1ObjectIdentifier("1.2.840.113549.1.1.5"));
+        q.put("SHA1WITHRSA", new ASN1ObjectIdentifier("1.2.840.113549.1.1.5"));
+        Hashtable hashtable = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier = PKCSObjectIdentifiers.X;
+        hashtable.put("SHA224WITHRSAENCRYPTION", aSN1ObjectIdentifier);
+        q.put("SHA224WITHRSA", aSN1ObjectIdentifier);
+        Hashtable hashtable2 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier2 = PKCSObjectIdentifiers.U;
+        hashtable2.put("SHA256WITHRSAENCRYPTION", aSN1ObjectIdentifier2);
+        q.put("SHA256WITHRSA", aSN1ObjectIdentifier2);
+        Hashtable hashtable3 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier3 = PKCSObjectIdentifiers.V;
+        hashtable3.put("SHA384WITHRSAENCRYPTION", aSN1ObjectIdentifier3);
+        q.put("SHA384WITHRSA", aSN1ObjectIdentifier3);
+        Hashtable hashtable4 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier4 = PKCSObjectIdentifiers.W;
+        hashtable4.put("SHA512WITHRSAENCRYPTION", aSN1ObjectIdentifier4);
+        q.put("SHA512WITHRSA", aSN1ObjectIdentifier4);
+        Hashtable hashtable5 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier5 = PKCSObjectIdentifiers.T;
+        hashtable5.put("SHA1WITHRSAANDMGF1", aSN1ObjectIdentifier5);
+        q.put("SHA224WITHRSAANDMGF1", aSN1ObjectIdentifier5);
+        q.put("SHA256WITHRSAANDMGF1", aSN1ObjectIdentifier5);
+        q.put("SHA384WITHRSAANDMGF1", aSN1ObjectIdentifier5);
+        q.put("SHA512WITHRSAANDMGF1", aSN1ObjectIdentifier5);
+        q.put("RSAWITHSHA1", new ASN1ObjectIdentifier("1.2.840.113549.1.1.5"));
+        Hashtable hashtable6 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier6 = TeleTrusTObjectIdentifiers.g;
+        hashtable6.put("RIPEMD128WITHRSAENCRYPTION", aSN1ObjectIdentifier6);
+        q.put("RIPEMD128WITHRSA", aSN1ObjectIdentifier6);
+        Hashtable hashtable7 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier7 = TeleTrusTObjectIdentifiers.f;
+        hashtable7.put("RIPEMD160WITHRSAENCRYPTION", aSN1ObjectIdentifier7);
+        q.put("RIPEMD160WITHRSA", aSN1ObjectIdentifier7);
+        Hashtable hashtable8 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier8 = TeleTrusTObjectIdentifiers.h;
+        hashtable8.put("RIPEMD256WITHRSAENCRYPTION", aSN1ObjectIdentifier8);
+        q.put("RIPEMD256WITHRSA", aSN1ObjectIdentifier8);
+        q.put("SHA1WITHDSA", new ASN1ObjectIdentifier("1.2.840.10040.4.3"));
+        q.put("DSAWITHSHA1", new ASN1ObjectIdentifier("1.2.840.10040.4.3"));
+        Hashtable hashtable9 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier9 = NISTObjectIdentifiers.T;
+        hashtable9.put("SHA224WITHDSA", aSN1ObjectIdentifier9);
+        Hashtable hashtable10 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier10 = aSN1ObjectIdentifier9;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier11 = NISTObjectIdentifiers.U;
+        hashtable10.put("SHA256WITHDSA", aSN1ObjectIdentifier11);
+        ASN1ObjectIdentifier aSN1ObjectIdentifier12 = aSN1ObjectIdentifier11;
+        q.put("SHA384WITHDSA", NISTObjectIdentifiers.V);
+        q.put("SHA512WITHDSA", NISTObjectIdentifiers.W);
+        Hashtable hashtable11 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier13 = X9ObjectIdentifiers.r3;
+        hashtable11.put("SHA1WITHECDSA", aSN1ObjectIdentifier13);
+        Hashtable hashtable12 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier14 = X9ObjectIdentifiers.v3;
+        hashtable12.put("SHA224WITHECDSA", aSN1ObjectIdentifier14);
+        Hashtable hashtable13 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier15 = aSN1ObjectIdentifier14;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier16 = X9ObjectIdentifiers.w3;
+        hashtable13.put("SHA256WITHECDSA", aSN1ObjectIdentifier16);
+        Hashtable hashtable14 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier17 = aSN1ObjectIdentifier16;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier18 = X9ObjectIdentifiers.x3;
+        hashtable14.put("SHA384WITHECDSA", aSN1ObjectIdentifier18);
+        Hashtable hashtable15 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier19 = X9ObjectIdentifiers.y3;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier20 = aSN1ObjectIdentifier18;
+        hashtable15.put("SHA512WITHECDSA", aSN1ObjectIdentifier19);
+        q.put("ECDSAWITHSHA1", aSN1ObjectIdentifier13);
+        Hashtable hashtable16 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier21 = CryptoProObjectIdentifiers.n;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier22 = aSN1ObjectIdentifier19;
+        hashtable16.put("GOST3411WITHGOST3410", aSN1ObjectIdentifier21);
+        q.put("GOST3410WITHGOST3411", aSN1ObjectIdentifier21);
+        Hashtable hashtable17 = q;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier23 = CryptoProObjectIdentifiers.o;
+        ASN1ObjectIdentifier aSN1ObjectIdentifier24 = aSN1ObjectIdentifier13;
+        hashtable17.put("GOST3411WITHECGOST3410", aSN1ObjectIdentifier23);
+        q.put("GOST3411WITHECGOST3410-2001", aSN1ObjectIdentifier23);
+        q.put("GOST3411WITHGOST3410-2001", aSN1ObjectIdentifier23);
+        z.put(new ASN1ObjectIdentifier("1.2.840.113549.1.1.5"), "SHA1WITHRSA");
+        z.put(aSN1ObjectIdentifier, "SHA224WITHRSA");
+        z.put(aSN1ObjectIdentifier2, "SHA256WITHRSA");
+        z.put(aSN1ObjectIdentifier3, "SHA384WITHRSA");
+        z.put(aSN1ObjectIdentifier4, "SHA512WITHRSA");
+        z.put(aSN1ObjectIdentifier21, "GOST3411WITHGOST3410");
+        z.put(aSN1ObjectIdentifier23, "GOST3411WITHECGOST3410");
+        z.put(new ASN1ObjectIdentifier("1.2.840.113549.1.1.4"), "MD5WITHRSA");
+        z.put(new ASN1ObjectIdentifier("1.2.840.113549.1.1.2"), "MD2WITHRSA");
+        Object obj = "SHA1WITHDSA";
+        z.put(new ASN1ObjectIdentifier("1.2.840.10040.4.3"), obj);
+        ASN1ObjectIdentifier aSN1ObjectIdentifier25 = aSN1ObjectIdentifier24;
+        z.put(aSN1ObjectIdentifier25, "SHA1WITHECDSA");
+        ASN1ObjectIdentifier aSN1ObjectIdentifier26 = aSN1ObjectIdentifier15;
+        z.put(aSN1ObjectIdentifier26, "SHA224WITHECDSA");
+        ASN1ObjectIdentifier aSN1ObjectIdentifier27 = aSN1ObjectIdentifier17;
+        z.put(aSN1ObjectIdentifier27, "SHA256WITHECDSA");
+        ASN1ObjectIdentifier aSN1ObjectIdentifier28 = aSN1ObjectIdentifier20;
+        z.put(aSN1ObjectIdentifier28, "SHA384WITHECDSA");
+        ASN1ObjectIdentifier aSN1ObjectIdentifier29 = aSN1ObjectIdentifier22;
+        z.put(aSN1ObjectIdentifier29, "SHA512WITHECDSA");
+        z.put(OIWObjectIdentifiers.k, "SHA1WITHRSA");
+        z.put(OIWObjectIdentifiers.j, obj);
+        ASN1ObjectIdentifier aSN1ObjectIdentifier30 = aSN1ObjectIdentifier10;
+        z.put(aSN1ObjectIdentifier30, "SHA224WITHDSA");
+        ASN1ObjectIdentifier aSN1ObjectIdentifier31 = aSN1ObjectIdentifier12;
+        z.put(aSN1ObjectIdentifier31, "SHA256WITHDSA");
+        y.put(PKCSObjectIdentifiers.K, "RSA");
+        y.put(X9ObjectIdentifiers.d4, "DSA");
+        p0.add(aSN1ObjectIdentifier25);
+        p0.add(aSN1ObjectIdentifier26);
+        p0.add(aSN1ObjectIdentifier27);
+        p0.add(aSN1ObjectIdentifier28);
+        p0.add(aSN1ObjectIdentifier29);
+        p0.add(X9ObjectIdentifiers.e4);
+        p0.add(aSN1ObjectIdentifier30);
+        p0.add(aSN1ObjectIdentifier31);
+        p0.add(aSN1ObjectIdentifier21);
+        p0.add(aSN1ObjectIdentifier23);
+        ASN1ObjectIdentifier aSN1ObjectIdentifier32 = OIWObjectIdentifiers.i;
+        DERNull dERNull = DERNull.c;
+        Object obj2 = "SHA1WITHRSAANDMGF1";
+        x.put(obj2, e(new AlgorithmIdentifier(aSN1ObjectIdentifier32, dERNull), 20));
+        Object obj3 = "SHA224WITHRSAANDMGF1";
+        x.put(obj3, e(new AlgorithmIdentifier(NISTObjectIdentifiers.f, dERNull), 28));
+        Object obj4 = "SHA256WITHRSAANDMGF1";
+        x.put(obj4, e(new AlgorithmIdentifier(NISTObjectIdentifiers.c, dERNull), 32));
+        Object obj5 = "SHA384WITHRSAANDMGF1";
+        x.put(obj5, e(new AlgorithmIdentifier(NISTObjectIdentifiers.d, dERNull), 48));
+        Object obj6 = "SHA512WITHRSAANDMGF1";
+        x.put(obj6, e(new AlgorithmIdentifier(NISTObjectIdentifiers.e, dERNull), 64));
+    }
+
+    private static RSASSAPSSparams e(AlgorithmIdentifier hashAlgId, int saltSize) {
+        return new RSASSAPSSparams(hashAlgId, new AlgorithmIdentifier(PKCSObjectIdentifiers.R, hashAlgId), new ASN1Integer((long) saltSize), new ASN1Integer(1));
+    }
+
+    public byte[] getEncoded() {
+        try {
+            return getEncoded("DER");
+        } catch (IOException e) {
+            throw new RuntimeException(e.toString());
+        }
+    }
+}

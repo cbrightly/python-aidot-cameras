@@ -1,0 +1,41 @@
+package com.google.android.gms.common.api.internal;
+
+import android.os.IBinder;
+import android.os.IInterface;
+import android.os.Parcel;
+import androidx.annotation.NonNull;
+import com.google.android.gms.common.api.Status;
+import com.google.android.gms.internal.base.zab;
+import com.google.android.gms.internal.base.zac;
+
+/* compiled from: com.google.android.gms:play-services-base@@18.2.0 */
+public interface IStatusCallback extends IInterface {
+
+    /* compiled from: com.google.android.gms:play-services-base@@18.2.0 */
+    public static abstract class Stub extends zab implements IStatusCallback {
+        public Stub() {
+            super("com.google.android.gms.common.api.internal.IStatusCallback");
+        }
+
+        @NonNull
+        public static IStatusCallback asInterface(@NonNull IBinder obj) {
+            if (obj == null) {
+                return null;
+            }
+            IInterface queryLocalInterface = obj.queryLocalInterface("com.google.android.gms.common.api.internal.IStatusCallback");
+            return queryLocalInterface instanceof IStatusCallback ? (IStatusCallback) queryLocalInterface : new zaby(obj);
+        }
+
+        /* access modifiers changed from: protected */
+        public final boolean zaa(int i, @NonNull Parcel parcel, @NonNull Parcel parcel2, int i2) {
+            if (i != 1) {
+                return false;
+            }
+            zac.zab(parcel);
+            onResult((Status) zac.zaa(parcel, Status.CREATOR));
+            return true;
+        }
+    }
+
+    void onResult(@NonNull Status status);
+}
