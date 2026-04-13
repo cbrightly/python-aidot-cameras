@@ -4675,7 +4675,7 @@ class DeviceClient(object):
             # linear-parsing camera firmware recognises this as an SDES offer
             # rather than a pure-ICE offer and does not discard the key.
             f"m=audio {audio_port} RTP/SAVPF 0 8\r\n"
-            f"c=IN IP4 {local_ip}\r\n"
+            f"c=IN IP4 {_public_ip or local_ip}\r\n"
             "a=recvonly\r\n"
             "a=mid:0\r\n"
             f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
@@ -4698,7 +4698,7 @@ class DeviceClient(object):
             )
             # video m-section
             + f"m=video {video_port} RTP/SAVPF 96 97\r\n"
-            f"c=IN IP4 {local_ip}\r\n"
+            f"c=IN IP4 {_public_ip or local_ip}\r\n"
             "a=recvonly\r\n"
             "a=mid:1\r\n"
             f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
@@ -4811,6 +4811,88 @@ class DeviceClient(object):
         # candidates when direct connectivity fails (e.g. symmetric NAT).
         _sdes_ice_server_list = [{"Uris": ["stun:stun.l.google.com:19302"]}]
         _sdes_ice_server_list.extend(_sdes_turn_entries)
+        # Pre-generate PSK and compressed SDP for webrtcReq; the same PSK is
+        # reused in webrtcResp so the camera sees a consistent value.
+        import random as _rnd_psk_req
+        _psk_charset_req = "123456789abcdef"
+        _psk_value_req = "".join(
+            _psk_charset_req[_rnd_psk_req.randint(0, len(_psk_charset_req) - 1)]
+            for _ in range(64)
+        )
+
+        def _compress_sdp_req(_sdp: str) -> str:
+            """g.b() equivalent — selective SDP filter for wPayload."""
+            _out: list = []
+            _seen: dict = {}
+            _media_type = ""
+            _before_m = True
+
+            def _k(_ln: str, _key: str = "") -> None:
+                _out.append(_ln + "\r\n")
+                if _key:
+                    _seen[_key] = "1"
+
+            for _ln in _sdp.splitlines():
+                if _ln.startswith("m="):
+                    _before_m = False
+                    _media_type = _ln.split(" ")[0]
+                    _k(_ln)
+                    continue
+                if _before_m:
+                    if _ln.startswith("s="):
+                        _k(_ln)
+                    continue
+                if _ln.startswith("a=ssrc") and "cname" in _ln:
+                    _k(_ln)
+                    continue
+                if any(_d in _ln for _d in ("sendrecv", "recvonly", "sendonly")):
+                    _k(_ln)
+                    continue
+                for _ak in ("ice-ufrag", "ice-pwd", "fingerprint", "setup",
+                            "ice-options", "crypto"):
+                    if _ak in _ln:
+                        if _seen.get(_ak) is None:
+                            _k(_ln, _ak)
+                        break
+                else:
+                    if "candidate" in _ln and " udp " in _ln.lower():
+                        _k(_ln)
+                        continue
+                    if _media_type == "m=audio":
+                        if any(_c in _ln for _c in ("opus", "PCMU", "PCMA", "AAC")):
+                            _k(_ln)
+                    elif _media_type == "m=video":
+                        if "H264/90000" in _ln and _seen.get("H264/90000") is None:
+                            _k(_ln, "H264/90000")
+                            try:
+                                _seen["H264/90000_pt"] = _ln.split(":")[1].split(" ")[0]
+                            except Exception:
+                                pass
+                        elif "H265/90000" in _ln and _seen.get("H265/90000") is None:
+                            _k(_ln, "H265/90000")
+                            try:
+                                _seen["H265/90000_pt"] = _ln.split(":")[1].split(" ")[0]
+                            except Exception:
+                                pass
+                        elif "apt=" in _ln:
+                            try:
+                                _apt = _ln.split("apt=")[1].strip()
+                            except Exception:
+                                _apt = ""
+                            if _apt and _apt in (
+                                _seen.get("H264/90000_pt", ""),
+                                _seen.get("H265/90000_pt", ""),
+                            ):
+                                _k(_ln)
+                        elif "fmtp" in _ln and "profile-level-id" in _ln:
+                            if _seen.get("profile-level") is None:
+                                _k(_ln, "profile-level")
+                    elif _media_type == "m=application":
+                        if "sctp-port" in _ln:
+                            _k(_ln)
+            return "".join(_out)
+
+        _compressed_sdp_req = _compress_sdp_req(sdes_offer_sdp)
         _webrtc_req_sdes_payload = json.dumps({
             "method":  "webrtcReq",
             "service": "IPC",
@@ -4826,10 +4908,15 @@ class DeviceClient(object):
                 "offer":   {"type": "offer", "sdp": sdes_offer_sdp},
                 "trackId": 0,
                 "dstAddr": user_id,
-                # Browser-style nested fields for newer firmware.
+                "encOffer": 1,
+                "liveMqtt": 1,
+                # wPayload: newer firmware parses wPayload for ICE credentials
+                # and PSK.  Fields match reference app o.java (signaling/tyrus).
                 "wPayload": {
                     "peerid": peer_id,
-                    "offer":  {"type": "offer", "sdp": sdes_offer_sdp},
+                    "sts":    int(time.time() * 1000),
+                    "psk":    _psk_value_req,
+                    "offer":  {"type": "offer", "sdp": _compressed_sdp_req},
                 },
                 "IceServerList": _sdes_ice_server_list,
             },
@@ -4874,6 +4961,10 @@ class DeviceClient(object):
                             })
                 except Exception:
                     pass
+            # Reuse the PSK and compressed SDP already generated for webrtcReq
+            # so the camera sees consistent values across both messages.
+            _compressed_sdp = _compressed_sdp_req
+
             _webrtc_resp_sdes_topic = f"iot/v1/s/{user_id}/IPC/webrtcResp"
             _webrtc_resp_sdes = json.dumps({
                 "method":  "webrtcResp",
@@ -4889,14 +4980,16 @@ class DeviceClient(object):
                     "answer":  {"type": "answer", "sdp": sdes_offer_sdp},
                     "trackId": 0,
                     "dstAddr": device_id,
-                    # wPayload mirrors the webrtcReq format.  Newer firmware
-                    # (e.g. LK.IPC.A001064) parses wPayload.answer.sdp to
-                    # extract our ICE credentials; without this field the
-                    # camera cannot form valid STUN binding requests and never
-                    # initiates ICE connectivity checks → 0 frames.
+                    "encOffer": 1,
+                    "liveMqtt": 1,
+                    # wPayload: newer firmware (e.g. LK.IPC.A001064) parses
+                    # wPayload to extract ICE credentials and PSK.  Fields match
+                    # reference app o.java (signaling/tyrus).
                     "wPayload": {
                         "peerid": peer_id,
-                        "answer": {"type": "answer", "sdp": sdes_offer_sdp},
+                        "sts":    int(time.time() * 1000),
+                        "psk":    _psk_value_req,
+                        "answer": {"type": "answer", "sdp": _compressed_sdp},
                     },
                 },
             })
@@ -4975,7 +5068,7 @@ class DeviceClient(object):
 
             # Step 1: unauthenticated Allocate → get REALM and NONCE from 401
             _tid1 = os.urandom(12)
-            _b1 = _a(0x0019, b'\x00\x00\x00\x11')  # REQUESTED-TRANSPORT = UDP(17)
+            _b1 = _a(0x0019, b'\x11\x00\x00\x00')  # REQUESTED-TRANSPORT = UDP(17), RFC 5766 §14.7 protocol in MSB
             _r1 = b'\x00\x03' + _st_ta.pack('!H', len(_b1)) + _MAGIC_TA + _tid1 + _b1
             try:
                 _ta_sock.sendto(_r1, (_ta_host, _ta_port))
@@ -5023,7 +5116,7 @@ class DeviceClient(object):
                 _a(0x0006, _ta_user)                  # USERNAME
                 + _a(0x0014, _realm_ta)               # REALM
                 + _a(0x0015, _nonce_ta)               # NONCE
-                + _a(0x0019, b'\x00\x00\x00\x11')     # REQUESTED-TRANSPORT = UDP
+                + _a(0x0019, b'\x11\x00\x00\x00')     # REQUESTED-TRANSPORT = UDP, RFC 5766 §14.7 protocol in MSB
             )
             _h2 = b'\x00\x03' + _st_ta.pack('!H', len(_b2) + 24) + _MAGIC_TA + _tid2
             _b2 += _a(0x0008, _mi_ta(_key_ta, _h2 + _b2))  # MESSAGE-INTEGRITY
