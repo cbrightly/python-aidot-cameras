@@ -4908,7 +4908,7 @@ class DeviceClient(object):
         def _turn_allocate_udp(_ta_sock, _ta_host, _ta_port, _ta_user, _ta_pass):
             """RFC 5766 TURN relay allocation with long-term credential auth.
             Returns (relay_ip, relay_port, realm, nonce) or None on failure."""
-            import hashlib as _ha, hmac as _hm, struct as _st_ta, select as _sl_ta
+            import hashlib as _ha, hmac as _hm, struct as _st_ta, select as _sl_ta, time as _tm_ta
 
             _MAGIC_TA = b'\x21\x12\xa4\x42'
 
@@ -4932,9 +4932,9 @@ class DeviceClient(object):
             # Loop until we get a response whose TID matches our request (discard
             # stale packets from previous exchanges that may linger in the buffer).
             _rsp1 = None
-            _dl1 = _sl_ta.time() + 2.0
-            while _sl_ta.time() < _dl1:
-                _rem = _dl1 - _sl_ta.time()
+            _dl1 = _tm_ta.time() + 2.0
+            while _tm_ta.time() < _dl1:
+                _rem = _dl1 - _tm_ta.time()
                 _rs1, _, _ = _sl_ta.select([_ta_sock], [], [], min(_rem, 0.5))
                 if not _rs1:
                     continue
@@ -4983,9 +4983,9 @@ class DeviceClient(object):
             # Same TID-matching loop — if step 1's 401 was still in the buffer,
             # a bare recvfrom would consume it and report failure on a good alloc.
             _rsp2 = None
-            _dl2 = _sl_ta.time() + 2.0
-            while _sl_ta.time() < _dl2:
-                _rem = _dl2 - _sl_ta.time()
+            _dl2 = _tm_ta.time() + 2.0
+            while _tm_ta.time() < _dl2:
+                _rem = _dl2 - _tm_ta.time()
                 _rs2, _, _ = _sl_ta.select([_ta_sock], [], [], min(_rem, 0.5))
                 if not _rs2:
                     continue
