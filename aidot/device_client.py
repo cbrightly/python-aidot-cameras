@@ -3266,6 +3266,8 @@ class DeviceClient(object):
         # ------------------------------------------------------------------ #
         # aiortc peer connection (DTLS-SRTP path)
         # ------------------------------------------------------------------ #
+        import logging as _logging_dtls
+        _logging_dtls.getLogger("aioice").setLevel(_logging_dtls.DEBUG)
         from aiortc import RTCConfiguration, RTCIceServer
 
         def _sanitize_ice_uris(uris):
@@ -3690,10 +3692,58 @@ class DeviceClient(object):
                 out.append(line)
             return '\r\n'.join(out)
 
-        _offer_sdp = _filter_sdp_candidates(
-            _reorder_m_section_ice_attrs(
-                _normalize_bundle_ice_credentials(
-                    _inject_h265_into_mid1(_upgrade_sctp(pc.localDescription.sdp))
+        def _strip_datachannel(sdp: str) -> str:
+            """Remove the m=application (datachannel) section from the SDP offer.
+
+            Camera firmware (e.g. LK.IPC.A001064) does not support WebRTC data
+            channels and silently discards offers that include an m=application
+            section.  aiortc adds this section automatically; stripping it gives
+            the camera a clean 2-m-line offer (audio + video) that it can parse.
+
+            Also removes the datachannel mid from the BUNDLE group so the SDP
+            remains well-formed.
+            """
+            import re as _re_dc
+            lines = _re_dc.split(r'\r?\n', sdp)
+            # Find the start of m=application section
+            _dc_start = None
+            for _i, _ln in enumerate(lines):
+                if _ln.startswith('m=application'):
+                    _dc_start = _i
+                    break
+            if _dc_start is None:
+                return sdp  # no datachannel section — nothing to strip
+            # The section ends at the next m= line (or EOF)
+            _dc_end = len(lines)
+            for _i in range(_dc_start + 1, len(lines)):
+                if lines[_i].startswith('m='):
+                    _dc_end = _i
+                    break
+            # Extract the mid of the datachannel section so we can remove it
+            # from a=group:BUNDLE
+            _dc_mid = None
+            for _ln in lines[_dc_start:_dc_end]:
+                if _ln.startswith('a=mid:'):
+                    _dc_mid = _ln[len('a=mid:'):]
+                    break
+            # Remove the datachannel section
+            out_lines = lines[:_dc_start] + lines[_dc_end:]
+            # Update a=group:BUNDLE to remove the datachannel mid
+            if _dc_mid is not None:
+                for _i, _ln in enumerate(out_lines):
+                    if _ln.startswith('a=group:BUNDLE'):
+                        mids = _ln[len('a=group:BUNDLE'):].split()
+                        mids = [m for m in mids if m != _dc_mid]
+                        out_lines[_i] = 'a=group:BUNDLE' + (' ' + ' '.join(mids) if mids else '')
+                        break
+            return '\r\n'.join(out_lines)
+
+        _offer_sdp = _strip_datachannel(
+            _filter_sdp_candidates(
+                _reorder_m_section_ice_attrs(
+                    _normalize_bundle_ice_credentials(
+                        _inject_h265_into_mid1(_upgrade_sctp(pc.localDescription.sdp))
+                    )
                 )
             )
         )
@@ -4415,23 +4465,25 @@ class DeviceClient(object):
                 ))
                 _devattr_midloop_sent = True
                 _status("getDevAttrReq re-sent (mid-loop, waiting for camera IP)")
-            # Re-send webrtcResp + ICE candidates if camera reconnected during ICE.
+            # Re-send ICE candidates if camera reconnected during ICE.
             # LK.IPC.A001064 performs a quickConn MQTT reconnect after receiving
             # our signaling; the reconnect resets its WebRTC session so we must
-            # re-deliver the answer and candidates after the camera comes back online.
-            # Guard: only for echo-only role-reversal cameras (_rr_webrtc_resp_payload
-            # is empty for all other paths) and at most once per session.
+            # re-deliver ICE candidates after the camera comes back online.
+            # NOTE: do NOT re-send webrtcResp — that triggers another quickConn,
+            # creating an infinite reconnect loop.  ICE candidates alone are
+            # sufficient to resume connectivity checks.
+            # Guard: only for echo-only role-reversal cameras (_rr_ice_payloads
+            # is empty for all other paths) and at most 3 times per session.
             if (camera_reconnect_ev.is_set()
                     and _reconnect_resent_count < 3
-                    and _rr_webrtc_resp_payload):
+                    and _rr_ice_payloads):
                 _reconnect_resent_count += 1
                 camera_reconnect_ev.clear()
                 _status(
                     "camera reconnected during ICE"
-                    " — re-sending webrtcResp + ICE candidates"
+                    " — re-sending ICE candidates only (not webrtcResp)"
                 )
-                await asyncio.sleep(0.3)  # let camera stabilize before re-send
-                outgoing_q.put_nowait((_rr_webrtc_resp_topic, _rr_webrtc_resp_payload))
+                await asyncio.sleep(1.5)  # let camera stabilize before re-send
                 for _rr_ice_p in _rr_ice_payloads:
                     outgoing_q.put_nowait(_rr_ice_p)
             await asyncio.sleep(0.1)
