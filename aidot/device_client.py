@@ -5715,16 +5715,16 @@ class DeviceClient(object):
         # despite reporting enableSdes='1' in its device properties.
         # Detect this by checking: echo-reversal received (_cam_echo_received)
         # AND no STUN in the ICE window AND no early SRTP.
-        # dtls_fallback_ok is also checked: _cam_echo_received=True
-        # only for cameras that mirror our webrtcReq (e.g. A001064); non-echo
-        # SDES cameras (e.g. A001513) have _cam_echo_received=False and are
-        # never affected.  For isDTLS=0 cameras skip this fallback entirely —
-        # DTLS is not supported so the SDES path must proceed to ffmpeg even
-        # without a confirmed STUN/SRTP handshake in the ICE window.
+        # _cam_echo_received=True only for cameras that mirror our webrtcReq
+        # (e.g. A001064); non-echo SDES cameras (e.g. A001513) always have it
+        # False and are never affected by this block.
+        # NOTE: isDTLS='0' (dtls_fallback_ok=False) does NOT mean the camera
+        # cannot do DTLS — webrtc_internals_dump confirms LK.IPC.A001064 uses
+        # DTLS (UDP/TLS/RTP/SAVPF) when given a proper DTLS offer.  The
+        # property means SDES is available, not that DTLS is absent.
         if (_cam_echo_received
                 and _stun_count == 0
-                and not _srtp_detected
-                and dtls_fallback_ok):
+                and not _srtp_detected):
             _status(
                 "echo-reversal camera: no STUN or SRTP received in ICE window"
                 " — camera likely requires DTLS; falling back"
