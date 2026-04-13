@@ -4926,130 +4926,11 @@ class DeviceClient(object):
         outgoing_q.put_nowait((webrtc_req_topic, _webrtc_req_sdes_payload))
         _status(f"webrtcReq sent (SDES)  peerid={peer_id}")
 
-        # --- Acknowledge camera's webrtcReq echo with webrtcResp ------------- #
-        # LK.IPC.A001064 echoes our offer back as webrtcReq before doing ICE.
-        # It will not start streaming until it receives a webrtcResp from us.
-        # Check for the echo within 2 s so the webrtcResp is sent while our
-        # reservation sockets are still open (camera's ICE may arrive next).
-        #
-        # NOTE: webrtc_req_echo_fut (not camera_offer_fut) is the correct future
-        # here.  camera_offer_fut is only set for non-echo (role-reversal) messages
-        # where is_echo=False.  The broker echo carries our own srcAddr prefix so
-        # is_echo=True, which is exactly what webrtc_req_echo_fut signals.
-        _echo_fut = webrtc_req_echo_fut if webrtc_req_echo_fut is not None else camera_offer_fut
-        _cam_echo_received = False
-        _webrtc_resp_sdes_topic: "Optional[str]" = None
-        _webrtc_resp_sdes: "Optional[str]" = None
-        try:
-            await _asyncio.wait_for(
-                _asyncio.shield(_echo_fut), timeout=2.0
-            )
-            _cam_echo_received = True
-            _status("camera webrtcReq echo received — sending webrtcResp to trigger streaming")
-            # Seed _sdes_turn_entries from the echo's IceServerList if the HTTP
-            # ice_config fetch returned nothing (empty list).  The echo carries
-            # our userId TURN credentials — extract them so the hole-punch and
-            # any future relay allocation use the correct server/port.
-            if not _sdes_turn_entries:
-                try:
-                    _echo_payload = _echo_fut.result() if (_echo_fut is not None and _echo_fut.done()) else {}
-                    for _e in (_echo_payload.get("IceServerList") or []):
-                        _e_uris = _e.get("Uris") or []
-                        if any("turn:" in str(u) for u in _e_uris):
-                            _sdes_turn_entries.append({
-                                "Uris":     _e_uris,
-                                "Username": _e.get("Username") or "",
-                                "Password": str(_e.get("Password") or ""),
-                            })
-                except Exception:
-                    pass
-            # Reuse the PSK and compressed SDP already generated for webrtcReq
-            # so the camera sees consistent values across both messages.
-            _compressed_sdp = _compressed_sdp_req
-
-            _webrtc_resp_sdes_topic = f"iot/v1/s/{user_id}/IPC/webrtcResp"
-            _webrtc_resp_sdes = json.dumps({
-                "method":  "webrtcResp",
-                "service": "IPC",
-                "devId":   device_id,
-                "srcAddr": f"0.{user_id}",
-                "seq":     _seq(),
-                "tst":     int(time.time() * 1000),
-                **( {"userId": numeric_uid_raw} if numeric_uid_raw is not None else {} ),
-                "payload": {
-                    "peerid":  peer_id,
-                    "devId":   device_id,
-                    "answer":  {"type": "answer", "sdp": sdes_offer_sdp},
-                    "trackId": 0,
-                    "dstAddr": device_id,
-                    "encOffer": 1,
-                    "liveMqtt": 1,
-                    # wPayload: newer firmware (e.g. LK.IPC.A001064) parses
-                    # wPayload to extract ICE credentials and PSK.  Fields match
-                    # reference app o.java (signaling/tyrus).
-                    "wPayload": {
-                        "peerid": peer_id,
-                        "sts":    int(time.time() * 1000),
-                        "psk":    _psk_value_req,
-                        "answer": {"type": "answer", "sdp": _compressed_sdp},
-                    },
-                },
-            })
-            outgoing_q.put_nowait((_webrtc_resp_sdes_topic, _webrtc_resp_sdes))
-        except _asyncio.TimeoutError:
-            pass  # no echo — camera uses a different signalling variant; proceed
-
-        # --- Announce our ICE candidates via MQTT (iceCandidateReq) ----------- #
-        # The iOS app always sends iceCandidateReq after webrtcReq/webrtcResp.
-        # ICE-capable cameras (e.g. LK.IPC.A001064) wait for this trickle-ICE
-        # message before initiating STUN connectivity checks, even when the same
-        # candidates are already present in the SDP a=candidate lines.  Without
-        # this step the camera sits idle and never sends STUN — resulting in 0
-        # frames.  Non-ICE cameras (e.g. LK.IPC.A001513) ignore iceCandidateReq
-        # and begin streaming immediately from the SDP exchange, so sending these
-        # messages is safe for all camera models.
-        _ice_cand_topic_sdes = f"iot/v1/s/{user_id}/IPC/iceCandidateReq"
-
-        def _send_sdes_ice_cand(cand_str: str, mid: str) -> None:
-            """Publish a single trickle-ICE candidate via MQTT."""
-            _cand_obj = {
-                "candidate":     cand_str,
-                "sdpMid":        mid,
-                "sdpMLineIndex": int(mid),
-            }
-            _msg = json.dumps({
-                "method":  "iceCandidateReq",
-                "service": "IPC",
-                "devId":   device_id,
-                "srcAddr": f"0.{user_id}",
-                "seq":     _seq(),
-                "tst":     int(time.time() * 1000),
-                **( {"userId": numeric_uid_raw} if numeric_uid_raw is not None else {} ),
-                "payload": {
-                    # dstAddr routes to the camera device, not the user account.
-                    # HAR captures confirm payload.dstAddr = deviceId on every
-                    # iceCandidateReq; using user_id causes silent drops by firmware.
-                    "dstAddr": device_id,
-                    # wPayload is the nested format required by newer firmware
-                    # (e.g. LK.IPC.A001064) that parses wPayload.candidate instead
-                    # of the flat payload.candidate field.
-                    "wPayload": {
-                        "peerid":    peer_id,
-                        "candidate": _cand_obj,
-                    },
-                    # Flat legacy fields retained for older firmware compatibility.
-                    "peerid":    peer_id,
-                    "devId":     device_id,
-                    "candidate": _cand_obj,
-                },
-            })
-            outgoing_q.put_nowait((_ice_cand_topic_sdes, _msg))
-
-        # --- TURN relay allocation: give camera a reachable relay candidate ---- #
-        # Camera probes sent via TURN arrive as Data Indications (type 0x0017) on
-        # the existing NAT mapping for 3.230.182.123:5349 (the TURN control port
-        # opened by the hole-punch below).  Allocating our relay and advertising a
-        # relay candidate lets ICE succeed even through port-restricted NAT.
+        # --- TURN relay allocation helper ------------------------------------ #
+        # Defined here so the echo handler below can call it before sending
+        # webrtcResp.  Pure-SDES cameras read c= from our answer SDP and stream
+        # SRTP directly there — putting the relay IP in the answer is the only
+        # way camera traffic reaches us through port-restricted NAT.
         _relay_addrs: dict = {}  # sock → (relay_ip, relay_port, realm, nonce, t_host, t_port, key)
 
         def _turn_allocate_udp(_ta_sock, _ta_host, _ta_port, _ta_user, _ta_pass):
@@ -5198,53 +5079,256 @@ class DeviceClient(object):
                     return _r_ip_ta, _xp, _realm_ta, _nonce_ta
             return None
 
+        # --- Acknowledge camera's webrtcReq echo with webrtcResp ------------- #
+        # LK.IPC.A001064 echoes our offer back as webrtcReq before doing ICE.
+        # It will not start streaming until it receives a webrtcResp from us.
+        # Check for the echo within 2 s so the webrtcResp is sent while our
+        # reservation sockets are still open (camera's ICE may arrive next).
+        #
+        # NOTE: webrtc_req_echo_fut (not camera_offer_fut) is the correct future
+        # here.  camera_offer_fut is only set for non-echo (role-reversal) messages
+        # where is_echo=False.  The broker echo carries our own srcAddr prefix so
+        # is_echo=True, which is exactly what webrtc_req_echo_fut signals.
+        _echo_fut = webrtc_req_echo_fut if webrtc_req_echo_fut is not None else camera_offer_fut
+        _cam_echo_received = False
+        _webrtc_resp_sdes_topic: "Optional[str]" = None
+        _webrtc_resp_sdes: "Optional[str]" = None
         try:
-            import re as _re_relay, hashlib as _hlk
-            _our_turn_entry = None
-            for _te in _sdes_turn_entries:
-                if _te.get("Username") == user_id:
-                    _our_turn_entry = _te
-                    break
-            if _our_turn_entry is None and _sdes_turn_entries:
-                _our_turn_entry = _sdes_turn_entries[0]
-            if _our_turn_entry:
-                _t_uri_r = next(
-                    (str(u) for u in (_our_turn_entry.get("Uris") or [])
-                     if "turn:" in str(u)),
-                    ""
+            await _asyncio.wait_for(
+                _asyncio.shield(_echo_fut), timeout=2.0
+            )
+            _cam_echo_received = True
+            _status("camera webrtcReq echo received — sending webrtcResp to trigger streaming")
+            # Seed _sdes_turn_entries from the echo's IceServerList if the HTTP
+            # ice_config fetch returned nothing (empty list).  The echo carries
+            # our userId TURN credentials — extract them so the hole-punch and
+            # any future relay allocation use the correct server/port.
+            if not _sdes_turn_entries:
+                try:
+                    _echo_payload = _echo_fut.result() if (_echo_fut is not None and _echo_fut.done()) else {}
+                    for _e in (_echo_payload.get("IceServerList") or []):
+                        _e_uris = _e.get("Uris") or []
+                        if any("turn:" in str(u) for u in _e_uris):
+                            _sdes_turn_entries.append({
+                                "Uris":     _e_uris,
+                                "Username": _e.get("Username") or "",
+                                "Password": str(_e.get("Password") or ""),
+                            })
+                except Exception:
+                    pass
+            # Allocate TURN relay before sending webrtcResp so the relay IP/port
+            # can go into the answer SDP's c= and m= lines.  Pure-SDES cameras
+            # (no ICE) read our answer's c= and stream SRTP directly there —
+            # if we put the relay address here the camera can reach us even
+            # through port-restricted NAT.
+            try:
+                import re as _re_relay_e, hashlib as _hlk_e
+                _our_te = next(
+                    (e for e in _sdes_turn_entries if e.get("Username") == user_id),
+                    _sdes_turn_entries[0] if _sdes_turn_entries else None,
                 )
-                _tm_r = _re_relay.search(r'turns?:([^:?]+)(?::(\d+))?', _t_uri_r)
-                if _tm_r:
-                    _t_host_r = _tm_r.group(1)
-                    _t_port_r = int(_tm_r.group(2) or 5349)
-                    _t_user_r = (_our_turn_entry.get("Username") or "").encode()
-                    _t_pass_r = str(_our_turn_entry.get("Password") or "").encode()
-                    for _alloc_sock in (_audio_sock, _video_sock):
-                        _alloc_res = _turn_allocate_udp(
-                            _alloc_sock, _t_host_r, _t_port_r,
-                            _t_user_r, _t_pass_r,
-                        )
-                        if _alloc_res:
-                            _r_ip, _r_port, _r_realm, _r_nonce = _alloc_res
-                            _r_key = _hlk.md5(
-                                _t_user_r + b':' + _r_realm + b':' + _t_pass_r
-                            ).digest()
-                            _relay_addrs[_alloc_sock] = (
-                                _r_ip, _r_port, _r_realm, _r_nonce,
-                                _t_host_r, _t_port_r, _r_key,
+                if _our_te:
+                    _t_uri_e = next(
+                        (str(u) for u in (_our_te.get("Uris") or [])
+                         if "turn:" in str(u)), ""
+                    )
+                    _tm_e = _re_relay_e.search(
+                        r'turns?:([^:?]+)(?::(\d+))?', _t_uri_e
+                    )
+                    if _tm_e:
+                        _t_host_e = _tm_e.group(1)
+                        _t_port_e = int(_tm_e.group(2) or 5349)
+                        _t_user_e = (_our_te.get("Username") or "").encode()
+                        _t_pass_e = str(_our_te.get("Password") or "").encode()
+                        for _alloc_sock_e in (_audio_sock, _video_sock):
+                            _alloc_res_e = _turn_allocate_udp(
+                                _alloc_sock_e, _t_host_e, _t_port_e,
+                                _t_user_e, _t_pass_e,
                             )
-                            _status(
-                                f"TURN relay allocated: "
-                                f"{'audio' if _alloc_sock is _audio_sock else 'video'}"
-                                f" → {_r_ip}:{_r_port}"
+                            if _alloc_res_e:
+                                _r_ip_e, _r_port_e, _r_realm_e, _r_nonce_e = _alloc_res_e
+                                _r_key_e = _hlk_e.md5(
+                                    _t_user_e + b':' + _r_realm_e + b':' + _t_pass_e
+                                ).digest()
+                                _relay_addrs[_alloc_sock_e] = (
+                                    _r_ip_e, _r_port_e, _r_realm_e, _r_nonce_e,
+                                    _t_host_e, _t_port_e, _r_key_e,
+                                )
+                                _status(
+                                    f"TURN relay allocated (early): "
+                                    f"{'audio' if _alloc_sock_e is _audio_sock else 'video'}"
+                                    f" → {_r_ip_e}:{_r_port_e}"
+                                )
+            except Exception as _relay_early_exc:
+                _LOGGER.warning(
+                    "TURN early relay allocation error: %s", _relay_early_exc
+                )
+            # Build relay-aware answer SDP: relay IP/port in c= and m= so camera
+            # sends SRTP to our relay.  Falls back to public/local IP if allocation
+            # failed (same behaviour as before this change).
+            _audio_relay_e = _relay_addrs.get(_audio_sock)
+            _video_relay_e = _relay_addrs.get(_video_sock)
+            _ans_audio_ip   = _audio_relay_e[0] if _audio_relay_e else (_public_ip or local_ip)
+            _ans_audio_port = _audio_relay_e[1] if _audio_relay_e else audio_port
+            _ans_video_ip   = _video_relay_e[0] if _video_relay_e else (_public_ip or local_ip)
+            _ans_video_port = _video_relay_e[1] if _video_relay_e else video_port
+            _relay_answer_sdp = (
+                "v=0\r\n"
+                f"o=- {ts} {ts} IN IP4 {local_ip}\r\n"
+                "s=-\r\n"
+                "t=0 0\r\n"
+                f"m=audio {_ans_audio_port} RTP/SAVPF 0 8\r\n"
+                f"c=IN IP4 {_ans_audio_ip}\r\n"
+                "a=recvonly\r\n"
+                "a=mid:0\r\n"
+                f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
+                "a=rtpmap:0 PCMU/8000\r\n"
+                "a=rtpmap:8 PCMA/8000\r\n"
+                "a=rtcp-mux\r\n"
+                f"m=video {_ans_video_port} RTP/SAVPF 96 97\r\n"
+                f"c=IN IP4 {_ans_video_ip}\r\n"
+                "a=recvonly\r\n"
+                "a=mid:1\r\n"
+                f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
+                "a=rtpmap:96 H264/90000\r\n"
+                "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
+                "profile-level-id=42e01f\r\n"
+                "a=rtpmap:97 H265/90000\r\n"
+                "a=fmtp:97 level-id=93\r\n"
+                "a=rtcp-mux\r\n"
+            )
+            _compressed_sdp_ans = _compress_sdp_req(_relay_answer_sdp)
+
+            _webrtc_resp_sdes_topic = f"iot/v1/s/{user_id}/IPC/webrtcResp"
+            _webrtc_resp_sdes = json.dumps({
+                "method":  "webrtcResp",
+                "service": "IPC",
+                "devId":   device_id,
+                "srcAddr": f"0.{user_id}",
+                "seq":     _seq(),
+                "tst":     int(time.time() * 1000),
+                **( {"userId": numeric_uid_raw} if numeric_uid_raw is not None else {} ),
+                "payload": {
+                    "peerid":  peer_id,
+                    "devId":   device_id,
+                    "answer":  {"type": "answer", "sdp": _relay_answer_sdp},
+                    "trackId": 0,
+                    "dstAddr": device_id,
+                    "encOffer": 1,
+                    "liveMqtt": 1,
+                    # wPayload: newer firmware (e.g. LK.IPC.A001064) parses
+                    # wPayload to extract ICE credentials and PSK.  Fields match
+                    # reference app o.java (signaling/tyrus).
+                    "wPayload": {
+                        "peerid": peer_id,
+                        "sts":    int(time.time() * 1000),
+                        "psk":    _psk_value_req,
+                        "answer": {"type": "answer", "sdp": _compressed_sdp_ans},
+                    },
+                },
+            })
+            outgoing_q.put_nowait((_webrtc_resp_sdes_topic, _webrtc_resp_sdes))
+        except _asyncio.TimeoutError:
+            pass  # no echo — camera uses a different signalling variant; proceed
+
+        # --- Announce our ICE candidates via MQTT (iceCandidateReq) ----------- #
+        # The iOS app always sends iceCandidateReq after webrtcReq/webrtcResp.
+        # ICE-capable cameras (e.g. LK.IPC.A001064) wait for this trickle-ICE
+        # message before initiating STUN connectivity checks, even when the same
+        # candidates are already present in the SDP a=candidate lines.  Without
+        # this step the camera sits idle and never sends STUN — resulting in 0
+        # frames.  Non-ICE cameras (e.g. LK.IPC.A001513) ignore iceCandidateReq
+        # and begin streaming immediately from the SDP exchange, so sending these
+        # messages is safe for all camera models.
+        _ice_cand_topic_sdes = f"iot/v1/s/{user_id}/IPC/iceCandidateReq"
+
+        def _send_sdes_ice_cand(cand_str: str, mid: str) -> None:
+            """Publish a single trickle-ICE candidate via MQTT."""
+            _cand_obj = {
+                "candidate":     cand_str,
+                "sdpMid":        mid,
+                "sdpMLineIndex": int(mid),
+            }
+            _msg = json.dumps({
+                "method":  "iceCandidateReq",
+                "service": "IPC",
+                "devId":   device_id,
+                "srcAddr": f"0.{user_id}",
+                "seq":     _seq(),
+                "tst":     int(time.time() * 1000),
+                **( {"userId": numeric_uid_raw} if numeric_uid_raw is not None else {} ),
+                "payload": {
+                    # dstAddr routes to the camera device, not the user account.
+                    # HAR captures confirm payload.dstAddr = deviceId on every
+                    # iceCandidateReq; using user_id causes silent drops by firmware.
+                    "dstAddr": device_id,
+                    # wPayload is the nested format required by newer firmware
+                    # (e.g. LK.IPC.A001064) that parses wPayload.candidate instead
+                    # of the flat payload.candidate field.
+                    "wPayload": {
+                        "peerid":    peer_id,
+                        "candidate": _cand_obj,
+                    },
+                    # Flat legacy fields retained for older firmware compatibility.
+                    "peerid":    peer_id,
+                    "devId":     device_id,
+                    "candidate": _cand_obj,
+                },
+            })
+            outgoing_q.put_nowait((_ice_cand_topic_sdes, _msg))
+
+        # --- TURN relay allocation: fallback for cameras that skip the echo path #
+        # Early allocation was done inside the echo handler above.  This block
+        # handles cameras that did not produce an echo (non-echo-reversal path)
+        # so _relay_addrs is still empty at this point.
+        if not _relay_addrs:
+            try:
+                import re as _re_relay, hashlib as _hlk
+                _our_turn_entry = None
+                for _te in _sdes_turn_entries:
+                    if _te.get("Username") == user_id:
+                        _our_turn_entry = _te
+                        break
+                if _our_turn_entry is None and _sdes_turn_entries:
+                    _our_turn_entry = _sdes_turn_entries[0]
+                if _our_turn_entry:
+                    _t_uri_r = next(
+                        (str(u) for u in (_our_turn_entry.get("Uris") or [])
+                         if "turn:" in str(u)),
+                        ""
+                    )
+                    _tm_r = _re_relay.search(r'turns?:([^:?]+)(?::(\d+))?', _t_uri_r)
+                    if _tm_r:
+                        _t_host_r = _tm_r.group(1)
+                        _t_port_r = int(_tm_r.group(2) or 5349)
+                        _t_user_r = (_our_turn_entry.get("Username") or "").encode()
+                        _t_pass_r = str(_our_turn_entry.get("Password") or "").encode()
+                        for _alloc_sock in (_audio_sock, _video_sock):
+                            _alloc_res = _turn_allocate_udp(
+                                _alloc_sock, _t_host_r, _t_port_r,
+                                _t_user_r, _t_pass_r,
                             )
-                        else:
-                            _LOGGER.warning(
-                                "TURN allocation failed for %s socket",
-                                "audio" if _alloc_sock is _audio_sock else "video",
-                            )
-        except Exception as _relay_exc:
-            _LOGGER.warning("TURN relay allocation error: %s", _relay_exc)
+                            if _alloc_res:
+                                _r_ip, _r_port, _r_realm, _r_nonce = _alloc_res
+                                _r_key = _hlk.md5(
+                                    _t_user_r + b':' + _r_realm + b':' + _t_pass_r
+                                ).digest()
+                                _relay_addrs[_alloc_sock] = (
+                                    _r_ip, _r_port, _r_realm, _r_nonce,
+                                    _t_host_r, _t_port_r, _r_key,
+                                )
+                                _status(
+                                    f"TURN relay allocated: "
+                                    f"{'audio' if _alloc_sock is _audio_sock else 'video'}"
+                                    f" → {_r_ip}:{_r_port}"
+                                )
+                            else:
+                                _LOGGER.warning(
+                                    "TURN allocation failed for %s socket",
+                                    "audio" if _alloc_sock is _audio_sock else "video",
+                                )
+            except Exception as _relay_exc:
+                _LOGGER.warning("TURN relay allocation error: %s", _relay_exc)
 
         for _ice_mid, _ice_port in (("0", audio_port), ("1", video_port)):
             # Host candidate (LAN IP)
@@ -5871,7 +5955,8 @@ class DeviceClient(object):
         # property means SDES is available, not that DTLS is absent.
         if (_cam_echo_received
                 and _stun_count == 0
-                and not _srtp_detected):
+                and not _srtp_detected
+                and not _relay_addrs):
             _status(
                 "echo-reversal camera: no STUN or SRTP received in ICE window"
                 " — camera likely requires DTLS; falling back"
