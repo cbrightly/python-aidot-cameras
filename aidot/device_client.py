@@ -5353,22 +5353,12 @@ class DeviceClient(object):
                     },
                 },
             })
-            if not dtls_fallback_ok:
-                # isDTLS='0': camera is pure SDES; send webrtcResp now so it knows
-                # where to stream SRTP.
-                outgoing_q.put_nowait((_webrtc_resp_sdes_topic, _webrtc_resp_sdes))
-                _sdes_webrtcresp_sent = True
-                _status("webrtcResp sent (SDES, isDTLS='0')")
-            else:
-                # dtls_fallback_ok: camera may be DTLS (e.g. LK.IPC.A001064).
-                # Sending a SDES webrtcResp would lock the camera into a stale SDES
-                # session, causing it to ignore the subsequent DTLS webrtcReq and
-                # only disconnect/reset ~20s later.  Suppress it here; the DTLS
-                # fallback will offer a clean DTLS session instead.
-                _status(
-                    "webrtcResp suppressed (dtls_fallback_ok)"
-                    " — will fall back to DTLS if no STUN/SRTP"
-                )
+            # Echo cameras always reach _SdesNoAnswerError (no isDTLS guard).
+            # Non-echo SDES cameras (e.g. A001513) never enter this block.
+            # Sending webrtcResp here poisons the camera's session regardless
+            # of isDTLS value — suppress unconditionally; DTLS fallback will
+            # run on a clean camera state.
+            _status("webrtcResp suppressed (echo camera — DTLS fallback will run)")
         except _asyncio.TimeoutError:
             pass  # no echo — camera uses a different signalling variant; proceed
 
