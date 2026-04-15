@@ -5622,7 +5622,7 @@ class DeviceClient(object):
         #     exit quickly so the DTLS fallback starts sooner.
         #   SRTP early exit: if a non-STUN packet arrives (SRTP), ICE is done —
         #     close sockets immediately so ffmpeg can bind.
-        import struct as _struct, select as _select
+        import struct as _struct, select as _select, hmac as _hmac_ice, hashlib as _hashlib_ice
         _STUN_MAGIC = b'\x21\x12\xa4\x42'
         _stun_count = 0
         _stun_seen = False
@@ -5717,9 +5717,22 @@ class DeviceClient(object):
                             _xport = (_resp_src_port ^ 0x2112) & 0xFFFF
                             _xma = (b'\x00\x20\x00\x08\x00\x01'
                                     + _struct.pack('!H', _xport) + _xip)
-                            _resp = (b'\x01\x01'
-                                     + _struct.pack('!H', len(_xma))
-                                     + _STUN_MAGIC + _tid + _xma)
+                            # RFC 8489 §14.5: MESSAGE-INTEGRITY required when
+                            # request carried MI.  ICE always does (RFC 8445).
+                            # Key = local ICE password (short-term credentials).
+                            _mi_pwd = (
+                                _pwd_a if _sock is _audio_sock else _pwd_v
+                            ).encode()
+                            # Length field pre-set to include MI attr (4+20=24).
+                            _mi_len = len(_xma) + 24
+                            _resp_hdr = (b'\x01\x01'
+                                         + _struct.pack('!H', _mi_len)
+                                         + _STUN_MAGIC + _tid)
+                            _mi_val = _hmac_ice.new(
+                                _mi_pwd, _resp_hdr + _xma, _hashlib_ice.sha1
+                            ).digest()
+                            _resp = (_resp_hdr + _xma
+                                     + b'\x00\x08\x00\x14' + _mi_val)
                             if _turn_peer_ip_sw and _sock in _relay_addrs:
                                 # Arrived via TURN — respond via Send Indication
                                 _ri_sw = _relay_addrs[_sock]
@@ -5858,9 +5871,18 @@ class DeviceClient(object):
                             _xport_r = (_src_r[1] ^ 0x2112) & 0xFFFF
                             _xma_r = (b'\x00\x20\x00\x08\x00\x01'
                                       + _struct.pack('!H', _xport_r) + _xip_r)
-                            _resp_r = (b'\x01\x01'
-                                       + _struct.pack('!H', len(_xma_r))
-                                       + _STUN_MAGIC + _tid_r + _xma_r)
+                            _mi_pwd_r = (
+                                _pwd_a if _sk_r is _audio_sock else _pwd_v
+                            ).encode()
+                            _mi_len_r = len(_xma_r) + 24
+                            _resp_r_hdr = (b'\x01\x01'
+                                           + _struct.pack('!H', _mi_len_r)
+                                           + _STUN_MAGIC + _tid_r)
+                            _mi_val_r = _hmac_ice.new(
+                                _mi_pwd_r, _resp_r_hdr + _xma_r, _hashlib_ice.sha1
+                            ).digest()
+                            _resp_r = (_resp_r_hdr + _xma_r
+                                       + b'\x00\x08\x00\x14' + _mi_val_r)
                             _sk_r.sendto(_resp_r, _src_r)
                             _stun_count += 1
                         except Exception:
@@ -6081,9 +6103,19 @@ class DeviceClient(object):
                                 _bxport = (_bresp_port ^ 0x2112) & 0xFFFF
                                 _bxma = (b'\x00\x20\x00\x08\x00\x01'
                                          + _st_br.pack('!H', _bxport) + _bxip)
-                                _bresp = (b'\x01\x01'
-                                          + _st_br.pack('!H', len(_bxma))
-                                          + _STUN_MAGIC_BR + _btid + _bxma)
+                                import hmac as _hmac_br2, hashlib as _hashlib_br2
+                                _mi_pwd_br = (
+                                    _pwd_a if _bs is _audio_sock else _pwd_v
+                                ).encode()
+                                _mi_len_br = len(_bxma) + 24
+                                _bresp_hdr = (b'\x01\x01'
+                                              + _st_br.pack('!H', _mi_len_br)
+                                              + _STUN_MAGIC_BR + _btid)
+                                _mi_val_br = _hmac_br2.new(
+                                    _mi_pwd_br, _bresp_hdr + _bxma, _hashlib_br2.sha1
+                                ).digest()
+                                _bresp = (_bresp_hdr + _bxma
+                                          + b'\x00\x08\x00\x14' + _mi_val_br)
                                 if _br_turn_peer_ip and _bs in _relay_addrs:
                                     # Arrived via TURN — respond via Send Indication
                                     _bri = _relay_addrs[_bs]
