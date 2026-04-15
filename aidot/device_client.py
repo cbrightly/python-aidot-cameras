@@ -5348,7 +5348,7 @@ class DeviceClient(object):
                 "t=0 0\r\n"
                 f"m=audio {_ans_audio_port} RTP/SAVPF 0 8\r\n"
                 f"c=IN IP4 {_ans_audio_ip}\r\n"
-                "a=recvonly\r\n"
+                "a=sendonly\r\n"
                 "a=mid:0\r\n"
                 f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
                 "a=rtpmap:0 PCMU/8000\r\n"
@@ -5370,7 +5370,7 @@ class DeviceClient(object):
                 )
                 + f"m=video {_ans_video_port} RTP/SAVPF 96 97\r\n"
                 f"c=IN IP4 {_ans_video_ip}\r\n"
-                "a=recvonly\r\n"
+                "a=sendonly\r\n"
                 "a=mid:1\r\n"
                 f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
                 "a=rtpmap:96 H264/90000\r\n"
