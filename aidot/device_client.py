@@ -5353,7 +5353,21 @@ class DeviceClient(object):
                 "a=rtpmap:0 PCMU/8000\r\n"
                 "a=rtpmap:8 PCMA/8000\r\n"
                 "a=rtcp-mux\r\n"
-                f"m=video {_ans_video_port} RTP/SAVPF 96 97\r\n"
+                f"a=ice-ufrag:{_ufrag_a}\r\n"
+                f"a=ice-pwd:{_pwd_a}\r\n"
+                f"a=candidate:1 1 udp 2130706431 {local_ip} {audio_port} typ host\r\n"
+                + (
+                    f"a=candidate:2 1 udp 1694498815 {_public_ip} {audio_port}"
+                    f" typ srflx raddr {local_ip} rport {audio_port}\r\n"
+                    if _public_ip else ""
+                )
+                + (
+                    f"a=candidate:3 1 udp 16777215 {_relay_addrs[_audio_sock][0]}"
+                    f" {_relay_addrs[_audio_sock][1]}"
+                    f" typ relay raddr {local_ip} rport {audio_port}\r\n"
+                    if _audio_sock in _relay_addrs else ""
+                )
+                + f"m=video {_ans_video_port} RTP/SAVPF 96 97\r\n"
                 f"c=IN IP4 {_ans_video_ip}\r\n"
                 "a=recvonly\r\n"
                 "a=mid:1\r\n"
@@ -5364,6 +5378,20 @@ class DeviceClient(object):
                 "a=rtpmap:97 H265/90000\r\n"
                 "a=fmtp:97 level-id=93\r\n"
                 "a=rtcp-mux\r\n"
+                f"a=ice-ufrag:{_ufrag_v}\r\n"
+                f"a=ice-pwd:{_pwd_v}\r\n"
+                f"a=candidate:1 1 udp 2130706431 {local_ip} {video_port} typ host\r\n"
+                + (
+                    f"a=candidate:2 1 udp 1694498815 {_public_ip} {video_port}"
+                    f" typ srflx raddr {local_ip} rport {video_port}\r\n"
+                    if _public_ip else ""
+                )
+                + (
+                    f"a=candidate:3 1 udp 16777215 {_relay_addrs[_video_sock][0]}"
+                    f" {_relay_addrs[_video_sock][1]}"
+                    f" typ relay raddr {local_ip} rport {video_port}\r\n"
+                    if _video_sock in _relay_addrs else ""
+                )
             )
             _compressed_sdp_ans = _compress_sdp_req(_relay_answer_sdp)
 
