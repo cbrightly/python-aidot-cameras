@@ -4962,18 +4962,15 @@ class DeviceClient(object):
         _pwd_a   = _secrets.token_urlsafe(24)[:22]
         _ufrag_v = _secrets.token_urlsafe(4)[:4]
         _pwd_v   = _secrets.token_urlsafe(24)[:22]
-        # If relay was pre-allocated, embed relay IP/port in c= and m= so the
-        # camera sends SRTP to our TURN relay rather than our public IP.
-        # Fall back to local_ip (not _public_ip) so LAN cameras can reach us
-        # directly without hairpin NAT issues.
-        _offer_audio_ip   = (_relay_addrs[_audio_sock][0]
-                             if _audio_sock in _relay_addrs else local_ip)
-        _offer_audio_port = (_relay_addrs[_audio_sock][1]
-                             if _audio_sock in _relay_addrs else audio_port)
-        _offer_video_ip   = (_relay_addrs[_video_sock][0]
-                             if _video_sock in _relay_addrs else local_ip)
-        _offer_video_port = (_relay_addrs[_video_sock][1]
-                             if _video_sock in _relay_addrs else video_port)
+        # Use srflx (public) IP and direct port in c= and m= for the offer too,
+        # for consistency with the answer.  TURN relay requires CreatePermission
+        # for the camera's public IP which is unknown; relay in c= causes TURN to
+        # drop every camera packet.  Relay is still in a=candidate: for ICE.
+        # For LAN cameras (_public_ip is None) fall back to local_ip directly.
+        _offer_audio_ip   = _public_ip or local_ip
+        _offer_audio_port = audio_port
+        _offer_video_ip   = _public_ip or local_ip
+        _offer_video_port = video_port
         sdes_offer_sdp = (
             "v=0\r\n"
             f"o=- {ts} {ts} IN IP4 {local_ip}\r\n"
@@ -5041,12 +5038,15 @@ class DeviceClient(object):
             )
         )
 
+        _relay_str = (
+            f"  relay-audio={_relay_addrs[_audio_sock][0]}:{_relay_addrs[_audio_sock][1]}"
+            if _audio_sock in _relay_addrs else ""
+        )
         _status(
             f"SDP offer (SDES)  local={local_ip}"
             + (f"  srflx={_public_ip}" if _public_ip else "")
             + f"  audio={audio_port}  video={video_port}"
-            + (f"  relay-audio={_offer_audio_ip}:{_offer_audio_port}"
-               if _audio_sock in _relay_addrs else "")
+            + _relay_str
         )
 
         # Send livePlayReq before the SDP offer to arm the camera's stream.
