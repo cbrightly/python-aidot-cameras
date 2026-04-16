@@ -5331,16 +5331,19 @@ class DeviceClient(object):
                     _LOGGER.warning(
                         "TURN relay allocation error: %s", _relay_early_exc
                     )
-            # Answer SDP c= and m= use our srflx (public) IP/port so the camera
-            # sends SRTP straight to our NAT-mapped address.  Using the TURN relay
-            # address here requires a CreatePermission for the camera's public IP,
-            # which is unknown; TURN would silently drop every camera packet.
-            # The relay candidate is still listed in a=candidate: so ICE can use
-            # the relay path if the camera performs connectivity checks.
-            _ans_audio_ip   = _public_ip or local_ip
-            _ans_audio_port = audio_port
-            _ans_video_ip   = _public_ip or local_ip
-            _ans_video_port = video_port
+            # Answer SDP c= and m= use the TURN relay address when available so
+            # the camera sends SRTP to our relay port.  The TURN server then
+            # wraps each SRTP packet in a Data Indication and delivers it to
+            # audio_sock / video_sock; the bridge thread strips the wrapper and
+            # forwards the inner SRTP to ffmpeg's loopback ports.
+            # For cameras on the same LAN or when relay allocation failed, fall
+            # back to the srflx (public) or local IP.
+            _audio_relay = _relay_addrs.get(_audio_sock)
+            _video_relay = _relay_addrs.get(_video_sock)
+            _ans_audio_ip   = _audio_relay[0] if _audio_relay else (_public_ip or local_ip)
+            _ans_audio_port = _audio_relay[1] if _audio_relay else audio_port
+            _ans_video_ip   = _video_relay[0] if _video_relay else (_public_ip or local_ip)
+            _ans_video_port = _video_relay[1] if _video_relay else video_port
             _relay_answer_sdp = (
                 "v=0\r\n"
                 f"o=- {ts} {ts} IN IP4 {local_ip}\r\n"
@@ -5428,8 +5431,9 @@ class DeviceClient(object):
             # (srflx), which routes through NAT directly to our socket.
             outgoing_q.put_nowait((_webrtc_resp_sdes_topic, _webrtc_resp_sdes))
             _sdes_webrtcresp_sent = True
+            _ans_via = "relay" if (_audio_relay or _video_relay) else "srflx"
             _status(
-                f"webrtcResp sent (SDES, srflx answer:"
+                f"webrtcResp sent (SDES, {_ans_via} answer:"
                 f" audio={_ans_audio_ip}:{_ans_audio_port}"
                 f" video={_ans_video_ip}:{_ans_video_port})"
             )
