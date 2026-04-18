@@ -3180,7 +3180,9 @@ class DeviceClient(object):
             "payload": {
                 "peerid":  peer_id,
                 "devId":   device_id,
-                "dstAddr": user_id,
+                # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
+                # to the target deviceId for livePlayReq.
+                "dstAddr": device_id,
             },
         })
         if not use_sdes:
@@ -3799,12 +3801,9 @@ class DeviceClient(object):
                 "offer":   {"type": pc.localDescription.type,
                              "sdp":  _offer_sdp},
                 "trackId": 0,
-                # dstAddr matches the SDES webrtcReq format (user_id).  The broker
-                # uses the MQTT topic path (iot/v1/s/{userId}/IPC/webrtcReq) for
-                # camera routing, not this field; but camera firmware may use it to
-                # route the webrtcResp — wrong value causes response to be silently
-                # discarded or routed to the wrong endpoint.
-                "dstAddr": user_id,
+                # Decompiled reference app (tyrus/o.java) sets dstAddr=deviceId
+                # for webrtcReq.
+                "dstAddr": device_id,
                 "liveMqtt": 1,
                 "encOffer": 1,
             },
@@ -5062,7 +5061,9 @@ class DeviceClient(object):
             "payload": {
                 "peerid":  peer_id,
                 "devId":   device_id,
-                "dstAddr": user_id,
+                # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
+                # to the target deviceId for livePlayReq.
+                "dstAddr": device_id,
             },
         })
         _live_play_topic_sdes = f"iot/v1/s/{user_id}/IPC/livePlayReq"
@@ -5230,7 +5231,9 @@ class DeviceClient(object):
                 "devId":   device_id,
                 "offer":   {"type": "offer", "sdp": sdes_offer_sdp},
                 "trackId": 0,
-                "dstAddr": user_id,
+                # Decompiled reference app (tyrus/o.java) sets dstAddr=deviceId
+                # for webrtcReq.
+                "dstAddr": device_id,
                 "encOffer": 1,
                 "liveMqtt": 1,
                 # wPayload: newer firmware parses wPayload for ICE credentials
