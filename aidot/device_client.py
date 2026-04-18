@@ -5630,6 +5630,9 @@ class DeviceClient(object):
         _stun_count = 0
         _stun_seen = False
         _srtp_detected = False
+        _stun_window_pkt_count = 0
+        _turn_only_pkt_count = 0
+        _camera_side_pkt_count = 0
         if not _cam_echo_received:
             _stun_max = 2.5
         elif _sdes_webrtcresp_sent:
@@ -5665,10 +5668,18 @@ class DeviceClient(object):
                     _pkt, _src = _sock.recvfrom(2048)
                 except OSError:
                     continue
+                _stun_window_pkt_count += 1
                 _LOGGER.debug(
                     "STUN window: %d bytes from %s:%d, first4=%s",
                     len(_pkt), _src[0], _src[1], _pkt[:4].hex()
                 )
+                # Track packets that are only TURN server control responses
+                # (Allocate/permission challenge/success), which do not indicate
+                # that the camera actually started ICE checks.
+                if _src[0] == _hp_host:
+                    _turn_only_pkt_count += 1
+                else:
+                    _camera_side_pkt_count += 1
                 # --- TURN Data Indication (type 0x0017): strip wrapper --------- #
                 # Camera ICE probes routed via TURN arrive as Data Indications from
                 # 3.230.182.123:5349 (the control channel, already NAT-mapped).
@@ -5696,6 +5707,10 @@ class DeviceClient(object):
                             _sw_inner = _sw_av
                     if _sw_inner:
                         _pkt = _sw_inner  # process inner payload
+                    # TURN Data Indication with XOR-PEER-ADDRESS means the
+                    # camera (or its relay) is actively talking to us.
+                    if _turn_peer_ip_sw:
+                        _camera_side_pkt_count += 1
 
                 if (len(_pkt) >= 20 and _pkt[4:8] == _STUN_MAGIC):
                     # STUN packet — only Binding Requests (0x0001) indicate that
@@ -5781,7 +5796,16 @@ class DeviceClient(object):
         if _stun_count:
             _status(f"ICE: responded to {_stun_count} STUN binding request(s)")
         elif not _srtp_detected:
-            _status("ICE: 0 packets received in STUN window (NAT may be blocking camera probes)")
+            if _stun_window_pkt_count and _turn_only_pkt_count == _stun_window_pkt_count:
+                _status(
+                    "ICE: no camera probes seen in STUN window"
+                    f" (received {_stun_window_pkt_count} TURN-server control packet(s) only)"
+                )
+            else:
+                _status(
+                    "ICE: 0 camera STUN binding requests in window"
+                    f" (total packets={_stun_window_pkt_count})"
+                )
         if _srtp_detected:
             _status("SRTP detected — exiting STUN window, handing off to ffmpeg")
 
@@ -6223,8 +6247,9 @@ class DeviceClient(object):
         # property means SDES is available, not that DTLS is absent.
         if (_cam_echo_received
                 and _stun_count == 0
+                and _camera_side_pkt_count == 0
                 and not _srtp_detected
-                and not _relay_addrs):
+                and dtls_fallback_ok):
             _status(
                 "echo-reversal camera: no STUN or SRTP received in ICE window"
                 " — camera likely requires DTLS; falling back"
@@ -6241,6 +6266,15 @@ class DeviceClient(object):
                 pass
             outgoing_q.put_nowait(None)   # stop MQTT thread
             raise DeviceClient._SdesNoAnswerError()
+        elif (_cam_echo_received
+              and _stun_count == 0
+              and _camera_side_pkt_count == 0
+              and not _srtp_detected
+              and not dtls_fallback_ok):
+            _status(
+                "echo-reversal camera: no STUN or SRTP received in ICE window"
+                " — DTLS fallback disabled by camera flags; continuing SDES path"
+            )
 
         if output_path:
             # Ensure the output directory exists before ffmpeg tries to open the
