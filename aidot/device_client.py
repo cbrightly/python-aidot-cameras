@@ -4932,45 +4932,9 @@ class DeviceClient(object):
                     _xp = _st_ta.unpack_from('!H', _av, 2)[0] ^ 0x2112
                     _xb = bytes(a ^ b for a, b in zip(_av[4:8], _MAGIC_TA))
                     _r_ip_ta = '.'.join(str(b) for b in _xb)
-                    # CreatePermission: tell TURN server which peer source IP(s)
-                    # to accept SRTP from and forward as Data Indications.
-                    # Primary: camera's public IP (_public_ip, e.g. 72.84.199.230)
-                    # — this is the source IP the TURN server sees when the camera
-                    # sends SRTP to our relay (both camera and client behind same NAT).
-                    # Fallback to _ta_host (TURN server IP) if _public_ip unavailable.
-                    # Also send a second permission for _ta_host (belt-and-suspenders
-                    # in case camera routes via its own TURN allocation on same server).
-                    def _send_create_perm(_perm_ip_str):
-                        _pxip = bytes(
-                            a ^ b for a, b in zip(
-                                bytes(int(x) for x in _perm_ip_str.split('.')),
-                                _MAGIC_TA,
-                            )
-                        )
-                        _pxpa = b'\x00\x01' + _st_ta.pack('!H', 0x2112) + _pxip
-                        _pbp = (
-                            _a(0x0006, _ta_user)
-                            + _a(0x0014, _realm_ta)
-                            + _a(0x0015, _nonce_ta)
-                            + _a(0x0012, _pxpa)
-                        )
-                        _ptp = os.urandom(12)
-                        _php = (b'\x00\x08' + _st_ta.pack('!H', len(_pbp) + 24)
-                                + _MAGIC_TA + _ptp)
-                        _pbp += _a(0x0008, _mi_ta(_key_ta, _php + _pbp))
-                        _pcp = (b'\x00\x08' + _st_ta.pack('!H', len(_pbp))
-                                + _MAGIC_TA + _ptp + _pbp)
-                        _LOGGER.debug(
-                            "TURN CreatePermission for peer %s", _perm_ip_str)
-                        try:
-                            _ta_sock.sendto(_pcp, (_ta_host, _ta_port))
-                        except Exception:
-                            pass
-
-                    _perm_ip_primary = _public_ip if _public_ip else _ta_host
-                    _send_create_perm(_perm_ip_primary)
-                    if _ta_host != _perm_ip_primary:
-                        _send_create_perm(_ta_host)
+                    # Do NOT pre-create permissions for our own srflx IP or
+                    # TURN server IP. That can cause TURN self-loop Data
+                    # Indications and massive STUN echo storms.
                     return _r_ip_ta, _xp, _realm_ta, _nonce_ta
             return None
 
@@ -5717,6 +5681,9 @@ class DeviceClient(object):
                 return True
             return False
 
+        _selfloop_drop_count = 0
+        _bridge_selfloop_drop_count = 0
+
         # --- ICE STUN responder (runs while reservation sockets are still open) #
         # Two-phase window:
         #   Normal (no echo-reversal): exit after 0.5 s idle, max 2.5 s total.
@@ -5868,10 +5835,14 @@ class DeviceClient(object):
                                 # local/srflx address). Responding via TURN
                                 # creates an endless STUN echo loop and no media.
                                 # Drop it and wait for real camera checks.
-                                _LOGGER.debug(
-                                    "STUN window: drop TURN self-loop peer %s:%s",
-                                    _turn_peer_ip_sw, _turn_peer_port_sw,
-                                )
+                                _selfloop_drop_count += 1
+                                if _selfloop_drop_count <= 5 or _selfloop_drop_count % 50 == 0:
+                                    _LOGGER.debug(
+                                        "STUN window: drop TURN self-loop peer %s:%s"
+                                        " (count=%d)",
+                                        _turn_peer_ip_sw, _turn_peer_port_sw,
+                                        _selfloop_drop_count,
+                                    )
                             else:
                                 _sock.sendto(_resp, _src)
                             _stun_count += 1
@@ -6252,10 +6223,15 @@ class DeviceClient(object):
                                         _br_turn_peer_ip, _br_turn_peer_port,
                                     )
                                 elif _br_turn_peer_ip and _is_self_peer_ip(_br_turn_peer_ip):
-                                    _LOGGER.debug(
-                                        "bridge: drop TURN self-loop STUN peer %s:%d",
-                                        _br_turn_peer_ip, _br_turn_peer_port,
-                                    )
+                                    _bridge_selfloop_drop_count += 1
+                                    if (_bridge_selfloop_drop_count <= 5
+                                            or _bridge_selfloop_drop_count % 50 == 0):
+                                        _LOGGER.debug(
+                                            "bridge: drop TURN self-loop STUN peer %s:%d"
+                                            " (count=%d)",
+                                            _br_turn_peer_ip, _br_turn_peer_port,
+                                            _bridge_selfloop_drop_count,
+                                        )
                                 else:
                                     _bs.sendto(_bresp, _bsrc)
                                     _LOGGER.debug(
