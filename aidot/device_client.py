@@ -5683,6 +5683,7 @@ class DeviceClient(object):
 
         _selfloop_drop_count = 0
         _bridge_selfloop_drop_count = 0
+        _prefer_direct_stun = {_audio_sock: False, _video_sock: False}
 
         # --- ICE STUN responder (runs while reservation sockets are still open) #
         # Two-phase window:
@@ -5788,6 +5789,8 @@ class DeviceClient(object):
                     if _pkt[:2] == b'\x00\x01':
                         # Binding Request — reply with Binding Success Response
                         _stun_seen = True
+                        if _turn_peer_ip_sw is None and _src[0] != _hp_host:
+                            _prefer_direct_stun[_sock] = True
                         _tid = _pkt[8:20]
                         try:
                             # Use TURN peer address for XOR-MAPPED-ADDRESS when
@@ -5803,7 +5806,9 @@ class DeviceClient(object):
                                 ),
                                 magic_cookie=_STUN_MAGIC,
                             )
-                            if (_turn_peer_ip_sw and _sock in _relay_addrs
+                            if _turn_peer_ip_sw and _prefer_direct_stun.get(_sock, False):
+                                pass
+                            elif (_turn_peer_ip_sw and _sock in _relay_addrs
                                     and not _is_self_peer_ip(_turn_peer_ip_sw)):
                                 # Arrived via TURN — respond via Send Indication
                                 _ri_sw = _relay_addrs[_sock]
@@ -6113,6 +6118,7 @@ class DeviceClient(object):
             nonlocal _br_first_di_logged, _br_first_srtp_logged
             _STUN_MAGIC_BR = b'\x21\x12\xa4\x42'
             import struct as _st_br, select as _sel_br
+            _br_prefer_direct_stun = {_audio_sock: False, _video_sock: False}
             _lo_a = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
             _lo_v = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
             try:
@@ -6171,6 +6177,8 @@ class DeviceClient(object):
                                 and _bpkt[:2] == b'\x00\x01'):
                             # STUN Binding Request — send Binding Success Response
                             try:
+                                if _br_turn_peer_ip is None and _bsrc[0] != _hp_host:
+                                    _br_prefer_direct_stun[_bs] = True
                                 _btid = _bpkt[8:20]
                                 # Use TURN peer address when arrived via relay
                                 _bresp_ip = _br_turn_peer_ip or _bsrc[0]
@@ -6184,7 +6192,9 @@ class DeviceClient(object):
                                     ),
                                     magic_cookie=_STUN_MAGIC_BR,
                                 )
-                                if (_br_turn_peer_ip and _bs in _relay_addrs
+                                if _br_turn_peer_ip and _br_prefer_direct_stun.get(_bs, False):
+                                    pass
+                                elif (_br_turn_peer_ip and _bs in _relay_addrs
                                         and not _is_self_peer_ip(_br_turn_peer_ip)):
                                     # Arrived via TURN — respond via Send Indication
                                     _bri = _relay_addrs[_bs]
