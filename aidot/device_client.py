@@ -9,6 +9,7 @@ import struct
 import threading
 import time
 import asyncio
+import zlib
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, List, Optional
@@ -268,6 +269,48 @@ def _parse_video_payload(data: bytes) -> List[VideoFrame]:
             ))
         offset = end
     return frames
+
+
+def _build_stun_binding_success_response(
+    *,
+    transaction_id: bytes,
+    mapped_ip: str,
+    mapped_port: int,
+    mi_password: str,
+    magic_cookie: bytes = b"\x21\x12\xa4\x42",
+) -> bytes:
+    """Build STUN Binding Success with MESSAGE-INTEGRITY and FINGERPRINT.
+
+    Some camera firmwares keep retransmitting ICE checks when responses lack a
+    valid fingerprinted STUN envelope. This helper emits:
+      XOR-MAPPED-ADDRESS + MESSAGE-INTEGRITY + FINGERPRINT
+    """
+    import hmac as _hmac, hashlib as _hashlib
+
+    ip_parts = [int(x) for x in mapped_ip.split(".")]
+    xip = bytes(a ^ b for a, b in zip(struct.pack("!4B", *ip_parts), magic_cookie))
+    xport = (mapped_port ^ 0x2112) & 0xFFFF
+    xma = b"\x00\x20\x00\x08\x00\x01" + struct.pack("!H", xport) + xip
+
+    mi_attr_len = 24  # type(2)+len(2)+sha1(20)
+    fp_attr_len = 8   # type(2)+len(2)+crc32(4)
+
+    # Per RFC 5389/8445, MESSAGE-INTEGRITY is computed with length set to end
+    # of MESSAGE-INTEGRITY (excluding any attributes that follow, e.g. FINGERPRINT).
+    len_for_mi = len(xma) + mi_attr_len
+    hdr_for_mi = b"\x01\x01" + struct.pack("!H", len_for_mi) + magic_cookie + transaction_id
+    mi_val = _hmac.new(
+        mi_password.encode(), hdr_for_mi + xma, _hashlib.sha1
+    ).digest()
+    mi_attr = b"\x00\x08\x00\x14" + mi_val
+
+    # On-wire message length includes FINGERPRINT.
+    len_with_fp = len_for_mi + fp_attr_len
+    hdr_with_fp = b"\x01\x01" + struct.pack("!H", len_with_fp) + magic_cookie + transaction_id
+    msg_wo_fp_attr = hdr_with_fp + xma + mi_attr
+    fp_val = (zlib.crc32(msg_wo_fp_attr) ^ 0x5354554E) & 0xFFFFFFFF
+    fp_attr = b"\x80\x28\x00\x04" + struct.pack("!I", fp_val)
+    return msg_wo_fp_attr + fp_attr
 
 # --------------------------------------------------------------------------- #
 # AES helpers (live stream)
@@ -5674,7 +5717,7 @@ class DeviceClient(object):
         #     exit quickly so the DTLS fallback starts sooner.
         #   SRTP early exit: if a non-STUN packet arrives (SRTP), ICE is done —
         #     close sockets immediately so ffmpeg can bind.
-        import struct as _struct, select as _select, hmac as _hmac_ice, hashlib as _hashlib_ice
+        import struct as _struct, select as _select
         _STUN_MAGIC = b'\x21\x12\xa4\x42'
         _stun_count = 0
         _stun_seen = False
@@ -5775,31 +5818,15 @@ class DeviceClient(object):
                             # request arrived via TURN Data Indication.
                             _resp_src_ip = _turn_peer_ip_sw or _src[0]
                             _resp_src_port = _turn_peer_port_sw or _src[1]
-                            _ip_parts = [int(x) for x in _resp_src_ip.split('.')]
-                            _xip = bytes(
-                                a ^ b for a, b in zip(
-                                    _struct.pack('!4B', *_ip_parts), _STUN_MAGIC
-                                )
+                            _resp = _build_stun_binding_success_response(
+                                transaction_id=_tid,
+                                mapped_ip=_resp_src_ip,
+                                mapped_port=_resp_src_port,
+                                mi_password=(
+                                    _pwd_a if _sock is _audio_sock else _pwd_v
+                                ),
+                                magic_cookie=_STUN_MAGIC,
                             )
-                            _xport = (_resp_src_port ^ 0x2112) & 0xFFFF
-                            _xma = (b'\x00\x20\x00\x08\x00\x01'
-                                    + _struct.pack('!H', _xport) + _xip)
-                            # RFC 8489 §14.5: MESSAGE-INTEGRITY required when
-                            # request carried MI.  ICE always does (RFC 8445).
-                            # Key = local ICE password (short-term credentials).
-                            _mi_pwd = (
-                                _pwd_a if _sock is _audio_sock else _pwd_v
-                            ).encode()
-                            # Length field pre-set to include MI attr (4+20=24).
-                            _mi_len = len(_xma) + 24
-                            _resp_hdr = (b'\x01\x01'
-                                         + _struct.pack('!H', _mi_len)
-                                         + _STUN_MAGIC + _tid)
-                            _mi_val = _hmac_ice.new(
-                                _mi_pwd, _resp_hdr + _xma, _hashlib_ice.sha1
-                            ).digest()
-                            _resp = (_resp_hdr + _xma
-                                     + b'\x00\x08\x00\x14' + _mi_val)
                             if _turn_peer_ip_sw and _sock in _relay_addrs:
                                 # Arrived via TURN — respond via Send Indication
                                 _ri_sw = _relay_addrs[_sock]
@@ -5938,27 +5965,15 @@ class DeviceClient(object):
                         _stun_seen = True
                         _tid_r = _pkt_r[8:20]
                         try:
-                            _ip_r = [int(x) for x in _src_r[0].split('.')]
-                            _xip_r = bytes(
-                                a ^ b for a, b in zip(
-                                    _struct.pack('!4B', *_ip_r), _STUN_MAGIC
-                                )
+                            _resp_r = _build_stun_binding_success_response(
+                                transaction_id=_tid_r,
+                                mapped_ip=_src_r[0],
+                                mapped_port=_src_r[1],
+                                mi_password=(
+                                    _pwd_a if _sk_r is _audio_sock else _pwd_v
+                                ),
+                                magic_cookie=_STUN_MAGIC,
                             )
-                            _xport_r = (_src_r[1] ^ 0x2112) & 0xFFFF
-                            _xma_r = (b'\x00\x20\x00\x08\x00\x01'
-                                      + _struct.pack('!H', _xport_r) + _xip_r)
-                            _mi_pwd_r = (
-                                _pwd_a if _sk_r is _audio_sock else _pwd_v
-                            ).encode()
-                            _mi_len_r = len(_xma_r) + 24
-                            _resp_r_hdr = (b'\x01\x01'
-                                           + _struct.pack('!H', _mi_len_r)
-                                           + _STUN_MAGIC + _tid_r)
-                            _mi_val_r = _hmac_ice.new(
-                                _mi_pwd_r, _resp_r_hdr + _xma_r, _hashlib_ice.sha1
-                            ).digest()
-                            _resp_r = (_resp_r_hdr + _xma_r
-                                       + b'\x00\x08\x00\x14' + _mi_val_r)
                             _sk_r.sendto(_resp_r, _src_r)
                             _stun_count += 1
                         except Exception:
@@ -6170,28 +6185,15 @@ class DeviceClient(object):
                                 # Use TURN peer address when arrived via relay
                                 _bresp_ip = _br_turn_peer_ip or _bsrc[0]
                                 _bresp_port = _br_turn_peer_port or _bsrc[1]
-                                _bip = [int(x) for x in _bresp_ip.split('.')]
-                                _bxip = bytes(
-                                    a ^ b for a, b in zip(
-                                        _st_br.pack('!4B', *_bip), _STUN_MAGIC_BR
-                                    )
+                                _bresp = _build_stun_binding_success_response(
+                                    transaction_id=_btid,
+                                    mapped_ip=_bresp_ip,
+                                    mapped_port=_bresp_port,
+                                    mi_password=(
+                                        _pwd_a if _bs is _audio_sock else _pwd_v
+                                    ),
+                                    magic_cookie=_STUN_MAGIC_BR,
                                 )
-                                _bxport = (_bresp_port ^ 0x2112) & 0xFFFF
-                                _bxma = (b'\x00\x20\x00\x08\x00\x01'
-                                         + _st_br.pack('!H', _bxport) + _bxip)
-                                import hmac as _hmac_br2, hashlib as _hashlib_br2
-                                _mi_pwd_br = (
-                                    _pwd_a if _bs is _audio_sock else _pwd_v
-                                ).encode()
-                                _mi_len_br = len(_bxma) + 24
-                                _bresp_hdr = (b'\x01\x01'
-                                              + _st_br.pack('!H', _mi_len_br)
-                                              + _STUN_MAGIC_BR + _btid)
-                                _mi_val_br = _hmac_br2.new(
-                                    _mi_pwd_br, _bresp_hdr + _bxma, _hashlib_br2.sha1
-                                ).digest()
-                                _bresp = (_bresp_hdr + _bxma
-                                          + b'\x00\x08\x00\x14' + _mi_val_br)
                                 if _br_turn_peer_ip and _bs in _relay_addrs:
                                     # Arrived via TURN — respond via Send Indication
                                     _bri = _relay_addrs[_bs]
