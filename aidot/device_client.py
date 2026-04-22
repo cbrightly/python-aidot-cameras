@@ -6059,6 +6059,85 @@ class DeviceClient(object):
             except Exception as _sdp_exc:
                 _LOGGER.warning("_open_sdes_stream: could not rewrite SDP: %s", _sdp_exc)
 
+        # --- ICE controlling: send STUN Binding Requests with USE-CANDIDATE --- #
+        # The camera is a full-ICE controlled agent (RFC 8445).  It sends STUN
+        # binding requests to our candidates (verified above), but it will NOT
+        # send SRTP until the controlling agent (us) nominates an ICE pair by
+        # sending a binding request with the USE-CANDIDATE attribute (0x0025).
+        # Without this, the camera stays in ICE "Checking" state indefinitely
+        # (hence the continuous duplicate STUN probe log lines) and never streams.
+        import re as _re_ice
+
+        # Parse camera's ICE credentials and UDP candidates from its answer SDP.
+        _cam_ice_ufrag: str = ""
+        _cam_ice_pwd:   str = ""
+        _cam_ice_cands: list = []   # list of (ip, port) tuples
+
+        if _pre_launch_answer_sdp:
+            for _ice_ln in _pre_launch_answer_sdp.splitlines():
+                if _ice_ln.startswith("a=ice-ufrag:") and not _cam_ice_ufrag:
+                    _cam_ice_ufrag = _ice_ln[len("a=ice-ufrag:"):].strip()
+                elif _ice_ln.startswith("a=ice-pwd:") and not _cam_ice_pwd:
+                    _cam_ice_pwd = _ice_ln[len("a=ice-pwd:"):].strip()
+                elif _ice_ln.startswith("a=candidate:"):
+                    _cand_m = _re_ice.match(
+                        r"a=candidate:\S+ \d+ udp \d+ ([\d.]+) (\d+)", _ice_ln
+                    )
+                    if _cand_m:
+                        _cam_ice_cands.append(
+                            (_cand_m.group(1), int(_cand_m.group(2)))
+                        )
+
+        def _send_use_candidate(sock, our_ufrag, our_pwd, cam_ufrag, cam_pwd, cam_addr):
+            """Send a STUN Binding Request with ICE-CONTROLLING + USE-CANDIDATE."""
+            import struct as _st_uc, os as _os_uc, hmac as _hm_uc, hashlib as _hs_uc
+            _MAGIC_UC = b'\x21\x12\xa4\x42'
+            _tid_uc = _os_uc.urandom(12)
+            _user = f"{cam_ufrag}:{our_ufrag}".encode()
+            _user_a = (
+                _st_uc.pack('!HH', 0x0006, len(_user))
+                + _user + b'\x00' * ((-len(_user)) % 4)
+            )
+            _tiebreaker = int.from_bytes(_os_uc.urandom(8), 'big')
+            _ctrl_a = _st_uc.pack('!HHQ', 0x802a, 8, _tiebreaker)  # ICE-CONTROLLING
+            _prio_a = _st_uc.pack('!HHI', 0x0024, 4, 1845493759)   # PRIORITY (prflx)
+            _uc_a   = _st_uc.pack('!HH',  0x0025, 0)               # USE-CANDIDATE
+            _attrs  = _user_a + _ctrl_a + _prio_a + _uc_a
+            _mi_len = len(_attrs) + 24
+            _mi_in  = _st_uc.pack('!HH', 0x0001, _mi_len) + _MAGIC_UC + _tid_uc + _attrs
+            _mi     = _hm_uc.new(cam_pwd.encode(), _mi_in, _hs_uc.sha1).digest()
+            _mi_a   = _st_uc.pack('!HH', 0x0008, 20) + _mi
+            _total  = len(_attrs) + len(_mi_a)
+            _req    = (
+                _st_uc.pack('!HH', 0x0001, _total)
+                + _MAGIC_UC + _tid_uc + _attrs + _mi_a
+            )
+            try:
+                sock.sendto(_req, cam_addr)
+            except Exception:
+                pass
+
+        if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:
+            for _c_ip, _c_port in _cam_ice_cands:
+                _send_use_candidate(
+                    _audio_sock, _ufrag_a, _pwd_a,
+                    _cam_ice_ufrag, _cam_ice_pwd, (_c_ip, _c_port),
+                )
+                _send_use_candidate(
+                    _video_sock, _ufrag_v, _pwd_v,
+                    _cam_ice_ufrag, _cam_ice_pwd, (_c_ip, _c_port),
+                )
+            _status(
+                f"ICE controlling: sent USE-CANDIDATE to"
+                f" {len(_cam_ice_cands)} camera candidate(s)"
+                f" ({_cam_ice_cands[0][0]}:{_cam_ice_cands[0][1]})"
+            )
+        else:
+            _status(
+                "ICE controlling: no camera ICE credentials in answer"
+                " (pre-answer or relay-only path)"
+            )
+
         # --- Bridge thread: keep reservation sockets open for ICE + SRTP ----- #
         # The camera's ICE agent sends STUN Binding Requests to audio_port and
         # video_port AFTER this point.  If we close those sockets and let ffmpeg
@@ -6117,8 +6196,9 @@ class DeviceClient(object):
         def _bridge_fn():
             nonlocal _br_first_di_logged, _br_first_srtp_logged
             _STUN_MAGIC_BR = b'\x21\x12\xa4\x42'
-            import struct as _st_br, select as _sel_br
+            import struct as _st_br, select as _sel_br, time as _time_br
             _br_prefer_direct_stun = {_audio_sock: False, _video_sock: False}
+            _br_last_uc = 0.0
             _lo_a = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
             _lo_v = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
             try:
@@ -6271,6 +6351,22 @@ class DeviceClient(object):
                                 )
                             except Exception:
                                 pass
+                    # Periodic ICE controlling check: re-send USE-CANDIDATE every 2.5 s.
+                    # Keeps the camera in ICE "Completed" state and satisfies consent
+                    # refresh (RFC 7675).  Also handles the case where the initial
+                    # USE-CANDIDATE (sent right after the STUN window) was lost.
+                    _br_now = _time_br.monotonic()
+                    if _cam_ice_cands and (_br_now - _br_last_uc) >= 2.5:
+                        _br_last_uc = _br_now
+                        for _c_ip, _c_port in _cam_ice_cands:
+                            _send_use_candidate(
+                                _audio_sock, _ufrag_a, _pwd_a,
+                                _cam_ice_ufrag, _cam_ice_pwd, (_c_ip, _c_port),
+                            )
+                            _send_use_candidate(
+                                _video_sock, _ufrag_v, _pwd_v,
+                                _cam_ice_ufrag, _cam_ice_pwd, (_c_ip, _c_port),
+                            )
             finally:
                 try:
                     _lo_a.close()
