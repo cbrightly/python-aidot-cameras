@@ -449,3 +449,73 @@ Observed IPC event page identifiers in camera IPC processors:
 - also service routing pages like `IPC.live`, `IPC.securityCameras`, `IPC.radarMap`, `IPC.signalTest`
 
 These indicate camera/IPC event routing surfaces, but exact MQTT topic strings carrying these event pages were not fully recoverable from the decompiled snippets inspected here.
+
+## 12) Deep-dive on previously known decompilation gaps
+
+This section revisits the prior gaps and records what is now recoverable from surrounding decompiled control flow.
+
+### 12.1 Gap: `o.i(...)` ICE config selection/merge logic
+
+**Now clarified from control-flow reconstruction:**
+
+1. Input JSON is parsed into `IceConfigBean`.
+2. `this.a` is reset to a new `JSONArray` and is used to store LDS-style `IceServerList` objects (`Password`, `Ttl`, `Uris`, `Username`).
+3. Device-specific TURN selection:
+   - iterate `IceConfigBean.dev`
+   - match `dev.id == deviceId`
+   - for matched device, append its URI list into one `IceServerList` item and push into `this.a`.
+4. App-level STUN/TURN for peer connection list:
+   - read first `app` element
+   - choose `dnsUris` when present/non-empty, else fallback to `uris`
+   - for each URI, build `PeerConnection.IceServer` using:
+     - username = `app[0].id`
+     - password = `app[0].token`
+   - append into `peerIceServers` argument list.
+5. Success path:
+   - if callback listener exists and `peerIceServers.size() > 0`, call `listener.b()` and mark trace success.
+6. Failure path:
+   - when no servers found, emits `onException` with “current device not found suitable iceServer...” detail.
+
+**What remains not fully visible:**
+- Any branch pruning done by compiler/obfuscation around edge-case null handling and logging side effects.
+
+### 12.2 Gap: `o.j(...)` `webrtcResp` handling and error mapping
+
+**Now clarified from decompiled body:**
+
+1. Parse response string into `SdpAnswerBean`.
+2. Require top-level `code == 200`; otherwise trace/report as negotiation error.
+3. Iterate `data[]` and process entries where `method == "webrtcResp"`.
+4. For each `webrtcResp` item:
+   - read `payload.peerid`, `payload.pskEnable`, `payload.trackId`, `payload.supportRtpExt`, `payload.offer`.
+   - require `item.code == 200` and `payload.offer.type == "answer"`.
+   - create `Event` object and push answer via callback `this.b.c(event)`.
+5. Ack (`data[i].ack`) handling:
+   - `ack.code == 200`: success trace.
+   - `ack.code == -50002`: maps to “已达最大直播推流路数” class of max-stream error.
+   - `ack.code == -50015`: maps to “sd卡最大连接数” class of SD-card/max-connection error.
+   - non-success invokes prelink error callback `this.g.a(code, desc, step, peerId)`.
+6. Timeout/error branch:
+   - non-200 item code maps to timeout-style message and reporter failure.
+
+**What remains not fully visible:**
+- Full mapping table of all possible negative `ack.code` values beyond those explicitly present in decompiled branch checks.
+
+### 12.3 Gap: inbound MQTT registration/dispatch for IPC camera callbacks
+
+**Now clarified from `IpcServiceImpl` decompilation context:**
+
+1. Device callback subscription topic template is explicit:
+   - `iot/v1/cb/deviceId/#`
+2. During full-update refresh, this template is expanded per camera device id and subscribed through `LDSBaseMqttService.subscribeTopic(...)` with a `{"topic": [ ... ]}` JSON body.
+3. Removed devices are unsubscribed similarly by building the same template-per-device list and calling `unSubscribeTopic(...)`.
+4. This callback channel is camera/IPC scoped (device-id keyed) and sits alongside outbound request topics (`iot/v1/s/{userId}/IPC/...`).
+
+**What remains not fully visible:**
+- Exact payload schemas delivered on `iot/v1/cb/{deviceId}/#` for every camera feature family, because subscription success callback is visible but message payload dispatch handlers are distributed/obfuscated.
+
+## 13) Remaining unknowns after this gap pass
+
+1. Complete callback message schema corpus for all `iot/v1/cb/{deviceId}/#` subtopics (especially non-live camera capabilities).
+2. Full negative error-code taxonomy for `webrtcResp.ack.code` beyond `-50002` and `-50015` branches visible here.
+3. Whether there are region/build-variant topic aliases not present in this decompiled build.
