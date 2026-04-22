@@ -258,3 +258,194 @@ These are explicit gaps where code is truncated (`UnsupportedOperationException`
 3. Full LDS inbound MQTT subscription registration path (topic subscriptions and dispatch source are not all visible in the inspected files).
 
 If you want, I can do a second pass focused only on these three gaps and trace all call sites into `f0.java` and service interfaces to produce an exact “known vs unknown” matrix per function.
+
+## 10) Field-by-field sample JSON corpus (observed schema examples)
+
+> These are **schema-faithful examples** derived from the Java composition/parsing logic. Values are illustrative placeholders.
+
+### 10.1 `livePlayReq` (App -> Camera via MQTT/TCP)
+
+```json
+{
+  "method": "livePlayReq",
+  "service": "IPC",
+  "srcAddr": "0.123456789",
+  "dstAddr": "A4D9XXXXDEVICE",
+  "livePlay": 1,
+  "payload": {
+    "dseq": 1700012345,
+    "dstAddr": "A4D9XXXXDEVICE",
+    "livePlay": 1,
+    "p2pCache": 0,
+    "peerid": "peer_7f8a9b",
+    "powerType": 1
+  }
+}
+```
+
+Field notes:
+- `srcAddr`/`dstAddr`: `String`
+- `livePlay`: `int`
+- `payload.dseq`: `int`
+- `payload.p2pCache`: `int`
+- `payload.peerid`: `String`
+- `payload.powerType`: `int`
+
+### 10.2 `webrtcReq` (offer envelope, App -> Camera)
+
+```json
+{
+  "id": "A4D9XXXXDEVICE",
+  "extends": {
+    "method": "webrtcReq",
+    "devId": "A4D9XXXXDEVICE",
+    "service": "IPC",
+    "userId": "123456789",
+    "payload": {
+      "dstAddr": "A4D9XXXXDEVICE",
+      "powerType": "1",
+      "p2pCache": "0",
+      "encOffer": 1,
+      "liveMqtt": 1,
+      "wPayload": {
+        "peerid": "peer_7f8a9b",
+        "sts": 1712345678901,
+        "psk": "psk_or_token_here",
+        "offer": {
+          "type": "offer",
+          "sdp": "<compressed_sdp_string>"
+        }
+      },
+      "IceServerList": [
+        {
+          "Password": "turn_token",
+          "Ttl": 86400,
+          "Uris": [
+            "stun:stun.kinesisvideo.us-east-1.amazonaws.com:443",
+            "turn:example.turn.host:443?transport=udp"
+          ],
+          "Username": "turn_user"
+        }
+      ]
+    }
+  }
+}
+```
+
+Field notes:
+- `extends.method/devId/service/userId`: `String`
+- `payload.powerType/p2pCache`: observed as `String` in this path
+- `wPayload.sts`: `long`
+- `offer.type/sdp`: `String`
+- `IceServerList`: `JSONArray` of objects
+
+### 10.3 `iceCandidateReq` (App -> Camera)
+
+```json
+{
+  "id": "A4D9XXXXDEVICE",
+  "extends": {
+    "method": "iceCandidateReq",
+    "devId": "A4D9XXXXDEVICE",
+    "service": "IPC",
+    "userId": "123456789",
+    "payload": {
+      "dstAddr": "A4D9XXXXDEVICE",
+      "powerType": "1",
+      "p2pCache": "0",
+      "wPayload": {
+        "peerid": "peer_7f8a9b",
+        "sts": 1712345678912,
+        "candidate": {
+          "candidate": "candidate:0 1 UDP 2122252543 192.168.1.10 52182 typ host"
+        }
+      }
+    }
+  }
+}
+```
+
+Field notes:
+- `wPayload.candidate.candidate`: nested candidate string field
+- topic-level behavior sets this request as publish-ack-only in MQTT config path
+
+### 10.4 `webrtcResp` (Camera -> App expected parse shape)
+
+```json
+{
+  "code": 200,
+  "desc": "ok",
+  "data": [
+    {
+      "code": 200,
+      "method": "webrtcResp",
+      "desc": "ok",
+      "devId": "A4D9XXXXDEVICE",
+      "service": "IPC",
+      "srcAddr": "A4D9XXXXDEVICE",
+      "seq": "1712345678",
+      "payload": {
+        "peerid": "peer_7f8a9b",
+        "trackId": 0,
+        "supportRtpExt": 1,
+        "pskEnable": 0,
+        "offer": {
+          "type": "answer",
+          "sdp": "v=0\\r\\n..."
+        }
+      }
+    }
+  ]
+}
+```
+
+Field notes (from parse model usage):
+- top-level `code`: `Integer`
+- `data`: `List<DataBean>`
+- `DataBean.method`: expected `"webrtcResp"`
+- `DataBean.payload.offer.type`: expected `"answer"`
+- `DataBean.payload.offer.sdp`: remote SDP
+
+## 11) MQTT trace map for camera/IPC devices across streaming technologies
+
+This section tracks MQTT behavior for camera devices only, regardless of stream transport.
+
+### 11.1 LDS WebRTC / hybrid LDS+KVS path (explicit MQTT signaling)
+
+Observed outbound MQTT topics:
+- `iot/v1/s/{userId}/IPC/livePlayReq`
+- `iot/v1/s/{userId}/IPC/webrtcReq`
+- `iot/v1/s/{userId}/IPC/iceCandidateReq`
+
+Observed send characteristics:
+- messages are also sent over TCP in parallel (dual-channel)
+- default publish ack behavior derives from topic name containing `Req`
+- explicit override sets `iceCandidateReq` to ack-only behavior
+
+Expected device response family (from parser/model usage):
+- `webrtcResp` payloads are parsed as answer-bearing response objects
+- `livePlayResp` is referenced in business logic changes and aligns with start-play gating flow
+
+### 11.2 KVS-only stream signaling path
+
+Observed signaling plane is WebSocket (`SDP_OFFER`/`SDP_ANSWER`/`ICE_CANDIDATE`) and AWS APIs.
+
+MQTT conclusion for inspected KVS-only path:
+- no distinct camera MQTT request topic set beyond LDS IPC topics was found in inspected KVS signaling classes.
+- KVS control messages are carried by websocket payloads in this implementation segment.
+
+### 11.3 TUTK/AVIOCTRL camera path
+
+Observed camera control is AVIOCTRL-based (`IOTYPE_USER_IPCAM_*`) in `smartcamera/sdk/a.java` and related handlers.
+
+MQTT conclusion for inspected TUTK path:
+- no camera-control MQTT topic corpus analogous to `livePlayReq/webrtcReq/iceCandidateReq` was found in inspected TUTK control path; transport appears SDK/AV channel driven.
+
+### 11.4 IPC event-style camera push handling (non-stream-setup telemetry/events)
+
+Observed IPC event page identifiers in camera IPC processors:
+- `IPC.event`
+- `IPC.cloudEvents`
+- also service routing pages like `IPC.live`, `IPC.securityCameras`, `IPC.radarMap`, `IPC.signalTest`
+
+These indicate camera/IPC event routing surfaces, but exact MQTT topic strings carrying these event pages were not fully recoverable from the decompiled snippets inspected here.
