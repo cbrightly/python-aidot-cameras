@@ -14,7 +14,7 @@ sequenceDiagram
     participant Dev as Camera Device
     participant AWS as AWS KVS Signaling
 
-    App->>API: GET /v15/api/webrtc/iceConfig?forceRefresh=0\n(headers: owner, token, terminal, appId, appVersion)
+    App->>API: GET /v15/api/webrtc/iceConfig?forceRefresh=0 (headers: owner, token, terminal, appId, appVersion)
     API-->>App: ICE config JSON (cached to files/web/iceConfig/config.txt)
 
     App->>MQTT: publish iot/v1/s/{userId}/IPC/livePlayReq
