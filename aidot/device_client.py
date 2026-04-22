@@ -9,6 +9,7 @@ import struct
 import threading
 import time
 import asyncio
+import zlib
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, List, Optional
@@ -268,6 +269,48 @@ def _parse_video_payload(data: bytes) -> List[VideoFrame]:
             ))
         offset = end
     return frames
+
+
+def _build_stun_binding_success_response(
+    *,
+    transaction_id: bytes,
+    mapped_ip: str,
+    mapped_port: int,
+    mi_password: str,
+    magic_cookie: bytes = b"\x21\x12\xa4\x42",
+) -> bytes:
+    """Build STUN Binding Success with MESSAGE-INTEGRITY and FINGERPRINT.
+
+    Some camera firmwares keep retransmitting ICE checks when responses lack a
+    valid fingerprinted STUN envelope. This helper emits:
+      XOR-MAPPED-ADDRESS + MESSAGE-INTEGRITY + FINGERPRINT
+    """
+    import hmac as _hmac, hashlib as _hashlib
+
+    ip_parts = [int(x) for x in mapped_ip.split(".")]
+    xip = bytes(a ^ b for a, b in zip(struct.pack("!4B", *ip_parts), magic_cookie))
+    xport = (mapped_port ^ 0x2112) & 0xFFFF
+    xma = b"\x00\x20\x00\x08\x00\x01" + struct.pack("!H", xport) + xip
+
+    mi_attr_len = 24  # type(2)+len(2)+sha1(20)
+    fp_attr_len = 8   # type(2)+len(2)+crc32(4)
+
+    # Per RFC 5389/8445, MESSAGE-INTEGRITY is computed with length set to end
+    # of MESSAGE-INTEGRITY (excluding any attributes that follow, e.g. FINGERPRINT).
+    len_for_mi = len(xma) + mi_attr_len
+    hdr_for_mi = b"\x01\x01" + struct.pack("!H", len_for_mi) + magic_cookie + transaction_id
+    mi_val = _hmac.new(
+        mi_password.encode(), hdr_for_mi + xma, _hashlib.sha1
+    ).digest()
+    mi_attr = b"\x00\x08\x00\x14" + mi_val
+
+    # On-wire message length includes FINGERPRINT.
+    len_with_fp = len_for_mi + fp_attr_len
+    hdr_with_fp = b"\x01\x01" + struct.pack("!H", len_with_fp) + magic_cookie + transaction_id
+    msg_wo_fp_attr = hdr_with_fp + xma + mi_attr
+    fp_val = (zlib.crc32(msg_wo_fp_attr) ^ 0x5354554E) & 0xFFFFFFFF
+    fp_attr = b"\x80\x28\x00\x04" + struct.pack("!I", fp_val)
+    return msg_wo_fp_attr + fp_attr
 
 # --------------------------------------------------------------------------- #
 # AES helpers (live stream)
@@ -2785,6 +2828,7 @@ class DeviceClient(object):
         cam_ip_q:         asyncio.Queue   = asyncio.Queue()  # camera IP from setDevAttrNotif
         camera_ready_ev:  asyncio.Event   = asyncio.Event()  # set when camera is on MQTT
         liveplay_echo_ev: asyncio.Event   = asyncio.Event()  # set when livePlayReq echo arrives
+        liveplay_resp_fut: asyncio.Future = loop.create_future()  # set on livePlayResp
         camera_reconnect_ev: asyncio.Event = asyncio.Event() # set when camera sends device/connect
 
         # Gate: block asyncio until MQTT is connected + subscribed
@@ -2841,6 +2885,10 @@ class DeviceClient(object):
                     or inner.get("devId") == device_id
                     or msg.get("devId") == device_id):
                 loop.call_soon_threadsafe(camera_ready_ev.set)
+            # livePlayResp: explicit camera ack/nack for start-play command.
+            if method == "livePlayResp" and inner.get("devId") == device_id:
+                if not liveplay_resp_fut.done():
+                    loop.call_soon_threadsafe(liveplay_resp_fut.set_result, inner)
             # livePlayReq echo: broker/camera confirmed delivery of our livePlayReq.
             # Signal _open_sdes_stream to proceed with webrtcReq.
             if method == "livePlayReq" and inner.get("devId") == device_id:
@@ -3180,7 +3228,15 @@ class DeviceClient(object):
             "payload": {
                 "peerid":  peer_id,
                 "devId":   device_id,
-                "dstAddr": user_id,
+                # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
+                # to the target deviceId for livePlayReq.
+                "dstAddr": device_id,
+                # App payload compatibility fields (see LiveRequestParamsBean /
+                # LivePlayPaylodBean in decompiled app).
+                "livePlay": 1,
+                "powerType": "1",
+                "p2pCache": "0",
+                "dseq": 0,
             },
         })
         if not use_sdes:
@@ -3192,6 +3248,21 @@ class DeviceClient(object):
             # Proceed as soon as the echo arrives; fall through after 0.5 s.
             try:
                 await asyncio.wait_for(liveplay_echo_ev.wait(), timeout=0.5)
+            except asyncio.TimeoutError:
+                pass
+            # livePlayResp carries camera-side accept/reject.  If the camera
+            # rejects start-play, continuing to SDP/ICE causes large STUN churn
+            # but no media.  Fail fast with the concrete code.
+            try:
+                _lp_resp = await asyncio.wait_for(
+                    asyncio.shield(liveplay_resp_fut), timeout=2.0
+                )
+                _lp_code = int(_lp_resp.get("code", 200))
+                _lp_on = int(_lp_resp.get("livePlay", 1))
+                if _lp_code not in (0, 200) or _lp_on == 0:
+                    raise RuntimeError(
+                        f"livePlay rejected by camera (code={_lp_code}, livePlay={_lp_on})"
+                    )
             except asyncio.TimeoutError:
                 pass
             # Short extra wait for getIceConfigResp — the server may only respond
@@ -3225,6 +3296,7 @@ class DeviceClient(object):
                     _status=_status,
                     mqtt_fut=mqtt_fut,
                     liveplay_echo_ev=liveplay_echo_ev,
+                    liveplay_resp_fut=liveplay_resp_fut,
                     numeric_uid_raw=_numeric_uid_raw,
                     dtls_fallback_ok=_dtls_fallback_ok,
                     second_answer_fut=second_answer_fut,
@@ -3799,12 +3871,9 @@ class DeviceClient(object):
                 "offer":   {"type": pc.localDescription.type,
                              "sdp":  _offer_sdp},
                 "trackId": 0,
-                # dstAddr matches the SDES webrtcReq format (user_id).  The broker
-                # uses the MQTT topic path (iot/v1/s/{userId}/IPC/webrtcReq) for
-                # camera routing, not this field; but camera firmware may use it to
-                # route the webrtcResp — wrong value causes response to be silently
-                # discarded or routed to the wrong endpoint.
-                "dstAddr": user_id,
+                # Decompiled reference app (tyrus/o.java) sets dstAddr=deviceId
+                # for webrtcReq.
+                "dstAddr": device_id,
                 "liveMqtt": 1,
                 "encOffer": 1,
             },
@@ -4632,6 +4701,7 @@ class DeviceClient(object):
         _status,
         mqtt_fut,
         liveplay_echo_ev,
+        liveplay_resp_fut,
         numeric_uid_raw=None,
         dtls_fallback_ok: bool = True,
         second_answer_fut=None,
@@ -4862,45 +4932,9 @@ class DeviceClient(object):
                     _xp = _st_ta.unpack_from('!H', _av, 2)[0] ^ 0x2112
                     _xb = bytes(a ^ b for a, b in zip(_av[4:8], _MAGIC_TA))
                     _r_ip_ta = '.'.join(str(b) for b in _xb)
-                    # CreatePermission: tell TURN server which peer source IP(s)
-                    # to accept SRTP from and forward as Data Indications.
-                    # Primary: camera's public IP (_public_ip, e.g. 72.84.199.230)
-                    # — this is the source IP the TURN server sees when the camera
-                    # sends SRTP to our relay (both camera and client behind same NAT).
-                    # Fallback to _ta_host (TURN server IP) if _public_ip unavailable.
-                    # Also send a second permission for _ta_host (belt-and-suspenders
-                    # in case camera routes via its own TURN allocation on same server).
-                    def _send_create_perm(_perm_ip_str):
-                        _pxip = bytes(
-                            a ^ b for a, b in zip(
-                                bytes(int(x) for x in _perm_ip_str.split('.')),
-                                _MAGIC_TA,
-                            )
-                        )
-                        _pxpa = b'\x00\x01' + _st_ta.pack('!H', 0x2112) + _pxip
-                        _pbp = (
-                            _a(0x0006, _ta_user)
-                            + _a(0x0014, _realm_ta)
-                            + _a(0x0015, _nonce_ta)
-                            + _a(0x0012, _pxpa)
-                        )
-                        _ptp = os.urandom(12)
-                        _php = (b'\x00\x08' + _st_ta.pack('!H', len(_pbp) + 24)
-                                + _MAGIC_TA + _ptp)
-                        _pbp += _a(0x0008, _mi_ta(_key_ta, _php + _pbp))
-                        _pcp = (b'\x00\x08' + _st_ta.pack('!H', len(_pbp))
-                                + _MAGIC_TA + _ptp + _pbp)
-                        _LOGGER.debug(
-                            "TURN CreatePermission for peer %s", _perm_ip_str)
-                        try:
-                            _ta_sock.sendto(_pcp, (_ta_host, _ta_port))
-                        except Exception:
-                            pass
-
-                    _perm_ip_primary = _public_ip if _public_ip else _ta_host
-                    _send_create_perm(_perm_ip_primary)
-                    if _ta_host != _perm_ip_primary:
-                        _send_create_perm(_ta_host)
+                    # Do NOT pre-create permissions for our own srflx IP or
+                    # TURN server IP. That can cause TURN self-loop Data
+                    # Indications and massive STUN echo storms.
                     return _r_ip_ta, _xp, _realm_ta, _nonce_ta
             return None
 
@@ -5062,7 +5096,14 @@ class DeviceClient(object):
             "payload": {
                 "peerid":  peer_id,
                 "devId":   device_id,
-                "dstAddr": user_id,
+                # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
+                # to the target deviceId for livePlayReq.
+                "dstAddr": device_id,
+                # App payload compatibility fields (decompiled live-play model).
+                "livePlay": 1,
+                "powerType": "1",
+                "p2pCache": "0",
+                "dseq": 0,
             },
         })
         _live_play_topic_sdes = f"iot/v1/s/{user_id}/IPC/livePlayReq"
@@ -5078,6 +5119,19 @@ class DeviceClient(object):
             _status("livePlayReq echo received — sending webrtcReq, ICE, then launching ffmpeg")
         except _asyncio.TimeoutError:
             _status("no livePlayReq echo in 5s — sending webrtcReq, ICE, then launching ffmpeg anyway")
+        # If camera provided explicit livePlayResp failure, abort before SDP/ICE.
+        try:
+            _lp_resp_sdes = await _asyncio.wait_for(
+                _asyncio.shield(liveplay_resp_fut), timeout=1.0
+            )
+            _lp_code_sdes = int(_lp_resp_sdes.get("code", 200))
+            _lp_on_sdes = int(_lp_resp_sdes.get("livePlay", 1))
+            if _lp_code_sdes not in (0, 200) or _lp_on_sdes == 0:
+                raise RuntimeError(
+                    f"livePlay rejected by camera (code={_lp_code_sdes}, livePlay={_lp_on_sdes})"
+                )
+        except _asyncio.TimeoutError:
+            pass
 
         # --- Build local-receiver SDP for ffmpeg ----------------------------- #
         # Built BEFORE sending webrtcReq so ffmpeg is already listening on the
@@ -5230,7 +5284,9 @@ class DeviceClient(object):
                 "devId":   device_id,
                 "offer":   {"type": "offer", "sdp": sdes_offer_sdp},
                 "trackId": 0,
-                "dstAddr": user_id,
+                # Decompiled reference app (tyrus/o.java) sets dstAddr=deviceId
+                # for webrtcReq.
+                "dstAddr": device_id,
                 "encOffer": 1,
                 "liveMqtt": 1,
                 # wPayload: newer firmware parses wPayload for ICE credentials
@@ -5616,6 +5672,19 @@ class DeviceClient(object):
             + (f" and :{_hp_port2}" if _hp_port != _hp_port2 else "")
         )
 
+        def _is_self_peer_ip(_ip: "Optional[str]") -> bool:
+            if not _ip:
+                return False
+            if _ip in {"127.0.0.1", "0.0.0.0", local_ip}:
+                return True
+            if _public_ip and _ip == _public_ip:
+                return True
+            return False
+
+        _selfloop_drop_count = 0
+        _bridge_selfloop_drop_count = 0
+        _prefer_direct_stun = {_audio_sock: False, _video_sock: False}
+
         # --- ICE STUN responder (runs while reservation sockets are still open) #
         # Two-phase window:
         #   Normal (no echo-reversal): exit after 0.5 s idle, max 2.5 s total.
@@ -5625,11 +5694,14 @@ class DeviceClient(object):
         #     exit quickly so the DTLS fallback starts sooner.
         #   SRTP early exit: if a non-STUN packet arrives (SRTP), ICE is done —
         #     close sockets immediately so ffmpeg can bind.
-        import struct as _struct, select as _select, hmac as _hmac_ice, hashlib as _hashlib_ice
+        import struct as _struct, select as _select
         _STUN_MAGIC = b'\x21\x12\xa4\x42'
         _stun_count = 0
         _stun_seen = False
         _srtp_detected = False
+        _stun_window_pkt_count = 0
+        _turn_only_pkt_count = 0
+        _camera_side_pkt_count = 0
         if not _cam_echo_received:
             _stun_max = 2.5
         elif _sdes_webrtcresp_sent:
@@ -5665,10 +5737,18 @@ class DeviceClient(object):
                     _pkt, _src = _sock.recvfrom(2048)
                 except OSError:
                     continue
+                _stun_window_pkt_count += 1
                 _LOGGER.debug(
                     "STUN window: %d bytes from %s:%d, first4=%s",
                     len(_pkt), _src[0], _src[1], _pkt[:4].hex()
                 )
+                # Track packets that are only TURN server control responses
+                # (Allocate/permission challenge/success), which do not indicate
+                # that the camera actually started ICE checks.
+                if _src[0] == _hp_host:
+                    _turn_only_pkt_count += 1
+                else:
+                    _camera_side_pkt_count += 1
                 # --- TURN Data Indication (type 0x0017): strip wrapper --------- #
                 # Camera ICE probes routed via TURN arrive as Data Indications from
                 # 3.230.182.123:5349 (the control channel, already NAT-mapped).
@@ -5696,6 +5776,10 @@ class DeviceClient(object):
                             _sw_inner = _sw_av
                     if _sw_inner:
                         _pkt = _sw_inner  # process inner payload
+                    # TURN Data Indication with XOR-PEER-ADDRESS means the
+                    # camera (or its relay) is actively talking to us.
+                    if _turn_peer_ip_sw:
+                        _camera_side_pkt_count += 1
 
                 if (len(_pkt) >= 20 and _pkt[4:8] == _STUN_MAGIC):
                     # STUN packet — only Binding Requests (0x0001) indicate that
@@ -5705,38 +5789,27 @@ class DeviceClient(object):
                     if _pkt[:2] == b'\x00\x01':
                         # Binding Request — reply with Binding Success Response
                         _stun_seen = True
+                        if _turn_peer_ip_sw is None and _src[0] != _hp_host:
+                            _prefer_direct_stun[_sock] = True
                         _tid = _pkt[8:20]
                         try:
                             # Use TURN peer address for XOR-MAPPED-ADDRESS when
                             # request arrived via TURN Data Indication.
                             _resp_src_ip = _turn_peer_ip_sw or _src[0]
                             _resp_src_port = _turn_peer_port_sw or _src[1]
-                            _ip_parts = [int(x) for x in _resp_src_ip.split('.')]
-                            _xip = bytes(
-                                a ^ b for a, b in zip(
-                                    _struct.pack('!4B', *_ip_parts), _STUN_MAGIC
-                                )
+                            _resp = _build_stun_binding_success_response(
+                                transaction_id=_tid,
+                                mapped_ip=_resp_src_ip,
+                                mapped_port=_resp_src_port,
+                                mi_password=(
+                                    _pwd_a if _sock is _audio_sock else _pwd_v
+                                ),
+                                magic_cookie=_STUN_MAGIC,
                             )
-                            _xport = (_resp_src_port ^ 0x2112) & 0xFFFF
-                            _xma = (b'\x00\x20\x00\x08\x00\x01'
-                                    + _struct.pack('!H', _xport) + _xip)
-                            # RFC 8489 §14.5: MESSAGE-INTEGRITY required when
-                            # request carried MI.  ICE always does (RFC 8445).
-                            # Key = local ICE password (short-term credentials).
-                            _mi_pwd = (
-                                _pwd_a if _sock is _audio_sock else _pwd_v
-                            ).encode()
-                            # Length field pre-set to include MI attr (4+20=24).
-                            _mi_len = len(_xma) + 24
-                            _resp_hdr = (b'\x01\x01'
-                                         + _struct.pack('!H', _mi_len)
-                                         + _STUN_MAGIC + _tid)
-                            _mi_val = _hmac_ice.new(
-                                _mi_pwd, _resp_hdr + _xma, _hashlib_ice.sha1
-                            ).digest()
-                            _resp = (_resp_hdr + _xma
-                                     + b'\x00\x08\x00\x14' + _mi_val)
-                            if _turn_peer_ip_sw and _sock in _relay_addrs:
+                            if _turn_peer_ip_sw and _prefer_direct_stun.get(_sock, False):
+                                pass
+                            elif (_turn_peer_ip_sw and _sock in _relay_addrs
+                                    and not _is_self_peer_ip(_turn_peer_ip_sw)):
                                 # Arrived via TURN — respond via Send Indication
                                 _ri_sw = _relay_addrs[_sock]
                                 _t_host_sw, _t_port_sw = _ri_sw[4], _ri_sw[5]
@@ -5762,6 +5835,19 @@ class DeviceClient(object):
                                              + _STUN_MAGIC + os.urandom(12)
                                              + _si_body)
                                 _sock.sendto(_send_ind, (_t_host_sw, _t_port_sw))
+                            elif _turn_peer_ip_sw and _is_self_peer_ip(_turn_peer_ip_sw):
+                                # Self-loop Data Indication (peer == our own
+                                # local/srflx address). Responding via TURN
+                                # creates an endless STUN echo loop and no media.
+                                # Drop it and wait for real camera checks.
+                                _selfloop_drop_count += 1
+                                if _selfloop_drop_count <= 5 or _selfloop_drop_count % 50 == 0:
+                                    _LOGGER.debug(
+                                        "STUN window: drop TURN self-loop peer %s:%s"
+                                        " (count=%d)",
+                                        _turn_peer_ip_sw, _turn_peer_port_sw,
+                                        _selfloop_drop_count,
+                                    )
                             else:
                                 _sock.sendto(_resp, _src)
                             _stun_count += 1
@@ -5781,7 +5867,16 @@ class DeviceClient(object):
         if _stun_count:
             _status(f"ICE: responded to {_stun_count} STUN binding request(s)")
         elif not _srtp_detected:
-            _status("ICE: 0 packets received in STUN window (NAT may be blocking camera probes)")
+            if _stun_window_pkt_count and _turn_only_pkt_count == _stun_window_pkt_count:
+                _status(
+                    "ICE: no camera probes seen in STUN window"
+                    f" (received {_stun_window_pkt_count} TURN-server control packet(s) only)"
+                )
+            else:
+                _status(
+                    "ICE: 0 camera STUN binding requests in window"
+                    f" (total packets={_stun_window_pkt_count})"
+                )
         if _srtp_detected:
             _status("SRTP detected — exiting STUN window, handing off to ffmpeg")
 
@@ -5865,27 +5960,15 @@ class DeviceClient(object):
                         _stun_seen = True
                         _tid_r = _pkt_r[8:20]
                         try:
-                            _ip_r = [int(x) for x in _src_r[0].split('.')]
-                            _xip_r = bytes(
-                                a ^ b for a, b in zip(
-                                    _struct.pack('!4B', *_ip_r), _STUN_MAGIC
-                                )
+                            _resp_r = _build_stun_binding_success_response(
+                                transaction_id=_tid_r,
+                                mapped_ip=_src_r[0],
+                                mapped_port=_src_r[1],
+                                mi_password=(
+                                    _pwd_a if _sk_r is _audio_sock else _pwd_v
+                                ),
+                                magic_cookie=_STUN_MAGIC,
                             )
-                            _xport_r = (_src_r[1] ^ 0x2112) & 0xFFFF
-                            _xma_r = (b'\x00\x20\x00\x08\x00\x01'
-                                      + _struct.pack('!H', _xport_r) + _xip_r)
-                            _mi_pwd_r = (
-                                _pwd_a if _sk_r is _audio_sock else _pwd_v
-                            ).encode()
-                            _mi_len_r = len(_xma_r) + 24
-                            _resp_r_hdr = (b'\x01\x01'
-                                           + _struct.pack('!H', _mi_len_r)
-                                           + _STUN_MAGIC + _tid_r)
-                            _mi_val_r = _hmac_ice.new(
-                                _mi_pwd_r, _resp_r_hdr + _xma_r, _hashlib_ice.sha1
-                            ).digest()
-                            _resp_r = (_resp_r_hdr + _xma_r
-                                       + b'\x00\x08\x00\x14' + _mi_val_r)
                             _sk_r.sendto(_resp_r, _src_r)
                             _stun_count += 1
                         except Exception:
@@ -6035,6 +6118,7 @@ class DeviceClient(object):
             nonlocal _br_first_di_logged, _br_first_srtp_logged
             _STUN_MAGIC_BR = b'\x21\x12\xa4\x42'
             import struct as _st_br, select as _sel_br
+            _br_prefer_direct_stun = {_audio_sock: False, _video_sock: False}
             _lo_a = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
             _lo_v = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
             try:
@@ -6093,33 +6177,25 @@ class DeviceClient(object):
                                 and _bpkt[:2] == b'\x00\x01'):
                             # STUN Binding Request — send Binding Success Response
                             try:
+                                if _br_turn_peer_ip is None and _bsrc[0] != _hp_host:
+                                    _br_prefer_direct_stun[_bs] = True
                                 _btid = _bpkt[8:20]
                                 # Use TURN peer address when arrived via relay
                                 _bresp_ip = _br_turn_peer_ip or _bsrc[0]
                                 _bresp_port = _br_turn_peer_port or _bsrc[1]
-                                _bip = [int(x) for x in _bresp_ip.split('.')]
-                                _bxip = bytes(
-                                    a ^ b for a, b in zip(
-                                        _st_br.pack('!4B', *_bip), _STUN_MAGIC_BR
-                                    )
+                                _bresp = _build_stun_binding_success_response(
+                                    transaction_id=_btid,
+                                    mapped_ip=_bresp_ip,
+                                    mapped_port=_bresp_port,
+                                    mi_password=(
+                                        _pwd_a if _bs is _audio_sock else _pwd_v
+                                    ),
+                                    magic_cookie=_STUN_MAGIC_BR,
                                 )
-                                _bxport = (_bresp_port ^ 0x2112) & 0xFFFF
-                                _bxma = (b'\x00\x20\x00\x08\x00\x01'
-                                         + _st_br.pack('!H', _bxport) + _bxip)
-                                import hmac as _hmac_br2, hashlib as _hashlib_br2
-                                _mi_pwd_br = (
-                                    _pwd_a if _bs is _audio_sock else _pwd_v
-                                ).encode()
-                                _mi_len_br = len(_bxma) + 24
-                                _bresp_hdr = (b'\x01\x01'
-                                              + _st_br.pack('!H', _mi_len_br)
-                                              + _STUN_MAGIC_BR + _btid)
-                                _mi_val_br = _hmac_br2.new(
-                                    _mi_pwd_br, _bresp_hdr + _bxma, _hashlib_br2.sha1
-                                ).digest()
-                                _bresp = (_bresp_hdr + _bxma
-                                          + b'\x00\x08\x00\x14' + _mi_val_br)
-                                if _br_turn_peer_ip and _bs in _relay_addrs:
+                                if _br_turn_peer_ip and _br_prefer_direct_stun.get(_bs, False):
+                                    pass
+                                elif (_br_turn_peer_ip and _bs in _relay_addrs
+                                        and not _is_self_peer_ip(_br_turn_peer_ip)):
                                     # Arrived via TURN — respond via Send Indication
                                     _bri = _relay_addrs[_bs]
                                     _br_t_host, _br_t_port = _bri[4], _bri[5]
@@ -6156,6 +6232,16 @@ class DeviceClient(object):
                                         "bridge: STUN resp via TURN → %s:%d",
                                         _br_turn_peer_ip, _br_turn_peer_port,
                                     )
+                                elif _br_turn_peer_ip and _is_self_peer_ip(_br_turn_peer_ip):
+                                    _bridge_selfloop_drop_count += 1
+                                    if (_bridge_selfloop_drop_count <= 5
+                                            or _bridge_selfloop_drop_count % 50 == 0):
+                                        _LOGGER.debug(
+                                            "bridge: drop TURN self-loop STUN peer %s:%d"
+                                            " (count=%d)",
+                                            _br_turn_peer_ip, _br_turn_peer_port,
+                                            _bridge_selfloop_drop_count,
+                                        )
                                 else:
                                     _bs.sendto(_bresp, _bsrc)
                                     _LOGGER.debug(
@@ -6223,8 +6309,9 @@ class DeviceClient(object):
         # property means SDES is available, not that DTLS is absent.
         if (_cam_echo_received
                 and _stun_count == 0
+                and _camera_side_pkt_count == 0
                 and not _srtp_detected
-                and not _relay_addrs):
+                and dtls_fallback_ok):
             _status(
                 "echo-reversal camera: no STUN or SRTP received in ICE window"
                 " — camera likely requires DTLS; falling back"
@@ -6241,6 +6328,15 @@ class DeviceClient(object):
                 pass
             outgoing_q.put_nowait(None)   # stop MQTT thread
             raise DeviceClient._SdesNoAnswerError()
+        elif (_cam_echo_received
+              and _stun_count == 0
+              and _camera_side_pkt_count == 0
+              and not _srtp_detected
+              and not dtls_fallback_ok):
+            _status(
+                "echo-reversal camera: no STUN or SRTP received in ICE window"
+                " — DTLS fallback disabled by camera flags; continuing SDES path"
+            )
 
         if output_path:
             # Ensure the output directory exists before ffmpeg tries to open the
