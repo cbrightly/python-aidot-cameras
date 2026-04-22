@@ -1,0 +1,260 @@
+# Official Java implementation: network call map (API + device signaling)
+
+## Scope and methodology
+This document is derived directly from the decompiled Java sources under `sources/com/leedarson/smartcamera/kvswebrtc/**` and related signaling model classes. It focuses on **observed code paths only** and avoids assumptions where methods are partially decompiled or unavailable.
+
+## 1) High-level architecture (observed)
+
+```mermaid
+sequenceDiagram
+    participant App as Android App (kvswebrtc)
+    participant API as HTTP API
+    participant MQTT as MQTT Broker
+    participant TCP as TCP Signaling Service
+    participant Dev as Camera Device
+    participant AWS as AWS KVS Signaling
+
+    App->>API: GET /v15/api/webrtc/iceConfig?forceRefresh=0\n(headers: owner, token, terminal, appId, appVersion)
+    API-->>App: ICE config JSON (cached to files/web/iceConfig/config.txt)
+
+    App->>MQTT: publish iot/v1/s/{userId}/IPC/livePlayReq
+    App->>TCP: nativeSendMessageToTarget(...livePlayReq...)
+    Note over App,MQTT: Dual channel send wrapper races MQTT+TCP
+    Note over App,TCP: First success wins; second success recorded as fallback ordering
+
+    App->>MQTT: publish iot/v1/s/{userId}/IPC/webrtcReq (offer)
+    App->>TCP: nativeSendMessageToTarget(...webrtcReq...)
+    Dev-->>App: webrtcResp (answer path)
+
+    App->>MQTT: publish iot/v1/s/{userId}/IPC/iceCandidateReq
+    App->>TCP: nativeSendMessageToTarget(...iceCandidateReq...)
+    Dev-->>App: candidate events
+
+    App->>AWS: GetSignalingChannelEndpoint / GetIceServerConfig (KVS path)
+    App->>AWS: WebSocket signaling (SDP_OFFER/SDP_ANSWER/ICE_CANDIDATE)
+    Dev-->>App: Base64 messagePayload over WS
+```
+
+## 2) API calls (cloud HTTP)
+
+### 2.1 ICE config HTTP endpoint
+Observed in `IceConfigUpdateJobManager` (`m.java`):
+
+- Base URL source: `SharePreferenceUtils.getPrefString(..., "httpServer", "")`
+- Endpoint path: `"%s/v15/api/webrtc/iceConfig?forceRefresh=0"`
+- HTTP manager call: `b0.b().K(...)`
+- Header JSON fields set by code:
+  - `owner: String`
+  - `token: String` (from `accessToken`)
+  - `terminal: String` (`"app"` literal)
+  - `appId: String`
+  - `appVersion: String`
+
+Response is written to local file cache:
+- directory: `${filesDir}/web/iceConfig`
+- file: `${filesDir}/web/iceConfig/config.txt`
+
+The cache validity check uses TTL thresholds for app-level and device-level records (local parse path). If valid, local cache is returned; otherwise network refresh is used.
+
+## 3) Device signaling transport (MQTT + TCP dual channel)
+
+## 3.1 Transport abstraction and behavior
+`LdsSignalSwitchChanelWrap` (`channel/c.java`) wraps two channels:
+- `TcpSignalSwitchChannel` (`channel/e.java`)
+- `MqttSignalSwitchChannel` (`channel/d.java`)
+
+Behavior:
+- Each send operation creates a task id (`System.nanoTime()`)
+- Message is sent on **both channels**
+- First success marks task done and invokes caller callback
+- If both channels fail, failure callback is triggered
+- For OFFER messages, reporter stores answer source ordering:
+  - `mqtt`, `tcp_mqtt`, `mqtt_tcp`, or `未收到` (not received)
+
+### 3.2 MQTT channel send
+`channel/d.java` calls:
+- `LDSBaseMqttService.publish(configBean.topic, configBean, JSONObject(messageBody), handler)`
+
+### 3.3 TCP channel send
+`channel/e.java` calls:
+- `TcpService.nativeSendMessageToTarget(deviceId, sendMsg, timeoutMs, typeCode, handler)`
+
+TCP pre-send enriches JSON if missing:
+- `srcAddr: "0.{userId}"`
+- `seq: String` via `SpExtendHelper.generateNextSeq()`
+- `tst: long` via `System.currentTimeMillis()`
+- `tid: String` via `SpExtendHelper.generateTid()`
+
+`typeCode` mapping observed:
+- OFFER => `1`
+- non-OFFER (CANDIDATE/LIVEPLAY) => `2`
+
+## 4) MQTT topics and message types (observed)
+
+The following outbound topics are explicit in code:
+
+- `iot/v1/s/{userId}/IPC/livePlayReq`
+- `iot/v1/s/{userId}/IPC/webrtcReq`
+- `iot/v1/s/{userId}/IPC/iceCandidateReq`
+
+The placeholder is replaced from app user id (`BaseApplication.b().d()` or shared pref `userId`).
+
+## 5) Message schemas (observed fields/types)
+
+## 5.1 `livePlayReq`
+Model class: `LiveRequestParamsBean`
+
+Top-level:
+- `method: String = "livePlayReq"`
+- `service: String = "IPC"`
+- `srcAddr: String`
+- `dstAddr: String`
+- `livePlay: int` (default `1`)
+- `payload: LivePlayPaylodBean`
+
+Payload (`LivePlayPaylodBean`):
+- `dseq: int`
+- `dstAddr: String`
+- `livePlay: int`
+- `p2pCache: int`
+- `peerid: String`
+- `powerType: int`
+
+Send assembly (`o.u(...)`) sets:
+- top-level `srcAddr = "0.{userId}"`
+- top-level `dstAddr = deviceId`
+- payload `dstAddr = deviceId`
+- payload `peerid = peerid`
+- payload `dseq = dseq`
+- payload `powerType/p2pCache` from `IpcService.getIPCDeviceInfoByDeviceId(...)`
+
+## 5.2 `webrtcReq` (offer signaling to device)
+Assembled in `o.q(...)` using nested JSON.
+
+Envelope structure observed:
+- outer JSON has `id = deviceId`
+- `extends` object with:
+  - `method = "webrtcReq"`
+  - `devId = deviceId`
+  - `service = "IPC"`
+  - `userId = userId`
+  - `payload = {...}`
+
+`payload` fields observed:
+- `dstAddr: String` (set to `deviceId`)
+- `powerType: String` (from IPC device info; fallback `"1"`)
+- `p2pCache: String` (from IPC device info; fallback `"0"`)
+- `encOffer: int = 1`
+- `liveMqtt: int = 1`
+- `wPayload: JSONObject`
+- `IceServerList: JSONArray`
+
+`wPayload` fields observed:
+- `peerid: String`
+- `sts: long` (timestamp)
+- `psk: String`
+- `offer: { type: "offer", sdp: <compressed_sdp> }`
+
+`IceServerList` behavior:
+- KVS+LDS mode uses generated list including AWS stun URI and turn URIs
+- otherwise uses pre-built local array from selected ICE config
+
+## 5.3 `iceCandidateReq`
+Assembled in `o.p(...)`:
+
+Envelope:
+- `id = deviceId`
+- `extends.method = "iceCandidateReq"`
+- `extends.devId = deviceId`
+- `extends.service = "IPC"`
+- `extends.userId = userId`
+- `extends.payload = payloadObj`
+
+Payload:
+- `dstAddr = deviceId`
+- `powerType` / `p2pCache` (same derivation/fallback style)
+- `wPayload` object:
+  - `peerid: String`
+  - `sts: long`
+  - `candidate: { candidate: String }`
+
+## 5.4 `webrtcResp` (device answer)
+Observed in two places:
+- expected method string check inside `o.j(...)` (partially decompiled)
+- synthetic error response construction in `o.a.b(...)` that creates `SdpAnswerBean` + `DataBean` with `method = "webrtcResp"`
+
+Parsed structures used by app include:
+- `DataBean.method: String`
+- `DataBean.payload.offer.{type,sdp}`
+- `DataBean.payload.peerid: String`
+- `DataBean.code: int`
+- `DataBean.desc: String`
+
+## 6) KVS signaling path (AWS)
+
+In addition to LDS MQTT/TCP signaling, the app also contains an AWS Kinesis Video signaling path (`f0.java`, `tyrus/n.java`):
+
+- AWS clients used:
+  - `AWSKinesisVideoClient` for signaling endpoints
+  - `AWSKinesisVideoSignalingClient` for ICE server config
+- Calls observed:
+  - `getSignalingChannelEndpoint(...)`
+  - `getIceServerConfig(...)`
+- websocket signaling client (`tyrus/n.java`) receives/sends:
+  - `SDP_OFFER`
+  - `SDP_ANSWER`
+  - `ICE_CANDIDATE`
+- `Event.messagePayload` is Base64-encoded JSON and parsed into SDP/candidate objects.
+
+## 7) Chinese log text translations (selected)
+
+Key strings translated for operational meaning:
+
+- `获取IceConfig数据：(开始)` -> “Fetching IceConfig data: (start)”
+- `获取IceConfig数据（成功）` -> “Fetching IceConfig data (success)”
+- `获取IceConfig数据(失败)` -> “Fetching IceConfig data (failure)”
+- `媒体协商(数据准备ing)` -> “Media negotiation (preparing data)”
+- `媒体协商（App==>设备）数据内容为` -> “Media negotiation (App => Device) payload is”
+- `起播指令投递成功` -> “Start-play command delivered successfully”
+- `候选人数据交换(App==>设备)` -> “ICE candidate exchange (App => Device)”
+- `双通道发送失败` -> “Dual-channel send failed”
+- `未收到` -> “Not received”
+
+## 8) Direct implementation checklist for parity (strictly observed requirements)
+
+To match what this Java implementation explicitly does, your client needs at minimum:
+
+1. **ICE config acquisition + cache policy**
+   - call `/v15/api/webrtc/iceConfig?forceRefresh=0`
+   - use required headers (`owner`, `token`, `terminal`, `appId`, `appVersion`)
+   - maintain local cache and TTL validation
+
+2. **Dual-channel signaling send**
+   - send each signaling command over MQTT and TCP concurrently
+   - deduplicate first successful callback, track fallback ordering
+
+3. **Topic and method names**
+   - `livePlayReq`, `webrtcReq`, `iceCandidateReq`, and response parsing for `webrtcResp`
+   - MQTT topics under `iot/v1/s/{userId}/IPC/...`
+
+4. **Field-level message composition**
+   - set `dstAddr = deviceId`
+   - include `srcAddr = 0.{userId}` (at least where used in Java path)
+   - include `peerid`, `dseq`, `powerType`, `p2pCache`, timestamps/sequence ids where applicable
+
+5. **Offer/candidate payload formatting**
+   - `webrtcReq` with `extends.payload.wPayload.offer` and optional `IceServerList`
+   - `iceCandidateReq` with nested `wPayload.candidate.candidate`
+
+6. **Response gating by peer id**
+   - inbound answer/candidate handling checks expected peer id before applying
+
+## 9) Unknown/partially decompiled areas (needs your clarification)
+
+These are explicit gaps where code is truncated (`UnsupportedOperationException` in decompilation), so exact behavior cannot be guaranteed from this snapshot:
+
+1. Full logic of `o.i(...)` (ICE config selection/merging details).
+2. Full logic of `o.j(...)` (exact `webrtcResp` success/error branch handling and code mapping).
+3. Full LDS inbound MQTT subscription registration path (topic subscriptions and dispatch source are not all visible in the inspected files).
+
+If you want, I can do a second pass focused only on these three gaps and trace all call sites into `f0.java` and service interfaces to produce an exact “known vs unknown” matrix per function.
