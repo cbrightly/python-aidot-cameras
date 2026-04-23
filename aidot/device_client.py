@@ -312,6 +312,107 @@ def _build_stun_binding_success_response(
     fp_attr = b"\x80\x28\x00\x04" + struct.pack("!I", fp_val)
     return msg_wo_fp_attr + fp_attr
 
+
+def _compress_sdp_for_camera(sdp: str) -> str:
+    """Selective SDP filter matching official Java client's g.b() behaviour.
+
+    The Leedarson firmware (KVS-derived) parses ``wPayload.offer.sdp`` with
+    ``encOffer=1`` expecting a compact SDP that includes only the lines its
+    ICE/DTLS/codec stack needs.  Sending a full WebRTC-stack SDP (~5 KB+
+    with extmap/rtcp-fb/ssrc/msid lines) frequently causes A001064-class
+    cameras to drop the MQTT session immediately on receipt — the embedded
+    MQTT buffer overflows.
+
+    Keeps: v=, s=, m=, c=, a=group, a=msid-semantic, a=mid, direction
+    (sendrecv/recvonly/sendonly), a=ice-ufrag, a=ice-pwd, a=ice-options,
+    a=fingerprint, a=setup, a=crypto, a=ssrc cname (first per section),
+    a=candidate (UDP only), a=rtpmap (PCMU/PCMA/AAC/opus only on audio,
+    H264/H265/RTX-apt on video), a=fmtp profile-level-id, a=sctp-port.
+
+    Drops: a=extmap, a=rtcp-fb, a=rtcp-mux, a=rtcp-rsize, a=msid, a=ssrc
+    (non-cname), a=rtcp:9, redundant rtpmap entries.
+    """
+    out: list = []
+    seen: dict = {}
+    media_type = ""
+    before_m = True
+
+    def keep(ln: str, key: str = "") -> None:
+        out.append(ln + "\r\n")
+        if key:
+            seen[key] = "1"
+
+    for ln in sdp.splitlines():
+        if ln.startswith("m="):
+            before_m = False
+            media_type = ln.split(" ")[0]
+            keep(ln)
+            continue
+        if before_m:
+            if (ln.startswith("v=") or ln.startswith("o=")
+                    or ln.startswith("s=") or ln.startswith("t=")
+                    or ln.startswith("a=group:")
+                    or ln.startswith("a=msid-semantic")):
+                keep(ln)
+            continue
+        if ln.startswith("c="):
+            keep(ln)
+            continue
+        if ln.startswith("a=mid:"):
+            keep(ln)
+            continue
+        if ln.startswith("a=ssrc") and "cname" in ln:
+            if seen.get(f"ssrc-cname-{media_type}") is None:
+                keep(ln, f"ssrc-cname-{media_type}")
+            continue
+        if any(d in ln for d in ("sendrecv", "recvonly", "sendonly")):
+            keep(ln)
+            continue
+        for ak in ("ice-ufrag", "ice-pwd", "fingerprint", "setup",
+                   "ice-options", "crypto"):
+            if ak in ln:
+                if seen.get(ak) is None:
+                    keep(ln, ak)
+                break
+        else:
+            if "candidate" in ln and " udp " in ln.lower():
+                keep(ln)
+                continue
+            if media_type == "m=audio":
+                if any(c in ln for c in ("opus", "PCMU", "PCMA", "AAC")):
+                    keep(ln)
+            elif media_type == "m=video":
+                if "H264/90000" in ln and seen.get("H264/90000") is None:
+                    keep(ln, "H264/90000")
+                    try:
+                        seen["H264/90000_pt"] = ln.split(":")[1].split(" ")[0]
+                    except Exception:
+                        pass
+                elif "H265/90000" in ln and seen.get("H265/90000") is None:
+                    keep(ln, "H265/90000")
+                    try:
+                        seen["H265/90000_pt"] = ln.split(":")[1].split(" ")[0]
+                    except Exception:
+                        pass
+                elif "apt=" in ln:
+                    try:
+                        apt = ln.split("apt=")[1].strip()
+                    except Exception:
+                        apt = ""
+                    if apt and apt in (
+                        seen.get("H264/90000_pt", ""),
+                        seen.get("H265/90000_pt", ""),
+                    ):
+                        keep(ln)
+                elif "fmtp" in ln and "profile-level-id" in ln:
+                    if seen.get("profile-level") is None:
+                        keep(ln, "profile-level")
+            elif media_type == "m=application":
+                if "sctp-port" in ln:
+                    keep(ln)
+    return "".join(out)
+
+
 # --------------------------------------------------------------------------- #
 # AES helpers (live stream)
 #
@@ -3852,9 +3953,17 @@ class DeviceClient(object):
         # webrtcReq.  The browser always sends IceServerList; without it some
         # camera firmware (e.g. LK.IPC.A001064) does not activate its ICE
         # agent and never sends STUN probes, causing ICE to time out.
-        _ice_server_list = []
+        # Deduplicate by URI tuple — getIceConfigResp commonly returns the
+        # same TURN server 8x (one entry per relay slot).  Sending all 8
+        # bloats the webrtcReq payload past A001064's MQTT receive buffer.
+        _ice_server_list: list = []
+        _seen_uris: set = set()
         for _srv in _ice_servers:
             _uris = _srv.urls if isinstance(_srv.urls, list) else [_srv.urls]
+            _key = tuple(_uris)
+            if _key in _seen_uris:
+                continue
+            _seen_uris.add(_key)
             _entry: dict = {"Uris": _uris}
             if getattr(_srv, "username", None):
                 _entry["Username"] = _srv.username
@@ -3868,6 +3977,14 @@ class DeviceClient(object):
             _psk_charset_dtls[_rnd_psk_dtls.randint(0, len(_psk_charset_dtls) - 1)]
             for _ in range(64)
         )
+
+        # Compress SDP for wPayload.offer.sdp.  encOffer=1 in the official
+        # client signals "compact SDP" — the camera's parser only consumes
+        # the lines kept by _compress_sdp_for_camera.  Sending the full
+        # aiortc-generated SDP (~5 KB+ of extmap/rtcp-fb/ssrc/msid) overflows
+        # A001064's MQTT receive buffer and the camera quickConn-resets the
+        # broker session before processing the request.
+        _compressed_offer_sdp = _compress_sdp_for_camera(_offer_sdp)
 
         webrtc_req_payload = json.dumps({
             "method":  "webrtcReq",
@@ -3888,7 +4005,7 @@ class DeviceClient(object):
                     "sts":    int(time.time() * 1000),
                     "psk":    _psk_dtls,
                     "offer":  {"type": pc.localDescription.type,
-                                "sdp":  _offer_sdp},
+                                "sdp":  _compressed_offer_sdp},
                 },
                 "IceServerList": _ice_server_list,
                 # Legacy flat fields — older firmware parses payload.peerid directly.
@@ -3902,11 +4019,18 @@ class DeviceClient(object):
                 "dstAddr": device_id,
                 "liveMqtt": 1,
                 "encOffer": 1,
+                # powerType/p2pCache: per docs/official_camera_network_calls.md
+                # §5.2, both fields are present on every webrtcReq.  Defaults
+                # used here match the fallback behaviour in the decompiled
+                # reference app when IPC device info is unavailable.
+                "powerType": "1",
+                "p2pCache": "0",
             },
         })
         outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
         _status(f"webrtcReq sent  peerid={peer_id}"
-                f"  IceServerList×{len(_ice_server_list)}")
+                f"  IceServerList×{len(_ice_server_list)}"
+                f"  payload={len(webrtc_req_payload)}B")
 
         # Re-send getDevAttrReq now that the camera is confirmed awake
         # (it responded to livePlayReq).  The first getDevAttrReq was sent
