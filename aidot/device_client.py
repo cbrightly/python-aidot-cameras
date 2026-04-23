@@ -5020,6 +5020,76 @@ class DeviceClient(object):
             except Exception as _bt_install_exc:
                 _status(f"byte-tap install failed: {_bt_install_exc}")
 
+            # --- DTLS-decrypted-data tap (Path B diagnostic) -------------- #
+            # Camera sends DTLS application_data (0x17) records post-handshake
+            # that we don't understand.  aiortc decrypts them via OpenSSL then
+            # routes plaintext to RTCDtlsTransport._data_receiver._handle_data.
+            # We attach a logging shim so the next log shows the actual decrypted
+            # payload (first ~64 bytes hex) — this discriminates between SCTP
+            # INIT chunks (KVS firmware always opens SCTP) and proprietary
+            # Leedarson control messages.
+            try:
+                import time as _ddt_time
+
+                class _LoggingDataReceiver:
+                    def __init__(self, _wrap, _t0):
+                        self._wrap = _wrap
+                        self._t0 = _t0
+                        self._n = 0
+
+                    async def _handle_data(self, data: bytes) -> None:
+                        self._n += 1
+                        _dt = _ddt_time.monotonic() - self._t0
+                        try:
+                            _hex = data[:64].hex() if data else ""
+                            # SCTP common header parse (RFC 4960 §3.1):
+                            # bytes 0-1 = source port, 2-3 = dest port,
+                            # 4-7 = verification tag, 8-11 = checksum.
+                            # If this is SCTP, you'll see plausible port
+                            # numbers (often 5000) and a non-zero verif tag.
+                            _hint = ""
+                            if len(data) >= 12:
+                                _sp = int.from_bytes(data[0:2], "big")
+                                _dp = int.from_bytes(data[2:4], "big")
+                                _vt = int.from_bytes(data[4:8], "big")
+                                _hint = (
+                                    f"  if-sctp: srcPort={_sp} dstPort={_dp}"
+                                    f" verifTag=0x{_vt:08x}"
+                                )
+                            _status(
+                                f"DTLS-app-data #{self._n} t+{_dt:.3f}s"
+                                f" {len(data)}B hex={_hex}{_hint}"
+                            )
+                        except Exception:
+                            pass
+                        if self._wrap is not None:
+                            try:
+                                await self._wrap._handle_data(data)
+                            except Exception as _wrap_exc:
+                                _status(
+                                    f"  wrapped data_receiver raised: {_wrap_exc}"
+                                )
+
+                _ddt_t0 = _bt_start  # share start time with byte-tap
+                _ddt_n = 0
+                for _ddt_idx, _ddt_tc in enumerate(pc.getTransceivers()):
+                    _ddt_dtls = _ddt_tc.receiver.transport
+                    _ddt_existing = getattr(_ddt_dtls, "_data_receiver", None)
+                    _ddt_shim = _LoggingDataReceiver(_ddt_existing, _ddt_t0)
+                    # _register_data_receiver per aiortc API; fall back to
+                    # direct attribute set if API name differs.
+                    try:
+                        _ddt_dtls._register_data_receiver(_ddt_shim)
+                    except Exception:
+                        _ddt_dtls._data_receiver = _ddt_shim
+                    _ddt_n += 1
+                _status(
+                    f"DTLS data-receiver tap installed on {_ddt_n} transceiver(s)"
+                    f" (will log decrypted 0x17 records)"
+                )
+            except Exception as _ddt_install_exc:
+                _status(f"DTLS data-receiver tap install failed: {_ddt_install_exc}")
+
             # Extract ICE candidates embedded in the SDP answer body.
             # The AiDot camera includes its host candidate as a=candidate: lines
             # inside the answer SDP.  The browser WebRTC API processes these
