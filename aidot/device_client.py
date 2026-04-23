@@ -1643,6 +1643,22 @@ class DeviceClient(object):
     #      announced ssrc:5079 / 5077).  Bytes are not standard SRTP at all.
     _DTLS_FORCED_MODELS: frozenset = frozenset({"LK.IPC.A001064"})
 
+    # Models for which we should NOT include an SCTP data channel in the
+    # WebRTC offer.  Most KVS-WebRTC firmware (LK.IPC.A000088, .A001513) sends
+    # SCTP control messages over DTLS application_data after handshake; if the
+    # client never set up an SCTP transport, the camera retransmits, then
+    # tears DTLS down with close_notify after ~22 s — observed via byte-tap.
+    # A001064 is the exception: across runs it answers our datachannel offer
+    # with (a) no m=application section, (b) a different kind, or (c) extra
+    # video sections — all of which break setRemoteDescription.  Keep it
+    # data-channel-less; it's parked on the SDES/TUTK side anyway.
+    _NO_DATACHANNEL_MODELS: frozenset = frozenset({"LK.IPC.A001064"})
+
+    @property
+    def _offer_should_include_datachannel(self) -> bool:
+        model = getattr(getattr(self, "info", None), "model_id", None)
+        return model not in self._NO_DATACHANNEL_MODELS
+
     @property
     def is_sdes_camera(self) -> bool:
         """True if the camera uses SDES-SRTP rather than DTLS-SRTP.
@@ -3602,17 +3618,20 @@ class DeviceClient(object):
         )
         pc.addTransceiver("audio", direction="recvonly")   # mid:0  audio
         pc.addTransceiver("video", direction="recvonly")   # mid:1  video (H264; H265 injected below)
-        # Don't offer a SCTP datachannel — A001064 firmware behaves
-        # unpredictably for mid:2: across runs we've observed it (a) omit
-        # the section entirely, (b) include it as application, or (c)
-        # replace it with a second video (H265) section.  Cases (a) and
-        # (c) both make aiortc raise "Media sections in answer do not
-        # match offer" (count or kind mismatch).  Removing the offer's
-        # datachannel collapses the offer to 2 sections (audio + video),
-        # which the camera then answers with 2 sections (matching) most
-        # of the time.  We don't use the datachannel anyway — we are a
-        # recvonly media client.  If the camera still inserts an extra
-        # video for mid:2, the answer-rebuild logic below handles it.
+        # KVS-WebRTC firmware (A000088, A001513) sends SCTP control messages
+        # over DTLS application_data after handshake; without an SCTP transport
+        # to ack, the camera retransmits and tears DTLS down with close_notify
+        # after ~22 s (observed via byte-tap on Deck/A000088).  Adding the data
+        # channel here causes aiortc to set up an SCTP endpoint that can SACK
+        # those packets so the camera proceeds to media.
+        # Skipped only for A001064 (see _NO_DATACHANNEL_MODELS) where the
+        # camera responded unpredictably to mid:2 across runs and we're
+        # parked on the SDES/TUTK side anyway.
+        if self._offer_should_include_datachannel:
+            pc.createDataChannel("control")               # mid:2  SCTP datachannel
+            _status("offer: including SCTP datachannel (KVS firmware expects it)")
+        else:
+            _status("offer: SCTP datachannel skipped (model in _NO_DATACHANNEL_MODELS)")
 
         track_tasks: list = []
 
