@@ -4000,19 +4000,28 @@ class DeviceClient(object):
                 # requires IceServerList to activate its ICE agent.
                 # HAR captures from the official AiDot web app confirm this is
                 # the canonical format; flat fields are kept for older firmware.
+                # wPayload.offer.sdp must carry the FULL SDP (not the
+                # compressed form): the camera's compressed-answer codepath
+                # appears to skip its fingerprint-fill step when fed a
+                # compressed offer, returning a malformed
+                # `a=fingerprint:sha-256 ` line with empty value that
+                # aiortc then rejects with "not enough values to unpack".
+                # The legacy flat payload.offer.sdp gets the COMPRESSED SDP
+                # so the total request still fits under the camera's MQTT
+                # receive buffer (~10 KB threshold; we want < ~7-8 KB).
                 "wPayload": {
                     "peerid": peer_id,
                     "sts":    int(time.time() * 1000),
                     "psk":    _psk_dtls,
                     "offer":  {"type": pc.localDescription.type,
-                                "sdp":  _compressed_offer_sdp},
+                                "sdp":  _offer_sdp},
                 },
                 "IceServerList": _ice_server_list,
                 # Legacy flat fields — older firmware parses payload.peerid directly.
                 "peerid":  peer_id,
                 "devId":   device_id,
                 "offer":   {"type": pc.localDescription.type,
-                             "sdp":  _offer_sdp},
+                             "sdp":  _compressed_offer_sdp},
                 "trackId": 0,
                 # Decompiled reference app (tyrus/o.java) sets dstAddr=deviceId
                 # for webrtcReq.
