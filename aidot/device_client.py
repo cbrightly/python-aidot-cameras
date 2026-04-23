@@ -6321,10 +6321,6 @@ class DeviceClient(object):
                                         + _br_si_body
                                     )
                                     _bs.sendto(_br_send_ind, (_br_t_host, _br_t_port))
-                                    _LOGGER.debug(
-                                        "bridge: STUN resp via TURN → %s:%d",
-                                        _br_turn_peer_ip, _br_turn_peer_port,
-                                    )
                                 elif _br_turn_peer_ip and _is_self_peer_ip(_br_turn_peer_ip):
                                     _bridge_selfloop_drop_count += 1
                                     if (_bridge_selfloop_drop_count <= 5
@@ -6338,11 +6334,6 @@ class DeviceClient(object):
                                 else:
                                     _bs.sendto(_bresp, _bsrc)
                                     _br_stun_resp_count += 1
-                                    if _br_stun_resp_count <= 5 or _br_stun_resp_count % 50 == 0:
-                                        _LOGGER.debug(
-                                            "bridge: STUN resp → %s:%d (n=%d)",
-                                            _bsrc[0], _bsrc[1], _br_stun_resp_count,
-                                        )
                             except Exception:
                                 pass
                         elif len(_bpkt) >= 20 and _bpkt[4:8] == _STUN_MAGIC_BR:
