@@ -3618,22 +3618,22 @@ class DeviceClient(object):
         )
         pc.addTransceiver("audio", direction="recvonly")   # mid:0  audio
         pc.addTransceiver("video", direction="recvonly")   # mid:1  video (H264; H265 injected below)
-        # Tried adding a second video transceiver (mid:2, commit 1679dd7b) to
-        # mirror camera's natural 3-section answer (audio + H264 + H265).
-        # Reverted: aiortc's default video m-section duplicates ~3KB of codec
-        # attrs, ballooning webrtcReq to 10186B — well over the camera's
-        # ~7-8KB MQTT buffer limit, causing immediate quickConn:1 disconnect.
-        # If we revisit, mid:2 must be hand-trimmed to a minimal H265-only
-        # stub (~500B) before sending; not done yet.
-        # No SCTP datachannel.  An earlier attempt to add one (commit 8da23871)
-        # caused two regressions on A000088: (1) camera answered mid:2 with
-        # H265 video instead of m=application, then aiortc crashed in
-        # rtcsctptransport.serialize_packet because the stubbed answer had no
-        # SCTP port; (2) the 0x17 DTLS application_data records the camera
-        # sends post-handshake appear in both modes (DC and no-DC), proving
-        # those records are NOT SCTP — they're some Leedarson-proprietary
-        # control we don't yet understand.  Stay on the no-DC path until we
-        # decode what the 0x17 records actually carry.
+        # SCTP data channel — KVS firmware ALWAYS opens SCTP regardless of
+        # whether m=application is in the negotiated answer.  Decoded the
+        # post-handshake 0x17 records as SCTP INIT chunks (srcPort=5000
+        # dstPort=5000 verifTag=0 chunkType=0x01).  Camera retransmits INIT
+        # at ~6s intervals and tears DTLS down with close_notify after ~22s
+        # if it never receives INIT-ACK.  Adding the data channel here
+        # creates an SCTP endpoint on our side that answers the INIT.
+        # The answer-rebuild logic synthesizes a valid m=application stub
+        # with sctp-port:5000 when camera answers mid:2 with H265 video
+        # instead of m=application (its consistent behavior on A000088).
+        # Skipped only for A001064 (see _NO_DATACHANNEL_MODELS).
+        if self._offer_should_include_datachannel:
+            pc.createDataChannel("control")               # mid:2  SCTP datachannel
+            _status("offer: including SCTP datachannel (KVS opens SCTP regardless)")
+        else:
+            _status("offer: SCTP datachannel skipped (model in _NO_DATACHANNEL_MODELS)")
 
         track_tasks: list = []
 
@@ -4734,8 +4734,21 @@ class DeviceClient(object):
 
             def _stub(_m: str, _kind: str) -> list:
                 if _kind == "application":
-                    _hdr = "m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
-                elif _kind == "audio":
+                    # Synthesize a VALID m=application section so aiortc's SCTP
+                    # transport can start.  Camera (KVS firmware) answers mid:2
+                    # with m=video H265 instead of m=application but always
+                    # opens SCTP on port 5000 regardless.  Without these attrs
+                    # aiortc crashes in serialize_packet (port=None).
+                    # port=9 per RFC 8842 = "use sctp-port".
+                    _hdr = "m=application 9 UDP/DTLS/SCTP webrtc-datachannel"
+                    _block = [_hdr, "c=IN IP4 0.0.0.0", f"a=mid:{_m}"]
+                    for _x in (_ice_ufrag_ln, _ice_pwd_ln, _fp_ln, _setup_ln):
+                        if _x:
+                            _block.append(_x)
+                    _block.append("a=sctp-port:5000")
+                    _block.append("a=max-message-size:262144")
+                    return _block
+                if _kind == "audio":
                     _hdr = "m=audio 0 UDP/TLS/RTP/SAVPF 0"
                 else:
                     _hdr = "m=video 0 UDP/TLS/RTP/SAVPF 0"
