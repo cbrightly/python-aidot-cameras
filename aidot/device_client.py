@@ -3618,20 +3618,15 @@ class DeviceClient(object):
         )
         pc.addTransceiver("audio", direction="recvonly")   # mid:0  audio
         pc.addTransceiver("video", direction="recvonly")   # mid:1  video (H264; H265 injected below)
-        # KVS-WebRTC firmware (A000088, A001513) sends SCTP control messages
-        # over DTLS application_data after handshake; without an SCTP transport
-        # to ack, the camera retransmits and tears DTLS down with close_notify
-        # after ~22 s (observed via byte-tap on Deck/A000088).  Adding the data
-        # channel here causes aiortc to set up an SCTP endpoint that can SACK
-        # those packets so the camera proceeds to media.
-        # Skipped only for A001064 (see _NO_DATACHANNEL_MODELS) where the
-        # camera responded unpredictably to mid:2 across runs and we're
-        # parked on the SDES/TUTK side anyway.
-        if self._offer_should_include_datachannel:
-            pc.createDataChannel("control")               # mid:2  SCTP datachannel
-            _status("offer: including SCTP datachannel (KVS firmware expects it)")
-        else:
-            _status("offer: SCTP datachannel skipped (model in _NO_DATACHANNEL_MODELS)")
+        # No SCTP datachannel.  An earlier attempt to add one (commit 8da23871)
+        # caused two regressions on A000088: (1) camera answered mid:2 with
+        # H265 video instead of m=application, then aiortc crashed in
+        # rtcsctptransport.serialize_packet because the stubbed answer had no
+        # SCTP port; (2) the 0x17 DTLS application_data records the camera
+        # sends post-handshake appear in both modes (DC and no-DC), proving
+        # those records are NOT SCTP — they're some Leedarson-proprietary
+        # control we don't yet understand.  Stay on the no-DC path until we
+        # decode what the 0x17 records actually carry.
 
         track_tasks: list = []
 
