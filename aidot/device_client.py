@@ -4666,12 +4666,26 @@ class DeviceClient(object):
             }
             _missing_mids = [m for m in _offer_mids if m not in _ans_mids]
             if _missing_mids:
+                # aiortc requires every m-section (including rejected ones)
+                # to carry a=ice-ufrag + a=ice-pwd; without them it raises
+                # "ICE username fragment or password is missing" even when
+                # the section has port=0.  Reuse the answer's audio-section
+                # ICE creds + fingerprint + setup (all shared across BUNDLE).
+                def _first(_attr: str) -> str:
+                    for _ln in _ans_sdp.splitlines():
+                        if _ln.startswith(_attr):
+                            return _ln
+                    return ""
+                _ice_ufrag_ln = _first("a=ice-ufrag:")
+                _ice_pwd_ln   = _first("a=ice-pwd:")
+                _fp_ln        = _first("a=fingerprint:")
+                _setup_ln     = _first("a=setup:")
                 _stub_lines: list = []
                 for _m in _missing_mids:
                     _kind = _offer_kinds.get(_m, "application")
                     if _kind == "application":
                         _stub_lines.append(
-                            f"m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
+                            "m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
                         )
                     elif _kind == "audio":
                         _stub_lines.append("m=audio 0 UDP/TLS/RTP/SAVPF 0")
@@ -4679,6 +4693,14 @@ class DeviceClient(object):
                         _stub_lines.append("m=video 0 UDP/TLS/RTP/SAVPF 0")
                     _stub_lines.append("c=IN IP4 0.0.0.0")
                     _stub_lines.append(f"a=mid:{_m}")
+                    if _ice_ufrag_ln:
+                        _stub_lines.append(_ice_ufrag_ln)
+                    if _ice_pwd_ln:
+                        _stub_lines.append(_ice_pwd_ln)
+                    if _fp_ln:
+                        _stub_lines.append(_fp_ln)
+                    if _setup_ln:
+                        _stub_lines.append(_setup_ln)
                 _ans_sdp = (
                     _ans_sdp.rstrip("\r\n") + "\r\n"
                     + "\r\n".join(_stub_lines) + "\r\n"
