@@ -3602,13 +3602,17 @@ class DeviceClient(object):
         )
         pc.addTransceiver("audio", direction="recvonly")   # mid:0  audio
         pc.addTransceiver("video", direction="recvonly")   # mid:1  video (H264; H265 injected below)
-        pc.createDataChannel("data")                        # mid:2  SCTP datachannel
-        # HAR capture of the official AiDot web app confirms cameras answer with a
-        # 3-section SDP: audio (PCMA) + video (H264 PT 103) + application/SCTP.
-        # H265 is advertised alongside H264 in the single video m-section (mid:1),
-        # matching Chrome's behaviour.  A separate H265 m-section is wrong and causes
-        # aiortc's setRemoteDescription to misalign sections (datachannel answer mapped
-        # to our H265 video transceiver), breaking ICE/DTLS/media.
+        # Don't offer a SCTP datachannel — A001064 firmware behaves
+        # unpredictably for mid:2: across runs we've observed it (a) omit
+        # the section entirely, (b) include it as application, or (c)
+        # replace it with a second video (H265) section.  Cases (a) and
+        # (c) both make aiortc raise "Media sections in answer do not
+        # match offer" (count or kind mismatch).  Removing the offer's
+        # datachannel collapses the offer to 2 sections (audio + video),
+        # which the camera then answers with 2 sections (matching) most
+        # of the time.  We don't use the datachannel anyway — we are a
+        # recvonly media client.  If the camera still inserts an extra
+        # video for mid:2, the answer-rebuild logic below handles it.
 
         track_tasks: list = []
 
@@ -4639,78 +4643,121 @@ class DeviceClient(object):
                 )
                 _ans_sdp = _ans_sdp_patched
 
-            # ---- Pad missing m-sections from the answer -------------------------- #
-            # Per RFC 3264 §6 an answerer that rejects an offered m-section
-            # MUST still emit it with port 0; A001064 instead just omits it.
-            # aiortc requires section count to match the offer or it raises
-            # ValueError("Media sections in answer do not match offer").
-            # Walk the offer's m=/a=mid pairs in order and synthesise a
-            # rejected (port 0) stub for any mid that the answer skipped,
-            # appending in the offer's mid order so aiortc's index→mid map
-            # stays correct.
+            # ---- Rebuild answer m-sections to match offer's mid+kind ------------ #
+            # A001064 firmware violates RFC 3264 §6 in three observed ways:
+            #   1. Drops rejected m-sections entirely instead of port=0.
+            #   2. Replaces a rejected section with a different KIND (e.g.
+            #      datachannel → second video for H265).
+            #   3. Adds m-sections for kinds we never offered (e.g. extra
+            #      H265 video at mid:2 when offer was audio+video only).
+            # aiortc enforces strict count + kind match.  Rebuild the answer
+            # by walking the offer's mid order: for each offer mid take the
+            # answer's matching same-kind section if present, otherwise
+            # synthesise a rejected (port=0) stub.  Answer mids not in the
+            # offer are dropped.  Result has exactly the same mid order +
+            # kind sequence as the offer.
             _offer_sdp_local = pc.localDescription.sdp
             _offer_mids: list = []
             _offer_kinds: dict = {}
             _cur_kind: str = ""
             for _ln in _offer_sdp_local.splitlines():
                 if _ln.startswith("m="):
-                    _cur_kind = _ln.split(" ", 1)[0][2:]   # "audio"/"video"/"application"
+                    _cur_kind = _ln.split(" ", 1)[0][2:]   # audio/video/application
                 elif _ln.startswith("a=mid:"):
                     _mid = _ln[len("a=mid:"):].strip()
                     _offer_mids.append(_mid)
                     _offer_kinds[_mid] = _cur_kind
-            _ans_mids: set = {
-                _ln[len("a=mid:"):].strip()
-                for _ln in _ans_sdp.splitlines()
-                if _ln.startswith("a=mid:")
-            }
-            _missing_mids = [m for m in _offer_mids if m not in _ans_mids]
-            if _missing_mids:
-                # aiortc requires every m-section (including rejected ones)
-                # to carry a=ice-ufrag + a=ice-pwd; without them it raises
-                # "ICE username fragment or password is missing" even when
-                # the section has port=0.  Reuse the answer's audio-section
-                # ICE creds + fingerprint + setup (all shared across BUNDLE).
-                def _first(_attr: str) -> str:
-                    for _ln in _ans_sdp.splitlines():
-                        if _ln.startswith(_attr):
-                            return _ln
-                    return ""
-                _ice_ufrag_ln = _first("a=ice-ufrag:")
-                _ice_pwd_ln   = _first("a=ice-pwd:")
-                _fp_ln        = _first("a=fingerprint:")
-                _setup_ln     = _first("a=setup:")
-                _stub_lines: list = []
-                for _m in _missing_mids:
-                    _kind = _offer_kinds.get(_m, "application")
-                    if _kind == "application":
-                        _stub_lines.append(
-                            "m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
-                        )
-                    elif _kind == "audio":
-                        _stub_lines.append("m=audio 0 UDP/TLS/RTP/SAVPF 0")
-                    else:
-                        _stub_lines.append("m=video 0 UDP/TLS/RTP/SAVPF 0")
-                    _stub_lines.append("c=IN IP4 0.0.0.0")
-                    _stub_lines.append(f"a=mid:{_m}")
-                    if _ice_ufrag_ln:
-                        _stub_lines.append(_ice_ufrag_ln)
-                    if _ice_pwd_ln:
-                        _stub_lines.append(_ice_pwd_ln)
-                    if _fp_ln:
-                        _stub_lines.append(_fp_ln)
-                    if _setup_ln:
-                        _stub_lines.append(_setup_ln)
-                _ans_sdp = (
-                    _ans_sdp.rstrip("\r\n") + "\r\n"
-                    + "\r\n".join(_stub_lines) + "\r\n"
-                )
+
+            # Split answer into header (pre-first-m=) + per-section blocks.
+            # Each section block runs from its m= line through the line
+            # before the next m= (or end-of-SDP).
+            def _first_attr(_sdp: str, _attr: str) -> str:
+                for _ln2 in _sdp.splitlines():
+                    if _ln2.startswith(_attr):
+                        return _ln2
+                return ""
+            _ice_ufrag_ln = _first_attr(_ans_sdp, "a=ice-ufrag:")
+            _ice_pwd_ln   = _first_attr(_ans_sdp, "a=ice-pwd:")
+            _fp_ln        = _first_attr(_ans_sdp, "a=fingerprint:")
+            _setup_ln     = _first_attr(_ans_sdp, "a=setup:")
+
+            _ans_lines = _ans_sdp.splitlines()
+            _ans_sections: dict = {}      # mid → list[str] of section's lines
+            _ans_header: list = []
+            _cur_block: list = []
+            _cur_mid: str = ""
+            _cur_block_kind: str = ""
+            _seen_first_m = False
+            def _flush():
+                if _cur_block and _cur_mid:
+                    _ans_sections[_cur_mid] = (_cur_block_kind, list(_cur_block))
+            for _ln in _ans_lines:
+                if _ln.startswith("m="):
+                    _flush()
+                    _seen_first_m = True
+                    _cur_block = [_ln]
+                    _cur_mid = ""
+                    _cur_block_kind = _ln.split(" ", 1)[0][2:]
+                elif not _seen_first_m:
+                    _ans_header.append(_ln)
+                else:
+                    _cur_block.append(_ln)
+                    if _ln.startswith("a=mid:"):
+                        _cur_mid = _ln[len("a=mid:"):].strip()
+            _flush()
+
+            def _stub(_m: str, _kind: str) -> list:
+                if _kind == "application":
+                    _hdr = "m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
+                elif _kind == "audio":
+                    _hdr = "m=audio 0 UDP/TLS/RTP/SAVPF 0"
+                else:
+                    _hdr = "m=video 0 UDP/TLS/RTP/SAVPF 0"
+                _block = [_hdr, "c=IN IP4 0.0.0.0", f"a=mid:{_m}"]
+                for _x in (_ice_ufrag_ln, _ice_pwd_ln, _fp_ln, _setup_ln):
+                    if _x:
+                        _block.append(_x)
+                return _block
+
+            _rebuilt: list = list(_ans_header)
+            _kept_count = 0
+            _stub_count = 0
+            _dropped_mids: list = []
+            for _m in _offer_mids:
+                _expected_kind = _offer_kinds[_m]
+                _ans_kind, _ans_block = _ans_sections.get(_m, ("", []))
+                if _ans_block and _ans_kind == _expected_kind:
+                    _rebuilt.extend(_ans_block)
+                    _kept_count += 1
+                else:
+                    _rebuilt.extend(_stub(_m, _expected_kind))
+                    _stub_count += 1
+            for _ans_mid in _ans_sections:
+                if _ans_mid not in _offer_kinds:
+                    _dropped_mids.append(_ans_mid)
+
+            if _stub_count or _dropped_mids:
                 _status(
-                    f"answer SDP: appended {len(_missing_mids)} rejected"
-                    f" m-section stub(s) for missing mid(s)"
-                    f" {_missing_mids} (camera omitted instead of port=0)"
+                    f"answer SDP rebuilt: kept={_kept_count}"
+                    f" stubbed={_stub_count} dropped={_dropped_mids}"
+                    f" (offer mids={_offer_mids})"
                 )
 
+            # Also fix a=group:BUNDLE so its mid list matches offer order.
+            _rebuilt2: list = []
+            _bundle_replaced = False
+            for _ln in _rebuilt:
+                if _ln.startswith("a=group:BUNDLE") and not _bundle_replaced:
+                    _rebuilt2.append("a=group:BUNDLE " + " ".join(_offer_mids))
+                    _bundle_replaced = True
+                else:
+                    _rebuilt2.append(_ln)
+            _ans_sdp = "\r\n".join(_rebuilt2) + "\r\n"
+
+            # Apply DTLS cert bypass — always, whenever we patched
+            # fingerprints (camera's empty-fingerprint quirk applies on
+            # every webrtcResp from this firmware family).
+            if _fp_subs:
                 import types as _np_types
                 try:
                     from aiortc.rtcdtlstransport import (
