@@ -3618,14 +3618,13 @@ class DeviceClient(object):
         )
         pc.addTransceiver("audio", direction="recvonly")   # mid:0  audio
         pc.addTransceiver("video", direction="recvonly")   # mid:1  video (H264; H265 injected below)
-        # Second video transceiver (mid:2) — matches camera's natural 3-section
-        # answer shape (audio + H264-video + H265-video) on KVS firmware.  When
-        # we offered 3 sections with DC last, camera replaced mid:2's
-        # m=application with m=video H265 (PT 103), proving it mirrors m-line
-        # count + fills video-kinds with H265 by default.  This second
-        # transceiver gives the camera a same-kind slot to drop H265 into
-        # without kind-mismatch triggering our answer-rebuild stubs.
-        pc.addTransceiver("video", direction="recvonly")   # mid:2  video (camera fills with H265)
+        # Tried adding a second video transceiver (mid:2, commit 1679dd7b) to
+        # mirror camera's natural 3-section answer (audio + H264 + H265).
+        # Reverted: aiortc's default video m-section duplicates ~3KB of codec
+        # attrs, ballooning webrtcReq to 10186B — well over the camera's
+        # ~7-8KB MQTT buffer limit, causing immediate quickConn:1 disconnect.
+        # If we revisit, mid:2 must be hand-trimmed to a minimal H265-only
+        # stub (~500B) before sending; not done yet.
         # No SCTP datachannel.  An earlier attempt to add one (commit 8da23871)
         # caused two regressions on A000088: (1) camera answered mid:2 with
         # H265 video instead of m=application, then aiortc crashed in
