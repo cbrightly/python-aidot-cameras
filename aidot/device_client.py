@@ -4611,6 +4611,14 @@ class DeviceClient(object):
                     )
                 )
             except Exception as exc:
+                # Dump full SDP and traceback so we can pinpoint where aiortc
+                # is choking (the {exc} message alone — e.g. "not enough
+                # values to unpack" — does not identify the offending line).
+                import traceback as _tb_dtls
+                _LOGGER.warning(
+                    "setRemoteDescription failed: %s\n--- camera answer SDP ---\n%s\n--- traceback ---\n%s",
+                    exc, _ans_sdp, _tb_dtls.format_exc(),
+                )
                 _status(f"setRemoteDescription failed: {exc}")
                 outgoing_q.put_nowait(None)
                 await pc.close()
