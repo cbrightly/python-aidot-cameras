@@ -3629,9 +3629,51 @@ class DeviceClient(object):
         # with sctp-port:5000 when camera answers mid:2 with H265 video
         # instead of m=application (its consistent behavior on A000088).
         # Skipped only for A001064 (see _NO_DATACHANNEL_MODELS).
+        _kvs_dc = None
         if self._offer_should_include_datachannel:
-            pc.createDataChannel("control")               # mid:2  SCTP datachannel
+            _kvs_dc = pc.createDataChannel("control")     # mid:2  SCTP datachannel
             _status("offer: including SCTP datachannel (KVS opens SCTP regardless)")
+
+            # Send TUTK AVIO_CTRL_SESSION_MODE_REQ(LIVING) the instant the
+            # data channel opens.  This is the missing "viewer hello":
+            # decoded from research/decompiled_apk:
+            #   newui/view/BaseKVSCameraView.java:374 → on OPEN calls k()
+            #   k() → f0.C0(LIVING)
+            #   f0.C0 → W2(seq, 5376, AVIO_CTRLCmd.parseContent(0, 1))
+            #   f0.W2 → 28-byte LE header + payload, binary DataChannel.send
+            # Until this fires, KVS firmware retransmits SCTP DATA-less and
+            # tears DTLS down at ~22s.
+            @_kvs_dc.on("open")
+            def _on_kvs_dc_open() -> None:
+                try:
+                    _seq = random.randint(0, 0x7fffffff)
+                    _ts_ms = int(time.time() * 1000)
+                    _payload = struct.pack("<IB3x", 0, 1)  # channel=0, mode=LIVING(1)
+                    _hdr = struct.pack(
+                        "<IIqII4x",
+                        _seq, 5376, _ts_ms, len(_payload), 0,
+                    )
+                    _frame = _hdr + _payload
+                    _kvs_dc.send(_frame)
+                    _status(
+                        f"DC OPEN → sent AVIO LIVING (5376) {len(_frame)}B"
+                        f" seq=0x{_seq:08x}"
+                    )
+                except Exception as _dc_send_exc:
+                    _status(f"DC LIVING send failed: {_dc_send_exc}")
+
+            @_kvs_dc.on("message")
+            def _on_kvs_dc_message(message) -> None:
+                try:
+                    if isinstance(message, (bytes, bytearray)):
+                        _status(
+                            f"DC RX {len(message)}B"
+                            f" hex={bytes(message)[:32].hex()}"
+                        )
+                    else:
+                        _status(f"DC RX text {message!r}")
+                except Exception:
+                    pass
         else:
             _status("offer: SCTP datachannel skipped (model in _NO_DATACHANNEL_MODELS)")
 
