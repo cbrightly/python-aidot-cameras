@@ -5738,10 +5738,12 @@ class DeviceClient(object):
                 except OSError:
                     continue
                 _stun_window_pkt_count += 1
-                _LOGGER.debug(
-                    "STUN window: %d bytes from %s:%d, first4=%s",
-                    len(_pkt), _src[0], _src[1], _pkt[:4].hex()
-                )
+                if _stun_window_pkt_count <= 3 or _stun_window_pkt_count % 50 == 0:
+                    _LOGGER.debug(
+                        "STUN window: %d bytes from %s:%d, first4=%s (pkt#%d)",
+                        len(_pkt), _src[0], _src[1], _pkt[:4].hex(),
+                        _stun_window_pkt_count,
+                    )
                 # Track packets that are only TURN server control responses
                 # (Allocate/permission challenge/success), which do not indicate
                 # that the camera actually started ICE checks.
@@ -6108,10 +6110,20 @@ class DeviceClient(object):
             _mi     = _hm_uc.new(cam_pwd.encode(), _mi_in, _hs_uc.sha1).digest()
             _mi_a   = _st_uc.pack('!HH', 0x0008, 20) + _mi
             _total  = len(_attrs) + len(_mi_a)
-            _req    = (
-                _st_uc.pack('!HH', 0x0001, _total)
+            # FINGERPRINT (RFC 5389 §15.5): CRC32 XOR 0x5354554E, after MI.
+            # KVS SDK silently drops binding requests without a valid FINGERPRINT.
+            # MI is computed with length=_total (end-of-MI); FINGERPRINT uses
+            # length=_total+8.  The camera strips FINGERPRINT before verifying MI,
+            # so the MI value is unchanged.
+            import zlib as _zl_uc
+            _fp_total = _total + 8
+            _req_for_fp = (
+                _st_uc.pack('!HH', 0x0001, _fp_total)
                 + _MAGIC_UC + _tid_uc + _attrs + _mi_a
             )
+            _fp_val = (_zl_uc.crc32(_req_for_fp) & 0xFFFFFFFF) ^ 0x5354554E
+            _fp_a   = _st_uc.pack('!HHI', 0x8028, 4, _fp_val)
+            _req    = _req_for_fp + _fp_a
             try:
                 sock.sendto(_req, cam_addr)
             except Exception:
@@ -6199,6 +6211,7 @@ class DeviceClient(object):
             import struct as _st_br, select as _sel_br, time as _time_br
             _br_prefer_direct_stun = {_audio_sock: False, _video_sock: False}
             _br_last_uc = 0.0
+            _br_stun_resp_count = 0
             _lo_a = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
             _lo_v = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
             try:
@@ -6324,10 +6337,12 @@ class DeviceClient(object):
                                         )
                                 else:
                                     _bs.sendto(_bresp, _bsrc)
-                                    _LOGGER.debug(
-                                        "bridge: STUN resp → %s:%d",
-                                        _bsrc[0], _bsrc[1],
-                                    )
+                                    _br_stun_resp_count += 1
+                                    if _br_stun_resp_count <= 5 or _br_stun_resp_count % 50 == 0:
+                                        _LOGGER.debug(
+                                            "bridge: STUN resp → %s:%d (n=%d)",
+                                            _bsrc[0], _bsrc[1], _br_stun_resp_count,
+                                        )
                             except Exception:
                                 pass
                         elif len(_bpkt) >= 20 and _bpkt[4:8] == _STUN_MAGIC_BR:
