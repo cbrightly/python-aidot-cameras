@@ -4639,6 +4639,56 @@ class DeviceClient(object):
                 )
                 _ans_sdp = _ans_sdp_patched
 
+            # ---- Pad missing m-sections from the answer -------------------------- #
+            # Per RFC 3264 §6 an answerer that rejects an offered m-section
+            # MUST still emit it with port 0; A001064 instead just omits it.
+            # aiortc requires section count to match the offer or it raises
+            # ValueError("Media sections in answer do not match offer").
+            # Walk the offer's m=/a=mid pairs in order and synthesise a
+            # rejected (port 0) stub for any mid that the answer skipped,
+            # appending in the offer's mid order so aiortc's index→mid map
+            # stays correct.
+            _offer_sdp_local = pc.localDescription.sdp
+            _offer_mids: list = []
+            _offer_kinds: dict = {}
+            _cur_kind: str = ""
+            for _ln in _offer_sdp_local.splitlines():
+                if _ln.startswith("m="):
+                    _cur_kind = _ln.split(" ", 1)[0][2:]   # "audio"/"video"/"application"
+                elif _ln.startswith("a=mid:"):
+                    _mid = _ln[len("a=mid:"):].strip()
+                    _offer_mids.append(_mid)
+                    _offer_kinds[_mid] = _cur_kind
+            _ans_mids: set = {
+                _ln[len("a=mid:"):].strip()
+                for _ln in _ans_sdp.splitlines()
+                if _ln.startswith("a=mid:")
+            }
+            _missing_mids = [m for m in _offer_mids if m not in _ans_mids]
+            if _missing_mids:
+                _stub_lines: list = []
+                for _m in _missing_mids:
+                    _kind = _offer_kinds.get(_m, "application")
+                    if _kind == "application":
+                        _stub_lines.append(
+                            f"m=application 0 UDP/DTLS/SCTP webrtc-datachannel"
+                        )
+                    elif _kind == "audio":
+                        _stub_lines.append("m=audio 0 UDP/TLS/RTP/SAVPF 0")
+                    else:
+                        _stub_lines.append("m=video 0 UDP/TLS/RTP/SAVPF 0")
+                    _stub_lines.append("c=IN IP4 0.0.0.0")
+                    _stub_lines.append(f"a=mid:{_m}")
+                _ans_sdp = (
+                    _ans_sdp.rstrip("\r\n") + "\r\n"
+                    + "\r\n".join(_stub_lines) + "\r\n"
+                )
+                _status(
+                    f"answer SDP: appended {len(_missing_mids)} rejected"
+                    f" m-section stub(s) for missing mid(s)"
+                    f" {_missing_mids} (camera omitted instead of port=0)"
+                )
+
                 import types as _np_types
                 try:
                     from aiortc.rtcdtlstransport import (
