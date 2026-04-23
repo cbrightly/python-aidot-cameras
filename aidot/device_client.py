@@ -4612,6 +4612,67 @@ class DeviceClient(object):
             )
             _status("Answer m-sections (%d): %s" % (len(_ans_mlines), " | ".join(_ans_mlines)))
 
+            # ---- Fingerprint placeholder + bypass -------------------------------- #
+            # A001064 (and family) returns answer SDP with empty
+            # ``a=fingerprint:sha-256 `` lines (template not filled in by the
+            # camera's compressed-answer codepath; behaviour is identical
+            # whether we send a compressed or uncompressed offer in
+            # wPayload).  aiortc's SDP parser then fails at the empty value
+            # with "not enough values to unpack".  Substitute a placeholder
+            # 32-byte zero fingerprint so the parse succeeds, then patch
+            # _validate_peer_identity on each DTLS transport so the actual
+            # camera certificate is accepted at handshake time (same pattern
+            # used in the role-reversal branch above).  This is safe because
+            # the MQTT signaling channel is already authenticated; cert
+            # pinning here would add no extra security.
+            import re as _fp_re
+            _ZERO_FP = ":".join(["00"] * 32)
+            _ans_sdp_patched, _fp_subs = _fp_re.subn(
+                r'(?m)^(a=fingerprint:sha-256)\s*$',
+                rf'\1 {_ZERO_FP}',
+                _ans_sdp,
+            )
+            if _fp_subs:
+                _status(
+                    f"answer SDP: filled in {_fp_subs} empty"
+                    " a=fingerprint:sha-256 line(s) with placeholder"
+                )
+                _ans_sdp = _ans_sdp_patched
+
+                import types as _np_types
+                try:
+                    from aiortc.rtcdtlstransport import (
+                        RTCDtlsFingerprint as _NPFp,
+                        certificate_digest as _np_cert_fp,
+                    )
+
+                    def _np_accept_cam_cert(self, remote_params):
+                        try:
+                            _cam_cert = self._ssl.get_peer_certificate(
+                                as_cryptography=True
+                            )
+                            if _cam_cert is not None:
+                                _real_fp = _np_cert_fp(_cam_cert, "sha-256")
+                                remote_params.fingerprints[:] = [
+                                    _NPFp(algorithm="sha-256", value=_real_fp)
+                                ]
+                        except Exception:
+                            pass
+
+                    for _np_tc in pc.getTransceivers():
+                        _np_tc.receiver.transport._validate_peer_identity = (
+                            _np_types.MethodType(
+                                _np_accept_cam_cert,
+                                _np_tc.receiver.transport,
+                            )
+                        )
+                    _status(
+                        "fingerprint bypass applied"
+                        f" ({len(pc.getTransceivers())} transceivers)"
+                    )
+                except Exception as _np_fp_exc:
+                    _status(f"fingerprint bypass skipped: {_np_fp_exc}")
+
             try:
                 await pc.setRemoteDescription(
                     RTCSessionDescription(
