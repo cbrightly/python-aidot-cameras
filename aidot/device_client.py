@@ -5085,20 +5085,49 @@ class DeviceClient(object):
 
                 _ddt_t0 = _bt_start  # share start time with byte-tap
                 _ddt_n = 0
+                import types as _ddt_types
+
+                # Wrap-on-call: don't pre-install — would steal the slot from
+                # aiortc's SCTP and trigger AssertionError(_data_receiver is
+                # None) when SCTP later tries to register.  Instead, monkey-
+                # patch _register_data_receiver so when SCTP registers, we
+                # transparently wrap it in our shim.  Camera's INIT then
+                # reaches SCTP unchanged → SCTP sends INIT-ACK → handshake
+                # completes; we still log every plaintext payload.
+                def _make_wrapped_register(_dtls_inst, _t0):
+                    _orig_reg = _dtls_inst._register_data_receiver
+
+                    def _wrapped_register(receiver):
+                        _shim = _LoggingDataReceiver(receiver, _t0)
+                        _orig_reg(_shim)
+                        try:
+                            _status(
+                                f"DTLS data-receiver registered: wrapping"
+                                f" {type(receiver).__name__}"
+                                f" → _LoggingDataReceiver"
+                            )
+                        except Exception:
+                            pass
+
+                    return _wrapped_register
+
                 for _ddt_idx, _ddt_tc in enumerate(pc.getTransceivers()):
                     _ddt_dtls = _ddt_tc.receiver.transport
                     _ddt_existing = getattr(_ddt_dtls, "_data_receiver", None)
-                    _ddt_shim = _LoggingDataReceiver(_ddt_existing, _ddt_t0)
-                    # _register_data_receiver per aiortc API; fall back to
-                    # direct attribute set if API name differs.
-                    try:
-                        _ddt_dtls._register_data_receiver(_ddt_shim)
-                    except Exception:
-                        _ddt_dtls._data_receiver = _ddt_shim
+                    if _ddt_existing is not None:
+                        # SCTP already registered before we got here — chain-
+                        # wrap by replacing its receiver with our shim.
+                        _ddt_dtls._data_receiver = _LoggingDataReceiver(
+                            _ddt_existing, _ddt_t0
+                        )
+                    else:
+                        _ddt_dtls._register_data_receiver = _make_wrapped_register(
+                            _ddt_dtls, _ddt_t0
+                        )
                     _ddt_n += 1
                 _status(
                     f"DTLS data-receiver tap installed on {_ddt_n} transceiver(s)"
-                    f" (will log decrypted 0x17 records)"
+                    f" (wrap-on-call; preserves aiortc SCTP registration)"
                 )
             except Exception as _ddt_install_exc:
                 _status(f"DTLS data-receiver tap install failed: {_ddt_install_exc}")
