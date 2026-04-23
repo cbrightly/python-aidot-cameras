@@ -4073,6 +4073,11 @@ class DeviceClient(object):
         # Forward our own ICE candidates to the camera via MQTT
         @pc.on("icecandidate")
         def _on_local_ice(candidate) -> None:
+            # Diag: aiortc gathers candidates during setLocalDescription and
+            # may never fire this event (vanilla-ICE behavior).  Log unconditionally
+            # so the next run tells us whether we can rely on this hook or must
+            # do the manual local-SDP candidate extraction (see post-SRD block).
+            _status(f"icecandidate event fired: {candidate!r}")
             if candidate is None:
                 return
             # Skip candidates that remote cameras cannot use.
@@ -4856,6 +4861,82 @@ class DeviceClient(object):
                         )
                 except Exception as _srd_diag_exc:
                     _status(f"  post-SRD diag failed: {_srd_diag_exc}")
+
+                # --- Manual iceCandidateReq trickle (DTLS path) ----------- #
+                # The official Android app sends iceCandidateReq for every local
+                # ICE candidate AFTER receiving webrtcResp.  The camera waits
+                # for this trickle, and tears down the DTLS session if it never
+                # arrives — even when the same candidates are present in the
+                # SDP offer's a=candidate lines.  aiortc gathers candidates
+                # synchronously during setLocalDescription so the @pc.on(
+                # "icecandidate") hook above never fires (vanilla-ICE);
+                # parse pc.localDescription.sdp directly and publish each.
+                try:
+                    import re as _re_lc
+                    _lsdp = (
+                        pc.localDescription.sdp if pc.localDescription
+                        else ""
+                    )
+                    _cur_mid: str | None = None
+                    _cur_idx: int = -1
+                    _sent_n = 0
+                    for _ln in _lsdp.splitlines():
+                        if _ln.startswith("m="):
+                            _cur_idx += 1
+                            _cur_mid = None
+                            continue
+                        _mid_m = _re_lc.match(r'^a=mid:(\S+)', _ln)
+                        if _mid_m:
+                            _cur_mid = _mid_m.group(1)
+                            continue
+                        _cand_m = _re_lc.match(r'^a=candidate:(.+)$', _ln)
+                        if not _cand_m or _cur_mid is None:
+                            continue
+                        _cand_str = "candidate:" + _cand_m.group(1).strip()
+                        # Skip Docker bridge / CGNAT / IPv6 — same filters as
+                        # the dead @pc.on("icecandidate") handler above.
+                        _cand_ip_m = _re_lc.search(
+                            r'\s(\d+\.\d+\.\d+\.\d+|[0-9a-fA-F:]+)\s\d+\s+typ\s',
+                            _cand_str,
+                        )
+                        _cand_ip = _cand_ip_m.group(1) if _cand_ip_m else ""
+                        if (_cand_ip.startswith("172.17.")
+                                or _cand_ip.startswith("100.")
+                                or ':' in _cand_ip):
+                            continue
+                        _cand_obj = {
+                            "candidate":     _cand_str,
+                            "sdpMid":        _cur_mid,
+                            "sdpMLineIndex": _cur_idx,
+                        }
+                        _ic_payload = json.dumps({
+                            "method":  "iceCandidateReq",
+                            "service": "IPC",
+                            "devId":   device_id,
+                            "srcAddr": f"0.{user_id}",
+                            "seq":     _seq(),
+                            "tst":     int(time.time() * 1000),
+                            **( {"userId": _numeric_uid_raw}
+                                if _numeric_uid_raw is not None else {} ),
+                            "payload": {
+                                "dstAddr": device_id,
+                                "wPayload": {
+                                    "peerid":    peer_id,
+                                    "candidate": _cand_obj,
+                                },
+                                "peerid":    peer_id,
+                                "devId":     device_id,
+                                "candidate": _cand_obj,
+                            },
+                        })
+                        outgoing_q.put_nowait((ice_cand_topic, _ic_payload))
+                        _sent_n += 1
+                    _status(
+                        f"iceCandidateReq trickle (post-SRD): {_sent_n} candidate(s)"
+                        f" sent from local SDP"
+                    )
+                except Exception as _trickle_exc:
+                    _status(f"  manual iceCandidateReq trickle failed: {_trickle_exc}")
             except Exception as exc:
                 # Dump full SDP and traceback so we can pinpoint where aiortc
                 # is choking (the {exc} message alone — e.g. "not enough
