@@ -3692,7 +3692,15 @@ class DeviceClient(object):
             # already generate (deviceId_random_count_0_streamID).  Camera
             # firmware likely pattern-matches this label.
             _dc_label = f"data-channel-of-{peer_id}"
-            _kvs_dc = pc.createDataChannel(_dc_label)     # mid:2  SCTP datachannel
+            # Pre-negotiated channel (negotiated=True, id=1): skip DCEP
+            # entirely.  Last log showed the channel stuck in "connecting"
+            # after SCTP came up — camera answered without m=application,
+            # so its WebRTC stack didn't set up DCEP processing, and our
+            # DCEP DATA_CHANNEL_OPEN went unanswered.  With negotiated=True,
+            # aiortc transitions readyState to "open" as soon as SCTP is
+            # established and our DATA chunks ride raw SCTP on stream id=1
+            # (no DCEP handshake required).
+            _kvs_dc = pc.createDataChannel(_dc_label, negotiated=True, id=1)
             _status(
                 f"offer: including SCTP datachannel label={_dc_label!r}"
                 f" (KVS opens SCTP regardless)"
