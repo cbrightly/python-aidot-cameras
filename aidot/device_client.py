@@ -3665,7 +3665,7 @@ class DeviceClient(object):
 
             @channel.on("open")
             def _on_remote_dc_open() -> None:
-                _send_avio_living(channel, f"remote:{channel.label}")
+                _status(f"DC[remote:{channel.label}] OPEN (camera-initiated)")
 
             @channel.on("message")
             def _on_remote_dc_message(message) -> None:
@@ -3680,11 +3680,6 @@ class DeviceClient(object):
                 except Exception:
                     pass
 
-            # If the channel is already open at handler-attach time (race),
-            # send LIVING now.
-            if channel.readyState == "open":
-                _send_avio_living(channel, f"remote:{channel.label}")
-
         _kvs_dc = None
         if self._offer_should_include_datachannel:
             # Match the official client's label exactly: f0.java:2923 uses
@@ -3692,25 +3687,30 @@ class DeviceClient(object):
             # already generate (deviceId_random_count_0_streamID).  Camera
             # firmware likely pattern-matches this label.
             _dc_label = f"data-channel-of-{peer_id}"
-            # Pre-negotiated channel (negotiated=True, id=1): skip DCEP
-            # entirely.  Last log showed the channel stuck in "connecting"
-            # after SCTP came up — camera answered without m=application,
-            # so its WebRTC stack didn't set up DCEP processing, and our
-            # DCEP DATA_CHANNEL_OPEN went unanswered.  With negotiated=True,
-            # aiortc transitions readyState to "open" as soon as SCTP is
-            # established and our DATA chunks ride raw SCTP on stream id=1
-            # (no DCEP handshake required).
-            _kvs_dc = pc.createDataChannel(_dc_label, negotiated=True, id=1)
+            # DCEP path (negotiated=False, default).  Official client
+            # f0.java:2923 uses `new DataChannel.Init()` with no negotiated
+            # flag — the phone is the DCEP initiator, sending DATA_CHANNEL_OPEN
+            # carrying the label.  Camera firmware likely treats the matching
+            # label as the "legitimate Aidot client" gate before producing media.
+            # We previously tried negotiated=True/id=1 to skip DCEP — SCTP came
+            # up and SACKed our DATA, but camera tore down at ~22s with no RTP
+            # ever produced.  The earlier "DCEP went unanswered" comment dates
+            # from before the SDP-rebuild fixes; retesting under current
+            # conditions to see whether DCEP completes naturally now.
+            _kvs_dc = pc.createDataChannel(_dc_label)
             _status(
                 f"offer: including SCTP datachannel label={_dc_label!r}"
-                f" (KVS opens SCTP regardless)"
+                f" (DCEP path; KVS opens SCTP regardless)"
             )
 
-            # Local-initiated path: when our channel transitions to OPEN,
-            # send the AVIO LIVING viewer-hello.
-            @_kvs_dc.on("open")
-            def _on_kvs_dc_open() -> None:
-                _send_avio_living(_kvs_dc, _dc_label)
+            # NOTE: AVIO LIVING (E_CMD_AVIO_CTRL_SESSION_MODE_REQ=5376) is
+            # NOT sent here.  Per BaseKVSCameraView.k():805-815, the official
+            # client only calls f0.C0(LIVING) when isSupportPreCon() is true
+            # (PreCon = battery-saving preconnect mode).  For non-PreCon
+            # cameras, streaming starts automatically once ICE+DTLS+(DCEP)
+            # are up; sending LIVING unconditionally is wrong.  When PreCon
+            # detection is added later, gate the call to _send_avio_living
+            # on that flag.
 
             @_kvs_dc.on("message")
             def _on_kvs_dc_message(message) -> None:
