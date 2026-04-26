@@ -3616,7 +3616,14 @@ class DeviceClient(object):
         pc = RTCPeerConnection(
             configuration=RTCConfiguration(iceServers=_ice_servers)
         )
-        pc.addTransceiver("audio", direction="recvonly")   # mid:0  audio
+        # Audio: sendrecv to advertise talkback capability.  Reference
+        # webrtc-internals capture (research/webrtc_internals_dump.json:5433)
+        # of a working session uses a=sendrecv on audio (with no actual
+        # audio track sent — sender stays silent).  Our previous a=recvonly
+        # appears to leave the camera waiting for talkback advertisement
+        # before it opens the encoder; camera tears down ~20s after SCTP
+        # up with no RTP ever produced.  Video stays recvonly (matches ref).
+        pc.addTransceiver("audio", direction="sendrecv")   # mid:0  audio (sendrecv for talkback advert)
         pc.addTransceiver("video", direction="recvonly")   # mid:1  video (H264; H265 injected below)
         # SCTP data channel — KVS firmware ALWAYS opens SCTP regardless of
         # whether m=application is in the negotiated answer.  Decoded the
@@ -4997,8 +5004,24 @@ class DeviceClient(object):
                             "__qualname__",
                             "missing",
                         )
+                        # Log id() of dtls/ice transports per transceiver:
+                        # if BUNDLE merged correctly, all transceivers share
+                        # the SAME RTCDtlsTransport + RTCIceTransport
+                        # objects.  Different ids ⇒ BUNDLE failed and aiortc
+                        # is running parallel transports — RTP would arrive
+                        # on whichever transport's DTLS is up but the
+                        # decoder receivers may be bound to the other one.
+                        _srd_kind = getattr(
+                            getattr(_srd_tc, "receiver", None),
+                            "_kind",
+                            getattr(_srd_tc, "kind", "?"),
+                        )
+                        _srd_mid = getattr(_srd_tc, "mid", "?")
                         _status(
                             f"  post-SRD[{_srd_idx}]"
+                            f" mid={_srd_mid} kind={_srd_kind}"
+                            f" dtls.id=0x{id(_srd_dtls):x}"
+                            f" ice.id=0x{id(_srd_ice):x}"
                             f" dtls.state={getattr(_srd_dtls, 'state', '?')}"
                             f" ice.state={getattr(_srd_ice, 'state', '?')}"
                             f" vpi={_srd_vpi}"
