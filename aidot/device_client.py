@@ -3687,30 +3687,29 @@ class DeviceClient(object):
             # already generate (deviceId_random_count_0_streamID).  Camera
             # firmware likely pattern-matches this label.
             _dc_label = f"data-channel-of-{peer_id}"
-            # DCEP path (negotiated=False, default).  Official client
-            # f0.java:2923 uses `new DataChannel.Init()` with no negotiated
-            # flag — the phone is the DCEP initiator, sending DATA_CHANNEL_OPEN
-            # carrying the label.  Camera firmware likely treats the matching
-            # label as the "legitimate Aidot client" gate before producing media.
-            # We previously tried negotiated=True/id=1 to skip DCEP — SCTP came
-            # up and SACKed our DATA, but camera tore down at ~22s with no RTP
-            # ever produced.  The earlier "DCEP went unanswered" comment dates
-            # from before the SDP-rebuild fixes; retesting under current
-            # conditions to see whether DCEP completes naturally now.
-            _kvs_dc = pc.createDataChannel(_dc_label)
+            # Pre-negotiated channel (negotiated=True, id=1): skip DCEP
+            # entirely.  Tested default (DCEP) createDataChannel on
+            # 2026-04-25 — DTLS regression: aiortc allocates a second
+            # ICE/DTLS transport for the DCEP-mode datachannel that doesn't
+            # survive the answer-rebuild BUNDLE rewrite, and `__connect()`
+            # raises InvalidStateError("RTCIceTransport is closed") before
+            # DTLS handshake can complete.  Pre-negotiated mode rides on the
+            # bundled transport, so DTLS comes up.  AVIO LIVING send below is
+            # disabled separately to test whether the camera tolerates its
+            # absence (per BaseKVSCameraView.k():805-815, the official client
+            # only sends LIVING for PreCon cameras).
+            _kvs_dc = pc.createDataChannel(_dc_label, negotiated=True, id=1)
             _status(
                 f"offer: including SCTP datachannel label={_dc_label!r}"
-                f" (DCEP path; KVS opens SCTP regardless)"
+                f" (pre-negotiated; KVS opens SCTP regardless)"
             )
 
-            # NOTE: AVIO LIVING (E_CMD_AVIO_CTRL_SESSION_MODE_REQ=5376) is
-            # NOT sent here.  Per BaseKVSCameraView.k():805-815, the official
-            # client only calls f0.C0(LIVING) when isSupportPreCon() is true
-            # (PreCon = battery-saving preconnect mode).  For non-PreCon
-            # cameras, streaming starts automatically once ICE+DTLS+(DCEP)
-            # are up; sending LIVING unconditionally is wrong.  When PreCon
-            # detection is added later, gate the call to _send_avio_living
-            # on that flag.
+            # AVIO LIVING (E_CMD_AVIO_CTRL_SESSION_MODE_REQ=5376) deliberately
+            # NOT sent here — testing whether non-PreCon cameras start
+            # streaming automatically.  Per BaseKVSCameraView.k():805-815,
+            # f0.C0(LIVING) is only called when isSupportPreCon() is true.
+            # If the camera still tears down with no RTP, LIVING isn't the
+            # gate either; the next investigation is RTCP/track setup.
 
             @_kvs_dc.on("message")
             def _on_kvs_dc_message(message) -> None:
