@@ -5,6 +5,7 @@ test_camera.py - Exercise the camera additions to python-aidot.
 Usage:
   cd /path/to/python-aidot
   python3 test_camera.py --username you@email.com --password yourpass [--country US]
+  python3 test_camera.py --auth-cache [PATH] [--country US]
 
   # Run on a specific camera only (device UID from the device list printed above):
   python3 test_camera.py --username ... --password ... --device DEVICE_ID --webrtc
@@ -53,6 +54,8 @@ import sys
 import time
 
 import aiohttp
+
+from aidot.auth_cache import AuthCacheError, load_or_init_cache
 
 
 class _Tee:
@@ -163,14 +166,43 @@ async def run(args: argparse.Namespace) -> None:
             password=args.password,
         )
 
+        cache_path = None
+        if args.auth_cache is not None:
+            try:
+                cache_path, cache_data, loaded_existing = load_or_init_cache(args.auth_cache)
+                cached_login = cache_data.get("login_info") or {}
+                if cached_login:
+                    client.login_info = cached_login.copy()
+                    client.username = cached_login.get("username", client.username)
+                    client.password = cached_login.get("password", client.password)
+                    client.country_name = cached_login.get("country", client.country_name)
+                    client._region = cached_login.get("region", client._region)
+                    client._base_url = f"https://prod-{client._region}-api.arnoo.com/v17"
+                    print(f"Using encrypted auth cache: {cache_path}")
+                elif loaded_existing:
+                    print(f"Encrypted auth cache found but empty: {cache_path}")
+                else:
+                    print(f"Created encrypted auth cache file: {cache_path}")
+            except AuthCacheError as exc:
+                print(f"Auth cache error: {exc}")
+                return
+
+        if not client.username or not client.password:
+            print("Missing credentials. Provide --username/--password once or load them via --auth-cache.")
+            return
+
         # Login (now calls /users/login with MD5 password + fetches MQTT pwd via /commons/userConfig)
-        print(f"\n[1] Logging in as {args.username} ...")
+        login_id = args.username or "<cached credentials>"
+        print(f"\n[1] Logging in as {login_id} ...")
         try:
             info = await client.async_post_login()
             user_id = info.get("id") or info.get("userId") or "?"
             has_mqtt_pwd = bool(info.get("mqttPassword"))
             print(f"    OK  userId={user_id}  region={client._region}  "
                   f"mqttPassword={'present' if has_mqtt_pwd else 'MISSING'}")
+            if cache_path is not None:
+                client.save_auth_cache(str(cache_path))
+                print(f"    Updated encrypted auth cache at {cache_path}")
             if not has_mqtt_pwd:
                 raw_cfg = info.get("_userConfigRaw") or {}
                 print(f"    [userConfig raw keys]: {list(raw_cfg.keys())}")
@@ -628,8 +660,10 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--username",  required=True,  help="AiDot account email")
-    parser.add_argument("--password",  required=True,  help="AiDot account password")
+    parser.add_argument("--username",  help="AiDot account email")
+    parser.add_argument("--password",  help="AiDot account password")
+    parser.add_argument("--auth-cache", nargs="?", const=".aidot_auth_cache.enc", metavar="PATH",
+                        help="Load/create encrypted credential cache. If PATH is omitted, uses ./.aidot_auth_cache.enc")
     parser.add_argument("--country",   default="US",   help="Country code (default: US)")
     parser.add_argument("--p2p",       action="store_true",
                         help="Fetch TUTK P2P UID for each camera")
@@ -677,6 +711,10 @@ def main() -> None:
                              "isDTLS device property; use to override SDES auto-detection")
 
     args = parser.parse_args()
+
+
+    if args.auth_cache is None and (not args.username or not args.password):
+        parser.error("--username and --password are required unless --auth-cache is provided")
 
     # Companion flags imply --webrtc so users don't need to add --webrtc explicitly
     # when they already specify --webrtc-output, --webrtc-sdes, or --webrtc-dtls.

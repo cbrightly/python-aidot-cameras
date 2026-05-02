@@ -7,6 +7,9 @@ import base64
 import aiohttp
 from aiohttp import ClientSession
 from typing import Any, Optional
+from pathlib import Path
+
+from .auth_cache import load_or_init_cache, save_cache
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -97,6 +100,32 @@ class AidotClient:
             self._region = token[CONF_REGION]
             self.country_name = token[CONF_COUNTRY]
             self._base_url = f"https://prod-{self._region}-api.arnoo.com/v17"
+
+
+    def load_auth_cache(self, cache_path: str | None = None) -> Path | None:
+        """Load auth details from encrypted cache into this client.
+
+        Returns cache path when loaded and containing credentials, else None.
+        """
+        path, cache_data, _loaded = load_or_init_cache(cache_path)
+        login_info = cache_data.get("login_info", {})
+        if not login_info:
+            return None
+        self.login_info = login_info.copy()
+        self.username = login_info.get(CONF_USERNAME, self.username)
+        self.password = login_info.get(CONF_PASSWORD, self.password)
+        self._region = login_info.get(CONF_REGION, self._region)
+        self.country_name = login_info.get(CONF_COUNTRY, self.country_name)
+        self._base_url = f"https://prod-{self._region}-api.arnoo.com/v17"
+        return path
+
+    def save_auth_cache(self, cache_path: str | None = None) -> Path:
+        """Persist current login state to encrypted auth cache."""
+        path, cache_data, _loaded = load_or_init_cache(cache_path)
+        cache_data["version"] = 1
+        cache_data["login_info"] = self.login_info.copy()
+        save_cache(path, cache_data)
+        return path
 
     def set_token_fresh_cb(self, callback) -> None:
         self._token_fresh_cb = callback
