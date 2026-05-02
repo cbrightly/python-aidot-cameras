@@ -3642,8 +3642,22 @@ class DeviceClient(object):
         # in patient-wait — diagnosing that requires a wire capture of an
         # official Aidot app session ([P1.2.c]); further SDP-attribute
         # guessing has not been productive.
-        pc.addTransceiver("audio", direction="sendrecv")   # mid:0  (sendrecv advert; no sender track)
-        pc.addTransceiver("video", direction="recvonly")   # mid:1  video (H264; H265 injected below)
+        pc.addTransceiver("audio", direction="sendrecv")   # mid:0  audio (sendrecv; no sender track)
+        pc.addTransceiver("video", direction="recvonly")   # mid:1  H264 video
+        # Wire capture (2026-05-02) of an official iOS Aidot session against
+        # A000088 showed the camera answers with FOUR BUNDLE'd m-sections:
+        #   mid:0  audio      sendrecv  PCMA/8000
+        #   mid:1  H264 video sendonly  PT 127 + RTX 124
+        #   mid:2  H265 video sendonly  PT 98  + RTX 99   ← separate section!
+        #   mid:3  datachannel sctp-port:5000
+        # Our old 3-section offer (audio/video/DC at mids 0/1/2) caused the
+        # camera's H265 answer on mid:2 to collide with our DC declaration
+        # (application ≠ video), so the answer-rebuild stubbed it as DC and
+        # discarded H265 entirely.  The camera never got confirmation that
+        # video negotiation succeeded and sent nothing on mid:1 either.
+        # Adding a second video transceiver for H265 shifts DC to mid:3,
+        # matching the camera's expected layout and unlocking video flow.
+        pc.addTransceiver("video", direction="recvonly")   # mid:2  H265 video (codec replaced below)
         # SCTP data channel — KVS firmware ALWAYS opens SCTP regardless of
         # whether m=application is in the negotiated answer.  Decoded the
         # post-handshake 0x17 records as SCTP INIT chunks (srcPort=5000
@@ -3651,9 +3665,7 @@ class DeviceClient(object):
         # at ~6s intervals and tears DTLS down with close_notify after ~22s
         # if it never receives INIT-ACK.  Adding the data channel here
         # creates an SCTP endpoint on our side that answers the INIT.
-        # The answer-rebuild logic synthesizes a valid m=application stub
-        # with sctp-port:5000 when camera answers mid:2 with H265 video
-        # instead of m=application (its consistent behavior on A000088).
+        # With the 4-section offer DC is now mid:3 (not mid:2).
         # Skipped only for A001064 (see _NO_DATACHANNEL_MODELS).
         # Helper: build the 36-byte AVIO LIVING TUTK frame and send via dc.
         # Extracted so it can be invoked from either dc.on("open") (we created
@@ -3852,23 +3864,26 @@ class DeviceClient(object):
                     out.append(line)   # includes a=max-message-size (keep as-is)
             return '\r\n'.join(out)
 
-        def _inject_h265_into_mid1(sdp: str) -> str:
-            """Append H265 codec lines to mid:1 (the single video m-section).
+        def _replace_mid2_codecs_with_h265(sdp: str) -> str:
+            """Replace mid:2's aiortc-generated H264 codec list with H265.
 
-            The AiDot web app (Chrome) puts ALL video codecs — VP8, VP9, H264, and
-            H265 — into a single m=video section (mid:1).  Cameras with liveType=2
-            require H265 to appear in that section before they will respond with
-            webrtcResp.  aiortc cannot offer H265 natively, so this function injects
-            the necessary lines after the existing codec list.
+            With the 4-section BUNDLE layout (audio/H264-video/H265-video/DC),
+            aiortc generates mid:2 as a second video transceiver with its own
+            standard H264 codec entries.  Cameras expect mid:2 to carry H265
+            (PT 98 + RTX 99 in captured iOS sessions).  This function replaces
+            mid:2's m-line codec list and all codec attribute lines with H265,
+            leaving all transport attributes (ICE, fingerprint, setup, direction)
+            intact.
 
-            H265 is assigned a dynamically chosen PT that does not collide with any
-            already-used PT in the SDP (RFC 8843 §9.2 requires globally unique PTs
-            across all BUNDLE m-sections).  Standard aiortc offers use PT 96–102 for
-            audio/video variants, so the selection reliably lands on PT 103 or higher.
+            PTs are chosen to avoid collision with any PT already declared in the
+            SDP (RFC 8843 §9.2: globally unique across all BUNDLE m-sections).
+            aiortc typically uses PT 96-102 for mid:1, so the selected PTs for
+            H265 land in the 103+ range; the camera adapts to whatever PTs the
+            viewer offers.
             """
             import re as _re
 
-            # Collect all PTs already declared anywhere in the SDP.
+            # Collect all PTs in use across the entire SDP (mid:0 + mid:1 + rest).
             _used_pts: set = set()
             for _ln in _re.split(r'\r?\n', sdp):
                 _mm = _re.match(r'^m=\S+ \d+ \S+ (.+)$', _ln)
@@ -3877,11 +3892,15 @@ class DeviceClient(object):
                         try:
                             _used_pts.add(int(_pt))
                         except ValueError:
-                            pass  # "webrtc-datachannel" and similar
+                            pass  # "webrtc-datachannel"
                 _rm = _re.match(r'^a=rtpmap:(\d+) ', _ln)
                 if _rm:
                     _used_pts.add(int(_rm.group(1)))
-            _h265_pt = next(pt for pt in range(96, 128) if pt not in _used_pts)
+
+            # Pick two free PTs (H265 primary + RTX).
+            _free = [pt for pt in range(96, 128) if pt not in _used_pts]
+            _h265_pt = _free[0]
+            _h265_rtx_pt = _free[1] if len(_free) > 1 else _free[0] + 1
 
             lines = _re.split(r'\r?\n', sdp)
             sections: list[list[str]] = []
@@ -3897,36 +3916,35 @@ class DeviceClient(object):
 
             result: list[str] = []
             for sec in sections:
-                if not any(a.rstrip() == 'a=mid:1' for a in sec):
+                if not any(a.rstrip() == 'a=mid:2' for a in sec):
                     result.extend(sec)
                     continue
-                # This is mid:1 (video) — add H265 PT to m-line and append codec attrs.
+                # This is mid:2 — replace codec list with H265 PTs.
                 new_sec: list[str] = []
                 for ln in sec:
                     if ln.startswith('m=video '):
-                        # Append the H265 PT to the codec list on the m-line.
-                        new_sec.append(ln.rstrip() + f' {_h265_pt}')
+                        # Rewrite m-line with only H265 + RTX PTs.
+                        parts = ln.split()
+                        # parts: m=video PORT PROTO PT...
+                        new_sec.append(f'{parts[0]} {parts[1]} {parts[2]} {_h265_pt} {_h265_rtx_pt}')
+                    elif (ln.startswith('a=rtpmap:') or
+                          ln.startswith('a=fmtp:') or
+                          ln.startswith('a=rtcp-fb:')):
+                        # Drop all H264-specific codec attrs — H265 ones added below.
+                        pass
                     else:
                         new_sec.append(ln)
-                # Insert H265 codec lines after the last existing codec attribute.
-                # Find the last rtpmap/fmtp/rtcp-fb line and insert after it.
-                last_codec_idx = -1
-                for i, ln in enumerate(new_sec):
-                    if (ln.startswith('a=rtpmap:') or
-                            ln.startswith('a=fmtp:') or
-                            ln.startswith('a=rtcp-fb:')):
-                        last_codec_idx = i
+                # Append H265 codec attributes after all non-codec attrs.
                 h265_lines = [
                     f'a=rtpmap:{_h265_pt} H265/90000',
                     f'a=fmtp:{_h265_pt} level-id=180;profile-id=1;tier-flag=0;tx-mode=SRST',
                     f'a=rtcp-fb:{_h265_pt} nack',
                     f'a=rtcp-fb:{_h265_pt} goog-remb',
                     f'a=rtcp-fb:{_h265_pt} transport-cc',
+                    f'a=rtpmap:{_h265_rtx_pt} rtx/90000',
+                    f'a=fmtp:{_h265_rtx_pt} apt={_h265_pt}',
                 ]
-                if last_codec_idx >= 0:
-                    new_sec[last_codec_idx + 1:last_codec_idx + 1] = h265_lines
-                else:
-                    new_sec.extend(h265_lines)
+                new_sec.extend(h265_lines)
                 result.extend(new_sec)
             return '\r\n'.join(result)
 
@@ -4102,7 +4120,7 @@ class DeviceClient(object):
             _filter_sdp_candidates(
                 _reorder_m_section_ice_attrs(
                     _normalize_bundle_ice_credentials(
-                        _inject_h265_into_mid1(_upgrade_sctp(pc.localDescription.sdp))
+                        _replace_mid2_codecs_with_h265(_upgrade_sctp(pc.localDescription.sdp))
                     )
                 )
             )
