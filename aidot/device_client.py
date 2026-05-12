@@ -152,9 +152,10 @@ class DeviceClient(object):
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.seq_num = 1
             await self.login()
-            self._connect_and_login = True
+            self._connect_and_login = self.status.online
         except Exception as e:
             self._connect_and_login = False
+            _LOGGER.warning(f"{self._TAG}:connect device error: {e}")
         finally:
             self._connecting = False
 
@@ -257,8 +258,7 @@ class DeviceClient(object):
                 raise
             except (BrokenPipeError, ConnectionResetError, asyncio.IncompleteReadError) as e:
                 _LOGGER.error(f"{self._TAG}:read status error {e}")
-                # await self.reset()
-                syncio.get_running_loop().call_soon(
+                asyncio.get_running_loop().call_soon(
                     lambda: asyncio.create_task(self.reset())
                 )
                 return
@@ -365,7 +365,7 @@ class DeviceClient(object):
             "srcAddr": "x.xxxxxxx",
             CONF_PAYLOAD: {},
         }
-        # _LOGGER.info(f"{self.device_id} send_ping_action {ping}")
+        _LOGGER.info(f"{self.device_id} send_ping_action {ping}")
         try:
             if self.ping_count >= 3:
                 _LOGGER.error(
@@ -427,5 +427,5 @@ class DeviceClient(object):
         #     10,  # 10秒后重连
         #     lambda: asyncio.create_task(self.async_login())
         # )
-        self._reconnect_handle = loop.call_later(15, self._schedule_reconnect)
+        self._reconnect_handle = loop.call_later(60, self._schedule_reconnect)
         self._login_task = asyncio.create_task(self.async_login())

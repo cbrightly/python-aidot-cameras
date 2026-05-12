@@ -15,7 +15,7 @@ import hashlib
 from .exceptions import AidotAuthFailed, AidotUserOrPassIncorrect
 from .device_client import DeviceClient
 from .discover import Discover
-from .login_const import APP_ID, PUBLIC_KEY_PEM, BASE_URL
+from .login_const import APP_ID, PUBLIC_KEY_PEM, API_URL_TEMPLATE, DEFAULT_REGION
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_APP_ID,
@@ -58,8 +58,8 @@ def rsa_password_encrypt(message: str) -> str:
 
 
 class AidotClient:
-    _base_url: str = BASE_URL
-    _region: str = "us"
+    _base_url: str = API_URL_TEMPLATE.format(region=DEFAULT_REGION)
+    _region: str = DEFAULT_REGION
     session: Optional[ClientSession] = None
     username: str = ""
     password: str = ""
@@ -77,7 +77,7 @@ class AidotClient:
         password: str | None = None,
         token: dict | None = None,
     ) -> None:
-        _LOGGER.info(f"Aidot Client Version: v0.3.46")
+        _LOGGER.info("Client Version: v0.3.51")
         self.session = session
         self.username = username
         self.password = password
@@ -87,7 +87,7 @@ class AidotClient:
             if item["id"] == self.country_code:
                 self.country_name = item["name"]
                 self._region = item["region"].lower()
-                self._base_url = f"https://prod-{self._region}-api.arnoo.com/v17"
+                self._base_url = API_URL_TEMPLATE.format(region=self._region)
                 break
         if token is not None:
             self.login_info = token.copy()
@@ -95,7 +95,7 @@ class AidotClient:
             self.password = token[CONF_PASSWORD]
             self._region = token[CONF_REGION]
             self.country_name = token[CONF_COUNTRY]
-            self._base_url = f"https://prod-{self._region}-api.arnoo.com/v17"
+            self._base_url = API_URL_TEMPLATE.format(region=self._region)
         self.setup_discover()
     def set_token_fresh_cb(self, callback) -> None:
         self._token_fresh_cb = callback
@@ -106,19 +106,22 @@ class AidotClient:
     def update_password(self, password: str) -> None:
         self.password = password
     
-    def get_terminal_id(self) -> str:
+    async def get_terminal_id(self) -> str:
         file_path = Path.home() / ".aidot_terminal_id"
-        if file_path.exists():
-            raw_id = file_path.read_text().strip()
-        else:
-            node = uuid.getnode()
-            is_random = (node >> 40) & 1
-            
-            if is_random:
-                raw_id = str(uuid.uuid4())
-            else:
-                raw_id = format(node, 'x')
-            file_path.write_text(raw_id)
+
+        def _read_or_create() -> str:
+            try:
+                if file_path.exists():
+                    return file_path.read_text().strip()
+                node = uuid.getnode()
+                is_random = (node >> 40) & 1
+                raw_id = str(uuid.uuid4()) if is_random else format(node, "x")
+                file_path.write_text(raw_id)
+                return raw_id
+            except OSError:
+                return 'gvz3gjae10l4zii00t7y0'
+
+        raw_id = await asyncio.to_thread(_read_or_create)
         return hashlib.md5(raw_id.encode()).hexdigest()
 
     async def async_post_login(self) -> dict[str, Any]:
@@ -126,7 +129,7 @@ class AidotClient:
         url = f"{self._base_url}/users/loginWithFreeVerification"
         headers = {CONF_APP_ID: APP_ID, CONF_TERMINAL: "app"}
         # f"{region}:{self.country_name.strip()}",
-        terminalId = self.get_terminal_id()
+        terminalId = await self.get_terminal_id()
         if terminalId is None:
             terminalId = "gvz3gjae10l4zii00t7y0"
         data = {
@@ -150,7 +153,7 @@ class AidotClient:
             self.setup_discover()
             return self.login_info
         except aiohttp.ClientError as e:
-            _LOGGER.info(f"async_post_login ClientError {e}")
+            _LOGGER.error(f"async_post_login ClientError: {e}")
             if response_data[CONF_CODE] == ServerErrorCode.USER_PWD_INCORRECT:
                 raise AidotUserOrPassIncorrect
             raise Exception
@@ -169,12 +172,12 @@ class AidotClient:
             self.login_info[CONF_ACCESS_TOKEN] = response_data[CONF_ACCESS_TOKEN]
             if response_data[CONF_REFRESH_TOKEN] is not None:
                 self.login_info[CONF_REFRESH_TOKEN] = response_data[CONF_REFRESH_TOKEN]
-            _LOGGER.info(f"refresh token {response_data}")
+            _LOGGER.debug(f"refresh token: {response_data}")
             if self._token_fresh_cb:
                 self._token_fresh_cb()
             return response_data
         except aiohttp.ClientError as e:
-            _LOGGER.info(f"async_refresh_token ClientError {e} {response_data}")
+            _LOGGER.error(f"async_refresh_token ClientError: {e} {response_data}")
             if response_data[CONF_CODE] == ServerErrorCode.LOGIN_INVALID:
                 raise AidotAuthFailed
             return None
@@ -199,7 +202,7 @@ class AidotClient:
             response.raise_for_status()
             return response_data
         except aiohttp.ClientError as e:
-            _LOGGER.info(f"async_get ClientError {e} {response_data}")
+            _LOGGER.error(f"async_get ClientError: {e} {response_data}")
             code = response_data.get(CONF_CODE)
             if code == ServerErrorCode.TOKEN_EXPIRED:
                 try:
@@ -297,5 +300,5 @@ class AidotClient:
 
     async def async_cleanup(self) -> None:
         """清理所有资源"""
-        _LOGGER.info(f"async_cleanup")
+        _LOGGER.debug("async_cleanup")
         await self.async_close()
