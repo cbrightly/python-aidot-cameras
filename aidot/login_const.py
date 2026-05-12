@@ -1,7 +1,10 @@
-"""Constants for the aidot integration."""
+"""Constants for the aidot login."""
 
 APP_ID = "1383974540041977857"
-BASE_URL = "https://prod-us-api.arnoo.com/v17"
+
+# API URL template - use .format(region="us") to construct
+API_URL_TEMPLATE = "https://prod-{region}-api.arnoo.com/v17"
+DEFAULT_REGION = "us"
 
 PUBLIC_KEY_PEM = b"""
 -----BEGIN PUBLIC KEY-----

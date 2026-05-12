@@ -101,6 +101,7 @@ SUPPORTED_COUNTRYS = [
     {"_id": "16-4", "id": "PK", "name": "Pakistan", "ext": "", "region": "JP"},
     {"_id": "16-5", "id": "PS", "name": "Palestine", "ext": "", "region": "JP"},
     {"_id": "16-6", "id": "PH", "name": "Philippines", "ext": "", "region": "JP"},
+    {"_id": "16-7", "id": "PL", "name": "Poland", "ext": "", "region": "EU"},
     {"_id": "17-0", "id": "QA", "name": "Qatar", "ext": "", "region": "JP"},
     {"_id": "18-0", "id": "RO", "name": "Romania", "ext": "", "region": "EU"},
     {"_id": "18-1", "id": "RU", "name": "Russia", "ext": "", "region": "EU"},
