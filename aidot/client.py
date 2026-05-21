@@ -90,6 +90,12 @@ class AidotClient:
                 self._base_url = API_URL_TEMPLATE.format(region=self._region)
                 break
         if token is not None:
+            # ✅ 兼容性处理: v1.0.8 数据结构迁移到 v1.1.3
+            # 旧版本: config_entry.data[CONF_LOGIN_INFO]
+            # 新版本: config_entry.data
+            if token.get(CONF_ID) is None and token.get(CONF_LOGIN_INFO) is not None:
+                token = token.get(CONF_LOGIN_INFO)
+            
             self.login_info = token.copy()
             self.username = token[CONF_USERNAME]
             self.password = token[CONF_PASSWORD]
