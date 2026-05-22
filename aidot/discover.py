@@ -12,7 +12,7 @@ from .exceptions import AidotOSError
 _LOGGER = logging.getLogger(__name__)
 # _DISCOVER_TIME = 15
 
-_DISCOVER_FAST = 10      # 启动时快速发现
+_DISCOVER_FAST = 6      # 启动时快速发现
 _DISCOVER_SLOW = 120    # 稳定后慢速维持
 
 class BroadcastProtocol:
@@ -111,7 +111,7 @@ class Discover:
 
     def start_repeat_broadcast(self) -> None:
         self._is_close = False
-        self._fast_discover_count = 3  # 前三次快速
+        self._fast_discover_count = 5  # 前5次快速
         self._schedule_broadcast()
 
     def _schedule_broadcast(self) -> None:
