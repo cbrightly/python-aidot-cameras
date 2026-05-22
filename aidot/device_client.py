@@ -123,6 +123,8 @@ class DeviceClient(object):
     writer: Any = None
     reader: Any = None
     syncProperties = [CONF_ON_OFF, CONF_DIMMING, CONF_RGBW, CONF_CCT]
+    heart_time = 10
+    # syncProperties = []
     _TAG: str = "DeviceClient"
     @property
     def connect_and_login(self) -> bool:
@@ -148,7 +150,10 @@ class DeviceClient(object):
         self.password = device.get(CONF_PASSWORD)
         self.device_id = device.get(CONF_ID)
         self._simpleVersion = device.get("simpleVersion")
-        self._TAG = f"{self.device_id}";
+        self._TAG = f"{self.device_id}"
+        # if self.info.model_id == 'lk.WIFI-RGBWLight-D0006':
+        #     self.syncProperties = [CONF_ON_OFF, CONF_DIMMING, CONF_RGBW, CONF_CCT]
+        
         _LOGGER.warning(f"{self._TAG}:{device}")
 
     async def connect(self, ip_address) -> None:
@@ -236,6 +241,7 @@ class DeviceClient(object):
 
             self.ascNumber = json_data[CONF_PAYLOAD][CONF_ASCNUMBER] + 1
             self.status.online = True
+            self._notify_status_update()
             self._receive_task = asyncio.create_task(
                 self.receive_data(),
                 name=f"aidot_receive_{self.device_id}"
@@ -290,7 +296,7 @@ class DeviceClient(object):
     def _schedule_ping(self):
         loop = asyncio.get_running_loop()
         loop.create_task(self.send_ping_action())
-        self._ping_timer = loop.call_later(30, self._schedule_ping)
+        self._ping_timer = loop.call_later(self.heart_time, self._schedule_ping)
 
     async def send_dev_attr(self, dev_attr) -> None:
         if not self._connect_and_login:
@@ -384,8 +390,8 @@ class DeviceClient(object):
                 return -1
             if self._connect_and_login is False:
                 return -1
-            self.writer.write(self.get_send_packet(json.dumps(ping).encode(), 2))
-            await self.writer.drain()
+            # self.writer.write(self.get_send_packet(json.dumps(ping).encode(), 2))
+            # await self.writer.drain()
             self.ping_count += 1
             await self.send_action(self.syncProperties, CONF_GET_DEV_ATTR_REQ)
             return 1
@@ -433,9 +439,5 @@ class DeviceClient(object):
         """延迟重连"""
         _LOGGER.info(f"{self.device_id} _schedule_reconnect")
         loop = asyncio.get_running_loop()
-        # self._reconnect_handle = loop.call_later(
-        #     10,  # 10秒后重连
-        #     lambda: asyncio.create_task(self.async_login())
-        # )
         self._reconnect_handle = loop.call_later(60, self._schedule_reconnect)
         self._login_task = asyncio.create_task(self.async_login())
