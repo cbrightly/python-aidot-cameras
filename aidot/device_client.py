@@ -35,6 +35,8 @@ from .const import (
     CONF_SERVICE_MODULES,
     CONF_ACK,
     CONF_CODE,
+    CONF_GET_DEV_ATTR_REQ,
+    CONF_SET_DEV_ATTR_REQ,
     Identity,
 )
 
@@ -44,10 +46,10 @@ _LOGGER = logging.getLogger(__name__)
 class DeviceStatusData:
     online: bool = False
     on: bool = False
-    rgdb: int = None
-    rgbw: tuple[int, int, int, int] = None
-    cct: int = None
-    dimming: int = None
+    rgdb: int = 0xFF000000
+    rgbw: tuple[int, int, int, int] = (255, 0, 0, 0)
+    cct: int = 2700
+    dimming: int = 100
 
     def update(self, attr: dict[str, Any]) -> None:
         if attr is None:
@@ -57,7 +59,13 @@ class DeviceStatusData:
         if attr.get(CONF_DIMMING) is not None:
             self.dimming = int(attr.get(CONF_DIMMING) * 255 / 100)
         if attr.get(CONF_RGBW) is not None:
-            self.rgdb = attr.get(CONF_RGBW)
+            rgbw_value = attr.get(CONF_RGBW)
+            # If RGBW is 0, set default red color (255, 0, 0, 0)
+            if rgbw_value == 0:
+                self.rgdb = 0xFF000000  # Red in int: 4278190080
+            else:
+                self.rgdb = rgbw_value
+            
             rgbw = ctypes.c_uint32(self.rgdb).value
             r = (rgbw >> 24) & 0xFF
             g = (rgbw >> 16) & 0xFF
@@ -114,6 +122,7 @@ class DeviceClient(object):
     _ping_timer: Any = None
     writer: Any = None
     reader: Any = None
+    syncProperties = [CONF_ON_OFF, CONF_DIMMING, CONF_RGBW, CONF_CCT]
     _TAG: str = "DeviceClient"
     @property
     def connect_and_login(self) -> bool:
@@ -238,7 +247,7 @@ class DeviceClient(object):
                 self._reconnect_handle = None
             self._schedule_ping()
             _LOGGER.warning(f"{self._TAG}:connect success: {self._ip_address}")
-            await self.send_action({}, "getDevAttrReq")
+            await self.send_action(self.syncProperties, CONF_GET_DEV_ATTR_REQ)
         except (BrokenPipeError, ConnectionResetError, Exception) as e:
             _LOGGER.error(f"{self.device_id} login read status error {e}")
 
@@ -286,7 +295,10 @@ class DeviceClient(object):
     async def send_dev_attr(self, dev_attr) -> None:
         if not self._connect_and_login:
             raise ConnectionError('Device offline')
-        await self.send_action(dev_attr, "setDevAttrReq")
+        if not self.status.on and not CONF_ON_OFF in dev_attr:
+            self.status.on = True
+            attr[CONF_ON_OFF] = 1
+        await self.send_action(dev_attr, CONF_SET_DEV_ATTR_REQ)
 
     async def async_turn_off(self) -> None:
         await self.send_dev_attr({CONF_ON_OFF: 0})
@@ -309,9 +321,6 @@ class DeviceClient(object):
         current_timestamp_milliseconds = int(time.time() * 1000)
         self.seq_num += 1
         seq = "ha93" + str(self.seq_num).zfill(5)
-        if not self.status.on and not CONF_ON_OFF in attr:
-            self.status.on = True
-            attr[CONF_ON_OFF] = 1
 
         if self._simpleVersion is not None:
             action = {
@@ -320,7 +329,7 @@ class DeviceClient(object):
                 "clientId": "ha-" + self.user_id,
                 "srcAddr": "0." + self.user_id,
                 "seq": "" + seq,
-                "payload": {
+                CONF_PAYLOAD: {
                     "devId": self.device_id,
                     "parentId": self.device_id,
                     "userId": self.user_id,
@@ -338,14 +347,14 @@ class DeviceClient(object):
                 "service": "device",
                 "seq": "" + seq,
                 "srcAddr": "0." + self.user_id,
-                "payload": {
+                CONF_PAYLOAD: {
                     "attr": attr,
                     "ascNumber": self.ascNumber,
                 },
                 "tst": current_timestamp_milliseconds,
                 "deviceId": self.device_id,
             }
-
+        _LOGGER.warning(f"{self.device_id} send_action {action}")
         try:
             self.writer.write(self.get_send_packet(json.dumps(action).encode(), 1))
             await self.writer.drain()
@@ -362,10 +371,10 @@ class DeviceClient(object):
             "service": "test",
             "method": "pingreq",
             "seq": "123456",
-            "srcAddr": "x.xxxxxxx",
+            "srcAddr": "123456",
             CONF_PAYLOAD: {},
         }
-        _LOGGER.info(f"{self.device_id} send_ping_action {ping}")
+        _LOGGER.warning(f"{self.device_id} send_ping_action {ping}")
         try:
             if self.ping_count >= 3:
                 _LOGGER.error(
@@ -378,6 +387,7 @@ class DeviceClient(object):
             self.writer.write(self.get_send_packet(json.dumps(ping).encode(), 2))
             await self.writer.drain()
             self.ping_count += 1
+            await self.send_action(self.syncProperties, CONF_GET_DEV_ATTR_REQ)
             return 1
         except Exception as e:
             _LOGGER.error(f"{self.device_id} ping error {e}")

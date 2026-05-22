@@ -208,6 +208,8 @@ CONF_RGBW = "RGBW"
 CONF_CCT = "CCT"
 CONF_ACK = "ack"
 CONF_IS_OWNER = "isOwner"
+CONF_GET_DEV_ATTR_REQ = "getDevAttrReq"
+CONF_SET_DEV_ATTR_REQ = "setDevAttrReq"
 
 
 class Identity(StrEnum):
