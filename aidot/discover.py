@@ -8,10 +8,9 @@ from typing import Any
 from .aes_utils import aes_encrypt, aes_decrypt
 from .const import CONF_ID, CONF_IPADDRESS
 from .exceptions import AidotOSError
+from aidot.models.discover_model import DiscoverResponse, DiscoverRequest
 
 _LOGGER = logging.getLogger(__name__)
-# _DISCOVER_TIME = 15
-
 _DISCOVER_FAST = 6      # 启动时快速发现
 _DISCOVER_SLOW = 120    # 稳定后慢速维持
 
@@ -19,10 +18,7 @@ class BroadcastProtocol:
     _is_closed = False
 
     def __init__(self, callback, user_id) -> None:
-        self.aes_key = bytearray(32)
-        key_string = "T54uednca587"
-        key_bytes = key_string.encode()
-        self.aes_key[: len(key_bytes)] = key_bytes
+        self.aes_key = bytearray(b"T54uednca587".ljust(32, b'\x00'))
 
         self._discover_cb = callback
         self.user_id = user_id
@@ -36,37 +32,25 @@ class BroadcastProtocol:
         if self._is_closed is True:
             _LOGGER.error(f"{self.user_id}:Connection is closed")
             return
-        current_timestamp_milliseconds = int(time.time() * 1000)
-        seq = str(current_timestamp_milliseconds + 1)[-9:]
-        message = {
-            "protocolVer": "2.0.0",
-            "service": "device",
-            "method": "devDiscoveryReq",
-            "seq": seq,
-            "srcAddr": f"0.{self.user_id}]",
-            "tst": current_timestamp_milliseconds,
-            "payload": {
-                "extends": {},
-                "localCtrFlag": 1,
-                "timestamp": str(current_timestamp_milliseconds),
-            },
-        }
-        _LOGGER.info(f"send_broadcast {message}")
-        send_data = aes_encrypt(json.dumps(message).encode(), self.aes_key)
         try:
+            request = DiscoverRequest.from_params(userId=self.user_id)
+            message = request.to_dict()
+            _LOGGER.info(f"send_broadcast {message}")
+            send_data = aes_encrypt(json.dumps(message).encode(), self.aes_key)
             self.transport.sendto(send_data, ("255.255.255.255", 6666))
         except Exception as error:
             _LOGGER.error(f"{self.user_id}:Connection lost due to error: {error}")
 
     def datagram_received(self, data, addr) -> None:
-        data_str = aes_decrypt(data, self.aes_key)
-        data_json = json.loads(data_str)
-        _LOGGER.info(f"datagram_received {data_json}")
-        if "payload" in data_json:
-            if "mac" in data_json["payload"]:
-                devId = data_json["payload"]["devId"]
-                if self._discover_cb:
-                    self._discover_cb(devId, {CONF_IPADDRESS: addr[0]})
+        try:
+            data_str = aes_decrypt(data, self.aes_key)
+            data_json = json.loads(data_str)
+            response = DiscoverResponse.from_json(data=data_json)
+            _LOGGER.info(f"datagram_received {data_json}")
+            if response.payload and response.payload.devId and self._discover_cb:
+                self._discover_cb(response.payload.devId, {CONF_IPADDRESS: addr[0]})
+        except Exception as error:
+            _LOGGER.error(f"datagram_received error: {error}")
 
     def error_received(self, exc) -> None:
         _LOGGER.error(f"{self.user_id}:Error occurred: {exc}")
@@ -115,7 +99,7 @@ class Discover:
         self._schedule_broadcast()
 
     def _schedule_broadcast(self) -> None:
-        _LOGGER.debug(f"_schedule_broadcast")
+        _LOGGER.warning(f"_schedule_broadcast")
         # 前几次快速发现，之后慢速
         if self._fast_discover_count > 0:
             interval = _DISCOVER_FAST

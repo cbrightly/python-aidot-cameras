@@ -1,6 +1,8 @@
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding
+import json
+from typing import Any, Optional
 
 
 def aes_encrypt(plaintext, key):
@@ -25,3 +27,20 @@ def aes_decrypt(ciphertext, key):
     plaintext = unpadder.update(decrypted_data) + unpadder.finalize()
 
     return plaintext.decode()
+
+
+def aes_decrypt_to_json(ciphertext: bytes, key: Optional[bytes] = None) -> dict[str, Any]:
+    """Decrypt AES encrypted data and parse to JSON.
+    
+    Args:
+        ciphertext: AES encrypted data
+        key: AES key (optional, if None, assumes data is already decrypted)
+    
+    Returns:
+        Parsed JSON dict
+    """
+    if key:
+        decrypted_data = aes_decrypt(ciphertext, key)
+    else:
+        decrypted_data = ciphertext.decode() if isinstance(ciphertext, bytes) else ciphertext
+    return json.loads(decrypted_data)

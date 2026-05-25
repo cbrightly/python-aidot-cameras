@@ -11,7 +11,8 @@ from datetime import datetime
 from typing import Any
 
 from .exceptions import AidotNotLogin
-from .aes_utils import aes_encrypt, aes_decrypt
+from .aes_utils import aes_encrypt, aes_decrypt_to_json
+from .models.device_client_model import PingRequest, LoginRequest, LoginPayload, DeviceResponse, DeviceAttr, DeviceActionRequest
 from .const import (
     CONF_AES_KEY,
     CONF_ASCNUMBER,
@@ -51,15 +52,16 @@ class DeviceStatusData:
     cct: int = 2700
     dimming: int = 100
 
-    def update(self, attr: dict[str, Any]) -> None:
+    def update(self, attr: DeviceAttr) -> None:
+        """Update status from DeviceAttr model."""
         if attr is None:
             return
-        if attr.get(CONF_ON_OFF) is not None:
-            self.on = attr.get(CONF_ON_OFF)
-        if attr.get(CONF_DIMMING) is not None:
-            self.dimming = int(attr.get(CONF_DIMMING) * 255 / 100)
-        if attr.get(CONF_RGBW) is not None:
-            rgbw_value = attr.get(CONF_RGBW)
+        if attr.OnOff is not None:
+            self.on = attr.OnOff
+        if attr.Dimming is not None:
+            self.dimming = int(attr.Dimming * 255 / 100)
+        if attr.RGBW is not None:
+            rgbw_value = attr.RGBW
             # If RGBW is 0, set default red color (255, 0, 0, 0)
             if rgbw_value == 0:
                 self.rgdb = 0xFF000000  # Red in int: 4278190080
@@ -72,8 +74,8 @@ class DeviceStatusData:
             b = (rgbw >> 8) & 0xFF
             w = rgbw & 0xFF
             self.rgbw = (r, g, b, w)
-        if attr.get(CONF_CCT) is not None:
-            self.cct = attr.get(CONF_CCT)
+        if attr.CCT is not None:
+            self.cct = attr.CCT
 
 
 class DeviceInformation:
@@ -123,8 +125,8 @@ class DeviceClient(object):
     writer: Any = None
     reader: Any = None
     syncProperties = [CONF_ON_OFF, CONF_DIMMING, CONF_RGBW, CONF_CCT]
-    heart_time = 10
-    # syncProperties = []
+    heart_time = 30
+    ping_data = PingRequest().to_dict()
     _TAG: str = "DeviceClient"
     @property
     def connect_and_login(self) -> bool:
@@ -151,9 +153,10 @@ class DeviceClient(object):
         self.device_id = device.get(CONF_ID)
         self._simpleVersion = device.get("simpleVersion")
         self._TAG = f"{self.device_id}"
-        # if self.info.model_id == 'lk.WIFI-RGBWLight-D0006':
-        #     self.syncProperties = [CONF_ON_OFF, CONF_DIMMING, CONF_RGBW, CONF_CCT]
-        
+        if self.info.model_id == 'lk.WIFI-RGBWLight-D0006':
+            self.ping_data = None
+            self.heart_time = 10
+
         _LOGGER.warning(f"{self._TAG}:{device}")
 
     async def connect(self, ip_address) -> None:
@@ -209,37 +212,34 @@ class DeviceClient(object):
     async def login(self) -> None:
         login_seq = str(int(time.time() * 1000) + self._login_uuid)[-9:]
         self._login_uuid += 1
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-        message = {
-            "service": "device",
-            "method": "loginReq",
-            "seq": login_seq,
-            "srcAddr": self.user_id,
-            "deviceId": self.device_id,
-            "payload": {
-                "userId": self.user_id,
-                "password": self.password,
-                "timestamp": timestamp,
-                "ascNumber": 1,
-            },
-        }
+        
+        login_request = LoginRequest(
+            seq=login_seq,
+            srcAddr=self.user_id,
+            deviceId=self.device_id,
+            payload=LoginPayload(
+                userId=self.user_id,
+                password=self.password,
+            ),
+        )
+        message = login_request.to_dict()
         try:
             self.writer.write(self.get_send_packet(json.dumps(message).encode(), 1))
             await self.writer.drain()
             header = await self.reader.readexactly(8)
             magic, msgtype, bodysize = struct.unpack(">HHI", header)
             body = await self.reader.readexactly(bodysize)
-            decrypted_data = aes_decrypt(body, self.aes_key) if self.aes_key else body
-            json_data = json.loads(decrypted_data)
-            code = json_data[CONF_ACK][CONF_CODE]
-        
-            if code != 200:
+            json_data = aes_decrypt_to_json(body, self.aes_key)
+            _LOGGER.warning(f"{self._TAG}:login result: {json_data}")
+            
+            response = DeviceResponse.from_json(json_data)
+            if response.ack.code != 200:
                 # 登录失败
-                _LOGGER.error(f"{self._TAG}:login error, code: {code}")
+                _LOGGER.error(f"{self._TAG}:login error, code: {response.ack.code}")
                 await self.reset()
                 return
 
-            self.ascNumber = json_data[CONF_PAYLOAD][CONF_ASCNUMBER] + 1
+            self.ascNumber = response.payload.ascNumber + 1
             self.status.online = True
             self._notify_status_update()
             self._receive_task = asyncio.create_task(
@@ -265,8 +265,7 @@ class DeviceClient(object):
                 magic, msgtype, bodysize = struct.unpack(">HHI", header)
                 self.ping_count = 0 #有读到数据就把ping清零
                 body = await self.reader.readexactly(bodysize)
-                decrypted_data = aes_decrypt(body, self.aes_key)
-                json_data = json.loads(decrypted_data)
+                json_data = aes_decrypt_to_json(body, self.aes_key)
                 _LOGGER.warning(f"{self._TAG}:reveive_data : {json_data}")
             except asyncio.CancelledError:
                 _LOGGER.debug(f"{self._TAG}:Receive task cancelled")
@@ -279,19 +278,18 @@ class DeviceClient(object):
                 return
             except Exception as e:
                 _LOGGER.error(f"{self._TAG}:recv error: {e}")
-                self.ping_count = 0
                 continue
 
-            if "service" in json_data:
-                if "test" == json_data["service"]:
-                    self.ping_count = 0
-                    continue
-
-            payload = json_data.get(CONF_PAYLOAD)
-            if payload is not None:
-                self.ascNumber = payload.get(CONF_ASCNUMBER)
-                self.status.update(payload.get(CONF_ATTR))
-                self._notify_status_update()
+            response = DeviceResponse.from_json(json_data)
+            if response.service == "test":
+                continue
+            
+            if response.payload:
+                if response.payload.ascNumber:
+                    self.ascNumber = response.payload.ascNumber
+                if response.payload.attr:
+                    self.status.update(response.payload.attr)
+                    self._notify_status_update()
     
     def _schedule_ping(self):
         loop = asyncio.get_running_loop()
@@ -324,42 +322,19 @@ class DeviceClient(object):
         await self.send_dev_attr({CONF_CCT: cct})
 
     async def send_action(self, attr, method) -> None:
-        current_timestamp_milliseconds = int(time.time() * 1000)
         self.seq_num += 1
-        seq = "ha93" + str(self.seq_num).zfill(5)
-
-        if self._simpleVersion is not None:
-            action = {
-                "method": method,
-                "service": "device",
-                "clientId": "ha-" + self.user_id,
-                "srcAddr": "0." + self.user_id,
-                "seq": "" + seq,
-                CONF_PAYLOAD: {
-                    "devId": self.device_id,
-                    "parentId": self.device_id,
-                    "userId": self.user_id,
-                    "password": self.password,
-                    "attr": attr,
-                    "channel": "tcp",
-                    "ascNumber": self.ascNumber,
-                },
-                "tst": current_timestamp_milliseconds,
-                "deviceId": self.device_id,
-            }
-        else:
-            action = {
-                "method": method,
-                "service": "device",
-                "seq": "" + seq,
-                "srcAddr": "0." + self.user_id,
-                CONF_PAYLOAD: {
-                    "attr": attr,
-                    "ascNumber": self.ascNumber,
-                },
-                "tst": current_timestamp_milliseconds,
-                "deviceId": self.device_id,
-            }
+        action_request = DeviceActionRequest.from_params(
+            method=method,
+            user_id=self.user_id,
+            device_id=self.device_id,
+            password=self.password,
+            ascNumber=self.ascNumber,
+            attr=attr,
+            seq="ha93" + str(self.seq_num).zfill(5),
+            simpleVersion=self._simpleVersion,
+        )
+        
+        action = action_request.to_dict()
         _LOGGER.warning(f"{self.device_id} send_action {action}")
         try:
             self.writer.write(self.get_send_packet(json.dumps(action).encode(), 1))
@@ -373,14 +348,6 @@ class DeviceClient(object):
     async def send_ping_action(self) -> int:
         if self._is_close:
             return -1
-        ping = {
-            "service": "test",
-            "method": "pingreq",
-            "seq": "123456",
-            "srcAddr": "123456",
-            CONF_PAYLOAD: {},
-        }
-        _LOGGER.warning(f"{self.device_id} send_ping_action {ping}")
         try:
             if self.ping_count >= 3:
                 _LOGGER.error(
@@ -390,10 +357,15 @@ class DeviceClient(object):
                 return -1
             if self._connect_and_login is False:
                 return -1
-            # self.writer.write(self.get_send_packet(json.dumps(ping).encode(), 2))
-            # await self.writer.drain()
+            
             self.ping_count += 1
-            await self.send_action(self.syncProperties, CONF_GET_DEV_ATTR_REQ)
+            if self.ping_data is not None:
+                _LOGGER.warning(f"{self.device_id} send_ping {self.ping_data}")
+                self.writer.write(self.get_send_packet(json.dumps(self.ping_data).encode(), 2))
+                await self.writer.drain()
+            else:
+                _LOGGER.warning(f"{self.device_id} send_ping {self.syncProperties}")
+                await self.send_action(self.syncProperties, CONF_GET_DEV_ATTR_REQ)
             return 1
         except Exception as e:
             _LOGGER.error(f"{self.device_id} ping error {e}")
@@ -420,7 +392,7 @@ class DeviceClient(object):
                 await self.writer.wait_closed()
         except Exception as e:
             _LOGGER.error(f"{self.device_id} writer/reader close error {e}")
-        self.writer = self.reader = None;
+        self.writer = self.reader = None
 
         self._connect_and_login = False
         self.status.online = False
