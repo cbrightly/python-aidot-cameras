@@ -36,6 +36,8 @@ from .const import (
     SUPPORTED_COUNTRYS,
     DEFAULT_COUNTRY_CODE,
     CONF_IS_OWNER,
+    CONF_TYPE,
+    CONF_AES_KEY,
     ServerErrorCode,
 )
 
@@ -77,7 +79,7 @@ class AidotClient:
         password: str | None = None,
         token: dict | None = None,
     ) -> None:
-        _LOGGER.info("Client Version: v0.3.52")
+        _LOGGER.info("Client Version: v0.3.54b3")
         self.session = session
         self.username = username
         self.password = password
@@ -258,6 +260,7 @@ class AidotClient:
                 for device in final_device_list:
                     if device[CONF_PRODUCT_ID] == product[CONF_ID]:
                         device[CONF_PRODUCT] = product
+            
         except Exception as e:
             raise e
         return {CONF_DEVICE_LIST: final_device_list}
@@ -286,6 +289,7 @@ class AidotClient:
         if self._discover is not None:
             return
 
+        _LOGGER.warning(f"setup_discover")
         def _discover_callback(dev_id, event: dict[str, str]) -> None:
             device_ip = event[CONF_IPADDRESS]
             device_client: DeviceClient = self._device_clients.get(dev_id)
