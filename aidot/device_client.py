@@ -244,6 +244,10 @@ class DeviceInformation:
     aes_key: str
     # Local device access password (TUTK viewPwd candidate)
     device_password: str
+    # TUTK IOCtrl direction codes the camera advertises (e.g. [3,6] = left+right
+    # for a pan-only camera, [1,2,3,6] = full PTZ).  Empty means unknown — callers
+    # should treat unknown as "show all" for backward compatibility.
+    ptz_directions: list
 
     def __init__(self, device: dict[str, Any]) -> None:
         self.dev_id = device.get(CONF_ID)
@@ -256,6 +260,7 @@ class DeviceInformation:
         self.aes_key = _aes[0] if isinstance(_aes, list) and _aes else (
             str(_aes) if _aes else "")
         self.device_password = device.get("password") or ""
+        self.ptz_directions = []
         if CONF_PRODUCT in device and CONF_SERVICE_MODULES in device[CONF_PRODUCT]:
             for service in device[CONF_PRODUCT][CONF_SERVICE_MODULES]:
                 if service[CONF_IDENTITY] == Identity.RGBW:
@@ -265,6 +270,16 @@ class DeviceInformation:
                     self.cct_min = int(service[CONF_PROPERTIES][0][CONF_MINVALUE])
                     self.cct_max = int(service[CONF_PROPERTIES][0][CONF_MAXVALUE])
                     self.enable_cct = True
+                for prop in service.get(CONF_PROPERTIES) or []:
+                    if prop.get("code") == "ptzDirection":
+                        raw = prop.get("allowedValues")
+                        try:
+                            import json as _json
+                            codes = _json.loads(raw) if isinstance(raw, str) else raw
+                            if isinstance(codes, list):
+                                self.ptz_directions = [int(c) for c in codes]
+                        except Exception:
+                            pass
 
 # --------------------------------------------------------------------------- #
 # Camera data types
