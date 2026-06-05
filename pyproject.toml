@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "python-aidot-cameras-cbrightly"
+version = "0.5.0"
+description = "Control AiDot/Leedarson WiFi lights and cameras (WebRTC streaming, two-way audio, PTZ, controls)"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "cbrightly", email = "chris.brightly@gmail.com" }]
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "aiohttp",
+    "paho-mqtt>=2.0",
+    "cryptography",
+    "pycryptodome",
+]
+
+[project.optional-dependencies]
+webrtc = [
+    "aiortc>=1.9.0",
+    "av",
+    "pylibsrtp",
+    "pyopenssl",
+    "numpy",
+    "Pillow",
+]
+
+[project.urls]
+Homepage = "https://github.com/cbrightly/python-AiDot"
+"Issue Tracker" = "https://github.com/cbrightly/python-AiDot/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
