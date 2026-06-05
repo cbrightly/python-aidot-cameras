@@ -1,0 +1,49 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref (avoids piling up duplicate runs).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Lint is pure-Python; run it on Ubuntu (fast). node24-runtime actions.
+  lint:
+    name: Lint (errors only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5        # node24
+      - uses: actions/setup-python@v6    # node24
+        with:
+          python-version: "3.13"
+      - run: pip install flake8
+      # Fail ONLY on genuine breakage: syntax errors (E9), undefined names (F82),
+      # invalid comparisons (F63) and the like - not style/convention noise.
+      - name: Lint for real errors
+        run: flake8 $(git ls-files '*.py') --count --select=E9,F63,F7,F82 --show-source --statistics
+
+  # Tests run inside an Alpine (musl) container - the SAME libc Home Assistant
+  # OS / Container uses - so the native deps (aiortc / av / pylibsrtp, all via
+  # musllinux wheels) install and run exactly as they do on a real HA host.
+  # Alpine container jobs REQUIRE node24-runtime actions (checkout@v5+): GitHub's
+  # node20 binary is glibc-only and cannot execute inside a musl container.
+  test:
+    name: Unit tests (Alpine / musl - HA runtime)
+    runs-on: ubuntu-latest
+    container: python:3.13-alpine
+    steps:
+      - uses: actions/checkout@v5        # node24 (mandatory in a musl container)
+      # git for checkout; small build toolchain as a safety net for any
+      # transitive dep that lacks a musllinux wheel (the heavy ones all have them).
+      - name: System deps
+        run: apk add --no-cache git gcc musl-dev libffi-dev
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[webrtc]" pytest
+      - name: Run unit tests
+        run: pytest tests/ -q

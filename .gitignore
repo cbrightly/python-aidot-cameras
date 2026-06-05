@@ -159,4 +159,35 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# macOS artifacts
+.DS_Store
+**/.DS_Store
+
+# Development environment
+__INIT_VENV__
+venv/
+.venv/
+
+# Test captures and scratch files
+*.pcap
+a.txt
+camera_tests/
+camera_stream.*
+camera_traffic.*
+
+# Development utility scripts (local only)
+copy_to_macbook.sh
+extract.sh
+test-*.sh
+camera_test_runner.sh
+research/tutk_bridge/android-bionic/aosp_arm64-exp-RP1A/system.img
+
+# Local venv rebuild snapshot (dev artifact)
+requirements-venv-snapshot.txt
+
+# Reverse-engineering artifacts (decompiled APK, SDK headers, binary analysis)
+# kept locally, purged from git history 2026-05-30 (backup: ~/aidot-research-backup-20260530)
+research/
+
+# Manual camera exerciser (local dev/diagnostic script, not shipped)
 test_camera.py
