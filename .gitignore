@@ -191,3 +191,30 @@ research/
 
 # Manual camera exerciser (local dev/diagnostic script, not shipped)
 test_camera.py
+
+# Live-device integration tests (contain per-device credentials and LAN IPs)
+tutk_test.py
+beta_test.py
+
+# Development/diagnostic scripts (contain hardcoded paths and LAN IPs)
+tools/
+
+# Experimental sidecar / research artifacts (Go binary, compiled bytecode)
+sidecar/
+
+# Internal development planning notes
+plan.md
+
+# AI session memory (local only)
+.claude/
+
+# Reverse-engineering and validation docs (contain LAN IPs and internal architecture notes)
+docs/APK_DTLS_WEBRTC.md
+docs/CAMERA_LIFECYCLE_PARITY.md
+docs/DTLS_ICE_NOMINATION_FIX.md
+docs/EXPERIMENT_DC_ONLY_HANDOFF.md
+docs/ICE_DTLS_ROOT_CAUSE.md
+docs/SIDECAR_SCOPE.md
+docs/VALIDATION_2026-05-30.md
+docs/WEBRTC_BASELINE.md
+docs/official_camera_network_calls.md
