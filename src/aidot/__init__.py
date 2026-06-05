@@ -6,6 +6,7 @@ from .discover import Discover
 from .exceptions import (
     AidotAuthFailed,
     AidotAuthTokenExpired,
+    AidotCameraBusy,
     AidotError,
     AidotNotLogin,
     AidotOSError,
@@ -19,6 +20,7 @@ __all__ = [
     "AidotClient",
     "DeviceClient",
     "Discover",
+    "AidotCameraBusy",
     "AidotError",
     "AidotAuthFailed",
     "AidotAuthTokenExpired",
