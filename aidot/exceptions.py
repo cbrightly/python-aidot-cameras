@@ -1,37 +1,58 @@
-"""aidot Exceptions."""
+"""AiDot exception hierarchy."""
 
 
 class AidotError(Exception):
-    """Aidot api exception."""
+    """Base exception for all AiDot errors."""
 
 
 class InvalidURL(AidotError):
-    """Invalid url exception."""
+    """Invalid URL."""
 
 
 class HTTPError(AidotError):
-    """Invalid host exception."""
+    """HTTP request failed."""
 
 
 class InvalidHost(AidotError):
-    """Invalid host exception."""
+    """Invalid host."""
 
 
 class AidotAuthTokenExpired(AidotError):
-    """Authentication failed because token is invalid or expired."""
+    """Auth token is invalid or expired."""
 
 
 class AidotAuthFailed(AidotError):
-    """Authentication failed"""
+    """Authentication failed."""
 
 
 class AidotNotLogin(AidotError):
-    """Aidot not login"""
+    """Client is not logged in."""
 
 
 class AidotUserOrPassIncorrect(AidotError):
-    """Authentication failed"""
+    """Username or password is incorrect."""
 
 
-class AidotOSError(Exception):
-    """Aidot exception."""
+class AidotOSError(AidotError):
+    """OS-level error from the AiDot library."""
+
+
+class AidotCameraBusy(AidotError):
+    """Camera refused the live stream with a TERMINAL ack code - retrying is futile.
+
+    Raised when a ``webrtcResp`` carries ``ack.code`` in the terminal set:
+      -50002  WEBRTC_ERROR_EN_RTC_ERR_CODE_SESSION_EXCEED (max concurrent streams)
+      -50015  LIVE_SD_MAX_CONNECT_ERROR (SD-card / connection cap)
+
+    The official app treats both as terminal (shows an error, does NOT retry -
+    decompiled LiveCameraView.java:765). Callers should surface the error rather
+    than burning their retry budget hammering a camera that already said no.
+    """
+
+    def __init__(self, code: int, desc: str = "") -> None:
+        self.code = code
+        self.desc = desc
+        msg = f"camera refused stream: ack code {code}"
+        if desc:
+            msg += f" ({desc})"
+        super().__init__(msg)
