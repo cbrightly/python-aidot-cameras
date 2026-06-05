@@ -123,7 +123,7 @@ class AidotClient:
         try:
             response = await self.session.post(url, headers=headers, json=data)
             response_data = await response.json(content_type=None)
-            _LOGGER.debug("async_post_login HTTP=%d response: %s", response.status, response_data)
+            _LOGGER.debug("async_post_login HTTP=%d code=%s", response.status, response_data.get(CONF_CODE))
             app_code = response_data.get(CONF_CODE)
             if app_code == ServerErrorCode.USER_PWD_INCORRECT:
                 raise AidotUserOrPassIncorrect
@@ -178,7 +178,7 @@ class AidotClient:
             async with self.session.get(url, headers=headers,
                                         timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 body = await resp.json(content_type=None)
-            _LOGGER.debug("userConfig response: %s", body)
+            _LOGGER.debug("userConfig response keys=%s", list(body.keys()) if isinstance(body, dict) else type(body).__name__)
             # The MQTT password field may be named mqttPassword or similar.
             # Store the full response data alongside login_info for DeviceClient.
             data = body if isinstance(body, dict) else {}
