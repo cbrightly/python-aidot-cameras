@@ -1,7 +1,6 @@
 """The aidot integration."""
 
 import asyncio
-import hashlib
 import json
 import logging
 import base64
@@ -53,10 +52,6 @@ def rsa_password_encrypt(message: str) -> str:
     encrypted = public_key.encrypt(message.encode("utf-8"), padding.PKCS1v15())
     return base64.b64encode(encrypted).decode("utf-8")
 
-
-def md5_password(message: str) -> str:
-    """MD5 hex digest of the password (for /users/login web-app flow)."""
-    return hashlib.md5(message.encode("utf-8")).hexdigest()
 
 
 class AidotClient:
@@ -253,7 +248,7 @@ class AidotClient:
         inflight = self._ensure_token_inflight
         if inflight is not None and not inflight.done():
             return await inflight
-        fut = asyncio.get_event_loop().create_future()
+        fut = asyncio.get_running_loop().create_future()
         self._ensure_token_inflight = fut
         try:
             result = await self._do_ensure_token()
@@ -342,26 +337,23 @@ class AidotClient:
 
     async def async_get_all_device(self) -> dict[str, Any]:
         final_device_list: list[dict[str, Any]] = []
-        try:
-            houses = await self.async_get_houses()
-            for house in houses:
-                if house.get(CONF_IS_OWNER) is False:
-                    continue
-                # get device_list
-                device_list = await self.async_get_devices(house[CONF_ID])
-                if device_list:
-                    final_device_list.extend(device_list)
+        houses = await self.async_get_houses()
+        for house in houses:
+            if house.get(CONF_IS_OWNER) is False:
+                continue
+            # get device_list
+            device_list = await self.async_get_devices(house[CONF_ID])
+            if device_list:
+                final_device_list.extend(device_list)
 
-            # get product_list
-            productIds = ",".join([item[CONF_PRODUCT_ID] for item in final_device_list])
-            product_list = await self.async_get_products(productIds)
+        # get product_list
+        productIds = ",".join([item[CONF_PRODUCT_ID] for item in final_device_list])
+        product_list = await self.async_get_products(productIds)
 
-            for product in product_list:
-                for device in final_device_list:
-                    if device[CONF_PRODUCT_ID] == product[CONF_ID]:
-                        device[CONF_PRODUCT] = product
-        except Exception:
-            raise
+        for product in product_list:
+            for device in final_device_list:
+                if device[CONF_PRODUCT_ID] == product[CONF_ID]:
+                    device[CONF_PRODUCT] = product
 
         # Share the full device ID list with every DeviceClient so that
         # batchGetDeviceUserInfo is called with all IDs (the server may return

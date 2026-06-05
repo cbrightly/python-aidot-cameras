@@ -93,7 +93,7 @@ class BroadcastProtocol:
             "service": "device",
             "method": "devDiscoveryReq",
             "seq": seq,
-            "srcAddr": f"0.{self.user_id}]",
+            "srcAddr": f"0.{self.user_id}",
             "tst": current_timestamp_milliseconds,
             "payload": {
                 "extends": {},
@@ -166,7 +166,7 @@ class Discover:
                 self._discover_callback, user_id, broadcast_addr=broadcast_ip
             )
             try:
-                await asyncio.get_event_loop().create_datagram_endpoint(
+                await asyncio.get_running_loop().create_datagram_endpoint(
                     lambda p=protocol: p,
                     local_addr=(bind_ip, 0),
                 )
@@ -183,7 +183,7 @@ class Discover:
             # Last-resort fallback
             protocol = BroadcastProtocol(self._discover_callback, user_id)
             try:
-                await asyncio.get_event_loop().create_datagram_endpoint(
+                await asyncio.get_running_loop().create_datagram_endpoint(
                     lambda: protocol,
                     local_addr=("0.0.0.0", 0),
                 )
