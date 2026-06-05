@@ -992,7 +992,7 @@ class TutkStreamSession:
 
     async def start(self) -> bool:
         """Load native libs, connect P2P, and start the frame-receive thread."""
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._start_sync)
 
     def _start_sync(self) -> bool:
@@ -1211,7 +1211,7 @@ class TutkStreamSession:
         """Signal the receive thread to stop and wait for it."""
         self._stop_event.set()
         if self._thread is not None:
-            await asyncio.get_event_loop().run_in_executor(
+            await asyncio.get_running_loop().run_in_executor(
                 None, lambda: self._thread.join(timeout=5.0)
             )
 
@@ -1328,7 +1328,7 @@ class LiveStreamSession:
             return False
 
         # Start background receive/heartbeat task.
-        self._task = asyncio.get_event_loop().create_task(self._receive_loop())
+        self._task = asyncio.get_running_loop().create_task(self._receive_loop())
         return True
 
     async def stop(self) -> None:
@@ -4248,7 +4248,7 @@ class DeviceClient(object):
                 buf = _io.BytesIO()
                 pil_img.save(buf, "JPEG")
                 self.latest_jpeg = buf.getvalue()
-                self._last_frame_time = asyncio.get_event_loop().time()
+                self._last_frame_time = asyncio.get_running_loop().time()
             except Exception as enc_exc:
                 _LOGGER.debug("Streaming encode failed for %s: %s", self.device_id, enc_exc)
 
@@ -4287,7 +4287,7 @@ class DeviceClient(object):
             try:
                 while self._streaming_active:
                     await asyncio.sleep(5.0)
-                    elapsed = asyncio.get_event_loop().time() - self._last_frame_time
+                    elapsed = asyncio.get_running_loop().time() - self._last_frame_time
                     if self._last_frame_time > 0 and elapsed > _WATCHDOG:
                         _LOGGER.warning(
                             "No frames from %s in %.0fs - restarting stream",
@@ -4417,7 +4417,7 @@ class DeviceClient(object):
         serve_url = self._keepalive_rtsp_url
         _MIN_DELAY, _MAX_DELAY = 5.0, 300.0
         retry_delay = _MIN_DELAY
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         while self._streaming_active:
             # Thread-safe queues: taps run on the loop, the A/V mux in a thread.
             vq: "_queue.Queue" = _queue.Queue(maxsize=600)
@@ -7162,10 +7162,10 @@ class DeviceClient(object):
         # the camera silently ignores the original request and we time out.
         _init_done: set = set()
         _init_pending: set = {answer_fut, camera_offer_fut, webrtc_req_echo_fut}
-        _init_deadline = asyncio.get_event_loop().time() + timeout
+        _init_deadline = asyncio.get_running_loop().time() + timeout
         _init_reconnect_resends = 0
-        while asyncio.get_event_loop().time() < _init_deadline:
-            _init_remaining = _init_deadline - asyncio.get_event_loop().time()
+        while asyncio.get_running_loop().time() < _init_deadline:
+            _init_remaining = _init_deadline - asyncio.get_running_loop().time()
             _init_done, _init_pending = await asyncio.wait(
                 _init_pending,
                 timeout=min(1.0, max(0.01, _init_remaining)),
@@ -7201,12 +7201,12 @@ class DeviceClient(object):
                 and camera_offer_fut not in _rr_done):
             _status("webrtcReq echo received - waiting for camera webrtcResp...")
             _rr_secondary_limit = 20.0
-            _rr_secondary_deadline = asyncio.get_event_loop().time() + _rr_secondary_limit
+            _rr_secondary_deadline = asyncio.get_running_loop().time() + _rr_secondary_limit
             _rr_done2: set = set()
             _rr_pending2 = _rr_pending   # {answer_fut, camera_offer_fut}
             _rr_reconnect_resends = 0
-            while asyncio.get_event_loop().time() < _rr_secondary_deadline:
-                _remaining = _rr_secondary_deadline - asyncio.get_event_loop().time()
+            while asyncio.get_running_loop().time() < _rr_secondary_deadline:
+                _remaining = _rr_secondary_deadline - asyncio.get_running_loop().time()
                 _rr_done2, _rr_pending2 = await asyncio.wait(
                     _rr_pending2,
                     timeout=min(1.0, max(0.01, _remaining)),
@@ -7246,11 +7246,11 @@ class DeviceClient(object):
                     outgoing_q.put_nowait(_di_p)
 
                 _rr_ext_limit    = 20.0
-                _rr_ext_deadline = asyncio.get_event_loop().time() + _rr_ext_limit
+                _rr_ext_deadline = asyncio.get_running_loop().time() + _rr_ext_limit
                 _rr_done3: set   = set()
                 _rr_reconnect_ext = 0
-                while asyncio.get_event_loop().time() < _rr_ext_deadline:
-                    _ext_rem = _rr_ext_deadline - asyncio.get_event_loop().time()
+                while asyncio.get_running_loop().time() < _rr_ext_deadline:
+                    _ext_rem = _rr_ext_deadline - asyncio.get_running_loop().time()
                     _rr_done3, _rr_pending2 = await asyncio.wait(
                         _rr_pending2,
                         timeout=min(1.0, max(0.01, _ext_rem)),
