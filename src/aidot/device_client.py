@@ -3433,7 +3433,7 @@ class DeviceClient(object):
             "MotionDetection_Enable", "1" if enabled else "0")
 
     async def async_set_floodlight(self, on: bool, brightness: int = 100) -> bool:
-        # Confirmed 2026-05-05: cameras with autoLightEnable=1 (PTZ, A000088-1) ignore
+        # Confirmed 2026-05-05: cameras with autoLightEnable=1 (A001064 PTZ, A000088) ignore
         # manual LightOnOff commands unless auto-light is disabled first.
         # Turning on: disable auto-light, set LightOnOff=1 (and optional Dimming).
         # Turning off: set LightOnOff=0 only (leave autoLightEnable as-is so the
@@ -5363,7 +5363,7 @@ class DeviceClient(object):
         liveplay_resp_fut: asyncio.Future = loop.create_future()  # set on livePlayResp
         camera_reconnect_ev: asyncio.Event = asyncio.Event() # set when camera sends device/connect
         # Mutable flag: set True when setDevAttrNotif delivers sptPreconn:1.
-        # Confirmed 2026-05-02: both A000088 A000088-1 and A001064 PTZ report
+        # Confirmed 2026-05-02: both A000088 and A001064 PTZ report
         # sptPreconn:1.  AVIO LIVING (SESSION_MODE_REQ=5376) must be sent
         # via the data channel to trigger streaming in PreCon cameras.
         _spt_preconn: list = [False]
@@ -5563,7 +5563,7 @@ class DeviceClient(object):
                 # and won't send its own binding requests.
                 _extract_cam_ip("setDevAttrNotif", inner, msg)
                 # Also capture sptPreconn (PreCon / PreConnect support flag).
-                # Confirmed 2026-05-02: both A001064 PTZ and A000088 A000088-1 have
+                # Confirmed 2026-05-02: both A001064 PTZ and A000088 have
                 # sptPreconn:1.  Per BaseKVSCameraView.k():805-815, the official
                 # client sends AVIO LIVING (SESSION_MODE_REQ=5376) via the data
                 # channel only when isSupportPreCon() is true.  Set the flag
@@ -6312,7 +6312,7 @@ class DeviceClient(object):
 
             # AVIO LIVING (E_CMD_AVIO_CTRL_SESSION_MODE_REQ=5376) is sent
             # unconditionally when DC opens.  2026-05-03 testing confirmed:
-            # A000088 cameras (A000088-1 + A000088-2) connect via DTLS,
+            # A000088 cameras connect via DTLS,
             # SCTP comes up, DC opens at t+1-2s - but camera tears down at
             # t+22s if LIVING is not sent.  This is the PreCon watchdog:
             # without LIVING the camera gives up waiting for a viewer.
