@@ -2110,7 +2110,32 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
         while True:
             fr = fifo.read(1024)   # AAC wants 1024-sample frames
             if fr is None:
-                break
+                # 160 PCMA samples → 960 resampled @ 48 kHz, but AAC needs 1024.
+                # Every ~17 packets (~340 ms) the FIFO falls 64 samples short
+                # and would skip an entire 21 ms frame — audible choppiness.
+                # Pad the leftover with silence so the frame is complete.
+                s = getattr(fifo, "samples", 0)
+                if s == 0:
+                    break
+                fr = fifo.read(s)
+                if fr is None or fr.samples == 0:
+                    break
+                if _np is not None:
+                    try:
+                        arr = fr.to_ndarray()
+                        pad_n = 1024 - arr.shape[1]
+                        if pad_n > 0:
+                            padded = _np.concatenate(
+                                [arr, _np.zeros((arr.shape[0], pad_n), dtype=arr.dtype)],
+                                axis=1,
+                            )
+                            pfr = av.AudioFrame.from_ndarray(
+                                padded, format="fltp", layout="mono"
+                            )
+                            pfr.sample_rate = 48000
+                            fr = pfr
+                    except Exception:
+                        break
             fr.pts = a_pts[0]
             fr.time_base = Fraction(1, 48000)
             a_pts[0] += fr.samples
@@ -2124,7 +2149,7 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
     while not stop_flag.is_set():
         _flush_video()
         _flush_audio()
-        _t.sleep(0.02)
+        _t.sleep(0.005)  # 5 ms — processes audio within 5 ms of arrival vs 20 ms
     _flush_video()
     _flush_audio()
     try:
