@@ -4600,6 +4600,13 @@ class DeviceClient(object):
             return None
         cmd = [
             "ffmpeg", "-y", "-loglevel", "warning",
+            # Suppress input-side buffering: the PyAV mux already writes
+            # correctly-interleaved, timestamped MPEG-TS to the pipe every
+            # ~20ms.  Without +nobuffer ffmpeg's mpegts demuxer accumulates a
+            # read-ahead window (and the output mpegts muxer defaults to 700ms
+            # of A/V interleave delay) before flushing to go2rtc - exactly the
+            # bursty/choppy audio pattern.  Matches the SDES serve's approach.
+            "-fflags", "+nobuffer",
             "-i", "pipe:0",
             "-c", "copy", "-f", "mpegts", "-listen", "1", serve_url,
         ]
