@@ -5960,14 +5960,24 @@ class DeviceClient(object):
             # Short extra wait for getIceConfigResp - the server may only respond
             # once a live camera session is active (i.e. after livePlayReq).
             # Waiting here ensures TURN credentials arrive before RTCPeerConnection
-            # is created.  The 3-second window is long enough for typical Arnoo
-            # broker round-trips without adding noticeable latency to fast paths.
-            if not ice_config_fut.done():
+            # is created.  MEASURED (2026-06-07, live): this wait is the DOMINANT
+            # cold-start cost - ~2.5 s for getIceConfigResp to arrive after camera
+            # wake (NOT the TURN gather, which is ~70 ms).  AIDOT_FAST_CONNECT
+            # skips it: we proceed immediately on STUN/host candidates (no relay),
+            # so a LAN camera connects in ~1 s.  getIceConfigResp only supplies the
+            # per-session TURN relay credentials, which LAN-direct doesn't need;
+            # remote/strict-NAT cameras do, hence this is opt-in (see flag above).
+            if not ice_config_fut.done() and not _fast_connect:
                 try:
                     await asyncio.wait_for(asyncio.shield(ice_config_fut), timeout=3.0)
                     _status("getIceConfigResp received (post-livePlayReq)")
                 except asyncio.TimeoutError:
                     pass  # proceed without TURN; synthetic candidates are fallback
+            elif _fast_connect:
+                _status(
+                    "AIDOT_FAST_CONNECT: skipping getIceConfigResp wait"
+                    " (~2.5s) - STUN/host candidates only, LAN-direct"
+                )
 
         # ------------------------------------------------------------------ #
         # Branch: SDES-SRTP cameras use ffmpeg; DTLS cameras use aiortc
