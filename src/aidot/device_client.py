@@ -4440,14 +4440,32 @@ class DeviceClient(object):
         import threading as _threading
         import queue as _queue
         serve_url = self._keepalive_rtsp_url
-        _MIN_DELAY, _MAX_DELAY = 5.0, 300.0
+        # APK parity: the official app gates re-connects to ~15 s (f0.java I1=15000)
+        # and never hammers.  We previously floored at 5 s and a partial-success →
+        # reset path could drop the effective spacing even lower, pounding a flaky
+        # A000088 camera fast enough to wedge its DTLS stack (ICE completes but DTLS
+        # never fires until a power-cycle).  Floor the backoff at the 15 s gate and,
+        # independently, enforce a hard minimum wall-clock spacing between OPEN
+        # attempts so no code path (reset bug, fast PC-death) can pound the camera.
+        _MIN_DELAY, _MAX_DELAY = 15.0, 300.0
+        _open_gate = float(os.environ.get("AIDOT_DTLS_RETRY_GATE_S", "15"))
         retry_delay = _MIN_DELAY
+        _last_open_at = 0.0  # monotonic of the previous open attempt (0 = none yet)
         loop = asyncio.get_running_loop()
         while self._streaming_active:
             # Thread-safe queues: taps run on the loop, the A/V mux in a thread.
             vq: "_queue.Queue" = _queue.Queue(maxsize=600)
             aq: "_queue.Queue" = _queue.Queue(maxsize=600)
             self._serve_ready.clear()  # fresh (cold) session: not ready until bound
+            # Hard inter-attempt gate (APK parity): never start an open within
+            # _open_gate seconds of the previous one, regardless of retry_delay.
+            _since_open = loop.time() - _last_open_at
+            if _last_open_at and _since_open < _open_gate:
+                try:
+                    await asyncio.sleep(_open_gate - _since_open)
+                except asyncio.CancelledError:
+                    return
+            _last_open_at = loop.time()
             try:
                 session = await self.async_open_webrtc_stream(on_frame=lambda _f: None)
             except asyncio.CancelledError:
