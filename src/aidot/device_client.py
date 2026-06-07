@@ -8644,6 +8644,17 @@ class DeviceClient(object):
         import tempfile
         import json
 
+        # _open_sdes_stream runs in its own scope, so recompute the fast-connect
+        # flag here (same precedence as the parent open path: explicit per-camera
+        # option set via start_keepalive, else the AIDOT_FAST_CONNECT env var).
+        # Without this the SDES path NameErrors on every open (regression fixed
+        # 2026-06-07: the SDES TURN-skip gates reference _fast_connect).
+        _fast_connect = getattr(self, "_fast_connect_opt", None)
+        if _fast_connect is None:
+            _fast_connect = os.environ.get("AIDOT_FAST_CONNECT", "").strip().lower() in (
+                "1", "true", "yes", "on",
+            )
+
         user_id = user_id or str(self.user_id)
 
         # Models confirmed (2026-05-02) to send TUTK-framed data instead of
