@@ -4042,7 +4042,11 @@ class DeviceClient(object):
             except asyncio.CancelledError:
                 return
 
-    async def start_keepalive(self, rtsp_push_url: Optional[str] = None) -> None:
+    async def start_keepalive(
+        self,
+        rtsp_push_url: Optional[str] = None,
+        fast_connect: Optional[bool] = None,
+    ) -> None:
         """Start a persistent stream that keeps the camera session alive.
 
         For SDES cameras (A001064/A001513): opens an indefinite ffmpeg stream and
@@ -4054,8 +4058,15 @@ class DeviceClient(object):
         pulls (real play/pause video, no decode/re-encode). Without a serve URL
         it falls back to the on_frame keepalive loop (latest_jpeg / MJPEG).
 
+        ``fast_connect`` enables LAN-direct mode (skip the ~2.5s livePlay/ICE-config
+        waits + TURN relay; see _async_open_webrtc_stream_impl).  ``None`` leaves it
+        to the ``AIDOT_FAST_CONNECT`` env var; ``True``/``False`` override it (e.g.
+        from a Home Assistant config-entry option, since HA OS can't set env vars).
+
         Safe to call multiple times - does nothing if already running.
         """
+        if fast_connect is not None:
+            self._fast_connect_opt = fast_connect
         if self._stream_task is not None and not self._stream_task.done():
             return
         self._keepalive_rtsp_url = rtsp_push_url
@@ -5164,9 +5175,13 @@ class DeviceClient(object):
         # LAN host candidate connects in ~1 s.  TRADE-OFF: no relay means cameras
         # on a different network segment / behind strict NAT cannot connect, so
         # this is opt-in and off by default.
-        _fast_connect = os.environ.get("AIDOT_FAST_CONNECT", "").strip().lower() in (
-            "1", "true", "yes", "on",
-        )
+        # Prefer an explicit per-camera setting (e.g. HA config-entry option via
+        # start_keepalive(fast_connect=...)); fall back to the env var otherwise.
+        _fast_connect = getattr(self, "_fast_connect_opt", None)
+        if _fast_connect is None:
+            _fast_connect = os.environ.get("AIDOT_FAST_CONNECT", "").strip().lower() in (
+                "1", "true", "yes", "on",
+            )
 
         # Wake battery cameras via the cloud HTTP low-power endpoint before the
         # handshake (matches the app, which fires the HTTP wake so a sleeping camera
