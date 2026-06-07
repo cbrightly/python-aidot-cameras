@@ -5154,6 +5154,20 @@ class DeviceClient(object):
 
         use_sdes = force_sdes if force_sdes is not None else self.is_sdes_camera
 
+        # AIDOT_FAST_CONNECT (default off): LAN-direct mode.  Both transports stall
+        # the offer on a TURN relay allocation to the cloud TURN server before ICE
+        # can even start — for DTLS, aiortc's setLocalDescription blocks until ICE
+        # gathering (incl. TURN Allocate) completes; for SDES we synchronously
+        # pre-allocate relay before building the offer.  On a LAN the camera's host
+        # candidate wins anyway, so this is pure cold-start latency (~2-3 s).  When
+        # set, we skip relay allocation so the offer goes out immediately and the
+        # LAN host candidate connects in ~1 s.  TRADE-OFF: no relay means cameras
+        # on a different network segment / behind strict NAT cannot connect, so
+        # this is opt-in and off by default.
+        _fast_connect = os.environ.get("AIDOT_FAST_CONNECT", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+
         # Wake battery cameras via the cloud HTTP low-power endpoint before the
         # handshake (matches the app, which fires the HTTP wake so a sleeping camera
         # gets the signal even with no live MQTT session; the MQTT
@@ -5946,14 +5960,24 @@ class DeviceClient(object):
             # Short extra wait for getIceConfigResp - the server may only respond
             # once a live camera session is active (i.e. after livePlayReq).
             # Waiting here ensures TURN credentials arrive before RTCPeerConnection
-            # is created.  The 3-second window is long enough for typical Arnoo
-            # broker round-trips without adding noticeable latency to fast paths.
-            if not ice_config_fut.done():
+            # is created.  MEASURED (2026-06-07, live): this wait is the DOMINANT
+            # cold-start cost — ~2.5 s for getIceConfigResp to arrive after camera
+            # wake (NOT the TURN gather, which is ~70 ms).  AIDOT_FAST_CONNECT
+            # skips it: we proceed immediately on STUN/host candidates (no relay),
+            # so a LAN camera connects in ~1 s.  getIceConfigResp only supplies the
+            # per-session TURN relay credentials, which LAN-direct doesn't need;
+            # remote/strict-NAT cameras do, hence this is opt-in (see flag above).
+            if not ice_config_fut.done() and not _fast_connect:
                 try:
                     await asyncio.wait_for(asyncio.shield(ice_config_fut), timeout=3.0)
                     _status("getIceConfigResp received (post-livePlayReq)")
                 except asyncio.TimeoutError:
                     pass  # proceed without TURN; synthetic candidates are fallback
+            elif _fast_connect:
+                _status(
+                    "AIDOT_FAST_CONNECT: skipping getIceConfigResp wait"
+                    " (~2.5s) - STUN/host candidates only, LAN-direct"
+                )
 
         # ------------------------------------------------------------------ #
         # Branch: SDES-SRTP cameras use ffmpeg; DTLS cameras use aiortc
@@ -6152,6 +6176,28 @@ class DeviceClient(object):
             f"ICE servers: STUN={_stun_url}"
             f"  relay×{len(_turn_entries)}: {_turn_entries}"
         )
+        if _fast_connect:
+            # Strip TURN URIs so aiortc's setLocalDescription doesn't block on a
+            # TURN Allocate round-trip during ICE gathering — the LAN host
+            # candidate then connects in ~1 s.  Keep STUN (cheap, no allocate).
+            _stun_only = []
+            for _srv in _ice_servers:
+                _su = [
+                    u for u in (_srv.urls if isinstance(_srv.urls, list) else [_srv.urls])
+                    if not str(u).startswith(("turn:", "turns:"))
+                ]
+                if _su:
+                    _stun_only.append(
+                        RTCIceServer(urls=_su, username=_srv.username,
+                                     credential=_srv.credential)
+                    )
+            _ice_servers = _stun_only or [
+                RTCIceServer(urls=["stun:stun.l.google.com:19302"])
+            ]
+            _status(
+                "AIDOT_FAST_CONNECT: stripped TURN (STUN-only, LAN-direct) -"
+                f" {len(_ice_servers)} ICE server(s), no relay gather stall"
+            )
         pc = RTCPeerConnection(
             configuration=RTCConfiguration(iceServers=_ice_servers)
         )
@@ -8810,7 +8856,10 @@ class DeviceClient(object):
         # Allocate relay now so offer c= and m= carry relay IP/port.
         # Camera reads offer's c= to know where to send SRTP - relay address
         # here means SRTP reaches us even through port-restricted / hairpin NAT.
-        if _sdes_turn_entries:
+        # AIDOT_FAST_CONNECT skips this blocking pre-allocation (LAN-direct mode):
+        # the offer goes out immediately with host/srflx candidates and the LAN
+        # path connects without waiting on a cloud TURN Allocate round-trip.
+        if _sdes_turn_entries and not _fast_connect:
             try:
                 import re as _re_pre, hashlib as _hlk_pre
                 _our_te_pre = next(
@@ -9500,7 +9549,10 @@ class DeviceClient(object):
         # Early allocation was done inside the echo handler above.  This block
         # handles cameras that did not produce an echo (non-echo-reversal path)
         # so _relay_addrs is still empty at this point.
-        if not _relay_addrs:
+        # Skipped in AIDOT_FAST_CONNECT (LAN-direct): no relay alloc, host/srflx
+        # candidates only (the synchronous allocate would block the post-offer
+        # candidate trickle on a cloud round-trip).
+        if not _relay_addrs and not _fast_connect:
             try:
                 import re as _re_relay, hashlib as _hlk
                 _our_turn_entry = None
