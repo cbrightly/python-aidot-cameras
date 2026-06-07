@@ -5938,25 +5938,40 @@ class DeviceClient(object):
             _status(f"livePlayReq sent  peerid={peer_id}")
             # Wait for the broker to echo livePlayReq back (confirms delivery).
             # Proceed as soon as the echo arrives; fall through after 0.5 s.
-            try:
-                await asyncio.wait_for(liveplay_echo_ev.wait(), timeout=0.5)
-            except asyncio.TimeoutError:
-                pass
+            # AIDOT_FAST_CONNECT skips this too (the echo often just times out,
+            # costing a flat 0.5 s); we proceed straight to SDP/ICE.
+            if not _fast_connect:
+                try:
+                    await asyncio.wait_for(liveplay_echo_ev.wait(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    pass
             # livePlayResp carries camera-side accept/reject.  If the camera
             # rejects start-play, continuing to SDP/ICE causes large STUN churn
             # but no media.  Fail fast with the concrete code.
-            try:
-                _lp_resp = await asyncio.wait_for(
-                    asyncio.shield(liveplay_resp_fut), timeout=2.0
-                )
-                _lp_code = int(_lp_resp.get("code", 200))
-                _lp_on = int(_lp_resp.get("livePlay", 1))
-                if _lp_code not in (0, 200) or _lp_on == 0:
-                    raise RuntimeError(
-                        f"livePlay rejected by camera (code={_lp_code}, livePlay={_lp_on})"
+            # MEASURED (2026-06-07, live A/B): this up-to-2 s wait is the DOMINANT
+            # cold-start cost (camera-awake → ICE-servers ≈ 2.5 s = 0.5 s echo +
+            # 2.0 s here).  The official app does NOT wait for/parse livePlayResp
+            # (parity-confirmed).  AIDOT_FAST_CONNECT skips it and proceeds to
+            # SDP/ICE immediately — losing fast-fail on rejection (rare; ICE then
+            # fails instead) in exchange for ~2 s off every LAN connect.
+            if not _fast_connect:
+                try:
+                    _lp_resp = await asyncio.wait_for(
+                        asyncio.shield(liveplay_resp_fut), timeout=2.0
                     )
-            except asyncio.TimeoutError:
-                pass
+                    _lp_code = int(_lp_resp.get("code", 200))
+                    _lp_on = int(_lp_resp.get("livePlay", 1))
+                    if _lp_code not in (0, 200) or _lp_on == 0:
+                        raise RuntimeError(
+                            f"livePlay rejected by camera (code={_lp_code}, livePlay={_lp_on})"
+                        )
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                _status(
+                    "AIDOT_FAST_CONNECT: skipping livePlayResp wait (~2s) -"
+                    " proceeding to SDP/ICE (app-parity, no fast-fail on reject)"
+                )
             # Short extra wait for getIceConfigResp - the server may only respond
             # once a live camera session is active (i.e. after livePlayReq).
             # Waiting here ensures TURN credentials arrive before RTCPeerConnection
