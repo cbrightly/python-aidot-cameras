@@ -2083,6 +2083,53 @@ def _inject_sprop(sdp: str, devid: str) -> str:
     return "\r\n".join(out)
 
 
+def _sdes_serve_port(url: "Optional[str]") -> "Optional[int]":
+    """Extract the TCP port from an SDES serve URL (``http://127.0.0.1:PORT/x.ts``).
+
+    Returns None if the URL is missing/malformed.  Pure (unit-testable)."""
+    if not url:
+        return None
+    try:
+        return int(url.rsplit(":", 1)[1].split("/", 1)[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _tcp_table_has_established_on_port(table_text: str, port: int) -> bool:
+    """True if any row in a /proc/net/tcp[6] dump is ESTABLISHED on local ``port``.
+
+    /proc/net/tcp columns: ``sl local_address rem_address st ...`` where
+    local_address is ``HEXIP:HEXPORT`` (port is upper-hex, %04X) and ``st`` is the
+    connection state (``01`` == ESTABLISHED, ``0A`` == LISTEN).  A LISTEN socket
+    (ffmpeg ``-listen 1`` waiting) is NOT a consumer; only an ESTABLISHED peer is.
+    Pure function so the no-viewer policy is unit-testable without a live host."""
+    target = f"{port:04X}"
+    for line in table_text.splitlines()[1:]:  # skip header row
+        cols = line.split()
+        if len(cols) < 4:
+            continue
+        local, st = cols[1], cols[3]
+        if ":" not in local:
+            continue
+        if local.rsplit(":", 1)[1].upper() == target and st == "01":
+            return True
+    return False
+
+
+def _idle_release_due(present, last_consumer: float, now: float,
+                      idle_secs: float) -> bool:
+    """Whether a viewerless SDES keepalive should release.
+
+    ``present``: True (a TCP consumer is connected to the serve port), False
+    (none), or None (the table was unreadable - unknown).  Release ONLY when
+    we're certain there's no consumer (False) AND the idle window has elapsed;
+    True keeps it alive and None never releases (fail-safe on non-Linux).  Pure
+    so the policy is unit-testable without a live loop."""
+    if present is not False:
+        return False
+    return (now - last_consumer) > idle_secs
+
+
 def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
     """Mux tapped video (H.264 copy) + audio (PCMA->AAC) to ``out_fileobj`` as
     RTP-timestamped MPEG-TS.  Runs in a worker thread; the serve's ffmpeg reads
@@ -4279,6 +4326,24 @@ class DeviceClient(object):
                 await session.stop()
         return True
 
+    def _sdes_serve_consumer_present(self, port: int) -> "Optional[bool]":
+        """True if a TCP client is connected to the SDES serve ``port`` (a viewer
+        is pulling), False if none, None if the TCP table can't be read (non-Linux
+        / sandboxed host).  The caller MUST treat None as 'unknown' and NOT release
+        — failing safe to the current always-reconnect behaviour."""
+        read_any = False
+        found = False
+        for _path in ("/proc/net/tcp", "/proc/net/tcp6"):
+            try:
+                with open(_path, "r") as _fh:
+                    _txt = _fh.read()
+            except OSError:
+                continue
+            read_any = True
+            if _tcp_table_has_established_on_port(_txt, port):
+                found = True
+        return found if read_any else None
+
     async def _sdes_keepalive_loop(self) -> None:
         """Background task: keep SDES stream alive; push to go2rtc via RTSP."""
         _MIN_DELAY = 10.0
@@ -4315,6 +4380,20 @@ class DeviceClient(object):
             _started_at = time.monotonic()
             _done = asyncio.ensure_future(session.wait_done())
             _stalled = False
+            _idle_release = False
+            # No-viewer release.  Unlike the DTLS serve (which idle-releases when
+            # its mux pipe goes stale), an SDES keepalive otherwise reconnects
+            # FOREVER even with zero HA consumers — a battery-draining orphan that
+            # also holds a stream slot and TURN-relay bandwidth.  SDES has no mux
+            # pipe to watch, so detect "nobody is pulling" via an ESTABLISHED TCP
+            # connection on the -listen serve port and release after the same idle
+            # window as DTLS; the next view re-runs camera.stream_source().  Fail
+            # safe: unknown (non-Linux /proc) never releases.  Escape hatch:
+            # AIDOT_SDES_IDLE_RELEASE=0.
+            _idle_on = os.environ.get("AIDOT_SDES_IDLE_RELEASE", "1") != "0"
+            _idle_secs = float(os.environ.get("AIDOT_STREAM_IDLE_S", "120"))
+            _serve_port = _sdes_serve_port(self._keepalive_rtsp_url)
+            _last_consumer = _started_at  # grace: count idle from session open
             try:
                 while True:
                     _fin, _ = await asyncio.wait({_done}, timeout=5.0)
@@ -4327,6 +4406,15 @@ class DeviceClient(object):
                     ):
                         _stalled = True
                         break
+                    if _idle_on and _serve_port is not None:
+                        _present = self._sdes_serve_consumer_present(_serve_port)
+                        if _present:  # True → a viewer is pulling; stay alive
+                            _last_consumer = time.monotonic()
+                        elif _idle_release_due(_present, _last_consumer,
+                                               time.monotonic(), _idle_secs):
+                            _idle_release = True
+                            break
+                        # _present is None (unreadable table) → don't release
             except asyncio.CancelledError:
                 _done.cancel()
                 self._stream_session = None
@@ -4334,6 +4422,25 @@ class DeviceClient(object):
                 return
             finally:
                 self._stream_session = None
+
+            if _idle_release:
+                # No HA consumer for the idle window: go dormant instead of
+                # reconnecting forever.  camera.stream_source() restarts us (and
+                # the camera.py stale-stream watchdog evicts HA's cached stream
+                # once stream_rtsp_url is None) when someone opens the view again.
+                _done.cancel()
+                try:
+                    await session.stop()
+                except Exception:
+                    pass
+                self._streaming_active = False
+                self._keepalive_rtsp_url = None
+                self._serve_ready.clear()
+                _LOGGER.debug(
+                    "SDES serve: %s idle (no viewer) - released until next view",
+                    self.device_id,
+                )
+                return
 
             if _stalled:
                 _LOGGER.info(
