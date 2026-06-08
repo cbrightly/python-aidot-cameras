@@ -2059,8 +2059,11 @@ def _save_sprop(devid: str, sprop: str) -> None:
         with open(tmp, "w") as fh:
             fh.write(sprop)
         os.replace(tmp, _sprop_cache_path(devid))
-    except OSError:
-        pass
+    except OSError as exc:
+        # Surface (don't swallow): if the cache dir isn't writable the whole
+        # sprop feature is silently inert.  AIDOT_SPROP_DIR can redirect it.
+        _LOGGER.warning("sprop cache write failed (%s): %s - set AIDOT_SPROP_DIR "
+                        "to a writable path", _SPROP_DIR, exc)
 
 
 def _inject_sprop(sdp: str, devid: str) -> str:
@@ -12098,8 +12101,13 @@ class DeviceClient(object):
                             "a=rtcp-mux\r\n"
                         )
                         try:
+                            # Re-apply the cached sprop-parameter-sets here too:
+                            # this serve-restart rewrite is the SDP the keepalive
+                            # ffmpeg actually reads on every watchdog cycle, so
+                            # without this the out-of-band SPS is lost on restart
+                            # (the failure persisted live even for cached cameras).
                             with open(sdp_path, "w") as _f2:
-                                _f2.write(_new_sdp)
+                                _f2.write(_inject_sprop(_new_sdp, self.device_id))
                         except Exception as _sdp_exc2:
                             _LOGGER.warning("could not rewrite SDP for restart: %s", _sdp_exc2)
                         proc = subprocess.Popen(
