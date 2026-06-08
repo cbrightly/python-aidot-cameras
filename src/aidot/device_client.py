@@ -2017,6 +2017,20 @@ def _tcp_table_has_established_on_port(table_text: str, port: int) -> bool:
     return False
 
 
+def _idle_release_due(present, last_consumer: float, now: float,
+                      idle_secs: float) -> bool:
+    """Whether a viewerless SDES keepalive should release.
+
+    ``present``: True (a TCP consumer is connected to the serve port), False
+    (none), or None (the table was unreadable - unknown).  Release ONLY when
+    we're certain there's no consumer (False) AND the idle window has elapsed;
+    True keeps it alive and None never releases (fail-safe on non-Linux).  Pure
+    so the policy is unit-testable without a live loop."""
+    if present is not False:
+        return False
+    return (now - last_consumer) > idle_secs
+
+
 def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
     """Mux tapped video (H.264 copy) + audio (PCMA->AAC) to ``out_fileobj`` as
     RTP-timestamped MPEG-TS.  Runs in a worker thread; the serve's ffmpeg reads
@@ -4297,9 +4311,8 @@ class DeviceClient(object):
                         _present = self._sdes_serve_consumer_present(_serve_port)
                         if _present:  # True → a viewer is pulling; stay alive
                             _last_consumer = time.monotonic()
-                        elif _present is False and (
-                            time.monotonic() - _last_consumer > _idle_secs
-                        ):
+                        elif _idle_release_due(_present, _last_consumer,
+                                               time.monotonic(), _idle_secs):
                             _idle_release = True
                             break
                         # _present is None (unreadable table) → don't release

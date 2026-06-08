@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from aidot.device_client import (
     _sdes_serve_port,
     _tcp_table_has_established_on_port,
+    _idle_release_due,
 )
 
 _PORT = 18981          # 0x4A25
@@ -92,6 +93,39 @@ def test_mixed_rows_finds_the_established_one():
         _row(_HEX, "01"),          # our port, ESTABLISHED  <-- the viewer
     ])
     assert _tcp_table_has_established_on_port(table, _PORT) is True
+
+
+# ---- _idle_release_due (the release decision) ------------------------------
+
+_IDLE = 120.0
+
+
+def test_consumer_present_never_releases():
+    # present=True → a viewer is pulling, even long past the idle window
+    assert _idle_release_due(True, last_consumer=0.0, now=10_000.0,
+                             idle_secs=_IDLE) is False
+
+
+def test_unknown_table_never_releases():
+    # present=None → /proc unreadable (non-Linux) → fail-safe, never release
+    assert _idle_release_due(None, last_consumer=0.0, now=10_000.0,
+                             idle_secs=_IDLE) is False
+
+
+def test_no_consumer_within_window_holds():
+    # no consumer but still inside the idle window → keep trying
+    assert _idle_release_due(False, last_consumer=1000.0, now=1090.0,
+                             idle_secs=_IDLE) is False
+
+
+def test_no_consumer_past_window_releases():
+    # no consumer for longer than the idle window → release the orphan
+    assert _idle_release_due(False, last_consumer=1000.0, now=1121.0,
+                             idle_secs=_IDLE) is True
+
+
+def test_release_boundary_is_strictly_greater():
+    assert _idle_release_due(False, 1000.0, 1120.0, _IDLE) is False  # == window
 
 
 if __name__ == "__main__":
