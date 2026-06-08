@@ -11911,39 +11911,48 @@ class DeviceClient(object):
             # promptly after stream_source() returns; PLI re-arms an IDR so a
             # late consumer still gets decodable frames within ~5 s.
             #
-            # Audio MUST be transcoded: the camera sends G.711 PCMA (PT=8), which
-            # MPEG-TS cannot carry as a recognized stream - a raw `-c copy` writes
-            # it as an undecodable private-data stream and the player plays video
-            # with NO sound.  Transcode PCMA->AAC@48k (matching the DTLS serve's
-            # mux), `-c:v copy` the H.264 untouched.
+            # VIDEO-ONLY BY DEFAULT (the AAC audio transcode was DEADLOCKING the
+            # serve under loss; root-caused live 2026-06-08).  The mpegts muxer
+            # cannot write its PAT/PMT until every mapped output stream has
+            # produced a first packet.  `-c:v copy` knows the H.264 params from
+            # the input SDP immediately, but `-c:a aac` must ENCODE a first AAC
+            # frame, which needs real PCMA samples.  On a battery camera over a
+            # weak uplink the PCMA (PT=8) audio arrives sparse/late, the encoder
+            # yields "No filtered frames for output stream", the PMT is never
+            # written, and the consumer (go2rtc/HA) receives ZERO bytes -> the
+            # dashboard spins forever with no error and no timeout.  Proven by a
+            # serve-path A/B: production AAC config -> 0 bytes; `-an` -> 3.8 MB /
+            # 408 frames / 10 IDRs in 25 s.  (`-max_interleave_delta 0` does NOT
+            # rescue it - the block is the PMT, not interleaving.)  So drop audio
+            # by default and let video flow; the H.264 is `-c:v copy` untouched.
             #
-            # `volume`: this camera's PCMA mic runs hot (validated live: "a bit
-            # too loud" vs the -15 dBFS the DTLS AGC targets).  Trim with a
-            # STATELESS `volume` filter (per-sample gain, no look-ahead/buffer) -
-            # safe on the real-time RTP->mpegts serve, unlike the dynamic
-            # normalizers (dynaudnorm/loudnorm) whose buffering broke the DTLS
-            # pipe path.  Env-tunable; default -8 dB.  (SDES has no adaptive AGC
-            # like DTLS's PyAV mux - that lives in numpy on decoded samples and
-            # isn't reusable in this ffmpeg-only serve.)
-            #
-            # (NOTE: `-max_interleave_delta 0` was tried here to keep AAC-encode
-            # latency from holding video back, but it made the mpegts muxer flush
-            # audio with gaps -> repeating ~100 ms audio CUTOUTS (validated live).
-            # Reverted to the default interleave; video stutter is handled by the
-            # bounded startup-PLI burst instead, not by starving the muxer.)
-            try:
-                _sdes_gain_db = float(
-                    os.environ.get("AIDOT_SDES_AUDIO_GAIN_DB", "-8")
-                )
-            except (ValueError, TypeError):
-                _sdes_gain_db = -8.0
-            dest_args = [
-                "-c:v", "copy",
-                "-af", f"volume={_sdes_gain_db}dB",
-                "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
-                "-f", "mpegts", "-listen", "1",
-                rtsp_push_url,
-            ]
+            # Opt back into audio with AIDOT_SDES_SERVE_AUDIO=1 (e.g. a strong-
+            # signal/mains camera where PCMA arrives densely enough to keep the
+            # AAC encoder fed).  When enabled: transcode PCMA->AAC@48k with a
+            # STATELESS `volume` trim (the mic runs hot; default -8 dB, env-tunable
+            # via AIDOT_SDES_AUDIO_GAIN_DB).  Dynamic normalizers (dynaudnorm/
+            # loudnorm) and `-max_interleave_delta 0` are avoided - both regressed
+            # the pipe (buffering / ~100 ms audio cutouts) in earlier live tests.
+            if os.environ.get("AIDOT_SDES_SERVE_AUDIO", "0") == "1":
+                try:
+                    _sdes_gain_db = float(
+                        os.environ.get("AIDOT_SDES_AUDIO_GAIN_DB", "-8")
+                    )
+                except (ValueError, TypeError):
+                    _sdes_gain_db = -8.0
+                dest_args = [
+                    "-c:v", "copy",
+                    "-af", f"volume={_sdes_gain_db}dB",
+                    "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
+                    "-f", "mpegts", "-listen", "1",
+                    rtsp_push_url,
+                ]
+            else:
+                dest_args = [
+                    "-c:v", "copy", "-an",
+                    "-f", "mpegts", "-listen", "1",
+                    rtsp_push_url,
+                ]
         elif rtsp_push_url:
             # Legacy PUSH model: publish to an RTSP server (e.g. go2rtc at :8554).
             # Requires the stream to be pre-registered in go2rtc; retained for
