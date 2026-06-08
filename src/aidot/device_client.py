@@ -1984,6 +1984,102 @@ def _get_stream_slots() -> "asyncio.Semaphore":
     return _STREAM_SLOTS
 
 
+# Where captured SPS/PPS are cached.  Override with AIDOT_SPROP_DIR so HA can
+# point it at persistent storage (the core container's ~ is ephemeral; without a
+# persistent dir the cache simply re-bootstraps from the first stream each boot).
+_SPROP_DIR = os.environ.get("AIDOT_SPROP_DIR") or os.path.join(
+    os.path.expanduser("~"), ".config", "aidot", "sprop")
+
+
+def _extract_param_sets_from_rtp(pkt: bytes) -> dict:
+    """Pull H.264 SPS (NAL type 7) / PPS (type 8) out of one RTP packet.
+
+    Handles single-NAL-unit packets and STAP-A (type 24) aggregation - SPS/PPS
+    are small and the camera sends them either as their own packets or in a
+    STAP-A at the head of an IDR.  FU-A fragments are ignored (param sets are not
+    fragmented in practice).  Returns ``{7: sps_bytes, 8: pps_bytes}`` for those
+    found (each value is the NAL unit *including* its header byte).  Pure /
+    unit-testable: parses the RTP header length defensively."""
+    if len(pkt) < 13:
+        return {}
+    cc = pkt[0] & 0x0F
+    ext = (pkt[0] >> 4) & 0x01
+    off = 12 + 4 * cc
+    if ext and len(pkt) >= off + 4:
+        ext_words = int.from_bytes(pkt[off + 2:off + 4], "big")
+        off += 4 + 4 * ext_words
+    payload = pkt[off:]
+    if not payload:
+        return {}
+    out: dict = {}
+    ntype = payload[0] & 0x1F
+    if ntype == 24:  # STAP-A: [hdr] then [ (size16)(nal) ]...
+        i = 1
+        while i + 2 <= len(payload):
+            size = int.from_bytes(payload[i:i + 2], "big")
+            i += 2
+            nal = payload[i:i + size]
+            i += size
+            if nal:
+                t = nal[0] & 0x1F
+                if t in (7, 8):
+                    out[t] = nal
+    elif ntype in (7, 8):  # single NAL unit packet
+        out[ntype] = payload
+    return out
+
+
+def _build_sprop(sps: bytes, pps: bytes) -> str:
+    """``sprop-parameter-sets`` value: base64(SPS NAL),base64(PPS NAL)."""
+    import base64 as _b64
+    return _b64.b64encode(sps).decode() + "," + _b64.b64encode(pps).decode()
+
+
+def _sprop_cache_path(devid: str) -> str:
+    return os.path.join(_SPROP_DIR, f"{devid}.sprop")
+
+
+def _load_sprop(devid: str) -> "Optional[str]":
+    """Cached ``sprop-parameter-sets`` for ``devid`` (captured from a prior
+    stream), or None.  Fail-safe: any error -> None (SDP omits sprop = today's
+    behaviour)."""
+    try:
+        with open(_sprop_cache_path(devid), "r") as fh:
+            s = fh.read().strip()
+        return s or None
+    except OSError:
+        return None
+
+
+def _save_sprop(devid: str, sprop: str) -> None:
+    """Persist the ``sprop-parameter-sets`` string for ``devid`` (best-effort)."""
+    try:
+        os.makedirs(_SPROP_DIR, exist_ok=True)
+        tmp = _sprop_cache_path(devid) + ".tmp"
+        with open(tmp, "w") as fh:
+            fh.write(sprop)
+        os.replace(tmp, _sprop_cache_path(devid))
+    except OSError:
+        pass
+
+
+def _inject_sprop(sdp: str, devid: str) -> str:
+    """Append the cached ``sprop-parameter-sets`` to the ffmpeg-input SDP's
+    ``a=fmtp:96`` line so ffmpeg inits the H.264 decoder out-of-band (robust to
+    in-band SPS loss).  No-op if nothing is cached yet or sprop is already
+    present.  Applied at every ffmpeg-input SDP write so both the serve path and
+    the snapshot/file path benefit."""
+    sprop = _load_sprop(devid)
+    if not sprop or "sprop-parameter-sets=" in sdp:
+        return sdp
+    out = []
+    for ln in sdp.split("\r\n"):
+        if ln.startswith("a=fmtp:96") and "sprop-parameter-sets" not in ln:
+            ln = ln + ";sprop-parameter-sets=" + sprop
+        out.append(ln)
+    return "\r\n".join(out)
+
+
 def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
     """Mux tapped video (H.264 copy) + audio (PCMA->AAC) to ``out_fileobj`` as
     RTP-timestamped MPEG-TS.  Runs in a worker thread; the serve's ffmpeg reads
@@ -9224,7 +9320,7 @@ class DeviceClient(object):
         )
 
         sdp_path = await asyncio.get_running_loop().run_in_executor(
-            None, _make_sdp_tempfile, ffmpeg_sdp)
+            None, _make_sdp_tempfile, _inject_sprop(ffmpeg_sdp, self.device_id))
 
         # --- Send webrtcReq BEFORE releasing reservation sockets ------------- #
         # ICE cameras (e.g. LK.IPC.A001064) send STUN binding requests to our
@@ -10178,7 +10274,7 @@ class DeviceClient(object):
                 )
             try:
                 await asyncio.get_running_loop().run_in_executor(
-                    None, _write_text_file, sdp_path, _updated_sdp)
+                    None, _write_text_file, sdp_path, _inject_sprop(_updated_sdp, self.device_id))
             except Exception as _sdp_exc:
                 _LOGGER.warning("_open_sdes_stream: could not rewrite SDP: %s", _sdp_exc)
 
@@ -10423,6 +10519,7 @@ class DeviceClient(object):
         # TUTK cameras use plain RTP/AVP (no SRTP): the bridge synthesizes
         # standard RTP packets from TUTK SFrames and forwards without crypto.
         _ts_br = int(time.time())
+        # (Out-of-band SPS/PPS is injected at the write below via _inject_sprop.)
         if _use_plain_rtp:
             _br_sdp = (
                 "v=0\r\n"
@@ -10467,7 +10564,7 @@ class DeviceClient(object):
             )
         try:
             await asyncio.get_running_loop().run_in_executor(
-                None, _write_text_file, sdp_path, _br_sdp)
+                None, _write_text_file, sdp_path, _inject_sprop(_br_sdp, self.device_id))
         except Exception as _br_sdp_exc:
             _LOGGER.warning("bridge: could not rewrite SDP: %s", _br_sdp_exc)
 
@@ -11548,6 +11645,26 @@ class DeviceClient(object):
                                                 f" ssrc=0x{_ssrc_d:08x}"
                                                 f" pt={_pt}"
                                             )
+                            # Capture this camera's SPS/PPS once so future streams
+                            # can inject sprop-parameter-sets (out-of-band decoder
+                            # init, robust to in-band SPS loss).  Parses only until
+                            # both are seen; then _sprop_done short-circuits.
+                            if (_kind == "video"
+                                    and not getattr(_bridge_fn, "_sprop_done", False)):
+                                _ps = _extract_param_sets_from_rtp(_fwd_pkt)
+                                if _ps:
+                                    _psc = getattr(_bridge_fn, "_ps_cache", None)
+                                    if _psc is None:
+                                        _psc = {}
+                                        _bridge_fn._ps_cache = _psc
+                                    _psc.update(_ps)
+                                    if 7 in _psc and 8 in _psc:
+                                        _sprop_new = _build_sprop(_psc[7], _psc[8])
+                                        if _sprop_new != _load_sprop(self.device_id):
+                                            _save_sprop(self.device_id, _sprop_new)
+                                            _status("bridge: cached sprop-parameter"
+                                                    f"-sets for {self.device_id}")
+                                        _bridge_fn._sprop_done = True
                             # Rebase RTP timestamps to start near 0.  Camera picks a
                             # random starting timestamp (RFC 3550 §5.1); the 90 kHz
                             # video clock can be near 2^32 and wraps, producing huge
