@@ -4196,6 +4196,7 @@ class DeviceClient(object):
         self,
         rtsp_push_url: Optional[str] = None,
         fast_connect: Optional[bool] = None,
+        sdes_audio: Optional[bool] = None,
     ) -> None:
         """Start a persistent stream that keeps the camera session alive.
 
@@ -4217,6 +4218,8 @@ class DeviceClient(object):
         """
         if fast_connect is not None:
             self._fast_connect_opt = fast_connect
+        if sdes_audio is not None:
+            self._sdes_audio_opt = sdes_audio
         if self._stream_task is not None and not self._stream_task.done():
             return
         self._keepalive_rtsp_url = rtsp_push_url
@@ -11952,7 +11955,10 @@ class DeviceClient(object):
             # via AIDOT_SDES_AUDIO_GAIN_DB).  Dynamic normalizers (dynaudnorm/
             # loudnorm) and `-max_interleave_delta 0` are avoided - both regressed
             # the pipe (buffering / ~100 ms audio cutouts) in earlier live tests.
-            if os.environ.get("AIDOT_SDES_SERVE_AUDIO", "0") == "1":
+            _sdes_audio = getattr(self, "_sdes_audio_opt", None)
+            if _sdes_audio is None:
+                _sdes_audio = os.environ.get("AIDOT_SDES_SERVE_AUDIO", "0") == "1"
+            if _sdes_audio:
                 try:
                     _sdes_gain_db = float(
                         os.environ.get("AIDOT_SDES_AUDIO_GAIN_DB", "-8")
