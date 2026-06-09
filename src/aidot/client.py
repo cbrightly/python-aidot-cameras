@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import base64
+import random
 import aiohttp
 from aiohttp import ClientSession
 from typing import Any, Callable, Optional
@@ -54,6 +55,14 @@ def rsa_password_encrypt(message: str) -> str:
 
 
 
+async def _prefetch_ice_config(dc: "DeviceClient") -> None:
+    """Background task: warm the HTTP ICE config cache for a device."""
+    try:
+        await dc.async_get_ice_config_http()
+    except Exception:
+        pass  # best-effort; errors are logged inside async_get_ice_config_http
+
+
 class AidotClient:
     _base_url: str = BASE_URL
     _region: str = "us"
@@ -79,6 +88,7 @@ class AidotClient:
         self.login_info: dict[str, Any] = {}
         self._token_fresh_cb: Optional[Callable] = None
         self._device_clients = {}
+        self._refresh_task: "Optional[asyncio.Task]" = None
         # Single-flight guard so a burst of camera 21026s (all 7 pollers at once)
         # coalesces into ONE token refresh / re-login instead of 7 concurrent ones.
         self._ensure_token_inflight: "Optional[asyncio.Future]" = None
@@ -95,9 +105,41 @@ class AidotClient:
             self._region = token[CONF_REGION]
             self.country_name = token[CONF_COUNTRY]
             self._base_url = f"https://prod-{self._region}-api.arnoo.com/v17"
+            # Token loaded from storage: schedule a proactive refresh shortly
+            # after startup.  Exact remaining TTL is unknown, so pass a short
+            # synthetic TTL (120s → 78-138s delay) to catch tokens that are
+            # already near expiry.  After the refresh fires, _schedule_proactive_refresh
+            # sets the next cycle at the proper 90%-of-TTL interval.
+            _LOGGER.info("AidotClient: stored token loaded, scheduling startup proactive refresh")
+            self._schedule_proactive_refresh(120)
 
     def set_token_fresh_cb(self, callback) -> None:
         self._token_fresh_cb = callback
+
+    def _schedule_proactive_refresh(self, expires_in_secs: int) -> None:
+        """Schedule a proactive token refresh at 90% of the token's TTL."""
+        if self._refresh_task and not self._refresh_task.done():
+            self._refresh_task.cancel()
+        delay = max(60.0, expires_in_secs * 0.9 + random.uniform(-30, 30))
+        _LOGGER.debug(
+            "Proactive token refresh scheduled in %.0f s (TTL=%d s)", delay, expires_in_secs
+        )
+
+        async def _refresh_after_delay():
+            try:
+                await asyncio.sleep(delay)
+                await self.async_ensure_token()
+                _LOGGER.debug("Proactive token refresh complete")
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                _LOGGER.warning("Proactive token refresh failed: %s", exc)
+
+        try:
+            loop = asyncio.get_running_loop()
+            self._refresh_task = loop.create_task(_refresh_after_delay())
+        except RuntimeError:
+            pass  # no running loop (e.g. called from sync test context)
 
     def get_identifier(self) -> str:
         return f"{self._region}-{self.username}"
@@ -145,6 +187,9 @@ class AidotClient:
             self.login_info[CONF_USERNAME] = self.username
             # Fetch MQTT password from /commons/userConfig (separate call required).
             await self._async_fetch_user_config()
+            # Schedule proactive refresh so tokens never expire mid-session.
+            _expires_in = int(response_data.get("expiresIn") or 7200)
+            self._schedule_proactive_refresh(_expires_in)
             return self.login_info
         except AidotUserOrPassIncorrect:
             raise
@@ -232,6 +277,8 @@ class AidotClient:
             _LOGGER.debug("refresh token ok  code=%s", response_data.get(CONF_CODE))
             if self._token_fresh_cb:
                 self._token_fresh_cb()
+            _expires_in = int(response_data.get("expiresIn") or 7200)
+            self._schedule_proactive_refresh(_expires_in)
             return response_data
         except aiohttp.ClientError as e:
             _LOGGER.info("async_refresh_token ClientError %s  code=%s", e, response_data.get(CONF_CODE))
@@ -374,6 +421,10 @@ class AidotClient:
             device_client.set_token_refresh_cb(self.async_ensure_token)
             self._device_clients[device_id] = device_client
             asyncio.get_running_loop().create_task(device_client.ping_task())
+            # Pre-warm ICE config cache so stream open does not block on this fetch.
+            asyncio.get_running_loop().create_task(
+                _prefetch_ice_config(device_client)
+            )
         # NOTE: no LAN-broadcast discovery here.  For APK parity, the camera's LAN
         # IP comes from the WebRTC signaling host candidate (iceCandidateReq), which
         # the camera advertises and we add verbatim - the official app does the same
@@ -392,6 +443,8 @@ class AidotClient:
         self._device_clients.clear()
 
     async def async_cleanup(self) -> None:
+        if self._refresh_task and not self._refresh_task.done():
+            self._refresh_task.cancel()
         for client in self._device_clients.values():
             await client.close()
         self._device_clients.clear()
