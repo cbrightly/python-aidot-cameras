@@ -2898,9 +2898,12 @@ class DeviceClient(object):
         cb = self._token_refresh_cb
         if cb is None:
             return False
-        # A fresh token invalidates the cached smarthome auth / MQTT URL.
+        # A fresh token invalidates the cached smarthome auth / MQTT URL and
+        # any cached ICE/TURN config (credentials are bound to the access token).
         self._smarthome_auth = None
         self._mqtt_url = None
+        self._cached_ice_config = None
+        self._ice_config_fetched_at = 0.0
         try:
             return bool(await cb())
         except Exception as exc:  # noqa: BLE001
@@ -3701,7 +3704,8 @@ class DeviceClient(object):
         smarthome_auth = await self._async_get_smarthome_auth()
         mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
         mqtt_pwd  = (smarthome_auth or {}).get("mqttPassword") or ""
-        client_id = (self._user_info.get("mqttClientId") or f"app-{mqtt_user}")
+        _base_cid = (self._user_info.get("mqttClientId") or f"app-{mqtt_user}")
+        client_id = f"{_base_cid}-cmd"
         user_id   = self.user_id
         device_id = self.device_id
 
@@ -6214,6 +6218,21 @@ class DeviceClient(object):
                     "AIDOT_FAST_CONNECT: skipping getIceConfigResp wait"
                     " (~2.5s) - STUN/host candidates only, LAN-direct"
                 )
+            # Second livePlayResp check: catches late rejections that arrived
+            # while we were waiting for ice_config (fast-ICE + slow-reject path).
+            if not _fast_connect and liveplay_resp_fut.done():
+                try:
+                    _lp_resp2 = liveplay_resp_fut.result()
+                    _lp_code2 = int(_lp_resp2.get("code", 200))
+                    _lp_on2   = int(_lp_resp2.get("livePlay", 1))
+                    if _lp_code2 not in (0, 200) or _lp_on2 == 0:
+                        raise RuntimeError(
+                            f"livePlay rejected by camera (code={_lp_code2}, livePlay={_lp_on2})"
+                        )
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
 
         # ------------------------------------------------------------------ #
         # Branch: SDES-SRTP cameras use ffmpeg; DTLS cameras use aiortc
