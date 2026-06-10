@@ -3844,19 +3844,24 @@ class DeviceClient(object):
             )
             return []
 
-    async def async_get_event_video_url(self, event_uuid: str) -> Optional[str]:
-        """Return a direct playback URL (MP4 or M3U8) for a specific recording.
+    async def async_get_event_video_media(
+        self, event_uuid: str
+    ) -> Optional[tuple[str, str]]:
+        """Return (url, mime_type) for a specific cloud recording.
 
-        event_uuid: the eventUuid field from an async_get_cloud_recordings() item.
-        Returns the first video URL from getEventVideoUrl, or None on error.
+        Prefers MP4 (type=1) over M3U8 (type=2) because HA's media player and
+        most browsers handle direct MP4 more reliably than HLS with signed CDN
+        segments.  Falls back to whatever is available.
 
         From CloudPlaybackFragment.java / EventListRepos.java:
           POST /api/ipc/playback/getEventVideoUrl
           body: {deviceId, eventList: [{eventUuid}]}
-          response: data.eventUrlList[0].videoUrlList[0].url
-          type 1 = MP4, type 2 = M3U8
+          response: data.eventUrlList[0].videoUrlList[]
+          each item: {url, type}  (type 1=MP4, type 2=M3U8)
         """
         import aiohttp
+
+        _MIME = {1: "video/mp4", 2: "application/x-mpegURL"}
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -3871,6 +3876,8 @@ class DeviceClient(object):
                 ) as resp:
                     body = await resp.json(content_type=None)
 
+            _LOGGER.debug("getEventVideoUrl raw for %s uuid=%s: %s", self.device_id, event_uuid, body)
+
             if body.get("code") != 200:
                 _LOGGER.warning(
                     "getEventVideoUrl code=%s for %s uuid=%s: %s",
@@ -3884,14 +3891,34 @@ class DeviceClient(object):
             video_url_list = (event_url_list[0] or {}).get("videoUrlList") or []
             if not video_url_list:
                 return None
-            return video_url_list[0].get("url") or None
+
+            # Prefer MP4 (type=1), fall back to first available entry
+            mp4 = next((v for v in video_url_list if v.get("type") == 1), None)
+            entry = mp4 or video_url_list[0]
+            url = entry.get("url")
+            if not url:
+                return None
+            mime = _MIME.get(entry.get("type"), "video/mp4")
+            _LOGGER.debug(
+                "getEventVideoUrl resolved for %s: type=%s mime=%s url=%s",
+                self.device_id, entry.get("type"), mime, url,
+            )
+            return url, mime
 
         except Exception as exc:
             _LOGGER.error(
-                "async_get_event_video_url failed for %s uuid=%s: %s",
+                "async_get_event_video_media failed for %s uuid=%s: %s",
                 self.device_id, event_uuid, exc,
             )
             return None
+
+    async def async_get_event_video_url(self, event_uuid: str) -> Optional[str]:
+        """Return the video URL for a cloud recording (URL only, no MIME type).
+
+        Prefer async_get_event_video_media() when you also need the MIME type.
+        """
+        result = await self.async_get_event_video_media(event_uuid)
+        return result[0] if result else None
 
     async def async_get_latest_thumbnail(self) -> Optional[str]:
         """Return the URL of the most recent event/motion thumbnail for this camera.
