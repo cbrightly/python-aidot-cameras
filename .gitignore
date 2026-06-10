@@ -206,7 +206,6 @@ sidecar/
 plan.md
 
 # AI session memory (local only)
-.claude/
 
 # Reverse-engineering and validation docs (contain LAN IPs and internal architecture notes)
 docs/APK_DTLS_WEBRTC.md
