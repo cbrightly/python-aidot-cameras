@@ -3799,21 +3799,20 @@ class DeviceClient(object):
         """
         import aiohttp
 
-        await self._async_get_smarthome_auth()
+        _body = {
+            "deviceIds": [self.device_id],
+            "pageNum":   page,
+            "pageSize":  page_size,
+            "recordSta": start_ts,
+            "recordEnd": end_ts,
+        }
+        _LOGGER.debug("eventRecordingList request for %s: %s", self.device_id, _body)
         async def _fetch():
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{self._smarthome_base}/api/ipc/playback/eventRecordingList",
-                    json={
-                        "deviceIds":  [self.device_id],
-                        "eventCodes": [],
-                        "areaIds":    [],
-                        "pageNum":    page,
-                        "pageSize":   page_size,
-                        "recordSta":  start_ts,
-                        "recordEnd":  end_ts,
-                    },
-                    headers=self._leedarson_headers(),
+                    f"{self._aidot_v32_base}/playback/eventRecordingList",
+                    json=_body,
+                    headers=self._aidot_headers(),
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp:
                     return await resp.json(content_type=None)
@@ -3862,12 +3861,12 @@ class DeviceClient(object):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{self._smarthome_base}/api/ipc/playback/getEventVideoUrl",
+                    f"{self._aidot_v32_base}/playback/getEventVideoUrl",
                     json={
                         "deviceId":  self.device_id,
                         "eventList": [{"eventUuid": event_uuid}],
                     },
-                    headers=self._leedarson_headers(),
+                    headers=self._aidot_headers(),
                     timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
                     body = await resp.json(content_type=None)
@@ -3905,24 +3904,21 @@ class DeviceClient(object):
         """
         import aiohttp, time
 
-        await self._async_get_smarthome_auth()
         end_ts = int(time.time() * 1000)
         start_ts = end_ts - 30 * 86_400_000  # look back 30 days
 
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{self._smarthome_base}/api/ipc/playback/eventRecordingList",
+                    f"{self._aidot_v32_base}/playback/eventRecordingList",
                     json={
-                        "deviceIds":  [self.device_id],
-                        "eventCodes": [],
-                        "areaIds":    [],
-                        "pageNum":    1,
-                        "pageSize":   1,
-                        "recordSta":  start_ts,
-                        "recordEnd":  end_ts,
+                        "deviceIds": [self.device_id],
+                        "pageNum":   1,
+                        "pageSize":  1,
+                        "recordSta": start_ts,
+                        "recordEnd": end_ts,
                     },
-                    headers=self._leedarson_headers(),
+                    headers=self._aidot_headers(),
                     timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
                     body = await resp.json(content_type=None)
