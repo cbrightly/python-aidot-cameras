@@ -7,7 +7,7 @@ the upstream lights-only library.
 ## Streaming
 
 Cameras use WebRTC over the AiDot/Leedarson MQTT signaling channel (an
-AWS-KVS–derived flow), not a local API. Two media-key paths exist and are
+AWS-KVS-derived flow), not a local API. Two media-key paths exist and are
 auto-selected per camera:
 
 - **DTLS-SRTP** - A000088 models (e.g. M3 Pro, A000088-1).
@@ -26,7 +26,7 @@ session = await device_client.async_open_webrtc_stream(on_frame=cb, timeout=30.0
 A000088 cameras advertise **two consecutive ICE ports** `[P, P+1]` and only
 proceed to DTLS when the client nominates the **higher** one (their live DTLS
 socket). The library forces `USE-CANDIDATE` onto the highest remote port, which
-lifts the per-attempt connect rate from ~25% to ~75–87%. The fix is **scoped to
+lifts the per-attempt connect rate from ~25% to ~75-87%. The fix is **scoped to
 DTLS-camera connections only** - SDES cameras and non-camera devices are a strict
 no-op. Combined with retries (`--webrtc-retries`, default 5, jittered backoff)
 the effective connect rate is high.
@@ -43,7 +43,7 @@ stops retrying rather than burning the retry budget.
 SDES cameras - including battery models (A001513) - stream end-to-end once the
 ICE/SCTP handshake completes. Battery cameras require a periodic AVIO keepalive
 (`HEARTBEAT`, every 10 s) sent as an **encrypted SCTP DATA chunk** over the
-control channel; without it the firmware tears the session down at ~18–22 s. The
+control channel; without it the firmware tears the session down at ~18-22 s. The
 library sends this automatically (matching the official app's `DataChannel`
 keepalive timer), so battery streams hold while the camera is awake - validated
 at 72 s / 49 s holds on two A001513 cameras.

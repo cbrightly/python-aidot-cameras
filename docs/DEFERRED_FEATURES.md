@@ -3,11 +3,11 @@
 This document records functionality that was researched, prototyped, and deliberately
 not merged into the active code path.  Each section explains:
 
-- **What it does** — a description of the feature and where in the codebase it lives
-- **Why it was written** — the technical motivation and evidence base
-- **Why it is deferred** — the specific reason it cannot be activated right now
-- **Test results** — the evidence gathered during investigation
-- **Re-activation notes** — what would be needed to enable it
+- **What it does** - a description of the feature and where in the codebase it lives
+- **Why it was written** - the technical motivation and evidence base
+- **Why it is deferred** - the specific reason it cannot be activated right now
+- **Test results** - the evidence gathered during investigation
+- **Re-activation notes** - what would be needed to enable it
 
 ---
 
@@ -101,7 +101,7 @@ added in commit `8350553` were reverted.
 
 | Test | Result |
 |------|--------|
-| API query of all connected cameras for `liveType` | All returned `"2"` — WebRTC path |
+| API query of all connected cameras for `liveType` | All returned `"2"` - WebRTC path |
 | API query of all connected cameras for `p2pId` | Field absent on every device |
 | HA logs for `TutkStreamSession` code paths | No log entries from TUTK path in 2 weeks of operation |
 | Python import of `TutkStreamSession` class | OK (ctypes stubs load; native libs absent on HA host) |
@@ -115,7 +115,7 @@ To re-enable for a `liveType=0` camera:
 2. Obtain `libIOTCAPIs.so` and `libAVAPIs.so` from the TUTK SDK distribution or an
    extracted AiDot APK and place them accessible to the HA Python process.
 3. Verify the camera's `batchGetDeviceUserInfo` response returns a `p2pId`.
-4. Call `DeviceClient.async_open_live_stream()` — the improved init sequence
+4. Call `DeviceClient.async_open_live_stream()` - the improved init sequence
    (`TUTK_SDK_Set_License_Key`, `IOTC_Setup_Session_Alive_Timeout`, CONNECTION_CHECK_REQ,
    24-byte IPCAM_START) is the path described in `LdsTutkChannel.java`.
 

@@ -245,7 +245,7 @@ class DeviceInformation:
     # Local device access password (TUTK viewPwd candidate)
     device_password: str
     # TUTK IOCtrl direction codes the camera advertises (e.g. [3,6] = left+right
-    # for a pan-only camera, [1,2,3,6] = full PTZ).  Empty means unknown — callers
+    # for a pan-only camera, [1,2,3,6] = full PTZ).  Empty means unknown - callers
     # should treat unknown as "show all" for backward compatibility.
     ptz_directions: list
 
@@ -2062,7 +2062,7 @@ def _save_sprop(devid: str, sprop: str) -> None:
     except OSError as exc:
         # Surface (don't swallow): if the cache dir isn't writable the whole
         # sprop feature is silently inert.  AIDOT_SPROP_DIR can redirect it.
-        _LOGGER.warning("sprop cache write failed (%s): %s — set AIDOT_SPROP_DIR "
+        _LOGGER.warning("sprop cache write failed (%s): %s - set AIDOT_SPROP_DIR "
                         "to a writable path", _SPROP_DIR, exc)
 
 
@@ -2258,7 +2258,7 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
             if fr is None:
                 # 160 PCMA samples → 960 resampled @ 48 kHz, but AAC needs 1024.
                 # Every ~17 packets (~340 ms) the FIFO falls 64 samples short
-                # and would skip an entire 21 ms frame — audible choppiness.
+                # and would skip an entire 21 ms frame - audible choppiness.
                 # Pad the leftover with silence so the frame is complete.
                 s = getattr(fifo, "samples", 0)
                 if s == 0:
@@ -2295,7 +2295,7 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
     while not stop_flag.is_set():
         _flush_video()
         _flush_audio()
-        _t.sleep(0.005)  # 5 ms — processes audio within 5 ms of arrival vs 20 ms
+        _t.sleep(0.005)  # 5 ms - processes audio within 5 ms of arrival vs 20 ms
     _flush_video()
     _flush_audio()
     try:
@@ -3657,7 +3657,7 @@ class DeviceClient(object):
     async def async_set_motion_sensitivity(self, level: int) -> bool:
         """Set motion detection sensitivity.
 
-        level: 1 (lowest) – 5 (highest).
+        level: 1 (lowest) - 5 (highest).
         Attribute: MotionDetection_Sen (observed value '2' on A000088).
         """
         return await self.async_set_device_attribute(
@@ -4360,7 +4360,7 @@ class DeviceClient(object):
         """True if a TCP client is connected to the SDES serve ``port`` (a viewer
         is pulling), False if none, None if the TCP table can't be read (non-Linux
         / sandboxed host).  The caller MUST treat None as 'unknown' and NOT release
-        — failing safe to the current always-reconnect behaviour."""
+        - failing safe to the current always-reconnect behaviour."""
         read_any = False
         found = False
         for _path in ("/proc/net/tcp", "/proc/net/tcp6"):
@@ -4413,7 +4413,7 @@ class DeviceClient(object):
             _idle_release = False
             # No-viewer release.  Unlike the DTLS serve (which idle-releases when
             # its mux pipe goes stale), an SDES keepalive otherwise reconnects
-            # FOREVER even with zero HA consumers — a battery-draining orphan that
+            # FOREVER even with zero HA consumers - a battery-draining orphan that
             # also holds a stream slot and TURN-relay bandwidth.  SDES has no mux
             # pipe to watch, so detect "nobody is pulling" via an ESTABLISHED TCP
             # connection on the -listen serve port and release after the same idle
@@ -5403,7 +5403,7 @@ class DeviceClient(object):
 
         # AIDOT_FAST_CONNECT (default off): LAN-direct mode.  Both transports stall
         # the offer on a TURN relay allocation to the cloud TURN server before ICE
-        # can even start — for DTLS, aiortc's setLocalDescription blocks until ICE
+        # can even start - for DTLS, aiortc's setLocalDescription blocks until ICE
         # gathering (incl. TURN Allocate) completes; for SDES we synchronously
         # pre-allocate relay before building the offer.  On a LAN the camera's host
         # candidate wins anyway, so this is pure cold-start latency (~2-3 s).  When
@@ -6085,7 +6085,7 @@ class DeviceClient(object):
                 # setKeepAliveTime keeps the camera in active state for 25 s
                 # after wake (n.java:224 - keepAliveTime=25, not 20).
                 # Without this call the camera's built-in timer may return it
-                # to sleep before SCTP + LIVING completes (~10–15 s).
+                # to sleep before SCTP + LIVING completes (~10-15 s).
                 try:
                     import aiohttp as _aiohttp_k
                     async with _aiohttp_k.ClientSession() as _ks:
@@ -6203,7 +6203,7 @@ class DeviceClient(object):
             # cold-start cost (camera-awake → ICE-servers ≈ 2.5 s = 0.5 s echo +
             # 2.0 s here).  The official app does NOT wait for/parse livePlayResp
             # (parity-confirmed).  AIDOT_FAST_CONNECT skips it and proceeds to
-            # SDP/ICE immediately — losing fast-fail on rejection (rare; ICE then
+            # SDP/ICE immediately - losing fast-fail on rejection (rare; ICE then
             # fails instead) in exchange for ~2 s off every LAN connect.
             if not _fast_connect:
                 try:
@@ -6227,7 +6227,7 @@ class DeviceClient(object):
             # once a live camera session is active (i.e. after livePlayReq).
             # Waiting here ensures TURN credentials arrive before RTCPeerConnection
             # is created.  MEASURED (2026-06-07, live): this wait is the DOMINANT
-            # cold-start cost — ~2.5 s for getIceConfigResp to arrive after camera
+            # cold-start cost - ~2.5 s for getIceConfigResp to arrive after camera
             # wake (NOT the TURN gather, which is ~70 ms).  AIDOT_FAST_CONNECT
             # skips it: we proceed immediately on STUN/host candidates (no relay),
             # so a LAN camera connects in ~1 s.  getIceConfigResp only supplies the
@@ -6459,7 +6459,7 @@ class DeviceClient(object):
         )
         if _fast_connect:
             # Strip TURN URIs so aiortc's setLocalDescription doesn't block on a
-            # TURN Allocate round-trip during ICE gathering — the LAN host
+            # TURN Allocate round-trip during ICE gathering - the LAN host
             # candidate then connects in ~1 s.  Keep STUN (cheap, no allocate).
             _stun_only = []
             for _srv in _ice_servers:
@@ -12491,7 +12491,12 @@ class DeviceClient(object):
                 return
             data_len = len(data)
             if data_len <= 0:
-                _LOGGER.error("recv data error len, exit socket")
+                # Peer closed the control socket (idle cloud socket, device
+                # reboot, or a brief Wi-Fi blip).  reset() reconnects, so this is
+                # a recoverable hiccup, not an error-level condition.
+                _LOGGER.debug(
+                    "%s control socket closed by peer; reconnecting", self.device_id
+                )
                 await self.reset()
                 self.status.online = False
                 return
@@ -12607,8 +12612,12 @@ class DeviceClient(object):
         }
         try:
             if self.ping_count >= 2:
-                _LOGGER.error(
-                    f"Last ping did not return within 20 seconds. device id:{self.device_id}"
+                # Two pings (~20s) went unanswered: the device is briefly
+                # unreachable (Wi-Fi congestion, device busy).  reset() reconnects
+                # automatically, so this is a recoverable hiccup, not an error.
+                _LOGGER.warning(
+                    "No ping response within 20s from %s; resetting connection "
+                    "(will reconnect)", self.device_id,
                 )
                 await self.reset()
                 return -1
