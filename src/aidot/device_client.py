@@ -12491,7 +12491,12 @@ class DeviceClient(object):
                 return
             data_len = len(data)
             if data_len <= 0:
-                _LOGGER.error("recv data error len, exit socket")
+                # Peer closed the control socket (idle cloud socket, device
+                # reboot, or a brief Wi-Fi blip).  reset() reconnects, so this is
+                # a recoverable hiccup, not an error-level condition.
+                _LOGGER.debug(
+                    "%s control socket closed by peer; reconnecting", self.device_id
+                )
                 await self.reset()
                 self.status.online = False
                 return
@@ -12607,8 +12612,12 @@ class DeviceClient(object):
         }
         try:
             if self.ping_count >= 2:
-                _LOGGER.error(
-                    f"Last ping did not return within 20 seconds. device id:{self.device_id}"
+                # Two pings (~20s) went unanswered: the device is briefly
+                # unreachable (Wi-Fi congestion, device busy).  reset() reconnects
+                # automatically, so this is a recoverable hiccup, not an error.
+                _LOGGER.warning(
+                    "No ping response within 20s from %s; resetting connection "
+                    "(will reconnect)", self.device_id,
                 )
                 await self.reset()
                 return -1
