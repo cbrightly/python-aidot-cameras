@@ -2204,7 +2204,7 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
             except Exception:
                 pass
 
-    def _flush_audio():
+    def _flush_audio(drain=False):
         if not have_audio:
             try:
                 while True:
@@ -2247,10 +2247,16 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
         while True:
             fr = fifo.read(1024)   # AAC wants 1024-sample frames
             if fr is None:
-                # 160 PCMA samples → 960 resampled @ 48 kHz, but AAC needs 1024.
-                # Every ~17 packets (~340 ms) the FIFO falls 64 samples short
-                # and would skip an entire 21 ms frame - audible choppiness.
-                # Pad the leftover with silence so the frame is complete.
+                # FIFO has < 1024 samples.  The audio source is continuous
+                # (measured: 100% timeline coverage, no lost packets), so the
+                # remainder must stay in the FIFO and be completed by the next
+                # decoded packet - NOT padded with silence here.  Padding on
+                # every 5 ms flush injected a micro-silence whenever the FIFO was
+                # momentarily short (almost always, given ~40 ms packet spacing) -
+                # that was the choppiness.  Only on the final drain do we pad the
+                # last partial frame so the encoder can flush it.
+                if not drain:
+                    break
                 s = getattr(fifo, "samples", 0)
                 if s == 0:
                     break
@@ -2288,7 +2294,7 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
         _flush_audio()
         _t.sleep(0.005)  # 5 ms - processes audio within 5 ms of arrival vs 20 ms
     _flush_video()
-    _flush_audio()
+    _flush_audio(drain=True)  # final: pad the last partial frame so it flushes
     try:
         if have_audio:
             for opkt in aenc.encode(None):  # flush
