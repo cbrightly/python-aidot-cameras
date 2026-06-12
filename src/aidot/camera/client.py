@@ -46,9 +46,139 @@ from ..const import (
 _LOGGER = logging.getLogger(__name__)
 
 
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:  # annotations only — no runtime import (avoids cycle)
-    from ..device_client import DeviceStatusData, DeviceInformation
+# Runtime import: device_client defines these classes BEFORE importing this
+# module (the package __init__ loads aidot.device_client first), so the
+# partially-initialized module already exposes them here.
+from ..device_client import DeviceStatusData, DeviceInformation
+
+
+class CameraStatusData(DeviceStatusData):
+    """Core status plus camera fields; accepts both typed-model and dict updates."""
+
+    # Camera-specific fields (None = unknown/not yet queried)
+    motion_detection: Optional[bool] = None
+    motion_sensitivity: Optional[int] = None  # MotionDetection_Sen 1-5
+    status_led: Optional[bool] = None
+    microphone: Optional[bool] = None
+    night_vision_mode: Optional[str] = None   # "auto" | "on" | "off"
+    ir_light: Optional[bool] = None           # nightVisionIRLight 0/1
+    floodlight: Optional[bool] = None
+    ptz_tracking: Optional[bool] = None
+    siren: bool = False
+    speaker_volume: Optional[int] = None  # SoundLevel 0-100
+    # Diagnostic / read-only camera fields
+    battery_remaining: Optional[int] = None  # Battery_remaining 0-100 (%)
+    occupancy: Optional[bool] = None          # Occupancy live presence
+    sd_card_status: Optional[str] = None      # SDcardStatus
+
+    def update(self, attr) -> None:
+        if attr is None:
+            return
+        if not isinstance(attr, dict):
+            # Typed DeviceAttr model from the core local-control receive path.
+            super().update(attr)
+            return
+        # Dict path (camera attribute / cloud-properties payloads).
+        if attr.get(CONF_ON_OFF) is not None:
+            self.on = attr.get(CONF_ON_OFF)
+        if attr.get(CONF_DIMMING) is not None:
+            self.dimming = int(attr.get(CONF_DIMMING) * 255 / 100)
+        if attr.get(CONF_RGBW) is not None:
+            self.rgdb = attr.get(CONF_RGBW)
+            rgbw = ctypes.c_uint32(self.rgdb).value
+            r = (rgbw >> 24) & 0xFF
+            g = (rgbw >> 16) & 0xFF
+            b = (rgbw >> 8) & 0xFF
+            w = rgbw & 0xFF
+            self.rgbw = (r, g, b, w)
+        if attr.get(CONF_CCT) is not None:
+            self.cct = attr.get(CONF_CCT)
+        # Camera attributes
+        if (v := attr.get("MotionDetection_Enable")) is not None:
+            self.motion_detection = bool(int(v))
+        if (v := attr.get("MotionDetection_Sen")) is not None:
+            self.motion_sensitivity = int(v)
+        if (v := attr.get("LedOnOff")) is not None:
+            self.status_led = bool(int(v))
+        if (v := attr.get("micEnable")) is not None:
+            self.microphone = bool(int(v))
+        if (v := attr.get("nightVisionMode")) is not None:
+            try:
+                nv = int(v)
+                self.night_vision_mode = {0: "auto", 1: "on", 2: "off"}.get(nv, str(nv))
+            except (ValueError, TypeError):
+                # Camera may send string "on"/"off"/"auto" instead of 0/1/2
+                self.night_vision_mode = str(v)
+        if (v := attr.get("nightVisionIRLight")) is not None:
+            self.ir_light = bool(int(v))
+        if (v := attr.get("LightOnOff")) is not None:
+            self.floodlight = bool(int(v))
+        if (v := attr.get("trackingMode")) is not None:
+            self.ptz_tracking = bool(int(v))
+        if (v := attr.get("SoundLevel")) is not None:
+            self.speaker_volume = int(v)
+        # Diagnostic / read-only
+        if (v := attr.get("Battery_remaining")) is not None:
+            try:
+                self.battery_remaining = int(v)
+            except (ValueError, TypeError):
+                pass
+        if (v := attr.get("Occupancy")) is not None:
+            self.occupancy = bool(int(v))
+        if (v := attr.get("SDcardStatus")) is not None:
+            self.sd_card_status = str(v)
+
+    # Cloud "properties" keys that belong to lights, not cameras.  A camera's
+    # image "Dimming" must not be read as a light brightness (and could TypeError
+    # if non-numeric), so exclude the light-only keys when populating a camera.
+    _LIGHT_ONLY_ATTR_KEYS = (CONF_ON_OFF, CONF_DIMMING, CONF_RGBW, CONF_CCT)
+
+    def update_from_camera_attributes(self, attrs: dict) -> None:
+        """Populate camera fields from a camera attribute / cloud-properties dict.
+
+        Accepts either a setDevAttrNotif ``attr`` dict or a cloud device
+        ``properties`` dict - both share the same camera attribute keys
+        (Battery_remaining, Occupancy, SDcardStatus, MotionDetection_*, …).
+        """
+        self.update({
+            k: v for k, v in attrs.items()
+            if k not in self._LIGHT_ONLY_ATTR_KEYS
+        })
+
+
+class CameraDeviceInformation(DeviceInformation):
+    """Core device info plus camera fields parsed from the device dict."""
+
+    # Per-device AES-128 key from the API (16-char ASCII).  Hypothesis: used
+    # for TUTK IOCtrl encryption in LDS/SDES mode.  Confirmed structure-fit
+    # (16B = AES-128).  Needs key from PTZ/L2 cameras to test against pcap.
+    aes_key: str
+    # Local device access password (TUTK viewPwd candidate)
+    device_password: str
+    # TUTK IOCtrl direction codes the camera advertises (e.g. [3,6] = left+right
+    # for a pan-only camera, [1,2,3,6] = full PTZ).  Empty means unknown - callers
+    # should treat unknown as "show all" for backward compatibility.
+    ptz_directions: list
+
+    def __init__(self, device: dict[str, Any]) -> None:
+        super().__init__(device)
+        # aesKey is a list in the API response; take first entry
+        _aes = device.get("aesKey") or []
+        self.aes_key = _aes[0] if isinstance(_aes, list) and _aes else (
+            str(_aes) if _aes else "")
+        self.device_password = device.get("password") or ""
+        self.ptz_directions = []
+        if CONF_PRODUCT in device and CONF_SERVICE_MODULES in device[CONF_PRODUCT]:
+            for service in device[CONF_PRODUCT][CONF_SERVICE_MODULES]:
+                for prop in service.get(CONF_PROPERTIES) or []:
+                    if prop.get("code") == "ptzDirection":
+                        raw = prop.get("allowedValues")
+                        try:
+                            codes = json.loads(raw) if isinstance(raw, str) else raw
+                            if isinstance(codes, list):
+                                self.ptz_directions = [int(c) for c in codes]
+                        except Exception:
+                            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -2544,6 +2674,101 @@ def _ip_looks_ascii_garbled(ip_str) -> bool:
 
 class CameraMixin:
     """All camera/streaming methods, mixed into DeviceClient via inheritance."""
+
+    def _init_camera_state(self, device: dict, user_info: dict) -> None:
+        """Camera-side state init, called once at the end of DeviceClient.__init__.
+
+        Everything camera-specific that the upstream constructor does not set
+        lives here, so the core __init__ body stays aligned with upstream.
+        """
+        # Swap in the camera-aware status/info supersets created by the core.
+        self.status = CameraStatusData()
+        self.info = CameraDeviceInformation(device)
+        # livePlayReq dseq - app parity (Q0(): starts at 100, increments per
+        # request).  Camera tracks the live-play sequence; 0 is not a valid seq.
+        self._live_dseq = 100
+        # Store full user_info for camera API calls
+        self._user_info: dict[str, Any] = user_info
+        # Region written to login_info by AidotClient.async_post_login()
+        self._region: str = user_info.get("region", "us")
+        # Cache slot for MQTT broker URL, fetched lazily on first playback call
+        self._mqtt_url: Optional[str] = None
+        # Cache slot for Leedarson smarthome auth (mqttUser, mqttPassword, userId)
+        # Fetched lazily via _async_get_smarthome_auth()
+        self._smarthome_auth: Optional[dict] = None
+        # Async callback (set by AidotClient) that refreshes the access token and
+        # updates the shared login_info in place, so camera HTTP calls can recover
+        # from a 21026 "Please login again" instead of failing silently.
+        self._token_refresh_cb: "Optional[Callable]" = None
+        # Raw device dict retained for transport-type detection (isDTLS field)
+        self._raw_device: dict = device
+        # Devices without an aesKey never set this in the core constructor.
+        if not hasattr(self, "aes_key"):
+            self.aes_key = None
+        # Seed camera/diagnostic status from the cloud device "properties" payload
+        # (Battery_remaining, Occupancy, SDcardStatus, MotionDetection_*, …).  This
+        # is the authoritative, always-current source the official app itself reads
+        # - cameras do not push these reliably over MQTT - so sensors populate
+        # immediately on load, before any poll.  No-op for devices without it.
+        self.update_status_from_device(device)
+        # Full list of device IDs for this account.  Used when calling
+        # batchGetDeviceUserInfo so the server returns data for this device
+        # (sending only one ID may yield an empty response).  Populated by
+        # AidotClient after the full device list is fetched; falls back to
+        # just this device's ID so standalone DeviceClient usage still works.
+        self._all_device_ids: list = [self.device_id]
+        # Pre-populate _ip_address from the device-list entry if it contains
+        # an IP field.  Covers cameras (e.g. LK.IPC.A001064) whose
+        # batchGetDeviceUserInfo response returns no IP and whose firmware
+        # does not push setDevAttrNotif promptly after user/connect.
+        _dev_ip_init = (
+            device.get("localIp") or device.get("ipAddress")
+            or device.get("ip") or device.get("localIPAddress")
+            or device.get("wlanIp") or device.get("wifiIp")
+            or device.get("lanIp") or device.get("addr")
+            or (device.get("properties") or {}).get("ipAddress")
+            or (device.get("properties") or {}).get("ip")
+        )
+        if _dev_ip_init:
+            # Guard against ASCII-encoded IPs (cloud stores a LAN IP's raw bytes
+            # as the octets, e.g. "49.57.50.46" == ASCII of "192.").
+            _ip_str = str(_dev_ip_init)
+            if _ip_looks_ascii_garbled(_ip_str):
+                _LOGGER.warning(
+                    "DeviceClient %s: ignoring ASCII-encoded IP %r from device dict "
+                    "(cloud stored IP bytes as ASCII chars; real IP unknown)",
+                    device.get("id") or device.get("devId"), _ip_str,
+                )
+            else:
+                self._ip_address = _ip_str
+        # Persistent background streaming state
+        self.latest_jpeg: Optional[bytes] = None
+        self._streaming_active: bool = False
+        self._stream_session: Optional[Any] = None
+        self._stream_task: Optional["asyncio.Task[None]"] = None
+        self._last_frame_time: float = 0.0
+        self._keepalive_rtsp_url: Optional[str] = None  # RTSP push URL for go2rtc
+        # Set by the DTLS serve loop once ffmpeg is bound + serving, so
+        # camera.stream_source() can wait and hand HA a ready URL (avoids HA's
+        # ~40s connection-refused retry gap on cold start).
+        self._serve_ready: "asyncio.Event" = asyncio.Event()
+        # Motion/event polling (cloud event list). NOTE: the camera does NOT push motion
+        # to a passive MQTT subscriber - alarmType is only emitted during an active live
+        # view (decompiled NewLiveFragment) - so real-time-ish motion for HA comes from
+        # polling the cloud event list, mirroring how the app surfaces background events.
+        self._motion_active: bool = False
+        self._motion_cb: Optional[Callable] = None
+        self._motion_task: Optional["asyncio.Task[None]"] = None
+        self._motion_seen: set = set()
+        self._motion_interval: float = 30.0
+
+    # -- Pre-0.6 core API, kept for existing consumers ----------------------- #
+
+    def set_status_fresh_cb(self, callback) -> None:
+        self.on_status_update = callback
+
+    async def read_status(self):
+        return self.status
 
     # Camera models that report ``enableSdes: '1'`` but whose SDES-SRTP
     # implementation is non-functional on the wire.  Forced to the DTLS path.
