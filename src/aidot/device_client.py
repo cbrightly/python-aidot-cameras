@@ -120,6 +120,8 @@ from .camera.client import (
     CameraMixin,
     WebRTCSession,
     SdesSession,
+    TALK_PCM_FRAME_BYTES,
+    TALK_PCM_RATE,
     _CAMERA_ALARM_TYPES,
     _WEBRTC_TERMINAL_ACK_CODES,
     _build_sprop,
