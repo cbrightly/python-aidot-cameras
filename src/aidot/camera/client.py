@@ -2689,6 +2689,17 @@ class CameraMixin:
     # default it so get_send_packet and friends see None instead of raising.
     aes_key = None
 
+    # Optional LAN control client; when attached, attribute writes go local-first.
+    _lan_client = None
+
+    def attach_lan_client(self, lan_client) -> None:
+        """Route camera attribute writes through ``lan_client`` (local-first,
+        cloud-fallback).  Pass an ``aidot.camera.lan_control.CameraLanClient``."""
+        self._lan_client = lan_client
+
+    def detach_lan_client(self) -> None:
+        self._lan_client = None
+
     def _init_camera_state(self, device: dict, user_info: dict) -> None:
         """Camera-side state init, called once at the end of DeviceClient.__init__.
 
@@ -3501,9 +3512,21 @@ class CameraMixin:
         we add it ourselves.  onlyPubAck=false means camera sends
         setDevAttrResp matched by seq.  _mqtt_device_cmd sends a
         lowPowerActiveStateReq wake signal before this command.
+        Local-first: if a LAN control client is attached (see
+        :meth:`attach_lan_client`) and reachable, the attribute is set over the
+        LAN and the cloud round-trip is skipped; any LAN failure falls through to
+        the MQTT path below.
         """
         import json as _json
         import random as _random
+
+        lan = getattr(self, "_lan_client", None)
+        if lan is not None:
+            try:
+                if await lan.async_set_attributes({attr: value}):
+                    return True
+            except Exception as _exc:  # noqa: BLE001 - any LAN error -> cloud fallback
+                _LOGGER.debug("LAN set %s failed (%s); falling back to cloud", attr, _exc)
 
         device_id = self.device_id
         user_id   = self.user_id
