@@ -14,7 +14,9 @@ from aidot.camera.lan_control import (
     ATTR_KEYS,
     CameraLanClient,
     CameraLanError,
+    _local_ipv4,
     _pack,
+    discover_subnet,
 )
 
 DEVICE = {"id": "dev1", "modelId": "LK.IPC.A000088", "aesKey": ["k" * 16], "password": "pw"}
@@ -67,3 +69,14 @@ def test_battery_gating():
 @pytest.mark.parametrize("friendly,wire", list(ATTR_KEYS.items()))
 def test_attr_keys_are_strings(friendly, wire):
     assert isinstance(friendly, str) and isinstance(wire, str)
+
+
+def test_network_helpers_are_callable():
+    # Real behaviour is covered by the live smoke test; here just assert the
+    # discovery helpers are importable and have the expected shape (the test
+    # sandbox blocks sockets, so we don't invoke them).
+    import inspect
+    assert callable(_local_ipv4)
+    assert inspect.iscoroutinefunction(discover_subnet)
+    sig = inspect.signature(discover_subnet)
+    assert list(sig.parameters) == ["cidr24", "timeout", "concurrency"]
