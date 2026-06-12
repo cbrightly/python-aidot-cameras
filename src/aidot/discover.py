@@ -11,10 +11,11 @@ from typing import Any, List, Tuple
 from .aes_utils import aes_encrypt, aes_decrypt
 from .const import CONF_ID, CONF_IPADDRESS
 from .exceptions import AidotOSError
+from .models.discover_model import DiscoverResponse, DiscoverRequest
 
 _LOGGER = logging.getLogger(__name__)
-_DISCOVER_TIME = 5
-
+_DISCOVER_FAST = 6      # fast discovery cadence right after startup
+_DISCOVER_SLOW = 120    # slow maintenance cadence once stable
 
 def _get_broadcast_candidates() -> List[Tuple[str, str]]:
     """Return (bind_ip, broadcast_ip) pairs for every active IPv4 interface.
@@ -68,11 +69,7 @@ class BroadcastProtocol:
     _is_closed = False
 
     def __init__(self, callback, user_id, broadcast_addr: str = "255.255.255.255") -> None:
-        self.aes_key = bytearray(32)
-        key_string = "T54uednca587"
-        key_bytes = key_string.encode()
-        self.aes_key[: len(key_bytes)] = key_bytes
-
+        self.aes_key = bytearray(b"T54uednca587".ljust(32, b'\x00'))
         self._discover_cb = callback
         self.user_id = user_id
         self._broadcast_addr = broadcast_addr
@@ -86,28 +83,16 @@ class BroadcastProtocol:
         if self._is_closed:
             _LOGGER.error("%s: connection is closed", self.user_id)
             return
-        current_timestamp_milliseconds = int(time.time() * 1000)
-        seq = str(current_timestamp_milliseconds + 1)[-9:]
-        message = {
-            "protocolVer": "2.0.0",
-            "service": "device",
-            "method": "devDiscoveryReq",
-            "seq": seq,
-            "srcAddr": f"0.{self.user_id}",
-            "tst": current_timestamp_milliseconds,
-            "payload": {
-                "extends": {},
-                "localCtrFlag": 1,
-                "timestamp": str(current_timestamp_milliseconds),
-            },
-        }
-        send_data = aes_encrypt(json.dumps(message).encode(), self.aes_key)
         try:
+            request = DiscoverRequest.from_params(userId=self.user_id)
+            message = request.to_dict()
+            _LOGGER.debug("send_broadcast %s", message)
+            send_data = aes_encrypt(json.dumps(message).encode(), self.aes_key)
             sock = self.transport.get_extra_info("socket")
             local_addr = sock.getsockname() if sock else ("?", 0)
             self.transport.sendto(send_data, (self._broadcast_addr, 6666))
-            _LOGGER.info(
-                "discovery broadcast sent: %s:%s → %s:6666",
+            _LOGGER.debug(
+                "discovery broadcast sent: %s:%s -> %s:6666",
                 local_addr[0], local_addr[1], self._broadcast_addr,
             )
         except Exception as error:
@@ -120,10 +105,13 @@ class BroadcastProtocol:
         except Exception as exc:
             _LOGGER.debug("discovery: ignored undecodable packet from %s: %s", addr, exc)
             return
-        if "payload" in data_json and "mac" in data_json["payload"]:
-            devId = data_json["payload"]["devId"]
-            if self._discover_cb:
-                self._discover_cb(devId, {CONF_IPADDRESS: addr[0]})
+        try:
+            response = DiscoverResponse.from_json(data=data_json)
+            _LOGGER.debug("datagram_received %s", data_json)
+            if response.payload and response.payload.devId and self._discover_cb:
+                self._discover_cb(response.payload.devId, {CONF_IPADDRESS: addr[0]})
+        except Exception as error:
+            _LOGGER.error(f"datagram_received error: {error}")
 
     def error_received(self, exc) -> None:
         _LOGGER.error("%s: error occurred: %s", self.user_id, exc)
@@ -145,20 +133,23 @@ class BroadcastProtocol:
 class Discover:
     _login_info: dict[str, Any] = None
     discovered_device: dict[str, str]
-    _is_close: bool = False
+    _timer_handle: asyncio.TimerHandle | None = None
 
     def __init__(self, login_info, callback):
         self.discovered_device = {}
         self._login_info = login_info
         self._callback = callback
         self._protocols: List[BroadcastProtocol] = []
+        self._is_close = False
+        self._broadcast_task: "asyncio.Task | None" = None
 
     async def _ensure_sockets(self) -> None:
         """Create one datagram endpoint per active interface (idempotent)."""
-        if self._protocols:
+        if self._is_close or self._protocols:
             return
 
-        candidates = _get_broadcast_candidates()
+        # subprocess-based interface enumeration must not block the loop
+        candidates = await asyncio.to_thread(_get_broadcast_candidates)
         user_id = self._login_info[CONF_ID]
 
         for bind_ip, broadcast_ip in candidates:
@@ -203,19 +194,32 @@ class Discover:
         for proto in self._protocols:
             proto.send_broadcast()
 
-    async def repeat_broadcast(self) -> None:
+    def start_repeat_broadcast(self) -> None:
+        """Timer-driven discovery: a few fast rounds at startup, then slow."""
         self._is_close = False
-        while True:
-            await self.send_broadcast()
-            for _ in range(_DISCOVER_TIME):
-                await asyncio.sleep(1)
-                if self._is_close:
-                    return
+        self._fast_discover_count = 5
+        self._schedule_broadcast()
 
-    async def fetch_devices_info(self) -> dict[str, str]:
-        await self.send_broadcast()
-        await asyncio.sleep(2)
-        return self.discovered_device
+    def _schedule_broadcast(self) -> None:
+        if self._is_close:
+            return
+        if self._fast_discover_count > 0:
+            interval = _DISCOVER_FAST
+            self._fast_discover_count -= 1
+        else:
+            interval = _DISCOVER_SLOW
+
+        loop = asyncio.get_running_loop()
+        self._broadcast_task = asyncio.create_task(self._do_broadcast())
+        self._timer_handle = loop.call_later(interval, self._schedule_broadcast)
+
+    async def _do_broadcast(self) -> None:
+        if self._is_close:
+            return
+        try:
+            await self.send_broadcast()
+        except Exception as e:
+            _LOGGER.error(f"Broadcast failed: {e}")
 
     def _discover_callback(self, dev_id, event: dict[str, str]) -> None:
         self.discovered_device[dev_id] = event[CONF_IPADDRESS]
@@ -224,6 +228,11 @@ class Discover:
 
     def close(self) -> None:
         self._is_close = True
+        if self._broadcast_task is not None and not self._broadcast_task.done():
+            self._broadcast_task.cancel()
+        if self._timer_handle is not None:
+            self._timer_handle.cancel()
+            self._timer_handle = None
         for proto in self._protocols:
             proto.close()
         self._protocols.clear()
