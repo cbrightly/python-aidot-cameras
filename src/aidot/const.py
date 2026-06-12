@@ -233,8 +233,9 @@ class ServerErrorCode(IntEnum):
 
 # ── Cloud API credentials ──────────────────────────────────────────────────── #
 
-APP_ID = "1383974540041977857"
-BASE_URL = "https://prod-us-api.arnoo.com/v17"
+from .login_const import APP_ID, PUBLIC_KEY_PEM  # noqa: E402 - back-compat re-export
+from .login_const import API_URL_TEMPLATE as _API_URL_TEMPLATE, DEFAULT_REGION as _DEFAULT_REGION  # noqa: E402
+BASE_URL = _API_URL_TEMPLATE.format(region=_DEFAULT_REGION)
 
 PUBLIC_KEY_PEM = b"""-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCtQAnPCi8ksPnS1Du6z96PsKfN

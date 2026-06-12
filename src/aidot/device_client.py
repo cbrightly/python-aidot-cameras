@@ -201,6 +201,9 @@ class DeviceClient(CameraMixin, object):
             sock: socket.socket = self.writer.get_extra_info("socket")
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.seq_num = 1
+            # Cloud polls may have seeded status.online; the gate below must
+            # reflect this TCP login only.
+            self.status.online = False
             await self.login()
             self._connect_and_login = self.status.online
         except Exception as e:
@@ -322,6 +325,9 @@ class DeviceClient(CameraMixin, object):
                     self.ascNumber = response.payload.ascNumber
                 if response.payload.attr:
                     self.status.update(response.payload.attr)
+                    # Camera/floodlight keys are not in the typed DeviceAttr
+                    # model; pass the raw dict so they are not dropped.
+                    self.status.update((json_data.get(CONF_PAYLOAD) or {}).get(CONF_ATTR))
                     self._notify_status_update()
     
     def _schedule_ping(self):
@@ -436,13 +442,29 @@ class DeviceClient(CameraMixin, object):
 
     async def close(self) -> None:
         self._is_close = True
+        if self._login_task is not None and not self._login_task.done():
+            self._login_task.cancel()
         await self.async_stop_streaming()
         await self.reset()
         _LOGGER.info(f"{self.device_id} connect close by user")
 
+    _last_login_attempt: float = 0.0
+
     def _schedule_reconnect(self) -> None:
         """延迟重连"""
+        if self._is_close:
+            return
+        if self._reconnect_handle is not None:
+            return  # a reconnect chain is already armed
         _LOGGER.info(f"{self.device_id} _schedule_reconnect")
         loop = asyncio.get_running_loop()
-        self._reconnect_handle = loop.call_later(60, self._schedule_reconnect)
+        self._reconnect_handle = loop.call_later(60, self._reconnect_fire)
+        now = time.monotonic()
+        if now - self._last_login_attempt < 30:
+            return  # too soon after the last attempt; the timer above retries
+        self._last_login_attempt = now
         self._login_task = asyncio.create_task(self.async_login())
+
+    def _reconnect_fire(self) -> None:
+        self._reconnect_handle = None
+        self._schedule_reconnect()
