@@ -9,7 +9,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import aidot.device_client as dc
+# stream-cap singleton lives in the camera module after the camera extraction
+import aidot.camera.client as dc
 
 
 def _fresh_slots(n):
