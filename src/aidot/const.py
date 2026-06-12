@@ -101,6 +101,7 @@ SUPPORTED_COUNTRYS = [
     {"_id": "16-4", "id": "PK", "name": "Pakistan", "ext": "", "region": "JP"},
     {"_id": "16-5", "id": "PS", "name": "Palestine", "ext": "", "region": "JP"},
     {"_id": "16-6", "id": "PH", "name": "Philippines", "ext": "", "region": "JP"},
+    {"_id": "16-7", "id": "PL", "name": "Poland", "ext": "", "region": "EU"},
     {"_id": "17-0", "id": "QA", "name": "Qatar", "ext": "", "region": "JP"},
     {"_id": "18-0", "id": "RO", "name": "Romania", "ext": "", "region": "EU"},
     {"_id": "18-1", "id": "RU", "name": "Russia", "ext": "", "region": "EU"},
@@ -187,6 +188,7 @@ CONF_IS_DEFAULT = "isDefault"
 CONF_TYPE = "type"
 CONF_MODEL_ID = "modelId"
 CONF_MAC = "mac"
+CONF_LOGIN_INFO = "loginInfo"
 CONF_AES_KEY = "aesKey"
 CONF_HARDWARE_VERSION = "hardwareVersion"
 CONF_SERVICE_MODULES = "serviceModules"
@@ -205,6 +207,8 @@ CONF_RGBW = "RGBW"
 CONF_CCT = "CCT"
 CONF_ACK = "ack"
 CONF_IS_OWNER = "isOwner"
+CONF_GET_DEV_ATTR_REQ = "getDevAttrReq"
+CONF_SET_DEV_ATTR_REQ = "setDevAttrReq"
 
 
 class Identity(StrEnum):

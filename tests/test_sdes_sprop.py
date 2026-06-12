@@ -11,7 +11,8 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import aidot.device_client as dc
+# _SPROP_DIR / sprop helpers live in the camera module after the camera extraction
+import aidot.camera.client as dc
 from aidot.device_client import (
     _extract_param_sets_from_rtp,
     _build_sprop,
