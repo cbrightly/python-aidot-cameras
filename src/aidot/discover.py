@@ -14,7 +14,6 @@ from .exceptions import AidotOSError
 from .models.discover_model import DiscoverResponse, DiscoverRequest
 
 _LOGGER = logging.getLogger(__name__)
-_DISCOVER_TIME = 5      # legacy repeat_broadcast() loop interval (seconds)
 _DISCOVER_FAST = 6      # fast discovery cadence right after startup
 _DISCOVER_SLOW = 120    # slow maintenance cadence once stable
 
@@ -141,13 +140,16 @@ class Discover:
         self._login_info = login_info
         self._callback = callback
         self._protocols: List[BroadcastProtocol] = []
+        self._is_close = False
+        self._broadcast_task: "asyncio.Task | None" = None
 
     async def _ensure_sockets(self) -> None:
         """Create one datagram endpoint per active interface (idempotent)."""
-        if self._protocols:
+        if self._is_close or self._protocols:
             return
 
-        candidates = _get_broadcast_candidates()
+        # subprocess-based interface enumeration must not block the loop
+        candidates = await asyncio.to_thread(_get_broadcast_candidates)
         user_id = self._login_info[CONF_ID]
 
         for bind_ip, broadcast_ip in candidates:
@@ -192,15 +194,6 @@ class Discover:
         for proto in self._protocols:
             proto.send_broadcast()
 
-    async def repeat_broadcast(self) -> None:
-        self._is_close = False
-        while True:
-            await self.send_broadcast()
-            for _ in range(_DISCOVER_TIME):
-                await asyncio.sleep(1)
-                if self._is_close:
-                    return
-
     def start_repeat_broadcast(self) -> None:
         """Timer-driven discovery: a few fast rounds at startup, then slow."""
         self._is_close = False
@@ -208,6 +201,8 @@ class Discover:
         self._schedule_broadcast()
 
     def _schedule_broadcast(self) -> None:
+        if self._is_close:
+            return
         if self._fast_discover_count > 0:
             interval = _DISCOVER_FAST
             self._fast_discover_count -= 1
@@ -215,19 +210,16 @@ class Discover:
             interval = _DISCOVER_SLOW
 
         loop = asyncio.get_running_loop()
-        asyncio.create_task(self._do_broadcast())
+        self._broadcast_task = asyncio.create_task(self._do_broadcast())
         self._timer_handle = loop.call_later(interval, self._schedule_broadcast)
 
     async def _do_broadcast(self) -> None:
+        if self._is_close:
+            return
         try:
             await self.send_broadcast()
         except Exception as e:
             _LOGGER.error(f"Broadcast failed: {e}")
-
-    async def fetch_devices_info(self) -> dict[str, str]:
-        await self.send_broadcast()
-        await asyncio.sleep(2)
-        return self.discovered_device
 
     def _discover_callback(self, dev_id, event: dict[str, str]) -> None:
         self.discovered_device[dev_id] = event[CONF_IPADDRESS]
@@ -236,6 +228,8 @@ class Discover:
 
     def close(self) -> None:
         self._is_close = True
+        if self._broadcast_task is not None and not self._broadcast_task.done():
+            self._broadcast_task.cancel()
         if self._timer_handle is not None:
             self._timer_handle.cancel()
             self._timer_handle = None
