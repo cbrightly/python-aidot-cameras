@@ -107,6 +107,46 @@ async def discover_unicast(ip: str, timeout: float = 2.0) -> Optional[dict]:
         sock.close()
 
 
+def _local_ipv4() -> Optional[str]:
+    """Best-effort primary IPv4 of this host (no traffic sent)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("192.0.2.1", 9))  # TEST-NET-1; just selects an interface
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+async def discover_subnet(cidr24: Optional[str] = None, timeout: float = 3.0,
+                          concurrency: int = 64) -> dict[str, str]:
+    """Unicast-sweep a /24 and return ``{devId: ip}`` for every camera that answers.
+
+    Cameras ignore the broadcast discovery sweep but answer a unicast probe, so the
+    only way to map a camera's devId to its LAN IP locally is to probe each host.
+    ``cidr24`` is the first three octets (e.g. ``"192.168.1"``); if omitted it is
+    derived from this host's primary IPv4.  Cheap (254 UDP probes, ~timeout wall).
+    """
+    if cidr24 is None:
+        ip = _local_ipv4()
+        if not ip:
+            return {}
+        cidr24 = ip.rsplit(".", 1)[0]
+
+    sem = asyncio.Semaphore(concurrency)
+    found: dict[str, str] = {}
+
+    async def probe(host: str) -> None:
+        async with sem:
+            payload = await discover_unicast(host, timeout=timeout)
+        if payload and payload.get("devId"):
+            found[payload["devId"]] = host
+
+    await asyncio.gather(*(probe(f"{cidr24}.{n}") for n in range(1, 255)))
+    return found
+
+
 class CameraLanError(Exception):
     """A local control operation failed (connect, login, or protocol error)."""
 
