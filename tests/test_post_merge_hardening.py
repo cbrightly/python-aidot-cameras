@@ -165,11 +165,12 @@ def test_no_silent_mro_shadowing():
     conflict-free merge.  Keep this intersection explicitly reviewed."""
     intentional = {
         # device_client.py deliberately overrides/joins these:
-        "__init__", "__doc__", "__module__", "__qualname__", "__dict__",
-        "__weakref__", "__annotations__",
+        "__init__",
     }
-    core = set(DeviceClient.__dict__)
-    camera = set(CameraMixin.__dict__)
+    # Compare only non-dunder names: interpreter-added dunders vary by
+    # Python version (3.13 adds __firstlineno__/__static_attributes__).
+    core = {n for n in DeviceClient.__dict__ if not n.startswith("__")}
+    camera = {n for n in CameraMixin.__dict__ if not n.startswith("__")}
     collisions = (core & camera) - intentional
     assert collisions == set(), (
         f"DeviceClient now shadows CameraMixin names {sorted(collisions)}; "
