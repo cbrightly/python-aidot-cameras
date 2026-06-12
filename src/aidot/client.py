@@ -58,6 +58,14 @@ def rsa_password_encrypt(message: str) -> str:
 
 
 
+def _is_camera(device_client: "DeviceClient") -> bool:
+    """Cameras get their LAN IP from WebRTC signaling, never from the UDP
+    sweep; pushing a discovered IP would trigger light-protocol logins on
+    TCP:10000 (which can hang - the camera accepts but never answers)."""
+    model = getattr(getattr(device_client, "info", None), "model_id", "") or ""
+    return "IPC" in model
+
+
 async def _prefetch_ice_config(dc: "DeviceClient") -> None:
     """Background task: warm the HTTP ICE config cache for a device."""
     try:
@@ -157,7 +165,11 @@ class AidotClient:
     def update_password(self, password: str) -> None:
         self.password = password
 
+    _terminal_id: "Optional[str]" = None
+
     async def get_terminal_id(self) -> str:
+        if self._terminal_id is not None:
+            return self._terminal_id
         file_path = Path.home() / ".aidot_terminal_id"
 
         def _read_or_create() -> str:
@@ -173,7 +185,8 @@ class AidotClient:
                 return 'gvz3gjae10l4zii00t7y0'
 
         raw_id = await asyncio.to_thread(_read_or_create)
-        return hashlib.md5(raw_id.encode()).hexdigest()
+        self._terminal_id = hashlib.md5(raw_id.encode()).hexdigest()
+        return self._terminal_id
 
     async def async_post_login(self) -> dict[str, Any]:
         """Login via loginWithFreeVerification (RSA-encrypted password)."""
@@ -456,11 +469,15 @@ class AidotClient:
             asyncio.get_running_loop().create_task(
                 _prefetch_ice_config(device_client)
             )
+        # Started lazily here as well: __init__ cannot start discovery when
+        # constructed outside a running event loop (stored-token sync path).
+        if self._discover is None:
+            self.setup_discover()
         # Lights get their LAN IP from UDP discovery.  Cameras do NOT use the
         # broadcast sweep: their LAN IP comes from the WebRTC signaling host
         # candidate (iceCandidateReq), which the camera advertises and we add
         # verbatim - the official app does the same.
-        if self._discover is not None:
+        if self._discover is not None and not _is_camera(device_client):
             ip = self._discover.discovered_device.get(device_id)
             device_client.update_ip_address(ip)
         return device_client
@@ -481,7 +498,7 @@ class AidotClient:
         def _discover_callback(dev_id, event: dict[str, str]) -> None:
             device_ip = event[CONF_IPADDRESS]
             device_client: DeviceClient = self._device_clients.get(dev_id)
-            if device_client is not None:
+            if device_client is not None and not _is_camera(device_client):
                 device_client.update_ip_address(device_ip)
 
         try:
@@ -493,6 +510,8 @@ class AidotClient:
 
     async def async_close(self) -> None:
         """Close the client and release resources."""
+        if self._refresh_task and not self._refresh_task.done():
+            self._refresh_task.cancel()
         if self._discover is not None:
             self._discover.close()
             self._discover = None
@@ -501,14 +520,8 @@ class AidotClient:
         self._device_clients.clear()
 
     def cleanup(self) -> None:
-        if self._discover is not None:
-            self._discover.close()
-            self._discover = None
-        for client in self._device_clients.values():
-            asyncio.get_running_loop().create_task(client.close())
-        self._device_clients.clear()
+        """Sync entry point: fire-and-forget async_close()."""
+        asyncio.get_running_loop().create_task(self.async_close())
 
     async def async_cleanup(self) -> None:
-        if self._refresh_task and not self._refresh_task.done():
-            self._refresh_task.cancel()
         await self.async_close()

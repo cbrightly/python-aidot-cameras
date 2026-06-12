@@ -17,6 +17,7 @@ from typing import Any, Callable, List, Optional
 
 from ..aes_utils import aes_encrypt, aes_decrypt, aes_ecb_encrypt_str_key, aes_ecb_decrypt_str_key
 from ..exceptions import AidotCameraBusy
+from ..login_const import APP_ID as _AIDOT_APP_ID
 from ..const import (
     CONF_AES_KEY,
     CONF_ASCNUMBER,
@@ -49,11 +50,27 @@ _LOGGER = logging.getLogger(__name__)
 # Runtime import: device_client defines these classes BEFORE importing this
 # module (the package __init__ loads aidot.device_client first), so the
 # partially-initialized module already exposes them here.
-from ..device_client import DeviceStatusData, DeviceInformation
+try:
+    from ..device_client import DeviceStatusData, DeviceInformation
+except ImportError as _exc:  # pragma: no cover - ordering contract violation
+    raise ImportError(
+        "aidot.camera.client must be imported via aidot.device_client "
+        "(import aidot first); keep the camera import block in "
+        "device_client.py below the DeviceStatusData/DeviceInformation "
+        "definitions"
+    ) from _exc
 
 
 class CameraStatusData(DeviceStatusData):
     """Core status plus camera fields; accepts both typed-model and dict updates."""
+
+    # Restore None-as-unknown semantics: the core defaults (red/2700K/100)
+    # would otherwise be pushed to consumers as real state before the first
+    # getDevAttrReq reply arrives.
+    rgdb: "int | None" = None
+    rgbw: "tuple[int, int, int, int] | None" = None
+    cct: "int | None" = None
+    dimming: "int | None" = None
 
     # Camera-specific fields (None = unknown/not yet queried)
     motion_detection: Optional[bool] = None
@@ -76,23 +93,16 @@ class CameraStatusData(DeviceStatusData):
             return
         if not isinstance(attr, dict):
             # Typed DeviceAttr model from the core local-control receive path.
+            # Guard: a malformed payload.attr (non-dict, non-model) must not
+            # kill the caller's receive loop.
+            if not hasattr(attr, "OnOff"):
+                return
             super().update(attr)
             return
-        # Dict path (camera attribute / cloud-properties payloads).
-        if attr.get(CONF_ON_OFF) is not None:
-            self.on = attr.get(CONF_ON_OFF)
-        if attr.get(CONF_DIMMING) is not None:
-            self.dimming = int(attr.get(CONF_DIMMING) * 255 / 100)
-        if attr.get(CONF_RGBW) is not None:
-            self.rgdb = attr.get(CONF_RGBW)
-            rgbw = ctypes.c_uint32(self.rgdb).value
-            r = (rgbw >> 24) & 0xFF
-            g = (rgbw >> 16) & 0xFF
-            b = (rgbw >> 8) & 0xFF
-            w = rgbw & 0xFF
-            self.rgbw = (r, g, b, w)
-        if attr.get(CONF_CCT) is not None:
-            self.cct = attr.get(CONF_CCT)
+        # Dict path: camera attributes ONLY.  Light keys (OnOff/Dimming/RGBW/
+        # CCT) are handled by the typed-model path in the core; the dict
+        # feeders either strip them (update_from_camera_attributes) or have
+        # already applied them via the model (receive_data raw-dict pass).
         # Camera attributes
         if (v := attr.get("MotionDetection_Enable")) is not None:
             self.motion_detection = bool(int(v))
@@ -2675,15 +2685,25 @@ def _ip_looks_ascii_garbled(ip_str) -> bool:
 class CameraMixin:
     """All camera/streaming methods, mixed into DeviceClient via inheritance."""
 
+    # Devices without an aesKey never get this set by the core constructor;
+    # default it so get_send_packet and friends see None instead of raising.
+    aes_key = None
+
     def _init_camera_state(self, device: dict, user_info: dict) -> None:
         """Camera-side state init, called once at the end of DeviceClient.__init__.
 
         Everything camera-specific that the upstream constructor does not set
         lives here, so the core __init__ body stays aligned with upstream.
         """
-        # Swap in the camera-aware status/info supersets created by the core.
+        # Swap in the camera-aware status/info supersets created by the core,
+        # carrying forward anything the core constructor seeded into the
+        # originals so upstream-added seeding cannot be lost silently.
+        _core_status, _core_info = self.status, self.info
         self.status = CameraStatusData()
+        self.status.__dict__.update(_core_status.__dict__)
         self.info = CameraDeviceInformation(device)
+        for _k, _v in _core_info.__dict__.items():
+            self.info.__dict__.setdefault(_k, _v)
         # livePlayReq dseq - app parity (Q0(): starts at 100, increments per
         # request).  Camera tracks the live-play sequence; 0 is not a valid seq.
         self._live_dseq = 100
@@ -2702,9 +2722,7 @@ class CameraMixin:
         self._token_refresh_cb: "Optional[Callable]" = None
         # Raw device dict retained for transport-type detection (isDTLS field)
         self._raw_device: dict = device
-        # Devices without an aesKey never set this in the core constructor.
-        if not hasattr(self, "aes_key"):
-            self.aes_key = None
+
         # Seed camera/diagnostic status from the cloud device "properties" payload
         # (Battery_remaining, Occupancy, SDcardStatus, MotionDetection_*, …).  This
         # is the authoritative, always-current source the official app itself reads
@@ -3169,7 +3187,7 @@ class CameraMixin:
         token = (self._user_info.get("accessToken")
                  or self._user_info.get("access_token") or "")
         return {
-            "Appid":        "1383974540041977857",
+            "Appid":        _AIDOT_APP_ID,
             "Token":        token,
             "Terminal":     "app",
             "Content-Type": "application/json",
