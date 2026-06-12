@@ -12007,7 +12007,14 @@ class CameraMixin:
                     _sdes_gain_db = -8.0
                 dest_args = [
                     "-c:v", "copy",
-                    "-af", f"volume={_sdes_gain_db}dB",
+                    # aresample=async=1 fills timing gaps with silence so the AAC
+                    # encoder always has a full 1024-sample frame to emit.  Battery
+                    # cameras send PCMA sparsely (radio duty-cycling + weak uplink);
+                    # without this the encoder starves, the mpegts PAT/PMT is never
+                    # written, and the consumer gets ZERO bytes - the whole stream
+                    # dies.  first_pts=0 anchors the clock so the first AAC frame
+                    # (and thus the PMT) is produced promptly at stream start.
+                    "-af", f"aresample=async=1:first_pts=0,volume={_sdes_gain_db}dB",
                     "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
                     "-f", "mpegts", "-listen", "1",
                     rtsp_push_url,
