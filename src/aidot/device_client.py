@@ -1,22 +1,18 @@
 """The aidot integration."""
 
 import ctypes
-import json
-import logging
-import os
-import random
 import socket
 import struct
-import threading
 import time
+import json
 import asyncio
-import zlib
-from dataclasses import dataclass
+import logging
 from datetime import datetime
-from typing import Any, Callable, List, Optional
+from typing import Any
 
-from .aes_utils import aes_encrypt, aes_decrypt, aes_ecb_encrypt_str_key, aes_ecb_decrypt_str_key
-from .exceptions import AidotCameraBusy
+from .exceptions import AidotNotLogin
+from .aes_utils import aes_encrypt, aes_decrypt_to_json
+from .models.device_client_model import PingRequest, LoginRequest, LoginPayload, DeviceResponse, DeviceAttr, DeviceActionRequest
 from .const import (
     CONF_AES_KEY,
     CONF_ASCNUMBER,
@@ -40,14 +36,86 @@ from .const import (
     CONF_SERVICE_MODULES,
     CONF_ACK,
     CONF_CODE,
+    CONF_GET_DEV_ATTR_REQ,
+    CONF_SET_DEV_ATTR_REQ,
     Identity,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 
-# Camera surface lives in aidot.camera.client; re-export the names that the
-# public API and the test-suite import from this module (back-compat).
+class DeviceStatusData:
+    online: bool = False
+    on: bool = False
+    rgdb: int = 0xFF000000
+    rgbw: tuple[int, int, int, int] = (255, 0, 0, 0)
+    cct: int = 2700
+    dimming: int = 100
+
+    def update(self, attr: DeviceAttr) -> None:
+        """Update status from DeviceAttr model."""
+        if attr is None:
+            return
+        if attr.OnOff is not None:
+            self.on = attr.OnOff
+        if attr.Dimming is not None:
+            self.dimming = int(attr.Dimming * 255 / 100)
+        if attr.RGBW is not None:
+            rgbw_value = attr.RGBW
+            # If RGBW is 0, set default red color (255, 0, 0, 0)
+            if rgbw_value == 0:
+                self.rgdb = 0xFF000000  # Red in int: 4278190080
+            else:
+                self.rgdb = rgbw_value
+            
+            rgbw = ctypes.c_uint32(self.rgdb).value
+            r = (rgbw >> 24) & 0xFF
+            g = (rgbw >> 16) & 0xFF
+            b = (rgbw >> 8) & 0xFF
+            w = rgbw & 0xFF
+            self.rgbw = (r, g, b, w)
+        if attr.CCT is not None:
+            self.cct = attr.CCT
+
+
+class DeviceInformation:
+    enable_rgbw: bool = False
+    enable_dimming: bool = True
+    enable_cct: bool = False
+    cct_min: int
+    cct_max: int
+    dev_id: str
+    mac: str
+    model_id: str
+    name: str
+    hw_version: str
+
+    def __init__(self, device: dict[str, Any]) -> None:
+        self.dev_id = device.get(CONF_ID)
+        self.mac = device.get(CONF_MAC) if device.get(CONF_MAC) is not None else ""
+        self.model_id = device.get(CONF_MODEL_ID)
+        self.name = device.get(CONF_NAME)
+        self.hw_version = device.get(CONF_HARDWARE_VERSION)
+        if CONF_PRODUCT in device and CONF_SERVICE_MODULES in device[CONF_PRODUCT]:
+            for service in device[CONF_PRODUCT][CONF_SERVICE_MODULES]:
+                if service[CONF_IDENTITY] == Identity.RGBW:
+                    self.enable_rgbw = True
+                    self.enable_cct = True
+                elif service[CONF_IDENTITY] == Identity.CCT:
+                    self.cct_min = int(service[CONF_PROPERTIES][0][CONF_MINVALUE])
+                    self.cct_max = int(service[CONF_PROPERTIES][0][CONF_MAXVALUE])
+                    self.enable_cct = True
+
+
+
+# --------------------------------------------------------------------------- #
+# Camera surface (additive layer)
+# --------------------------------------------------------------------------- #
+# All camera/streaming code lives in aidot.camera.client and attaches to
+# DeviceClient via CameraMixin.  This import must come AFTER DeviceStatusData /
+# DeviceInformation (camera subclasses them at import time) and BEFORE the
+# DeviceClient class definition.  Names below are re-exported for back-compat:
+# the public API and the test-suite import them from this module.
 from .camera.client import (
     CameraMixin,
     WebRTCSession,
@@ -69,161 +137,6 @@ from .camera.client import (
 )
 
 
-# --------------------------------------------------------------------------- #
-# Existing device-state classes (unchanged from original library)
-# --------------------------------------------------------------------------- #
-
-class DeviceStatusData:
-    online: bool = False
-    on: bool = False
-    rgdb: int = None
-    rgbw: tuple[int, int, int, int] = None
-    cct: int = None
-    dimming: int = None
-    # Camera-specific fields (None = unknown/not yet queried)
-    motion_detection: Optional[bool] = None
-    motion_sensitivity: Optional[int] = None  # MotionDetection_Sen 1-5
-    status_led: Optional[bool] = None
-    microphone: Optional[bool] = None
-    night_vision_mode: Optional[str] = None   # "auto" | "on" | "off"
-    ir_light: Optional[bool] = None           # nightVisionIRLight 0/1
-    floodlight: Optional[bool] = None
-    ptz_tracking: Optional[bool] = None
-    siren: bool = False
-    speaker_volume: Optional[int] = None  # SoundLevel 0-100
-    # Diagnostic / read-only camera fields
-    battery_remaining: Optional[int] = None  # Battery_remaining 0-100 (%)
-    occupancy: Optional[bool] = None          # Occupancy live presence
-    sd_card_status: Optional[str] = None      # SDcardStatus
-
-    def update(self, attr: dict[str, Any]) -> None:
-        if attr is None:
-            return
-        if attr.get(CONF_ON_OFF) is not None:
-            self.on = attr.get(CONF_ON_OFF)
-        if attr.get(CONF_DIMMING) is not None:
-            self.dimming = int(attr.get(CONF_DIMMING) * 255 / 100)
-        if attr.get(CONF_RGBW) is not None:
-            self.rgdb = attr.get(CONF_RGBW)
-            rgbw = ctypes.c_uint32(self.rgdb).value
-            r = (rgbw >> 24) & 0xFF
-            g = (rgbw >> 16) & 0xFF
-            b = (rgbw >> 8) & 0xFF
-            w = rgbw & 0xFF
-            self.rgbw = (r, g, b, w)
-        if attr.get(CONF_CCT) is not None:
-            self.cct = attr.get(CONF_CCT)
-        # Camera attributes
-        if (v := attr.get("MotionDetection_Enable")) is not None:
-            self.motion_detection = bool(int(v))
-        if (v := attr.get("MotionDetection_Sen")) is not None:
-            self.motion_sensitivity = int(v)
-        if (v := attr.get("LedOnOff")) is not None:
-            self.status_led = bool(int(v))
-        if (v := attr.get("micEnable")) is not None:
-            self.microphone = bool(int(v))
-        if (v := attr.get("nightVisionMode")) is not None:
-            try:
-                nv = int(v)
-                self.night_vision_mode = {0: "auto", 1: "on", 2: "off"}.get(nv, str(nv))
-            except (ValueError, TypeError):
-                # Camera may send string "on"/"off"/"auto" instead of 0/1/2
-                self.night_vision_mode = str(v)
-        if (v := attr.get("nightVisionIRLight")) is not None:
-            self.ir_light = bool(int(v))
-        if (v := attr.get("LightOnOff")) is not None:
-            self.floodlight = bool(int(v))
-        if (v := attr.get("trackingMode")) is not None:
-            self.ptz_tracking = bool(int(v))
-        if (v := attr.get("SoundLevel")) is not None:
-            self.speaker_volume = int(v)
-        # Diagnostic / read-only
-        if (v := attr.get("Battery_remaining")) is not None:
-            try:
-                self.battery_remaining = int(v)
-            except (ValueError, TypeError):
-                pass
-        if (v := attr.get("Occupancy")) is not None:
-            self.occupancy = bool(int(v))
-        if (v := attr.get("SDcardStatus")) is not None:
-            self.sd_card_status = str(v)
-
-    # Cloud "properties" keys that belong to lights, not cameras.  A camera's
-    # image "Dimming" must not be read as a light brightness (and could TypeError
-    # if non-numeric), so exclude the light-only keys when populating a camera.
-    _LIGHT_ONLY_ATTR_KEYS = (CONF_ON_OFF, CONF_DIMMING, CONF_RGBW, CONF_CCT)
-
-    def update_from_camera_attributes(self, attrs: dict) -> None:
-        """Populate camera fields from a camera attribute / cloud-properties dict.
-
-        Accepts either a setDevAttrNotif ``attr`` dict or a cloud device
-        ``properties`` dict - both share the same camera attribute keys
-        (Battery_remaining, Occupancy, SDcardStatus, MotionDetection_*, …).
-        """
-        self.update({
-            k: v for k, v in attrs.items()
-            if k not in self._LIGHT_ONLY_ATTR_KEYS
-        })
-
-
-class DeviceInformation:
-    enable_rgbw: bool = False
-    enable_dimming: bool = True
-    enable_cct: bool = False
-    cct_min: int
-    cct_max: int
-    dev_id: str
-    mac: str
-    model_id: str
-    name: str
-    hw_version: str
-    # Per-device AES-128 key from the API (16-char ASCII).  Hypothesis: used
-    # for TUTK IOCtrl encryption in LDS/SDES mode.  Confirmed structure-fit
-    # (16B = AES-128).  Needs key from PTZ/L2 cameras to test against pcap.
-    aes_key: str
-    # Local device access password (TUTK viewPwd candidate)
-    device_password: str
-    # TUTK IOCtrl direction codes the camera advertises (e.g. [3,6] = left+right
-    # for a pan-only camera, [1,2,3,6] = full PTZ).  Empty means unknown - callers
-    # should treat unknown as "show all" for backward compatibility.
-    ptz_directions: list
-
-    def __init__(self, device: dict[str, Any]) -> None:
-        self.dev_id = device.get(CONF_ID)
-        self.mac = device.get(CONF_MAC) if device.get(CONF_MAC) is not None else ""
-        self.model_id = device.get(CONF_MODEL_ID)
-        self.name = device.get(CONF_NAME)
-        self.hw_version = device.get(CONF_HARDWARE_VERSION)
-        # aesKey is a list in the API response; take first entry
-        _aes = device.get("aesKey") or []
-        self.aes_key = _aes[0] if isinstance(_aes, list) and _aes else (
-            str(_aes) if _aes else "")
-        self.device_password = device.get("password") or ""
-        self.ptz_directions = []
-        if CONF_PRODUCT in device and CONF_SERVICE_MODULES in device[CONF_PRODUCT]:
-            for service in device[CONF_PRODUCT][CONF_SERVICE_MODULES]:
-                if service[CONF_IDENTITY] == Identity.RGBW:
-                    self.enable_rgbw = True
-                    self.enable_cct = True
-                elif service[CONF_IDENTITY] == Identity.CCT:
-                    self.cct_min = int(service[CONF_PROPERTIES][0][CONF_MINVALUE])
-                    self.cct_max = int(service[CONF_PROPERTIES][0][CONF_MAXVALUE])
-                    self.enable_cct = True
-                for prop in service.get(CONF_PROPERTIES) or []:
-                    if prop.get("code") == "ptzDirection":
-                        raw = prop.get("allowedValues")
-                        try:
-                            import json as _json
-                            codes = _json.loads(raw) if isinstance(raw, str) else raw
-                            if isinstance(codes, list):
-                                self.ptz_directions = [int(c) for c in codes]
-                        except Exception:
-                            pass
-
-# --------------------------------------------------------------------------- #
-# Camera data types
-# --------------------------------------------------------------------------- #
-
 class DeviceClient(CameraMixin, object):
     status: DeviceStatusData
     info: DeviceInformation
@@ -234,8 +147,17 @@ class DeviceClient(CameraMixin, object):
     _ip_address: str = None
     device_id: str
     _is_close: bool = False
-    _status_fresh_cb: Any = None
-
+    on_status_update: Any = None
+    _receive_task: Any = None
+    _login_task: Any = None
+    _reconnect_handle: Any = None
+    _ping_timer: Any = None
+    writer: Any = None
+    reader: Any = None
+    syncProperties = [CONF_ON_OFF, CONF_DIMMING, CONF_RGBW, CONF_CCT]
+    heart_time = 30
+    ping_data = PingRequest().to_dict()
+    _TAG: str = "DeviceClient"
     @property
     def connect_and_login(self) -> bool:
         return self._connect_and_login
@@ -249,52 +171,6 @@ class DeviceClient(CameraMixin, object):
         self.status = DeviceStatusData()
         self.info = DeviceInformation(device)
         self.user_id = user_info.get(CONF_ID)
-        # Local-control (TCP:10000) stream handles - only opened by connect();
-        # initialise here so reset()/close() guards work for devices (cameras)
-        # that never establish a local-control connection.
-        self.reader = None
-        self.writer = None
-        # livePlayReq dseq - app parity (Q0(): starts at 100, increments per
-        # request).  Camera tracks the live-play sequence; 0 is not a valid seq.
-        self._live_dseq = 100
-
-        # Store full user_info for camera API calls
-        self._user_info: dict[str, Any] = user_info
-
-        # Region written to login_info by AidotClient.async_post_login()
-        self._region: str = user_info.get("region", "us")
-
-        # Cache slot for MQTT broker URL, fetched lazily on first playback call
-        self._mqtt_url: Optional[str] = None
-
-        # Cache slot for Leedarson smarthome auth (mqttUser, mqttPassword, userId)
-        # Fetched lazily via _async_get_smarthome_auth()
-        self._smarthome_auth: Optional[dict] = None
-
-        # Async callback (set by AidotClient) that refreshes the access token and
-        # updates the shared login_info in place, so camera HTTP calls can recover
-        # from a 21026 "Please login again" instead of failing silently.
-        self._token_refresh_cb: "Optional[Callable]" = None
-
-        # Raw device dict retained for transport-type detection (isDTLS field)
-        self._raw_device: dict = device
-
-        self.password = device.get(CONF_PASSWORD)
-        self.device_id = device.get(CONF_ID)
-
-        # Seed camera/diagnostic status from the cloud device "properties" payload
-        # (Battery_remaining, Occupancy, SDcardStatus, MotionDetection_*, …).  This
-        # is the authoritative, always-current source the official app itself reads
-        # - cameras do not push these reliably over MQTT - so sensors populate
-        # immediately on load, before any poll.  No-op for devices without it.
-        self.update_status_from_device(device)
-
-        # Full list of device IDs for this account.  Used when calling
-        # batchGetDeviceUserInfo so the server returns data for this device
-        # (sending only one ID may yield an empty response).  Populated by
-        # AidotClient after the full device list is fetched; falls back to
-        # just this device's ID so standalone DeviceClient usage still works.
-        self._all_device_ids: list = [self.device_id]
 
         if CONF_AES_KEY in device:
             key_string = device[CONF_AES_KEY][0]
@@ -302,57 +178,20 @@ class DeviceClient(CameraMixin, object):
                 self.aes_key = bytearray(16)
                 key_bytes = key_string.encode()
                 self.aes_key[: len(key_bytes)] = key_bytes
+
+        self.password = device.get(CONF_PASSWORD)
+        self.device_id = device.get(CONF_ID)
         self._simpleVersion = device.get("simpleVersion")
-        # Pre-populate _ip_address from the device-list entry if it contains
-        # an IP field.  Covers cameras (e.g. LK.IPC.A001064) whose
-        # batchGetDeviceUserInfo response returns no IP and whose firmware
-        # does not push setDevAttrNotif promptly after user/connect.
-        _dev_ip_init = (
-            device.get("localIp") or device.get("ipAddress")
-            or device.get("ip") or device.get("localIPAddress")
-            or device.get("wlanIp") or device.get("wifiIp")
-            or device.get("lanIp") or device.get("addr")
-            or (device.get("properties") or {}).get("ipAddress")
-            or (device.get("properties") or {}).get("ip")
-        )
-        if _dev_ip_init:
-            # Guard against ASCII-encoded IPs (cloud stores a LAN IP's raw bytes
-            # as the octets, e.g. "49.57.50.46" == ASCII of "192.").
-            _ip_str = str(_dev_ip_init)
-            if _ip_looks_ascii_garbled(_ip_str):
-                _LOGGER.warning(
-                    "DeviceClient %s: ignoring ASCII-encoded IP %r from device dict "
-                    "(cloud stored IP bytes as ASCII chars; real IP unknown)",
-                    device.get("id") or device.get("devId"), _ip_str,
-                )
-            else:
-                self._ip_address = _ip_str
+        self._TAG = f"{self.device_id}"
+        if self.info.model_id == 'lk.WIFI-RGBWLight-D0006':
+            self.ping_data = None
+            self.heart_time = 10
 
-        # Persistent background streaming state
-        self.latest_jpeg: Optional[bytes] = None
-        self._streaming_active: bool = False
-        self._stream_session: Optional[Any] = None
-        self._stream_task: Optional["asyncio.Task[None]"] = None
-        self._last_frame_time: float = 0.0
-        self._keepalive_rtsp_url: Optional[str] = None  # RTSP push URL for go2rtc
-        # Set by the DTLS serve loop once ffmpeg is bound + serving, so
-        # camera.stream_source() can wait and hand HA a ready URL (avoids HA's
-        # ~40s connection-refused retry gap on cold start).
-        self._serve_ready: "asyncio.Event" = asyncio.Event()
-        # Motion/event polling (cloud event list). NOTE: the camera does NOT push motion
-        # to a passive MQTT subscriber - alarmType is only emitted during an active live
-        # view (decompiled NewLiveFragment) - so real-time-ish motion for HA comes from
-        # polling the cloud event list, mirroring how the app surfaces background events.
-        self._motion_active: bool = False
-        self._motion_cb: Optional[Callable] = None
-        self._motion_task: Optional["asyncio.Task[None]"] = None
-        self._motion_seen: set = set()
-        self._motion_interval: float = 30.0
-
-    # -- Existing methods (unchanged) ---------------------------------------- #
+        _LOGGER.debug(f"{self._TAG}:{device}")
+        self._init_camera_state(device, user_info)
 
     async def connect(self, ip_address) -> None:
-        _LOGGER.info(f"connect device : {ip_address}")
+        _LOGGER.warning(f"{self._TAG}:connect device: {ip_address}")
         self.reader = self.writer = None
         self._connecting = True
         try:
@@ -361,9 +200,10 @@ class DeviceClient(CameraMixin, object):
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.seq_num = 1
             await self.login()
-            self._connect_and_login = True
-        except Exception:
+            self._connect_and_login = self.status.online
+        except Exception as e:
             self._connect_and_login = False
+            _LOGGER.warning(f"{self._TAG}:connect device error: {e}")
         finally:
             self._connecting = False
 
@@ -372,8 +212,9 @@ class DeviceClient(CameraMixin, object):
             return
         self._ip_address = ip
         if self._connecting is not True and self._connect_and_login is not True:
-            asyncio.get_running_loop().create_task(self.async_login())
+            self._login_task = asyncio.create_task(self.async_login())
 
+        
     async def async_login(self) -> None:
         if self._ip_address is None:
             return
@@ -383,126 +224,116 @@ class DeviceClient(CameraMixin, object):
     def get_send_packet(self, message, msgtype):
         magic = struct.pack(">H", 0x1EED)
         _msgtype = struct.pack(">h", msgtype)
+
         if self.aes_key is not None:
             send_data = aes_encrypt(message, self.aes_key)
         else:
             send_data = message
+
         bodysize = struct.pack(">i", len(send_data))
         packet = magic + _msgtype + bodysize + send_data
+
         return packet
+    
+    def _notify_status_update(self) -> None:
+        if self.on_status_update:
+            self.on_status_update(self.status)
+        
 
     async def login(self) -> None:
         login_seq = str(int(time.time() * 1000) + self._login_uuid)[-9:]
         self._login_uuid += 1
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-        message = {
-            "service": "device",
-            "method": "loginReq",
-            "seq": login_seq,
-            "srcAddr": self.user_id,
-            "deviceId": self.device_id,
-            "payload": {
-                "userId": self.user_id,
-                "password": self.password,
-                "timestamp": timestamp,
-                "ascNumber": 1,
-            },
-        }
+        
+        login_request = LoginRequest(
+            seq=login_seq,
+            srcAddr=self.user_id,
+            deviceId=self.device_id,
+            payload=LoginPayload(
+                userId=self.user_id,
+                password=self.password,
+            ),
+        )
+        message = login_request.to_dict()
         try:
             self.writer.write(self.get_send_packet(json.dumps(message).encode(), 1))
             await self.writer.drain()
-            data = await self.reader.read(1024)
-        except (BrokenPipeError, ConnectionResetError) as e:
-            _LOGGER.error(f"{self.device_id} login read status error {e}")
-        except Exception as e:
-            _LOGGER.error(f"recv data error {e}")
-
-        data_len = len(data)
-        if data_len <= 0:
-            return
-
-        try:
-            magic, msgtype, bodysize = struct.unpack(">HHI", data[:8])
-            encrypted_data = data[8:]
-            if self.aes_key is not None:
-                decrypted_data = aes_decrypt(encrypted_data, self.aes_key)
-            else:
-                decrypted_data = encrypted_data
-            json_data = json.loads(decrypted_data)
-            code = json_data[CONF_ACK][CONF_CODE]
-            if code != 200:
-                _LOGGER.error(f"{self.device_id} login error, code: {code}")
+            header = await self.reader.readexactly(8)
+            magic, msgtype, bodysize = struct.unpack(">HHI", header)
+            body = await self.reader.readexactly(bodysize)
+            json_data = aes_decrypt_to_json(body, self.aes_key)
+            _LOGGER.warning(f"{self._TAG}:login result: {json_data}")
+            
+            response = DeviceResponse.from_json(json_data)
+            if response.ack.code != 200:
+                # 登录失败
+                _LOGGER.error(f"{self._TAG}:login error, code: {response.ack.code}")
                 await self.reset()
                 return
-            self.ascNumber = json_data[CONF_PAYLOAD][CONF_ASCNUMBER]
-            self.ascNumber += 1
+
+            self.ascNumber = response.payload.ascNumber + 1
             self.status.online = True
-            asyncio.get_running_loop().create_task(self.reveive_data())
-            _LOGGER.info(f"connect device success: {self._ip_address}")
-            await self.send_action({}, "getDevAttrReq")
-        except Exception as e:
-            _LOGGER.error(f"connect device error : {e}")
-            return
+            self._notify_status_update()
+            self._receive_task = asyncio.create_task(
+                self.receive_data(),
+                name=f"aidot_receive_{self.device_id}"
+            )
+            if self._ping_timer:
+                self._ping_timer.cancel()
+            if self._reconnect_handle:
+                self._reconnect_handle.cancel()
+                self._reconnect_handle = None
+            self._schedule_ping()
+            _LOGGER.warning(f"{self._TAG}:connect success: {self._ip_address}")
+            await self.send_action(self.syncProperties, CONF_GET_DEV_ATTR_REQ)
+        except (BrokenPipeError, ConnectionResetError, Exception) as e:
+            _LOGGER.error(f"{self.device_id} login read status error {e}")
 
-    async def reveive_data(self) -> None:
+    # TCP容易拼包，需要谨慎处理
+    async def receive_data(self) -> None:
         while True:
             try:
-                data = await self.reader.read(1024)
-            except (BrokenPipeError, ConnectionResetError) as e:
-                _LOGGER.error(f"{self.device_id} read status error {e}")
-                await self.reset()
-                self.status.online = False
-                return
-            except Exception as e:
-                _LOGGER.error(f"recv data error {e}")
-                return
-            data_len = len(data)
-            if data_len <= 0:
-                # Peer closed the control socket (idle cloud socket, device
-                # reboot, or a brief Wi-Fi blip).  reset() reconnects, so this is
-                # a recoverable hiccup, not an error-level condition.
-                _LOGGER.debug(
-                    "%s control socket closed by peer; reconnecting", self.device_id
+                header = await self.reader.readexactly(8)
+                magic, msgtype, bodysize = struct.unpack(">HHI", header)
+                self.ping_count = 0 #有读到数据就把ping清零
+                body = await self.reader.readexactly(bodysize)
+                json_data = aes_decrypt_to_json(body, self.aes_key)
+                _LOGGER.debug(f"{self._TAG}:reveive_data : {json_data}")
+            except asyncio.CancelledError:
+                _LOGGER.debug(f"{self._TAG}:Receive task cancelled")
+                raise
+            except (BrokenPipeError, ConnectionResetError, asyncio.IncompleteReadError) as e:
+                _LOGGER.error(f"{self._TAG}:read status error {e}")
+                asyncio.get_running_loop().call_soon(
+                    lambda: asyncio.create_task(self.reset())
                 )
-                await self.reset()
-                self.status.online = False
                 return
-            try:
-                magic, msgtype, bodysize = struct.unpack(">HHI", data[:8])
-                decrypted_data = aes_decrypt(data[8:], self.aes_key)
-                json_data = json.loads(decrypted_data)
             except Exception as e:
-                _LOGGER.error(f"recv json error : {e}")
+                _LOGGER.error(f"{self._TAG}:recv error: {e}")
                 continue
-            if "service" in json_data:
-                if "test" == json_data["service"]:
-                    self.ping_count = 0
-                    continue
-            payload = json_data.get(CONF_PAYLOAD)
-            if payload is not None:
-                self.ascNumber = payload.get(CONF_ASCNUMBER)
-                self.status.update(payload.get(CONF_ATTR))
-                if self._status_fresh_cb:
-                    self._status_fresh_cb(self.status)
 
-    def set_status_fresh_cb(self, callback) -> None:
-        self._status_fresh_cb = callback
-
-    async def read_status(self) -> DeviceStatusData:
-        return self.status
-
-    async def ping_task(self) -> None:
-        while True:
-            if self._is_close:
-                return
-            await asyncio.sleep(5)
-            await self.send_ping_action()
-            await asyncio.sleep(5)
+            response = DeviceResponse.from_json(json_data)
+            if response.service == "test":
+                continue
+            
+            if response.payload:
+                if response.payload.ascNumber:
+                    self.ascNumber = response.payload.ascNumber
+                if response.payload.attr:
+                    self.status.update(response.payload.attr)
+                    self._notify_status_update()
+    
+    def _schedule_ping(self):
+        loop = asyncio.get_running_loop()
+        loop.create_task(self.send_ping_action())
+        self._ping_timer = loop.call_later(self.heart_time, self._schedule_ping)
 
     async def send_dev_attr(self, dev_attr) -> None:
         if not self._connect_and_login:
             raise ConnectionError('Device offline')
-        await self.send_action(dev_attr, "setDevAttrReq")
+        if not self.status.on and not CONF_ON_OFF in dev_attr:
+            self.status.on = True
+            attr[CONF_ON_OFF] = 1
+        await self.send_action(dev_attr, CONF_SET_DEV_ATTR_REQ)
 
     async def async_turn_off(self) -> None:
         await self.send_dev_attr({CONF_ON_OFF: 0})
@@ -522,77 +353,50 @@ class DeviceClient(CameraMixin, object):
         await self.send_dev_attr({CONF_CCT: cct})
 
     async def send_action(self, attr, method) -> None:
-        current_timestamp_milliseconds = int(time.time() * 1000)
         self.seq_num += 1
-        seq = "ha93" + str(self.seq_num).zfill(5)
-        if not self.status.on and CONF_ON_OFF not in attr:
-            self.status.on = True
-            attr[CONF_ON_OFF] = 1
-        if self._simpleVersion is not None:
-            action = {
-                "method": method,
-                "service": "device",
-                "clientId": "ha-" + self.user_id,
-                "srcAddr": "0." + self.user_id,
-                "seq": "" + seq,
-                "payload": {
-                    "devId": self.device_id,
-                    "parentId": self.device_id,
-                    "userId": self.user_id,
-                    "password": self.password,
-                    "attr": attr,
-                    "channel": "tcp",
-                    "ascNumber": self.ascNumber,
-                },
-                "tst": current_timestamp_milliseconds,
-                "deviceId": self.device_id,
-            }
-        else:
-            action = {
-                "method": method,
-                "service": "device",
-                "seq": "" + seq,
-                "srcAddr": "0." + self.user_id,
-                "payload": {
-                    "attr": attr,
-                    "ascNumber": self.ascNumber,
-                },
-                "tst": current_timestamp_milliseconds,
-                "deviceId": self.device_id,
-            }
+        action_request = DeviceActionRequest.from_params(
+            method=method,
+            user_id=self.user_id,
+            device_id=self.device_id,
+            password=self.password,
+            ascNumber=self.ascNumber,
+            attr=attr,
+            seq="ha93" + str(self.seq_num).zfill(5),
+            simpleVersion=self._simpleVersion,
+        )
+        
+        action = action_request.to_dict()
+        _LOGGER.warning(f"{self.device_id} send_action {action}")
         try:
             self.writer.write(self.get_send_packet(json.dumps(action).encode(), 1))
             await self.writer.drain()
         except (BrokenPipeError, ConnectionResetError) as e:
-            _LOGGER.error(f"{self.device_id} send action error {e}")
+            _LOGGER.error(f"{self._TAG}:send action error {e}")
             await self.reset()
         except Exception as e:
-            _LOGGER.error(f"{self.device_id} send action error {e}")
+            _LOGGER.error(f"{self._TAG}:send action error {e}")
 
     async def send_ping_action(self) -> int:
-        ping = {
-            "service": "test",
-            "method": "pingreq",
-            "seq": "123456",
-            "srcAddr": "x.xxxxxxx",
-            CONF_PAYLOAD: {},
-        }
+        if self._is_close:
+            return -1
         try:
-            if self.ping_count >= 2:
-                # Two pings (~20s) went unanswered: the device is briefly
-                # unreachable (Wi-Fi congestion, device busy).  reset() reconnects
-                # automatically, so this is a recoverable hiccup, not an error.
-                _LOGGER.warning(
-                    "No ping response within 20s from %s; resetting connection "
-                    "(will reconnect)", self.device_id,
+            if self.ping_count >= 3:
+                _LOGGER.error(
+                    f"{self._TAG}:Device unresponsive within 90 seconds, disconnecting."
                 )
                 await self.reset()
                 return -1
             if self._connect_and_login is False:
                 return -1
-            self.writer.write(self.get_send_packet(json.dumps(ping).encode(), 2))
-            await self.writer.drain()
+            
             self.ping_count += 1
+            if self.ping_data is not None:
+                _LOGGER.warning(f"{self.device_id} send_ping {self.ping_data}")
+                self.writer.write(self.get_send_packet(json.dumps(self.ping_data).encode(), 2))
+                await self.writer.drain()
+            else:
+                _LOGGER.warning(f"{self.device_id} send_ping {self.syncProperties}")
+                await self.send_action(self.syncProperties, CONF_GET_DEV_ATTR_REQ)
             return 1
         except Exception as e:
             _LOGGER.error(f"{self.device_id} ping error {e}")
@@ -600,18 +404,44 @@ class DeviceClient(CameraMixin, object):
             return -1
 
     async def reset(self) -> None:
+        if self._ping_timer:
+            self._ping_timer.cancel()
+        if self._reconnect_handle:
+            self._reconnect_handle.cancel()
+            self._reconnect_handle = None
+
+        if self._receive_task and not self._receive_task.done():
+            self._receive_task.cancel()
+            try:
+                await self._receive_task
+            except asyncio.CancelledError as e:
+                _LOGGER.error(f"{self.device_id} writer close error {e}")
+                pass
         try:
             if self.writer:
                 self.writer.close()
                 await self.writer.wait_closed()
         except Exception as e:
-            _LOGGER.error(f"{self.device_id} writer close error {e}")
+            _LOGGER.error(f"{self.device_id} writer/reader close error {e}")
+        self.writer = self.reader = None
+
         self._connect_and_login = False
         self.status.online = False
         self.ping_count = 0
+        self._notify_status_update()
+        # 自动重连（如果没有主动关闭）
+        if not self._is_close and self._ip_address:
+            self._schedule_reconnect()
 
     async def close(self) -> None:
         self._is_close = True
         await self.async_stop_streaming()
         await self.reset()
         _LOGGER.info(f"{self.device_id} connect close by user")
+
+    def _schedule_reconnect(self) -> None:
+        """延迟重连"""
+        _LOGGER.info(f"{self.device_id} _schedule_reconnect")
+        loop = asyncio.get_running_loop()
+        self._reconnect_handle = loop.call_later(60, self._schedule_reconnect)
+        self._login_task = asyncio.create_task(self.async_login())
