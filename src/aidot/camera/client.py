@@ -2168,8 +2168,15 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
             _target = _db2amp(float(os.environ.get("AIDOT_AUDIO_TARGET_DBFS", "-15"))) * 32767.0
             _maxg = _db2amp(float(os.environ.get("AIDOT_AUDIO_MAXGAIN_DB", "30")))
             _ming = _db2amp(float(os.environ.get("AIDOT_AUDIO_MINGAIN_DB", "-12")))
+            # Noise gate: below this RMS the input is (near) silence, so the AGC
+            # must NOT crank toward +maxg - doing so amplifies the A-law
+            # quantization floor into audible high-frequency clicking on a quiet
+            # camera.  Gain is scaled down quadratically below the gate.  Set very
+            # low (e.g. -120) to disable.
+            _gate = _db2amp(float(os.environ.get("AIDOT_AUDIO_GATE_DBFS", "-45"))) * 32767.0
         except (ValueError, TypeError):
             _target, _maxg, _ming = _db2amp(-15) * 32767.0, _db2amp(30), _db2amp(-12)
+            _gate = _db2amp(-45) * 32767.0
         _agc_ms = [None]   # smoothed mean-square (level tracker)
         try:
             import numpy as _np
@@ -2232,6 +2239,12 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                                 _agc_ms[0] = _agc_ms[0] * 0.95 + _ms * 0.05
                             _rms = (_agc_ms[0] ** 0.5) + 1.0
                             _gain = min(_maxg, max(_ming, _target / _rms))
+                            # Noise gate: when the level is below the gate floor the
+                            # signal is essentially silence; scale the gain down
+                            # quadratically so the A-law quantization noise is not
+                            # amplified into audible clicking.
+                            if _rms < _gate:
+                                _gain *= (_rms / _gate) ** 2
                             # tanh soft-limiter catches transient peaks past target.
                             _y = _np.tanh(_x * (_gain / 32767.0)) * 32767.0
                             _g = av.AudioFrame.from_ndarray(
