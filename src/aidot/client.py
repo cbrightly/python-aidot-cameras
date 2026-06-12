@@ -11,19 +11,22 @@ from typing import Any, Callable, Optional
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
-
+import uuid
+from pathlib import Path
+import hashlib
 from .exceptions import AidotAuthFailed, AidotUserOrPassIncorrect
 from .device_client import DeviceClient
+from .discover import Discover
+from .login_const import APP_ID, PUBLIC_KEY_PEM, API_URL_TEMPLATE, DEFAULT_REGION
 from .const import (
-    APP_ID,
-    BASE_URL,
-    PUBLIC_KEY_PEM,
     CONF_ACCESS_TOKEN,
     CONF_APP_ID,
     CONF_CODE,
     CONF_COUNTRY,
     CONF_DEVICE_LIST,
     CONF_ID,
+    CONF_IPADDRESS,
+    CONF_LOGIN_INFO,
     CONF_PASSWORD,
     CONF_PRODUCT,
     CONF_PRODUCT_ID,
@@ -64,14 +67,15 @@ async def _prefetch_ice_config(dc: "DeviceClient") -> None:
 
 
 class AidotClient:
-    _base_url: str = BASE_URL
-    _region: str = "us"
+    _base_url: str = API_URL_TEMPLATE.format(region=DEFAULT_REGION)
+    _region: str = DEFAULT_REGION
     session: Optional[ClientSession] = None
     username: str = ""
     password: str = ""
     country_name: str = DEFAULT_COUNTRY_NAME
     country_code: str = DEFAULT_COUNTRY_CODE
     _device_clients: dict[str, DeviceClient]
+    _discover: Optional[Discover] = None
 
     def __init__(
         self,
@@ -96,15 +100,20 @@ class AidotClient:
             if item["id"] == self.country_code:
                 self.country_name = item["name"]
                 self._region = item["region"].lower()
-                self._base_url = f"https://prod-{self._region}-api.arnoo.com/v17"
+                self._base_url = API_URL_TEMPLATE.format(region=self._region)
                 break
         if token is not None:
+            # v1.0.8 -> v1.1.3 data structure migration:
+            # old config entries nest the login info under CONF_LOGIN_INFO.
+            if token.get(CONF_ID) is None and token.get(CONF_LOGIN_INFO) is not None:
+                token = token.get(CONF_LOGIN_INFO)
+
             self.login_info = token.copy()
             self.username = token[CONF_USERNAME]
             self.password = token[CONF_PASSWORD]
             self._region = token[CONF_REGION]
             self.country_name = token[CONF_COUNTRY]
-            self._base_url = f"https://prod-{self._region}-api.arnoo.com/v17"
+            self._base_url = API_URL_TEMPLATE.format(region=self._region)
             # Token loaded from storage: schedule a proactive refresh shortly
             # after startup.  Exact remaining TTL is unknown, so pass a short
             # synthetic TTL (120s → 78-138s delay) to catch tokens that are
@@ -112,6 +121,7 @@ class AidotClient:
             # sets the next cycle at the proper 90%-of-TTL interval.
             _LOGGER.info("AidotClient: stored token loaded, scheduling startup proactive refresh")
             self._schedule_proactive_refresh(120)
+        self.setup_discover()
 
     def set_token_fresh_cb(self, callback) -> None:
         self._token_fresh_cb = callback
@@ -147,15 +157,36 @@ class AidotClient:
     def update_password(self, password: str) -> None:
         self.password = password
 
+    async def get_terminal_id(self) -> str:
+        file_path = Path.home() / ".aidot_terminal_id"
+
+        def _read_or_create() -> str:
+            try:
+                if file_path.exists():
+                    return file_path.read_text().strip()
+                node = uuid.getnode()
+                is_random = (node >> 40) & 1
+                raw_id = str(uuid.uuid4()) if is_random else format(node, "x")
+                file_path.write_text(raw_id)
+                return raw_id
+            except OSError:
+                return 'gvz3gjae10l4zii00t7y0'
+
+        raw_id = await asyncio.to_thread(_read_or_create)
+        return hashlib.md5(raw_id.encode()).hexdigest()
+
     async def async_post_login(self) -> dict[str, Any]:
         """Login via loginWithFreeVerification (RSA-encrypted password)."""
         url = f"{self._base_url}/users/loginWithFreeVerification"
         headers = {CONF_APP_ID: APP_ID, CONF_TERMINAL: "app"}
+        terminalId = await self.get_terminal_id()
+        if terminalId is None:
+            terminalId = "gvz3gjae10l4zii00t7y0"
         data = {
             "countryKey": f"region:{self.country_name.strip()}",
             "username":   self.username,
             "password":   rsa_password_encrypt(self.password),
-            "terminalId": "gvz3gjae10l4zii00t7y0",
+            "terminalId": terminalId,
             "webVersion": "0.5.0",
             "area":       "Asia/Shanghai",
             "UTC":        "UTC+8",
@@ -190,11 +221,12 @@ class AidotClient:
             # Schedule proactive refresh so tokens never expire mid-session.
             _expires_in = int(response_data.get("expiresIn") or 7200)
             self._schedule_proactive_refresh(_expires_in)
+            self.setup_discover()
             return self.login_info
         except AidotUserOrPassIncorrect:
             raise
         except aiohttp.ClientError as e:
-            _LOGGER.info("async_post_login ClientError %s  response=%s", e, response_data)
+            _LOGGER.error("async_post_login ClientError %s  response=%s", e, response_data)
             raise
 
     async def _async_fetch_user_config(self) -> None:
@@ -281,7 +313,7 @@ class AidotClient:
             self._schedule_proactive_refresh(_expires_in)
             return response_data
         except aiohttp.ClientError as e:
-            _LOGGER.info("async_refresh_token ClientError %s  code=%s", e, response_data.get(CONF_CODE))
+            _LOGGER.error("async_refresh_token ClientError %s  code=%s", e, response_data.get(CONF_CODE))
             if response_data.get(CONF_CODE) == ServerErrorCode.LOGIN_INVALID:
                 raise AidotAuthFailed
             return None
@@ -355,7 +387,7 @@ class AidotClient:
             response.raise_for_status()
             return response_data
         except aiohttp.ClientError as e:
-            _LOGGER.info("async_get ClientError %s %s", e, response_data)
+            _LOGGER.error("async_get ClientError %s %s", e, response_data)
             code = response_data.get(CONF_CODE)
             if code == ServerErrorCode.TOKEN_EXPIRED:
                 if not _retry:
@@ -420,15 +452,17 @@ class AidotClient:
             # ("Please login again") and retry, like async_session_get does.
             device_client.set_token_refresh_cb(self.async_ensure_token)
             self._device_clients[device_id] = device_client
-            asyncio.get_running_loop().create_task(device_client.ping_task())
             # Pre-warm ICE config cache so stream open does not block on this fetch.
             asyncio.get_running_loop().create_task(
                 _prefetch_ice_config(device_client)
             )
-        # NOTE: no LAN-broadcast discovery here.  For APK parity, the camera's LAN
-        # IP comes from the WebRTC signaling host candidate (iceCandidateReq), which
-        # the camera advertises and we add verbatim - the official app does the same
-        # and never does a UDP discovery sweep.
+        # Lights get their LAN IP from UDP discovery.  Cameras do NOT use the
+        # broadcast sweep: their LAN IP comes from the WebRTC signaling host
+        # candidate (iceCandidateReq), which the camera advertises and we add
+        # verbatim - the official app does the same.
+        if self._discover is not None:
+            ip = self._discover.discovered_device.get(device_id)
+            device_client.update_ip_address(ip)
         return device_client
 
     async def remove_device_client(self, dev_id: str) -> None:
@@ -437,7 +471,39 @@ class AidotClient:
             await device_client.close()
             del self._device_clients[dev_id]
 
+    def setup_discover(self) -> None:
+        """Start LAN device discovery once login info is available."""
+        if self.login_info.get(CONF_ID) is None:
+            return
+        if self._discover is not None:
+            return
+
+        def _discover_callback(dev_id, event: dict[str, str]) -> None:
+            device_ip = event[CONF_IPADDRESS]
+            device_client: DeviceClient = self._device_clients.get(dev_id)
+            if device_client is not None:
+                device_client.update_ip_address(device_ip)
+
+        try:
+            self._discover = Discover(self.login_info, _discover_callback)
+            self._discover.start_repeat_broadcast()
+        except RuntimeError:
+            # No running event loop (sync construction); retried on next call.
+            self._discover = None
+
+    async def async_close(self) -> None:
+        """Close the client and release resources."""
+        if self._discover is not None:
+            self._discover.close()
+            self._discover = None
+        for client in self._device_clients.values():
+            await client.close()
+        self._device_clients.clear()
+
     def cleanup(self) -> None:
+        if self._discover is not None:
+            self._discover.close()
+            self._discover = None
         for client in self._device_clients.values():
             asyncio.get_running_loop().create_task(client.close())
         self._device_clients.clear()
@@ -445,6 +511,4 @@ class AidotClient:
     async def async_cleanup(self) -> None:
         if self._refresh_task and not self._refresh_task.done():
             self._refresh_task.cancel()
-        for client in self._device_clients.values():
-            await client.close()
-        self._device_clients.clear()
+        await self.async_close()
