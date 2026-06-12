@@ -4834,7 +4834,13 @@ class CameraMixin:
                             await asyncio.sleep(0.2)
                             if progress[0] > _p0:
                                 break
-                        await asyncio.sleep(2.0)  # let ffmpeg analyze input + bind
+                        # ffmpeg binds its -listen socket at startup, so by the time
+                        # the mux has written a frame (progress moved above) the
+                        # socket is long bound.  A short margin is plenty; the old
+                        # 2.0s blind wait was pure cold-start latency.  (Don't probe
+                        # the port - `-listen 1` would consume our probe as its one
+                        # client and tear down before go2rtc connects.)
+                        await asyncio.sleep(0.3)
                         self._serve_ready.set()
                     # Wait for ffmpeg to exit (go2rtc disconnect) or idle release.
                     while self._streaming_active and proc.returncode is None:
