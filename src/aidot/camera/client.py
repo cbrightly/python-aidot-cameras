@@ -6250,7 +6250,7 @@ class CameraMixin:
                     rtsp_push_url=rtsp_push_url,
                     talk=talk,
                 )
-            except DeviceClient._SdesNoAnswerError:
+            except CameraMixin._SdesNoAnswerError:
                 # Camera reported enableSdes='1' but did not respond to our SDES
                 # offer.  iOS telemetry shows models such as LK.IPC.A001064 can
                 # have an incorrectly set enableSdes property while actually
@@ -11894,7 +11894,7 @@ class CameraMixin:
             except Exception:
                 pass
             outgoing_q.put_nowait(None)   # stop MQTT thread
-            raise DeviceClient._SdesNoAnswerError()
+            raise CameraMixin._SdesNoAnswerError()
         elif (_cam_echo_received
               and _stun_count == 0
               and _camera_side_pkt_count == 0
@@ -12267,7 +12267,7 @@ class CameraMixin:
                 except Exception:
                     pass
                 outgoing_q.put_nowait(None)   # signal MQTT thread to exit
-                raise DeviceClient._SdesNoAnswerError()
+                raise CameraMixin._SdesNoAnswerError()
             else:
                 # isDTLS='0': this camera cannot do DTLS so falling back is
                 # pointless.  Some SDES cameras (e.g. LK.IPC.A001064) start

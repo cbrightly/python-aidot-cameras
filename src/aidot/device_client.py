@@ -334,7 +334,7 @@ class DeviceClient(CameraMixin, object):
             raise ConnectionError('Device offline')
         if not self.status.on and not CONF_ON_OFF in dev_attr:
             self.status.on = True
-            attr[CONF_ON_OFF] = 1
+            dev_attr[CONF_ON_OFF] = 1
         await self.send_action(dev_attr, CONF_SET_DEV_ATTR_REQ)
 
     async def async_turn_off(self) -> None:
