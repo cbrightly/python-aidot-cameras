@@ -31,11 +31,11 @@ def aes_decrypt(ciphertext, key):
 
 def aes_decrypt_to_json(ciphertext: bytes, key: Optional[bytes] = None) -> dict[str, Any]:
     """Decrypt AES encrypted data and parse to JSON.
-    
+
     Args:
         ciphertext: AES encrypted data
         key: AES key (optional, if None, assumes data is already decrypted)
-    
+
     Returns:
         Parsed JSON dict
     """

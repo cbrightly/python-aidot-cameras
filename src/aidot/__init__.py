@@ -17,16 +17,16 @@ from .exceptions import (
 )
 
 __all__ = [
-    "AidotClient",
-    "DeviceClient",
-    "Discover",
-    "AidotCameraBusy",
-    "AidotError",
     "AidotAuthFailed",
     "AidotAuthTokenExpired",
+    "AidotCameraBusy",
+    "AidotClient",
+    "AidotError",
     "AidotNotLogin",
     "AidotOSError",
     "AidotUserOrPassIncorrect",
+    "DeviceClient",
+    "Discover",
     "HTTPError",
     "InvalidHost",
     "InvalidURL",
