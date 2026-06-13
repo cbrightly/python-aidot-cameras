@@ -55,7 +55,7 @@ def test_cap_blocks_beyond_limit_then_frees():
         try:
             await asyncio.wait_for(sem.acquire(), timeout=0.2)
             raise AssertionError("3rd acquire should have blocked")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         sem.release()
         await asyncio.wait_for(sem.acquire(), timeout=0.2)  # now proceeds

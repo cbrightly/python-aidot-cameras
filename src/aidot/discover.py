@@ -1,7 +1,6 @@
 import re
 import socket
 import json
-import time
 import logging
 import asyncio
 import subprocess
