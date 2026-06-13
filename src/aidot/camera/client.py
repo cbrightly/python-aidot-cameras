@@ -4842,11 +4842,22 @@ class CameraMixin:
                         # client and tear down before go2rtc connects.)
                         await asyncio.sleep(0.3)
                         self._serve_ready.set()
+                    # Periodic keyframe request shortens the camera's GOP so HA's
+                    # HLS segmenter (which cuts on keyframes) produces short
+                    # segments -> far less player buffering (the ~20s HLS lag is
+                    # dominated by long native GOPs).  0 disables; raising it
+                    # lowers bitrate at the cost of latency.  Mains DTLS cameras
+                    # only; the SDES path has its own PLI cadence.
+                    _gop_pli_s = float(os.environ.get("AIDOT_GOP_PLI_S", "2.0"))
+                    _last_gop_pli = loop.time()
                     # Wait for ffmpeg to exit (go2rtc disconnect) or idle release.
                     while self._streaming_active and proc.returncode is None:
-                        await asyncio.sleep(1.0)
+                        await asyncio.sleep(0.5)
                         if _pc_dead():
                             break
+                        if _gop_pli_s > 0 and loop.time() - _last_gop_pli >= _gop_pli_s:
+                            await self._send_video_pli(pc)
+                            _last_gop_pli = loop.time()
                         # No consumer -> the pipe fills, the mux blocks, progress
                         # goes stale.  A real viewer keeps it fresh.
                         if loop.time() - progress[0] > idle_secs:
