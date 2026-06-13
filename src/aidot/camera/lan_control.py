@@ -97,11 +97,11 @@ async def discover_unicast(ip: str, timeout: float = 2.0) -> Optional[dict]:
         await loop.sock_sendto(sock, enc, (ip, _DISCOVER_PORT))
         try:
             data = await asyncio.wait_for(loop.sock_recv(sock, 8192), timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None
         try:
             return json.loads(aes_decrypt(data, _DISCOVER_KEY)).get("payload")
-        except Exception:  # noqa: BLE001 - undecodable / foreign packet
+        except Exception:
             return None
     finally:
         sock.close()
@@ -221,7 +221,7 @@ class CameraLanClient:
                 reader, writer = await asyncio.wait_for(
                     asyncio.open_connection(self._ip, _CONTROL_PORT), timeout=5.0
                 )
-            except (OSError, asyncio.TimeoutError) as exc:
+            except (TimeoutError, OSError) as exc:
                 raise CameraLanError(f"{self.device_id}: connect failed: {exc}") from exc
             try:
                 asc = await self._login(reader, writer)
@@ -236,7 +236,7 @@ class CameraLanClient:
                     for _ in range(4):
                         try:
                             raw = await _read_frame(reader, timeout=4.0)
-                        except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+                        except (TimeoutError, asyncio.IncompleteReadError):
                             break
                         frame = json.loads(aes_decrypt(raw, self._key))
                         replies.append(frame)
@@ -247,7 +247,7 @@ class CameraLanClient:
                 writer.close()
                 try:
                     await writer.wait_closed()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
 
     async def _login(self, reader, writer) -> int:

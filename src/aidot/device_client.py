@@ -8,7 +8,7 @@ import json
 import asyncio
 import logging
 from datetime import datetime
-from typing import Any
+from typing import ClassVar, Any
 
 from .exceptions import AidotNotLogin
 from .aes_utils import aes_encrypt, aes_decrypt_to_json
@@ -43,6 +43,9 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Strong refs to fire-and-forget tasks (see camera/client.py).
+_DC_BG_TASKS: set = set()
+
 
 class DeviceStatusData:
     online: bool = False
@@ -67,7 +70,7 @@ class DeviceStatusData:
                 self.rgdb = 0xFF000000  # Red in int: 4278190080
             else:
                 self.rgdb = rgbw_value
-            
+
             rgbw = ctypes.c_uint32(self.rgdb).value
             r = (rgbw >> 24) & 0xFF
             g = (rgbw >> 16) & 0xFF
@@ -139,7 +142,7 @@ from .camera.client import (
 )
 
 
-class DeviceClient(CameraMixin, object):
+class DeviceClient(CameraMixin):
     status: DeviceStatusData
     info: DeviceInformation
     _login_uuid = 0
@@ -156,7 +159,7 @@ class DeviceClient(CameraMixin, object):
     _ping_timer: Any = None
     writer: Any = None
     reader: Any = None
-    syncProperties = [CONF_ON_OFF, CONF_DIMMING, CONF_RGBW, CONF_CCT]
+    syncProperties: ClassVar = [CONF_ON_OFF, CONF_DIMMING, CONF_RGBW, CONF_CCT]
     heart_time = 30
     ping_data = PingRequest().to_dict()
     _TAG: str = "DeviceClient"
@@ -219,7 +222,7 @@ class DeviceClient(CameraMixin, object):
         if self._connecting is not True and self._connect_and_login is not True:
             self._login_task = asyncio.create_task(self.async_login())
 
-        
+
     async def async_login(self) -> None:
         if self._ip_address is None:
             return
@@ -239,16 +242,16 @@ class DeviceClient(CameraMixin, object):
         packet = magic + _msgtype + bodysize + send_data
 
         return packet
-    
+
     def _notify_status_update(self) -> None:
         if self.on_status_update:
             self.on_status_update(self.status)
-        
+
 
     async def login(self) -> None:
         login_seq = str(int(time.time() * 1000) + self._login_uuid)[-9:]
         self._login_uuid += 1
-        
+
         login_request = LoginRequest(
             seq=login_seq,
             srcAddr=self.user_id,
@@ -267,7 +270,7 @@ class DeviceClient(CameraMixin, object):
             body = await self.reader.readexactly(bodysize)
             json_data = aes_decrypt_to_json(body, self.aes_key)
             _LOGGER.debug(f"{self._TAG}:login result: {json_data}")
-            
+
             response = DeviceResponse.from_json(json_data)
             if response.ack.code != 200:
                 # 登录失败
@@ -319,7 +322,7 @@ class DeviceClient(CameraMixin, object):
             response = DeviceResponse.from_json(json_data)
             if response.service == "test":
                 continue
-            
+
             if response.payload:
                 if response.payload.ascNumber:
                     self.ascNumber = response.payload.ascNumber
@@ -329,16 +332,18 @@ class DeviceClient(CameraMixin, object):
                     # model; pass the raw dict so they are not dropped.
                     self.status.update((json_data.get(CONF_PAYLOAD) or {}).get(CONF_ATTR))
                     self._notify_status_update()
-    
+
     def _schedule_ping(self):
         loop = asyncio.get_running_loop()
-        loop.create_task(self.send_ping_action())
+        _t = loop.create_task(self.send_ping_action())
+        _DC_BG_TASKS.add(_t)
+        _t.add_done_callback(_DC_BG_TASKS.discard)
         self._ping_timer = loop.call_later(self.heart_time, self._schedule_ping)
 
     async def send_dev_attr(self, dev_attr) -> None:
         if not self._connect_and_login:
             raise ConnectionError('Device offline')
-        if not self.status.on and not CONF_ON_OFF in dev_attr:
+        if not self.status.on and CONF_ON_OFF not in dev_attr:
             self.status.on = True
             dev_attr[CONF_ON_OFF] = 1
         await self.send_action(dev_attr, CONF_SET_DEV_ATTR_REQ)
@@ -372,7 +377,7 @@ class DeviceClient(CameraMixin, object):
             seq="ha93" + str(self.seq_num).zfill(5),
             simpleVersion=self._simpleVersion,
         )
-        
+
         action = action_request.to_dict()
         _LOGGER.debug(f"{self.device_id} send_action {action}")
         try:
@@ -396,7 +401,7 @@ class DeviceClient(CameraMixin, object):
                 return -1
             if self._connect_and_login is False:
                 return -1
-            
+
             self.ping_count += 1
             if self.ping_data is not None:
                 _LOGGER.debug(f"{self.device_id} send_ping {self.ping_data}")
