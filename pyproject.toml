@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "python-aidot-cameras"
-version = "0.6.1"
+version = "0.7.9"
 description = "Control AiDot/Leedarson WiFi lights and cameras (WebRTC streaming, two-way audio, PTZ, controls)"
 readme = "README.md"
 license = "MIT"
@@ -39,3 +39,36 @@ Homepage = "https://github.com/cbrightly/python-AiDot"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+# High-signal rules only; opinionated style (quotes, trailing commas, missing
+# annotations/docstrings, magic values) is intentionally left to the formatter.
+select = ["F", "E4", "E7", "E9", "W", "B", "ASYNC", "RUF", "UP", "SIM", "PIE", "RET", "PERF"]
+ignore = [
+    "E501",                                  # line length: formatter's job
+    "E701", "E741",                          # multiple-statements / ambiguous name: cosmetic
+    "UP035", "UP006", "UP007", "UP045", "UP037", "UP031",  # typing/format style (keep broad compat)
+    "E702",                                  # multiple-statements (semicolon): cosmetic
+    "SIM102", "SIM103", "SIM105", "SIM108", "SIM117",  # collapsible/ternary/suppress/nested: stylistic
+    "ASYNC109", "ASYNC240",                  # timeout-param design; os.path.join is non-blocking
+    "RET504", "RET505", "RET506",            # return-style: stylistic
+    "PERF203", "PERF401",                    # try/except in loop, manual comprehension: stylistic
+    "PIE810",                                # multiple startswith/endswith: stylistic
+    "RUF001", "RUF003", "RUF059",            # ambiguous-unicode (intentional ×), unused-unpacked: cosmetic
+    "B904",                                  # raise-without-from: traceback-chaining style (not enforced)
+    "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B", "RUF", "SIM", "PERF", "ASYNC", "F811", "PIE", "E731", "E702"]
+# Re-export modules: imports are intentional public re-exports / back-compat shims.
+"__init__.py" = ["F401"]
+# device_client.py re-exports from camera.client mid-file (avoids a circular import).
+"**/device_client.py" = ["F401", "E402"]
+# Inherited ffmpeg streaming engine is process-based (Popen / subprocess poll /
+# SDP file write); a full non-blocking refactor needs on-device testing.
+"src/aidot/camera/client.py" = ["ASYNC110", "ASYNC220", "ASYNC221", "ASYNC230"]

@@ -177,7 +177,7 @@ class DeviceActionRequest:
         ascNumber: int,
         attr: dict[str, Any],
         seq: str,
-        simpleVersion: str = None,
+        simpleVersion: str | None = None,
     ) -> "DeviceActionRequest":
         """Create DeviceActionRequest from params."""
         if simpleVersion is not None:
@@ -207,4 +207,4 @@ class DeviceActionRequest:
                 ),
                 deviceId=device_id,
             )
-        
+
