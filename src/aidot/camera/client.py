@@ -5,46 +5,39 @@ import json
 import logging
 import os
 import random
-import socket
 import struct
 import threading
 import time
 import asyncio
 import zlib
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Callable, List, Optional
 
-from ..aes_utils import aes_encrypt, aes_decrypt, aes_ecb_encrypt_str_key, aes_ecb_decrypt_str_key
+from ..aes_utils import aes_ecb_encrypt_str_key, aes_ecb_decrypt_str_key
 from ..exceptions import AidotCameraBusy
 from ..login_const import APP_ID as _AIDOT_APP_ID
 from ..const import (
-    CONF_AES_KEY,
-    CONF_ASCNUMBER,
-    CONF_ATTR,
     CONF_CCT,
-    CONF_HARDWARE_VERSION,
-    CONF_ID,
-    CONF_IDENTITY,
-    CONF_MAC,
-    CONF_MAXVALUE,
-    CONF_MINVALUE,
-    CONF_MODEL_ID,
-    CONF_NAME,
     CONF_ON_OFF,
     CONF_DIMMING,
-    CONF_PASSWORD,
-    CONF_PAYLOAD,
     CONF_PRODUCT,
     CONF_PROPERTIES,
     CONF_RGBW,
     CONF_SERVICE_MODULES,
-    CONF_ACK,
-    CONF_CODE,
-    Identity,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Strong refs to fire-and-forget tasks: asyncio only keeps weak refs, so a
+# discarded task can be garbage-collected mid-flight. Discarded on completion.
+_BG_TASKS: set = set()
+
+
+def _spawn_bg(coro):
+    _t = asyncio.ensure_future(coro)
+    _BG_TASKS.add(_t)
+    _t.add_done_callback(_BG_TASKS.discard)
+    return _t
 
 
 # Runtime import: device_client defines these classes BEFORE importing this
@@ -447,10 +440,11 @@ def _build_stun_binding_success_response(
     valid fingerprinted STUN envelope. This helper emits:
       XOR-MAPPED-ADDRESS + MESSAGE-INTEGRITY + FINGERPRINT
     """
-    import hmac as _hmac, hashlib as _hashlib
+    import hmac as _hmac
+    import hashlib as _hashlib
 
     ip_parts = [int(x) for x in mapped_ip.split(".")]
-    xip = bytes(a ^ b for a, b in zip(struct.pack("!4B", *ip_parts), magic_cookie))
+    xip = bytes(a ^ b for a, b in zip(struct.pack("!4B", *ip_parts), magic_cookie, strict=False))
     xport = (mapped_port ^ 0x2112) & 0xFFFF
     xma = b"\x00\x20\x00\x08\x00\x01" + struct.pack("!H", xport) + xip
 
@@ -797,7 +791,7 @@ class CloudPlaybackSession:
             hdr, resp_payload = await asyncio.wait_for(
                 _read_frame(self._reader), timeout=10.0
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _LOGGER.error("Cloud playback: login response timed out")
             return False
         except Exception as exc:
@@ -861,7 +855,7 @@ class CloudPlaybackSession:
                     _read_frame(self._reader),
                     timeout=30.0,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 _LOGGER.warning("Cloud playback: receive timeout")
                 break
             except asyncio.IncompleteReadError:
@@ -987,7 +981,6 @@ class TutkStreamSession:
             None, self._start_sync)
 
     def _start_sync(self) -> bool:
-        import ctypes
 
         try:
             iotc = ctypes.CDLL(self._iotc_lib_path)
@@ -1134,7 +1127,6 @@ class TutkStreamSession:
         return True
 
     def _recv_loop(self, av, iotc, FrameInfo) -> None:
-        import ctypes
 
         # avRecvFrameData2 signature (from AVAPIs.java / TUTK SDK):
         #   (nAVIndex, abFrameData, nFrameDataMaxSize,
@@ -1361,7 +1353,7 @@ class LiveStreamSession:
                         _read_frame(self._reader),
                         timeout=hb_interval * 2,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     _LOGGER.warning("LiveStreamSession: receive timeout -- reconnect?")
                     break
 
@@ -1748,7 +1740,9 @@ def _run_sdes_talk_pump(state: dict) -> None:
     and exits when ``state['stop']`` is set.  This is the validated spike pump
     with a live provider in place of the test tone.
     """
-    import time as _t, struct as _st, base64 as _b64
+    import time as _t
+    import struct as _st
+    import base64 as _b64
     try:
         import pylibsrtp as _pls
     except Exception:
@@ -2035,7 +2029,7 @@ def _load_sprop(devid: str) -> "Optional[str]":
     stream), or None.  Fail-safe: any error -> None (SDP omits sprop = today's
     behaviour)."""
     try:
-        with open(_sprop_cache_path(devid), "r") as fh:
+        with open(_sprop_cache_path(devid)) as fh:
             s = fh.read().strip()
         return s or None
     except OSError:
@@ -2911,7 +2905,7 @@ class CameraMixin:
         self._ice_config_fetched_at = 0.0
         try:
             return bool(await cb())
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _LOGGER.debug("token refresh failed for %s: %s", self.device_id, exc)
             return False
 
@@ -3544,7 +3538,7 @@ class CameraMixin:
             try:
                 if await lan.async_set_attributes({attr: value}):
                     return True
-            except Exception as _exc:  # noqa: BLE001 - any LAN error -> cloud fallback
+            except Exception as _exc:
                 _LOGGER.debug("LAN set %s failed (%s); falling back to cloud", attr, _exc)
 
         device_id = self.device_id
@@ -3579,7 +3573,7 @@ class CameraMixin:
             # poll, so only known attributes update (others are no-ops).
             try:
                 self.status.update_from_camera_attributes({attr: value})
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
         return ok
 
@@ -3946,7 +3940,8 @@ class CameraMixin:
 
         Returns the CDN URL string, or None if no events exist.
         """
-        import aiohttp, time
+        import aiohttp
+        import time
 
         end_ts = int(time.time() * 1000)
         start_ts = end_ts - 30 * 86_400_000  # look back 30 days
@@ -4041,7 +4036,7 @@ class CameraMixin:
                         _session.wait_done(),
                         timeout=_sdes_snap_seconds + 80,
                     )
-                except (_asyncio.TimeoutError, _asyncio.CancelledError):
+                except (TimeoutError, _asyncio.CancelledError):
                     pass
                 finally:
                     await _session.stop()
@@ -4104,7 +4099,7 @@ class CameraMixin:
         try:
             try:
                 await _asyncio.wait_for(frame_event.wait(), timeout=timeout)
-            except _asyncio.TimeoutError:
+            except TimeoutError:
                 _LOGGER.warning(
                     "async_snapshot: no keyframe received within %.0fs for %s",
                     timeout, self.device_id,
@@ -4217,7 +4212,7 @@ class CameraMixin:
                         try:
                             res = self._motion_cb(it)
                             if asyncio.iscoroutine(res):
-                                asyncio.ensure_future(res)
+                                _spawn_bg(res)
                         except Exception:
                             _LOGGER.debug("motion callback raised", exc_info=True)
                 primed = True
@@ -4301,7 +4296,7 @@ class CameraMixin:
         try:
             await asyncio.wait_for(ev.wait(), timeout=timeout)
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return False
 
     async def async_speak(
@@ -4364,7 +4359,7 @@ class CameraMixin:
             return False
         try:
             await asyncio.wait_for(done.wait(), timeout=max_seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         try:
             await session.async_stop_talk()
@@ -4382,7 +4377,7 @@ class CameraMixin:
         found = False
         for _path in ("/proc/net/tcp", "/proc/net/tcp6"):
             try:
-                with open(_path, "r") as _fh:
+                with open(_path) as _fh:
                     _txt = _fh.read()
             except OSError:
                 continue
@@ -4773,7 +4768,7 @@ class CameraMixin:
             _disc_since = [None]
             _DISC_DEBOUNCE = float(os.environ.get("AIDOT_ICE_DISCONNECT_S", "8"))
 
-            def _pc_dead() -> bool:
+            def _pc_dead(pc=pc, _disc_since=_disc_since, _DISC_DEBOUNCE=_DISC_DEBOUNCE) -> bool:
                 _st = getattr(pc, "connectionState", "closed")
                 if _st in ("closed", "failed"):
                     return True
@@ -5184,7 +5179,7 @@ class CameraMixin:
         session = TutkStreamSession(uid=uid, on_frame=on_frame)
         try:
             ok = await asyncio.wait_for(session.start(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             _LOGGER.error(
                 "async_open_live_stream: TUTK connect timed out after %.0fs for %s",
                 timeout, self.device_id,
@@ -5251,9 +5246,7 @@ class CameraMixin:
                 try:
                     msg = json.loads(raw)
                     inner = (msg.get("payload") or msg.get("data") or msg)
-                    if isinstance(inner, dict) and ("app" in inner or "dev" in inner):
-                        result["data"] = inner
-                    elif isinstance(inner, dict) and "data" not in result:
+                    if (isinstance(inner, dict) and ("app" in inner or "dev" in inner)) or (isinstance(inner, dict) and "data" not in result):
                         result["data"] = inner
                 except Exception:
                     result["data"] = raw
@@ -6146,8 +6139,8 @@ class CameraMixin:
                         "setKeepAliveTime HTTP failed for %s: %s", device_id, _ke
                     )
 
-            asyncio.ensure_future(_http_wake())
-            asyncio.ensure_future(_http_keepalive())
+            _spawn_bg(_http_wake())
+            _spawn_bg(_http_keepalive())
 
             outgoing_q.put_nowait(
                 (f"iot/v1/s/{user_id}/IPC/getIceConfigReq", _ice_req_payload)
@@ -6156,7 +6149,7 @@ class CameraMixin:
             try:
                 await asyncio.wait_for(camera_ready_ev.wait(), timeout=12.0)
                 _status("Camera awake - got MQTT signal")
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # First 12s window elapsed without a camera MQTT signal.
                 # Resend both the wake signal and ICE config req, then give
                 # a shorter 5s window before proceeding regardless - cameras
@@ -6170,11 +6163,11 @@ class CameraMixin:
                 outgoing_q.put_nowait(
                     (f"iot/v1/s/{user_id}/IPC/getIceConfigReq", _ice_req_payload)
                 )
-                asyncio.ensure_future(_http_wake())
+                _spawn_bg(_http_wake())
                 try:
                     await asyncio.wait_for(camera_ready_ev.wait(), timeout=5.0)
                     _status("Camera awake - got MQTT signal (after retry)")
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     _status("Camera not responding - proceeding anyway")
                     if use_sdes:
                         _status(
@@ -6235,7 +6228,7 @@ class CameraMixin:
             if not _fast_connect:
                 try:
                     await asyncio.wait_for(liveplay_echo_ev.wait(), timeout=0.5)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
             # livePlayResp carries camera-side accept/reject.  If the camera
             # rejects start-play, continuing to SDP/ICE causes large STUN churn
@@ -6257,7 +6250,7 @@ class CameraMixin:
                         raise RuntimeError(
                             f"livePlay rejected by camera (code={_lp_code}, livePlay={_lp_on})"
                         )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
             else:
                 _status(
@@ -6278,7 +6271,7 @@ class CameraMixin:
                 try:
                     await asyncio.wait_for(asyncio.shield(ice_config_fut), timeout=3.0)
                     _status("getIceConfigResp received (post-livePlayReq)")
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass  # proceed without TURN; synthetic candidates are fallback
             elif _fast_connect:
                 _status(
@@ -6798,7 +6791,7 @@ class CameraMixin:
                     _hb_task = asyncio.ensure_future(_heartbeat_loop())
                     track_tasks.append(_hb_task)
 
-                asyncio.ensure_future(_dcep_open_then_living())
+                _spawn_bg(_dcep_open_then_living())
 
             @_kvs_dc.on("message")
             def _on_kvs_dc_message(message) -> None:
@@ -6866,7 +6859,7 @@ class CameraMixin:
                             )
                             break
                 if talk_pcm_provider is None:
-                    asyncio.ensure_future(_suppress_audio_sender_rtcp())
+                    _spawn_bg(_suppress_audio_sender_rtcp())
                 # Drain decoded audio frames so the queue doesn't grow unbounded.
                 async def _drain_audio() -> None:
                     try:
@@ -6912,7 +6905,7 @@ class CameraMixin:
                         except Exception as _pli_exc:
                             _LOGGER.debug("RTCP PLI attempt failed: %s", _pli_exc)
                     _LOGGER.debug("RTCP PLI: no SSRC discovered within 5s")
-                asyncio.ensure_future(_request_keyframe())
+                _spawn_bg(_request_keyframe())
                 if on_frame is not None:
                     t = asyncio.ensure_future(_webrtc_consume_video(track, on_frame))
                     track_tasks.append(t)
@@ -7059,7 +7052,7 @@ class CameraMixin:
                 sections.append(_cur_sec)
 
             # Find mid:1 (H264) section to clone transport attrs for H265.
-            _h264_sec = next((s for s in sections if any('a=mid:1' == l.rstrip() for l in s)), None)
+            _h264_sec = next((s for s in sections if any(l.rstrip() == 'a=mid:1' for l in s)), None)
             _ufrag = _pwd = _fp = _setup = ''
             if _h264_sec:
                 for _l in _h264_sec:
@@ -7093,7 +7086,7 @@ class CameraMixin:
             # Renumber DC section: mid:2 → mid:3.
             new_sections: list[list[str]] = []
             for sec in sections:
-                if any('a=mid:2' == l.rstrip() for l in sec) and sec[0].startswith('m=application'):
+                if any(l.rstrip() == 'a=mid:2' for l in sec) and sec[0].startswith('m=application'):
                     new_sections.append([l.replace('a=mid:2', 'a=mid:3') if l.rstrip() == 'a=mid:2' else l for l in sec])
                 else:
                     new_sections.append(sec)
@@ -7102,7 +7095,7 @@ class CameraMixin:
             result_secs: list[list[str]] = []
             for sec in new_sections:
                 result_secs.append(sec)
-                if any('a=mid:1' == l.rstrip() for l in sec):
+                if any(l.rstrip() == 'a=mid:1' for l in sec):
                     result_secs.append(_h265_sec)
 
             # Update a=group:BUNDLE in header.
@@ -8933,7 +8926,6 @@ class CameraMixin:
         import base64
         import os
         import subprocess
-        import tempfile
         import json
 
         # _open_sdes_stream runs in its own scope, so recompute the fast-connect
@@ -9067,7 +9059,11 @@ class CameraMixin:
         def _turn_allocate_udp(_ta_sock, _ta_host, _ta_port, _ta_user, _ta_pass):
             """RFC 5766 TURN relay allocation with long-term credential auth.
             Returns (relay_ip, relay_port, realm, nonce) or None on failure."""
-            import hashlib as _ha, hmac as _hm, struct as _st_ta, select as _sl_ta, time as _tm_ta
+            import hashlib as _ha
+            import hmac as _hm
+            import struct as _st_ta
+            import select as _sl_ta
+            import time as _tm_ta
 
             _MAGIC_TA = b'\x21\x12\xa4\x42'
 
@@ -9181,7 +9177,7 @@ class CameraMixin:
                 _o += 4 + _al + (-_al % 4)
                 if _at == 0x0016 and _al >= 8:  # XOR-RELAYED-ADDRESS
                     _xp = _st_ta.unpack_from('!H', _av, 2)[0] ^ 0x2112
-                    _xb = bytes(a ^ b for a, b in zip(_av[4:8], _MAGIC_TA))
+                    _xb = bytes(a ^ b for a, b in zip(_av[4:8], _MAGIC_TA, strict=False))
                     _r_ip_ta = '.'.join(str(b) for b in _xb)
                     # Do NOT pre-create permissions for our own srflx IP or
                     # TURN server IP. That can cause TURN self-loop Data
@@ -9198,7 +9194,8 @@ class CameraMixin:
         # path connects without waiting on a cloud TURN Allocate round-trip.
         if _sdes_turn_entries and not _fast_connect:
             try:
-                import re as _re_pre, hashlib as _hlk_pre
+                import re as _re_pre
+                import hashlib as _hlk_pre
                 _our_te_pre = next(
                     (e for e in _sdes_turn_entries if e.get("Username") == user_id),
                     _sdes_turn_entries[0],
@@ -9244,7 +9241,8 @@ class CameraMixin:
             from cryptography.hazmat.primitives import hashes as _ch, serialization as _cser
             from cryptography.hazmat.primitives.asymmetric import ec as _cec
             from cryptography.hazmat.backends import default_backend as _cbd
-            import datetime as _dt_dc, hashlib as _hs_dc
+            import datetime as _dt_dc
+            import hashlib as _hs_dc
             _dc_key = _cec.generate_private_key(_cec.SECP256R1(), _cbd())
             _dc_name = _cx509.Name([_cx509.NameAttribute(_CNOID.COMMON_NAME, "aidot-dc")])
             _dc_cert = (
@@ -9465,7 +9463,7 @@ class CameraMixin:
         try:
             await _asyncio.wait_for(liveplay_echo_ev.wait(), timeout=5.0)
             _status("livePlayReq echo received - sending webrtcReq, ICE, then launching ffmpeg")
-        except _asyncio.TimeoutError:
+        except TimeoutError:
             _status("no livePlayReq echo in 5s - sending webrtcReq, ICE, then launching ffmpeg anyway")
         # If camera provided explicit livePlayResp failure, abort before SDP/ICE.
         try:
@@ -9478,7 +9476,7 @@ class CameraMixin:
                 raise RuntimeError(
                     f"livePlay rejected by camera (code={_lp_code_sdes}, livePlay={_lp_on_sdes})"
                 )
-        except _asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
         # --- Build local-receiver SDP for ffmpeg ----------------------------- #
@@ -9686,7 +9684,8 @@ class CameraMixin:
             # and _relay_addrs is populated - skip to avoid double-allocation.
             if not _relay_addrs:
                 try:
-                    import re as _re_relay_e, hashlib as _hlk_e
+                    import re as _re_relay_e
+                    import hashlib as _hlk_e
                     _our_te = next(
                         (e for e in _sdes_turn_entries if e.get("Username") == user_id),
                         _sdes_turn_entries[0] if _sdes_turn_entries else None,
@@ -9833,7 +9832,7 @@ class CameraMixin:
                 f" audio={_ans_audio_ip}:{_ans_audio_port}"
                 f" video={_ans_video_ip}:{_ans_video_port})"
             )
-        except _asyncio.TimeoutError:
+        except TimeoutError:
             pass  # no echo - camera uses a different signalling variant; proceed
 
         # --- Announce our ICE candidates via MQTT (iceCandidateReq) ----------- #
@@ -9891,7 +9890,8 @@ class CameraMixin:
         # candidate trickle on a cloud round-trip).
         if not _relay_addrs and not _fast_connect:
             try:
-                import re as _re_relay, hashlib as _hlk
+                import re as _re_relay
+                import hashlib as _hlk
                 _our_turn_entry = None
                 for _te in _sdes_turn_entries:
                     if _te.get("Username") == user_id:
@@ -10037,7 +10037,8 @@ class CameraMixin:
         #     exit quickly so the DTLS fallback starts sooner.
         #   SRTP early exit: if a non-STUN packet arrives (SRTP), ICE is done -
         #     close sockets immediately so ffmpeg can bind.
-        import struct as _struct, select as _select
+        import struct as _struct
+        import select as _select
         _STUN_MAGIC = b'\x21\x12\xa4\x42'
         _stun_count = 0
         _stun_seen = False
@@ -10113,7 +10114,7 @@ class CameraMixin:
                         if _sw_at == 0x0012 and _sw_al >= 8:  # XOR-PEER-ADDRESS
                             _sw_xp = _struct.unpack_from('!H', _sw_av, 2)[0] ^ 0x2112
                             _sw_xb = bytes(
-                                a ^ b for a, b in zip(_sw_av[4:8], _STUN_MAGIC)
+                                a ^ b for a, b in zip(_sw_av[4:8], _STUN_MAGIC, strict=False)
                             )
                             _turn_peer_ip_sw = '.'.join(str(b) for b in _sw_xb)
                             _turn_peer_port_sw = _sw_xp
@@ -10162,7 +10163,7 @@ class CameraMixin:
                                     int(x) for x in _turn_peer_ip_sw.split('.')
                                 )
                                 _si_xip = bytes(
-                                    a ^ b for a, b in zip(_si_pip, _STUN_MAGIC)
+                                    a ^ b for a, b in zip(_si_pip, _STUN_MAGIC, strict=False)
                                 )
                                 _si_xport = (_turn_peer_port_sw ^ 0x2112) & 0xFFFF
                                 _si_xpa = (b'\x00\x01'
@@ -10500,7 +10501,8 @@ class CameraMixin:
             return raw + b'\x00' * ((-len(raw)) % 4)
 
         def _sctp_init():
-            import struct as _st_sc, random as _r_sc
+            import struct as _st_sc
+            import random as _r_sc
             if _sctp['local_tag'] == 0:
                 _sctp['local_tag'] = _r_sc.randint(1, 0xFFFFFFFF)
                 _sctp['local_tsn'] = _r_sc.randint(1, 0xFFFFFFFF)
@@ -10550,7 +10552,8 @@ class CameraMixin:
             return None
 
         def _sctp_init_ack_pkt():
-            import struct as _st_sc, random as _r_sc
+            import struct as _st_sc
+            import random as _r_sc
             # RFC 4960 §5.2.1: reuse local_tag/tsn from our INIT in simultaneous open
             if _sctp['local_tag'] == 0:
                 _sctp['local_tag'] = _r_sc.randint(1, 0xFFFFFFFF)
@@ -10581,7 +10584,9 @@ class CameraMixin:
                     + label)
 
         def _session_mode_req_msg():
-            import struct as _st_sc, random as _r_sc, time as _t_sc
+            import struct as _st_sc
+            import random as _r_sc
+            import time as _t_sc
             seq = _r_sc.randint(0, 0x7FFFFFFF)
             ts  = int(_t_sc.time() * 1000)
             return (_st_sc.pack('<IIqII4x', seq, 5376, ts, 8, 0)
@@ -10630,7 +10635,10 @@ class CameraMixin:
 
         def _send_use_candidate(sock, our_ufrag, our_pwd, cam_ufrag, cam_pwd, cam_addr):
             """Send a STUN Binding Request with ICE-CONTROLLING + USE-CANDIDATE."""
-            import struct as _st_uc, os as _os_uc, hmac as _hm_uc, hashlib as _hs_uc
+            import struct as _st_uc
+            import os as _os_uc
+            import hmac as _hm_uc
+            import hashlib as _hs_uc
             _MAGIC_UC = b'\x21\x12\xa4\x42'
             _tid_uc = _os_uc.urandom(12)
             _user = f"{cam_ufrag}:{our_ufrag}".encode()
@@ -10702,7 +10710,8 @@ class CameraMixin:
         #   • forwards all non-STUN packets (SRTP) to ffmpeg's loopback ports
         # When the session ends, SdesSession.stop() closes the original sockets,
         # which causes the bridge thread's select() to raise and it exits cleanly.
-        import threading as _threading_br, socket as _socket_br
+        import threading as _threading_br
+        import socket as _socket_br
 
         def _alloc_lo_port():
             _s = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
@@ -10785,7 +10794,9 @@ class CameraMixin:
             nonlocal _br_first_audio_logged, _br_first_video_logged, _avio_living_sent
             nonlocal _bridge_selfloop_drop_count  # incremented below; needs nonlocal
             _STUN_MAGIC_BR = b'\x21\x12\xa4\x42'
-            import struct as _st_br, select as _sel_br, time as _time_br
+            import struct as _st_br
+            import select as _sel_br
+            import time as _time_br
             _br_prefer_direct_stun = {_audio_sock: False, _video_sock: False}
             _br_last_uc = 0.0
             _br_stun_resp_count = 0
@@ -10841,7 +10852,8 @@ class CameraMixin:
                     if (_sdes_probe_received
                             and _hb_sock is not None and _hb_src is not None
                             and _time_br.time() - _last_hb_ts >= 10.0):
-                        import struct as _st_hb, random as _r_hb
+                        import struct as _st_hb
+                        import random as _r_hb
                         _hb_seq = _r_hb.randint(0, 0x7FFFFFFF)
                         _hb_ts  = int(_time_br.time() * 1000)
                         # 28-byte AVIO header, cmd=5156 (HEARTHEAT_REQ), empty payload.
@@ -10994,7 +11006,8 @@ class CameraMixin:
                                 # after the encrypted-SCTP handshake defines them; same closure
                                 # pattern as the LIVING send above).  dcep_sock/dcep_src are the
                                 # socket+addr the SCTP handshake (and LIVING) used.
-                                import struct as _st_pcmd, random as _r_pcmd
+                                import struct as _st_pcmd
+                                import random as _r_pcmd
 
                                 def _persistent_sdes_cmd(_cmd, _extra=b''):
                                     _seq = _r_pcmd.randint(0, 0x7FFFFFFF)
@@ -11008,7 +11021,7 @@ class CameraMixin:
                                     try:
                                         _chunk = _sctp_data(53, _avio)
                                         _csock.sendto(
-                                            _enc_c8_sctp(_sctp_pkt(_sctp['peer_tag'], _chunk)),  # noqa: F821
+                                            _enc_c8_sctp(_sctp_pkt(_sctp['peer_tag'], _chunk)),
                                             _csrc,
                                         )
                                     except Exception:
@@ -11024,7 +11037,8 @@ class CameraMixin:
                             and not _sdes_probe_received
                             and _trigger_bs is not None
                             and _time_br.time() - _last_trigger_ts >= 2.0):
-                        import struct as _st_re2, random as _r_re2
+                        import struct as _st_re2
+                        import random as _r_re2
                         _re_ts  = int(_time_br.time() * 1000)
                         _re_seq  = _r_re2.randint(0, 0x7FFFFFFF)
                         _re_plain = (
@@ -11088,7 +11102,7 @@ class CameraMixin:
                                         '!H', _br_av, 2)[0] ^ 0x2112)
                                     _br_xb = bytes(
                                         a ^ b for a, b in zip(
-                                            _br_av[4:8], _STUN_MAGIC_BR)
+                                            _br_av[4:8], _STUN_MAGIC_BR, strict=False)
                                     )
                                     _br_turn_peer_ip = '.'.join(
                                         str(b) for b in _br_xb)
@@ -11143,7 +11157,7 @@ class CameraMixin:
                                     )
                                     _br_xip2 = bytes(
                                         a ^ b for a, b in zip(
-                                            _br_pip, _STUN_MAGIC_BR)
+                                            _br_pip, _STUN_MAGIC_BR, strict=False)
                                     )
                                     _br_xport2 = (
                                         _br_turn_peer_port ^ 0x2112) & 0xFFFF
@@ -12248,7 +12262,7 @@ class CameraMixin:
                     _second_ans = await asyncio.wait_for(
                         asyncio.shield(second_answer_fut), timeout=5.0
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     _second_ans = None
             elif second_answer_fut is not None and second_answer_fut.done():
                 try:
@@ -12332,7 +12346,7 @@ class CameraMixin:
                             stderr=subprocess.PIPE,
                         )
                         _status("ffmpeg restarted with camera's SRTP keys")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if _cam_echo_received:
                 # We already sent webrtcResp in response to the camera's echo.
                 # The camera should now be streaming; keep ffmpeg running.
@@ -12420,7 +12434,7 @@ class CameraMixin:
                                     )
                         except Exception:
                             pass
-                    asyncio.ensure_future(_late_second_answer_task())
+                    _spawn_bg(_late_second_answer_task())
 
         return SdesSession(
             proc=proc,

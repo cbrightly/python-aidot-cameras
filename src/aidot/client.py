@@ -346,7 +346,7 @@ class AidotClient:
             result = await self._do_ensure_token()
             fut.set_result(result)
             return result
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             fut.set_exception(exc)
             raise
         finally:
@@ -365,14 +365,14 @@ class AidotClient:
                     return True
         except AidotAuthFailed:
             pass
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _LOGGER.debug("async_ensure_token: refresh failed: %s", exc)
         try:
             await self.async_post_login()
             if self._token_fresh_cb:
                 self._token_fresh_cb()
             return True
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _LOGGER.warning("async_ensure_token: re-login failed: %s", exc)
             return False
 
