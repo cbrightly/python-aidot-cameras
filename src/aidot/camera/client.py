@@ -5452,6 +5452,13 @@ class CameraMixin:
             _fast_connect = os.environ.get("AIDOT_FAST_CONNECT", "").strip().lower() in (
                 "1", "true", "yes", "on",
             )
+        # fast_connect (skip livePlay/ICE waits + strip TURN) is validated for the
+        # DTLS path only.  On SDES cameras those skips leave the SCTP handshake
+        # under-armed and the session churns/re-establishes (~every 60-90s),
+        # dropping the live view to a snapshot.  Force the full, stable handshake
+        # for SDES regardless of the option/env.
+        if self.is_sdes_camera:
+            _fast_connect = False
 
         # Wake battery cameras via the cloud HTTP low-power endpoint before the
         # handshake (matches the app, which fires the HTTP wake so a sleeping camera
@@ -8939,6 +8946,10 @@ class CameraMixin:
             _fast_connect = os.environ.get("AIDOT_FAST_CONNECT", "").strip().lower() in (
                 "1", "true", "yes", "on",
             )
+        # SDES path: fast_connect's wait-skips / TURN-strip destabilise the SCTP
+        # handshake (session churns ~every 60-90s -> live view drops to snapshot),
+        # so always use the full, stable handshake here.
+        _fast_connect = False
 
         user_id = user_id or str(self.user_id)
 
