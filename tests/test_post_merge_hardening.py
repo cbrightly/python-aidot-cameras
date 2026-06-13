@@ -13,9 +13,8 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import pytest
 
-from aidot.camera.client import CameraMixin, CameraStatusData, CameraDeviceInformation
+from aidot.camera.client import CameraMixin, CameraStatusData
 from aidot.client import _is_camera
 from aidot.device_client import DeviceClient, DeviceStatusData
 from aidot.discover import Discover
