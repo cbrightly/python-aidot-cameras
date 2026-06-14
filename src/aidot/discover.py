@@ -1,11 +1,13 @@
+import os
 import re
 import socket
 import json
+import shutil
 import logging
 import asyncio
 import subprocess
 import sys
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 from .aes_utils import aes_encrypt, aes_decrypt
 from .const import CONF_ID, CONF_IPADDRESS
@@ -16,45 +18,69 @@ _LOGGER = logging.getLogger(__name__)
 _DISCOVER_FAST = 6      # fast discovery cadence right after startup
 _DISCOVER_SLOW = 120    # slow maintenance cadence once stable
 
+def _resolve_tool(name: str, absolute_fallback: str) -> Optional[str]:
+    """Resolve a system tool via PATH, falling back to an absolute path.
+
+    Returns None if neither the PATH lookup nor the fallback path exists, so
+    callers can degrade gracefully instead of shelling out to a missing tool.
+    """
+    resolved = shutil.which(name)
+    if resolved:
+        return resolved
+    if os.path.exists(absolute_fallback):
+        return absolute_fallback
+    return None
+
+
 def _get_broadcast_candidates() -> List[Tuple[str, str]]:
     """Return (bind_ip, broadcast_ip) pairs for every active IPv4 interface.
 
     Sends a separate broadcast per interface so cameras are reachable
     regardless of which interface the OS default route prefers.
     Falls back to a single ("0.0.0.0", "255.255.255.255") entry if
-    interface enumeration is unavailable.
+    interface enumeration is unavailable (missing tool or subprocess error).
     """
     results: List[Tuple[str, str]] = []
     try:
         if sys.platform == "darwin":
             # macOS ifconfig: "inet 192.168.1.175 netmask 0xffffff00 broadcast 192.168.1.255"
-            out = subprocess.check_output(
-                ["/sbin/ifconfig"], text=True, stderr=subprocess.DEVNULL
-            )
-            for m in re.finditer(
-                r"\binet\s+"
-                r"((?!127\.|169\.254\.)\d+\.\d+\.\d+\.\d+)"
-                r"\s+netmask\s+\S+"
-                r"\s+broadcast\s+"
-                r"(\d+\.\d+\.\d+\.\d+)",
-                out,
-            ):
-                results.append((m.group(1), m.group(2)))
+            tool = _resolve_tool("ifconfig", "/sbin/ifconfig")
+            if tool is None:
+                _LOGGER.debug("_get_broadcast_candidates: ifconfig not found on PATH")
+            else:
+                out = subprocess.check_output(
+                    [tool], text=True, stderr=subprocess.DEVNULL
+                )
+                for m in re.finditer(
+                    r"\binet\s+"
+                    r"((?!127\.|169\.254\.)\d+\.\d+\.\d+\.\d+)"
+                    r"\s+netmask\s+\S+"
+                    r"\s+broadcast\s+"
+                    r"(\d+\.\d+\.\d+\.\d+)",
+                    out,
+                ):
+                    results.append((m.group(1), m.group(2)))
         else:
             # Linux: "inet 192.168.1.x/24 brd 192.168.1.255"
-            out = subprocess.check_output(
-                ["ip", "addr", "show"], text=True, stderr=subprocess.DEVNULL
-            )
-            for m in re.finditer(
-                r"\binet\s+"
-                r"((?!127\.|169\.254\.)\d+\.\d+\.\d+\.\d+)/\d+"
-                r"\s+brd\s+"
-                r"(\d+\.\d+\.\d+\.\d+)",
-                out,
-            ):
-                results.append((m.group(1), m.group(2)))
-    except Exception as exc:
+            tool = _resolve_tool("ip", "/sbin/ip")
+            if tool is None:
+                _LOGGER.debug("_get_broadcast_candidates: ip not found on PATH")
+            else:
+                out = subprocess.check_output(
+                    [tool, "addr", "show"], text=True, stderr=subprocess.DEVNULL
+                )
+                for m in re.finditer(
+                    r"\binet\s+"
+                    r"((?!127\.|169\.254\.)\d+\.\d+\.\d+\.\d+)/\d+"
+                    r"\s+brd\s+"
+                    r"(\d+\.\d+\.\d+\.\d+)",
+                    out,
+                ):
+                    results.append((m.group(1), m.group(2)))
+    except (OSError, subprocess.SubprocessError) as exc:
         _LOGGER.debug("_get_broadcast_candidates: interface enumeration failed: %s", exc)
+    except Exception as exc:  # never let enumeration crash discovery
+        _LOGGER.debug("_get_broadcast_candidates: unexpected error: %s", exc)
 
     if not results:
         # Fallback: let the OS pick the outgoing interface
@@ -116,6 +142,7 @@ class BroadcastProtocol:
         _LOGGER.error("%s: error occurred: %s", self.user_id, exc)
 
     def close(self) -> None:
+        """Close this interface's datagram transport."""
         try:
             self.transport.close()
         except Exception as error:
@@ -186,9 +213,11 @@ class Discover:
     # ---------------------------------------------------------------------- #
 
     async def try_create_broadcast(self) -> None:
+        """Ensure discovery sockets are open without sending a broadcast yet."""
         await self._ensure_sockets()
 
     async def send_broadcast(self) -> None:
+        """Send a discovery broadcast on every active interface."""
         await self._ensure_sockets()
         for proto in self._protocols:
             proto.send_broadcast()
@@ -226,6 +255,7 @@ class Discover:
             self._callback(dev_id, event)
 
     def close(self) -> None:
+        """Stop discovery, cancel timers/tasks, and close all sockets."""
         self._is_close = True
         if self._broadcast_task is not None and not self._broadcast_task.done():
             self._broadcast_task.cancel()
