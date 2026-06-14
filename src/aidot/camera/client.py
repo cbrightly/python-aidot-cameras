@@ -7747,7 +7747,7 @@ class CameraMixin:
                     certificate_digest as _rr_cert_fp,
                 )
 
-                def _rr_accept_cam_cert(self, remote_params):
+                def _accept_camera_cert(self, remote_params):
                     """Accept camera's actual DTLS cert (echo-reversal fingerprint fix)."""
                     try:
                         _cam_cert = self._ssl.get_peer_certificate(
@@ -7764,7 +7764,7 @@ class CameraMixin:
                 for _rr_tc in pc.getTransceivers():
                     _rr_tc.receiver.transport._validate_peer_identity = (
                         _types.MethodType(
-                            _rr_accept_cam_cert, _rr_tc.receiver.transport
+                            _accept_camera_cert, _rr_tc.receiver.transport
                         )
                     )
                 _status(
@@ -9061,7 +9061,7 @@ class CameraMixin:
                 _p = (-len(_v)) % 4
                 return _st_ta.pack('!HH', _t, len(_v)) + _v + b'\x00' * _p
 
-            def _mi_ta(_k, _m):
+            def _stun_message_integrity(_k, _m):
                 # Patch Length to include the MI attribute (4 hdr + 20 digest = 24)
                 _patched = _m[:2] + _st_ta.pack('!H', len(_m) - 20 + 24) + _m[4:]
                 return _hm.new(_k, _patched, _ha.sha1).digest()
@@ -9119,7 +9119,7 @@ class CameraMixin:
                 + _a(0x0019, b'\x11\x00\x00\x00')     # REQUESTED-TRANSPORT = UDP, RFC 5766 §14.7 protocol in MSB
             )
             _h2 = b'\x00\x03' + _st_ta.pack('!H', len(_b2) + 24) + _MAGIC_TA + _tid2
-            _b2 += _a(0x0008, _mi_ta(_key_ta, _h2 + _b2))  # MESSAGE-INTEGRITY
+            _b2 += _a(0x0008, _stun_message_integrity(_key_ta, _h2 + _b2))  # MESSAGE-INTEGRITY
             _r2 = b'\x00\x03' + _st_ta.pack('!H', len(_b2)) + _MAGIC_TA + _tid2 + _b2
             try:
                 _ta_sock.sendto(_r2, (_ta_host, _ta_port))
@@ -10160,12 +10160,12 @@ class CameraMixin:
                                            + _struct.pack('!H', _si_xport)
                                            + _si_xip)
 
-                                def _si_a(_t, _v):
+                                def _build_stun_attr(_t, _v):
                                     _p = (-len(_v)) % 4
                                     return (_struct.pack('!HH', _t, len(_v))
                                             + _v + b'\x00' * _p)
 
-                                _si_body = _si_a(0x0012, _si_xpa) + _si_a(0x0013, _resp)
+                                _si_body = _build_stun_attr(0x0012, _si_xpa) + _build_stun_attr(0x0013, _resp)
                                 _send_ind = (b'\x00\x16'
                                              + _struct.pack('!H', len(_si_body))
                                              + _STUN_MAGIC + os.urandom(12)
@@ -11155,14 +11155,14 @@ class CameraMixin:
                                                + _st_br.pack('!H', _br_xport2)
                                                + _br_xip2)
 
-                                    def _br_a(_t, _v):
+                                    def _build_stun_attr(_t, _v):
                                         _p = (-len(_v)) % 4
                                         return (_st_br.pack('!HH', _t, len(_v))
                                                 + _v + b'\x00' * _p)
 
                                     _br_si_body = (
-                                        _br_a(0x0012, _br_xpa)
-                                        + _br_a(0x0013, _bresp)
+                                        _build_stun_attr(0x0012, _br_xpa)
+                                        + _build_stun_attr(0x0013, _bresp)
                                     )
                                     _br_send_ind = (
                                         b'\x00\x16'
@@ -11199,7 +11199,7 @@ class CameraMixin:
                                                 (_br_ci, _br_cp),
                                             )
                                         except Exception:
-                                            _LOGGER.debug("camera %s: swallowed exception", '_br_a', exc_info=True)
+                                            _LOGGER.debug("camera %s: swallowed exception", '_build_stun_attr', exc_info=True)
                                     _status(
                                         f"bridge: late USE-CANDIDATE sent to"
                                         f" {len(_bridge_uc_info['cands'])} camera candidate(s)"
