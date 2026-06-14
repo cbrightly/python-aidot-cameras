@@ -73,5 +73,6 @@ ignore = [
 # device_client.py re-exports from camera.client mid-file (avoids a circular import).
 "**/device_client.py" = ["F401", "E402"]
 # Inherited ffmpeg streaming engine is process-based (Popen / subprocess poll /
-# SDP file write); a full non-blocking refactor needs on-device testing.
-"src/aidot/camera/client.py" = ["ASYNC110", "ASYNC220", "ASYNC221", "ASYNC230"]
+# SDP file write); a full non-blocking refactor needs on-device testing. The
+# engine is split across several camera/* modules, so this applies package-wide.
+"src/aidot/camera/*.py" = ["ASYNC110", "ASYNC220", "ASYNC221", "ASYNC230"]
