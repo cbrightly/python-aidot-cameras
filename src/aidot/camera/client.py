@@ -56,6 +56,7 @@ from .constants import (
     _FRAME_TYPE_AUDIO,
     _PTZ_DIR_CODES,
     SETSTREAMCTRL_CMD,
+    GETSTREAMCTRL_CMD,  # noqa: F401 - re-exported for back-compat (public pair; unused in-module)
     _STREAM_QUALITY,
 )
 
@@ -11199,7 +11200,7 @@ class CameraMixin:
                                                 (_br_ci, _br_cp),
                                             )
                                         except Exception:
-                                            _LOGGER.debug("camera %s: swallowed exception", '_build_stun_attr', exc_info=True)
+                                            _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
                                     _status(
                                         f"bridge: late USE-CANDIDATE sent to"
                                         f" {len(_bridge_uc_info['cands'])} camera candidate(s)"
