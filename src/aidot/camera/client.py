@@ -1,6 +1,5 @@
 """Camera / WebRTC / SDES extensions, layered additively over the core DeviceClient."""
 
-import ctypes
 import json
 import logging
 import os
@@ -10,21 +9,11 @@ import threading
 import time
 import asyncio
 import zlib
-from dataclasses import dataclass
 from typing import Any, Callable, List, Optional
 
 from ..aes_utils import aes_ecb_encrypt_str_key, aes_ecb_decrypt_str_key
 from ..exceptions import AidotCameraBusy
 from ..login_const import APP_ID as _AIDOT_APP_ID
-from ..const import (
-    CONF_CCT,
-    CONF_ON_OFF,
-    CONF_DIMMING,
-    CONF_PRODUCT,
-    CONF_PROPERTIES,
-    CONF_RGBW,
-    CONF_SERVICE_MODULES,
-)
 
 # Wire/protocol constants live in constants.py; re-imported here so all
 # in-module references (and any external importers) keep resolving.
@@ -50,15 +39,17 @@ from .constants import (
     _CMD_SUBCMD,
     _CMD_PARAM,
     _SF_HDR_SIZE,
-    _FRAME_TYPE_P_FRAME,
-    _FRAME_TYPE_B_FRAME,
-    _FRAME_TYPE_I_FRAME,
-    _FRAME_TYPE_AUDIO,
     _PTZ_DIR_CODES,
     SETSTREAMCTRL_CMD,
     GETSTREAMCTRL_CMD,  # noqa: F401 - re-exported for back-compat (public pair; unused in-module)
     _STREAM_QUALITY,
 )
+from .models import (  # re-exported: data models split into models.py
+    CameraDeviceInformation,
+    CameraStatusData,
+    VideoFrame,
+)
+from .tutk import TutkStreamSession  # re-exported (split into tutk.py)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,7 +83,7 @@ def _ffmpeg_path(binary: str = "ffmpeg") -> Optional[str]:
 # module (the package __init__ loads aidot.device_client first), so the
 # partially-initialized module already exposes them here.
 try:
-    from ..device_client import DeviceStatusData, DeviceInformation
+    from ..device_client import DeviceStatusData
 except ImportError as _exc:  # pragma: no cover - ordering contract violation
     raise ImportError(
         "aidot.camera.client must be imported via aidot.device_client "
@@ -102,134 +93,8 @@ except ImportError as _exc:  # pragma: no cover - ordering contract violation
     ) from _exc
 
 
-class CameraStatusData(DeviceStatusData):
-    """Core status plus camera fields; accepts both typed-model and dict updates."""
-
-    # Restore None-as-unknown semantics: the core defaults (red/2700K/100)
-    # would otherwise be pushed to consumers as real state before the first
-    # getDevAttrReq reply arrives.
-    rgdb: "int | None" = None
-    rgbw: "tuple[int, int, int, int] | None" = None
-    cct: "int | None" = None
-    dimming: "int | None" = None
-
-    # Camera-specific fields (None = unknown/not yet queried)
-    motion_detection: Optional[bool] = None
-    motion_sensitivity: Optional[int] = None  # MotionDetection_Sen 1-5
-    status_led: Optional[bool] = None
-    microphone: Optional[bool] = None
-    night_vision_mode: Optional[str] = None   # "auto" | "on" | "off"
-    ir_light: Optional[bool] = None           # nightVisionIRLight 0/1
-    floodlight: Optional[bool] = None
-    ptz_tracking: Optional[bool] = None
-    siren: bool = False
-    speaker_volume: Optional[int] = None  # SoundLevel 0-100
-    # Diagnostic / read-only camera fields
-    battery_remaining: Optional[int] = None  # Battery_remaining 0-100 (%)
-    occupancy: Optional[bool] = None          # Occupancy live presence
-    sd_card_status: Optional[str] = None      # SDcardStatus
-
-    def update(self, attr) -> None:
-        if attr is None:
-            return
-        if not isinstance(attr, dict):
-            # Typed DeviceAttr model from the core local-control receive path.
-            # Guard: a malformed payload.attr (non-dict, non-model) must not
-            # kill the caller's receive loop.
-            if not hasattr(attr, "OnOff"):
-                return
-            super().update(attr)
-            return
-        # Dict path: camera attributes ONLY.  Light keys (OnOff/Dimming/RGBW/
-        # CCT) are handled by the typed-model path in the core; the dict
-        # feeders either strip them (update_from_camera_attributes) or have
-        # already applied them via the model (receive_data raw-dict pass).
-        # Camera attributes
-        if (v := attr.get("MotionDetection_Enable")) is not None:
-            self.motion_detection = bool(int(v))
-        if (v := attr.get("MotionDetection_Sen")) is not None:
-            self.motion_sensitivity = int(v)
-        if (v := attr.get("LedOnOff")) is not None:
-            self.status_led = bool(int(v))
-        if (v := attr.get("micEnable")) is not None:
-            self.microphone = bool(int(v))
-        if (v := attr.get("nightVisionMode")) is not None:
-            try:
-                nv = int(v)
-                self.night_vision_mode = {0: "auto", 1: "on", 2: "off"}.get(nv, str(nv))
-            except (ValueError, TypeError):
-                # Camera may send string "on"/"off"/"auto" instead of 0/1/2
-                self.night_vision_mode = str(v)
-        if (v := attr.get("nightVisionIRLight")) is not None:
-            self.ir_light = bool(int(v))
-        if (v := attr.get("LightOnOff")) is not None:
-            self.floodlight = bool(int(v))
-        if (v := attr.get("trackingMode")) is not None:
-            self.ptz_tracking = bool(int(v))
-        if (v := attr.get("SoundLevel")) is not None:
-            self.speaker_volume = int(v)
-        # Diagnostic / read-only
-        if (v := attr.get("Battery_remaining")) is not None:
-            try:
-                self.battery_remaining = int(v)
-            except (ValueError, TypeError):
-                _LOGGER.debug("camera %s: swallowed exception", 'update', exc_info=True)
-        if (v := attr.get("Occupancy")) is not None:
-            self.occupancy = bool(int(v))
-        if (v := attr.get("SDcardStatus")) is not None:
-            self.sd_card_status = str(v)
-
-    # Cloud "properties" keys that belong to lights, not cameras.  A camera's
-    # image "Dimming" must not be read as a light brightness (and could TypeError
-    # if non-numeric), so exclude the light-only keys when populating a camera.
-    _LIGHT_ONLY_ATTR_KEYS = (CONF_ON_OFF, CONF_DIMMING, CONF_RGBW, CONF_CCT)
-
-    def update_from_camera_attributes(self, attrs: dict) -> None:
-        """Populate camera fields from a camera attribute / cloud-properties dict.
-
-        Accepts either a setDevAttrNotif ``attr`` dict or a cloud device
-        ``properties`` dict - both share the same camera attribute keys
-        (Battery_remaining, Occupancy, SDcardStatus, MotionDetection_*, …).
-        """
-        self.update({
-            k: v for k, v in attrs.items()
-            if k not in self._LIGHT_ONLY_ATTR_KEYS
-        })
 
 
-class CameraDeviceInformation(DeviceInformation):
-    """Core device info plus camera fields parsed from the device dict."""
-
-    # Per-device AES-128 key from the API (16-char ASCII).  Hypothesis: used
-    # for TUTK IOCtrl encryption in LDS/SDES mode.  Confirmed structure-fit
-    # (16B = AES-128).  Needs key from PTZ/L2 cameras to test against pcap.
-    aes_key: str
-    # Local device access password (TUTK viewPwd candidate)
-    device_password: str
-    # TUTK IOCtrl direction codes the camera advertises (e.g. [3,6] = left+right
-    # for a pan-only camera, [1,2,3,6] = full PTZ).  Empty means unknown - callers
-    # should treat unknown as "show all" for backward compatibility.
-    ptz_directions: list
-
-    def __init__(self, device: dict[str, Any]) -> None:
-        super().__init__(device)
-        # aesKey is a list in the API response; take first entry
-        _aes = device.get("aesKey") or []
-        self.aes_key = _aes[0] if isinstance(_aes, list) and _aes else (
-            str(_aes) if _aes else "")
-        self.device_password = device.get("password") or ""
-        self.ptz_directions = []
-        if CONF_PRODUCT in device and CONF_SERVICE_MODULES in device[CONF_PRODUCT]:
-            for service in device[CONF_PRODUCT][CONF_SERVICE_MODULES]:
-                for prop in service.get(CONF_PROPERTIES) or []:
-                    if prop.get("code") == "ptzDirection":
-                        raw = prop.get("allowedValues")
-                        try:
-                            codes = json.loads(raw) if isinstance(raw, str) else raw
-                            if isinstance(codes, list):
-                                self.ptz_directions = [int(c) for c in codes]
-                        except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception", '__init__', exc_info=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -237,32 +102,6 @@ class CameraDeviceInformation(DeviceInformation):
 # --------------------------------------------------------------------------- #
 
 
-@dataclass
-class VideoFrame:
-    # frame_type: 2=P-frame  3=B-frame  4=I-frame/keyframe  5=audio
-    # audio_codec: 0=N/A  1=G.711A  (meaningful only when frame_type==5)
-    # timestamp: server-side PTS in milliseconds
-    # is_encrypted: True when sub-frame encryption byte was non-zero
-    # data: raw H.264 NAL bytes (video) or G.711A bytes (audio)
-    frame_type:   int
-    audio_codec:  int
-    timestamp:    int
-    is_encrypted: bool
-    data:         bytes
-
-    @property
-    def is_video(self) -> bool:
-        return self.frame_type in (_FRAME_TYPE_P_FRAME,
-                                   _FRAME_TYPE_B_FRAME,
-                                   _FRAME_TYPE_I_FRAME)
-
-    @property
-    def is_keyframe(self) -> bool:
-        return self.frame_type == _FRAME_TYPE_I_FRAME
-
-    @property
-    def is_audio(self) -> bool:
-        return self.frame_type == _FRAME_TYPE_AUDIO
 
 # --------------------------------------------------------------------------- #
 # JPEG snapshot helper
@@ -922,252 +761,6 @@ class CloudPlaybackSession:
 # Obtain them from the TUTK SDK distribution or an extracted AiDot APK.
 # --------------------------------------------------------------------------- #
 
-class TutkStreamSession:
-    """TUTK IOTC P2P live-stream session."""
-
-    _IOTYPE_INNER_SND_DATA_DELAY = 255   # TutkManager.java: sent before START
-    _IOTYPE_USER_IPCAM_START     = 511   # AVIOCTRLDEFs: IOTYPE_USER_IPCAM_START
-    _IOTYPE_USER_IPCAM_STOP      = 767   # AVIOCTRLDEFs: IOTYPE_USER_IPCAM_STOP
-    _IOTYPE_USER_IPCAM_AUDIOSTART = 768  # AVIOCTRLDEFs: IOTYPE_USER_IPCAM_AUDIOSTART
-
-    def __init__(
-        self,
-        uid: str,
-        on_frame: Callable[["VideoFrame"], None],
-        iotc_lib_path: str = "libIOTCAPIs.so",
-        av_lib_path: str = "libAVAPIs.so",
-    ) -> None:
-        self._uid           = uid
-        self._on_frame      = on_frame
-        self._iotc_lib_path = iotc_lib_path
-        self._av_lib_path   = av_lib_path
-        self._thread: Optional[threading.Thread] = None
-        self._stop_event    = threading.Event()
-        self._sid           = -1
-        self._av_index      = -1
-
-    async def start(self) -> bool:
-        """Load native libs, connect P2P, and start the frame-receive thread."""
-        return await asyncio.get_running_loop().run_in_executor(
-            None, self._start_sync)
-
-    def _start_sync(self) -> bool:
-
-        try:
-            iotc = ctypes.CDLL(self._iotc_lib_path)
-            av   = ctypes.CDLL(self._av_lib_path)
-        except OSError as exc:
-            _LOGGER.error(
-                "TutkStreamSession: cannot load TUTK native libraries "
-                "(%s, %s): %s. "
-                "Obtain them from the TUTK SDK or an extracted AiDot APK.",
-                self._iotc_lib_path, self._av_lib_path, exc,
-            )
-            return False
-
-        # --- Declare function signatures ------------------------------------ #
-        iotc.IOTC_Initialize2.restype  = ctypes.c_int
-        iotc.IOTC_Initialize2.argtypes = [ctypes.c_int]
-
-        iotc.IOTC_Get_SessionID.restype  = ctypes.c_int
-        iotc.IOTC_Get_SessionID.argtypes = []
-
-        iotc.IOTC_Set_Max_Session_Number.restype  = None
-        iotc.IOTC_Set_Max_Session_Number.argtypes = [ctypes.c_int]
-
-        iotc.IOTC_Connect_ByUID_Parallel.restype  = ctypes.c_int
-        iotc.IOTC_Connect_ByUID_Parallel.argtypes = [ctypes.c_char_p, ctypes.c_int]
-
-        iotc.IOTC_Session_Close.restype  = None
-        iotc.IOTC_Session_Close.argtypes = [ctypes.c_int]
-
-        # TutkManager.java: AVAPIs.avInitialize(32)
-        av.avInitialize.restype  = ctypes.c_int
-        av.avInitialize.argtypes = [ctypes.c_int]
-
-        av.avClientStart2.restype  = ctypes.c_int
-        av.avClientStart2.argtypes = [
-            ctypes.c_int,                        # nSID
-            ctypes.c_char_p,                     # account
-            ctypes.c_char_p,                     # password
-            ctypes.c_int,                        # timeout_ms
-            ctypes.POINTER(ctypes.c_int),        # srvType[] (out)
-            ctypes.c_int,                        # reserved=0
-            ctypes.POINTER(ctypes.c_int),        # nSend[] (out)
-        ]
-
-        av.avClientStop.restype  = ctypes.c_int
-        av.avClientStop.argtypes = [ctypes.c_int]
-
-        av.avSendIOCtrl.restype  = ctypes.c_int
-        av.avSendIOCtrl.argtypes = [
-            ctypes.c_int,    # nAVIndex
-            ctypes.c_uint,   # nIOCtrlType
-            ctypes.c_char_p, # cabIOCtrlData
-            ctypes.c_int,    # nIOCtrlDataSize
-        ]
-
-        # FRAMEINFO_t - TUTK SDK v3.x layout (codec_id, flags, onlineNum,
-        # frameSize, frameNo, timestamp). Adjust if your SDK version differs.
-        class FrameInfo(ctypes.Structure):
-            _fields_ = [
-                ("codec_id",   ctypes.c_uint),
-                ("flags",      ctypes.c_uint),
-                ("onlineNum",  ctypes.c_uint),
-                ("frameSize",  ctypes.c_uint),
-                ("frameNo",    ctypes.c_uint),
-                ("timestamp",  ctypes.c_uint),
-            ]
-
-        av.avRecvFrameData2.restype  = ctypes.c_int
-        av.avRecvFrameData2.argtypes = [
-            ctypes.c_int,                        # nAVIndex
-            ctypes.c_char_p,                     # abFrameData
-            ctypes.c_int,                        # nFrameDataMaxSize (by value)
-            ctypes.POINTER(ctypes.c_int),        # pnActualFrameSize (out)
-            ctypes.POINTER(ctypes.c_int),        # pnExpectedFrameSize (out)
-            ctypes.c_char_p,                     # pFrameInfo (byte buffer)
-            ctypes.c_int,                        # nFrameInfoBufSize (by value)
-            ctypes.POINTER(ctypes.c_int),        # pnActualFrameInfoSize (out)
-            ctypes.POINTER(ctypes.c_int),        # pnFrameIndex (out)
-        ]
-
-        # --- Initialize IOTC (idempotent) ----------------------------------- #
-        # TutkManager.java: IOTC_Initialize2(0) then IOTC_Set_Max_Session_Number(10)
-        # then avInitialize(32)
-        ret = iotc.IOTC_Initialize2(0)
-        if ret < 0:
-            _LOGGER.debug("IOTC_Initialize2 returned %d (may already be initialized)", ret)
-        else:
-            iotc.IOTC_Set_Max_Session_Number(10)
-
-        ret = av.avInitialize(32)
-        if ret < 0:
-            _LOGGER.debug("avInitialize returned %d (may already be initialized)", ret)
-
-        # --- Connect P2P ---------------------------------------------------- #
-        sid = iotc.IOTC_Get_SessionID()
-        if sid < 0:
-            _LOGGER.error("TUTK: IOTC_Get_SessionID failed: %d", sid)
-            return False
-
-        _LOGGER.debug("TUTK: connecting to uid=%s (sid=%d)", self._uid, sid)
-        ret = iotc.IOTC_Connect_ByUID_Parallel(self._uid.encode(), sid)
-        if ret < 0:
-            _LOGGER.error(
-                "TUTK: IOTC_Connect_ByUID_Parallel(%s) failed: %d",
-                self._uid, ret,
-            )
-            return False
-        self._sid = ret
-
-        # --- Start AV client ------------------------------------------------ #
-        # TutkManager.java: avClientStart2(nSID, account, pwd, 2000, srvType, 0, nSend)
-        # Credentials: "admin" / "admin123" (hardcoded in TutkManager.java)
-        srv_type = ctypes.c_int(0)
-        n_send   = ctypes.c_int(0)
-        av_index = av.avClientStart2(
-            self._sid, b"admin", b"admin123", 2000,
-            ctypes.byref(srv_type), 0, ctypes.byref(n_send))
-        if av_index < 0:
-            _LOGGER.error("TUTK: avClientStart2 failed: %d", av_index)
-            iotc.IOTC_Session_Close(self._sid)
-            self._sid = -1
-            return False
-        self._av_index = av_index
-
-        # --- Send IOCtrl commands per TutkManager.java ---------------------- #
-        # 1. IOTYPE_INNER_SND_DATA_DELAY (255) - 2-byte body
-        av.avSendIOCtrl(self._av_index, self._IOTYPE_INNER_SND_DATA_DELAY,
-                        (ctypes.c_uint8 * 2)(), 2)
-        # 2. IOTYPE_USER_IPCAM_START (511) - 8-byte body (all zeros = default stream)
-        av.avSendIOCtrl(self._av_index, self._IOTYPE_USER_IPCAM_START,
-                        (ctypes.c_uint8 * 8)(), 8)
-        # 3. IOTYPE_USER_IPCAM_AUDIOSTART (768) - 8-byte body
-        av.avSendIOCtrl(self._av_index, self._IOTYPE_USER_IPCAM_AUDIOSTART,
-                        (ctypes.c_uint8 * 8)(), 8)
-
-        # --- Launch frame-receive thread ------------------------------------ #
-        self._thread = threading.Thread(
-            target=self._recv_loop,
-            args=(av, iotc, FrameInfo),
-            daemon=True,
-            name=f"tutk-recv-{self._uid[:8]}",
-        )
-        self._thread.start()
-        return True
-
-    def _recv_loop(self, av, iotc, FrameInfo) -> None:
-
-        # avRecvFrameData2 signature (from AVAPIs.java / TUTK SDK):
-        #   (nAVIndex, abFrameData, nFrameDataMaxSize,
-        #    *pnActualFrameSize, *pnExpectedFrameSize,
-        #    pFrameInfo, nFrameInfoBufSize,
-        #    *pnActualFrameInfoSize, *pnFrameIndex)
-        BUF_SIZE     = 131072   # 128 KB - matches TutkManager.VIDEO_BUF_SIZE (100000)
-        frame_buf    = ctypes.create_string_buffer(BUF_SIZE)
-        info_buf     = ctypes.create_string_buffer(ctypes.sizeof(FrameInfo))
-        actual_sz    = ctypes.c_int(0)
-        expected_sz  = ctypes.c_int(0)
-        actual_info  = ctypes.c_int(0)
-        frame_idx    = ctypes.c_int(0)
-
-        _LOGGER.debug("TUTK: recv loop started (avIndex=%d)", self._av_index)
-
-        while not self._stop_event.is_set():
-            ret = av.avRecvFrameData2(
-                self._av_index,
-                frame_buf,
-                BUF_SIZE,
-                ctypes.byref(actual_sz),
-                ctypes.byref(expected_sz),
-                info_buf,
-                ctypes.sizeof(FrameInfo),
-                ctypes.byref(actual_info),
-                ctypes.byref(frame_idx),
-            )
-            if ret == -20012:
-                # AV_ER_DATA_NOREADY - no frame yet; brief sleep per TutkManager (2ms)
-                time.sleep(0.002)
-                continue
-            if ret < 0:
-                _LOGGER.error("TUTK: avRecvFrameData2 returned %d - stopping", ret)
-                break
-
-            raw      = bytes(frame_buf.raw[: actual_sz.value])
-            fi       = FrameInfo.from_buffer_copy(info_buf)
-            vf  = VideoFrame(
-                frame_type   = fi.codec_id,
-                audio_codec  = 0,
-                timestamp    = fi.timestamp,
-                is_encrypted = False,
-                data         = raw,
-            )
-            try:
-                self._on_frame(vf)
-            except Exception as exc:
-                _LOGGER.error("TUTK: on_frame callback raised: %s", exc)
-
-        # Teardown
-        if self._av_index >= 0:
-            try:
-                av.avClientStop(self._av_index)
-            except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_recv_loop', exc_info=True)
-        if self._sid >= 0:
-            try:
-                iotc.IOTC_Session_Close(self._sid)
-            except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_recv_loop', exc_info=True)
-        _LOGGER.debug("TUTK: recv loop exited")
-
-    async def stop(self) -> None:
-        """Signal the receive thread to stop and wait for it."""
-        self._stop_event.set()
-        if self._thread is not None:
-            await asyncio.get_running_loop().run_in_executor(
-                None, lambda: self._thread.join(timeout=5.0)
-            )
 
 
 # --------------------------------------------------------------------------- #
@@ -2343,7 +1936,6 @@ def _mqtt_session_sync(
     """
     import paho.mqtt.client as _paho
     import ssl as _ssl
-    import threading
     import queue as _queue
     from urllib.parse import urlparse
 
