@@ -18,8 +18,9 @@ session = await device_client.async_open_webrtc_stream(on_frame=cb, timeout=30.0
 # ... session.stop() when done
 ```
 
-`test_camera.py` is a CLI harness that exercises the full path
-(`python test_camera.py --webrtc -d "<name>"`); see `--help`.
+The `test_camera.py` CLI harness in the companion
+[`cbrightly/hass-AiDot`](https://github.com/cbrightly/hass-AiDot) repo exercises
+the full path (`python test_camera.py --webrtc -d "<name>"`); see its `--help`.
 
 ### Connection reliability (DTLS / A000088)
 
@@ -88,7 +89,9 @@ A-law (PCMA, PT=8) - the codec the camera negotiates.
   audibly on an A001513 (the camera ACKs `SPEAKERSTART` with `851`). Pure-streaming
   opens stay `recvonly` and are unaffected.
 
-`tools/talk_test.py` plays a 440 Hz tone for a few seconds (validated audibly).
+The companion [`cbrightly/hass-AiDot`](https://github.com/cbrightly/hass-AiDot)
+repo's `tools/talk_test.py` plays a 440 Hz tone for a few seconds (validated
+audibly).
 
 ## Motion events
 
