@@ -8,9 +8,10 @@ live WebRTC video streaming (DTLS and SDES-SRTP paths), snapshots, PTZ, camera
 controls, cloud recordings/thumbnails, and two-way (push-to-talk) audio.
 
 This repository is the **library** (distribution name `python-aidot-cameras`).
-The standalone CLI harness (`test_camera.py`) and the Home Assistant custom
-component (`custom_components/aidot/`) live in the companion integration repo
-[`cbrightly/hass-AiDot`](https://github.com/cbrightly/hass-AiDot).
+The Home Assistant custom component (`custom_components/aidot/`) lives in the
+companion integration repo
+[`cbrightly/hass-AiDot`](https://github.com/cbrightly/hass-AiDot), which depends
+on this library.
 
 ## Library install
 
@@ -59,12 +60,15 @@ snapshots, recordings, motion polling, two-way audio, and LAN-direct media).
 
 ## Home Assistant component and CLI
 
-The Home Assistant custom component (`custom_components/aidot/`) and the
-`test_camera.py` CLI harness are **not** part of this library repo - they live
-in the companion integration repo
+The Home Assistant custom component (`custom_components/aidot/`) is **not** part
+of this library repo - it lives in the companion integration repo
 [`cbrightly/hass-AiDot`](https://github.com/cbrightly/hass-AiDot), which depends
 on this library. See that repo for installing the component (via HACS or by
-copying `custom_components/aidot/`) and for running the CLI.
+copying `custom_components/aidot/`).
+
+The `test_camera.py` CLI harness and the scripts under `tools/` are local
+developer/diagnostic tools (they carry hardcoded LAN IPs and are gitignored), so
+they are not shipped with the published library.
 
 ## Environment variables
 
