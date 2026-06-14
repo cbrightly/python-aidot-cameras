@@ -48,6 +48,8 @@ _DC_BG_TASKS: set = set()
 
 
 class DeviceStatusData:
+    """Mutable view of a device's current on/off, color, and brightness state."""
+
     online: bool = False
     on: bool = False
     rgdb: int = 0xFF000000
@@ -82,6 +84,8 @@ class DeviceStatusData:
 
 
 class DeviceInformation:
+    """Static device metadata and capability flags parsed from the cloud record."""
+
     enable_rgbw: bool = False
     enable_dimming: bool = True
     enable_cct: bool = False
@@ -143,6 +147,8 @@ from .camera.client import (
 
 
 class DeviceClient(CameraMixin):
+    """Per-device LAN client: connects, logs in, and sends/receives control messages."""
+
     status: DeviceStatusData
     info: DeviceInformation
     _login_uuid = 0
@@ -165,10 +171,12 @@ class DeviceClient(CameraMixin):
     _TAG: str = "DeviceClient"
     @property
     def connect_and_login(self) -> bool:
+        """True when the device is connected and logged in."""
         return self._connect_and_login
 
     @property
     def connecting(self) -> bool:
+        """True while a connection attempt is in progress."""
         return self._connecting
 
     def __init__(self, device: dict[str, Any], user_info: dict[str, Any]) -> None:
@@ -196,6 +204,7 @@ class DeviceClient(CameraMixin):
         self._init_camera_state(device, user_info)
 
     async def connect(self, ip_address) -> None:
+        """Open a TCP connection to the device and log in."""
         _LOGGER.info(f"{self._TAG}:connect device: {ip_address}")
         self.reader = self.writer = None
         self._connecting = True
@@ -216,6 +225,7 @@ class DeviceClient(CameraMixin):
             self._connecting = False
 
     def update_ip_address(self, ip: str) -> None:
+        """Record the device's LAN IP and trigger a login if not already connected."""
         if ip is None:
             return
         self._ip_address = ip
@@ -224,12 +234,14 @@ class DeviceClient(CameraMixin):
 
 
     async def async_login(self) -> None:
+        """Connect and log in using the last-known IP if not already connected."""
         if self._ip_address is None:
             return
         if self._connecting is not True and self._connect_and_login is not True:
             await self.connect(self._ip_address)
 
     def get_send_packet(self, message, msgtype):
+        """Build a framed (optionally AES-encrypted) protocol packet for sending."""
         magic = struct.pack(">H", 0x1EED)
         _msgtype = struct.pack(">h", msgtype)
 
@@ -249,6 +261,7 @@ class DeviceClient(CameraMixin):
 
 
     async def login(self) -> None:
+        """Perform the device login handshake and start the receive/ping loops."""
         login_seq = str(int(time.time() * 1000) + self._login_uuid)[-9:]
         self._login_uuid += 1
 
@@ -273,7 +286,7 @@ class DeviceClient(CameraMixin):
 
             response = DeviceResponse.from_json(json_data)
             if response.ack.code != 200:
-                # 登录失败
+                # Login failed
                 _LOGGER.error(f"{self._TAG}:login error, code: {response.ack.code}")
                 await self.reset()
                 return
@@ -296,16 +309,17 @@ class DeviceClient(CameraMixin):
         except (BrokenPipeError, ConnectionResetError, Exception) as e:
             _LOGGER.error(f"{self.device_id} login read status error {e}")
 
-    # TCP容易拼包，需要谨慎处理
+    # TCP readily coalesces packets (no message framing), so handle carefully.
     async def receive_data(self) -> None:
+        """Read and dispatch incoming device messages until the connection closes."""
         while True:
             try:
                 header = await self.reader.readexactly(8)
                 magic, msgtype, bodysize = struct.unpack(">HHI", header)
-                self.ping_count = 0 #有读到数据就把ping清零
+                self.ping_count = 0  # reset ping counter whenever data arrives
                 body = await self.reader.readexactly(bodysize)
                 json_data = aes_decrypt_to_json(body, self.aes_key)
-                _LOGGER.debug(f"{self._TAG}:reveive_data : {json_data}")
+                _LOGGER.debug(f"{self._TAG}:receive_data : {json_data}")
             except asyncio.CancelledError:
                 _LOGGER.debug(f"{self._TAG}:Receive task cancelled")
                 raise
@@ -341,6 +355,7 @@ class DeviceClient(CameraMixin):
         self._ping_timer = loop.call_later(self.heart_time, self._schedule_ping)
 
     async def send_dev_attr(self, dev_attr) -> None:
+        """Send a device attribute change, turning the device on first if needed."""
         if not self._connect_and_login:
             raise ConnectionError('Device offline')
         if not self.status.on and CONF_ON_OFF not in dev_attr:
@@ -349,23 +364,29 @@ class DeviceClient(CameraMixin):
         await self.send_action(dev_attr, CONF_SET_DEV_ATTR_REQ)
 
     async def async_turn_off(self) -> None:
+        """Turn the device off."""
         await self.send_dev_attr({CONF_ON_OFF: 0})
 
     async def async_turn_on(self) -> None:
+        """Turn the device on."""
         await self.send_dev_attr({CONF_ON_OFF: 1})
 
     async def async_set_brightness(self, brightness: int) -> None:
+        """Set brightness from a 0-255 value (converted to the device's 0-100 scale)."""
         final_dimming = int(brightness * 100 / 255)
         await self.send_dev_attr({CONF_DIMMING: final_dimming})
 
     async def async_set_rgbw(self, rgbw: tuple[int, int, int, int]) -> None:
+        """Set the RGBW color from an (r, g, b, w) tuple of 0-255 channel values."""
         final_rgbw = (rgbw[0] << 24) | (rgbw[1] << 16) | (rgbw[2] << 8) | rgbw[3]
         await self.send_dev_attr({CONF_RGBW: ctypes.c_int32(final_rgbw).value})
 
     async def async_set_cct(self, cct: int) -> None:
+        """Set the correlated color temperature (in Kelvin)."""
         await self.send_dev_attr({CONF_CCT: cct})
 
     async def send_action(self, attr, method) -> None:
+        """Send an attribute get/set action request to the device."""
         self.seq_num += 1
         action_request = DeviceActionRequest.from_params(
             method=method,
@@ -390,6 +411,7 @@ class DeviceClient(CameraMixin):
             _LOGGER.error(f"{self._TAG}:send action error {e}")
 
     async def send_ping_action(self) -> int:
+        """Send a keepalive ping; reset the connection if the device is unresponsive."""
         if self._is_close:
             return -1
         try:
@@ -417,6 +439,7 @@ class DeviceClient(CameraMixin):
             return -1
 
     async def reset(self) -> None:
+        """Tear down the connection and schedule a reconnect unless closed by the user."""
         if self._ping_timer:
             self._ping_timer.cancel()
         if self._reconnect_handle:
@@ -441,11 +464,12 @@ class DeviceClient(CameraMixin):
         self.status.online = False
         self.ping_count = 0
         self._notify_status_update()
-        # 自动重连（如果没有主动关闭）
+        # Auto-reconnect (unless the connection was closed deliberately).
         if not self._is_close and self._ip_address:
             self._schedule_reconnect()
 
     async def close(self) -> None:
+        """Close the connection permanently and stop any streaming (no reconnect)."""
         self._is_close = True
         if self._login_task is not None and not self._login_task.done():
             self._login_task.cancel()
@@ -456,7 +480,7 @@ class DeviceClient(CameraMixin):
     _last_login_attempt: float = 0.0
 
     def _schedule_reconnect(self) -> None:
-        """延迟重连"""
+        """Schedule a delayed reconnect attempt."""
         if self._is_close:
             return
         if self._reconnect_handle is not None:

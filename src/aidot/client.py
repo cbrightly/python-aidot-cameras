@@ -75,6 +75,8 @@ async def _prefetch_ice_config(dc: "DeviceClient") -> None:
 
 
 class AidotClient:
+    """AiDot cloud client: handles login, token refresh, device listing, and discovery."""
+
     _base_url: str = API_URL_TEMPLATE.format(region=DEFAULT_REGION)
     _region: str = DEFAULT_REGION
     session: Optional[ClientSession] = None
@@ -132,6 +134,7 @@ class AidotClient:
         self.setup_discover()
 
     def set_token_fresh_cb(self, callback) -> None:
+        """Register a callback invoked whenever the access token is refreshed."""
         self._token_fresh_cb = callback
 
     def _schedule_proactive_refresh(self, expires_in_secs: int) -> None:
@@ -160,14 +163,17 @@ class AidotClient:
             pass  # no running loop (e.g. called from sync test context)
 
     def get_identifier(self) -> str:
+        """Return a stable region-scoped identifier for this account."""
         return f"{self._region}-{self.username}"
 
     def update_password(self, password: str) -> None:
+        """Update the stored account password."""
         self.password = password
 
     _terminal_id: "Optional[str]" = None
 
     async def get_terminal_id(self) -> str:
+        """Return a stable per-host terminal ID, creating and caching one if needed."""
         if self._terminal_id is not None:
             return self._terminal_id
         file_path = Path.home() / ".aidot_terminal_id"
@@ -305,6 +311,7 @@ class AidotClient:
             _LOGGER.warning("_async_fetch_user_config failed: %s", exc)
 
     async def async_refresh_token(self) -> dict[str, Any]:
+        """Exchange the stored refresh token for a fresh access token."""
         url = f"{self._base_url}/users/refreshToken"
         headers = {"appid": _CLOUD_APP_ID, "terminal": "app"}
         data = {
@@ -380,6 +387,7 @@ class AidotClient:
         self, params: str, headers: dict[str, str] | None = None,
         _retry: bool = True,
     ) -> dict[str, Any]:
+        """GET a cloud API path with auth headers, refreshing the token once on expiry."""
         url = f"{self._base_url}{params}"
         token = self.login_info[CONF_ACCESS_TOKEN]
         if token is None:
@@ -428,6 +436,7 @@ class AidotClient:
         return await self.async_session_get(params)
 
     async def async_get_all_device(self) -> dict[str, Any]:
+        """Return all owned devices with their product metadata merged in."""
         final_device_list: list[dict[str, Any]] = []
         houses = await self.async_get_houses()
         for house in houses:
@@ -457,6 +466,7 @@ class AidotClient:
         return {CONF_DEVICE_LIST: final_device_list}
 
     def get_device_client(self, device: dict[str, Any]) -> DeviceClient:
+        """Return a cached DeviceClient for the device, creating one if needed."""
         device_id = device.get(CONF_ID)
         device_client: DeviceClient = self._device_clients.get(device_id)
         if device_client is None:
@@ -483,6 +493,7 @@ class AidotClient:
         return device_client
 
     async def remove_device_client(self, dev_id: str) -> None:
+        """Close and forget the DeviceClient for the given device ID."""
         device_client: DeviceClient = self._device_clients.get(dev_id)
         if device_client is not None:
             await device_client.close()
@@ -524,4 +535,5 @@ class AidotClient:
         asyncio.get_running_loop().create_task(self.async_close())
 
     async def async_cleanup(self) -> None:
+        """Async entry point: close the client and release resources."""
         await self.async_close()
