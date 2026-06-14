@@ -13,18 +13,32 @@ concurrency:
 jobs:
   # Lint is pure-Python; run it on Ubuntu (fast). node24-runtime actions.
   lint:
-    name: Lint (errors only)
+    name: Lint (ruff)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5        # node24
       - uses: actions/setup-python@v6    # node24
         with:
           python-version: "3.13"
-      - run: pip install flake8
-      # Fail ONLY on genuine breakage: syntax errors (E9), undefined names (F82),
-      # invalid comparisons (F63) and the like - not style/convention noise.
-      - name: Lint for real errors
-        run: flake8 $(git ls-files '*.py') --count --select=E9,F63,F7,F82 --show-source --statistics
+      - run: pip install ruff
+      # Run the project's real linter (configured in pyproject.toml). Baseline
+      # is clean, so this must pass.
+      - name: Ruff lint
+        run: ruff check .
+
+  # Type-check is informational only (continue-on-error), so it never blocks.
+  typecheck:
+    name: Type check (mypy)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5        # node24
+      - uses: actions/setup-python@v6    # node24
+        with:
+          python-version: "3.13"
+      - run: pip install mypy
+      - name: Mypy
+        run: mypy src/
 
   # Tests run inside an Alpine (musl) container - the SAME libc Home Assistant
   # OS / Container uses - so the native deps (aiortc / av / pylibsrtp, all via
@@ -44,6 +58,7 @@ jobs:
       - name: Install package + test deps
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[webrtc]" pytest
+          pip install -e ".[webrtc]" pytest pytest-cov
+      # Coverage is informational (term-missing report); it does not gate the build.
       - name: Run unit tests
-        run: pytest tests/ -q
+        run: pytest tests/ -q --cov=aidot --cov-report=term-missing
