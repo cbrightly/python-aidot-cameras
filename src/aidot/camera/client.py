@@ -40,6 +40,20 @@ def _spawn_bg(coro):
     return _t
 
 
+_FFMPEG_MISSING_MSG = (
+    "ffmpeg not found on PATH; install ffmpeg to enable recording/transcoding.\n"
+    "  Ubuntu/Debian:    sudo apt install ffmpeg\n"
+    "  macOS (Homebrew): brew install ffmpeg\n"
+    "  Windows:          https://ffmpeg.org/download.html"
+)
+
+
+def _ffmpeg_path(binary: str = "ffmpeg") -> Optional[str]:
+    """Return the resolved path to the ffmpeg binary, or None if not on PATH."""
+    import shutil
+    return shutil.which(binary)
+
+
 # Runtime import: device_client defines these classes BEFORE importing this
 # module (the package __init__ loads aidot.device_client first), so the
 # partially-initialized module already exposes them here.
@@ -125,7 +139,7 @@ class CameraStatusData(DeviceStatusData):
             try:
                 self.battery_remaining = int(v)
             except (ValueError, TypeError):
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", 'update', exc_info=True)
         if (v := attr.get("Occupancy")) is not None:
             self.occupancy = bool(int(v))
         if (v := attr.get("SDcardStatus")) is not None:
@@ -181,7 +195,7 @@ class CameraDeviceInformation(DeviceInformation):
                             if isinstance(codes, list):
                                 self.ptz_directions = [int(c) for c in codes]
                         except Exception:
-                            pass
+                            _LOGGER.debug("camera %s: swallowed exception", '__init__', exc_info=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -330,6 +344,9 @@ def _save_frame_as_jpeg(image_data: Any, output_path: str) -> bool:
                 pass
             # Pillow not available - pipe raw RGB to ffmpeg
             import subprocess as _sp
+            if _ffmpeg_path() is None:
+                _LOGGER.warning("async_snapshot: %s", _FFMPEG_MISSING_MSG)
+                return False
             h, w = image_data.shape[:2]
             r = _sp.run(
                 [
@@ -707,13 +724,13 @@ def _compress_sdp_for_camera(sdp: str) -> str:
                     try:
                         seen["H264/90000_pt"] = ln.split(":")[1].split(" ")[0]
                     except Exception:
-                        pass
+                        _LOGGER.debug("camera %s: swallowed exception", 'keep', exc_info=True)
                 elif "H265/90000" in ln and seen.get("H265/90000") is None:
                     keep(ln, "H265/90000")
                     try:
                         seen["H265/90000_pt"] = ln.split(":")[1].split(" ")[0]
                     except Exception:
-                        pass
+                        _LOGGER.debug("camera %s: swallowed exception", 'keep', exc_info=True)
                 elif "apt=" in ln:
                     try:
                         apt = ln.split("apt=")[1].strip()
@@ -931,7 +948,7 @@ class CloudPlaybackSession:
                 self._writer.close()
                 await self._writer.wait_closed()
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
             self._writer = None
             self._reader = None
 
@@ -1182,12 +1199,12 @@ class TutkStreamSession:
             try:
                 av.avClientStop(self._av_index)
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_recv_loop', exc_info=True)
         if self._sid >= 0:
             try:
                 iotc.IOTC_Session_Close(self._sid)
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_recv_loop', exc_info=True)
         _LOGGER.debug("TUTK: recv loop exited")
 
     async def stop(self) -> None:
@@ -1400,7 +1417,7 @@ class LiveStreamSession:
                 self._writer.close()
                 await self._writer.wait_closed()
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_cleanup', exc_info=True)
             self._writer = None
             self._reader = None
 
@@ -1502,7 +1519,7 @@ class WebRTCSession:
             if self._audio_sender is not None:
                 self._audio_sender.replaceTrack(None)
         except Exception:
-            pass
+            _LOGGER.debug("camera %s: swallowed exception", 'async_stop_talk', exc_info=True)
         self._talk_holder["provider"] = None
         return True
 
@@ -1514,14 +1531,14 @@ class WebRTCSession:
             try:
                 await self._recorder.stop()
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
         # Send None sentinel to stop the MQTT session in its thread
         self._outgoing_q.put_nowait(None)
         await self._pc.close()
         try:
             await asyncio.wait_for(self._mqtt_fut, timeout=5.0)
         except Exception:
-            pass
+            _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
 
 
 class SdesSession:
@@ -1695,25 +1712,25 @@ class SdesSession:
         try:
             stderr_bytes = self._proc.stderr.read()
         except Exception:
-            pass
+            _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
         if stderr_bytes:
             _LOGGER.warning("ffmpeg SDES stderr:\n%s", stderr_bytes.decode(errors="replace"))
         import os
         try:
             os.unlink(self._sdp_path)
         except Exception:
-            pass
+            _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
         for _sock in (self._audio_sock, self._video_sock):
             if _sock is not None:
                 try:
                     _sock.close()
                 except Exception:
-                    pass
+                    _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
         self._outgoing_q.put_nowait(None)
         try:
             await asyncio.wait_for(self._mqtt_fut, timeout=5.0)
         except Exception:
-            pass
+            _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
 
 
 # Two-way-audio (talk) PCM format: signed-16-bit little-endian, 8 kHz mono, in
@@ -1793,7 +1810,7 @@ def _run_sdes_talk_pump(state: dict) -> None:
                     try:
                         _sock.sendto(_tx.protect(_hdr + _alaw), _src)
                     except Exception:
-                        pass
+                        _LOGGER.debug("camera %s: swallowed exception", '_run_sdes_talk_pump', exc_info=True)
                     _seq = (_seq + 1) & 0xFFFF
                     _ts = (_ts + len(_alaw)) & 0xFFFFFFFF
             # Active talk: hold 20 ms pacing for the audio cadence.
@@ -1919,7 +1936,7 @@ def _terminate_proc(proc) -> None:
         if proc.returncode is None:
             proc.terminate()
     except Exception:
-        pass
+        _LOGGER.debug("camera %s: swallowed exception", '_terminate_proc', exc_info=True)
 
 
 _WEBRTC_OPEN_GATE: "Optional[asyncio.Semaphore]" = None
@@ -1972,8 +1989,13 @@ def _get_stream_slots() -> "asyncio.Semaphore":
 # Where captured SPS/PPS are cached.  Override with AIDOT_SPROP_DIR so HA can
 # point it at persistent storage (the core container's ~ is ephemeral; without a
 # persistent dir the cache simply re-bootstraps from the first stream each boot).
+# When AIDOT_SPROP_DIR is unset, honour the XDG base-directory spec: base the
+# path on $XDG_CONFIG_HOME (falling back to ~/.config) so the cache lands in the
+# user's configured config home rather than a hard-coded ~/.config.
+_XDG_CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+    os.path.expanduser("~"), ".config")
 _SPROP_DIR = os.environ.get("AIDOT_SPROP_DIR") or os.path.join(
-    os.path.expanduser("~"), ".config", "aidot", "sprop")
+    _XDG_CONFIG_HOME, "aidot", "sprop")
 
 
 def _extract_param_sets_from_rtp(pkt: bytes) -> dict:
@@ -2203,7 +2225,7 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                 out.mux(pkt)
                 progress[0] = _t.monotonic()
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_flush_video', exc_info=True)
 
     def _flush_audio(drain=False):
         if not have_audio:
@@ -2246,11 +2268,11 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                             _g.sample_rate = 8000
                             fr = _g
                         except Exception:
-                            pass
+                            _LOGGER.debug("camera %s: swallowed exception", '_flush_audio', exc_info=True)
                     for rfr in resampler.resample(fr):  # 8k PCMA -> 48k fltp
                         fifo.write(rfr)
         except Exception:
-            pass
+            _LOGGER.debug("camera %s: swallowed exception", '_flush_audio', exc_info=True)
         while True:
             fr = fifo.read(1024)   # AAC wants 1024-sample frames
             if fr is None:
@@ -2294,7 +2316,7 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                     out.mux(opkt)
                     progress[0] = _t.monotonic()
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_flush_audio', exc_info=True)
 
     while not stop_flag.is_set():
         _flush_video()
@@ -2307,11 +2329,11 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
             for opkt in aenc.encode(None):  # flush
                 out.mux(opkt)
     except Exception:
-        pass
+        _LOGGER.debug("camera %s: swallowed exception", '_dtls_av_mux_run', exc_info=True)
     try:
         out.close()
     except Exception:
-        pass
+        _LOGGER.debug("camera %s: swallowed exception", '_dtls_av_mux_run', exc_info=True)
 
 
 def _h264_has_keyframe(data: bytes) -> bool:
@@ -2456,7 +2478,7 @@ def _mqtt_session_sync(
         try:
             client.disconnect()
         except Exception:
-            pass
+            _LOGGER.debug("camera %s: swallowed exception", '_on_log', exc_info=True)
         return [], status
 
     if not status["connected"]:
@@ -2468,7 +2490,7 @@ def _mqtt_session_sync(
         try:
             client.disconnect()
         except Exception:
-            pass
+            _LOGGER.debug("camera %s: swallowed exception", '_on_log', exc_info=True)
         return [], status
 
     _LOGGER.info("_mqtt_session: connected to %s:%d clientId=%s", hostname, port, client_id)
@@ -2485,7 +2507,7 @@ def _mqtt_session_sync(
         try:
             on_ready(status)
         except Exception:
-            pass
+            _LOGGER.debug("camera %s: swallowed exception", '_on_log', exc_info=True)
 
     collected = []
     deadline  = _time.monotonic() + duration
@@ -2508,7 +2530,7 @@ def _mqtt_session_sync(
                         try:
                             client.disconnect()
                         except Exception:
-                            pass
+                            _LOGGER.debug("camera %s: swallowed exception", '_on_log', exc_info=True)
                         return collected, status
                     pub_topic, pub_payload = out
                     client.publish(pub_topic, pub_payload)
@@ -2521,13 +2543,13 @@ def _mqtt_session_sync(
             try:
                 on_message(*item)
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_on_log', exc_info=True)
 
     client.loop_stop()
     try:
         client.disconnect()
     except Exception:
-        pass
+        _LOGGER.debug("camera %s: swallowed exception", '_mqtt_session_sync', exc_info=True)
     return collected, status
 
 
@@ -2621,7 +2643,7 @@ async def _mqtt_get_playback_server_info(
                 pl["serverIP"] = pl.get("serverIP") or pl.get("serverIp")
                 result_holder.append(pl)
         except Exception:
-            pass
+            _LOGGER.debug("camera %s: swallowed exception", '_check', exc_info=True)
 
     await _mqtt_session(
         mqtt_url, mqtt_user, mqtt_pwd, client_id,
@@ -3574,7 +3596,7 @@ class CameraMixin:
             try:
                 self.status.update_from_camera_attributes({attr: value})
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", 'async_set_device_attribute', exc_info=True)
         return ok
 
     async def async_trigger_device_action(
@@ -3613,11 +3635,13 @@ class CameraMixin:
     # Convenience wrappers - confirmed attribute names/types from APK source
 
     async def async_set_motion_detection(self, enabled: bool) -> bool:
+        """Enable or disable the camera's motion detection."""
         # MotionDetection_Enable is read as getString() in IpcServiceImpl → use str
         return await self.async_set_device_attribute(
             "MotionDetection_Enable", "1" if enabled else "0")
 
     async def async_set_floodlight(self, on: bool, brightness: int = 100) -> bool:
+        """Turn the floodlight on/off (with optional 0-100 brightness)."""
         # Confirmed 2026-05-05: cameras with autoLightEnable=1 (A001064 PTZ, A000088) ignore
         # manual LightOnOff commands unless auto-light is disabled first.
         # Turning on: disable auto-light, set LightOnOff=1 (and optional Dimming).
@@ -3634,17 +3658,21 @@ class CameraMixin:
         return ok
 
     async def async_set_status_led(self, enabled: bool) -> bool:
+        """Turn the camera's status LED on or off."""
         return await self.async_set_device_attribute("LedOnOff", 1 if enabled else 0)
 
     async def async_set_microphone(self, enabled: bool) -> bool:
+        """Enable or disable the camera's microphone."""
         # micEnable: 1=on (default), 0=off
         return await self.async_set_device_attribute("micEnable", 1 if enabled else 0)
 
     async def async_set_speaker_volume(self, level: int) -> bool:
+        """Set the camera's speaker volume (0-100, clamped)."""
         return await self.async_set_device_attribute(
             "SoundLevel", max(0, min(100, level)))
 
     async def async_set_siren(self, on: bool) -> bool:
+        """Turn the camera's siren on or off."""
         # Siren uses devActionReq(action="playSound", in=[on,1,30])
         # in[0]=1/0, in[1]=type?, in[2]=duration seconds
         # No attr notification comes back - track state locally.
@@ -3662,6 +3690,7 @@ class CameraMixin:
         return await self.async_set_device_attribute("nightVisionMode", value)
 
     async def async_set_ptz_tracking(self, enabled: bool) -> bool:
+        """Enable or disable PTZ motion auto-tracking."""
         return await self.async_set_device_attribute(
             "trackingMode", 1 if enabled else 0)
 
@@ -3710,7 +3739,7 @@ class CameraMixin:
             try:
                 await self.async_wake_camera()
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", 'async_get_camera_attributes', exc_info=True)
 
         smarthome_auth = await self._async_get_smarthome_auth()
         mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
@@ -4048,6 +4077,9 @@ class CameraMixin:
                     )
                     return False
 
+                if _ffmpeg_path() is None:
+                    _LOGGER.error("async_snapshot SDES: %s", _FFMPEG_MISSING_MSG)
+                    return False
                 _ffmpeg_snap = _sp.run(
                     ["ffmpeg", "-y", "-i", _tmp_ts,
                      "-frames:v", "1", "-f", "image2", output_path],
@@ -4069,7 +4101,7 @@ class CameraMixin:
                 try:
                     _os.unlink(_tmp_ts)
                 except Exception:
-                    pass
+                    _LOGGER.debug("camera %s: swallowed exception", 'async_snapshot', exc_info=True)
 
         # ── DTLS path: on_frame callback delivers frames from aiortc ─────── #
         frame_event = _asyncio.Event()
@@ -4141,14 +4173,14 @@ class CameraMixin:
             try:
                 await session.stop()
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", 'async_stop_streaming', exc_info=True)
         task, self._stream_task = self._stream_task, None
         if task is not None and not task.done():
             task.cancel()
             try:
                 await task
             except (asyncio.CancelledError, Exception):
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", 'async_stop_streaming', exc_info=True)
 
     async def async_start_motion_polling(
         self, callback: Callable, interval: float = 30.0, lookback_s: int = 600,
@@ -4188,7 +4220,7 @@ class CameraMixin:
             try:
                 await task
             except (asyncio.CancelledError, Exception):
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", 'async_stop_motion_polling', exc_info=True)
 
     async def _motion_poll_loop(self, lookback_s: int) -> None:
         """Background: poll the cloud event list; fire callback on newly-recorded events."""
@@ -4474,7 +4506,7 @@ class CameraMixin:
                 try:
                     await session.stop()
                 except Exception:
-                    pass
+                    _LOGGER.debug("camera %s: swallowed exception", '_sdes_keepalive_loop', exc_info=True)
                 self._streaming_active = False
                 self._keepalive_rtsp_url = None
                 self._serve_ready.clear()
@@ -4494,7 +4526,7 @@ class CameraMixin:
             try:
                 await session.stop()
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_sdes_keepalive_loop', exc_info=True)
 
             if self._streaming_active:
                 try:
@@ -4588,7 +4620,7 @@ class CameraMixin:
             try:
                 await session.stop()
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_on_frame', exc_info=True)
 
             if self._streaming_active:
                 try:
@@ -4640,7 +4672,7 @@ class CameraMixin:
                         except Exception:
                             pass  # full -> drop (PLI re-arms a GOP)
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_tap_put', exc_info=True)
             return _orig_put(task, *a, **k)
 
         _qd.put = _tap_put
@@ -4863,7 +4895,7 @@ class CameraMixin:
                     try:
                         wfile.close()
                     except Exception:
-                        pass
+                        _LOGGER.debug("camera %s: swallowed exception", '_pc_dead', exc_info=True)
                     wfile = None
                     mux_thread.join(timeout=2.0)
                     mux_thread = stop_flag = None
@@ -4880,7 +4912,7 @@ class CameraMixin:
                     try:
                         wfile.close()
                     except Exception:
-                        pass
+                        _LOGGER.debug("camera %s: swallowed exception", '_pc_dead', exc_info=True)
                 if mux_thread is not None:
                     mux_thread.join(timeout=2.0)
                 _terminate_proc(proc)  # never orphan ffmpeg on teardown
@@ -4888,7 +4920,7 @@ class CameraMixin:
                 try:
                     await session.stop()
                 except Exception:
-                    pass
+                    _LOGGER.debug("camera %s: swallowed exception", '_pc_dead', exc_info=True)
 
             if cancelled:
                 return
@@ -4916,6 +4948,9 @@ class CameraMixin:
         ffmpeg just copies and serves - re-encoding here dropped the live audio
         (mpegts PMT-timing on the real-time pipe).  Returns the process, or None."""
         if not serve_url:
+            return None
+        if _ffmpeg_path() is None:
+            _LOGGER.error("DTLS serve: %s", _FFMPEG_MISSING_MSG)
             return None
         cmd = [
             "ffmpeg", "-y", "-loglevel", "warning",
@@ -5022,6 +5057,7 @@ class CameraMixin:
         end_ts: int,
         on_frame: Callable[[VideoFrame], None],
     ) -> Optional[CloudPlaybackSession]:
+        """Open a cloud-playback session streaming frames for the given time range."""
         # Open a cloud-playback session and begin streaming VideoFrame objects.
         # start_ts / end_ts: Unix timestamps in milliseconds.
         # on_frame: called in the asyncio event loop for each decoded frame.
@@ -5138,6 +5174,7 @@ class CameraMixin:
         on_frame: Callable[[VideoFrame], None],
         timeout: float = 60.0,
     ) -> Optional[TutkStreamSession]:
+        """Open a TUTK IOTC P2P live-stream session, delivering frames to on_frame."""
         # Open a TUTK IOTC P2P live-stream session.
         # on_frame: called from the receive thread for each decoded VideoFrame.
         # Returns a running TutkStreamSession, or None on failure.
@@ -5462,7 +5499,7 @@ class CameraMixin:
             try:
                 await self.async_wake_camera()
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_async_open_webrtc_stream_impl', exc_info=True)
 
         if not use_sdes:
             try:
@@ -6292,7 +6329,7 @@ class CameraMixin:
                 except RuntimeError:
                     raise
                 except Exception:
-                    pass
+                    _LOGGER.debug("camera %s: swallowed exception", '_http_keepalive', exc_info=True)
 
         # ------------------------------------------------------------------ #
         # Branch: SDES-SRTP cameras use ffmpeg; DTLS cameras use aiortc
@@ -6628,7 +6665,7 @@ class CameraMixin:
                 _hdr = struct.pack("<IIqII4x", _seq, 5156, _ts_ms, 0, 0)
                 _dc_ref.send(_hdr)
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_send_avio_heartbeat', exc_info=True)
 
         def _send_avio_audiostart(_dc_ref) -> None:
             # IOTYPE_USER_IPCAM_AUDIOSTART = 768 (AVIOCTRLDEFs.java:154).
@@ -6647,7 +6684,7 @@ class CameraMixin:
                 _hdr = struct.pack("<IIqII4x", _seq, 768, _ts_ms, len(_payload), 0)
                 _dc_ref.send(_hdr + _payload)
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_send_avio_audiostart', exc_info=True)
 
         def _send_avio_speaker(_dc_ref, start: bool) -> None:
             # IOTYPE_USER_IPCAM_SPEAKERSTART = 848 / SPEAKERSTOP = 849
@@ -6694,7 +6731,7 @@ class CameraMixin:
                     else:
                         _status(f"DC[remote:{channel.label}] RX text {message!r}")
                 except Exception:
-                    pass
+                    _LOGGER.debug("camera %s: swallowed exception", '_on_remote_dc_message', exc_info=True)
 
         track_tasks: list = []
         _kvs_dc = None
@@ -6804,7 +6841,7 @@ class CameraMixin:
                     else:
                         _status(f"DC[{_dc_label}] RX text {message!r}")
                 except Exception:
-                    pass
+                    _LOGGER.debug("camera %s: swallowed exception", '_on_kvs_dc_message', exc_info=True)
 
             # Periodic readyState diagnostic - last run had no "DC OPEN"
             # log line, so we want to see whether readyState ever transitions
@@ -6866,7 +6903,7 @@ class CameraMixin:
                         while True:
                             await track.recv()
                     except Exception:
-                        pass
+                        _LOGGER.debug("camera %s: swallowed exception", '_drain_audio', exc_info=True)
                 t = asyncio.ensure_future(_drain_audio())
                 track_tasks.append(t)
             elif track.kind == "video":
@@ -6954,7 +6991,7 @@ class CameraMixin:
                     _LOGGER.debug(
                         "highport-fix: scoped to this DTLS camera connection")
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_on_track', exc_info=True)
 
         def _sdp_transport(sdp: str, kind: str) -> str:
             for line in sdp.splitlines():
@@ -7023,7 +7060,7 @@ class CameraMixin:
                         try:
                             _used_pts.add(int(_pt))
                         except ValueError:
-                            pass
+                            _LOGGER.debug("camera %s: swallowed exception", '_inject_h265_section', exc_info=True)
                 _rm = _re.match(r'^a=rtpmap:(\d+) ', _ln)
                 if _rm:
                     _used_pts.add(int(_rm.group(1)))
@@ -8253,7 +8290,7 @@ class CameraMixin:
                                     _NPFp(algorithm="sha-256", value=_real_fp)
                                 ]
                         except Exception:
-                            pass
+                            _LOGGER.debug("camera %s: swallowed exception", '_np_accept_cam_cert', exc_info=True)
 
                     # Diag: log PC/ICE state at patch-application time so we
                     # can see whether DTLS handshake has *already* started by
@@ -9006,7 +9043,7 @@ class CameraMixin:
                 if len(_p) == 4 and all(x.isdigit() and 0 <= int(x) <= 255 for x in _p):
                     _public_ip = _cand_pub
         except Exception:
-            pass
+            _LOGGER.debug("camera %s: swallowed exception", '_open_sdes_stream', exc_info=True)
 
         # Build TURN server list for _sdes_ice_server_list from ice_config if
         # available.  The camera's ICE agent uses these to gather its own relay
@@ -9047,7 +9084,7 @@ class CameraMixin:
                             "Password": _entry.get("credential") or "",
                         })
         except Exception:
-            pass
+            _LOGGER.debug("camera %s: swallowed exception", '_open_sdes_stream', exc_info=True)
 
         # --- TURN relay allocation helper ------------------------------------ #
         # Defined BEFORE the offer so relay IP/port can be embedded in the
@@ -9582,13 +9619,13 @@ class CameraMixin:
                             try:
                                 _seen["H264/90000_pt"] = _ln.split(":")[1].split(" ")[0]
                             except Exception:
-                                pass
+                                _LOGGER.debug("camera %s: swallowed exception", '_k', exc_info=True)
                         elif "H265/90000" in _ln and _seen.get("H265/90000") is None:
                             _k(_ln, "H265/90000")
                             try:
                                 _seen["H265/90000_pt"] = _ln.split(":")[1].split(" ")[0]
                             except Exception:
-                                pass
+                                _LOGGER.debug("camera %s: swallowed exception", '_k', exc_info=True)
                         elif "apt=" in _ln:
                             try:
                                 _apt = _ln.split("apt=")[1].strip()
@@ -9678,7 +9715,7 @@ class CameraMixin:
                                 "Password": str(_e.get("Password") or ""),
                             })
                 except Exception:
-                    pass
+                    _LOGGER.debug("camera %s: swallowed exception", '_k', exc_info=True)
             # Allocate TURN relay if not already done before offer build.
             # When ice_config provided TURN entries, pre-allocation already ran
             # and _relay_addrs is populated - skip to avoid double-allocation.
@@ -9993,13 +10030,13 @@ class CameraMixin:
                     _hp_host = _m_hp.group(1)
                     _hp_port = int(_m_hp.group(2) or 3478)
         except Exception:
-            pass
+            _LOGGER.debug("camera %s: swallowed exception", '_open_sdes_stream', exc_info=True)
         _hp_stun = b'\x00\x01\x00\x00\x21\x12\xa4\x42' + os.urandom(12)
         for _hp_sock in (_audio_sock, _video_sock):
             try:
                 _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port))
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_send_sdes_ice_cand', exc_info=True)
         # Punch to TURN allocation port (5349) as well so port-restricted NAT
         # allows traffic from either TURN port (3478 STUN or 5349 allocation).
         _hp_port2 = 5349
@@ -10008,7 +10045,7 @@ class CameraMixin:
                 try:
                     _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port2))
                 except Exception:
-                    pass
+                    _LOGGER.debug("camera %s: swallowed exception", '_send_sdes_ice_cand', exc_info=True)
         _status(
             f"NAT hole-punch: sent from audio={audio_port}"
             f" video={video_port} → {_hp_host}:{_hp_port}"
@@ -10060,7 +10097,7 @@ class CameraMixin:
             try:
                 _rsock.setblocking(False)
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_is_self_peer_ip', exc_info=True)
         while time.monotonic() < _stun_deadline:
             # Idle-exit: threshold depends on whether we've seen any STUN yet
             idle = time.monotonic() - _last_pkt_t
@@ -10198,7 +10235,7 @@ class CameraMixin:
                                 _sock.sendto(_resp, _src)
                             _stun_count += 1
                         except Exception:
-                            pass
+                            _LOGGER.debug("camera %s: swallowed exception", '_is_self_peer_ip', exc_info=True)
                 else:
                     # Non-STUN packet = SRTP arriving - ICE is done, hand off to ffmpeg now
                     _srtp_detected = True
@@ -10209,7 +10246,7 @@ class CameraMixin:
             try:
                 _rsock.setblocking(True)
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_is_self_peer_ip', exc_info=True)
         if _stun_count:
             _status(f"ICE: responded to {_stun_count} STUN binding request(s)")
         elif not _srtp_detected:
@@ -10279,7 +10316,7 @@ class CameraMixin:
                 try:
                     _hp_sock_r.sendto(_hp_stun, (_hp_host, _hp_port))
                 except Exception:
-                    pass
+                    _LOGGER.debug("camera %s: swallowed exception", '_is_self_peer_ip', exc_info=True)
             # Retry STUN window (8 s)
             _stun_deadline = time.monotonic() + 8.0
             _last_pkt_t = time.monotonic()
@@ -10318,7 +10355,7 @@ class CameraMixin:
                             _sk_r.sendto(_resp_r, _src_r)
                             _stun_count += 1
                         except Exception:
-                            pass
+                            _LOGGER.debug("camera %s: swallowed exception", '_is_self_peer_ip', exc_info=True)
                     else:
                         _srtp_detected = True
                         break
@@ -10354,7 +10391,7 @@ class CameraMixin:
                 _pre_ans = answer_fut.result()
                 _pre_launch_answer_sdp = (_pre_ans or {}).get("sdp", "")
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_is_self_peer_ip', exc_info=True)
         if _pre_launch_answer_sdp:
             _LOGGER.debug(
                 "_open_sdes_stream: camera webrtcResp answer SDP (len=%d)",
@@ -10673,7 +10710,7 @@ class CameraMixin:
             try:
                 sock.sendto(_req, cam_addr)
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_send_use_candidate', exc_info=True)
 
         if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:
             for _c_ip, _c_port in _cam_ice_cands:
@@ -10896,14 +10933,14 @@ class CameraMixin:
                                     _talk_state["speaker_on"] = True
                                     _status("SDES talk: sent SPEAKERSTART(848) (bridge thread)")
                                 except Exception:
-                                    pass
+                                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
                         elif _talk_state.get("speaker_on") and not _talk_state.get("want_speaker"):
                             try:
                                 _cmd_chan[0](849, b'\x00' * 8)  # SPEAKERSTOP
                                 _talk_state["speaker_on"] = False
                                 _status("SDES talk: sent SPEAKERSTOP(849) (bridge thread)")
                             except Exception:
-                                pass
+                                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
 
                     # RTCP PLI (Picture Loss Indication) - forces camera to
                     # resend IDR + VPS/SPS/PPS so ffmpeg gets codec params.
@@ -10957,13 +10994,13 @@ class CameraMixin:
                             )
                             _pli_sent = True
                         except Exception:
-                            pass
+                            _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
                         if not _pli_sent:
                             try:
                                 _bridge_fn._cam_srtp_sock.sendto(
                                     _pli_raw, _bridge_fn._cam_srtp_src)
                             except Exception:
-                                pass
+                                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
                         _bridge_fn._last_pli_ts = _time_br.time()
                         _pli_n = getattr(_bridge_fn, '_pli_count', 0) + 1
                         _bridge_fn._pli_count = _pli_n
@@ -11025,7 +11062,7 @@ class CameraMixin:
                                             _csrc,
                                         )
                                     except Exception:
-                                        pass
+                                        _LOGGER.debug("camera %s: swallowed exception", '_persistent_sdes_cmd', exc_info=True)
 
                                 _cmd_chan[0] = _persistent_sdes_cmd
                             except Exception as _dw_e:
@@ -11055,7 +11092,7 @@ class CameraMixin:
                                 _re_key, _AES_re2.MODE_CBC, _re_iv
                             ).encrypt(_pad_re2(_re_plain, 16))
                         except Exception:
-                            pass
+                            _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
                         for _rp in [_re_enc, _re_plain]:
                             if _rp is None:
                                 continue
@@ -11066,7 +11103,7 @@ class CameraMixin:
                                     _trigger_bsrc,
                                 )
                             except Exception:
-                                pass
+                                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
                         _last_trigger_ts = _time_br.time()
 
                     for _bs in _rl:
@@ -11209,14 +11246,14 @@ class CameraMixin:
                                                 (_br_ci, _br_cp),
                                             )
                                         except Exception:
-                                            pass
+                                            _LOGGER.debug("camera %s: swallowed exception", '_br_a', exc_info=True)
                                     _status(
                                         f"bridge: late USE-CANDIDATE sent to"
                                         f" {len(_bridge_uc_info['cands'])} camera candidate(s)"
                                         " (answer arrived after bridge started)"
                                     )
                             except Exception:
-                                pass
+                                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
                         elif len(_bpkt) >= 20 and _bpkt[4:8] == _STUN_MAGIC_BR:
                             # STUN BindingSuccess (0x0101) from camera: ICE complete.
                             # Send AES-128-CBC encrypted SESSION_MODE_REQ (AVIO LIVING).
@@ -11273,7 +11310,7 @@ class CameraMixin:
                                             f" → {_bsrc[0]}:{_bsrc[1]}"
                                         )
                                     except Exception:
-                                        pass
+                                        _LOGGER.debug("camera %s: swallowed exception", '_persistent_sdes_cmd', exc_info=True)
                                 _avio_living_sent = True
                                 _last_trigger_ts = _time_br.time()
                                 _trigger_bs   = _bs
@@ -11650,12 +11687,12 @@ class CameraMixin:
                                         _bs.sendto(_rr_sess.protect_rtcp(_rr_pkt), _bsrc)
                                         _rtcp_sent = True
                                     except Exception:
-                                        pass
+                                        _LOGGER.debug("camera %s: swallowed exception", '_persistent_sdes_cmd', exc_info=True)
                                     if not _rtcp_sent:
                                         try:
                                             _bs.sendto(_rr_pkt, _bsrc)
                                         except Exception:
-                                            pass
+                                            _LOGGER.debug("camera %s: swallowed exception", '_enc_c8_sctp', exc_info=True)
                                     if _bridge_fn._tutk_count == 1:
                                         _status(
                                             f"SDES: sent RTCP RR to camera"
@@ -11687,7 +11724,7 @@ class CameraMixin:
                                                     f" ({len(_pd_plain)}B PCMA)"
                                                 )
                                         except Exception:
-                                            pass
+                                            _LOGGER.debug("camera %s: swallowed exception", '_enc_c8_sctp', exc_info=True)
                                 continue
 
                             # Standard SRTP/SRTCP demux by RTP payload type.
@@ -11725,11 +11762,11 @@ class CameraMixin:
                                 try:
                                     _lo_a.sendto(_bpkt, ('127.0.0.1', _lo_audio_port))
                                 except Exception:
-                                    pass
+                                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
                                 try:
                                     _lo_v.sendto(_bpkt, ('127.0.0.1', _lo_video_port))
                                 except Exception:
-                                    pass
+                                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
                                 continue
                             _pt = _pt_byte & 0x7F
                             if _pt in (96, 97, 98):
@@ -11906,7 +11943,7 @@ class CameraMixin:
                                 )
                                 _media_progress[0] = _time_br.monotonic()
                             except Exception:
-                                pass
+                                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
                     # Periodic ICE controlling check: re-send USE-CANDIDATE every 2.5 s.
                     # Keeps the camera in ICE "Completed" state and satisfies consent
                     # refresh (RFC 7675).  Also handles the case where the initial
@@ -11927,11 +11964,11 @@ class CameraMixin:
                 try:
                     _lo_a.close()
                 except Exception:
-                    pass
+                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
                 try:
                     _lo_v.close()
                 except Exception:
-                    pass
+                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
 
         _br_first_di_logged = False
         _br_first_srtp_logged = False
@@ -11990,11 +12027,11 @@ class CameraMixin:
                 try:
                     _rsock.close()
                 except Exception:
-                    pass
+                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
             try:
                 os.unlink(sdp_path)
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
             outgoing_q.put_nowait(None)   # stop MQTT thread
             raise CameraMixin._SdesNoAnswerError()
         elif (_cam_echo_received
@@ -12110,6 +12147,25 @@ class CameraMixin:
             *dest_args,
         ]
         _LOGGER.info("SDES ffmpeg cmd: %s", " ".join(cmd))
+        if _ffmpeg_path() is None:
+            # ffmpeg is not installed - clean up and surface a clear error
+            # before launching (avoids a cryptic FileNotFoundError).
+            for _rsock in (_audio_sock, _video_sock):
+                try:
+                    _rsock.close()
+                except Exception:
+                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+            try:
+                os.unlink(sdp_path)
+            except Exception:
+                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+            outgoing_q.put_nowait(None)   # stop MQTT thread
+            raise RuntimeError(
+                "ffmpeg not found - install ffmpeg to stream SDES-SRTP cameras.\n"
+                "  Ubuntu/Debian:  sudo apt install ffmpeg\n"
+                "  macOS (Homebrew): brew install ffmpeg\n"
+                "  Windows:         https://ffmpeg.org/download.html"
+            )
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -12123,11 +12179,11 @@ class CameraMixin:
                 try:
                     _rsock.close()
                 except Exception:
-                    pass
+                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
             try:
                 os.unlink(sdp_path)
             except Exception:
-                pass
+                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
             outgoing_q.put_nowait(None)   # stop MQTT thread
             raise RuntimeError(
                 "ffmpeg not found - install ffmpeg to stream SDES-SRTP cameras.\n"
@@ -12370,11 +12426,11 @@ class CameraMixin:
                     try:
                         _rsock.close()
                     except Exception:
-                        pass
+                        _LOGGER.debug("camera %s: swallowed exception", '_udp_port_bound', exc_info=True)
                 try:
                     os.unlink(sdp_path)
                 except Exception:
-                    pass
+                    _LOGGER.debug("camera %s: swallowed exception", '_udp_port_bound', exc_info=True)
                 outgoing_q.put_nowait(None)   # signal MQTT thread to exit
                 raise CameraMixin._SdesNoAnswerError()
             else:
@@ -12433,7 +12489,7 @@ class CameraMixin:
                                         + (" [m=app]" if _dc_answer_has_app else "")
                                     )
                         except Exception:
-                            pass
+                            _LOGGER.debug("camera %s: swallowed exception", '_late_second_answer_task', exc_info=True)
                     _spawn_bg(_late_second_answer_task())
 
         return SdesSession(
