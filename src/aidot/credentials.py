@@ -15,7 +15,15 @@ import json
 import os
 import stat
 
-_CONFIG_DIR = os.path.expanduser("~/.config/aidot")
+def _xdg_config_home() -> str:
+    """Return the XDG base config dir, honoring XDG_CONFIG_HOME (per the spec)."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return xdg
+    return os.path.expanduser("~/.config")
+
+
+_CONFIG_DIR = os.path.join(_xdg_config_home(), "aidot")
 _DEFAULT_CREDS_FILE = os.path.join(_CONFIG_DIR, "credentials.json")
 _ENC_FILE = os.path.join(_CONFIG_DIR, "credentials.enc")
 _KEY_FILE = os.path.join(_CONFIG_DIR, ".key")
