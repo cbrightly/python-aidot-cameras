@@ -26,19 +26,20 @@ jobs:
       - name: Ruff lint
         run: ruff check .
 
-  # Type-check is informational only (continue-on-error), so it never blocks.
+  # Type-check is informational only: the codebase is not yet fully typed, so
+  # mypy is run for visibility (errors appear in the job log) but never fails
+  # the build (`|| true`) - it surfaces type issues without gating merges.
   typecheck:
-    name: Type check (mypy)
+    name: Type check (mypy, informational)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5        # node24
       - uses: actions/setup-python@v6    # node24
         with:
           python-version: "3.13"
       - run: pip install mypy
-      - name: Mypy
-        run: mypy src/
+      - name: Mypy (non-blocking)
+        run: mypy src/ || true
 
   # Tests run inside an Alpine (musl) container - the SAME libc Home Assistant
   # OS / Container uses - so the native deps (aiortc / av / pylibsrtp, all via
