@@ -1,43 +1,111 @@
-# python-aidot
+# python-aidot-cameras
 
-Control AIDOT WiFi lights **and cameras** from Python and Home Assistant.
+Control AIDOT WiFi lights **and cameras** from Python.
 
 This is a camera-capable fork of the upstream lights-only
 [`python-aidot`](https://github.com/Aidot-Development-Team/python-aidot). It adds
 live WebRTC video streaming (DTLS and SDES-SRTP paths), snapshots, PTZ, camera
-controls, cloud recordings/thumbnails, and two-way (push-to-talk) audio, plus a
-Home Assistant custom component that exposes all of it.
+controls, cloud recordings/thumbnails, and two-way (push-to-talk) audio.
+
+This repository is the **library** (distribution name `python-aidot-cameras`).
+The Home Assistant custom component (`custom_components/aidot/`) lives in the
+companion integration repo
+[`cbrightly/hass-AiDot`](https://github.com/cbrightly/hass-AiDot), which depends
+on this library.
 
 ## Library install
 
-The camera support is **not published to PyPI** (PyPI only has the upstream
-lights-only releases). Install this fork's library directly from the repo:
+Install from PyPI (the simplest, recommended method):
 
 ```bash
 # lights + camera cloud/control only:
-pip install "git+https://github.com/cbrightly/python-AiDot"
+pip install python-aidot-cameras
 # add live WebRTC streaming, snapshots, and two-way audio:
-pip install "python-aidot[webrtc] @ git+https://github.com/cbrightly/python-AiDot"
+pip install python-aidot-cameras[webrtc]
 ```
 
-## Home Assistant component
+`[webrtc]` pulls in the extra dependencies (aiortc, av, …) needed for live
+streaming, snapshots, and two-way audio. Without it you still get lights plus
+the camera cloud/control APIs, but not live media.
 
-The custom component lives in `custom_components/aidot/`. Its `manifest.json`
-lists the third-party Python dependencies (aiortc, av, paho-mqtt, …) so Home
-Assistant installs those automatically, **but the `aidot` library itself is not
-on PyPI** - install it into Home Assistant's Python environment first:
+For the latest unreleased code, install straight from the GitHub repo instead:
 
 ```bash
-# inside the HA venv / container
-pip install "python-aidot[webrtc] @ git+https://github.com/cbrightly/python-AiDot"
+# lights + camera cloud/control only:
+pip install "git+https://github.com/cbrightly/python-aidot-cameras"
+# add live WebRTC streaming, snapshots, and two-way audio:
+pip install "python-aidot-cameras[webrtc] @ git+https://github.com/cbrightly/python-aidot-cameras"
 ```
 
-Then copy `custom_components/aidot/` into your HA `config/custom_components/`
-folder (or add this repo to HACS as a custom repository) and restart Home
-Assistant.
+## Usage
 
-## CLI
+Open a live WebRTC stream from a camera device client:
 
-`test_camera.py` exercises the camera features directly - discovery, LAN probe,
-WebRTC streaming, snapshots, recordings, attribute get/set, and two-way audio
-(`--talk`). Run `python test_camera.py --help` for the full list.
+```python
+session = await device_client.async_open_webrtc_stream(on_frame=cb, timeout=30.0)
+# ... session.stop() when done
+```
+
+Two-way (push-to-talk) audio:
+
+```python
+session = await device_client.async_open_webrtc_stream(..., talk=True)
+await session.async_start_talk(pcm_provider)   # provider() -> 320B s16le PCM (20ms @ 8kHz), or None
+# ... speak ...
+await session.async_stop_talk()
+```
+
+See [`docs/CAMERAS.md`](docs/CAMERAS.md) for the full camera API (streaming,
+snapshots, recordings, motion polling, two-way audio, and LAN-direct media).
+
+## Home Assistant component and CLI
+
+The Home Assistant custom component (`custom_components/aidot/`) is **not** part
+of this library repo - it lives in the companion integration repo
+[`cbrightly/hass-AiDot`](https://github.com/cbrightly/hass-AiDot), which depends
+on this library. See that repo for installing the component (via HACS or by
+copying `custom_components/aidot/`).
+
+The `test_camera.py` CLI harness and the scripts under `tools/` are local
+developer/diagnostic tools (they carry hardcoded LAN IPs and are gitignored), so
+they are not shipped with the published library.
+
+## Environment variables
+
+The library reads the following environment variables.
+
+### Credentials
+
+Used by the credential helper (`aidot.credentials`); they take priority over any
+stored credentials file. See [`src/aidot/credentials.py`](src/aidot/credentials.py).
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `AIDOT_USERNAME` | AiDot account username/email. Used with `AIDOT_PASSWORD`. | (none) |
+| `AIDOT_PASSWORD` | AiDot account password. Used with `AIDOT_USERNAME`. | (none) |
+| `AIDOT_COUNTRY` | Account region/country code. | `US` |
+
+### Camera streaming / tuning
+
+Optional knobs read by the camera client (`aidot.camera.client`). Defaults are
+chosen to work out of the box; override only when tuning.
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `AIDOT_SPROP_DIR` | Directory where captured SPS/PPS (sprop) parameter sets are cached. Set this to a writable path (e.g. for Home Assistant) if the default location is read-only. | `<package dir>` |
+| `AIDOT_DISABLE_HIGHPORT_FIX` | If set (any value), disables the DTLS high-port `USE-CANDIDATE` nomination fix and falls back to upstream aioice behavior (used to measure the baseline connect rate). | unset (fix enabled) |
+| `AIDOT_FAST_CONNECT` | Enables LAN-direct "fast connect" mode (STUN-only, skips several cloud signaling waits) when set to a truthy value. | unset (off) |
+| `AIDOT_MAX_CONCURRENT_OPENS` | Caps how many stream opens run concurrently. | `2` |
+| `AIDOT_MAX_CONCURRENT_STREAMS` | Caps how many cameras stream at once. | `3` |
+| `AIDOT_STREAM_IDLE_S` | Seconds of stream idle before an idle release. | `120` |
+| `AIDOT_SDES_IDLE_RELEASE` | Set to `0` to disable idle release for SDES streams. | `1` (enabled) |
+| `AIDOT_ICE_DISCONNECT_S` | ICE-disconnect debounce, in seconds, before tearing down. | `8` |
+| `AIDOT_DTLS_RETRY_GATE_S` | Minimum spacing, in seconds, between DTLS open retries. | `15` |
+| `AIDOT_BUSY_RETRY_S` | Delay, in seconds, before retrying when a camera reports busy. | `45` |
+| `AIDOT_GOP_PLI_S` | Interval, in seconds, between PLI (keyframe) requests. | `2.0` |
+| `AIDOT_AUDIO_TARGET_DBFS` | Target loudness (dBFS) for two-way audio normalization. | `-15` |
+| `AIDOT_AUDIO_MAXGAIN_DB` | Maximum gain (dB) applied by the audio normalizer. | `30` |
+| `AIDOT_AUDIO_MINGAIN_DB` | Minimum gain (dB) applied by the audio normalizer. | `-12` |
+| `AIDOT_AUDIO_GATE_DBFS` | Noise-gate threshold (dBFS) for two-way audio. | `-45` |
+| `AIDOT_SDES_SERVE_AUDIO` | Set to `1` to serve audio on SDES cameras (off by default). | `0` (off) |
+| `AIDOT_SDES_AUDIO_GAIN_DB` | Gain (dB) applied when SDES audio is served. | `-8` |
