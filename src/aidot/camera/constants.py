@@ -86,3 +86,10 @@ _PTZ_DIR_CODES: dict = {
 SETSTREAMCTRL_CMD = 800
 GETSTREAMCTRL_CMD = 802
 _STREAM_QUALITY: dict = {"hd": 1, "sd": 5}  # AVIOCTRL_QUALITY_MAX / _MIDDLE
+
+
+# Two-way-audio (talk) / SDES timing constants (moved from client.py)
+TALK_PCM_RATE = 8000
+TALK_PCM_FRAME_BYTES = 320  # 160 samples (20 ms @ 8 kHz) x 2 bytes (s16)
+SDES_SPEAKERSTART_DELAY = 0.6     # seconds after command channel up
+SDES_TALK_PUMP_IDLE_TICK = 0.1   # pump idle sleep when not actively speaking
