@@ -4,6 +4,25 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.15]
+
+### Fixed
+- **Battery cameras (A001513/A001108/A001360, e.g. the L2 models) produced no live
+  media.** They rejected every MQTT `livePlayReq` with code `-50019` ("not ready")
+  and never ran ICE — even fresh-rebooted, app-closed, and uncontended — while
+  mains cameras of the same model streamed fine. Root cause: the official app
+  performs a cloud pre-connect the library skipped (`KVSPreConnectStrategy.
+  fetchKvsParams` → `POST /api/ipc/liveStream/liveStreamParam`) that provisions the
+  live-stream session and brings the camera online before signaling. The library
+  now makes that call for battery cameras at the start of the open path; the
+  existing MQTT/SDES signaling then succeeds and decrypted RTP flows. Best-effort,
+  gated on `is_battery_camera` (mains/DTLS unaffected), disable via
+  `AIDOT_LIVESTREAM_PARAM=0`. (#43)
+
+> Validated live on an A001513 battery camera: stream opens in ~16s and media flows
+> for the full session; previously persistent `-50019` / zero media. 5 unit tests
+> lock the request shape.
+
 ## [0.7.14]
 
 ### Changed
