@@ -12,6 +12,8 @@ import json
 import logging
 import os
 import random
+import select
+import socket
 import struct
 import tempfile
 import threading
@@ -610,6 +612,187 @@ def _sdes_serve_port(url: "Optional[str]") -> "Optional[int]":
         return int(url.rsplit(":", 1)[1].split("/", 1)[0])
     except (ValueError, IndexError):
         return None
+
+
+class _ServeRelay:
+    """Keep a public TCP serve port continuously connectable while the real
+    server (ffmpeg ``-listen 1``) comes and goes on an internal port.
+
+    Why this exists: the library advertises the public serve port to go2rtc / HA
+    the moment a view starts, but ffmpeg only binds its ``-listen`` socket AFTER
+    the ~16-25 s WebRTC handshake delivers the first frames - ffmpeg probes its
+    input before it opens any output (verified empirically: ``ffmpeg -i pipe:0
+    ... -f mpegts -listen 1`` does not bind the port until input data flows).  An
+    eager pull therefore hits ``ECONNREFUSED`` and go2rtc gives up within
+    ~200 ms, so the camera card stays blank on the first (cold) view.
+
+    This relay binds the public port up front and holds it for the whole
+    streaming session.  An early pull CONNECTS and waits; the relay keeps
+    redialing the current internal ffmpeg port (set via :meth:`set_backend`) and,
+    once ffmpeg is listening, splices bytes both ways.  The public listener
+    survives ffmpeg restarts (go2rtc reconnects), so the consumer never sees a
+    refused connection mid-session.
+    """
+
+    def __init__(self, public_port: int, *, host: str = "127.0.0.1",
+                 dial_timeout: float = 90.0, dial_interval: float = 0.1) -> None:
+        self._public_port = public_port
+        self._host = host
+        self._dial_timeout = dial_timeout
+        self._dial_interval = dial_interval
+        self._backend_port: "Optional[int]" = None
+        self._listen: "Optional[socket.socket]" = None
+        self._accept_thread: "Optional[threading.Thread]" = None
+        self._conns: "set[socket.socket]" = set()
+        self._lock = threading.Lock()
+        self._closed = threading.Event()
+
+    @property
+    def port(self) -> int:
+        """The bound public port (resolved after :meth:`start` if 0 was passed)."""
+        return self._public_port
+
+    def start(self) -> None:
+        """Bind the public port and begin accepting.  Raises OSError on bind."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((self._host, self._public_port))
+        s.listen(8)
+        s.settimeout(0.5)
+        self._public_port = s.getsockname()[1]
+        self._listen = s
+        self._accept_thread = threading.Thread(
+            target=self._accept_loop,
+            name=f"serve-relay-{self._public_port}",
+            daemon=True,
+        )
+        self._accept_thread.start()
+
+    def set_backend(self, port: "Optional[int]") -> None:
+        """Point the relay at the current internal ffmpeg port (None = no backend
+        running yet; connected pulls wait for the next backend)."""
+        with self._lock:
+            self._backend_port = port
+
+    def close(self) -> None:
+        """Tear down the listener, the accept thread, and any live connections."""
+        self._closed.set()
+        try:
+            if self._listen is not None:
+                self._listen.close()
+        except OSError:
+            pass
+        with self._lock:
+            conns = list(self._conns)
+            self._conns.clear()
+        for s in conns:
+            try:
+                s.close()
+            except OSError:
+                pass
+        t = self._accept_thread
+        if t is not None:
+            t.join(timeout=2.0)
+
+    def _accept_loop(self) -> None:
+        while not self._closed.is_set():
+            try:
+                cli, _ = self._listen.accept()  # type: ignore[union-attr]
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            threading.Thread(
+                target=self._handle, args=(cli,), daemon=True
+            ).start()
+
+    def _handle(self, cli: "socket.socket") -> None:
+        with self._lock:
+            self._conns.add(cli)
+        be: "Optional[socket.socket]" = None
+        try:
+            be = self._dial_backend()
+            if be is not None:
+                self._splice(cli, be)
+        finally:
+            for s in (cli, be):
+                if s is not None:
+                    try:
+                        s.close()
+                    except OSError:
+                        pass
+            with self._lock:
+                self._conns.discard(cli)
+
+    def _dial_backend(self) -> "Optional[socket.socket]":
+        """Block until the backend is set + connectable (or timeout / close)."""
+        deadline = time.monotonic() + self._dial_timeout
+        while not self._closed.is_set() and time.monotonic() < deadline:
+            with self._lock:
+                port = self._backend_port
+            if port:
+                try:
+                    return socket.create_connection(
+                        (self._host, port), timeout=2.0)
+                except OSError:
+                    pass
+            time.sleep(self._dial_interval)
+        return None
+
+    def _splice(self, a: "socket.socket", b: "socket.socket") -> None:
+        a.setblocking(True)
+        b.setblocking(True)
+        socks = [a, b]
+        while not self._closed.is_set():
+            try:
+                r, _, x = select.select(socks, [], socks, 1.0)
+            except (OSError, ValueError):
+                return
+            if x:
+                return
+            for s in r:
+                peer = b if s is a else a
+                try:
+                    data = s.recv(65536)
+                except OSError:
+                    return
+                if not data:
+                    return
+                try:
+                    peer.sendall(data)
+                except OSError:
+                    return
+
+
+def _rewrite_serve_port(url: "Optional[str]", new_port: int) -> "Optional[str]":
+    """Return ``url`` with its host port replaced by ``new_port``.
+
+    Used to point ffmpeg at an internal _ServeRelay backend port while the public
+    port (in the advertised URL) is held by the relay.  ``http://127.0.0.1:18989/
+    x.ts`` -> ``http://127.0.0.1:<new_port>/x.ts``.  Pure (unit-testable)."""
+    if not url:
+        return url
+    try:
+        scheme, rest = url.split("://", 1)
+        hostport, slash, path = rest.partition("/")
+        host = hostport.rsplit(":", 1)[0]
+        return f"{scheme}://{host}:{new_port}{slash}{path}"
+    except (ValueError, IndexError):
+        return url
+
+
+def _grab_free_port(host: str = "127.0.0.1") -> int:
+    """Bind an ephemeral TCP port, release it, and return the number.
+
+    There's an inherent TOCTOU window before ffmpeg rebinds it, but it's a
+    loopback-only internal port and ffmpeg's launch retries the serve cycle on
+    failure, so a lost race is self-healing."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind((host, 0))
+        return s.getsockname()[1]
+    finally:
+        s.close()
 
 
 def _tcp_table_has_established_on_port(table_text: str, port: int) -> bool:
