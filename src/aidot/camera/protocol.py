@@ -429,6 +429,46 @@ def next_backoff(
     return base + rand() * (ceiling - base)
 
 
+class ReconnectPacer:
+    """Reconnect-delay state machine shared by the camera reconnect loops.
+
+    Centralizes the attempt counter, the jittered-backoff math (:func:`next_backoff`),
+    and the escalate-on-failure / reset-on-healthy policy + increment ordering that
+    the SDES keepalive, JPEG streaming, and DTLS serve loops would otherwise each
+    re-implement.  Each loop keeps only its own liveness signal and feeds it in, so
+    a loop's policy (does it escalate on no-media, or just reset on open?) is an
+    explicit method call rather than hidden in copy-pasted counter bookkeeping.
+    Not thread-safe; one instance per loop scope.
+    """
+
+    def __init__(
+        self, base: float, cap: float,
+        *, rand: Optional[Callable[[], float]] = None,
+    ) -> None:
+        self._base = base
+        self._cap = cap
+        self._rand = rand  # forwarded to next_backoff; injectable for tests
+        self._attempt = 0
+
+    def fail_delay(self) -> float:
+        """Delay after a failed OPEN (no session established): the current attempt's
+        backoff, then escalate - so the first failure waits exactly ``base``."""
+        delay = next_backoff(self._attempt, base=self._base, cap=self._cap, rand=self._rand)
+        self._attempt += 1
+        return delay
+
+    def session_end_delay(self, *, healthy: bool) -> float:
+        """Delay after a session ENDED: reset to ``base`` if it delivered media
+        (``healthy``), else escalate first, then return the delay."""
+        self._attempt = 0 if healthy else self._attempt + 1
+        return next_backoff(self._attempt, base=self._base, cap=self._cap, rand=self._rand)
+
+    def reset(self) -> None:
+        """Clear the failure count - e.g. after a successful open in a loop that has
+        no end-of-session escalation (the DTLS serve loop, gated by its own spacing)."""
+        self._attempt = 0
+
+
 def _write_text_file(path: str, text: str) -> None:
     """Write ``text`` to ``path`` synchronously.
 
