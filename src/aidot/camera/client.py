@@ -8091,6 +8091,10 @@ class CameraMixin(_CameraControlsMixin):
         # Proc holder: set to the ffmpeg Popen object after launch so the
         # bridge thread can poll for exit without a NameError race.
         _proc_holder: list = [None]
+        # Camera's actual video payload type (96=H.264 / 97=H.265), set by the
+        # bridge on the first video RTP packet so the ffmpeg SDP can be narrowed
+        # to the matching single codec before ffmpeg is launched.
+        _first_video_pt: list = [None]
         # Media-liveness: bridge sets [0] = time.monotonic() on every forwarded
         # media packet; the keepalive watchdog reads it via SdesSession to
         # restart a session the camera silently stopped feeding.
@@ -9108,6 +9112,7 @@ class CameraMixin(_CameraControlsMixin):
                                     )
                             elif _kind == "video" and not _br_first_video_logged:
                                 _br_first_video_logged = True
+                                _first_video_pt[0] = _pt
                                 _status(f"bridge: first video RTP pt={_pt}")
                                 # Camera answers BUNDLE (all media on one 5-tuple),
                                 # so the talk destination is the same address as
@@ -9426,6 +9431,46 @@ class CameraMixin(_CameraControlsMixin):
             *_time_args,
             *dest_args,
         ]
+        # --- H.265 fix: narrow the ffmpeg SDP to the camera's actual codec ----
+        # The camera streams H.264 (pt=96) OR H.265 (pt=97), varying per session.
+        # An m=video line listing both ("96 97") makes ffmpeg bind the RTP
+        # depacketizer to the FIRST pt (96/H.264) and silently drop the camera's
+        # H.265 packets -> 0 frames.  Wait for the bridge to observe the real
+        # video pt, then rewrite the SDP to that single codec before launch.
+        # ffmpeg recovers on the next periodic keyframe, so the small spawn delay
+        # is harmless.  Falls back to the dual-codec SDP if no video is seen.
+        _vpt_deadline = time.monotonic() + 15.0
+        while _first_video_pt[0] is None and time.monotonic() < _vpt_deadline:
+            await asyncio.sleep(0.1)
+        _vpt = _first_video_pt[0]
+        if _vpt in (96, 97):
+            def _narrow_sdp_to_pt(_sdp_text: str, _keep: int) -> str:
+                _drop = 96 if _keep == 97 else 97
+                _kept = []
+                for _ln in _sdp_text.splitlines(keepends=True):
+                    _s = _ln.lstrip()
+                    if _s.startswith("m=video"):
+                        _ln = _ln.replace(" 96 97", f" {_keep}")
+                    elif (_s.startswith(f"a=rtpmap:{_drop} ")
+                          or _s.startswith(f"a=fmtp:{_drop} ")
+                          or _s.startswith(f"a=fmtp:{_drop};")):
+                        continue
+                    _kept.append(_ln)
+                return "".join(_kept)
+            def _read_sdp_file() -> str:
+                with open(sdp_path, encoding="utf-8") as _f_sdp:
+                    return _f_sdp.read()
+            try:
+                _cur_sdp = await asyncio.get_running_loop().run_in_executor(
+                    None, _read_sdp_file)
+                await asyncio.get_running_loop().run_in_executor(
+                    None, _write_text_file, sdp_path,
+                    _narrow_sdp_to_pt(_cur_sdp, int(_vpt)))
+                _status(
+                    f"SDES: narrowed ffmpeg SDP to video pt={_vpt}"
+                    f" ({'H265' if int(_vpt) == 97 else 'H264'})")
+            except Exception:
+                _LOGGER.debug("camera %s: swallowed exception", '_open_sdes_stream', exc_info=True)
         _LOGGER.info("SDES ffmpeg cmd: %s", " ".join(cmd))
         if _ffmpeg_path() is None:
             # ffmpeg is not installed - clean up and surface a clear error
