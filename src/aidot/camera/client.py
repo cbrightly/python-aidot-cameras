@@ -39,7 +39,7 @@ from .sdes import SdesSession  # re-exported (split into sdes.py)
 from .controls import _CameraControlsMixin
 from .protocol import (  # split into protocol.py; re-imported for use + back-compat
     _mqtt_timestamp,
-    next_backoff,
+    ReconnectPacer,
     _build_stun_binding_success_response,
     _terminal_webrtc_ack,
     _install_highport_nomination_patch,
@@ -636,6 +636,48 @@ class CameraMixin(_CameraControlsMixin):
             "Content-Type":    "application/json",
         }
 
+    def _owner_id(self) -> str:
+        """The Leedarson ``owner`` (userId) header value some IPC endpoints require.
+
+        ``_leedarson_headers`` deliberately omits ``owner`` (it breaks
+        recording/playback); the wake and liveStreamParam endpoints need it.
+        """
+        return (
+            self._user_info.get("owner")
+            or self._user_info.get("id")
+            or self._user_info.get("userId")
+            or str(self.user_id)
+        )
+
+    async def _async_post_ok(
+        self, url: str, headers: dict, body: str, *, timeout: float = 10.0,
+        label: str = "ipc post",
+    ) -> bool:
+        """POST a JSON ``body`` string to a Leedarson IPC endpoint; True on success.
+
+        Success = HTTP 200 with a ``code`` of 0/200/absent. Best-effort: any
+        network/parse error returns False, never raises. Shared by the wake and
+        liveStreamParam provisioning calls.
+        """
+        import aiohttp
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, headers=headers, data=body,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                ) as resp:
+                    status = resp.status
+                    data = await resp.json(content_type=None)
+            code = data.get("code") if isinstance(data, dict) else None
+            ok = status == 200 and (code in (None, 0, 200, "0", "200"))
+            _LOGGER.debug("%s %s: status=%s code=%s ok=%s",
+                          label, self.device_id, status, code, ok)
+            return bool(ok)
+        except Exception as exc:
+            _LOGGER.debug("%s failed for %s: %s", label, self.device_id, exc)
+            return False
+
     async def _async_http_wake(self) -> bool:
         """Wake a battery camera via the cloud HTTP low-power endpoint.
 
@@ -647,36 +689,13 @@ class CameraMixin(_CameraControlsMixin):
         the MQTT ``lowPowerActiveStateReq``, which only lands if the camera is
         already connected.  Returns True if the request was accepted (HTTP 200).
         """
-        import aiohttp
-
+        # The wake endpoint (unlike recording/playback) DOES require owner (n.java:71).
         headers = self._leedarson_headers()
-        # The wake endpoint (unlike recording/playback) DOES require owner - the app
-        # sends it (n.java:71).  owner is the Leedarson userId.
-        headers["owner"] = (
-            self._user_info.get("owner")
-            or self._user_info.get("id")
-            or self._user_info.get("userId")
-            or str(self.user_id)
-        )
+        headers["owner"] = self._owner_id()
         url = (f"{self._smarthome_base}/api/ipc/devices/"
                f"{self.device_id}/lowPowerActiveState")
-        body = {"deviceId": self.device_id, "status": "wakeup"}
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url, headers=headers, json=body,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    status = resp.status
-                    data = await resp.json(content_type=None)
-            code = data.get("code") if isinstance(data, dict) else None
-            ok = status == 200 and (code in (None, 0, 200, "0", "200"))
-            _LOGGER.debug("http wake %s: status=%s code=%s ok=%s",
-                          self.device_id, status, code, ok)
-            return bool(ok)
-        except Exception as exc:
-            _LOGGER.debug("http wake failed for %s: %s", self.device_id, exc)
-            return False
+        body = json.dumps({"deviceId": self.device_id, "status": "wakeup"})
+        return await self._async_post_ok(url, headers, body, label="http wake")
 
     def _live_stream_param_request(self):
         """Build ``(url, headers, body)`` for the liveStreamParam provision call.
@@ -686,12 +705,7 @@ class CameraMixin(_CameraControlsMixin):
         ``owner`` header is required (as on the wake endpoint).
         """
         headers = self._leedarson_headers()
-        headers["owner"] = (
-            self._user_info.get("owner")
-            or self._user_info.get("id")
-            or self._user_info.get("userId")
-            or str(self.user_id)
-        )
+        headers["owner"] = self._owner_id()
         url = f"{self._smarthome_base}/api/ipc/liveStream/liveStreamParam"
         return url, headers, json.dumps([self.device_id])
 
@@ -706,31 +720,10 @@ class CameraMixin(_CameraControlsMixin):
         provisions the session (and brings the camera online) and returns AWS KVS
         credentials.  We only need the provisioning side effect - the library
         streams over the proprietary MQTT/SDES path, not AWS KVS - so the returned
-        credentials are ignored.
-
-        The request body is a JSON **array** of device ids (an object body returns
-        HTTP 500) and needs the ``owner`` header (like the wake endpoint).
-        Best-effort: returns True on HTTP 200, never raises.
+        credentials are ignored.  Best-effort: returns True on HTTP 200.
         """
-        import aiohttp
-
         url, headers, body = self._live_stream_param_request()
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url, headers=headers, data=body,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    status = resp.status
-                    data = await resp.json(content_type=None)
-            code = data.get("code") if isinstance(data, dict) else None
-            ok = status == 200 and (code in (None, 0, 200, "0", "200"))
-            _LOGGER.debug("liveStreamParam %s: status=%s code=%s ok=%s",
-                          self.device_id, status, code, ok)
-            return bool(ok)
-        except Exception as exc:
-            _LOGGER.debug("liveStreamParam failed for %s: %s", self.device_id, exc)
-            return False
+        return await self._async_post_ok(url, headers, body, label="liveStreamParam")
 
     async def async_wake_camera(self, retries: int = 2) -> bool:
         """Wake a battery camera on demand via the cloud HTTP low-power endpoint.
@@ -1945,6 +1938,7 @@ class CameraMixin(_CameraControlsMixin):
         fast_connect: Optional[bool] = None,
         sdes_audio: Optional[bool] = None,
         go2rtc_url: Optional[str] = None,
+        live_stream_param: Optional[bool] = None,
     ) -> None:
         """Start a persistent stream that keeps the camera session alive.
 
@@ -1962,12 +1956,19 @@ class CameraMixin(_CameraControlsMixin):
         to the ``AIDOT_FAST_CONNECT`` env var; ``True``/``False`` override it (e.g.
         from a Home Assistant config-entry option, since HA OS can't set env vars).
 
+        ``live_stream_param`` toggles the battery-camera cloud pre-connect
+        (liveStreamParam); like ``fast_connect`` it overrides the
+        ``AIDOT_LIVESTREAM_PARAM`` env var, so an integration on HA OS (no env vars)
+        can still disable it per camera.
+
         Safe to call multiple times - does nothing if already running.
         """
         if fast_connect is not None:
             self._fast_connect_opt = fast_connect
         if sdes_audio is not None:
             self._sdes_audio_opt = sdes_audio
+        if live_stream_param is not None:
+            self._live_stream_param_opt = live_stream_param
         if self._stream_task is not None and not self._stream_task.done():
             return
         self._keepalive_rtsp_url = rtsp_push_url
@@ -2156,11 +2157,11 @@ class CameraMixin(_CameraControlsMixin):
         """Background task: keep SDES stream alive; push to go2rtc via RTSP."""
         _MIN_DELAY = 10.0
         _MAX_DELAY = 300.0
-        # Consecutive failed / no-media opens; drives jittered exponential
-        # backoff so a degraded camera (or a fleet reconnecting at once) isn't
-        # hammered into further degradation / cloud rate-limiting. Reset only
-        # after a session that actually delivered media (see end of loop).
-        _attempt = 0
+        # Jittered-backoff pacer: escalates on failed/no-media opens so a degraded
+        # camera (or a fleet reconnecting at once) isn't hammered into further
+        # degradation / cloud rate-limiting; resets after a session that delivered
+        # media (see end of loop).
+        _pacer = ReconnectPacer(_MIN_DELAY, _MAX_DELAY)
 
         while self._streaming_active:
             try:
@@ -2171,7 +2172,7 @@ class CameraMixin(_CameraControlsMixin):
             except asyncio.CancelledError:
                 return
             except Exception as exc:
-                _delay = next_backoff(_attempt, base=_MIN_DELAY, cap=_MAX_DELAY)
+                _delay = _pacer.fail_delay()
                 _LOGGER.warning(
                     "SDES keepalive: stream open failed for %s (retry in %.0fs): %s",
                     self.device_id, _delay, exc,
@@ -2180,7 +2181,6 @@ class CameraMixin(_CameraControlsMixin):
                     await asyncio.sleep(_delay)
                 except asyncio.CancelledError:
                     return
-                _attempt += 1
                 continue
 
             self._stream_session = session
@@ -2270,16 +2270,10 @@ class CameraMixin(_CameraControlsMixin):
                 # Escalate backoff only when the session never delivered media
                 # (camera refused / degraded on a rapid reconnect); a session
                 # that streamed fine and then ended (battery teardown, consumer
-                # gone) is a normal lifecycle event and resets to the base
-                # interval so the next view reconnects promptly.
-                if session.last_media_monotonic > 0.0:
-                    _attempt = 0
-                    _delay = _MIN_DELAY
-                else:
-                    _attempt += 1
-                    _delay = next_backoff(_attempt, base=_MIN_DELAY, cap=_MAX_DELAY)
+                # gone) is a normal lifecycle event and resets to the base interval.
+                _healthy = session.last_media_monotonic > 0.0
                 try:
-                    await asyncio.sleep(_delay)
+                    await asyncio.sleep(_pacer.session_end_delay(healthy=_healthy))
                 except asyncio.CancelledError:
                     return
 
@@ -2295,9 +2289,9 @@ class CameraMixin(_CameraControlsMixin):
         # to 15 s here (+ the SDES/serve loops) if strict app parity is wanted.
         _MIN_DELAY = 5.0
         _MAX_DELAY = 300.0
-        # Consecutive failed / frameless opens; drives jittered backoff (see
-        # next_backoff). Reset after a session that produced frames.
-        _attempt = 0
+        # Jittered-backoff pacer: escalates on failed/frameless opens, resets after
+        # a session that produced frames.
+        _pacer = ReconnectPacer(_MIN_DELAY, _MAX_DELAY)
 
         def _on_frame(frame) -> None:
             # Accept keyframes always; accept P-frames only after first keyframe.
@@ -2339,7 +2333,7 @@ class CameraMixin(_CameraControlsMixin):
                     return
                 continue
             except Exception as exc:
-                _delay = next_backoff(_attempt, base=_MIN_DELAY, cap=_MAX_DELAY)
+                _delay = _pacer.fail_delay()
                 _LOGGER.warning(
                     "Stream open failed for %s (retry in %.0fs): %s",
                     self.device_id, _delay, exc,
@@ -2348,7 +2342,6 @@ class CameraMixin(_CameraControlsMixin):
                     await asyncio.sleep(_delay)
                 except asyncio.CancelledError:
                     return
-                _attempt += 1
                 continue
 
             self._stream_session = session
@@ -2378,14 +2371,9 @@ class CameraMixin(_CameraControlsMixin):
                 # Reset backoff if this session produced frames (a normal drop
                 # after good streaming); escalate with jitter if it never did
                 # (the camera-degradation case).
-                if self._last_frame_time > _open_time:
-                    _attempt = 0
-                    _delay = _MIN_DELAY
-                else:
-                    _attempt += 1
-                    _delay = next_backoff(_attempt, base=_MIN_DELAY, cap=_MAX_DELAY)
+                _produced = self._last_frame_time > _open_time
                 try:
-                    await asyncio.sleep(_delay)
+                    await asyncio.sleep(_pacer.session_end_delay(healthy=_produced))
                 except asyncio.CancelledError:
                     return
 
@@ -2501,7 +2489,11 @@ class CameraMixin(_CameraControlsMixin):
         # attempts so no code path (reset bug, fast PC-death) can pound the camera.
         _MIN_DELAY, _MAX_DELAY = 15.0, 300.0
         _open_gate = float(os.environ.get("AIDOT_DTLS_RETRY_GATE_S", "15"))
-        _attempt = 0  # consecutive failed opens; drives jittered backoff
+        # Jittered-backoff pacer for failed opens. Unlike the SDES/JPEG loops this
+        # serve loop resets on any successful open (it has the _open_gate spacing
+        # below) rather than escalating on no-media - hence reset() not
+        # session_end_delay().
+        _pacer = ReconnectPacer(_MIN_DELAY, _MAX_DELAY)
         _last_open_at = 0.0  # monotonic of the previous open attempt (0 = none yet)
         loop = asyncio.get_running_loop()
         while self._streaming_active:
@@ -2537,7 +2529,7 @@ class CameraMixin(_CameraControlsMixin):
                     return
                 continue
             except Exception as exc:
-                _delay = next_backoff(_attempt, base=_MIN_DELAY, cap=_MAX_DELAY)
+                _delay = _pacer.fail_delay()
                 _LOGGER.warning(
                     "DTLS serve: open failed for %s (retry %.0fs): %s",
                     self.device_id, _delay, exc,
@@ -2546,10 +2538,9 @@ class CameraMixin(_CameraControlsMixin):
                     await asyncio.sleep(_delay)
                 except asyncio.CancelledError:
                     return
-                _attempt += 1
                 continue
 
-            _attempt = 0
+            _pacer.reset()
             self._stream_session = session
             pc = session._pc
             # PC-dead test for the serve loop.  closed/failed are terminal at
@@ -3167,12 +3158,15 @@ class CameraMixin(_CameraControlsMixin):
         # -50019 ("not ready") and never runs ICE -> no media.  App parity:
         # KVSPreConnectStrategy.fetchKvsParams calls liveStreamParam first.  We
         # only need the provisioning side effect (we stream over MQTT/SDES, not
-        # AWS KVS).  Mains cameras are always stream-ready, so skip them.  Disable
-        # via AIDOT_LIVESTREAM_PARAM=0.  Validated live on L2_170 (A001513): with
-        # this call livePlay succeeds and decrypted RTP flows; without it,
-        # persistent -50019.
-        if (self.is_battery_camera
-                and os.environ.get("AIDOT_LIVESTREAM_PARAM", "1") != "0"):
+        # AWS KVS).  Mains cameras are always stream-ready, so skip them.
+        # Validated live on L2_170 (A001513): with this call livePlay succeeds and
+        # decrypted RTP flows; without it, persistent -50019.  Controllable like
+        # fast_connect/sdes_audio: start_keepalive(live_stream_param=...) wins,
+        # else the AIDOT_LIVESTREAM_PARAM env var (default on).
+        _lsp = getattr(self, "_live_stream_param_opt", None)
+        if _lsp is None:
+            _lsp = os.environ.get("AIDOT_LIVESTREAM_PARAM", "1") != "0"
+        if self.is_battery_camera and _lsp:
             _lsp_ok = await self._async_fetch_live_stream_param()
             _LOGGER.debug("camera %s: liveStreamParam provisioned ok=%s",
                           self.device_id, _lsp_ok)
