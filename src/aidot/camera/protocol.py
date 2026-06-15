@@ -1145,3 +1145,196 @@ def _ip_looks_ascii_garbled(ip_str) -> bool:
     _decoded = "".join(chr(p) for p in _parts)
     return any(_decoded.startswith(pfx)
                for pfx in ("192.", "10.", "172.", "169.", "127."))
+
+
+# --- SDP transform helpers (lifted from _async_open_webrtc_stream_impl) ---
+
+def _sdp_transport(sdp: str, kind: str) -> str:
+    for line in sdp.splitlines():
+        if line.startswith(f"m={kind} "):
+            parts = line.split()
+            return parts[2] if len(parts) > 2 else "?"
+    return "absent"
+
+
+def _upgrade_sctp(sdp: str) -> str:
+    """Convert aiortc pre-RFC-8841 SCTP section to RFC 8841 format.
+
+    aiortc generates the legacy format:
+        m=application PORT DTLS/SCTP 5000
+        a=sctpmap:5000 webrtc-datachannel 65535
+        a=max-message-size:65536
+
+    RFC 8841 (and cameras / modern browsers) expect:
+        m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+        a=sctp-port:5000
+        a=max-message-size:65536   ← required by RFC 8841 §4.3.1
+    """
+    import re as _re
+    out = []
+    for line in _re.split(r'\r?\n', sdp):
+        if _re.match(r'^m=application \d+ DTLS/SCTP \d+$', line):
+            out.append('m=application 9 UDP/DTLS/SCTP webrtc-datachannel')
+        elif line.startswith('a=sctpmap:'):
+            out.append('a=sctp-port:5000')
+        else:
+            out.append(line)   # includes a=max-message-size (keep as-is)
+    return '\r\n'.join(out)
+
+
+def _normalize_bundle_ice_credentials(sdp: str) -> str:
+    """Unify all m-section ICE credentials to match the BUNDLE master (mid:0).
+
+    RFC 8843 §7.1.3 requires all bundled m-sections to carry the same
+    ice-ufrag and ice-pwd.  aiortc generates a separate ICETransport per
+    transceiver, giving each a unique credential pair.  Cameras that
+    validate this requirement silently reject offers with mismatched
+    credentials.  We overwrite every m-section's credentials with those
+    of the first m-section (the BUNDLE master, mid:0).
+
+    This is safe because: after BUNDLE negotiation succeeds, aiortc uses
+    only mid:0's ICETransport for all media; the camera's ICE checks go
+    exclusively to mid:0, whose credentials remain unchanged.
+    """
+    import re as _re
+    lines = _re.split(r'\r?\n', sdp)
+    master_ufrag: str | None = None
+    master_pwd:   str | None = None
+    in_msection = False
+    for ln in lines:
+        if ln.startswith('m='):
+            in_msection = True
+        if in_msection:
+            if ln.startswith('a=ice-ufrag:') and master_ufrag is None:
+                master_ufrag = ln
+            if ln.startswith('a=ice-pwd:') and master_pwd is None:
+                master_pwd = ln
+        if master_ufrag and master_pwd:
+            break
+    if not (master_ufrag and master_pwd):
+        return sdp   # no ICE credentials found; leave SDP unchanged
+    result = []
+    for ln in lines:
+        if ln.startswith('a=ice-ufrag:'):
+            result.append(master_ufrag)
+        elif ln.startswith('a=ice-pwd:'):
+            result.append(master_pwd)
+        else:
+            result.append(ln)
+    return '\r\n'.join(result)
+
+
+def _reorder_m_section_ice_attrs(sdp: str) -> str:
+    """Move transport attrs (ice-ufrag/pwd, fingerprint, setup) before candidates.
+
+    aiortc places a=ice-ufrag, a=ice-pwd, a=fingerprint, and a=setup at
+    the END of each m-section, after all a=candidate lines.  Camera
+    firmware parsers (and Chrome/libwebrtc) expect these transport
+    attributes to appear BEFORE the first a=candidate line.  A linear
+    parser that encounters candidates before seeing ice-ufrag/pwd cannot
+    validate them and silently rejects the offer - producing no webrtcResp.
+
+    This function moves those four lines to immediately before the first
+    a=candidate: in every m-section that contains candidates.  All other
+    attribute ordering is preserved; no content is added or removed.
+    """
+    import re as _re
+    _TRANSPORT = ('a=ice-ufrag:', 'a=ice-pwd:', 'a=fingerprint:', 'a=setup:')
+    lines = _re.split(r'\r?\n', sdp)
+    sections: list[list[str]] = []
+    current: list[str] = []
+    for ln in lines:
+        if ln.startswith('m=') and current:
+            sections.append(current)
+            current = [ln]
+        else:
+            current.append(ln)
+    if current:
+        sections.append(current)
+    result: list[str] = []
+    for sec in sections:
+        first_cand = next(
+            (i for i, ln in enumerate(sec) if ln.startswith('a=candidate:')),
+            None,
+        )
+        if first_cand is None:
+            result.extend(sec)
+            continue
+        # Collect transport lines that appear at-or-after first candidate
+        transport_after: list[str] = []
+        kept: list[str] = []
+        for ln in sec[first_cand:]:
+            if any(ln.startswith(p) for p in _TRANSPORT):
+                transport_after.append(ln)
+            else:
+                kept.append(ln)
+        result.extend(sec[:first_cand])
+        result.extend(transport_after)
+        result.extend(kept)
+    return '\r\n'.join(result)
+
+
+def _filter_sdp_candidates(sdp: str) -> str:
+    """Remove ICE candidates that are unreachable from remote cameras.
+
+    Strips Docker-bridge (172.17.x), CGNAT/Tailscale (100.x.x.x), and
+    all IPv6 addresses from the SDP.  These addresses are only reachable
+    within the local host or VPN and waste ICE checking time; they also
+    cause ICE-lite cameras to echo them back verbatim as their own
+    candidates, polluting the remote candidate list.
+
+    LAN (192.168.x / 10.x / 172.16-31 non-Docker), srflx, and TURN
+    relay candidates are kept - they represent paths a remote camera
+    can actually use.
+    """
+    import re as _re
+    out = []
+    for line in _re.split(r'\r?\n', sdp):
+        if line.startswith('a=candidate:'):
+            # Skip Docker bridge 172.17.x
+            if _re.search(r'\b172\.17\.', line):
+                continue
+            # Skip CGNAT / Tailscale 100.x.x.x
+            if _re.search(r'\b100\.\d+\.\d+\.\d+\b', line):
+                continue
+            # Skip IPv6 candidates (any colon-containing IP field)
+            # Format: "a=candidate:... IP6-addr port ..."
+            parts = line.split()
+            # parts[4] is the IP address in standard candidate line
+            if len(parts) > 4 and ':' in parts[4]:
+                continue
+        out.append(line)
+    return '\r\n'.join(out)
+
+
+def _dedup_bundle_candidates(sdp: str) -> str:
+    """Remove a=candidate lines from non-BUNDLE-master m-sections.
+
+    In a BUNDLE-d offer all m-sections share one ICE transport.
+    Candidates only need to appear in the first m-section (mid:0,
+    the BUNDLE master); listing them in mid:1 and mid:2 as well
+    bloats the SDP by ~800-1200 bytes and can push the total
+    webrtcReq MQTT payload over the camera's receive-buffer limit
+    (~9-10 KB for A000088), causing a quickConn reset.  Stripping
+    duplicate candidates from non-master sections is safe because
+    the camera uses a single ICE transport for all BUNDLE'd media.
+    """
+    import re as _re_dc2
+    lines = _re_dc2.split(r'\r?\n', sdp)
+    sections: list[list[str]] = []
+    current: list[str] = []
+    for ln in lines:
+        if ln.startswith('m=') and current:
+            sections.append(current)
+            current = [ln]
+        else:
+            current.append(ln)
+    if current:
+        sections.append(current)
+    result: list[str] = []
+    for i, sec in enumerate(sections):
+        if i == 0:
+            result.extend(sec)   # keep all in BUNDLE master (first m-section)
+        else:
+            result.extend(ln for ln in sec if not ln.startswith('a=candidate:'))
+    return '\r\n'.join(result)
