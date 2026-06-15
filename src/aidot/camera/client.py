@@ -508,6 +508,9 @@ class CameraMixin(_CameraControlsMixin):
         # Cold-start serve-port relay (holds the public port connectable through
         # the handshake so an eager go2rtc pull waits instead of being refused).
         self._serve_relay: "Optional[_ServeRelay]" = None
+        # Cold-start instrumentation: monotonic at the start of an open, so any
+        # thread (signaling, bridge, serve) can log elapsed-ms phase markers.
+        self._cold_open_t0: "Optional[float]" = None
         # Motion/event polling (cloud event list). NOTE: the camera does NOT push motion
         # to a passive MQTT subscriber - alarmType is only emitted during an active live
         # view (decompiled NewLiveFragment) - so real-time-ish motion for HA comes from
@@ -1946,6 +1949,7 @@ class CameraMixin(_CameraControlsMixin):
         go2rtc_url: Optional[str] = None,
         live_stream_param: Optional[bool] = None,
         serve_relay: Optional[bool] = None,
+        stream_idle_s: Optional[float] = None,
     ) -> None:
         """Start a persistent stream that keeps the camera session alive.
 
@@ -1974,6 +1978,14 @@ class CameraMixin(_CameraControlsMixin):
         ``AIDOT_SERVE_RELAY`` env var (default on); set False to serve ffmpeg
         directly on the public port (the pre-0.7.18 behaviour).
 
+        ``stream_idle_s`` sets the no-viewer idle-release window in seconds,
+        overriding the ``AIDOT_STREAM_IDLE_S`` env default (120).  ``0`` (or
+        negative) keeps the warm WebRTC session forever so re-views are instant
+        (app-like) - sensible for mains cameras (no battery cost), but it holds a
+        concurrent-stream slot for the camera's lifetime, so don't pin more
+        cameras than ``AIDOT_MAX_CONCURRENT_STREAMS`` allows.  Leave None for
+        battery cameras (motion-prewarm + idle-release preserves battery).
+
         Safe to call multiple times - does nothing if already running.
         """
         if fast_connect is not None:
@@ -1984,6 +1996,8 @@ class CameraMixin(_CameraControlsMixin):
             self._live_stream_param_opt = live_stream_param
         if serve_relay is not None:
             self._serve_relay_opt = serve_relay
+        if stream_idle_s is not None:
+            self._stream_idle_opt = stream_idle_s
         if self._stream_task is not None and not self._stream_task.done():
             return
         self._keepalive_rtsp_url = rtsp_push_url
@@ -2236,8 +2250,10 @@ class CameraMixin(_CameraControlsMixin):
             # window as DTLS; the next view re-runs camera.stream_source().  Fail
             # safe: unknown (non-Linux /proc) never releases.  Escape hatch:
             # AIDOT_SDES_IDLE_RELEASE=0.
-            _idle_on = os.environ.get("AIDOT_SDES_IDLE_RELEASE", "1") != "0"
-            _idle_secs = float(os.environ.get("AIDOT_STREAM_IDLE_S", "120"))
+            # stream_idle_s / AIDOT_STREAM_IDLE_S override; <= 0 = never release.
+            _idle_secs = self._resolve_idle_secs()
+            _idle_on = (os.environ.get("AIDOT_SDES_IDLE_RELEASE", "1") != "0"
+                        and _idle_secs > 0)
             _serve_port = _sdes_serve_port(self._keepalive_rtsp_url)
             _last_consumer = _started_at  # grace: count idle from session open
             try:
@@ -2480,6 +2496,38 @@ class CameraMixin(_CameraControlsMixin):
                 got_a = self._install_encoded_tap(_r, aq, False)
         return got_v
 
+    def _cold_phase(self, label: str) -> None:
+        """Log elapsed-ms since the open began (cold-start instrumentation).
+
+        Defensive + best-effort: never raises, no-op if no open is in flight.
+        Emits a single greppable INFO line per phase so a cold connect's timeline
+        (open -> webrtcReq -> first-media -> serving) can be measured without a
+        debugger or ad-hoc log scraping.  Grep ``cold-start[``."""
+        try:
+            t0 = self._cold_open_t0
+            if t0 is None:
+                return
+            _LOGGER.info(
+                "cold-start[%s] %s +%dms",
+                self.device_id, label, int((time.monotonic() - t0) * 1000),
+            )
+        except Exception:
+            pass
+
+    def _resolve_idle_secs(self) -> float:
+        """Serve idle-release window (seconds). A per-camera ``stream_idle_s``
+        (set via start_keepalive) overrides the ``AIDOT_STREAM_IDLE_S`` env
+        default of 120 s.  <= 0 means *never* idle-release (keep the warm session
+        for instant re-views — sensible for mains cameras, which have no battery
+        cost; note it holds a concurrent-stream slot for the camera's lifetime)."""
+        opt = getattr(self, "_stream_idle_opt", None)
+        if opt is not None:
+            return float(opt)
+        try:
+            return float(os.environ.get("AIDOT_STREAM_IDLE_S", "120"))
+        except (TypeError, ValueError):
+            return 120.0
+
     def _maybe_start_serve_relay(self, serve_url: Optional[str]) -> "Optional[_ServeRelay]":
         """Hold the public serve port via a _ServeRelay so an eager go2rtc pull
         connects-and-waits instead of hitting ECONNREFUSED during the ~16-25s
@@ -2646,7 +2694,9 @@ class CameraMixin(_CameraControlsMixin):
             # Must exceed HA's stream-worker reconnect interval (~40s) or the serve
             # is torn down between a viewer's retries -> "Connection refused". 120s
             # survives several retries while still releasing an unviewed camera.
-            idle_secs = float(os.environ.get("AIDOT_STREAM_IDLE_S", "120"))
+            # stream_idle_s / AIDOT_STREAM_IDLE_S override; <= 0 = never release
+            # (keep warm for instant re-views; mains cameras only - see P1).
+            idle_secs = self._resolve_idle_secs()
             proc = wfile = stop_flag = mux_thread = None
             cancelled = idle_release = False
             try:
@@ -2705,6 +2755,7 @@ class CameraMixin(_CameraControlsMixin):
                         # client and tear down before go2rtc connects.)
                         await asyncio.sleep(0.3)
                         self._serve_ready.set()
+                        self._cold_phase("serving (dtls)")
                     # Periodic keyframe request shortens the camera's GOP so HA's
                     # HLS segmenter (which cuts on keyframes) produces short
                     # segments -> far less player buffering (the ~20s HLS lag is
@@ -2722,8 +2773,9 @@ class CameraMixin(_CameraControlsMixin):
                             await self._send_video_pli(pc)
                             _last_gop_pli = loop.time()
                         # No consumer -> the pipe fills, the mux blocks, progress
-                        # goes stale.  A real viewer keeps it fresh.
-                        if loop.time() - progress[0] > idle_secs:
+                        # goes stale.  A real viewer keeps it fresh.  idle_secs<=0
+                        # disables release entirely (keep warm for instant views).
+                        if idle_secs > 0 and loop.time() - progress[0] > idle_secs:
                             idle_release = True
                             break
                     # Tear down this ffmpeg+mux cycle before the next.
@@ -3235,6 +3287,10 @@ class CameraMixin(_CameraControlsMixin):
             ``timeout`` seconds.
         """
         import queue as _q_mod
+
+        # Cold-start instrumentation: stamp t0 so phase markers below (and in the
+        # bridge/serve threads) log elapsed-ms.  Grep ``cold-start[``.
+        self._cold_open_t0 = time.monotonic()
 
         use_sdes = force_sdes if force_sdes is not None else self.is_sdes_camera
 
@@ -4912,6 +4968,7 @@ class CameraMixin(_CameraControlsMixin):
             },
         })
         outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
+        self._cold_phase("webrtcReq")
         _status(f"webrtcReq sent  peerid={peer_id}"
                 f"  IceServerList×{len(_ice_server_list)}"
                 f"  payload={len(webrtc_req_payload)}B")
@@ -8404,9 +8461,25 @@ class CameraMixin(_CameraControlsMixin):
                     # on the camera's own GOP).  We can't decode here to detect the
                     # first keyframe, so we time-box the burst and keep a slow
                     # safety PLI in case the camera's GOP is long.
-                    _PLI_BURST_N    = 3       # 5 s-spaced startup PLIs (t≈0,5,10)
+                    # P2: front-load the burst so the first decodable IDR arrives
+                    # sooner on a cold open.  Was 3 PLIs at a flat 5 s (first IDR
+                    # up to ~10 s); now a denser early ramp, then the same 30 s
+                    # safety PLI.  AIDOT_SDES_PLI_GAPS overrides the early gaps
+                    # (comma-sep seconds; e.g. "5,5,5" restores the old cadence).
+                    _pli_gaps = getattr(_bridge_fn, '_pli_gaps', None)
+                    if _pli_gaps is None:
+                        try:
+                            _pli_gaps = tuple(
+                                float(_x) for _x in os.environ.get(
+                                    "AIDOT_SDES_PLI_GAPS", "0,1.5,2,3").split(",")
+                                if _x.strip()
+                            ) or (0.0, 1.5, 2.0, 3.0)
+                        except ValueError:
+                            _pli_gaps = (0.0, 1.5, 2.0, 3.0)
+                        _bridge_fn._pli_gaps = _pli_gaps
                     _pli_done       = getattr(_bridge_fn, '_pli_count', 0)
-                    _pli_interval   = 5.0 if _pli_done < _PLI_BURST_N else 30.0
+                    _pli_interval   = (_pli_gaps[_pli_done]
+                                       if _pli_done < len(_pli_gaps) else 30.0)
                     if (hasattr(_bridge_fn, '_cam_video_ssrc')
                             and hasattr(_bridge_fn, '_cam_srtp_sock')
                             and _time_br.time() - getattr(
@@ -8455,7 +8528,7 @@ class CameraMixin(_CameraControlsMixin):
                         _bridge_fn._last_pli_ts = _time_br.time()
                         _pli_n = getattr(_bridge_fn, '_pli_count', 0) + 1
                         _bridge_fn._pli_count = _pli_n
-                        if _pli_n <= 3:
+                        if _pli_n <= len(_pli_gaps):
                             _status(
                                 f"SDES: sent RTCP PLI #{_pli_n}"
                                 f" → SSRC=0x{_pli_media_ssrc:08x}"
@@ -9334,6 +9407,7 @@ class CameraMixin(_CameraControlsMixin):
                                             _bridge_fn._srtp_rx_sess = _plsrtp_rx.Session(
                                                 policy=_rx_pol
                                             )
+                                            self._cold_phase("first-media")
                                             _status("bridge: SRTP RX session ready (cam→us)")
                                         except Exception as _srx_e:
                                             _status(f"bridge: SRTP RX init failed: {_srx_e}")
@@ -9740,6 +9814,7 @@ class CameraMixin(_CameraControlsMixin):
             await asyncio.sleep(0.05)
 
         _bind_ms = int((time.monotonic() - _t0) * 1000)
+        self._cold_phase("serving (sdes ffmpeg bound)")
         if _bound:
             _status(
                 f"SDES ffmpeg ready - loopback audio={_lo_audio_port}"
