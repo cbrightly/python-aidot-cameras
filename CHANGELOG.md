@@ -4,6 +4,35 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.12]
+
+### Added
+- **Prefer-go2rtc serve with ffmpeg fallback** (`aidot/camera/go2rtc.py`): when a
+  go2rtc server is reachable, the camera's local serve URL is registered as a
+  go2rtc stream so go2rtc handles low-latency WebRTC delivery and native
+  H.264/H.265 depacketization; when go2rtc is absent the existing ffmpeg serve
+  (e.g. Home Assistant HLS) is used unchanged. `start_keepalive(go2rtc_url=...)`
+  registers the stream, `stream_rtsp_url` prefers the go2rtc pull URL, and the
+  stream is deregistered on stop. Best-effort throughout — go2rtc errors never
+  break the fallback path. (#37)
+- `scripts/go2rtc_serve.py`: dev harness that drives the go2rtc serve path
+  without Home Assistant.
+
+### Fixed
+- **SDES streaming no-media on late ICE nomination**: a late USE-CANDIDATE now
+  nominates both the audio *and* video sockets (previously only one), so video
+  RTP reaches the bridge. Validated live (5.5 MB recording). (#36)
+
+### Changed
+- Finished decomposing the monolithic `camera/client.py` into focused modules
+  (data models + TUTK session, playback/WebRTC sessions, SDES session,
+  device-control setter mixin, stateless protocol helpers, SDP transforms).
+  Behavior-preserving: all existing imports keep working via re-exports. (#29–#35)
+
+> Validated live end-to-end through a real go2rtc server (camera → library serve
+> → go2rtc → ffprobe: H.264 1280x720 + AAC) in addition to the mocked unit suite
+> (`tests/test_go2rtc.py`, 8 cases).
+
 ## [0.7.11]
 
 ### Changed
