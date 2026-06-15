@@ -4,6 +4,14 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.16]
+
+### Documentation
+- Documented the `AIDOT_LIVESTREAM_PARAM` environment variable in the README's
+  environment-variable reference — the knob added in 0.7.15 to gate the
+  `liveStreamParam` cloud pre-connect that provisions battery cameras (set `0` to
+  disable). No code changes. (#45)
+
 ## [0.7.15]
 
 ### Fixed
