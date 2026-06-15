@@ -636,6 +636,48 @@ class CameraMixin(_CameraControlsMixin):
             "Content-Type":    "application/json",
         }
 
+    def _owner_id(self) -> str:
+        """The Leedarson ``owner`` (userId) header value some IPC endpoints require.
+
+        ``_leedarson_headers`` deliberately omits ``owner`` (it breaks
+        recording/playback); the wake and liveStreamParam endpoints need it.
+        """
+        return (
+            self._user_info.get("owner")
+            or self._user_info.get("id")
+            or self._user_info.get("userId")
+            or str(self.user_id)
+        )
+
+    async def _async_post_ok(
+        self, url: str, headers: dict, body: str, *, timeout: float = 10.0,
+        label: str = "ipc post",
+    ) -> bool:
+        """POST a JSON ``body`` string to a Leedarson IPC endpoint; True on success.
+
+        Success = HTTP 200 with a ``code`` of 0/200/absent. Best-effort: any
+        network/parse error returns False, never raises. Shared by the wake and
+        liveStreamParam provisioning calls.
+        """
+        import aiohttp
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, headers=headers, data=body,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                ) as resp:
+                    status = resp.status
+                    data = await resp.json(content_type=None)
+            code = data.get("code") if isinstance(data, dict) else None
+            ok = status == 200 and (code in (None, 0, 200, "0", "200"))
+            _LOGGER.debug("%s %s: status=%s code=%s ok=%s",
+                          label, self.device_id, status, code, ok)
+            return bool(ok)
+        except Exception as exc:
+            _LOGGER.debug("%s failed for %s: %s", label, self.device_id, exc)
+            return False
+
     async def _async_http_wake(self) -> bool:
         """Wake a battery camera via the cloud HTTP low-power endpoint.
 
@@ -647,36 +689,13 @@ class CameraMixin(_CameraControlsMixin):
         the MQTT ``lowPowerActiveStateReq``, which only lands if the camera is
         already connected.  Returns True if the request was accepted (HTTP 200).
         """
-        import aiohttp
-
+        # The wake endpoint (unlike recording/playback) DOES require owner (n.java:71).
         headers = self._leedarson_headers()
-        # The wake endpoint (unlike recording/playback) DOES require owner - the app
-        # sends it (n.java:71).  owner is the Leedarson userId.
-        headers["owner"] = (
-            self._user_info.get("owner")
-            or self._user_info.get("id")
-            or self._user_info.get("userId")
-            or str(self.user_id)
-        )
+        headers["owner"] = self._owner_id()
         url = (f"{self._smarthome_base}/api/ipc/devices/"
                f"{self.device_id}/lowPowerActiveState")
-        body = {"deviceId": self.device_id, "status": "wakeup"}
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url, headers=headers, json=body,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    status = resp.status
-                    data = await resp.json(content_type=None)
-            code = data.get("code") if isinstance(data, dict) else None
-            ok = status == 200 and (code in (None, 0, 200, "0", "200"))
-            _LOGGER.debug("http wake %s: status=%s code=%s ok=%s",
-                          self.device_id, status, code, ok)
-            return bool(ok)
-        except Exception as exc:
-            _LOGGER.debug("http wake failed for %s: %s", self.device_id, exc)
-            return False
+        body = json.dumps({"deviceId": self.device_id, "status": "wakeup"})
+        return await self._async_post_ok(url, headers, body, label="http wake")
 
     def _live_stream_param_request(self):
         """Build ``(url, headers, body)`` for the liveStreamParam provision call.
@@ -686,12 +705,7 @@ class CameraMixin(_CameraControlsMixin):
         ``owner`` header is required (as on the wake endpoint).
         """
         headers = self._leedarson_headers()
-        headers["owner"] = (
-            self._user_info.get("owner")
-            or self._user_info.get("id")
-            or self._user_info.get("userId")
-            or str(self.user_id)
-        )
+        headers["owner"] = self._owner_id()
         url = f"{self._smarthome_base}/api/ipc/liveStream/liveStreamParam"
         return url, headers, json.dumps([self.device_id])
 
@@ -706,31 +720,10 @@ class CameraMixin(_CameraControlsMixin):
         provisions the session (and brings the camera online) and returns AWS KVS
         credentials.  We only need the provisioning side effect - the library
         streams over the proprietary MQTT/SDES path, not AWS KVS - so the returned
-        credentials are ignored.
-
-        The request body is a JSON **array** of device ids (an object body returns
-        HTTP 500) and needs the ``owner`` header (like the wake endpoint).
-        Best-effort: returns True on HTTP 200, never raises.
+        credentials are ignored.  Best-effort: returns True on HTTP 200.
         """
-        import aiohttp
-
         url, headers, body = self._live_stream_param_request()
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url, headers=headers, data=body,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
-                    status = resp.status
-                    data = await resp.json(content_type=None)
-            code = data.get("code") if isinstance(data, dict) else None
-            ok = status == 200 and (code in (None, 0, 200, "0", "200"))
-            _LOGGER.debug("liveStreamParam %s: status=%s code=%s ok=%s",
-                          self.device_id, status, code, ok)
-            return bool(ok)
-        except Exception as exc:
-            _LOGGER.debug("liveStreamParam failed for %s: %s", self.device_id, exc)
-            return False
+        return await self._async_post_ok(url, headers, body, label="liveStreamParam")
 
     async def async_wake_camera(self, retries: int = 2) -> bool:
         """Wake a battery camera on demand via the cloud HTTP low-power endpoint.
@@ -2271,15 +2264,11 @@ class CameraMixin(_CameraControlsMixin):
                 # (camera refused / degraded on a rapid reconnect); a session
                 # that streamed fine and then ended (battery teardown, consumer
                 # gone) is a normal lifecycle event and resets to the base
-                # interval so the next view reconnects promptly.
-                if session.last_media_monotonic > 0.0:
-                    _attempt = 0
-                    _delay = _MIN_DELAY
-                else:
-                    _attempt += 1
-                    _delay = next_backoff(_attempt, base=_MIN_DELAY, cap=_MAX_DELAY)
+                # interval (next_backoff(0) == _MIN_DELAY) so the next view
+                # reconnects promptly.
+                _attempt = 0 if session.last_media_monotonic > 0.0 else _attempt + 1
                 try:
-                    await asyncio.sleep(_delay)
+                    await asyncio.sleep(next_backoff(_attempt, base=_MIN_DELAY, cap=_MAX_DELAY))
                 except asyncio.CancelledError:
                     return
 
@@ -2377,15 +2366,10 @@ class CameraMixin(_CameraControlsMixin):
             if self._streaming_active:
                 # Reset backoff if this session produced frames (a normal drop
                 # after good streaming); escalate with jitter if it never did
-                # (the camera-degradation case).
-                if self._last_frame_time > _open_time:
-                    _attempt = 0
-                    _delay = _MIN_DELAY
-                else:
-                    _attempt += 1
-                    _delay = next_backoff(_attempt, base=_MIN_DELAY, cap=_MAX_DELAY)
+                # (the camera-degradation case). next_backoff(0) == _MIN_DELAY.
+                _attempt = 0 if self._last_frame_time > _open_time else _attempt + 1
                 try:
-                    await asyncio.sleep(_delay)
+                    await asyncio.sleep(next_backoff(_attempt, base=_MIN_DELAY, cap=_MAX_DELAY))
                 except asyncio.CancelledError:
                     return
 
