@@ -11,8 +11,9 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# _SPROP_DIR / sprop helpers live in the camera module after the camera extraction
-import aidot.camera.client as dc
+# _SPROP_DIR + sprop helpers live in aidot.camera.protocol after the split;
+# patch the dir there (the module where the helpers read it).
+import aidot.camera.protocol as _proto
 from aidot.device_client import (
     _extract_param_sets_from_rtp,
     _build_sprop,
@@ -72,7 +73,7 @@ def test_csrc_header_offset_handled():
 
 def test_cache_roundtrip(monkeypatch):
     d = tempfile.mkdtemp()
-    monkeypatch.setattr(dc, "_SPROP_DIR", d)
+    monkeypatch.setattr(_proto, "_SPROP_DIR", d)
     devid = "abc123"
     assert _load_sprop(devid) is None          # nothing cached yet
     _save_sprop(devid, SPROP)
@@ -80,7 +81,7 @@ def test_cache_roundtrip(monkeypatch):
 
 
 def test_load_missing_is_none(monkeypatch):
-    monkeypatch.setattr(dc, "_SPROP_DIR", "/nonexistent/path/xyz")
+    monkeypatch.setattr(_proto, "_SPROP_DIR", "/nonexistent/path/xyz")
     assert _load_sprop("whatever") is None      # fail-safe, no raise
 
 
