@@ -61,6 +61,7 @@ async def _stream_one(client, device, hold: float, out_dir: str) -> bool:
         os.remove(out)
     frames = {"n": 0}
     t0 = time.time()
+    session = None
     print(f"\n>>> {name!r} ({model}) opening stream...")
     try:
         session = await dc.async_open_webrtc_stream(
@@ -73,6 +74,7 @@ async def _stream_one(client, device, hold: float, out_dir: str) -> bool:
               f"{type(session).__name__}; holding {hold:.0f}s...")
         await asyncio.sleep(hold)
         await _stop(session)
+        session = None
         await asyncio.sleep(1.0)
         size = os.path.getsize(out) if os.path.exists(out) else 0
         ok = frames["n"] > 0 or size > 20000
@@ -82,6 +84,14 @@ async def _stream_one(client, device, hold: float, out_dir: str) -> bool:
     except Exception as exc:
         print(f"    {name!r}: ERROR {type(exc).__name__}: {exc}")
         return False
+    finally:
+        # Always tear the session down so a failure mid-stream never leaves a
+        # hanging MQTT/peer connection (the cloud rate-limits stale sessions).
+        if session is not None:
+            try:
+                await _stop(session)
+            except Exception:
+                pass
 
 
 async def _run(args) -> int:
@@ -93,33 +103,36 @@ async def _run(args) -> int:
             username=creds["username"],
             password=creds["password"],
         )
-        await client.async_post_login()
-        devices = (await client.async_get_all_device())[CONF_DEVICE_LIST]
-        cameras = [d for d in devices if _is_camera(client.get_device_client(d))]
-        print(f"found {len(cameras)} camera(s) of {len(devices)} device(s)")
-        for cam in cameras:
-            dc = client.get_device_client(cam)
-            model = getattr(getattr(dc, "info", None), "model_id", "") or ""
-            print(f"  - {cam.get(CONF_NAME)!r:32} {model}")
+        try:
+            await client.async_post_login()
+            devices = (await client.async_get_all_device())[CONF_DEVICE_LIST]
+            cameras = [d for d in devices if _is_camera(client.get_device_client(d))]
+            print(f"found {len(cameras)} camera(s) of {len(devices)} device(s)")
+            for cam in cameras:
+                dc = client.get_device_client(cam)
+                model = getattr(getattr(dc, "info", None), "model_id", "") or ""
+                print(f"  - {cam.get(CONF_NAME)!r:32} {model}")
 
-        if args.list:
+            if args.list:
+                return 0
+
+            selected = cameras
+            if args.name:
+                wanted = [n.lower() for n in args.name]
+                selected = [c for c in cameras
+                            if any(w in (c.get(CONF_NAME) or "").lower() for w in wanted)]
+            print(f"\nstreaming {len(selected)} camera(s) sequentially")
+            results = [(c.get(CONF_NAME), await _stream_one(client, c, args.hold, args.out_dir))
+                       for c in selected]
+
+            print("\n==== SUMMARY ====")
+            for name, ok in results:
+                print(f"  {'PASS' if ok else 'FAIL'}  {name}")
+            return 0 if results and all(ok for _, ok in results) else 1
+        finally:
+            # Always log out / close MQTT + device clients, even on error, so we
+            # never leave a hanging cloud connection behind.
             await client.async_cleanup()
-            return 0
-
-        selected = cameras
-        if args.name:
-            wanted = [n.lower() for n in args.name]
-            selected = [c for c in cameras
-                        if any(w in (c.get(CONF_NAME) or "").lower() for w in wanted)]
-        print(f"\nstreaming {len(selected)} camera(s) sequentially")
-        results = [(c.get(CONF_NAME), await _stream_one(client, c, args.hold, args.out_dir))
-                   for c in selected]
-
-        print("\n==== SUMMARY ====")
-        for name, ok in results:
-            print(f"  {'PASS' if ok else 'FAIL'}  {name}")
-        await client.async_cleanup()
-        return 0 if results and all(ok for _, ok in results) else 1
 
 
 def main() -> int:
