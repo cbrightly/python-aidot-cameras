@@ -396,6 +396,39 @@ async def _webrtc_consume_video(track: Any, on_frame: Callable) -> None:
             break
 
 
+def next_backoff(
+    attempt: int,
+    *,
+    base: float,
+    cap: float,
+    rand: Optional[Callable[[], float]] = None,
+) -> float:
+    """Jittered exponential backoff (AWS-style) with a hard floor at ``base``.
+
+    Returns the retry delay for 0-based ``attempt``: an exponential ceiling
+    ``base * 2**attempt`` (capped at ``cap``), with the actual delay drawn
+    uniformly in ``[base, ceiling]``. The random spread de-synchronizes
+    concurrent reconnects so a fleet of cameras (or repeated failures of one)
+    recovering at the same moment doesn't stampede the cloud / MQTT broker into
+    a reconnect storm or rate-limit -- plain ``delay *= 2`` keeps every retrier
+    in lockstep, jitter breaks the lockstep while preserving the same average
+    growth.
+
+    ``attempt`` 0 always returns exactly ``base`` (preserving the loops'
+    existing minimum spacing). ``rand`` defaults to ``random.random`` and is
+    injectable so the policy is unit-testable without randomness.
+    """
+    if rand is None:
+        rand = random.random
+    # Clamp the exponent: a long-lived failing camera can drive ``attempt`` high,
+    # and 2**attempt overflows float64 around attempt~1024. The ceiling saturates
+    # at ``cap`` long before that, so 30 doublings is always enough headroom.
+    ceiling = min(cap, base * (2 ** min(max(attempt, 0), 30)))
+    if ceiling <= base:
+        return base
+    return base + rand() * (ceiling - base)
+
+
 def _write_text_file(path: str, text: str) -> None:
     """Write ``text`` to ``path`` synchronously.
 
