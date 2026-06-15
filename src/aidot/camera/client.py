@@ -55,6 +55,9 @@ from .protocol import (  # split into protocol.py; re-imported for use + back-co
     _save_sprop,
     _inject_sprop,
     _sdes_serve_port,
+    _ServeRelay,
+    _rewrite_serve_port,
+    _grab_free_port,
     _tcp_table_has_established_on_port,
     _idle_release_due,
     _dtls_av_mux_run,
@@ -502,6 +505,9 @@ class CameraMixin(_CameraControlsMixin):
         # camera.stream_source() can wait and hand HA a ready URL (avoids HA's
         # ~40s connection-refused retry gap on cold start).
         self._serve_ready: "asyncio.Event" = asyncio.Event()
+        # Cold-start serve-port relay (holds the public port connectable through
+        # the handshake so an eager go2rtc pull waits instead of being refused).
+        self._serve_relay: "Optional[_ServeRelay]" = None
         # Motion/event polling (cloud event list). NOTE: the camera does NOT push motion
         # to a passive MQTT subscriber - alarmType is only emitted during an active live
         # view (decompiled NewLiveFragment) - so real-time-ish motion for HA comes from
@@ -1939,6 +1945,7 @@ class CameraMixin(_CameraControlsMixin):
         sdes_audio: Optional[bool] = None,
         go2rtc_url: Optional[str] = None,
         live_stream_param: Optional[bool] = None,
+        serve_relay: Optional[bool] = None,
     ) -> None:
         """Start a persistent stream that keeps the camera session alive.
 
@@ -1961,6 +1968,12 @@ class CameraMixin(_CameraControlsMixin):
         ``AIDOT_LIVESTREAM_PARAM`` env var, so an integration on HA OS (no env vars)
         can still disable it per camera.
 
+        ``serve_relay`` toggles the cold-start serve-port relay (holds the public
+        serve port connectable through the WebRTC handshake so an eager go2rtc
+        pull waits instead of getting connection-refused).  Overrides the
+        ``AIDOT_SERVE_RELAY`` env var (default on); set False to serve ffmpeg
+        directly on the public port (the pre-0.7.18 behaviour).
+
         Safe to call multiple times - does nothing if already running.
         """
         if fast_connect is not None:
@@ -1969,6 +1982,8 @@ class CameraMixin(_CameraControlsMixin):
             self._sdes_audio_opt = sdes_audio
         if live_stream_param is not None:
             self._live_stream_param_opt = live_stream_param
+        if serve_relay is not None:
+            self._serve_relay_opt = serve_relay
         if self._stream_task is not None and not self._stream_task.done():
             return
         self._keepalive_rtsp_url = rtsp_push_url
@@ -2154,6 +2169,21 @@ class CameraMixin(_CameraControlsMixin):
         return found if read_any else None
 
     async def _sdes_keepalive_loop(self) -> None:
+        """Keep the cold-start serve relay alive around the SDES keepalive loop.
+
+        The relay holds the public serve port connectable through every (re)open
+        so an eager go2rtc pull waits instead of getting connection-refused while
+        the SDES handshake runs (the same race fixed for the DTLS serve)."""
+        self._serve_relay = self._maybe_start_serve_relay(self._keepalive_rtsp_url)
+        try:
+            await self._sdes_keepalive_loop_inner()
+        finally:
+            _relay = self._serve_relay
+            self._serve_relay = None
+            if _relay is not None:
+                _relay.close()
+
+    async def _sdes_keepalive_loop_inner(self) -> None:
         """Background task: keep SDES stream alive; push to go2rtc via RTSP."""
         _MIN_DELAY = 10.0
         _MAX_DELAY = 300.0
@@ -2164,6 +2194,10 @@ class CameraMixin(_CameraControlsMixin):
         _pacer = ReconnectPacer(_MIN_DELAY, _MAX_DELAY)
 
         while self._streaming_active:
+            if self._serve_relay is not None:
+                # Clear any stale backend from a prior session; the open below
+                # points the relay at this session's fresh internal ffmpeg port.
+                self._serve_relay.set_backend(None)
             try:
                 session = await self.async_open_webrtc_stream(
                     rtsp_push_url=self._keepalive_rtsp_url,
@@ -2446,6 +2480,38 @@ class CameraMixin(_CameraControlsMixin):
                 got_a = self._install_encoded_tap(_r, aq, False)
         return got_v
 
+    def _maybe_start_serve_relay(self, serve_url: Optional[str]) -> "Optional[_ServeRelay]":
+        """Hold the public serve port via a _ServeRelay so an eager go2rtc pull
+        connects-and-waits instead of hitting ECONNREFUSED during the ~16-25s
+        cold handshake (ffmpeg only binds its -listen socket after input frames).
+
+        Returns the started relay, or None when disabled / not an http serve /
+        the bind fails - in which case the caller serves ffmpeg directly on the
+        public port (the pre-relay behaviour, so a bind clash never breaks
+        streaming)."""
+        if not (serve_url and serve_url.startswith("http")):
+            return None
+        opt = getattr(self, "_serve_relay_opt", None)
+        if opt is None:
+            opt = os.environ.get("AIDOT_SERVE_RELAY", "1") != "0"
+        if not opt:
+            return None
+        port = _sdes_serve_port(serve_url)
+        if port is None:
+            return None
+        relay = _ServeRelay(port)
+        try:
+            relay.start()
+        except OSError as exc:
+            _LOGGER.warning(
+                "serve relay: bind :%s failed (%s) - serving ffmpeg directly",
+                port, exc,
+            )
+            return None
+        _LOGGER.debug(
+            "serve relay: holding public port :%s for %s", port, self.device_id)
+        return relay
+
     async def _dtls_serve_loop(self) -> None:
         """Acquire a concurrent-stream slot, then run the serve loop.
 
@@ -2460,9 +2526,14 @@ class CameraMixin(_CameraControlsMixin):
                 self.device_id,
             )
         await slots.acquire()
+        self._serve_relay = self._maybe_start_serve_relay(self._keepalive_rtsp_url)
         try:
             await self._dtls_serve_loop_inner()
         finally:
+            _relay = self._serve_relay
+            self._serve_relay = None
+            if _relay is not None:
+                _relay.close()
             slots.release()
 
     async def _dtls_serve_loop_inner(self) -> None:
@@ -2590,12 +2661,24 @@ class CameraMixin(_CameraControlsMixin):
                         except _queue.Empty:
                             pass
                     await self._send_video_pli(pc)  # request a clean keyframe
+                    # With the relay holding the public port, ffmpeg listens on a
+                    # fresh internal port each cycle and the relay splices to it;
+                    # without it, ffmpeg owns the public port directly (old path).
+                    _relay = self._serve_relay
+                    if _relay is not None:
+                        _ff_port = _grab_free_port()
+                        _ff_url = _rewrite_serve_port(serve_url, _ff_port)
+                    else:
+                        _ff_port = None
+                        _ff_url = serve_url
                     rfd, wfd = os.pipe()
-                    proc = await self._spawn_dtls_serve_ffmpeg(serve_url, rfd)
+                    proc = await self._spawn_dtls_serve_ffmpeg(_ff_url, rfd)
                     os.close(rfd)
                     if proc is None:
                         os.close(wfd)
                         break
+                    if _relay is not None:
+                        _relay.set_backend(_ff_port)
                     wfile = os.fdopen(wfd, "wb", buffering=0)
                     progress = [loop.time()]
                     stop_flag = _threading.Event()
@@ -2652,6 +2735,8 @@ class CameraMixin(_CameraControlsMixin):
                     wfile = None
                     mux_thread.join(timeout=2.0)
                     mux_thread = stop_flag = None
+                    if _relay is not None:
+                        _relay.set_backend(None)  # no backend until next ffmpeg
                     _terminate_proc(proc)
                     proc = None
                     if idle_release:
@@ -9422,6 +9507,16 @@ class CameraMixin(_CameraControlsMixin):
             )
 
         if rtsp_push_url and rtsp_push_url.startswith("http"):
+            # Cold-start relay: when the keepalive loop is holding the public
+            # serve port, point ffmpeg at a fresh internal port and let the relay
+            # splice the public port to it - so an early go2rtc pull waits through
+            # this handshake instead of being refused.  set_backend retries the
+            # dial until ffmpeg's -listen socket binds (only after input frames).
+            _relay = getattr(self, "_serve_relay", None)
+            if _relay is not None:
+                _ff_port = _grab_free_port()
+                rtsp_push_url = _rewrite_serve_port(rtsp_push_url, _ff_port)
+                _relay.set_backend(_ff_port)
             # PULL model: SERVE the decrypted stream over an HTTP-listen socket so
             # go2rtc / HA's stream integration pull it the standard way
             # (streams.add) - no go2rtc pre-registration needed.  ffmpeg -listen 1
