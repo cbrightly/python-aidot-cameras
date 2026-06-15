@@ -4,6 +4,24 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.18]
+
+### Fixed
+- **Cold-start blank video: the first view of an idle camera (or the first view
+  after an HA restart) could fail to load.** go2rtc pulls the library's local
+  `ffmpeg -f mpegts -listen 1` socket before ffmpeg has bound it — ffmpeg only
+  opens its `-listen` output after probing input, which needs the ~16–25 s WebRTC
+  handshake to deliver the first frames. go2rtc hit `ECONNREFUSED`, retried for
+  ~200 ms, then gave up, so the card stayed blank until a second attempt. The
+  library now holds the public serve port for the whole session via a small relay
+  (`_ServeRelay`) and proxies to ffmpeg on an internal port: an early pull
+  connects and waits instead of being refused, and the public listener survives
+  ffmpeg restarts (go2rtc reconnects). Wired into both serve paths (DTLS + SDES).
+  Default on; disable with `AIDOT_SERVE_RELAY=0` or `start_keepalive(
+  serve_relay=False)`. Falls back to serving ffmpeg directly on the public port
+  if the relay bind fails, so a port clash never breaks streaming.
+  Live-validated on an A001513 (SDES) camera. (#50, fixes #49)
+
 ## [0.7.17]
 
 ### Internal
