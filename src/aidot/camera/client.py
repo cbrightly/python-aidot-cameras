@@ -3361,6 +3361,12 @@ class CameraMixin(_CameraControlsMixin):
         camera_ready_ev:  asyncio.Event   = asyncio.Event()  # set when camera is on MQTT
         liveplay_echo_ev: asyncio.Event   = asyncio.Event()  # set when livePlayReq echo arrives
         liveplay_resp_fut: asyncio.Future = loop.create_future()  # set on livePlayResp
+        # Re-armable holder for the livePlayResp future: battery cameras can
+        # reject the first livePlayReq (-50019, "not ready") and need a retry, so
+        # the SDES open swaps in a fresh future per attempt. Starts as the future
+        # above so the DTLS path (which reads liveplay_resp_fut directly) is
+        # unaffected.
+        liveplay_resp_holder = [liveplay_resp_fut]
         camera_reconnect_ev: asyncio.Event = asyncio.Event() # set when camera sends device/connect
         # Mutable flag: set True when setDevAttrNotif delivers sptPreconn:1.
         # Confirmed 2026-05-02: both A000088 and A001064 PTZ report
@@ -3444,10 +3450,21 @@ class CameraMixin(_CameraControlsMixin):
                     or inner.get("devId") == device_id
                     or msg.get("devId") == device_id):
                 loop.call_soon_threadsafe(camera_ready_ev.set)
-            # livePlayResp: explicit camera ack/nack for start-play command.
-            if method == "livePlayResp" and inner.get("devId") == device_id:
-                if not liveplay_resp_fut.done():
-                    loop.call_soon_threadsafe(liveplay_resp_fut.set_result, inner)
+            # livePlayResp: explicit camera ack/nack for start-play command. The
+            # response payload carries NO devId - the camera is identified by the
+            # top-level srcAddr ("<n>.<deviceId>"), so match on that too. Without
+            # this the ack/nack (e.g. a battery camera's -50019 "not ready") is
+            # never delivered and the open proceeds blind into a ~90s ffmpeg
+            # timeout. Resolve the holder's CURRENT future (re-armed on retry).
+            if method == "livePlayResp" and (
+                inner.get("devId") == device_id
+                or (msg.get("srcAddr") or "").endswith(device_id)
+            ):
+                def _set_liveplay_resp(_inner=inner):
+                    _f = liveplay_resp_holder[0]
+                    if _f is not None and not _f.done():
+                        _f.set_result(_inner)
+                loop.call_soon_threadsafe(_set_liveplay_resp)
             # livePlayReq echo: broker/camera confirmed delivery of our livePlayReq.
             # Signal _open_sdes_stream to proceed with webrtcReq.
             if method == "livePlayReq" and inner.get("devId") == device_id:
@@ -3826,6 +3843,24 @@ class CameraMixin(_CameraControlsMixin):
                             " - will fall back to DTLS if SDES handshake fails"
                         )
 
+            # Battery cameras ACK the wake on MQTT (camera_ready_ev) well before
+            # their media pipeline finishes booting from deep sleep.  Starting
+            # signaling immediately makes the camera reject livePlayReq with
+            # -50019 and skip ICE entirely -> zero media (ffmpeg then times out
+            # ~90s later).  Settle after the wake so the pipeline is up before
+            # getIceConfig/SDP/webrtcReq/livePlay.  Validated on L2_170 (A001513):
+            # wake + ~8s settle -> decrypted RTP flows; without it, persistent
+            # -50019.  Tunable / disable via AIDOT_BATTERY_STREAM_SETTLE_S.
+            if self.is_battery_camera:
+                _batt_settle = float(
+                    os.environ.get("AIDOT_BATTERY_STREAM_SETTLE_S", "8"))
+                if _batt_settle > 0:
+                    _status(
+                        f"Battery camera awake - settling {_batt_settle:.0f}s "
+                        "for media pipeline before signaling"
+                    )
+                    await asyncio.sleep(_batt_settle)
+
         # ------------------------------------------------------------------ #
         # powerType / p2pCache - source: IpcServiceImpl.java:B()
         # B() returns 2 for battery/low-power models (A001513, A001108, A001360)
@@ -3966,6 +4001,7 @@ class CameraMixin(_CameraControlsMixin):
                     mqtt_fut=mqtt_fut,
                     liveplay_echo_ev=liveplay_echo_ev,
                     liveplay_resp_fut=liveplay_resp_fut,
+                    liveplay_resp_holder=liveplay_resp_holder,
                     numeric_uid_raw=_numeric_uid_raw,
                     dtls_fallback_ok=_dtls_fallback_ok,
                     second_answer_fut=second_answer_fut,
@@ -6213,6 +6249,7 @@ class CameraMixin(_CameraControlsMixin):
         mqtt_fut=None,
         liveplay_echo_ev=None,
         liveplay_resp_fut=None,
+        liveplay_resp_holder=None,
         numeric_uid_raw: Optional[str] = None,
         dtls_fallback_ok: bool = True,
         second_answer_fut=None,
@@ -6738,29 +6775,34 @@ class CameraMixin(_CameraControlsMixin):
 
         # Send livePlayReq before the SDP offer to arm the camera's stream.
         import random as _random
-        _live_req_sdes = json.dumps({
-            "method":  "livePlayReq",
-            "service": "IPC",
-            "devId":   device_id,
-            "srcAddr": f"0.{user_id}",
-            "seq":     f"ap{_random.randint(1000000, 9999999)}",
-            "tst":     int(time.time() * 1000),
-            **( {"userId": numeric_uid_raw} if numeric_uid_raw is not None else {} ),
-            "payload": {
-                "peerid":  peer_id,
+
+        def _build_live_req() -> str:
+            # Rebuilt per (re)send so each carries a fresh seq/tst/dseq - battery
+            # cameras may need the livePlayReq re-issued after they finish waking.
+            return json.dumps({
+                "method":  "livePlayReq",
+                "service": "IPC",
                 "devId":   device_id,
-                # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
-                # to the target deviceId for livePlayReq.
-                "dstAddr": device_id,
-                # App payload compatibility fields (decompiled live-play model).
-                "livePlay": 1,
-                "powerType": _live_power_type,
-                "p2pCache": _live_p2p_cache,
-                "dseq": self._next_dseq(),
-            },
-        })
+                "srcAddr": f"0.{user_id}",
+                "seq":     f"ap{_random.randint(1000000, 9999999)}",
+                "tst":     int(time.time() * 1000),
+                **( {"userId": numeric_uid_raw} if numeric_uid_raw is not None else {} ),
+                "payload": {
+                    "peerid":  peer_id,
+                    "devId":   device_id,
+                    # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
+                    # to the target deviceId for livePlayReq.
+                    "dstAddr": device_id,
+                    # App payload compatibility fields (decompiled live-play model).
+                    "livePlay": 1,
+                    "powerType": _live_power_type,
+                    "p2pCache": _live_p2p_cache,
+                    "dseq": self._next_dseq(),
+                },
+            })
+
         _live_play_topic_sdes = f"iot/v1/s/{user_id}/IPC/livePlayReq"
-        outgoing_q.put_nowait((_live_play_topic_sdes, _live_req_sdes))
+        outgoing_q.put_nowait((_live_play_topic_sdes, _build_live_req()))
         _status(f"livePlayReq sent (SDES)  peerid={peer_id}")
         import asyncio as _asyncio
         # Wait for the livePlayReq echo from the broker/camera before sending
@@ -6772,17 +6814,22 @@ class CameraMixin(_CameraControlsMixin):
             _status("livePlayReq echo received - sending webrtcReq, ICE, then launching ffmpeg")
         except TimeoutError:
             _status("no livePlayReq echo in 5s - sending webrtcReq, ICE, then launching ffmpeg anyway")
-        # If camera provided explicit livePlayResp failure, abort before SDP/ICE.
+        # livePlayResp on the FIRST livePlayReq is informational only - do NOT
+        # treat -50019 ("not ready") as fatal.  The official app (KVSWebRTCChannel
+        # $5.onCreateSuccess) sends livePlayReq TWICE: once on enter (this one,
+        # which a sleeping battery camera answers -50019), then AGAIN immediately
+        # before sendSdpOffer/webrtcReq - and that second, offer-adjacent send is
+        # what actually arms the stream.  We mirror that below (re-send right
+        # before webrtcReq), so here we just log the first response and proceed.
+        _lp_holder = liveplay_resp_holder or [liveplay_resp_fut]
         try:
             _lp_resp_sdes = await _asyncio.wait_for(
-                _asyncio.shield(liveplay_resp_fut), timeout=1.0
+                _asyncio.shield(_lp_holder[0]), timeout=1.0
             )
-            _lp_code_sdes = int(_lp_resp_sdes.get("code", 200))
-            _lp_on_sdes = int(_lp_resp_sdes.get("livePlay", 1))
-            if _lp_code_sdes not in (0, 200) or _lp_on_sdes == 0:
-                raise RuntimeError(
-                    f"livePlay rejected by camera (code={_lp_code_sdes}, livePlay={_lp_on_sdes})"
-                )
+            _status(
+                f"livePlayResp #1 code={_lp_resp_sdes.get('code')} "
+                "(informational; re-sending livePlayReq before webrtcReq)"
+            )
         except TimeoutError:
             pass
 
@@ -6945,6 +6992,13 @@ class CameraMixin(_CameraControlsMixin):
                 "IceServerList": _sdes_ice_server_list,
             },
         })
+        # App parity (KVSWebRTCChannel$5.onCreateSuccess): re-send livePlayReq
+        # immediately before the offer.  The app issues livePlay a second time,
+        # back-to-back with sendSdpOffer, and this offer-adjacent send is what
+        # arms the camera's media pipeline - a single early livePlay leaves
+        # battery cameras stuck answering -50019 with no ICE / no media.
+        outgoing_q.put_nowait((_live_play_topic_sdes, _build_live_req()))
+        _status(f"livePlayReq re-sent before webrtcReq (app parity)  peerid={peer_id}")
         outgoing_q.put_nowait((webrtc_req_topic, _webrtc_req_sdes_payload))
         _status(f"webrtcReq sent (SDES)  peerid={peer_id}")
 
