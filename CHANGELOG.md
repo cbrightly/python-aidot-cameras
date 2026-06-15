@@ -4,6 +4,22 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.13]
+
+### Fixed
+- **SDES H.265 streaming recorded 0-byte video** (#39): SDES cameras stream H.264
+  (pt=96) *or* H.265 (pt=97), varying per session, but the generated SDP listed
+  both (`m=video ... 96 97`) — so ffmpeg bound its depacketizer to the first
+  payload type (H.264) and silently dropped the camera's H.265 packets. The
+  bridge now records the camera's actual video payload type on the first video
+  RTP packet and narrows the ffmpeg SDP to that single codec before launch
+  (falling back to the dual-codec SDP if no video is observed). This fixes the
+  ffmpeg-fallback path for installs without go2rtc; go2rtc handles H.265 natively
+  on the preferred path (0.7.12, #37).
+
+> Validated live against a real SDES (A001513) camera: ~490 KB recorded on the
+> first attempt with the camera answering H.265.
+
 ## [0.7.12]
 
 ### Added
