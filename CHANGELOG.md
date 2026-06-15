@@ -4,6 +4,21 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.14]
+
+### Changed
+- **Jittered reconnect backoff** (`next_backoff` in `camera/protocol.py`): the SDES
+  keepalive, JPEG streaming, and DTLS serve loops now use equal-jitter exponential
+  backoff (with a hard floor at each loop's existing minimum) instead of a lockstep
+  `delay *= 2`. Randomized spread stops a degraded camera — or a fleet reconnecting
+  at once — from synchronizing into reconnect storms / cloud rate-limiting. The
+  loops also escalate backoff only when a session opens but never delivers media
+  (the camera-degradation case) and reset after a session that streamed; the
+  decrypted-RTP liveness watchdog still drives *when* to restart. (#41)
+
+> 7 new unit tests (`tests/test_backoff.py`). Validated live: all three DTLS
+> cameras and a mains SDES camera re-establish through the rewired loops.
+
 ## [0.7.13]
 
 ### Fixed
