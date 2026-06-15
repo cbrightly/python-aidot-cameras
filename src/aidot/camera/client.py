@@ -7180,6 +7180,7 @@ class CameraMixin(_CameraControlsMixin):
             },
         })
         outgoing_q.put_nowait((webrtc_req_topic, _webrtc_req_sdes_payload))
+        self._cold_phase("webrtcReq (sdes)")
         _status(f"webrtcReq sent (SDES)  peerid={peer_id}")
 
         # --- Acknowledge camera's webrtcReq echo with webrtcResp ------------- #
