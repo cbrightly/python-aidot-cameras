@@ -678,6 +678,60 @@ class CameraMixin(_CameraControlsMixin):
             _LOGGER.debug("http wake failed for %s: %s", self.device_id, exc)
             return False
 
+    def _live_stream_param_request(self):
+        """Build ``(url, headers, body)`` for the liveStreamParam provision call.
+
+        Pure/deterministic - unit-tested in tests/test_live_stream_param.py.  The
+        body MUST be a JSON array of device ids (object body -> HTTP 500) and the
+        ``owner`` header is required (as on the wake endpoint).
+        """
+        headers = self._leedarson_headers()
+        headers["owner"] = (
+            self._user_info.get("owner")
+            or self._user_info.get("id")
+            or self._user_info.get("userId")
+            or str(self.user_id)
+        )
+        url = f"{self._smarthome_base}/api/ipc/liveStream/liveStreamParam"
+        return url, headers, json.dumps([self.device_id])
+
+    async def _async_fetch_live_stream_param(self) -> bool:
+        """Provision the camera's live-stream session via the cloud (app parity).
+
+        Battery cameras waking from deep sleep reject the MQTT ``livePlayReq``
+        with code ``-50019`` ("not ready") and then never run ICE - so no media
+        ever flows - unless the app's pre-connect HTTP call has armed the session
+        first.  The official app (``KVSPreConnectStrategy.fetchKvsParams``) POSTs
+        the device id to ``/api/ipc/liveStream/liveStreamParam``; the cloud
+        provisions the session (and brings the camera online) and returns AWS KVS
+        credentials.  We only need the provisioning side effect - the library
+        streams over the proprietary MQTT/SDES path, not AWS KVS - so the returned
+        credentials are ignored.
+
+        The request body is a JSON **array** of device ids (an object body returns
+        HTTP 500) and needs the ``owner`` header (like the wake endpoint).
+        Best-effort: returns True on HTTP 200, never raises.
+        """
+        import aiohttp
+
+        url, headers, body = self._live_stream_param_request()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, headers=headers, data=body,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    status = resp.status
+                    data = await resp.json(content_type=None)
+            code = data.get("code") if isinstance(data, dict) else None
+            ok = status == 200 and (code in (None, 0, 200, "0", "200"))
+            _LOGGER.debug("liveStreamParam %s: status=%s code=%s ok=%s",
+                          self.device_id, status, code, ok)
+            return bool(ok)
+        except Exception as exc:
+            _LOGGER.debug("liveStreamParam failed for %s: %s", self.device_id, exc)
+            return False
+
     async def async_wake_camera(self, retries: int = 2) -> bool:
         """Wake a battery camera on demand via the cloud HTTP low-power endpoint.
 
@@ -3107,6 +3161,21 @@ class CameraMixin(_CameraControlsMixin):
         import queue as _q_mod
 
         use_sdes = force_sdes if force_sdes is not None else self.is_sdes_camera
+
+        # Battery cameras must have their live-stream session provisioned by the
+        # cloud BEFORE MQTT signaling, or the camera rejects livePlayReq with
+        # -50019 ("not ready") and never runs ICE -> no media.  App parity:
+        # KVSPreConnectStrategy.fetchKvsParams calls liveStreamParam first.  We
+        # only need the provisioning side effect (we stream over MQTT/SDES, not
+        # AWS KVS).  Mains cameras are always stream-ready, so skip them.  Disable
+        # via AIDOT_LIVESTREAM_PARAM=0.  Validated live on L2_170 (A001513): with
+        # this call livePlay succeeds and decrypted RTP flows; without it,
+        # persistent -50019.
+        if (self.is_battery_camera
+                and os.environ.get("AIDOT_LIVESTREAM_PARAM", "1") != "0"):
+            _lsp_ok = await self._async_fetch_live_stream_param()
+            _LOGGER.debug("camera %s: liveStreamParam provisioned ok=%s",
+                          self.device_id, _lsp_ok)
 
         # AIDOT_FAST_CONNECT (default off): LAN-direct mode.  Both transports stall
         # the offer on a TURN relay allocation to the cloud TURN server before ICE
