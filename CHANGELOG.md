@@ -4,6 +4,20 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.17]
+
+### Internal
+- Consolidated reconnect pacing behind a single `ReconnectPacer` (in
+  `camera/protocol.py`) wired into all three reconnect loops (SDES keepalive,
+  JPEG streaming, DTLS serve), replacing per-loop attempt-counter bookkeeping
+  with one escalate/reset policy. The open-fail and end-of-session delays are
+  unchanged; this is a behavior-preserving refactor with unit coverage for the
+  pacer's escalate/reset transitions.
+- Deduplicated the cloud IPC POST path into `_async_post_ok()` and the owner-id
+  fallback into `_owner_id()`, shared by the wake and `liveStreamParam` calls.
+- Promoted the `liveStreamParam` gate to a `live_stream_param` keyword on
+  `start_keepalive` (still falling back to `AIDOT_LIVESTREAM_PARAM`). (#47)
+
 ## [0.7.16]
 
 ### Documentation
