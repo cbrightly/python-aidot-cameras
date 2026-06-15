@@ -4,6 +4,15 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.20]
+
+### Fixed
+- **Cold-start instrumentation now covers the SDES `webrtcReq`.** The SDES open
+  has its own `webrtcReq` publish point that the 0.7.19 markers missed, so SDES
+  cameras logged `first-media`/`serving` but not `webrtcReq`. Added
+  `cold-start[<device>] webrtcReq (sdes) +<ms>` so the SDES cold-start timeline
+  is complete.
+
 ## [0.7.19]
 
 ### Added
