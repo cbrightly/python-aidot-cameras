@@ -4,6 +4,25 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.19]
+
+### Added
+- **Cold-start instrumentation.** `_cold_phase()` logs greppable
+  `cold-start[<device>] <phase> +<ms>` markers (webrtcReq → first-media →
+  serving) on both serve paths, so a cold connect's timeline is measurable
+  without a debugger. Best-effort: never raises, no-op when no open is in flight.
+- **Warm-hold option.** `start_keepalive(stream_idle_s=...)` overrides
+  `AIDOT_STREAM_IDLE_S` (default 120 s); `<= 0` keeps the warm WebRTC session
+  forever so re-views are instant — intended for mains cameras (it holds a
+  concurrent-stream slot + continuous decrypt for the camera's lifetime, so stay
+  within `AIDOT_MAX_CONCURRENT_STREAMS`, default 3). Default behaviour unchanged.
+
+### Changed
+- **Denser SDES startup PLI burst** so the first decodable keyframe arrives
+  sooner on a cold open: keyframe requests now ramp 0 / 1.5 / 3.5 / 6.5 s then
+  the same 30 s safety PLI (was 3 PLIs at a flat 5 s → first IDR up to ~10 s).
+  Tunable/revertable via `AIDOT_SDES_PLI_GAPS`. (#52)
+
 ## [0.7.18]
 
 ### Fixed
