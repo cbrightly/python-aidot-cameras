@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from aidot.camera.protocol import next_backoff
+from aidot.camera.protocol import ReconnectPacer, next_backoff
 
 _BASE = 10.0
 _CAP = 300.0
@@ -67,6 +67,46 @@ def test_large_attempt_does_not_overflow():
 
 def test_negative_attempt_treated_as_zero():
     assert next_backoff(-3, base=_BASE, cap=_CAP, rand=_lo) == _BASE
+
+
+# --- ReconnectPacer: the escalate/reset policy shared by the reconnect loops --- #
+
+def test_pacer_first_fail_is_base_then_escalates():
+    # fail_delay uses the current attempt then increments: first failure == base,
+    # subsequent failures climb the ceiling (rand=_hi gives the ceiling).
+    p = ReconnectPacer(_BASE, _CAP, rand=_hi)
+    assert p.fail_delay() == _BASE          # attempt 0
+    assert p.fail_delay() == 2 * _BASE      # attempt 1 ceiling
+    assert p.fail_delay() == 4 * _BASE      # attempt 2 ceiling
+
+
+def test_pacer_session_end_healthy_resets_to_base():
+    p = ReconnectPacer(_BASE, _CAP, rand=_hi)
+    p.fail_delay(); p.fail_delay()          # climb to attempt 2
+    assert p.session_end_delay(healthy=True) == _BASE   # reset
+    assert p.session_end_delay(healthy=True) == _BASE   # stays at base
+
+
+def test_pacer_session_end_unhealthy_escalates_then_resets():
+    # session_end escalates first, then computes: from attempt 0, no-media -> attempt 1.
+    p = ReconnectPacer(_BASE, _CAP, rand=_hi)
+    assert p.session_end_delay(healthy=False) == 2 * _BASE   # attempt 1 ceiling
+    assert p.session_end_delay(healthy=False) == 4 * _BASE   # attempt 2 ceiling
+    assert p.session_end_delay(healthy=True) == _BASE        # healthy resets
+
+
+def test_pacer_reset_clears_failures():
+    p = ReconnectPacer(_BASE, _CAP, rand=_hi)
+    p.fail_delay(); p.fail_delay(); p.fail_delay()
+    p.reset()
+    assert p.fail_delay() == _BASE          # back to attempt 0
+
+
+def test_pacer_delays_within_bounds_real_rng():
+    p = ReconnectPacer(_BASE, _CAP)
+    for _ in range(20):
+        d = p.fail_delay()
+        assert _BASE <= d <= _CAP
 
 
 if __name__ == "__main__":
