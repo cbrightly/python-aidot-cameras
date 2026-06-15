@@ -493,7 +493,10 @@ class CameraMixin(_CameraControlsMixin):
         self._stream_session: Optional[Any] = None
         self._stream_task: Optional["asyncio.Task[None]"] = None
         self._last_frame_time: float = 0.0
-        self._keepalive_rtsp_url: Optional[str] = None  # RTSP push URL for go2rtc
+        self._keepalive_rtsp_url: Optional[str] = None  # local serve URL (go2rtc pulls)
+        self._go2rtc_url: Optional[str] = None           # go2rtc API base (prefer-go2rtc)
+        self._go2rtc_pull_url: Optional[str] = None      # go2rtc pull URL once registered
+        self._go2rtc_task: "Optional[asyncio.Task[None]]" = None
         # Set by the DTLS serve loop once ffmpeg is bound + serving, so
         # camera.stream_source() can wait and hand HA a ready URL (avoids HA's
         # ~40s connection-refused retry gap on cold start).
@@ -1782,6 +1785,14 @@ class CameraMixin(_CameraControlsMixin):
         """Stop the persistent background WebRTC stream."""
         self._streaming_active = False
         self._serve_ready.clear()
+        g_task, self._go2rtc_task = self._go2rtc_task, None
+        if g_task is not None and not g_task.done():
+            g_task.cancel()
+            try:
+                await g_task
+            except (asyncio.CancelledError, Exception):
+                _LOGGER.debug("camera %s: swallowed exception", 'async_stop_streaming', exc_info=True)
+        await self._deregister_go2rtc()
         session, self._stream_session = self._stream_session, None
         if session is not None:
             try:
@@ -1878,6 +1889,7 @@ class CameraMixin(_CameraControlsMixin):
         rtsp_push_url: Optional[str] = None,
         fast_connect: Optional[bool] = None,
         sdes_audio: Optional[bool] = None,
+        go2rtc_url: Optional[str] = None,
     ) -> None:
         """Start a persistent stream that keeps the camera session alive.
 
@@ -1904,6 +1916,7 @@ class CameraMixin(_CameraControlsMixin):
         if self._stream_task is not None and not self._stream_task.done():
             return
         self._keepalive_rtsp_url = rtsp_push_url
+        self._go2rtc_url = go2rtc_url
         self._streaming_active = True
         if self.is_sdes_camera:
             self._stream_task = asyncio.ensure_future(self._sdes_keepalive_loop())
@@ -1911,6 +1924,11 @@ class CameraMixin(_CameraControlsMixin):
             self._stream_task = asyncio.ensure_future(self._dtls_serve_loop())
         else:
             self._stream_task = asyncio.ensure_future(self._streaming_loop())
+        # Prefer-go2rtc: if a go2rtc server is configured, register the local
+        # serve with it once ready and expose its pull URL (ffmpeg fallback
+        # otherwise). Opt-in: with no go2rtc_url, behaviour is unchanged.
+        if go2rtc_url:
+            self._go2rtc_task = asyncio.ensure_future(self._register_with_go2rtc())
 
     @property
     def stream_rtsp_url(self) -> Optional[str]:
@@ -1920,9 +1938,56 @@ class CameraMixin(_CameraControlsMixin):
         ``rtsp://HOST:PORT/NAME``, go2rtc makes the stream available at the same
         address for HA's stream integration to pull.
         """
-        if self._streaming_active and self._keepalive_rtsp_url:
-            return self._keepalive_rtsp_url
+        if self._streaming_active:
+            # Prefer the go2rtc pull URL (low-latency WebRTC / native codec)
+            # when registered; else the direct local serve URL (ffmpeg fallback,
+            # e.g. HA built-in HLS).
+            if self._go2rtc_pull_url:
+                return self._go2rtc_pull_url
+            if self._keepalive_rtsp_url:
+                return self._keepalive_rtsp_url
         return None
+
+    async def _register_with_go2rtc(self) -> None:
+        """Prefer go2rtc: once the local serve is ready, register it with the
+        configured go2rtc server and expose its low-latency pull URL via
+        ``stream_rtsp_url``.  Best-effort - on any failure the direct serve URL
+        remains the fallback (ffmpeg / HA HLS).
+        """
+        import aiohttp
+        from .go2rtc import prefer_go2rtc
+        try:
+            await self.async_wait_serve_ready(timeout=40.0)
+        except Exception:
+            _LOGGER.debug("camera %s: swallowed exception", '_register_with_go2rtc', exc_info=True)
+        if not (self._streaming_active and self._go2rtc_url and self._keepalive_rtsp_url):
+            return
+        name = f"aidot_{self.device_id[:12]}"
+        try:
+            async with aiohttp.ClientSession() as _s2:
+                url = await prefer_go2rtc(
+                    _s2, name, self._keepalive_rtsp_url, base_url=self._go2rtc_url)
+            if url:
+                self._go2rtc_pull_url = url
+                _LOGGER.info(
+                    "camera %s: preferring go2rtc stream -> %s", self.device_id, url)
+        except Exception:
+            _LOGGER.debug("camera %s: swallowed exception", '_register_with_go2rtc', exc_info=True)
+
+    async def _deregister_go2rtc(self) -> None:
+        """Remove this camera's stream from go2rtc (best-effort)."""
+        base, pull = self._go2rtc_url, self._go2rtc_pull_url
+        self._go2rtc_pull_url = None
+        if not (base and pull):
+            return
+        import aiohttp
+        from .go2rtc import Go2rtcClient
+        name = f"aidot_{self.device_id[:12]}"
+        try:
+            async with aiohttp.ClientSession() as _s2:
+                await Go2rtcClient(_s2, base).remove_stream(name)
+        except Exception:
+            _LOGGER.debug("camera %s: swallowed exception", '_deregister_go2rtc', exc_info=True)
 
     async def async_wait_serve_ready(self, timeout: float = 20.0) -> bool:
         """Wait until the DTLS serve is bound + serving (or ``timeout``).
