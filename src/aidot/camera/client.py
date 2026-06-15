@@ -39,6 +39,7 @@ from .sdes import SdesSession  # re-exported (split into sdes.py)
 from .controls import _CameraControlsMixin
 from .protocol import (  # split into protocol.py; re-imported for use + back-compat
     _mqtt_timestamp,
+    next_backoff,
     _build_stun_binding_success_response,
     _terminal_webrtc_ack,
     _install_highport_nomination_patch,
@@ -2101,7 +2102,11 @@ class CameraMixin(_CameraControlsMixin):
         """Background task: keep SDES stream alive; push to go2rtc via RTSP."""
         _MIN_DELAY = 10.0
         _MAX_DELAY = 300.0
-        _retry_delay = _MIN_DELAY
+        # Consecutive failed / no-media opens; drives jittered exponential
+        # backoff so a degraded camera (or a fleet reconnecting at once) isn't
+        # hammered into further degradation / cloud rate-limiting. Reset only
+        # after a session that actually delivered media (see end of loop).
+        _attempt = 0
 
         while self._streaming_active:
             try:
@@ -2112,18 +2117,18 @@ class CameraMixin(_CameraControlsMixin):
             except asyncio.CancelledError:
                 return
             except Exception as exc:
+                _delay = next_backoff(_attempt, base=_MIN_DELAY, cap=_MAX_DELAY)
                 _LOGGER.warning(
                     "SDES keepalive: stream open failed for %s (retry in %.0fs): %s",
-                    self.device_id, _retry_delay, exc,
+                    self.device_id, _delay, exc,
                 )
                 try:
-                    await asyncio.sleep(_retry_delay)
+                    await asyncio.sleep(_delay)
                 except asyncio.CancelledError:
                     return
-                _retry_delay = min(_retry_delay * 2, _MAX_DELAY)
+                _attempt += 1
                 continue
 
-            _retry_delay = _MIN_DELAY  # reset on success
             self._stream_session = session
             # Don't block solely on wait_done(): the SDES ffmpeg reads RTP over a
             # UDP socket with no input timeout, so when a battery camera tears the
@@ -2208,8 +2213,19 @@ class CameraMixin(_CameraControlsMixin):
                 _LOGGER.debug("camera %s: swallowed exception", '_sdes_keepalive_loop', exc_info=True)
 
             if self._streaming_active:
+                # Escalate backoff only when the session never delivered media
+                # (camera refused / degraded on a rapid reconnect); a session
+                # that streamed fine and then ended (battery teardown, consumer
+                # gone) is a normal lifecycle event and resets to the base
+                # interval so the next view reconnects promptly.
+                if session.last_media_monotonic > 0.0:
+                    _attempt = 0
+                    _delay = _MIN_DELAY
+                else:
+                    _attempt += 1
+                    _delay = next_backoff(_attempt, base=_MIN_DELAY, cap=_MAX_DELAY)
                 try:
-                    await asyncio.sleep(_MIN_DELAY)
+                    await asyncio.sleep(_delay)
                 except asyncio.CancelledError:
                     return
 
@@ -2225,7 +2241,9 @@ class CameraMixin(_CameraControlsMixin):
         # to 15 s here (+ the SDES/serve loops) if strict app parity is wanted.
         _MIN_DELAY = 5.0
         _MAX_DELAY = 300.0
-        _retry_delay = _MIN_DELAY
+        # Consecutive failed / frameless opens; drives jittered backoff (see
+        # next_backoff). Reset after a session that produced frames.
+        _attempt = 0
 
         def _on_frame(frame) -> None:
             # Accept keyframes always; accept P-frames only after first keyframe.
@@ -2248,6 +2266,7 @@ class CameraMixin(_CameraControlsMixin):
                 _LOGGER.debug("Streaming encode failed for %s: %s", self.device_id, enc_exc)
 
         while self._streaming_active:
+            _open_time = asyncio.get_running_loop().time()
             try:
                 session = await self.async_open_webrtc_stream(on_frame=_on_frame)
             except asyncio.CancelledError:
@@ -2266,18 +2285,18 @@ class CameraMixin(_CameraControlsMixin):
                     return
                 continue
             except Exception as exc:
+                _delay = next_backoff(_attempt, base=_MIN_DELAY, cap=_MAX_DELAY)
                 _LOGGER.warning(
                     "Stream open failed for %s (retry in %.0fs): %s",
-                    self.device_id, _retry_delay, exc,
+                    self.device_id, _delay, exc,
                 )
                 try:
-                    await asyncio.sleep(_retry_delay)
+                    await asyncio.sleep(_delay)
                 except asyncio.CancelledError:
                     return
-                _retry_delay = min(_retry_delay * 2, _MAX_DELAY)
+                _attempt += 1
                 continue
 
-            _retry_delay = _MIN_DELAY  # reset on success
             self._stream_session = session
             try:
                 while self._streaming_active:
@@ -2302,8 +2321,17 @@ class CameraMixin(_CameraControlsMixin):
                 _LOGGER.debug("camera %s: swallowed exception", '_on_frame', exc_info=True)
 
             if self._streaming_active:
+                # Reset backoff if this session produced frames (a normal drop
+                # after good streaming); escalate with jitter if it never did
+                # (the camera-degradation case).
+                if self._last_frame_time > _open_time:
+                    _attempt = 0
+                    _delay = _MIN_DELAY
+                else:
+                    _attempt += 1
+                    _delay = next_backoff(_attempt, base=_MIN_DELAY, cap=_MAX_DELAY)
                 try:
-                    await asyncio.sleep(_MIN_DELAY)
+                    await asyncio.sleep(_delay)
                 except asyncio.CancelledError:
                     return
 
@@ -2419,7 +2447,7 @@ class CameraMixin(_CameraControlsMixin):
         # attempts so no code path (reset bug, fast PC-death) can pound the camera.
         _MIN_DELAY, _MAX_DELAY = 15.0, 300.0
         _open_gate = float(os.environ.get("AIDOT_DTLS_RETRY_GATE_S", "15"))
-        retry_delay = _MIN_DELAY
+        _attempt = 0  # consecutive failed opens; drives jittered backoff
         _last_open_at = 0.0  # monotonic of the previous open attempt (0 = none yet)
         loop = asyncio.get_running_loop()
         while self._streaming_active:
@@ -2428,7 +2456,7 @@ class CameraMixin(_CameraControlsMixin):
             aq: "_queue.Queue" = _queue.Queue(maxsize=600)
             self._serve_ready.clear()  # fresh (cold) session: not ready until bound
             # Hard inter-attempt gate (APK parity): never start an open within
-            # _open_gate seconds of the previous one, regardless of retry_delay.
+            # _open_gate seconds of the previous one, regardless of the backoff.
             _since_open = loop.time() - _last_open_at
             if _last_open_at and _since_open < _open_gate:
                 try:
@@ -2455,18 +2483,19 @@ class CameraMixin(_CameraControlsMixin):
                     return
                 continue
             except Exception as exc:
+                _delay = next_backoff(_attempt, base=_MIN_DELAY, cap=_MAX_DELAY)
                 _LOGGER.warning(
                     "DTLS serve: open failed for %s (retry %.0fs): %s",
-                    self.device_id, retry_delay, exc,
+                    self.device_id, _delay, exc,
                 )
                 try:
-                    await asyncio.sleep(retry_delay)
+                    await asyncio.sleep(_delay)
                 except asyncio.CancelledError:
                     return
-                retry_delay = min(retry_delay * 2, _MAX_DELAY)
+                _attempt += 1
                 continue
 
-            retry_delay = _MIN_DELAY
+            _attempt = 0
             self._stream_session = session
             pc = session._pc
             # PC-dead test for the serve loop.  closed/failed are terminal at
