@@ -8440,20 +8440,30 @@ class CameraMixin(_CameraControlsMixin):
                                 # after bridge started (empty at setup time).
                                 if not _bridge_uc_info["sent"] and _bridge_uc_info["ufrag"]:
                                     _bridge_uc_info["sent"] = True
-                                    _br_uc_ufrag = _ufrag_a if _bs is _audio_sock else _ufrag_v
-                                    _br_uc_pwd   = _pwd_a   if _bs is _audio_sock else _pwd_v
+                                    # Nominate BOTH the audio and video sockets, not
+                                    # just the one that happened to receive this probe.
+                                    # The early (answer-in-time) path nominates both;
+                                    # the late path previously nominated only _bs (the
+                                    # socket with the first BindingReq, typically audio),
+                                    # so the video pair was never nominated and the
+                                    # camera never started video RTP (audio/control
+                                    # recovered, video stayed dark).
                                     for _br_ci, _br_cp in _bridge_uc_info["cands"]:
-                                        try:
-                                            _send_use_candidate(
-                                                _bs, _br_uc_ufrag, _br_uc_pwd,
-                                                _bridge_uc_info["ufrag"],
-                                                _bridge_uc_info["pwd"],
-                                                (_br_ci, _br_cp),
-                                            )
-                                        except Exception:
-                                            _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                                        for _uc_sock, _uc_ufrag, _uc_pwd in (
+                                            (_audio_sock, _ufrag_a, _pwd_a),
+                                            (_video_sock, _ufrag_v, _pwd_v),
+                                        ):
+                                            try:
+                                                _send_use_candidate(
+                                                    _uc_sock, _uc_ufrag, _uc_pwd,
+                                                    _bridge_uc_info["ufrag"],
+                                                    _bridge_uc_info["pwd"],
+                                                    (_br_ci, _br_cp),
+                                                )
+                                            except Exception:
+                                                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
                                     _status(
-                                        f"bridge: late USE-CANDIDATE sent to"
+                                        f"bridge: late USE-CANDIDATE sent (audio+video) to"
                                         f" {len(_bridge_uc_info['cands'])} camera candidate(s)"
                                         " (answer arrived after bridge started)"
                                     )
