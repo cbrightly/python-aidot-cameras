@@ -4,6 +4,23 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.25]
+
+### Fixed
+- **livePlayResp was never matched, so its wait always timed out.** The handler
+  matched the response on `devId`, but the camera's livePlayResp payload carries
+  no `devId` — it echoes back our exact `peerid`. The wait therefore always ran
+  to its full timeout (and the camera's reject `code` was never read). The match
+  now keys on the echoed `peerid` (falling back to `devId`), so the wait returns
+  the instant the response arrives (live: `elapsed=0ms arrived=True`).
+- **Spurious aborts on transient/unknown livePlay codes.** With the response now
+  actually parsed, the previously-dead reject path could fire on any non-OK code
+  — including `-50019` ("not ready"), which battery cameras emit routinely and
+  recover from via ICE. All three reject sites (one SDES, two DTLS) now fast-fail
+  *only* on an unambiguous refusal (`livePlay=0`); other non-OK codes (incl.
+  `-50019`) are logged as transient and the handshake proceeds. Validated live:
+  A001513 SDES (1.67 MB) and A000088 DTLS (frames received) both stream. (#61)
+
 ## [0.7.24]
 
 ### Fixed
