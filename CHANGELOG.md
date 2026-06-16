@@ -4,6 +4,20 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.23]
+
+### Changed
+- **SDES fast-liveplay (`AIDOT_SDES_FAST_LIVEPLAY` / `sdes_fast_liveplay`) is now
+  validated in soak** and relabelled from "experimental/unvalidated, may
+  destabilise" to **validated (opt-in, default off)**. A 3-hour live soak — 15
+  SDES opens across battery cameras, the flag engaging on every one, **0 churn /
+  0 fail**, with the ~4.5 s signaling saving holding throughout — confirmed it
+  doesn't break the handshake or cause near-term churn (it keeps the full
+  ICE/TURN/SCTP handshake; only the always-timing-out echo/livePlayResp acks are
+  shortened). **Kept off by default** pending broader multi-day use: per-open and
+  near-term stability are proven, long-haul sustained stability is not yet.
+  Docs/labels only — no behaviour change. (#59)
+
 ## [0.7.22]
 
 ### Fixed
