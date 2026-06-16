@@ -4,6 +4,32 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.22]
+
+### Fixed
+- **The experimental SDES fast-liveplay flag (0.7.21) was dead code for SDES
+  cameras** — its gate lived inside the DTLS-only `if not use_sdes:` block, so it
+  never ran for the SDES cameras it targets (explaining the earlier "no effect").
+  Moved the gate into the SDES open path where the SDES livePlay waits actually
+  live, so it now engages.
+
+### Changed (experimental)
+- **`AIDOT_SDES_FAST_LIVEPLAY` now shortens the always-timing-out SDES signaling,
+  not just the livePlayResp wait.** Instrumentation (see below) showed that for
+  the SDES cameras measured, both the livePlayReq-echo wait (5 s) and the
+  livePlayResp wait (1 s) **always time out** (echo/resp never arrive) yet
+  streaming succeeds — ~6 s of dead padding. With the flag on, the echo wait is
+  capped at 1.5 s and the livePlayResp wait is skipped: **~6 s → ~1.5 s of
+  signaling (a deterministic ~4.5 s saving)**, with the full ICE/TURN/SCTP
+  handshake untouched. Still EXPERIMENTAL/off by default — stability over a real
+  soak is unverified; enable to test and watch for SDES session churn.
+
+### Added
+- **`signaling-wait[<device>] <name> elapsed=<ms>` instrumentation** for the SDES
+  (and DTLS) livePlay/iceConfig waits, so the actual cost of each wait is
+  measurable from the logs (the `sdes_soak_monitor.py` validation tool reads
+  these alongside the `cold-start[...]` markers). (#57)
+
 ## [0.7.21]
 
 ### Added (experimental)
