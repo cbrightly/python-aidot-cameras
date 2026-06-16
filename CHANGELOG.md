@@ -4,6 +4,20 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.21]
+
+### Added (experimental)
+- **`AIDOT_SDES_FAST_LIVEPLAY` / `start_keepalive(sdes_fast_liveplay=...)`** — an
+  **experimental, unvalidated** opt-in that skips *only* the ~2 s `livePlayResp`
+  blocking wait for SDES cameras, keeping the full ICE/TURN/SCTP handshake (the
+  part whose skipping destabilises SDES — which is why full `fast_connect` stays
+  forced off for SDES). Theory: shaves ~2 s off the SDES cold start without the
+  SCTP churn that full fast-connect causes. **Off by default.** A clean synthetic
+  A/B was not achievable (SDES cameras degrade on rapid reconnects and the
+  available test cameras are battery / role-reversal), so this needs a real-world
+  soak before any default change — **may destabilise SDES; enable at your own
+  risk and watch for session churn.** (#55)
+
 ## [0.7.20]
 
 ### Fixed
