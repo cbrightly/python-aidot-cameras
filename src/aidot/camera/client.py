@@ -2559,6 +2559,30 @@ class CameraMixin(_CameraControlsMixin):
         return os.environ.get("AIDOT_SDES_FAST_LIVEPLAY", "").strip().lower() in (
             "1", "true", "yes", "on")
 
+    def _resolve_sdes_skip_turn(self) -> bool:
+        """EXPERIMENTAL (opt-in, default off): skip the blocking SDES TURN relay
+        pre-allocation, for cameras reachable LAN-direct.
+
+        Before building the offer the SDES path does two synchronous RFC-5766
+        Allocate round-trips (audio + video) to the cloud TURN server so the
+        offer's c=/m= can carry a relay address - ~2-3 s of pure cold-start
+        latency.  On a LAN the camera's host candidate wins and that relay is
+        never used, so skipping it shaves the latency - at the cost of no relay
+        fallback for a camera on a different segment / behind strict NAT (the
+        same trade-off ``AIDOT_FAST_CONNECT`` already makes for DTLS, and which
+        is force-disabled for SDES because it *also* skips the SCTP-arming
+        waits; this flag skips ONLY the relay pre-allocation, leaving the rest
+        of the SDES handshake intact).
+
+        Per-camera ``sdes_skip_turn`` (set via start_keepalive) wins; else the
+        ``AIDOT_SDES_SKIP_TURN_PREALLOC`` env (truthy = 1/true/yes/on), default
+        off.  Only consulted for SDES cameras."""
+        opt = getattr(self, "_sdes_skip_turn_opt", None)
+        if opt is not None:
+            return bool(opt)
+        return os.environ.get("AIDOT_SDES_SKIP_TURN_PREALLOC", "").strip().lower() in (
+            "1", "true", "yes", "on")
+
     def _maybe_start_serve_relay(self, serve_url: Optional[str]) -> "Optional[_ServeRelay]":
         """Hold the public serve port via a _ServeRelay so an eager go2rtc pull
         connects-and-waits instead of hitting ECONNREFUSED during the ~16-25s
@@ -6818,7 +6842,15 @@ class CameraMixin(_CameraControlsMixin):
         # AIDOT_FAST_CONNECT skips this blocking pre-allocation (LAN-direct mode):
         # the offer goes out immediately with host/srflx candidates and the LAN
         # path connects without waiting on a cloud TURN Allocate round-trip.
-        if _sdes_turn_entries and not _fast_connect:
+        # AIDOT_SDES_SKIP_TURN_PREALLOC (experimental, opt-in) does the same skip
+        # for SDES specifically, where _fast_connect is force-off (see
+        # _resolve_sdes_skip_turn).  Either way the cost is instrumented below so
+        # the saving is measurable: grep ``signaling-wait[`` for sdes-turn-prealloc.
+        _skip_turn_prealloc = self._resolve_sdes_skip_turn()
+        _turn_t0 = time.monotonic()
+        _turn_did = False
+        if _sdes_turn_entries and not _fast_connect and not _skip_turn_prealloc:
+            _turn_did = True
             try:
                 import re as _re_pre
                 import hashlib as _hlk_pre
@@ -6855,6 +6887,16 @@ class CameraMixin(_CameraControlsMixin):
                             )
             except Exception as _pre_exc:
                 _LOGGER.warning("TURN pre-allocation error: %s", _pre_exc)
+        if _skip_turn_prealloc and _sdes_turn_entries:
+            _status(
+                "AIDOT_SDES_SKIP_TURN_PREALLOC: skipping TURN relay"
+                " pre-allocation (~2-3s) - host/srflx candidates only, LAN-direct"
+            )
+        _LOGGER.info(
+            "signaling-wait[%s] sdes-turn-prealloc elapsed=%dms allocated=%d skipped=%s",
+            self.device_id,
+            int((time.monotonic() - _turn_t0) * 1000),
+            len(_relay_addrs), bool(_skip_turn_prealloc))
 
         # --- DTLS certificate for m=application probe ----------------------- #
         # PreCon cameras (sptPreconn=1) need SESSION_MODE_REQ via SCTP datachannel.
