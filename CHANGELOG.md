@@ -4,6 +4,24 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.26]
+
+### Added
+- **`AIDOT_SDES_SKIP_TURN_PREALLOC` (experimental, opt-in, default off):** skips
+  the blocking TURN relay pre-allocation on the SDES path for LAN-direct cameras.
+  Before building the offer the SDES path does two synchronous RFC-5766 Allocate
+  round-trips (audio + video) to the cloud TURN server so the offer can carry a
+  relay address — but on a LAN the camera's host candidate wins and that relay is
+  never used. Measured live, the pre-allocation costs ~2-3 s normally and **~4 s
+  when the Allocate times out** (which it does from networks that can't reach the
+  TURN server), all for `allocated=0`. Skipping it removes that dead wait. The
+  cost is now always instrumented (`signaling-wait[...] sdes-turn-prealloc
+  elapsed=...`), and `_fast_connect` is unchanged (still force-off for SDES) — this
+  flag skips *only* the relay pre-allocation, leaving the SCTP-arming handshake
+  intact. Validated live on A001513 (skip on: 9.8 MB over a 130 s hold, 0 SCTP
+  churn, healthy heartbeats throughout). Per-camera `sdes_skip_turn` (via
+  `start_keepalive`) or the env var; off by default pending a broader soak. (#64)
+
 ## [0.7.25]
 
 ### Fixed
