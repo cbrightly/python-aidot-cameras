@@ -4,6 +4,19 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.24]
+
+### Fixed
+- **SDES fast-liveplay degraded the A001064 (role-reversal PTZ) camera and is now
+  excluded from it.** That model's handshake has the camera echo our offer back
+  as its own webrtcReq before doing ICE, so it must be armed *before* our
+  webrtcReq — and the flag sends webrtcReq ~4.5 s earlier, which dropped its media
+  reliability (a live A/B showed 2/2 media with the flag off vs 1/2 with it on;
+  the flag's soak validation covered only the A001513 battery cameras). The flag
+  now never applies to role-reversal models (`_NO_FAST_LIVEPLAY_MODELS`,
+  currently `LK.IPC.A001064`) regardless of the option/env — they keep the full
+  livePlay waits. A001513 cameras still get the ~4.5 s saving. (#60)
+
 ## [0.7.23]
 
 ### Changed
