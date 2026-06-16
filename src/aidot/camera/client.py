@@ -1950,6 +1950,7 @@ class CameraMixin(_CameraControlsMixin):
         live_stream_param: Optional[bool] = None,
         serve_relay: Optional[bool] = None,
         stream_idle_s: Optional[float] = None,
+        sdes_fast_liveplay: Optional[bool] = None,
     ) -> None:
         """Start a persistent stream that keeps the camera session alive.
 
@@ -1998,6 +1999,8 @@ class CameraMixin(_CameraControlsMixin):
             self._serve_relay_opt = serve_relay
         if stream_idle_s is not None:
             self._stream_idle_opt = stream_idle_s
+        if sdes_fast_liveplay is not None:
+            self._sdes_fast_liveplay_opt = sdes_fast_liveplay
         if self._stream_task is not None and not self._stream_task.done():
             return
         self._keepalive_rtsp_url = rtsp_push_url
@@ -3337,6 +3340,24 @@ class CameraMixin(_CameraControlsMixin):
         if self.is_sdes_camera:
             _fast_connect = False
 
+        # P5 EXPERIMENT (opt-in): skip ONLY the livePlayResp blocking wait (~2 s)
+        # for SDES, while keeping the full ICE/TURN/SCTP handshake.  Rationale: the
+        # SDES instability that forces _fast_connect off comes from skipping the
+        # ICE/TURN waits + stripping TURN (under-arming SCTP) - NOT from skipping
+        # the livePlayResp ack, which is purely a camera accept/reject we don't
+        # need to block on (the official app never waits for it).  So this targeted
+        # skip is expected to be SCTP-safe and shave ~2 s off the SDES cold start.
+        # Off by default, pending live A/B validation.  start_keepalive(
+        # sdes_fast_liveplay=...) wins, else AIDOT_SDES_FAST_LIVEPLAY env.
+        _sdes_skip_lp = False
+        if self.is_sdes_camera:
+            _sl = getattr(self, "_sdes_fast_liveplay_opt", None)
+            if _sl is None:
+                _sl = os.environ.get(
+                    "AIDOT_SDES_FAST_LIVEPLAY", "").strip().lower() in (
+                    "1", "true", "yes", "on")
+            _sdes_skip_lp = bool(_sl)
+
         # Wake battery cameras via the cloud HTTP low-power endpoint before the
         # handshake (matches the app, which fires the HTTP wake so a sleeping camera
         # gets the signal even with no live MQTT session; the MQTT
@@ -4123,7 +4144,17 @@ class CameraMixin(_CameraControlsMixin):
             # (parity-confirmed).  AIDOT_FAST_CONNECT skips it and proceeds to
             # SDP/ICE immediately - losing fast-fail on rejection (rare; ICE then
             # fails instead) in exchange for ~2 s off every LAN connect.
-            if not _fast_connect:
+            if _fast_connect:
+                _status(
+                    "AIDOT_FAST_CONNECT: skipping livePlayResp wait (~2s) -"
+                    " proceeding to SDP/ICE (app-parity, no fast-fail on reject)"
+                )
+            elif _sdes_skip_lp:
+                _status(
+                    "AIDOT_SDES_FAST_LIVEPLAY: skipping livePlayResp wait (~2s)"
+                    " for SDES - full ICE/TURN/SCTP handshake retained (experiment)"
+                )
+            else:
                 try:
                     _lp_resp = await asyncio.wait_for(
                         asyncio.shield(liveplay_resp_fut), timeout=2.0
@@ -4136,11 +4167,6 @@ class CameraMixin(_CameraControlsMixin):
                         )
                 except TimeoutError:
                     pass
-            else:
-                _status(
-                    "AIDOT_FAST_CONNECT: skipping livePlayResp wait (~2s) -"
-                    " proceeding to SDP/ICE (app-parity, no fast-fail on reject)"
-                )
             # Short extra wait for getIceConfigResp - the server may only respond
             # once a live camera session is active (i.e. after livePlayReq).
             # Waiting here ensures TURN credentials arrive before RTCPeerConnection
