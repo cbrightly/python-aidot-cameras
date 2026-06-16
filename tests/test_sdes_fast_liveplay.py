@@ -38,6 +38,22 @@ def test_env_falsey_values(monkeypatch):
         assert _cam()._resolve_sdes_fast_liveplay() is False, val
 
 
+def test_role_reversal_model_always_excluded(monkeypatch):
+    # A001064 (role-reversal) must NOT use the flag even when opt/env force it on -
+    # the early webrtcReq degrades its media reliability.
+    from types import SimpleNamespace
+    monkeypatch.setenv("AIDOT_SDES_FAST_LIVEPLAY", "1")
+    cam = _cam()
+    cam.info = SimpleNamespace(model_id="LK.IPC.A001064")
+    cam._sdes_fast_liveplay_opt = True
+    assert cam._resolve_sdes_fast_liveplay() is False
+    # a non-excluded SDES model still honours the flag
+    cam2 = _cam()
+    cam2.info = SimpleNamespace(model_id="LK.IPC.A001513")
+    cam2._sdes_fast_liveplay_opt = True
+    assert cam2._resolve_sdes_fast_liveplay() is True
+
+
 def test_kwarg_option_wins_over_env(monkeypatch):
     monkeypatch.setenv("AIDOT_SDES_FAST_LIVEPLAY", "1")
     cam = _cam()
