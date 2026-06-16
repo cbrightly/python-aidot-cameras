@@ -52,6 +52,24 @@ only paid when the camera never answers. The opt-in `sdes_fast_liveplay`
 flag (`AIDOT_SDES_FAST_LIVEPLAY` env / `sdes_fast_liveplay=` kwarg) skips this
 wait for the eligible SDES (A001513) cameras to shave ~4.5 s off cold start.
 
+### Adaptive fast-with-fallback (SDES keepalive, opt-in)
+
+For SDES cameras the keepalive loop can run an **adaptive** strategy
+(`AIDOT_SDES_ADAPTIVE`, opt-in, default off; set `=1` to enable): the first open
+tries the fast path (skip the livePlay waits + the TURN relay pre-allocation) with
+a short 45 s open timeout / 40 s media grace. If that attempt delivers no media it
+**falls back** to the full, patient relay path for the rest of the loop. It is
+off by default because a fast *failure* costs ~40 s (the grace) before fallback
+while a fast *success* saves only ~7 s — the real-world failure rate should be
+characterised before making it a default. This makes fast-by-default safe regardless of
+reachability — a LAN-direct camera gets the fast connect; a strict-NAT / non-LAN
+camera loses one fast attempt then connects over the relay. A per-device cache
+(`_fast_path_unavailable`) remembers a camera whose fast attempt failed so later
+views skip straight to the full path, bounding the fast-timeout cost to once per
+camera per session. The relay pre-allocation itself is also separately skippable on
+the fast path via `AIDOT_SDES_SKIP_TURN_PREALLOC` (it does two synchronous TURN
+Allocate round-trips, ~2-3 s, unused on a LAN).
+
 ### Connection reliability (DTLS / A000088)
 
 A000088 cameras advertise **two consecutive ICE ports** `[P, P+1]` and only
