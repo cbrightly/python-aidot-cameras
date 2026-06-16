@@ -3720,7 +3720,14 @@ class CameraMixin(_CameraControlsMixin):
                     or msg.get("devId") == device_id):
                 loop.call_soon_threadsafe(camera_ready_ev.set)
             # livePlayResp: explicit camera ack/nack for start-play command.
-            if method == "livePlayResp" and inner.get("devId") == device_id:
+            # The camera echoes our peer_id (verified live); its payload has NO
+            # devId, so the old devId-only match never fired and this future never
+            # resolved (the wait always timed out).  Match on the echoed peer_id
+            # (per-open, precise); keep devId as a fallback for any camera that
+            # does send it.  dstAddr is the account-wide userId - too loose to use.
+            if method == "livePlayResp" and (
+                    inner.get("peerid") == peer_id
+                    or inner.get("devId") == device_id):
                 if not liveplay_resp_fut.done():
                     loop.call_soon_threadsafe(liveplay_resp_fut.set_result, inner)
             # livePlayReq echo: broker/camera confirmed delivery of our livePlayReq.
@@ -4186,9 +4193,19 @@ class CameraMixin(_CameraControlsMixin):
                     _lp_arrived = True
                     _lp_code = int(_lp_resp.get("code", 200))
                     _lp_on = int(_lp_resp.get("livePlay", 1))
-                    if _lp_code not in (0, 200) or _lp_on == 0:
+                    # Fast-fail only on an unambiguous refusal (livePlay=0).
+                    # Other non-OK codes (incl. -50019 "not ready") are
+                    # transient on battery cameras and recover via ICE; abort
+                    # there would spuriously kill otherwise-good streams.
+                    if _lp_on == 0:
                         raise RuntimeError(
-                            f"livePlay rejected by camera (code={_lp_code}, livePlay={_lp_on})"
+                            f"livePlay refused by camera (livePlay=0, code={_lp_code})"
+                        )
+                    elif _lp_code not in (0, 200):
+                        _status(
+                            f"livePlayResp: non-OK code {_lp_code}"
+                            f"{' (not ready, transient)' if _lp_code == -50019 else ''}"
+                            " - proceeding"
                         )
                 except TimeoutError:
                     pass
@@ -4231,9 +4248,15 @@ class CameraMixin(_CameraControlsMixin):
                     _lp_resp2 = liveplay_resp_fut.result()
                     _lp_code2 = int(_lp_resp2.get("code", 200))
                     _lp_on2   = int(_lp_resp2.get("livePlay", 1))
-                    if _lp_code2 not in (0, 200) or _lp_on2 == 0:
+                    if _lp_on2 == 0:
                         raise RuntimeError(
-                            f"livePlay rejected by camera (code={_lp_code2}, livePlay={_lp_on2})"
+                            f"livePlay refused by camera (livePlay=0, code={_lp_code2})"
+                        )
+                    elif _lp_code2 not in (0, 200):
+                        _status(
+                            f"livePlayResp: non-OK code {_lp_code2}"
+                            f"{' (not ready, transient)' if _lp_code2 == -50019 else ''}"
+                            " - proceeding"
                         )
                 except RuntimeError:
                     raise
@@ -7100,10 +7123,18 @@ class CameraMixin(_CameraControlsMixin):
                 _lp_arrived = True
                 _lp_code_sdes = int(_lp_resp_sdes.get("code", 200))
                 _lp_on_sdes = int(_lp_resp_sdes.get("livePlay", 1))
-                if _lp_code_sdes not in (0, 200) or _lp_on_sdes == 0:
+                # Only an explicit livePlay=0 is an unambiguous refusal (fast-fail).
+                # Numeric codes (e.g. -50019 "not ready" on a waking battery cam)
+                # are transient - the camera recovers and streams - so log and
+                # proceed rather than abort on a code we can't classify as terminal
+                # (genuine terminal rejects are still caught on the webrtcResp ack).
+                if _lp_on_sdes == 0:
                     raise RuntimeError(
-                        f"livePlay rejected by camera (code={_lp_code_sdes}, livePlay={_lp_on_sdes})"
-                    )
+                        f"livePlay refused by camera (livePlay=0, code={_lp_code_sdes})")
+                elif _lp_code_sdes not in (0, 200):
+                    _status(f"livePlayResp: non-OK code {_lp_code_sdes}"
+                            f"{' (not ready, transient)' if _lp_code_sdes == -50019 else ''}"
+                            " - proceeding")
             except TimeoutError:
                 pass
             _LOGGER.info(
