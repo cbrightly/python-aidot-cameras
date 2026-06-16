@@ -3359,9 +3359,9 @@ class CameraMixin(_CameraControlsMixin):
         # the livePlayResp ack, which is purely a camera accept/reject we don't
         # need to block on (the official app never waits for it).  So this targeted
         # skip is expected to be SCTP-safe and shave ~2 s off the SDES cold start.
-        # Off by default, pending live A/B validation.  start_keepalive(
+        # Off by default, pending live validation.  Applied in _open_sdes_stream
+        # (the SDES path has its own livePlayResp wait); start_keepalive(
         # sdes_fast_liveplay=...) wins, else AIDOT_SDES_FAST_LIVEPLAY env.
-        _sdes_skip_lp = self.is_sdes_camera and self._resolve_sdes_fast_liveplay()
 
         # Wake battery cameras via the cloud HTTP low-power endpoint before the
         # handshake (matches the app, which fires the HTTP wake so a sleeping camera
@@ -4150,20 +4150,24 @@ class CameraMixin(_CameraControlsMixin):
             # SDP/ICE immediately - losing fast-fail on rejection (rare; ICE then
             # fails instead) in exchange for ~2 s off every LAN connect.
             if _fast_connect:
+                _LOGGER.info(
+                    "signaling-wait[%s] livePlayResp skipped (fast_connect)",
+                    self.device_id)
                 _status(
                     "AIDOT_FAST_CONNECT: skipping livePlayResp wait (~2s) -"
                     " proceeding to SDP/ICE (app-parity, no fast-fail on reject)"
                 )
-            elif _sdes_skip_lp:
-                _status(
-                    "AIDOT_SDES_FAST_LIVEPLAY: skipping livePlayResp wait (~2s)"
-                    " for SDES - full ICE/TURN/SCTP handshake retained (experiment)"
-                )
             else:
+                # Instrumented: how long this wait actually costs (it returns as
+                # soon as livePlayResp arrives; the 2s is only paid on timeout).
+                # This is exactly the cost the sdes_fast_liveplay experiment skips.
+                _lp_t0 = time.monotonic()
+                _lp_arrived = False
                 try:
                     _lp_resp = await asyncio.wait_for(
                         asyncio.shield(liveplay_resp_fut), timeout=2.0
                     )
+                    _lp_arrived = True
                     _lp_code = int(_lp_resp.get("code", 200))
                     _lp_on = int(_lp_resp.get("livePlay", 1))
                     if _lp_code not in (0, 200) or _lp_on == 0:
@@ -4172,6 +4176,10 @@ class CameraMixin(_CameraControlsMixin):
                         )
                 except TimeoutError:
                     pass
+                _LOGGER.info(
+                    "signaling-wait[%s] livePlayResp elapsed=%dms arrived=%s",
+                    self.device_id,
+                    int((time.monotonic() - _lp_t0) * 1000), _lp_arrived)
             # Short extra wait for getIceConfigResp - the server may only respond
             # once a live camera session is active (i.e. after livePlayReq).
             # Waiting here ensures TURN credentials arrive before RTCPeerConnection
@@ -4183,11 +4191,18 @@ class CameraMixin(_CameraControlsMixin):
             # per-session TURN relay credentials, which LAN-direct doesn't need;
             # remote/strict-NAT cameras do, hence this is opt-in (see flag above).
             if not ice_config_fut.done() and not _fast_connect:
+                _ic_t0 = time.monotonic()
+                _ic_arrived = False
                 try:
                     await asyncio.wait_for(asyncio.shield(ice_config_fut), timeout=3.0)
+                    _ic_arrived = True
                     _status("getIceConfigResp received (post-livePlayReq)")
                 except TimeoutError:
                     pass  # proceed without TURN; synthetic candidates are fallback
+                _LOGGER.info(
+                    "signaling-wait[%s] getIceConfigResp elapsed=%dms arrived=%s",
+                    self.device_id,
+                    int((time.monotonic() - _ic_t0) * 1000), _ic_arrived)
             elif _fast_connect:
                 _status(
                     "AIDOT_FAST_CONNECT: skipping getIceConfigResp wait"
@@ -7032,24 +7047,49 @@ class CameraMixin(_CameraControlsMixin):
         # webrtcReq.  The echo confirms the MQTT pipeline to this device is live
         # and the broker session is registered.  Fall through after 5 s if it
         # never arrives (same safety as the old fixed 0.5 s sleep, but adaptive).
+        # P5 (experimental, opt-in via sdes_fast_liveplay): instrumentation showed
+        # the echo and livePlayResp waits BOTH always time out for the SDES cameras
+        # measured (echo/resp never arrive) yet streaming succeeds - i.e. ~6 s of
+        # dead padding.  When the flag is on, cap the echo wait short and skip the
+        # livePlayResp wait; the full ICE/TURN/SCTP handshake is untouched.  This
+        # is the SDES path's OWN livePlay waits (the DTLS gate above never runs for
+        # SDES: use_sdes is True there).
+        _skip_lp = self._resolve_sdes_fast_liveplay()
+        _echo_timeout = 1.5 if _skip_lp else 5.0
+        _echo_t0 = time.monotonic()
         try:
-            await _asyncio.wait_for(liveplay_echo_ev.wait(), timeout=5.0)
+            await _asyncio.wait_for(liveplay_echo_ev.wait(), timeout=_echo_timeout)
             _status("livePlayReq echo received - sending webrtcReq, ICE, then launching ffmpeg")
         except TimeoutError:
-            _status("no livePlayReq echo in 5s - sending webrtcReq, ICE, then launching ffmpeg anyway")
-        # If camera provided explicit livePlayResp failure, abort before SDP/ICE.
-        try:
-            _lp_resp_sdes = await _asyncio.wait_for(
-                _asyncio.shield(liveplay_resp_fut), timeout=1.0
-            )
-            _lp_code_sdes = int(_lp_resp_sdes.get("code", 200))
-            _lp_on_sdes = int(_lp_resp_sdes.get("livePlay", 1))
-            if _lp_code_sdes not in (0, 200) or _lp_on_sdes == 0:
-                raise RuntimeError(
-                    f"livePlay rejected by camera (code={_lp_code_sdes}, livePlay={_lp_on_sdes})"
+            _status(f"no livePlayReq echo in {_echo_timeout:.1f}s - sending webrtcReq,"
+                    " ICE, then launching ffmpeg anyway")
+        _LOGGER.info(
+            "signaling-wait[%s] livePlayReq-echo elapsed=%dms (timeout=%.1fs)",
+            self.device_id, int((time.monotonic() - _echo_t0) * 1000), _echo_timeout)
+        # livePlayResp: explicit camera accept/reject before SDP/ICE.
+        if _skip_lp:
+            _LOGGER.info(
+                "signaling-wait[%s] livePlayResp skipped (sdes_fast_liveplay)",
+                self.device_id)
+        else:
+            _lp_t0 = time.monotonic()
+            _lp_arrived = False
+            try:
+                _lp_resp_sdes = await _asyncio.wait_for(
+                    _asyncio.shield(liveplay_resp_fut), timeout=1.0
                 )
-        except TimeoutError:
-            pass
+                _lp_arrived = True
+                _lp_code_sdes = int(_lp_resp_sdes.get("code", 200))
+                _lp_on_sdes = int(_lp_resp_sdes.get("livePlay", 1))
+                if _lp_code_sdes not in (0, 200) or _lp_on_sdes == 0:
+                    raise RuntimeError(
+                        f"livePlay rejected by camera (code={_lp_code_sdes}, livePlay={_lp_on_sdes})"
+                    )
+            except TimeoutError:
+                pass
+            _LOGGER.info(
+                "signaling-wait[%s] livePlayResp elapsed=%dms arrived=%s",
+                self.device_id, int((time.monotonic() - _lp_t0) * 1000), _lp_arrived)
 
         # --- Build local-receiver SDP for ffmpeg ----------------------------- #
         # Built BEFORE sending webrtcReq so ffmpeg is already listening on the
