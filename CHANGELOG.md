@@ -4,6 +4,28 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.27]
+
+### Added
+- **Adaptive fast-with-fallback for SDES (`AIDOT_SDES_ADAPTIVE`, opt-in, default
+  off).** When enabled, the SDES keepalive loop tries the fast path first (skip the
+  livePlay waits + TURN relay pre-allocation, with a short 45 s open timeout / 40 s
+  media grace) and, if that attempt delivers no media, falls back to the full,
+  patient relay path for the rest of the loop. This makes a fast connect safe
+  regardless of camera reachability: a LAN-direct camera gets the fast connect; a
+  strict-NAT / non-LAN camera loses one fast attempt then connects via the relay. A
+  **per-device cache** (`_fast_path_unavailable`) latches a camera that failed the
+  fast path so later views skip straight to the full path — bounding the
+  fast-timeout penalty to once per camera per session. Role-reversal models keep
+  their `sdes_fast_liveplay` exclusion. Enable with `AIDOT_SDES_ADAPTIVE=1` or
+  `start_keepalive(sdes_adaptive=True)`. **Default off pending real-world
+  fast-failure-rate data** — a fast *failure* costs ~40 s (the grace) before
+  fallback while success saves ~7 s, so the failure rate must be characterised on
+  real fleets before this becomes a default. Live-validated on the dev-box LAN:
+  fast success on mains A001064 (first-media 16.1 s) and battery A001513 (9.96 s)
+  with 0 false fallbacks / 0 churn, and the fallback confirmed delivering media
+  (11 s) when a fast attempt failed. (#65)
+
 ## [0.7.26]
 
 ### Added
