@@ -2531,6 +2531,18 @@ class CameraMixin(_CameraControlsMixin):
         except (TypeError, ValueError):
             return 120.0
 
+    def _resolve_sdes_fast_liveplay(self) -> bool:
+        """Whether to skip the ~2 s livePlayResp wait for SDES (P5, EXPERIMENTAL).
+
+        Per-camera ``sdes_fast_liveplay`` (set via start_keepalive) wins; else the
+        ``AIDOT_SDES_FAST_LIVEPLAY`` env (truthy = 1/true/yes/on), default off.
+        Only consulted for SDES cameras (the caller gates on is_sdes_camera)."""
+        opt = getattr(self, "_sdes_fast_liveplay_opt", None)
+        if opt is not None:
+            return bool(opt)
+        return os.environ.get("AIDOT_SDES_FAST_LIVEPLAY", "").strip().lower() in (
+            "1", "true", "yes", "on")
+
     def _maybe_start_serve_relay(self, serve_url: Optional[str]) -> "Optional[_ServeRelay]":
         """Hold the public serve port via a _ServeRelay so an eager go2rtc pull
         connects-and-waits instead of hitting ECONNREFUSED during the ~16-25s
@@ -3349,14 +3361,7 @@ class CameraMixin(_CameraControlsMixin):
         # skip is expected to be SCTP-safe and shave ~2 s off the SDES cold start.
         # Off by default, pending live A/B validation.  start_keepalive(
         # sdes_fast_liveplay=...) wins, else AIDOT_SDES_FAST_LIVEPLAY env.
-        _sdes_skip_lp = False
-        if self.is_sdes_camera:
-            _sl = getattr(self, "_sdes_fast_liveplay_opt", None)
-            if _sl is None:
-                _sl = os.environ.get(
-                    "AIDOT_SDES_FAST_LIVEPLAY", "").strip().lower() in (
-                    "1", "true", "yes", "on")
-            _sdes_skip_lp = bool(_sl)
+        _sdes_skip_lp = self.is_sdes_camera and self._resolve_sdes_fast_liveplay()
 
         # Wake battery cameras via the cloud HTTP low-power endpoint before the
         # handshake (matches the app, which fires the HTTP wake so a sleeping camera
