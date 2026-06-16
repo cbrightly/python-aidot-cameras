@@ -22,6 +22,36 @@ session = await device_client.async_open_webrtc_stream(on_frame=cb, timeout=30.0
 that exercises the full path (`python test_camera.py --webrtc -d "<name>"`); see
 its `--help`.
 
+### Signaling handshake (MQTT)
+
+Before any media flows the library exchanges JSON messages with the camera over
+MQTT. The non-obvious wire facts (learned the hard way - keep them here so they
+don't have to be re-discovered):
+
+- **`peer_id` format:** `{32-hex session}_{6-hex rand}_{liveType}_{streamId}_{version}`,
+  where the trailing `version` is `1` for SDES and `2` for DTLS. The camera
+  **echoes our exact `peer_id` back** in its responses.
+- **`livePlayResp` is matched on `peerid`, not `devId`.** The response payload
+  carries **no `devId`** - it echoes back our `peerid`. Matching on `devId` (an
+  earlier bug) means the match never fires and the wait runs to its full timeout
+  every time. Match on the echoed `peerid` (with a `devId` fallback).
+- **Reject codes:** `livePlay=0` is an unambiguous refusal - fast-fail on it.
+  Other non-OK `code` values are **transient and recoverable**, most importantly
+  `-50019` ("not ready"), which battery cameras emit routinely and recover from
+  via ICE; treat these as transient and proceed rather than aborting. A camera
+  already at its viewer limit returns a terminal ack (`-50002` / `-50015`) -
+  see the busy handling below.
+- **SDES role-reversal (A001064 PTZ):** this model echoes our offer back as its
+  own `webrtcReq` *before* doing ICE, so it must be armed before our `webrtcReq`
+  is sent. The `sdes_fast_liveplay` optimisation sends `webrtcReq` ~4.5 s earlier
+  and breaks this model specifically, so A001064 is excluded from that flag
+  (`_NO_FAST_LIVEPLAY_MODELS`).
+
+The `livePlayResp` wait returns as soon as the response arrives; its timeout is
+only paid when the camera never answers. The opt-in `sdes_fast_liveplay`
+flag (`AIDOT_SDES_FAST_LIVEPLAY` env / `sdes_fast_liveplay=` kwarg) skips this
+wait for the eligible SDES (A001513) cameras to shave ~4.5 s off cold start.
+
 ### Connection reliability (DTLS / A000088)
 
 A000088 cameras advertise **two consecutive ICE ports** `[P, P+1]` and only
