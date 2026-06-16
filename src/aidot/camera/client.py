@@ -543,6 +543,14 @@ class CameraMixin(_CameraControlsMixin):
     # data-channel-less; it's parked on the SDES/TUTK side anyway.
     _NO_DATACHANNEL_MODELS: frozenset = frozenset({"LK.IPC.A001064"})
 
+    # A001064's role-reversal handshake (the camera echoes our offer back as its
+    # own webrtcReq before doing ICE, and won't stream until it gets our
+    # webrtcResp) needs the camera armed BEFORE our webrtcReq.  sdes_fast_liveplay
+    # sends webrtcReq ~4.5 s earlier, which degrades A001064 media reliability
+    # (2/2 -> 1/2 media in a live A/B; the flag was soak-validated only on the
+    # A001513 battery cameras).  Exclude role-reversal models from the flag.
+    _NO_FAST_LIVEPLAY_MODELS: frozenset = frozenset({"LK.IPC.A001064"})
+
     @property
     def _offer_should_include_datachannel(self) -> bool:
         model = getattr(getattr(self, "info", None), "model_id", None)
@@ -2537,7 +2545,14 @@ class CameraMixin(_CameraControlsMixin):
 
         Per-camera ``sdes_fast_liveplay`` (set via start_keepalive) wins; else the
         ``AIDOT_SDES_FAST_LIVEPLAY`` env (truthy = 1/true/yes/on), default off.
-        Only consulted for SDES cameras (the caller gates on is_sdes_camera)."""
+        Only consulted for SDES cameras (the caller gates on is_sdes_camera).
+
+        Role-reversal models (``_NO_FAST_LIVEPLAY_MODELS``, e.g. A001064) are always
+        excluded - their handshake needs the camera armed before our webrtcReq, so
+        the flag's early webrtcReq degrades their media reliability."""
+        model = getattr(getattr(self, "info", None), "model_id", None)
+        if model in self._NO_FAST_LIVEPLAY_MODELS:
+            return False
         opt = getattr(self, "_sdes_fast_liveplay_opt", None)
         if opt is not None:
             return bool(opt)
