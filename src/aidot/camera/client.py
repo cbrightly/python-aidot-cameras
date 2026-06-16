@@ -2532,7 +2532,8 @@ class CameraMixin(_CameraControlsMixin):
             return 120.0
 
     def _resolve_sdes_fast_liveplay(self) -> bool:
-        """Whether to skip the ~2 s livePlayResp wait for SDES (P5, EXPERIMENTAL).
+        """Whether to use SDES fast-liveplay (shorten the always-timing-out
+        echo/livePlayResp signaling) - validated in soak, opt-in, default off.
 
         Per-camera ``sdes_fast_liveplay`` (set via start_keepalive) wins; else the
         ``AIDOT_SDES_FAST_LIVEPLAY`` env (truthy = 1/true/yes/on), default off.
@@ -7047,13 +7048,16 @@ class CameraMixin(_CameraControlsMixin):
         # webrtcReq.  The echo confirms the MQTT pipeline to this device is live
         # and the broker session is registered.  Fall through after 5 s if it
         # never arrives (same safety as the old fixed 0.5 s sleep, but adaptive).
-        # P5 (experimental, opt-in via sdes_fast_liveplay): instrumentation showed
+        # SDES fast-liveplay (opt-in via sdes_fast_liveplay): instrumentation showed
         # the echo and livePlayResp waits BOTH always time out for the SDES cameras
         # measured (echo/resp never arrive) yet streaming succeeds - i.e. ~6 s of
         # dead padding.  When the flag is on, cap the echo wait short and skip the
         # livePlayResp wait; the full ICE/TURN/SCTP handshake is untouched.  This
         # is the SDES path's OWN livePlay waits (the DTLS gate above never runs for
-        # SDES: use_sdes is True there).
+        # SDES: use_sdes is True there).  VALIDATED in a 3 h live soak (15 SDES
+        # opens across battery cameras, flag engaged on all, 0 churn / 0 fail,
+        # ~4.5 s signaling saved); kept off by default pending broader multi-day
+        # use (per-open + near-term stability proven, long-haul not yet).
         _skip_lp = self._resolve_sdes_fast_liveplay()
         _echo_timeout = 1.5 if _skip_lp else 5.0
         _echo_t0 = time.monotonic()
