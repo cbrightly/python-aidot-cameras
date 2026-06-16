@@ -95,6 +95,8 @@ chosen to work out of the box; override only when tuning.
 | `AIDOT_SPROP_DIR` | Directory where captured SPS/PPS (sprop) parameter sets are cached. Set this to a writable path (e.g. for Home Assistant) if the default location is read-only. | `<package dir>` |
 | `AIDOT_DISABLE_HIGHPORT_FIX` | If set (any value), disables the DTLS high-port `USE-CANDIDATE` nomination fix and falls back to upstream aioice behavior (used to measure the baseline connect rate). | unset (fix enabled) |
 | `AIDOT_FAST_CONNECT` | Enables LAN-direct "fast connect" mode (STUN-only, skips several cloud signaling waits) when set to a truthy value. | unset (off) |
+| `AIDOT_SDES_FAST_LIVEPLAY` | Truthy value skips the `livePlayResp` blocking wait for eligible SDES cameras (~4.5 s faster cold start), while keeping the full ICE/SCTP handshake. Role-reversal models (A001064 PTZ) are always excluded. Soak-validated; opt-in. | unset (off) |
+| `AIDOT_SERVE_RELAY` | Holds the public stream port via an internal relay that proxies to ffmpeg, so the first (cold) view connects instead of failing while ffmpeg can't pre-bind the port. Set to `0` to serve ffmpeg directly. | `1` (enabled) |
 | `AIDOT_MAX_CONCURRENT_OPENS` | Caps how many stream opens run concurrently. | `2` |
 | `AIDOT_MAX_CONCURRENT_STREAMS` | Caps how many cameras stream at once. | `3` |
 | `AIDOT_STREAM_IDLE_S` | Seconds of stream idle before an idle release. | `120` |
@@ -104,6 +106,7 @@ chosen to work out of the box; override only when tuning.
 | `AIDOT_BUSY_RETRY_S` | Delay, in seconds, before retrying when a camera reports busy. | `45` |
 | `AIDOT_LIVESTREAM_PARAM` | Set to `0` to skip the cloud `liveStreamParam` pre-connect that provisions battery cameras' live-stream sessions before signaling (without it, battery cameras like the L2 models reject streaming with `-50019`). | `1` (enabled) |
 | `AIDOT_GOP_PLI_S` | Interval, in seconds, between PLI (keyframe) requests. | `2.0` |
+| `AIDOT_SDES_PLI_GAPS` | Comma-separated second offsets for the early PLI (keyframe-request) burst on SDES cameras, to pull the first keyframe in faster on cold start. | `0,1.5,2,3` |
 | `AIDOT_AUDIO_TARGET_DBFS` | Target loudness (dBFS) for two-way audio normalization. | `-15` |
 | `AIDOT_AUDIO_MAXGAIN_DB` | Maximum gain (dB) applied by the audio normalizer. | `30` |
 | `AIDOT_AUDIO_MINGAIN_DB` | Minimum gain (dB) applied by the audio normalizer. | `-12` |
