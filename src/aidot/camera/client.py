@@ -4093,16 +4093,40 @@ class CameraMixin(_CameraControlsMixin):
                     )
                 )
 
-        # Run MQTT in a thread executor (very long duration; stopped via
-        # outgoing_q sentinel when the caller calls WebRTCSession.stop()).
-        mqtt_fut = loop.run_in_executor(
-            None,
-            lambda: _mqtt_session_sync(
-                mqtt_url, mqtt_user, mqtt_pwd, mqtt_cid,
-                sub_topics, [], 3600.0, _on_mqtt_message,
-                "/mqtt", _on_mqtt_ready, outgoing_q,
-            ),
-        )
+        # MQTT transport for the stream signaling.  Default: a dedicated
+        # connect-per-stream session in an executor (stopped via outgoing_q
+        # sentinel on WebRTCSession.stop()).  AIDOT_PERSISTENT_MQTT (Phase 2):
+        # ride the SAME account-level persistent connection commands/attrs use
+        # (the stream's mqtt_cid IS the authorized mqttClientId, so it's the same
+        # connection) - subscribe + register a handler + drain outgoing_q through
+        # it, and DON'T tear the connection down on stop (matching the app).
+        _pm_stream = (await self._get_persistent_mqtt()
+                      if self._resolve_persistent_mqtt() else None)
+        if _pm_stream is not None:
+            await _pm_stream.subscribe(sub_topics)
+            _pm_stream.add_handler(_on_mqtt_message)
+
+            async def _pm_stream_drain():
+                try:
+                    while True:
+                        out = await loop.run_in_executor(None, outgoing_q.get)
+                        if out is None:   # stop sentinel from WebRTCSession.stop()
+                            return
+                        await _pm_stream.publish(out[0], out[1])
+                finally:
+                    _pm_stream.remove_handler(_on_mqtt_message)
+
+            mqtt_fut = asyncio.ensure_future(_pm_stream_drain())
+            _on_mqtt_ready({"connected": True, "rc": 0, "rc_str": "persistent"})
+        else:
+            mqtt_fut = loop.run_in_executor(
+                None,
+                lambda: _mqtt_session_sync(
+                    mqtt_url, mqtt_user, mqtt_pwd, mqtt_cid,
+                    sub_topics, [], 3600.0, _on_mqtt_message,
+                    "/mqtt", _on_mqtt_ready, outgoing_q,
+                ),
+            )
 
         # Wait for MQTT to be connected and subscribed before proceeding.
         # threading.Event.wait(timeout) returns True if set, False on timeout.

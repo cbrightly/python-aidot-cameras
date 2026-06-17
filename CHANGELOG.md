@@ -4,6 +4,25 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.29]
+
+### Changed
+- **Persistent MQTT now also carries the stream-open signaling
+  (`AIDOT_PERSISTENT_MQTT`) — Phase 2.** When enabled, the WebRTC stream open no
+  longer spins up its own connect-per-stream MQTT session; it subscribes and
+  registers its handler on the SAME account-level persistent connection that
+  commands/attributes use (the stream's `mqtt_cid` IS the authorized
+  `mqttClientId`, so it is literally the same connection), drains its outgoing
+  queue through it, and does NOT tear the connection down on stop — matching the
+  app, which keeps one connection for everything. This removes the per-open
+  connect churn that was rate-limiting the cloud account.
+  **Soak-validated (live, 7-camera round-robin):** SDES `NO_MEDIA` dropped from
+  **57% → 11%** (n=63 → n=28) and the connect RuntimeErrors went 6 → ~0, with no
+  per-camera regression — including the previously-worst battery camera going
+  from ~15% to ~71% media delivery. The flag is still opt-in (default off);
+  `_PersistentMqtt` gained `add_handler`/`remove_handler`/`publish`/`subscribe`
+  for the long-lived stream consumer. (#67)
+
 ## [0.7.28]
 
 ### Added
