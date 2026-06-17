@@ -209,42 +209,53 @@ def _build_sdes_serve_cmd(
     - ``output_path`` -> record to file.
     - neither -> ``-f null`` (keep ffmpeg alive draining SRTP, write nothing).
 
-    AUDIO trade-off (the http-listen PULL path only): video is ``-c:v copy`` and
-    its mpegts PMT is known from the input SDP immediately, but ``-c:a aac`` must
-    ENCODE a first frame before the *shared* mpegts PAT/PMT is written.  Battery
-    cameras send PCMA sparsely, so the encoder starves and the whole serve emits
-    ZERO bytes (video included) - which is why audio is opt-in.  ``aresample=
-    async=1:first_pts=0`` pads gaps with silence to keep the encoder fed; the
-    stateless ``volume`` trim tames the hot mic (dynamic normalizers regressed
-    the pipe in live tests).  Keeping audio and video in one mpegts output is the
-    residual coupling the passthrough rework (Option B) is meant to remove."""
+    AUDIO (the http-listen PULL path only): video is ``-c:v copy`` and its mpegts
+    PMT is known from the input SDP immediately, but ``-c:a aac`` must ENCODE a
+    first frame before the *shared* mpegts PAT/PMT is written.  Battery cameras
+    send PCMA sparsely/late, so a naive encoder starves at stream start and the
+    whole serve emits ZERO bytes (video included).  Fix (silence-base mix): add a
+    continuous ``anullsrc`` and ``amix`` the real PCMA over it - the encoder is
+    fed from t=0 so the PMT writes promptly, and because the silence is 0 with
+    ``normalize=0`` it's a no-op whenever real audio is present.  go2rtc/HA pulls
+    this mpegts the same way as the video-only serve, so the proven pull model +
+    cold-start relay are untouched.  Audio stays opt-in (default off) until the
+    silence-mix is soak-validated on battery cameras.  ``volume`` is the stateless
+    hot-mic trim (dynamic normalizers regressed the pipe in live tests)."""
+    time_args = ["-t", str(int(max_seconds))] if max_seconds else []
     if rtsp_push_url and rtsp_push_url.startswith("http"):
         if sdes_audio:
             dest_args = [
-                "-c:v", "copy",
-                "-af", f"aresample=async=1:first_pts=0,volume={audio_gain_db}dB",
-                "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
+                # Second input: continuous a-law-rate silence to keep the AAC
+                # encoder fed from t=0 (see docstring - prevents the PMT stall).
+                "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono",
+                "-filter_complex",
+                ("[0:a]aresample=async=1[a0];"
+                 "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
+                 f"volume={audio_gain_db}dB[aout]"),
+                "-map", "0:v:0", "-map", "[aout]",
+                "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
+                *time_args,
                 "-f", "mpegts", "-listen", "1",
                 rtsp_push_url,
             ]
         else:
             dest_args = [
                 "-c:v", "copy", "-an",
+                *time_args,
                 "-f", "mpegts", "-listen", "1",
                 rtsp_push_url,
             ]
     elif rtsp_push_url:
         dest_args = [
             "-c", "copy",
+            *time_args,
             "-f", "rtsp", "-rtsp_transport", "tcp",
             rtsp_push_url,
         ]
     elif output_path:
-        dest_args = ["-c", "copy", output_path]
+        dest_args = ["-c", "copy", *time_args, output_path]
     else:
-        dest_args = ["-f", "null", "/dev/null"]
-    # Output-side duration limit: -t N stops ffmpeg after N seconds of output.
-    time_args = ["-t", str(int(max_seconds))] if max_seconds else []
+        dest_args = [*time_args, "-f", "null", "/dev/null"]
     return [
         "ffmpeg", "-y",
         "-loglevel", "warning",
@@ -256,7 +267,6 @@ def _build_sdes_serve_cmd(
         "-analyzeduration", "2000000",
         "-probesize", "500000",
         "-i", sdp_path,
-        *time_args,
         *dest_args,
     ]
 

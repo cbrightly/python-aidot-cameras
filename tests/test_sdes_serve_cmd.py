@@ -26,20 +26,26 @@ def test_http_pull_video_only_default():
     assert cmd[-3:] == ["-listen", "1", "http://127.0.0.1:9000"]
 
 
-def test_http_pull_with_audio_transcodes_aac():
+def test_http_pull_with_audio_silence_mix():
     cmd = build(sdp_path="/x.sdp", rtsp_push_url="http://127.0.0.1:9000",
                 sdes_audio=True, audio_gain_db=-8.0)
     assert "-an" not in cmd
     assert cmd[_idx(cmd, "-c:a") + 1] == "aac"
-    af = cmd[_idx(cmd, "-af") + 1]
-    assert "aresample=async=1:first_pts=0" in af   # silence-pad to feed encoder
-    assert "volume=-8.0dB" in af
-    assert cmd[_idx(cmd, "-f") + 1] == "mpegts"
+    # Continuous silence second input keeps the encoder fed from t=0.
+    assert "anullsrc=r=8000:cl=mono" in cmd
+    fc = cmd[_idx(cmd, "-filter_complex") + 1]
+    assert "amix=inputs=2:duration=longest:normalize=0" in fc  # silence-base mix
+    assert "volume=-8.0dB" in fc
+    # explicit maps: copied video + mixed audio
+    assert "0:v:0" in cmd and "[aout]" in cmd
+    # output muxer is mpegts (the first -f is the lavfi silence input)
+    assert "mpegts" in cmd and cmd[cmd.index("mpegts") - 1] == "-f"
+    assert cmd[-4:] == ["mpegts", "-listen", "1", "http://127.0.0.1:9000"]
 
 
 def test_audio_gain_is_parameterised():
     cmd = build(sdp_path="/x.sdp", rtsp_push_url="http://h", sdes_audio=True, audio_gain_db=-3.5)
-    assert "volume=-3.5dB" in cmd[_idx(cmd, "-af") + 1]
+    assert "volume=-3.5dB" in cmd[_idx(cmd, "-filter_complex") + 1]
 
 
 def test_video_copy_present_even_with_audio():
