@@ -187,6 +187,80 @@ def _save_frame_as_jpeg(image_data: Any, output_path: str) -> bool:
     return False
 
 
+def _build_sdes_serve_cmd(
+    *,
+    sdp_path: str,
+    rtsp_push_url: Optional[str] = None,
+    output_path: Optional[str] = None,
+    max_seconds: Optional[float] = None,
+    sdes_audio: bool = False,
+    audio_gain_db: float = -8.0,
+) -> list:
+    """Build the ffmpeg argv for the SDES bridge serve.
+
+    Pure (no I/O - the caller creates any output directory and resolves
+    ``sdes_audio`` / ``audio_gain_db`` from opts/env).  Four destinations:
+
+    - ``rtsp_push_url`` is http(s)  -> PULL model: serve mpegts over an
+      ``-listen`` socket so go2rtc / HA's stream integration pull it (no go2rtc
+      pre-registration).
+    - ``rtsp_push_url`` is anything else -> legacy PUSH model: publish to an RTSP
+      server (``-f rtsp``), for callers running their own pre-registered go2rtc.
+    - ``output_path`` -> record to file.
+    - neither -> ``-f null`` (keep ffmpeg alive draining SRTP, write nothing).
+
+    AUDIO trade-off (the http-listen PULL path only): video is ``-c:v copy`` and
+    its mpegts PMT is known from the input SDP immediately, but ``-c:a aac`` must
+    ENCODE a first frame before the *shared* mpegts PAT/PMT is written.  Battery
+    cameras send PCMA sparsely, so the encoder starves and the whole serve emits
+    ZERO bytes (video included) - which is why audio is opt-in.  ``aresample=
+    async=1:first_pts=0`` pads gaps with silence to keep the encoder fed; the
+    stateless ``volume`` trim tames the hot mic (dynamic normalizers regressed
+    the pipe in live tests).  Keeping audio and video in one mpegts output is the
+    residual coupling the passthrough rework (Option B) is meant to remove."""
+    if rtsp_push_url and rtsp_push_url.startswith("http"):
+        if sdes_audio:
+            dest_args = [
+                "-c:v", "copy",
+                "-af", f"aresample=async=1:first_pts=0,volume={audio_gain_db}dB",
+                "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
+                "-f", "mpegts", "-listen", "1",
+                rtsp_push_url,
+            ]
+        else:
+            dest_args = [
+                "-c:v", "copy", "-an",
+                "-f", "mpegts", "-listen", "1",
+                rtsp_push_url,
+            ]
+    elif rtsp_push_url:
+        dest_args = [
+            "-c", "copy",
+            "-f", "rtsp", "-rtsp_transport", "tcp",
+            rtsp_push_url,
+        ]
+    elif output_path:
+        dest_args = ["-c", "copy", output_path]
+    else:
+        dest_args = ["-f", "null", "/dev/null"]
+    # Output-side duration limit: -t N stops ffmpeg after N seconds of output.
+    time_args = ["-t", str(int(max_seconds))] if max_seconds else []
+    return [
+        "ffmpeg", "-y",
+        "-loglevel", "warning",
+        "-protocol_whitelist", "file,rtp,udp,srtp",
+        # 2 s analyzeduration: the camera sends SPS+PPS+IDR in the first burst;
+        # 15 s consumed nearly all packets during analysis.  PLI re-arms an IDR
+        # every 5 s so parameters always re-arrive.
+        "-fflags", "+nobuffer+genpts",
+        "-analyzeduration", "2000000",
+        "-probesize", "500000",
+        "-i", sdp_path,
+        *time_args,
+        *dest_args,
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # TCP binary framing helpers
 # --------------------------------------------------------------------------- #
@@ -9939,106 +10013,34 @@ class CameraMixin(_CameraControlsMixin):
                 rtsp_push_url = _rewrite_serve_port(rtsp_push_url, _ff_port)
                 _relay.set_backend(_ff_port)
             # PULL model: SERVE the decrypted stream over an HTTP-listen socket so
-            # go2rtc / HA's stream integration pull it the standard way
-            # (streams.add) - no go2rtc pre-registration needed.  ffmpeg -listen 1
-            # blocks on accept() until the consumer connects, which go2rtc/HA do
-            # promptly after stream_source() returns; PLI re-arms an IDR so a
-            # late consumer still gets decodable frames within ~5 s.
-            #
-            # VIDEO-ONLY BY DEFAULT (the AAC audio transcode was DEADLOCKING the
-            # serve under loss; root-caused live 2026-06-08).  The mpegts muxer
-            # cannot write its PAT/PMT until every mapped output stream has
-            # produced a first packet.  `-c:v copy` knows the H.264 params from
-            # the input SDP immediately, but `-c:a aac` must ENCODE a first AAC
-            # frame, which needs real PCMA samples.  On a battery camera over a
-            # weak uplink the PCMA (PT=8) audio arrives sparse/late, the encoder
-            # yields "No filtered frames for output stream", the PMT is never
-            # written, and the consumer (go2rtc/HA) receives ZERO bytes -> the
-            # dashboard spins forever with no error and no timeout.  Proven by a
-            # serve-path A/B: production AAC config -> 0 bytes; `-an` -> 3.8 MB /
-            # 408 frames / 10 IDRs in 25 s.  (`-max_interleave_delta 0` does NOT
-            # rescue it - the block is the PMT, not interleaving.)  So drop audio
-            # by default and let video flow; the H.264 is `-c:v copy` untouched.
-            #
-            # Opt back into audio with AIDOT_SDES_SERVE_AUDIO=1 (e.g. a strong-
-            # signal/mains camera where PCMA arrives densely enough to keep the
-            # AAC encoder fed).  When enabled: transcode PCMA->AAC@48k with a
-            # STATELESS `volume` trim (the mic runs hot; default -8 dB, env-tunable
-            # via AIDOT_SDES_AUDIO_GAIN_DB).  Dynamic normalizers (dynaudnorm/
-            # loudnorm) and `-max_interleave_delta 0` are avoided - both regressed
-            # the pipe (buffering / ~100 ms audio cutouts) in earlier live tests.
-            _sdes_audio = getattr(self, "_sdes_audio_opt", None)
-            if _sdes_audio is None:
-                _sdes_audio = os.environ.get("AIDOT_SDES_SERVE_AUDIO", "0") == "1"
-            if _sdes_audio:
-                try:
-                    _sdes_gain_db = float(
-                        os.environ.get("AIDOT_SDES_AUDIO_GAIN_DB", "-8")
-                    )
-                except (ValueError, TypeError):
-                    _sdes_gain_db = -8.0
-                dest_args = [
-                    "-c:v", "copy",
-                    # aresample=async=1 fills timing gaps with silence so the AAC
-                    # encoder always has a full 1024-sample frame to emit.  Battery
-                    # cameras send PCMA sparsely (radio duty-cycling + weak uplink);
-                    # without this the encoder starves, the mpegts PAT/PMT is never
-                    # written, and the consumer gets ZERO bytes - the whole stream
-                    # dies.  first_pts=0 anchors the clock so the first AAC frame
-                    # (and thus the PMT) is produced promptly at stream start.
-                    "-af", f"aresample=async=1:first_pts=0,volume={_sdes_gain_db}dB",
-                    "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
-                    "-f", "mpegts", "-listen", "1",
-                    rtsp_push_url,
-                ]
-            else:
-                dest_args = [
-                    "-c:v", "copy", "-an",
-                    "-f", "mpegts", "-listen", "1",
-                    rtsp_push_url,
-                ]
-        elif rtsp_push_url:
-            # Legacy PUSH model: publish to an RTSP server (e.g. go2rtc at :8554).
-            # Requires the stream to be pre-registered in go2rtc; retained for
-            # non-HA callers that run their own go2rtc config.  -rtsp_transport tcp
-            # avoids UDP fragmentation on loopback.
-            dest_args = [
-                "-c", "copy",
-                "-f", "rtsp", "-rtsp_transport", "tcp",
-                rtsp_push_url,
-            ]
+            # go2rtc / HA's stream integration pull it the standard way - the only
+            # per-camera side effect here is the cold-start serve-relay rewrite
+            # above; the destination + audio args (and the PMT-stall rationale for
+            # audio being opt-in) live in _build_sdes_serve_cmd, built once below.
         elif output_path:
-            # Ensure the output directory exists before ffmpeg tries to open the
-            # file.  ffmpeg fails with "No such file or directory" if the parent
-            # directory is missing.
+            # Ensure the output directory exists before ffmpeg opens the file
+            # (ffmpeg fails with "No such file or directory" otherwise).
             out_dir = os.path.dirname(output_path)
             if out_dir:
                 os.makedirs(out_dir, exist_ok=True)
-            dest_args = ["-c", "copy", output_path]
-        else:
-            # -c copy /dev/null fails: "Unable to find a suitable output format
-            # for '/dev/null'".  Use the null muxer instead so ffmpeg stays
-            # alive and receives the SRTP stream without writing anything.
-            dest_args = ["-f", "null", "/dev/null"]
-        # Output-side duration limit: -t N stops ffmpeg after N seconds of
-        # encoded output.  The bridge thread detects ffmpeg exit via proc.poll()
-        # and stops forwarding + sending keepalives automatically.
-        _time_args = ["-t", str(int(max_seconds))] if max_seconds else []
-        cmd = [
-            "ffmpeg", "-y",
-            "-loglevel", "warning",
-            "-protocol_whitelist", "file,rtp,udp,srtp",
-            # 2 s analyzeduration: the camera sends SPS+PPS+IDR in the very
-            # first burst (seq=0,1,2...).  15 s consumed nearly all packets
-            # during analysis, leaving only 1s of output in a 30s test.
-            # PLI forces a new IDR every 5 s, so parameters always re-arrive.
-            "-fflags", "+nobuffer+genpts",
-            "-analyzeduration", "2000000",
-            "-probesize", "500000",
-            "-i", sdp_path,
-            *_time_args,
-            *dest_args,
-        ]
+        # Build the ffmpeg command (single source of truth: _build_sdes_serve_cmd).
+        # Audio is opt-in (opt wins over env, default off) because the AAC encoder
+        # can starve on sparse battery PCMA and stall the shared mpegts PMT.
+        _sdes_audio = getattr(self, "_sdes_audio_opt", None)
+        if _sdes_audio is None:
+            _sdes_audio = os.environ.get("AIDOT_SDES_SERVE_AUDIO", "0") == "1"
+        try:
+            _sdes_gain_db = float(os.environ.get("AIDOT_SDES_AUDIO_GAIN_DB", "-8"))
+        except (ValueError, TypeError):
+            _sdes_gain_db = -8.0
+        cmd = _build_sdes_serve_cmd(
+            sdp_path=sdp_path,
+            rtsp_push_url=rtsp_push_url,
+            output_path=output_path,
+            max_seconds=max_seconds,
+            sdes_audio=bool(_sdes_audio),
+            audio_gain_db=_sdes_gain_db,
+        )
         # --- H.265 fix: narrow the ffmpeg SDP to the camera's actual codec ----
         # The camera streams H.264 (pt=96) OR H.265 (pt=97), varying per session.
         # An m=video line listing both ("96 97") makes ffmpeg bind the RTP
