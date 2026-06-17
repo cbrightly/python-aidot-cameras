@@ -229,13 +229,34 @@ class DeviceClient(CameraMixin):
         if ip is None:
             return
         self._ip_address = ip
-        if self._connecting is not True and self._connect_and_login is not True:
-            self._login_task = asyncio.create_task(self.async_login())
+        if self._connecting is True or self._connect_and_login is True:
+            return
+        # Throttle (shared 30s window with the reconnect chain): a repeated
+        # discovery - or a camera that slipped the _is_camera gate because its
+        # model was momentarily unknown - must not spawn a fresh TCP:10000 login
+        # every broadcast tick.  That hammers a device whose control port refuses
+        # (e.g. a battery camera) and spams "login read status error".  A device
+        # that genuinely needs to connect still does so within 30s.
+        now = time.monotonic()
+        if now - self._last_login_attempt < 30:
+            return
+        self._last_login_attempt = now
+        self._login_task = asyncio.create_task(self.async_login())
 
 
     async def async_login(self) -> None:
         """Connect and log in using the last-known IP if not already connected."""
         if self._ip_address is None:
+            return
+        # The base TCP:10000 control channel is the LIGHT protocol.  Cameras never
+        # use it - their local control is the separate CameraLanClient
+        # (camera/lan_control.py) and their LAN IP comes from WebRTC signaling.  A
+        # camera reaching here means a discovered IP slipped the _is_camera gate;
+        # logging in would hammer a port the camera doesn't serve and spam
+        # "login read status error" (and never connect).  This is the single
+        # chokepoint for both the discovery and reconnect-chain login paths.
+        model = getattr(getattr(self, "info", None), "model_id", "") or ""
+        if "IPC" in model:
             return
         if self._connecting is not True and self._connect_and_login is not True:
             await self.connect(self._ip_address)
