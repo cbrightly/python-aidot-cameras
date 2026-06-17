@@ -529,6 +529,15 @@ class AidotClient:
         for client in self._device_clients.values():
             await client.close()
         self._device_clients.clear()
+        # Close the account-shared persistent MQTT connection, if one was opened
+        # (AIDOT_PERSISTENT_MQTT). Stored on the shared login_info by the camera
+        # command/attr paths; closing here stops its background paho loop.
+        pm = self.login_info.pop("_persistent_mqtt", None) if isinstance(self.login_info, dict) else None
+        if pm is not None:
+            try:
+                pm.close()
+            except Exception:
+                _LOGGER.debug("aidot: persistent mqtt close failed", exc_info=True)
 
     def cleanup(self) -> None:
         """Sync entry point: fire-and-forget async_close()."""

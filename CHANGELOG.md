@@ -4,6 +4,25 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.28]
+
+### Added
+- **Persistent MQTT connection reuse for commands + attributes
+  (`AIDOT_PERSISTENT_MQTT`, opt-in, default off) — Phase 1.** Historically every
+  device command (PTZ/settings) and every attribute fetch opened and tore down its
+  own cloud MQTT WebSocket; the official app instead keeps ONE persistent
+  connection per login session (LDSBaseMqttServiceImpl) and reuses it for
+  everything. When enabled, the new `_PersistentMqtt` holds one account-level
+  connection (the broker binds auth to the single authorized client_id, so there
+  can only be one), subscribes once, replays subscriptions on reconnect, and routes
+  `_mqtt_device_cmd` + `async_get_camera_attributes` through it — cutting the
+  per-command and per-5-min-attribute-poll connect churn that can trip cloud
+  rate-limiting across multiple cameras. The stream-open signaling path is
+  unchanged (it uses per-session client_ids) and is a later phase. Connection is
+  closed on `AidotClient.async_close`. Validated live: a real device reply
+  (`lowPowerActiveStateResp`) collected through a single shared connection
+  (`connects=1`); per-op fallback retained when off. (#66)
+
 ## [0.7.27]
 
 ### Added
