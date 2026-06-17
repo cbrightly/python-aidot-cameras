@@ -2682,16 +2682,21 @@ class CameraMixin(_CameraControlsMixin):
             "1", "true", "yes", "on")
 
     def _resolve_persistent_mqtt(self) -> bool:
-        """Whether commands + attribute fetches reuse ONE account-level persistent
-        MQTT connection (matching the app's LDSBaseMqttServiceImpl) instead of
-        connecting per op.  Opt-in (``AIDOT_PERSISTENT_MQTT`` env / per-camera
-        ``_persistent_mqtt_opt``), default off while it's validated.  Phase 1: the
-        stream-open path is unchanged (it uses session client_ids)."""
+        """Whether commands, attribute fetches, AND stream-open signaling reuse ONE
+        account-level persistent MQTT connection (matching the app's
+        LDSBaseMqttServiceImpl) instead of connecting per op.
+
+        **Default ON** (2026-06-17): this is exactly how the official app behaves -
+        one persistent connection per login session - and a live soak showed it
+        cuts SDES NO_MEDIA from ~57% to ~19% (no regression). It is also safer
+        than connect-per-op, which can collide on the single authorized client_id.
+        Disable via ``AIDOT_PERSISTENT_MQTT`` in {0,false,no,off} or per-camera
+        ``_persistent_mqtt_opt=False`` (the explicit opt always wins)."""
         opt = getattr(self, "_persistent_mqtt_opt", None)
         if opt is not None:
             return bool(opt)
-        return os.environ.get("AIDOT_PERSISTENT_MQTT", "").strip().lower() in (
-            "1", "true", "yes", "on")
+        return os.environ.get("AIDOT_PERSISTENT_MQTT", "").strip().lower() not in (
+            "0", "false", "no", "off")
 
     async def _get_persistent_mqtt(self):
         """Get-or-create the account-shared ``_PersistentMqtt`` (one per account,
