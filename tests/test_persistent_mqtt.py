@@ -21,25 +21,27 @@ def _cam():
     return _CAM.__new__(_CAM)
 
 
-def test_default_off(monkeypatch):
+def test_default_on(monkeypatch):
+    # default ON (matches the app's single persistent connection)
     monkeypatch.delenv("AIDOT_PERSISTENT_MQTT", raising=False)
-    assert _cam()._resolve_persistent_mqtt() is False
+    assert _cam()._resolve_persistent_mqtt() is True
 
 
-def test_env_enables(monkeypatch):
-    for val in ("1", "true", "TRUE", "yes", "on", " On "):
-        monkeypatch.setenv("AIDOT_PERSISTENT_MQTT", val)
-        assert _cam()._resolve_persistent_mqtt() is True, val
-
-
-def test_env_falsey_stays_off(monkeypatch):
-    for val in ("0", "false", "no", "off", "", "anything"):
+def test_env_disables(monkeypatch):
+    for val in ("0", "false", "FALSE", "no", "off", " Off "):
         monkeypatch.setenv("AIDOT_PERSISTENT_MQTT", val)
         assert _cam()._resolve_persistent_mqtt() is False, val
 
 
-def test_kwarg_wins_over_env(monkeypatch):
-    monkeypatch.setenv("AIDOT_PERSISTENT_MQTT", "1")
+def test_env_truthy_or_unknown_stays_on(monkeypatch):
+    for val in ("1", "true", "yes", "on", "anything"):
+        monkeypatch.setenv("AIDOT_PERSISTENT_MQTT", val)
+        assert _cam()._resolve_persistent_mqtt() is True, val
+
+
+def test_kwarg_off_wins_over_default(monkeypatch):
+    # an explicit opt=False (e.g. user turned the HA toggle off) overrides default-on
+    monkeypatch.delenv("AIDOT_PERSISTENT_MQTT", raising=False)
     cam = _cam()
     cam._persistent_mqtt_opt = False
     assert cam._resolve_persistent_mqtt() is False
