@@ -1245,6 +1245,186 @@ def _mqtt_session_sync(
     return collected, status
 
 
+class _PersistentMqtt:
+    """One long-lived paho MQTT connection reused across many publish/collect
+    round-trips - matching the official app's single persistent connection
+    (LDSBaseMqttServiceImpl) instead of our historical connect-per-op.
+
+    Thread-safe: the paho network loop runs in its own background thread and
+    auto-reconnects; tracked subscriptions are replayed on every (re)connect.
+    ``request()`` registers a transient collector, publishes, and gathers
+    matching messages for ``timeout`` WITHOUT tearing the connection down, so
+    N operations cost ONE connect instead of N. The client_id is account-level,
+    so exactly one of these should exist per account (per AidotClient)."""
+
+    def __init__(self, mqtt_url, mqtt_user, mqtt_pwd, client_id, ws_path="/mqtt"):
+        self._url = mqtt_url
+        self._user = mqtt_user
+        self._pwd = mqtt_pwd
+        self._cid = client_id
+        self._ws_path = ws_path
+        self._client = None
+        self._host = None
+        self._port = None
+        self._connected = threading.Event()
+        self._lock = threading.Lock()
+        self._subs = set()         # topics to (re)subscribe on connect
+        self._collectors = []      # transient queues, each receives every msg
+        self._started = False
+        self.connects = 0          # observability: how many times we connected
+
+    def _build(self):
+        import paho.mqtt.client as _paho
+        import ssl as _ssl
+        from urllib.parse import urlparse
+        parsed = urlparse(self._url)
+        self._host = parsed.hostname or self._url
+        self._port = parsed.port or (8443 if parsed.scheme in ("wss", "https") else 1883)
+        tls = parsed.scheme in ("wss", "https", "mqtts")
+        path = self._ws_path if self._ws_path is not None else (parsed.path or "/mqtt")
+        if path == "":
+            path = "/"
+        try:
+            c = _paho.Client(callback_api_version=_paho.CallbackAPIVersion.VERSION2,
+                             client_id=self._cid, transport="websockets")
+        except AttributeError:
+            c = _paho.Client(client_id=self._cid, transport="websockets")
+        c.ws_set_options(path=path)
+        if self._user:
+            c.username_pw_set(self._user, self._pwd or "")
+        if tls:
+            c.tls_set_context(_ssl.create_default_context())
+        try:
+            c.reconnect_delay_set(min_delay=1, max_delay=30)
+        except Exception:
+            pass
+        c.on_connect = self._on_connect
+        c.on_disconnect = self._on_disconnect
+        c.on_message = self._on_message
+        return c
+
+    def _on_connect(self, c, ud, flags, reason_code, props=None):
+        try:
+            rc = int(reason_code)
+        except (TypeError, ValueError):
+            rc = getattr(reason_code, "value", -1)
+        if rc == 0:
+            self.connects += 1
+            with self._lock:
+                subs = list(self._subs)
+            for t in subs:                 # replay subscriptions after (re)connect
+                try:
+                    c.subscribe(t)
+                except Exception:
+                    _LOGGER.debug("persistent mqtt: resubscribe %s failed", t)
+            self._connected.set()
+        else:
+            _LOGGER.warning("persistent mqtt: broker refused rc=%s", rc)
+
+    def _on_disconnect(self, c, ud, *args, **kwargs):
+        self._connected.clear()            # paho loop auto-reconnects; subs replay on_connect
+
+    def _on_message(self, c, ud, msg):
+        payload = (msg.payload.decode("utf-8", errors="replace")
+                   if isinstance(msg.payload, (bytes, bytearray)) else str(msg.payload))
+        item = (msg.topic, payload)
+        with self._lock:
+            cols = list(self._collectors)
+        for q in cols:
+            q.put(item)
+
+    def _ensure_started_sync(self, timeout=15.0):
+        with self._lock:
+            if self._client is None:
+                self._client = self._build()
+                try:
+                    self._client.connect(self._host, self._port, keepalive=60)
+                except Exception as exc:
+                    _LOGGER.warning("persistent mqtt: connect() raised: %s", exc)
+                    self._client = None
+                    return False
+                self._client.loop_start()  # drives keepalive + auto-reconnect
+                self._started = True
+        return self._connected.wait(timeout)
+
+    def _subscribe_sync(self, topics):
+        new = []
+        with self._lock:
+            for t in topics:
+                if t not in self._subs:
+                    self._subs.add(t)
+                    new.append(t)
+            c = self._client
+        if c is not None and self._connected.is_set():
+            for t in new:
+                try:
+                    c.subscribe(t)
+                except Exception:
+                    _LOGGER.debug("persistent mqtt: subscribe %s failed", t)
+
+    def _request_sync(self, publish_items, subscribe_topics, match, timeout):
+        import queue as _queue
+        import time as _time
+        if not self._ensure_started_sync():
+            return [], {"error": "persistent mqtt connect timeout"}
+        self._subscribe_sync(subscribe_topics or [])
+        q = _queue.Queue()
+        with self._lock:
+            self._collectors.append(q)
+        collected = []
+        try:
+            for pt, pp in (publish_items or []):
+                self._client.publish(pt, pp)
+            deadline = _time.monotonic() + timeout
+            while True:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    item = q.get(timeout=min(remaining, 0.1))
+                except _queue.Empty:
+                    continue
+                if match is None or match(item[0], item[1]):
+                    collected.append(item)
+        finally:
+            with self._lock:
+                try:
+                    self._collectors.remove(q)
+                except ValueError:
+                    pass
+        return collected, {"error": None}
+
+    async def request(self, publish_items, subscribe_topics=None, match=None, timeout=5.0):
+        """Publish ``publish_items`` and collect matching messages for ``timeout``
+        on the shared persistent connection (one connect for the account, reused).
+        Returns (messages, status)."""
+        import functools
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, functools.partial(
+            self._request_sync, publish_items, subscribe_topics, match, timeout))
+
+    async def ensure_connected(self, timeout=15.0):
+        import functools
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, functools.partial(self._ensure_started_sync, timeout))
+
+    def close(self):
+        c = self._client
+        self._client = None
+        self._started = False
+        self._connected.clear()
+        if c is not None:
+            try:
+                c.loop_stop()
+            except Exception:
+                pass
+            try:
+                c.disconnect()
+            except Exception:
+                pass
+
+
 async def _mqtt_session(
     mqtt_url: str,
     mqtt_user: str,
