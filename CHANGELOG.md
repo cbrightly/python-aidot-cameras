@@ -4,6 +4,21 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.31]
+
+### Fixed
+- **Two-way talk now releases the camera speaker on teardown, so the next talk
+  session isn't blocked.** Previously the DTLS `stop()` closed the PeerConnection
+  without sending SPEAKERSTOP when talk was active (stall/error/`async_speak`
+  paths), and even the clean path closed the transport immediately after
+  SPEAKERSTOP without letting it flush — leaving the camera's speaker/talk channel
+  bound to the dead session, so the app's (or HA's) next push-to-talk got `851`
+  "mic occupied". Now: DTLS `stop()` sends SPEAKERSTOP(849), idles the track, and
+  waits a short flush window before closing the PC whenever talk was active
+  (idempotent); SDES `stop()` additionally settles after the bridge sends
+  SPEAKERSTOP so the camera processes the release over the still-live SCTP before
+  teardown. (#69)
+
 ## [0.7.30]
 
 ### Changed
