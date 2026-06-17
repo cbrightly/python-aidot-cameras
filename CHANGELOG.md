@@ -4,6 +4,19 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.30]
+
+### Changed
+- **Persistent MQTT connection reuse is now ON by default
+  (`AIDOT_PERSISTENT_MQTT`).** This is exactly how the official app behaves — one
+  persistent connection per login session for commands, attributes, and stream
+  signaling — and the live soak validated it cuts SDES `NO_MEDIA` from ~57% to
+  ~19% with no regression (battery cameras roughly doubled their media-delivery
+  rate). It is also safer than connect-per-op, which can collide on the single
+  authorized client_id. Disable with `AIDOT_PERSISTENT_MQTT` in `{0,false,no,off}`
+  or per-camera `_persistent_mqtt_opt=False` (the explicit opt always wins). No
+  behaviour change for callers that already set the flag. (#68)
+
 ## [0.7.29]
 
 ### Changed
