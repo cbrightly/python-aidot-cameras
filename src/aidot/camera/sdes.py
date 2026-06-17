@@ -181,15 +181,23 @@ class SdesSession:
             self._talk_state["stop"] = True
             self._talk_state["provider"] = None
         self._proc.terminate()
+        _stop_loop = asyncio.get_running_loop()
         try:
-            _stop_loop = asyncio.get_running_loop()
             await _stop_loop.run_in_executor(None, lambda: self._proc.wait(5))
         except Exception:
             self._proc.kill()
+        # Read drained stderr in the executor with a hard timeout: proc.stderr.read()
+        # blocks until EOF, which never arrives if the killed process is still a
+        # zombie / stuck in uninterruptible I/O - doing it inline would hang the
+        # whole event loop (and thus all of teardown).  Bound it so a wedged ffmpeg
+        # can't stall the close; we lose only the diagnostic stderr in that case.
         stderr_bytes = b""
         try:
-            stderr_bytes = self._proc.stderr.read()
-        except Exception:
+            stderr_bytes = await asyncio.wait_for(
+                _stop_loop.run_in_executor(None, self._proc.stderr.read),
+                timeout=2.0,
+            )
+        except Exception:   # incl. asyncio.TimeoutError - never let teardown hang here
             _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
         if stderr_bytes:
             _LOGGER.warning("ffmpeg SDES stderr:\n%s", stderr_bytes.decode(errors="replace"))
