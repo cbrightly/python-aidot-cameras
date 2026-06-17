@@ -1241,12 +1241,23 @@ class CameraMixin(_CameraControlsMixin):
             publish_items.append((_wake_topic, _wake_payload))
         publish_items.append((pub_topic, payload_str))
 
-        messages = await _mqtt_session(
-            mqtt_url, mqtt_user, mqtt_pwd, client_id,
-            subscribe_topics=sub_topics,
-            publish_items=publish_items,
-            duration=timeout,
-        )
+        if self._resolve_persistent_mqtt():
+            pm = await self._get_persistent_mqtt()
+        else:
+            pm = None
+        if pm is not None:
+            messages, _st = await pm.request(
+                publish_items=publish_items,
+                subscribe_topics=sub_topics,
+                timeout=timeout,
+            )
+        else:
+            messages = await _mqtt_session(
+                mqtt_url, mqtt_user, mqtt_pwd, client_id,
+                subscribe_topics=sub_topics,
+                publish_items=publish_items,
+                duration=timeout,
+            )
 
         for topic, raw in messages:
             if ack_keyword and ack_keyword not in topic:
@@ -1473,12 +1484,23 @@ class CameraMixin(_CameraControlsMixin):
             })
             publish_items.append((_wake_topic, _wake_payload))
 
-        messages = await _mqtt_session(
-            mqtt_url, mqtt_user, mqtt_pwd, client_id,
-            subscribe_topics=sub_topics,
-            publish_items=publish_items,
-            duration=timeout,
-        )
+        if self._resolve_persistent_mqtt():
+            pm = await self._get_persistent_mqtt()
+        else:
+            pm = None
+        if pm is not None:
+            messages, _st = await pm.request(
+                publish_items=publish_items,
+                subscribe_topics=sub_topics,
+                timeout=timeout,
+            )
+        else:
+            messages = await _mqtt_session(
+                mqtt_url, mqtt_user, mqtt_pwd, client_id,
+                subscribe_topics=sub_topics,
+                publish_items=publish_items,
+                duration=timeout,
+            )
 
         for topic, raw in messages:
             if "setDevAttrNotif" not in topic:
@@ -2658,6 +2680,46 @@ class CameraMixin(_CameraControlsMixin):
             return bool(opt)
         return os.environ.get("AIDOT_SDES_ADAPTIVE", "").strip().lower() in (
             "1", "true", "yes", "on")
+
+    def _resolve_persistent_mqtt(self) -> bool:
+        """Whether commands + attribute fetches reuse ONE account-level persistent
+        MQTT connection (matching the app's LDSBaseMqttServiceImpl) instead of
+        connecting per op.  Opt-in (``AIDOT_PERSISTENT_MQTT`` env / per-camera
+        ``_persistent_mqtt_opt``), default off while it's validated.  Phase 1: the
+        stream-open path is unchanged (it uses session client_ids)."""
+        opt = getattr(self, "_persistent_mqtt_opt", None)
+        if opt is not None:
+            return bool(opt)
+        return os.environ.get("AIDOT_PERSISTENT_MQTT", "").strip().lower() in (
+            "1", "true", "yes", "on")
+
+    async def _get_persistent_mqtt(self):
+        """Get-or-create the account-shared ``_PersistentMqtt`` (one per account,
+        keyed on the shared ``login_info``).  The broker binds auth to the single
+        authorized client_id, so there must be exactly one.  Returns None if it
+        can't be built (caller falls back to per-op ``_mqtt_session``)."""
+        # _user_info is the shared account dict (same object across the account's
+        # DeviceClients, and the same object as AidotClient.login_info) - the right
+        # place to cache one connection per account.
+        li = self._user_info if isinstance(getattr(self, "_user_info", None), dict) else None
+        if li is None:
+            return None
+        pm = li.get("_persistent_mqtt")
+        if pm is not None:
+            return pm
+        smarthome_auth = await self._async_get_smarthome_auth()
+        mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
+        mqtt_pwd  = (smarthome_auth or {}).get("mqttPassword") or ""
+        client_id = (self._user_info.get("mqttClientId") or f"app-{mqtt_user}")
+        mqtt_url = await self._async_get_mqtt_url()
+        if not mqtt_url:
+            return None
+        from .protocol import _PersistentMqtt
+        pm = li.get("_persistent_mqtt")  # re-check under the brief await gap
+        if pm is None:
+            pm = _PersistentMqtt(mqtt_url, mqtt_user, mqtt_pwd, client_id)
+            li["_persistent_mqtt"] = pm
+        return pm
 
     @staticmethod
     def _adaptive_next_fast(adaptive: bool, fast_failed: bool) -> bool:
