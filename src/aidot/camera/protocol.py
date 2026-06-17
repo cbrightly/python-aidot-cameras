@@ -1270,6 +1270,7 @@ class _PersistentMqtt:
         self._lock = threading.Lock()
         self._subs = set()         # topics to (re)subscribe on connect
         self._collectors = []      # transient queues, each receives every msg
+        self._handlers = []        # persistent on_message callbacks (e.g. a stream)
         self._started = False
         self.connects = 0          # observability: how many times we connected
 
@@ -1330,8 +1331,14 @@ class _PersistentMqtt:
         item = (msg.topic, payload)
         with self._lock:
             cols = list(self._collectors)
+            handlers = list(self._handlers)
         for q in cols:
             q.put(item)
+        for h in handlers:                 # persistent subscribers (stream, etc.)
+            try:
+                h(msg.topic, payload)
+            except Exception:
+                _LOGGER.debug("persistent mqtt: handler raised", exc_info=True)
 
     def _ensure_started_sync(self, timeout=15.0):
         with self._lock:
@@ -1408,6 +1415,44 @@ class _PersistentMqtt:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None, functools.partial(self._ensure_started_sync, timeout))
+
+    # --- persistent subscriber API (for the stream signaling, Phase 2) -------- #
+    def add_handler(self, callback):
+        """Register a persistent on_message callback ``callback(topic, payload)``
+        that receives every message for the connection's lifetime (until removed).
+        Use for a long-lived consumer like an open stream's signaling handler."""
+        with self._lock:
+            self._handlers.append(callback)
+        return callback
+
+    def remove_handler(self, callback):
+        with self._lock:
+            try:
+                self._handlers.remove(callback)
+            except ValueError:
+                pass
+
+    async def subscribe(self, topics):
+        """Ensure the connection is up and subscribe ``topics`` (tracked for replay)."""
+        import functools
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._ensure_started_sync, 15.0)
+        await loop.run_in_executor(None, functools.partial(self._subscribe_sync, topics))
+
+    async def publish(self, topic, payload):
+        """Publish on the shared connection (ensures it's up first)."""
+        import functools
+
+        def _pub():
+            if not self._ensure_started_sync():
+                return False
+            try:
+                self._client.publish(topic, payload)
+                return True
+            except Exception:
+                return False
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, functools.partial(_pub))
 
     def close(self):
         c = self._client
