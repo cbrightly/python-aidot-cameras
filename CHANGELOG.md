@@ -4,6 +4,26 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.33]
+
+### Fixed
+- **SDES teardown no longer hangs on a wedged ffmpeg.** `SdesSession.stop()` read
+  ffmpeg's drained stderr with a blocking `proc.stderr.read()` on the event loop;
+  if the killed ffmpeg hadn't fully exited (zombie / stuck in uninterruptible I/O
+  — the no-media degradation case), the read never reached EOF and hung the whole
+  teardown, wedging `async_cleanup` / `async_stop_streaming` / `close()`. It now
+  runs in the executor under a 2 s timeout, so a wedged ffmpeg can't stall the
+  close. (#71)
+- **Cameras no longer hammer the light-protocol TCP:10000 login.** That control
+  channel is lights-only — cameras use the separate `CameraLanClient` for local
+  control and get their LAN IP from WebRTC signaling. When a discovered IP slipped
+  the `_is_camera` gate, `async_login` would log in to a port the camera doesn't
+  serve, fail with `login read status error 0 bytes read`, and re-fire every
+  broadcast tick. Cameras are now excluded at `async_login` (the single chokepoint
+  for the discovery and reconnect-chain paths), and `update_ip_address` is
+  throttled to the same 30 s window the reconnect chain uses. Lights are
+  unaffected. (#71)
+
 ## [0.7.32]
 
 ### Changed
