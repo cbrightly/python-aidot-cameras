@@ -153,6 +153,13 @@ A-law (PCMA, PT=8) - the codec the camera negotiates.
 `tools/talk_test.py` (a local developer script) plays a 440 Hz tone for a few
 seconds (validated audibly).
 
+**Releasing the speaker on teardown:** when a session that used talk is stopped,
+the library sends `SPEAKERSTOP(849)` and gives the transport a brief flush window
+before closing it, so the camera actually frees its speaker/talk channel. Without
+this the channel stays bound to the dead session and the next push-to-talk (ours
+or the official app's) gets `851` "mic occupied". This runs on every teardown
+path where talk was active — not just a clean `async_stop_talk`.
+
 ## Motion events
 
 Cameras do **not** push motion to a passive MQTT subscriber (alarm attributes are

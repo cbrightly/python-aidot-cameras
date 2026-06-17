@@ -173,6 +173,11 @@ class SdesSession:
                     if not self._talk_state.get("speaker_on"):
                         break
                     await asyncio.sleep(0.02)
+                # speaker_on flips once the bridge SENDS SPEAKERSTOP(849); give the
+                # camera a brief window to PROCESS it over the still-live SCTP before
+                # we tear down, so its talk channel is actually freed (avoids the
+                # next session getting 851 "mic occupied").
+                await asyncio.sleep(0.3)
             self._talk_state["stop"] = True
             self._talk_state["provider"] = None
         self._proc.terminate()
