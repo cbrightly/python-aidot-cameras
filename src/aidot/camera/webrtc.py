@@ -91,6 +91,7 @@ class WebRTCSession:
             return False
         # IOTYPE_USER_IPCAM_SPEAKERSTART = 848 (AVIOCTRLDEFs.java), 8-byte channel=0 payload.
         self._avio_cmd(848, b"\x00" * 8)
+        self._talk_holder["was_active"] = True  # ensure stop() releases the speaker
         return True
 
     async def async_stop_talk(self) -> bool:
@@ -111,6 +112,22 @@ class WebRTCSession:
 
     async def stop(self) -> None:
         """Tear down the stream: close peer connection and MQTT session."""
+        # If two-way talk was active this session, RELEASE the camera speaker
+        # before closing the PeerConnection: send SPEAKERSTOP(849), idle the track,
+        # and give the SCTP DataChannel a brief flush window so the camera actually
+        # processes the release.  Otherwise the camera keeps its talk channel bound
+        # to this (now-dead) connection and the next app/HA push-to-talk gets 851
+        # "mic occupied".  Idempotent (harmless if the speaker was already closed).
+        if self.talk_supported and self._talk_holder.get("was_active"):
+            try:
+                self._avio_cmd(849, b"\x00" * 8)
+                if self._audio_sender is not None:
+                    self._audio_sender.replaceTrack(None)
+                self._talk_holder["provider"] = None
+                self._talk_holder["was_active"] = False
+                await asyncio.sleep(0.4)   # let the DataChannel deliver SPEAKERSTOP
+            except Exception:
+                _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
         for task in self._track_tasks:
             task.cancel()
         if self._recorder is not None:
