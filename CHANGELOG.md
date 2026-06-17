@@ -13,7 +13,7 @@ date-less, incrementing patch versions published to PyPI via GitHub Releases.
   — the no-media degradation case), the read never reached EOF and hung the whole
   teardown, wedging `async_cleanup` / `async_stop_streaming` / `close()`. It now
   runs in the executor under a 2 s timeout, so a wedged ffmpeg can't stall the
-  close. (PRREF)
+  close. (#71)
 - **Cameras no longer hammer the light-protocol TCP:10000 login.** That control
   channel is lights-only — cameras use the separate `CameraLanClient` for local
   control and get their LAN IP from WebRTC signaling. When a discovered IP slipped
@@ -22,7 +22,7 @@ date-less, incrementing patch versions published to PyPI via GitHub Releases.
   broadcast tick. Cameras are now excluded at `async_login` (the single chokepoint
   for the discovery and reconnect-chain paths), and `update_ip_address` is
   throttled to the same 30 s window the reconnect chain uses. Lights are
-  unaffected. (PRREF)
+  unaffected. (#71)
 
 ## [0.7.32]
 
