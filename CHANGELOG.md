@@ -4,6 +4,18 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.32]
+
+### Changed
+- **SDES fast-liveplay is now ON by default (`AIDOT_SDES_FAST_LIVEPLAY`).** The
+  official app never waits for/parses `livePlayResp` — it fires `livePlayReq` and
+  goes straight to the WebRTC offer/ICE. We now match that by default (~4.5 s
+  faster SDES cold start) instead of blocking on the echo/ack. Role-reversal
+  models (`_NO_FAST_LIVEPLAY_MODELS`, e.g. A001064) remain hard-excluded for
+  correctness. Disable via `AIDOT_SDES_FAST_LIVEPLAY` in `{0,false,no,off}` or
+  `_sdes_fast_liveplay_opt=False`. With persistent-MQTT-by-default this brings the
+  SDES signaling path to app-parity. (#70)
+
 ## [0.7.31]
 
 ### Fixed

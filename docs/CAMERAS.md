@@ -48,9 +48,11 @@ don't have to be re-discovered):
   (`_NO_FAST_LIVEPLAY_MODELS`).
 
 The `livePlayResp` wait returns as soon as the response arrives; its timeout is
-only paid when the camera never answers. The opt-in `sdes_fast_liveplay`
-flag (`AIDOT_SDES_FAST_LIVEPLAY` env / `sdes_fast_liveplay=` kwarg) skips this
-wait for the eligible SDES (A001513) cameras to shave ~4.5 s off cold start.
+only paid when the camera never answers. `sdes_fast_liveplay`
+(`AIDOT_SDES_FAST_LIVEPLAY` env / `sdes_fast_liveplay=` kwarg) skips this wait and
+goes straight to webrtcReq/ICE — **on by default**, matching the official app
+(which never waits for `livePlayResp`). Role-reversal models (A001064) are always
+excluded. Disable with `AIDOT_SDES_FAST_LIVEPLAY` in `{0,false,no,off}`.
 
 ### Adaptive fast-with-fallback (SDES keepalive, opt-in)
 

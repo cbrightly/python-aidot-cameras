@@ -2607,16 +2607,19 @@ class CameraMixin(_CameraControlsMixin):
             return 120.0
 
     def _resolve_sdes_fast_liveplay(self) -> bool:
-        """Whether to use SDES fast-liveplay (shorten the always-timing-out
-        echo/livePlayResp signaling) - validated in soak, opt-in, default off.
+        """Whether to use SDES fast-liveplay: don't block on the always-timing-out
+        echo/livePlayResp signaling, go straight to webrtcReq/ICE.
 
-        Per-camera ``sdes_fast_liveplay`` (set via start_keepalive) wins; else the
-        ``AIDOT_SDES_FAST_LIVEPLAY`` env (truthy = 1/true/yes/on), default off.
-        Only consulted for SDES cameras (the caller gates on is_sdes_camera).
+        **Default ON** - this is exactly what the official app does (it never waits
+        for/parses livePlayResp; fire-and-forget). Disable via
+        ``AIDOT_SDES_FAST_LIVEPLAY`` in {0,false,no,off} or per-camera
+        ``_sdes_fast_liveplay_opt=False`` (the explicit opt always wins).
 
-        Role-reversal models (``_NO_FAST_LIVEPLAY_MODELS``, e.g. A001064) are always
-        excluded - their handshake needs the camera armed before our webrtcReq, so
-        the flag's early webrtcReq degrades their media reliability."""
+        Role-reversal models (``_NO_FAST_LIVEPLAY_MODELS``, e.g. A001064) are ALWAYS
+        excluded regardless of the flag - their handshake needs the camera armed
+        before our webrtcReq, so the early webrtcReq degrades their media (a
+        correctness exclusion, not a default choice). Only consulted for SDES
+        cameras (the caller gates on is_sdes_camera)."""
         model = getattr(getattr(self, "info", None), "model_id", None)
         if model in self._NO_FAST_LIVEPLAY_MODELS:
             return False
@@ -2626,8 +2629,8 @@ class CameraMixin(_CameraControlsMixin):
         ov = getattr(self, "_fast_attempt_override", None)
         if ov is not None:
             return bool(ov)
-        return os.environ.get("AIDOT_SDES_FAST_LIVEPLAY", "").strip().lower() in (
-            "1", "true", "yes", "on")
+        return os.environ.get("AIDOT_SDES_FAST_LIVEPLAY", "").strip().lower() not in (
+            "0", "false", "no", "off")
 
     def _resolve_sdes_skip_turn(self) -> bool:
         """EXPERIMENTAL (opt-in, default off): skip the blocking SDES TURN relay

@@ -21,21 +21,22 @@ def _cam():
     return _CAM.__new__(_CAM)
 
 
-def test_default_off(monkeypatch):
+def test_default_on(monkeypatch):
+    # default ON (matches the app — it never waits for livePlayResp)
     monkeypatch.delenv("AIDOT_SDES_FAST_LIVEPLAY", raising=False)
-    assert _cam()._resolve_sdes_fast_liveplay() is False
+    assert _cam()._resolve_sdes_fast_liveplay() is True
 
 
-def test_env_truthy_values(monkeypatch):
-    for val in ("1", "true", "TRUE", "yes", "on", " On "):
-        monkeypatch.setenv("AIDOT_SDES_FAST_LIVEPLAY", val)
-        assert _cam()._resolve_sdes_fast_liveplay() is True, val
-
-
-def test_env_falsey_values(monkeypatch):
-    for val in ("0", "false", "no", "off", ""):
+def test_env_disables(monkeypatch):
+    for val in ("0", "false", "no", "off", " Off "):
         monkeypatch.setenv("AIDOT_SDES_FAST_LIVEPLAY", val)
         assert _cam()._resolve_sdes_fast_liveplay() is False, val
+
+
+def test_env_truthy_or_unknown_stays_on(monkeypatch):
+    for val in ("1", "true", "yes", "on", "", "anything"):
+        monkeypatch.setenv("AIDOT_SDES_FAST_LIVEPLAY", val)
+        assert _cam()._resolve_sdes_fast_liveplay() is True, val
 
 
 def test_role_reversal_model_always_excluded(monkeypatch):
