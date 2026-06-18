@@ -91,19 +91,21 @@ async def get_user():
 
 
 # ── device / home listing ──────────────────────────────────────────────────
+# NOTE: these return BARE LISTS, not {"data": [...]} — the bridge does
+# `for house in await async_get_houses()` directly on the JSON (client.py:442).
 @app.get("/v17/houses")
 async def houses():
-    return {"data": _devices().get("houses", [])}
+    return _devices().get("houses", [])
 
 
 @app.get("/v17/devices")
-async def devices():
-    return {"data": _devices().get("devices", [])}
+async def devices(houseId: str = ""):
+    return _devices().get("devices", [])
 
 
 @app.get("/v17/products/{product_ids}")
 async def products(product_ids: str):
-    return {"data": _devices().get("products", [])}
+    return _devices().get("products", [])
 
 
 @app.post("/v21/devices/batchGetDeviceUserInfo")
