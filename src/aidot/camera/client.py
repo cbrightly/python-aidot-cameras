@@ -584,6 +584,7 @@ class CameraMixin(_CameraControlsMixin):
         self._streaming_active: bool = False
         self._stream_session: Optional[Any] = None
         self._stream_task: Optional["asyncio.Task[None]"] = None
+        self._stream_mqtt_drain: Optional["asyncio.Future"] = None
         self._last_frame_time: float = 0.0
         self._keepalive_rtsp_url: Optional[str] = None  # local serve URL (go2rtc pulls)
         self._go2rtc_url: Optional[str] = None           # go2rtc API base (prefer-go2rtc)
@@ -1979,6 +1980,16 @@ class CameraMixin(_CameraControlsMixin):
             task.cancel()
             try:
                 await task
+            except (asyncio.CancelledError, Exception):
+                _LOGGER.debug("camera %s: swallowed exception", 'async_stop_streaming', exc_info=True)
+        # Reap a persistent-MQTT stream drain that no session stopped (e.g. an
+        # open cancelled mid-handshake): cancelling it runs its finally, which
+        # removes the handler from the shared persistent connection.
+        drain, self._stream_mqtt_drain = getattr(self, "_stream_mqtt_drain", None), None
+        if drain is not None and not drain.done():
+            drain.cancel()
+            try:
+                await drain
             except (asyncio.CancelledError, Exception):
                 _LOGGER.debug("camera %s: swallowed exception", 'async_stop_streaming', exc_info=True)
 
@@ -4243,6 +4254,13 @@ class CameraMixin(_CameraControlsMixin):
                     _pm_stream.remove_handler(_on_mqtt_message)
 
             mqtt_fut = asyncio.ensure_future(_pm_stream_drain())
+            # Track the drain so teardown can reap it even if this open is
+            # cancelled before a WebRTCSession takes ownership (the session
+            # normally stops it via the outgoing_q sentinel).  Without this an
+            # open cancelled mid-handshake leaves the drain blocked on
+            # outgoing_q.get forever and its handler registered on the shared
+            # persistent connection.
+            self._stream_mqtt_drain = mqtt_fut
             _on_mqtt_ready({"connected": True, "rc": 0, "rc_str": "persistent"})
         else:
             mqtt_fut = loop.run_in_executor(
