@@ -45,6 +45,9 @@ found in a pre-release review.
   under reconnect churn), and on a stderr-read timeout it closes the pipe so the
   executor thread blocked in `stderr.read()` on a wedged ffmpeg is released instead
   of leaked.
+- **Removed a duplicate `CONF_LOGIN_INFO` definition** in `const.py` (a dead
+  `"login_info"` shadowed by `"loginInfo"`); no behaviour change — the effective
+  value was always `"loginInfo"`, which the v1.1.3 login_info migration expects.
 
 ### Validated
 - **Cloud TURN relay delivers media to a genuinely-remote client.** Verified from
