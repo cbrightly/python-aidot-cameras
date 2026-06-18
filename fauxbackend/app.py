@@ -143,7 +143,7 @@ async def low_power_active(device_id: str, req: Request):
 @app.post("/fileController/uploadImage")
 async def upload_image(req: Request):
     # us-storage.arnoo.com — camera uploads snapshots. Accept + drop (or save).
-    body = await req.body()
+    await req.body()
     return JSONResponse({"code": 0, "data": {"url": ""}})
 
 

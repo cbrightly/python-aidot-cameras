@@ -15,8 +15,8 @@ os.environ.setdefault("FAUX_HA_HOST", "192.168.1.162")
 os.environ.setdefault("FAUX_TURN_HOST", "192.168.1.162")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fastapi.testclient import TestClient  # noqa: E402
-import app as fauxapp  # noqa: E402
+from fastapi.testclient import TestClient
+import app as fauxapp
 
 client = TestClient(fauxapp.app)
 
@@ -43,7 +43,6 @@ CASES = [
 
 def run():
     fails = 0
-    redirect_checks = []
     for method, url, body in CASES:
         kw = {}
         if body is not None:

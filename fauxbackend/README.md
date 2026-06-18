@@ -1,6 +1,10 @@
 # AiDot faux backend (self-hosted / blackhole)
 
-**Status: SCAFFOLD — not deployed. Do not point live cameras at this without reading "Activation" below.**
+**Status: VALIDATED component-by-component, not yet deployed. See `DEPLOY.md`.**
+The real bridge enumerates all 42 devices / 7 cameras through `app.py`; coturn
+accepts our creds + allocates; `mqtt_responder.py` answers `getIceConfigReq` with
+our coturn. The only un-done step is redirecting a live camera (supervised).
+Do not point live cameras at this without reading `DEPLOY.md`.
 
 Goal: run the AiDot cameras + this project's bridge entirely against infrastructure we
 control, with AiDot's cloud (`*.arnoo.com`) blackholed. Built from the live-tested

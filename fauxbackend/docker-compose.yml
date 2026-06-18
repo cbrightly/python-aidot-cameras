@@ -1,0 +1,41 @@
+# Brings up the whole self-hosted AiDot backend on ONE host. Each service was
+# validated standalone (see DEPLOY.md "What's proven"). host networking so the
+# services bind the host IP/ports the cameras dial (443, 8443, 3478, 1883).
+#
+# Prereqs: certs/gen_certs.sh run; devices.json captured; .env filled (copy from
+# config.example.env). Then: docker compose up -d
+services:
+  faux-api:
+    build: .
+    command: >
+      uvicorn app:app --host 0.0.0.0 --port 443
+      --ssl-keyfile /certs/arnoo.key --ssl-certfile /certs/arnoo.crt
+    network_mode: host
+    env_file: .env
+    volumes:
+      - ./certs:/certs:ro
+      - ./devices.json:/app/devices.json:ro
+    restart: unless-stopped
+
+  responder:
+    build: .
+    command: python mqtt_responder.py
+    network_mode: host
+    env_file: .env
+    restart: unless-stopped
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    network_mode: host
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./certs:/mosquitto/certs:ro
+    restart: unless-stopped
+
+  coturn:
+    image: coturn/coturn:4
+    network_mode: host
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    restart: unless-stopped
