@@ -3164,19 +3164,37 @@ class CameraMixin(_CameraControlsMixin):
                     # lowers bitrate at the cost of latency.  Mains DTLS cameras
                     # only; the SDES path has its own PLI cadence.
                     _gop_pli_s = float(os.environ.get("AIDOT_GOP_PLI_S", "2.0"))
+                    # Stall-triggered keyframe: if muxed frames stop for
+                    # _stall_pli_s (a dropped GOP on a jittery link, e.g. a weak-
+                    # RSSI camera), ask for an IDR immediately instead of waiting
+                    # out the full cadence, so playback recovers sooner.  Fires
+                    # at most ONCE per stall episode (re-armed only when frames
+                    # resume) so a no-consumer stall - which also freezes progress
+                    # - can't spam the camera with PLIs.  0 disables.
+                    _stall_pli_s = float(os.environ.get("AIDOT_STALL_PLI_S", "1.0"))
                     _last_gop_pli = loop.time()
+                    _stall_pli_armed = True
                     # Wait for ffmpeg to exit (go2rtc disconnect) or idle release.
                     while self._streaming_active and proc.returncode is None:
                         await asyncio.sleep(0.5)
                         if _pc_dead():
                             break
-                        if _gop_pli_s > 0 and loop.time() - _last_gop_pli >= _gop_pli_s:
+                        _now = loop.time()
+                        _stall = _now - progress[0]
+                        if _stall < 0.5:
+                            _stall_pli_armed = True       # frames flowing; re-arm
+                        if _gop_pli_s > 0 and _now - _last_gop_pli >= _gop_pli_s:
                             await self._send_video_pli(pc)
-                            _last_gop_pli = loop.time()
+                            _last_gop_pli = _now
+                        elif (_stall_pli_s > 0 and _stall_pli_armed
+                              and _stall >= _stall_pli_s):
+                            await self._send_video_pli(pc)
+                            _last_gop_pli = _now           # also satisfies cadence
+                            _stall_pli_armed = False       # one shot per stall
                         # No consumer -> the pipe fills, the mux blocks, progress
                         # goes stale.  A real viewer keeps it fresh.  idle_secs<=0
                         # disables release entirely (keep warm for instant views).
-                        if idle_secs > 0 and loop.time() - progress[0] > idle_secs:
+                        if idle_secs > 0 and _now - progress[0] > idle_secs:
                             idle_release = True
                             break
                     # Tear down this ffmpeg+mux cycle before the next.

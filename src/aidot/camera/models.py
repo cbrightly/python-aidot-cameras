@@ -56,6 +56,7 @@ class CameraStatusData(DeviceStatusData):
     battery_remaining: Optional[int] = None  # Battery_remaining 0-100 (%)
     occupancy: Optional[bool] = None          # Occupancy live presence
     sd_card_status: Optional[str] = None      # SDcardStatus
+    wifi_rssi: Optional[int] = None           # networkRssi (dBm), cloud property
 
     def update(self, attr) -> None:
         if attr is None:
@@ -106,6 +107,11 @@ class CameraStatusData(DeviceStatusData):
             self.occupancy = bool(int(v))
         if (v := attr.get("SDcardStatus")) is not None:
             self.sd_card_status = str(v)
+        if (v := attr.get("networkRssi")) is not None:
+            try:
+                self.wifi_rssi = int(v)
+            except (ValueError, TypeError):
+                _LOGGER.debug("camera %s: swallowed exception", 'update', exc_info=True)
 
     # Cloud "properties" keys that belong to lights, not cameras.  A camera's
     # image "Dimming" must not be read as a light brightness (and could TypeError

@@ -68,6 +68,21 @@ def _fresh_talk_state():
     }
 
 
+def _stop_pump(s):
+    """Signal the talk pump to exit and JOIN it before the test returns.
+
+    async_start_talk spawns a daemon ``_run_sdes_talk_pump`` thread.  Production
+    stop() only flips the ``stop`` flag (the daemon winds itself down and never
+    blocks process exit), but pytest-homeassistant's teardown fails the test on
+    ANY leftover non-dummy thread - so tests that start the pump must join it.
+    """
+    if s._talk_state is not None:
+        s._talk_state["stop"] = True
+    t = getattr(s, "_talk_thread", None)
+    if t is not None:
+        t.join(timeout=2.0)
+
+
 def _make_sdes(talk_state):
     return SdesSession(
         proc=_FakeProc(),
@@ -94,7 +109,7 @@ def test_start_talk_sets_want_speaker_and_provider():
     assert ts["want_speaker"] is True
     assert ts["provider"] is prov
     assert ts["stop"] is False
-    ts["stop"] = True  # let the idle daemon pump exit (src is None -> it never sent)
+    _stop_pump(s)  # join the idle daemon pump (src is None -> it never sent)
 
 
 def test_start_talk_returns_false_without_talk_state():
@@ -129,9 +144,9 @@ def test_retalk_on_same_session_rearms_delay():
         assert ts["spk_eligible_ts"] is None    # re-armed
         await s.async_start_talk(lambda: None)  # clip 2
         assert ts["spk_eligible_ts"] is None    # still None -> fresh delay, not stale
-        ts["stop"] = True
 
     asyncio.run(_seq())
+    _stop_pump(s)  # join the pump from clip 2 so no daemon thread leaks
 
 
 def test_stop_waits_for_bridge_speakerstop_then_tears_down():
