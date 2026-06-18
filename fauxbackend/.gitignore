@@ -1,0 +1,7 @@
+# real secrets/artifacts — never commit
+.env
+devices.json
+certs/arnoo.crt
+certs/arnoo.key
+*.pem
+__pycache__/

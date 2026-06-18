@@ -1,0 +1,17 @@
+{
+  "_comment": "Capture this ONCE from the real cloud (or the bridge's device dump) and save as devices.json. Keep the exact fields the bridge reads. Do not commit real device IDs/keys.",
+  "houses": [
+    {"id": "REPLACE_HOUSE_ID", "isOwner": true}
+  ],
+  "devices": [
+    {
+      "id": "REPLACE_DEVICE_ID",
+      "model_id": "LK.IPC.A000088",
+      "productId": "REPLACE_PRODUCT_ID",
+      "name": "Deck"
+    }
+  ],
+  "products": [
+    {"id": "REPLACE_PRODUCT_ID", "model_id": "LK.IPC.A000088"}
+  ]
+}
