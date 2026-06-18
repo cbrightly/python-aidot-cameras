@@ -186,6 +186,13 @@ class SdesSession:
             await _stop_loop.run_in_executor(None, lambda: self._proc.wait(5))
         except Exception:
             self._proc.kill()
+            # Reap the SIGKILL'd child: this is a raw subprocess.Popen with no
+            # asyncio child-watcher to auto-reap it, so without a follow-up wait()
+            # it lingers as a zombie under rapid keepalive reconnect churn.
+            try:
+                await _stop_loop.run_in_executor(None, lambda: self._proc.wait(5))
+            except Exception:
+                _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
         # Read drained stderr in the executor with a hard timeout: proc.stderr.read()
         # blocks until EOF, which never arrives if the killed process is still a
         # zombie / stuck in uninterruptible I/O - doing it inline would hang the
@@ -199,6 +206,13 @@ class SdesSession:
             )
         except Exception:   # incl. asyncio.TimeoutError - never let teardown hang here
             _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
+            # On timeout the executor thread is still blocked in stderr.read() on
+            # a wedged ffmpeg; close the pipe so that read returns instead of
+            # pinning a default-pool thread for the life of the process.
+            try:
+                self._proc.stderr.close()
+            except Exception:
+                _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
         if stderr_bytes:
             _LOGGER.warning("ffmpeg SDES stderr:\n%s", stderr_bytes.decode(errors="replace"))
         import os

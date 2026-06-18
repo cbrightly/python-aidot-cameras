@@ -1378,10 +1378,16 @@ class _PersistentMqtt:
         q = _queue.Queue()
         with self._lock:
             self._collectors.append(q)
+            c = self._client   # snapshot: a concurrent close() may null self._client
         collected = []
         try:
-            for pt, pp in (publish_items or []):
-                self._client.publish(pt, pp)
+            if c is None:
+                return [], {"error": "persistent mqtt closed"}
+            try:
+                for pt, pp in (publish_items or []):
+                    c.publish(pt, pp)
+            except Exception as exc:
+                return [], {"error": f"persistent mqtt publish failed: {exc}"}
             deadline = _time.monotonic() + timeout
             while True:
                 remaining = deadline - _time.monotonic()

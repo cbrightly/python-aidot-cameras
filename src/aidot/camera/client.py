@@ -1340,6 +1340,20 @@ class CameraMixin(_CameraControlsMixin):
                 subscribe_topics=sub_topics,
                 timeout=timeout,
             )
+            if _st and _st.get("error"):
+                # Persistent connection unavailable - fall back to a fresh per-op
+                # connect so the command isn't silently dropped (and isn't falsely
+                # reported as sent on the empty result the persistent path returns).
+                _LOGGER.debug(
+                    "_mqtt_device_cmd: persistent MQTT failed (%s); falling back "
+                    "to a per-op session for %s", _st.get("error"), device_id,
+                )
+                messages = await _mqtt_session(
+                    mqtt_url, mqtt_user, mqtt_pwd, client_id,
+                    subscribe_topics=sub_topics,
+                    publish_items=publish_items,
+                    duration=timeout,
+                )
         else:
             messages = await _mqtt_session(
                 mqtt_url, mqtt_user, mqtt_pwd, client_id,
@@ -1583,6 +1597,20 @@ class CameraMixin(_CameraControlsMixin):
                 subscribe_topics=sub_topics,
                 timeout=timeout,
             )
+            if _st and _st.get("error"):
+                # Persistent connection unavailable - fall back to a fresh per-op
+                # connect so a transient outage doesn't masquerade as "no attrs".
+                _LOGGER.debug(
+                    "async_get_camera_attributes: persistent MQTT failed (%s); "
+                    "falling back to a per-op session for %s",
+                    _st.get("error"), device_id,
+                )
+                messages = await _mqtt_session(
+                    mqtt_url, mqtt_user, mqtt_pwd, client_id,
+                    subscribe_topics=sub_topics,
+                    publish_items=publish_items,
+                    duration=timeout,
+                )
         else:
             messages = await _mqtt_session(
                 mqtt_url, mqtt_user, mqtt_pwd, client_id,
@@ -1983,15 +2011,36 @@ class CameraMixin(_CameraControlsMixin):
             except (asyncio.CancelledError, Exception):
                 _LOGGER.debug("camera %s: swallowed exception", 'async_stop_streaming', exc_info=True)
         # Reap a persistent-MQTT stream drain that no session stopped (e.g. an
-        # open cancelled mid-handshake): cancelling it runs its finally, which
-        # removes the handler from the shared persistent connection.
-        drain, self._stream_mqtt_drain = getattr(self, "_stream_mqtt_drain", None), None
-        if drain is not None and not drain.done():
-            drain.cancel()
+        # open cancelled mid-handshake) so its handler is removed from the shared
+        # connection and its blocked executor thread is released.
+        await self._reap_stream_drain()
+
+    async def _reap_stream_drain(self):
+        """Stop and reap the persistent-MQTT stream drain task, if any.
+
+        The drain blocks an executor thread on ``outgoing_q.get`` until a ``None``
+        sentinel arrives. A normal stop pushes that sentinel from the
+        WebRTCSession/SdesSession; but if no session took ownership (open
+        cancelled mid-handshake) or a new open replaced this one, we must push it
+        ourselves - cancelling the future alone cannot interrupt the blocked
+        thread, leaking it (and its handler on the shared connection) forever."""
+        drain = getattr(self, "_stream_mqtt_drain", None)
+        outq = getattr(self, "_stream_mqtt_outq", None)
+        self._stream_mqtt_drain = None
+        self._stream_mqtt_outq = None
+        if drain is None:
+            return
+        if outq is not None:
             try:
-                await drain
-            except (asyncio.CancelledError, Exception):
-                _LOGGER.debug("camera %s: swallowed exception", 'async_stop_streaming', exc_info=True)
+                outq.put_nowait(None)   # release the executor thread in outgoing_q.get
+            except Exception:
+                _LOGGER.debug("camera %s: swallowed exception", '_reap_stream_drain', exc_info=True)
+        if not drain.done():
+            drain.cancel()
+        try:
+            await drain
+        except (asyncio.CancelledError, Exception):
+            _LOGGER.debug("camera %s: swallowed exception", '_reap_stream_drain', exc_info=True)
 
     async def async_start_motion_polling(
         self, callback: Callable, interval: float = 30.0, lookback_s: int = 600,
@@ -2844,19 +2893,28 @@ class CameraMixin(_CameraControlsMixin):
         pm = li.get("_persistent_mqtt")
         if pm is not None:
             return pm
-        smarthome_auth = await self._async_get_smarthome_auth()
-        mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-        mqtt_pwd  = (smarthome_auth or {}).get("mqttPassword") or ""
-        client_id = (self._user_info.get("mqttClientId") or f"app-{mqtt_user}")
-        mqtt_url = await self._async_get_mqtt_url()
-        if not mqtt_url:
-            return None
-        from .protocol import _PersistentMqtt
-        pm = li.get("_persistent_mqtt")  # re-check under the brief await gap
-        if pm is None:
+        # Serialize get-or-create. Without this, two concurrent first-callers
+        # (e.g. a command publish racing a stream open) both pass the None-check
+        # above, both await below, and both build a _PersistentMqtt - the second
+        # clobbering the first and orphaning a connection on the single-client_id
+        # broker. dict.setdefault is atomic (no await between create and insert),
+        # so every caller for this account shares the one lock.
+        lock = li.setdefault("_persistent_mqtt_lock", asyncio.Lock())
+        async with lock:
+            pm = li.get("_persistent_mqtt")  # re-check under the lock
+            if pm is not None:
+                return pm
+            smarthome_auth = await self._async_get_smarthome_auth()
+            mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
+            mqtt_pwd  = (smarthome_auth or {}).get("mqttPassword") or ""
+            client_id = (self._user_info.get("mqttClientId") or f"app-{mqtt_user}")
+            mqtt_url = await self._async_get_mqtt_url()
+            if not mqtt_url:
+                return None
+            from .protocol import _PersistentMqtt
             pm = _PersistentMqtt(mqtt_url, mqtt_user, mqtt_pwd, client_id)
             li["_persistent_mqtt"] = pm
-        return pm
+            return pm
 
     @staticmethod
     def _adaptive_next_fast(adaptive: bool, fast_failed: bool) -> bool:
@@ -4237,6 +4295,10 @@ class CameraMixin(_CameraControlsMixin):
         # (the stream's mqtt_cid IS the authorized mqttClientId, so it's the same
         # connection) - subscribe + register a handler + drain outgoing_q through
         # it, and DON'T tear the connection down on stop (matching the app).
+        # A prior open may have left a drain running (e.g. a reopen with no
+        # async_stop_streaming between them); reap it before starting a new one
+        # so we don't orphan its executor thread + handler on the shared conn.
+        await self._reap_stream_drain()
         _pm_stream = (await self._get_persistent_mqtt()
                       if self._resolve_persistent_mqtt() else None)
         if _pm_stream is not None:
@@ -4254,13 +4316,13 @@ class CameraMixin(_CameraControlsMixin):
                     _pm_stream.remove_handler(_on_mqtt_message)
 
             mqtt_fut = asyncio.ensure_future(_pm_stream_drain())
-            # Track the drain so teardown can reap it even if this open is
-            # cancelled before a WebRTCSession takes ownership (the session
-            # normally stops it via the outgoing_q sentinel).  Without this an
-            # open cancelled mid-handshake leaves the drain blocked on
-            # outgoing_q.get forever and its handler registered on the shared
-            # persistent connection.
+            # Track the drain AND its queue so teardown (or a replacing open) can
+            # reap it even if this open is cancelled before a WebRTCSession takes
+            # ownership.  _reap_stream_drain pushes the outgoing_q sentinel to
+            # release the thread blocked on outgoing_q.get and removes the handler
+            # from the shared persistent connection.
             self._stream_mqtt_drain = mqtt_fut
+            self._stream_mqtt_outq = outgoing_q
             _on_mqtt_ready({"connected": True, "rc": 0, "rc_str": "persistent"})
         else:
             mqtt_fut = loop.run_in_executor(
