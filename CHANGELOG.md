@@ -13,7 +13,7 @@ date-less, incrementing patch versions published to PyPI via GitHub Releases.
   would block on `outgoing_q.get` indefinitely with its handler still registered
   on the shared connection. It's now tracked and cancelled in
   `async_stop_streaming` (its `finally` removes the handler), so repeated
-  cancel-during-open no longer accumulates drains/handlers. (PRREF)
+  cancel-during-open no longer accumulates drains/handlers. (#74)
 
 ## [0.7.35]
 
