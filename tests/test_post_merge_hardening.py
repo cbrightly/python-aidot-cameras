@@ -141,6 +141,18 @@ def test_update_dispatch_model_vs_dict():
     s.update(["garbage"])
 
 
+def test_wifi_rssi_parsed_from_cloud_properties():
+    s = CameraStatusData()
+    assert s.wifi_rssi is None
+    # cloud "properties" carry networkRssi as a (negative) dBm string
+    s.update_from_camera_attributes({"networkRssi": "-56", "Battery_remaining": "80"})
+    assert s.wifi_rssi == -56
+    assert s.battery_remaining == 80
+    # malformed value must not raise and must not clobber the prior reading
+    s.update({"networkRssi": "n/a"})
+    assert s.wifi_rssi == -56
+
+
 def test_camera_state_carry_forward():
     """State seeded into the core status object before the camera swap must
     survive on the replacement object."""
