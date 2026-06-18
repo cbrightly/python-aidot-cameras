@@ -4,6 +4,55 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.8.0]
+
+Milestone release. The cloud TURN relay path is now empirically validated for a
+genuinely-remote client, and the default-on persistent-MQTT and SDES-teardown
+paths are hardened against the executor-thread leaks and silent command drops
+found in a pre-release review.
+
+### Fixed
+- **Persistent-MQTT stream drain no longer leaks an executor thread.** The drain
+  blocks an executor thread on `outgoing_q.get` until a `None` sentinel arrives.
+  Cancelling the drain future (the previous teardown behaviour, 0.7.36) cannot
+  interrupt that blocked thread, so a stream open cancelled mid-handshake — or a
+  second open that replaced a prior one without an intervening
+  `async_stop_streaming` — left the thread (and its handler on the shared
+  connection) pinned forever, eventually exhausting the shared default
+  `ThreadPoolExecutor`. Teardown and every new open now reap via
+  `_reap_stream_drain`, which pushes the `outgoing_q` sentinel to release the
+  thread before cancelling, and tracks the queue so a replacing open reaps the
+  prior drain too.
+- **Persistent-MQTT command/attribute requests fall back to a per-op connect.**
+  When the persistent connection is momentarily down, `request()` returns an empty
+  result with an error status; the command path previously treated that as a
+  successful fire-and-forget send, silently dropping e.g. a PTZ or `setDevAttr`
+  command. It now falls back to a fresh `_mqtt_session` connect (matching the
+  `pm is None` path), so a transient outage degrades gracefully instead of losing
+  the command or returning stale "no attributes".
+- **`_request_sync` no longer raises on a concurrent `close()`.** It snapshots
+  `self._client` under the lock and guards the publish, so a shutdown/reload
+  nulling the client (or a paho publish error) returns an error tuple rather than
+  letting an `AttributeError` escape `request()`.
+- **Exactly one persistent connection per account under concurrency.**
+  `_get_persistent_mqtt` now serializes get-or-create behind a per-account
+  `asyncio.Lock`; the prior double-checked re-check could still let two concurrent
+  first-callers each build a `_PersistentMqtt`, colliding on the single authorized
+  client_id.
+- **SDES ffmpeg teardown reaps the killed child and frees the stderr reader.** On
+  the `kill()` path `SdesSession.stop()` now `wait()`s to reap the SIGKILL'd child
+  (a raw `Popen` has no asyncio child-watcher, so it otherwise lingered as a zombie
+  under reconnect churn), and on a stderr-read timeout it closes the pipe so the
+  executor thread blocked in `stderr.read()` on a wedged ffmpeg is released instead
+  of leaked.
+
+### Validated
+- **Cloud TURN relay delivers media to a genuinely-remote client.** Verified from
+  an off-site host on a different public IP: with only the relay candidate offered
+  (host/srflx stripped), the camera delivered media through the cloud TURN relay
+  (`nominated local=relay`), confirming the relay-default connection mode
+  empirically rather than by app-parity inference alone.
+
 ## [0.7.36]
 
 ### Fixed
