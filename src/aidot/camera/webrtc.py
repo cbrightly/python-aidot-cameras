@@ -110,6 +110,64 @@ class WebRTCSession:
         self._talk_holder["provider"] = None
         return True
 
+    def _ice_path(self) -> "Optional[list]":
+        """The nominated ICE candidate pair(s), read from aiortc/aioice internals.
+
+        Returns None if nothing is nominated yet.  No public aiortc API exposes
+        the selected pair, so this reaches into private attributes; it is fully
+        guarded so a library upgrade that renames them degrades to None instead
+        of raising.  Each entry gives the local/remote candidate *type*
+        (host/srflx/relay/prflx) - the key signal for relay-vs-direct routing.
+        """
+        pc = self._pc
+        transports = (getattr(pc, "_RTCPeerConnection__iceTransports", None)
+                      or getattr(pc, "_iceTransports", None) or [])
+        pairs = []
+        for it in transports:
+            conn = getattr(it, "_connection", None) or getattr(it, "connection", None)
+            nominated = getattr(conn, "_nominated", None) or {}
+            for comp, pair in sorted(nominated.items()):
+                lc, rc = pair.local_candidate, pair.remote_candidate
+                pairs.append({
+                    "component": comp,
+                    "local_type": lc.type, "local": f"{lc.host}:{lc.port}",
+                    "remote_type": rc.type, "remote": f"{rc.host}:{rc.port}",
+                    "transport": lc.transport,
+                })
+        return pairs or None
+
+    async def get_stats(self) -> "dict[str, Any]":
+        """Best-effort connection-health snapshot for diagnostics.
+
+        Returns the nominated ICE path plus per-direction inbound RTP counters
+        (packets received/lost, loss %, jitter).  Never raises: on any failure
+        it returns whatever it gathered alongside an ``error`` key, so callers
+        (HA diagnostics, the camera_diag CLI) can log it without guarding.
+        """
+        out: "dict[str, Any]" = {"ice": None, "inbound": []}
+        try:
+            out["ice"] = self._ice_path()
+        except Exception as exc:  # pragma: no cover - private-attr drift
+            out["ice_error"] = str(exc)
+        try:
+            report = await self._pc.getStats()
+            for stat in report.values():
+                if getattr(stat, "type", None) != "inbound-rtp":
+                    continue
+                recv = getattr(stat, "packetsReceived", 0) or 0
+                lost = getattr(stat, "packetsLost", 0) or 0
+                total = recv + max(lost, 0)
+                out["inbound"].append({
+                    "kind": getattr(stat, "kind", "?"),
+                    "packets_received": recv,
+                    "packets_lost": lost,
+                    "loss_pct": round(100.0 * lost / total, 2) if total else 0.0,
+                    "jitter": getattr(stat, "jitter", None),
+                })
+        except Exception as exc:
+            out["error"] = str(exc)
+        return out
+
     async def stop(self) -> None:
         """Tear down the stream: close peer connection and MQTT session."""
         # If two-way talk was active this session, RELEASE the camera speaker
