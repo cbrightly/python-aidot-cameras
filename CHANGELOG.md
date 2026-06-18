@@ -12,7 +12,7 @@ date-less, incrementing patch versions published to PyPI via GitHub Releases.
   caller, in addition to the `AIDOT_SDES_AUDIO_GAIN_DB` env — so a Home Assistant
   install (which can't set env vars) can expose it as an option. New
   `_resolve_sdes_audio_gain_db` resolver (opt wins over env; bad value falls back
-  to the default). (PRREF)
+  to the default). (#73)
 
 ## [0.7.34]
 
