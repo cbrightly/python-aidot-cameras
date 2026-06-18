@@ -4,6 +4,20 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.34]
+
+### Changed
+- **SDES (battery) camera audio is now ON by default (`AIDOT_SDES_SERVE_AUDIO`).**
+  Matching the official app, the SDES serve includes audio. A continuous
+  `anullsrc` silence base is `amix`'d under the camera PCMA so the AAC encoder is
+  fed from t=0 and the mpegts PMT writes promptly; any gaps are filled with
+  silence, so audio from battery cameras streams smoothly. New
+  `_resolve_sdes_serve_audio` resolver (per-camera `sdes_audio` opt wins over the
+  `AIDOT_SDES_SERVE_AUDIO` env; falsy `{0,false,no,off}` disables). File recording
+  (snapshots, diagnostics) is unaffected — always a plain `-c copy`. Soak-validated
+  across the battery fleet (video + audio on every open). `AIDOT_SDES_AUDIO_GAIN_DB`
+  (default `-8`) trims the hot mic. (PRREF)
+
 ## [0.7.33]
 
 ### Fixed
