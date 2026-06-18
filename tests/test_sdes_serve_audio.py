@@ -48,6 +48,28 @@ def test_kwarg_option_wins_over_env(monkeypatch):
     assert cam2._resolve_sdes_serve_audio() is True
 
 
+def test_gain_default(monkeypatch):
+    monkeypatch.delenv("AIDOT_SDES_AUDIO_GAIN_DB", raising=False)
+    assert _cam()._resolve_sdes_audio_gain_db() == -8.0
+
+
+def test_gain_env(monkeypatch):
+    monkeypatch.setenv("AIDOT_SDES_AUDIO_GAIN_DB", "-3.5")
+    assert _cam()._resolve_sdes_audio_gain_db() == -3.5
+
+
+def test_gain_opt_wins(monkeypatch):
+    monkeypatch.setenv("AIDOT_SDES_AUDIO_GAIN_DB", "-3")
+    cam = _cam()
+    cam._sdes_audio_gain_opt = 2.0
+    assert cam._resolve_sdes_audio_gain_db() == 2.0
+
+
+def test_gain_bad_value_falls_back(monkeypatch):
+    monkeypatch.setenv("AIDOT_SDES_AUDIO_GAIN_DB", "loud")
+    assert _cam()._resolve_sdes_audio_gain_db() == -8.0
+
+
 if __name__ == "__main__":
     import traceback
 

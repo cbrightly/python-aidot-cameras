@@ -2071,6 +2071,7 @@ class CameraMixin(_CameraControlsMixin):
         sdes_fast_liveplay: Optional[bool] = None,
         sdes_skip_turn: Optional[bool] = None,
         sdes_adaptive: Optional[bool] = None,
+        sdes_audio_gain_db: Optional[float] = None,
     ) -> None:
         """Start a persistent stream that keeps the camera session alive.
 
@@ -2113,6 +2114,8 @@ class CameraMixin(_CameraControlsMixin):
             self._fast_connect_opt = fast_connect
         if sdes_audio is not None:
             self._sdes_audio_opt = sdes_audio
+        if sdes_audio_gain_db is not None:
+            self._sdes_audio_gain_opt = sdes_audio_gain_db
         if live_stream_param is not None:
             self._live_stream_param_opt = live_stream_param
         if serve_relay is not None:
@@ -2733,6 +2736,19 @@ class CameraMixin(_CameraControlsMixin):
             return bool(opt)
         return os.environ.get("AIDOT_SDES_SERVE_AUDIO", "").strip().lower() not in (
             "0", "false", "no", "off")
+
+    def _resolve_sdes_audio_gain_db(self) -> float:
+        """Gain (dB) applied to the served SDES audio (the camera mic runs hot).
+
+        Per-camera ``sdes_audio_gain_db`` (via ``start_keepalive``) wins; else the
+        ``AIDOT_SDES_AUDIO_GAIN_DB`` env; else ``-8``.  A bad value falls back to
+        the default rather than raising."""
+        opt = getattr(self, "_sdes_audio_gain_opt", None)
+        src = opt if opt is not None else os.environ.get("AIDOT_SDES_AUDIO_GAIN_DB", "-8")
+        try:
+            return float(src)
+        except (ValueError, TypeError):
+            return -8.0
 
     def _resolve_sdes_skip_turn(self) -> bool:
         """EXPERIMENTAL (opt-in, default off): skip the blocking SDES TURN relay
@@ -10052,18 +10068,13 @@ class CameraMixin(_CameraControlsMixin):
             if out_dir:
                 os.makedirs(out_dir, exist_ok=True)
         # Build the ffmpeg command (single source of truth: _build_sdes_serve_cmd).
-        _sdes_audio = self._resolve_sdes_serve_audio()
-        try:
-            _sdes_gain_db = float(os.environ.get("AIDOT_SDES_AUDIO_GAIN_DB", "-8"))
-        except (ValueError, TypeError):
-            _sdes_gain_db = -8.0
         cmd = _build_sdes_serve_cmd(
             sdp_path=sdp_path,
             rtsp_push_url=rtsp_push_url,
             output_path=output_path,
             max_seconds=max_seconds,
-            sdes_audio=bool(_sdes_audio),
-            audio_gain_db=_sdes_gain_db,
+            sdes_audio=self._resolve_sdes_serve_audio(),
+            audio_gain_db=self._resolve_sdes_audio_gain_db(),
         )
         # --- H.265 fix: narrow the ffmpeg SDP to the camera's actual codec ----
         # The camera streams H.264 (pt=96) OR H.265 (pt=97), varying per session.
