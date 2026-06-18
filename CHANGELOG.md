@@ -4,6 +4,17 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.7.36]
+
+### Fixed
+- **Orphaned persistent-MQTT stream drain is reaped on teardown.** When a stream
+  open is cancelled before a `WebRTCSession` takes ownership of the persistent-MQTT
+  drain (the session normally stops it via the `outgoing_q` sentinel), the drain
+  would block on `outgoing_q.get` indefinitely with its handler still registered
+  on the shared connection. It's now tracked and cancelled in
+  `async_stop_streaming` (its `finally` removes the handler), so repeated
+  cancel-during-open no longer accumulates drains/handlers. (#74)
+
 ## [0.7.35]
 
 ### Added
