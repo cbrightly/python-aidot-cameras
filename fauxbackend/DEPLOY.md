@@ -58,9 +58,18 @@ at us. Two options:
 - **AdGuard DNS rewrites** (`adguard-rewrites.md`) — ONLY if the cameras resolve
   through AdGuard. Verify first: AdGuard → Query Log, search `arnoo`. If empty,
   use the next option.
-- **L3 ARP/DNAT** (the `/home/chris/arp_dnat_intercept.sh` pattern, generalized to
-  DNAT arnoo `:443/:8443/:3478` → this host instead of the TLS observer). Works
-  even if cameras hardcode DNS.
+- **L3 ARP/DNAT** — works for *brief outbound capture*, but **does NOT sustain a
+  full redirect from a WiFi-client host**: live-tested (`validate_live.sh`) on two
+  mains cameras, both dropped offline when their traffic was hairpinned over WiFi
+  through rpi4 (camera→AP→rpi4→AP→gw is too lossy; the camera can't reconnect to
+  us). Only viable from a **wired, inline** box, not a WiFi station. Cameras
+  recover ~1 min after spoofing stops (no damage).
+
+**Recommended redirect = gateway/DNS level** (avoids the hairpin entirely):
+router DHCP/DNS pointed at the faux host, or AdGuard rewrites *if* the cameras
+resolve through AdGuard (they currently get the router as DNS — verify/repoint),
+or a wired inline appliance. This is the one piece still gated on router/DNS
+access.
 
 Do **one** camera first. Watch `faux-api` logs (`docker compose logs -f faux-api`)
 for its calls and the `[faux-unhandled]` lines — any unmodeled endpoint shows up
