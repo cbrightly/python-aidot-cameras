@@ -222,22 +222,27 @@ def _build_sdes_serve_cmd(
     silence-mix is soak-validated on battery cameras.  ``volume`` is the stateless
     hot-mic trim (dynamic normalizers regressed the pipe in live tests)."""
     time_args = ["-t", str(int(max_seconds))] if max_seconds else []
+
+    def _mpegts_audio_dest(target: str, listen: bool) -> list:
+        # Silence-base mix into mpegts (see docstring): a continuous a-law-rate
+        # anullsrc keeps the AAC encoder fed from t=0 so the PMT writes despite
+        # sparse battery PCMA; real audio mixes over the 0-valued silence
+        # (normalize=0 -> no-op when audio is present).
+        return [
+            "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono",
+            "-filter_complex",
+            ("[0:a]aresample=async=1[a0];"
+             "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
+             f"volume={audio_gain_db}dB[aout]"),
+            "-map", "0:v:0", "-map", "[aout]",
+            "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
+            *time_args, "-f", "mpegts", *(["-listen", "1"] if listen else []), target,
+        ]
+
+    _ts_file = bool(output_path) and output_path.rsplit(".", 1)[-1].lower() in ("ts", "mpegts", "m2ts")
     if rtsp_push_url and rtsp_push_url.startswith("http"):
         if sdes_audio:
-            dest_args = [
-                # Second input: continuous a-law-rate silence to keep the AAC
-                # encoder fed from t=0 (see docstring - prevents the PMT stall).
-                "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono",
-                "-filter_complex",
-                ("[0:a]aresample=async=1[a0];"
-                 "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
-                 f"volume={audio_gain_db}dB[aout]"),
-                "-map", "0:v:0", "-map", "[aout]",
-                "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
-                *time_args,
-                "-f", "mpegts", "-listen", "1",
-                rtsp_push_url,
-            ]
+            dest_args = _mpegts_audio_dest(rtsp_push_url, listen=True)
         else:
             dest_args = [
                 "-c:v", "copy", "-an",
@@ -252,6 +257,9 @@ def _build_sdes_serve_cmd(
             "-f", "rtsp", "-rtsp_transport", "tcp",
             rtsp_push_url,
         ]
+    elif output_path and sdes_audio and _ts_file:
+        # Recording to an mpegts file with audio hits the same PMT-stall risk.
+        dest_args = _mpegts_audio_dest(output_path, listen=False)
     elif output_path:
         dest_args = ["-c", "copy", *time_args, output_path]
     else:

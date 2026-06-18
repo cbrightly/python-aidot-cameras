@@ -56,6 +56,29 @@ def test_video_copy_present_even_with_audio():
         assert cmd[_idx(cmd, "-c:v") + 1] == "copy"
 
 
+def test_ts_file_with_audio_uses_silence_mix():
+    # Recording audio to an mpegts (.ts) file hits the same PMT-stall risk as the
+    # http serve, so it uses the silence-mix too (validated live on a battery cam).
+    cmd = build(sdp_path="/x.sdp", output_path="/tmp/rec.ts", sdes_audio=True, max_seconds=30)
+    assert "anullsrc=r=8000:cl=mono" in cmd
+    assert "amix=inputs=2:duration=longest:normalize=0" in cmd[_idx(cmd, "-filter_complex") + 1]
+    assert "-listen" not in cmd                    # file output, not a serve socket
+    assert cmd[-1] == "/tmp/rec.ts" and cmd[cmd.index("mpegts") - 1] == "-f"
+
+
+def test_ts_file_without_audio_is_copy():
+    cmd = build(sdp_path="/x.sdp", output_path="/tmp/rec.ts")
+    assert "anullsrc" not in " ".join(cmd) and cmd[-1] == "/tmp/rec.ts"
+    assert cmd[_idx(cmd, "-c") + 1] == "copy"
+
+
+def test_mkv_file_with_audio_stays_passthrough():
+    # Non-mpegts container carries PCMA natively -> -c copy, no transcode/mix.
+    cmd = build(sdp_path="/x.sdp", output_path="/tmp/rec.mkv", sdes_audio=True)
+    assert "anullsrc" not in " ".join(cmd)
+    assert cmd[_idx(cmd, "-c") + 1] == "copy"
+
+
 def test_rtsp_push_copies_both():
     cmd = build(sdp_path="/x.sdp", rtsp_push_url="rtsp://127.0.0.1:8554/cam")
     assert cmd[_idx(cmd, "-c") + 1] == "copy"
