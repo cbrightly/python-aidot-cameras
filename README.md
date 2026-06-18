@@ -113,5 +113,5 @@ chosen to work out of the box; override only when tuning.
 | `AIDOT_AUDIO_MAXGAIN_DB` | Maximum gain (dB) applied by the audio normalizer. | `30` |
 | `AIDOT_AUDIO_MINGAIN_DB` | Minimum gain (dB) applied by the audio normalizer. | `-12` |
 | `AIDOT_AUDIO_GATE_DBFS` | Noise-gate threshold (dBFS) for two-way audio. | `-45` |
-| `AIDOT_SDES_SERVE_AUDIO` | Set to `1` to serve audio on SDES cameras (off by default). | `0` (off) |
+| `AIDOT_SDES_SERVE_AUDIO` | Serve audio on SDES cameras (**on by default** — a silence-base mix keeps the audio encoder fed so battery-camera audio streams smoothly). Set to `0`/`false`/`no`/`off` to disable. | on |
 | `AIDOT_SDES_AUDIO_GAIN_DB` | Gain (dB) applied when SDES audio is served. | `-8` |
