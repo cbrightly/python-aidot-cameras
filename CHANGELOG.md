@@ -16,7 +16,7 @@ date-less, incrementing patch versions published to PyPI via GitHub Releases.
   `AIDOT_SDES_SERVE_AUDIO` env; falsy `{0,false,no,off}` disables). File recording
   (snapshots, diagnostics) is unaffected — always a plain `-c copy`. Soak-validated
   across the battery fleet (video + audio on every open). `AIDOT_SDES_AUDIO_GAIN_DB`
-  (default `-8`) trims the hot mic. (PRREF)
+  (default `-8`) trims the hot mic. (#72)
 
 ## [0.7.33]
 
