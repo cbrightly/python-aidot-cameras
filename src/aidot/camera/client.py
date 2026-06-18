@@ -209,40 +209,37 @@ def _build_sdes_serve_cmd(
     - ``output_path`` -> record to file.
     - neither -> ``-f null`` (keep ffmpeg alive draining SRTP, write nothing).
 
-    AUDIO (the http-listen PULL path only): video is ``-c:v copy`` and its mpegts
-    PMT is known from the input SDP immediately, but ``-c:a aac`` must ENCODE a
-    first frame before the *shared* mpegts PAT/PMT is written.  Battery cameras
-    send PCMA sparsely/late, so a naive encoder starves at stream start and the
-    whole serve emits ZERO bytes (video included).  Fix (silence-base mix): add a
-    continuous ``anullsrc`` and ``amix`` the real PCMA over it - the encoder is
-    fed from t=0 so the PMT writes promptly, and because the silence is 0 with
-    ``normalize=0`` it's a no-op whenever real audio is present.  go2rtc/HA pulls
-    this mpegts the same way as the video-only serve, so the proven pull model +
-    cold-start relay are untouched.  Audio stays opt-in (default off) until the
-    silence-mix is soak-validated on battery cameras.  ``volume`` is the stateless
-    hot-mic trim (dynamic normalizers regressed the pipe in live tests)."""
+    AUDIO (the http-listen serve only): the mpegts mux writes its PAT/PMT once
+    every mapped stream has produced a packet.  Video is ``-c:v copy`` (parameters
+    known from the SDP at once); the ``-c:a aac`` encoder needs PCM samples to emit
+    a frame, and battery cameras send PCMA sparsely.  So we feed the encoder a
+    continuous ``anullsrc`` silence base and ``amix`` the real PCMA over it
+    (``normalize=0`` -> the 0-valued silence is a no-op whenever real audio is
+    present): the encoder is fed from t=0 so the PMT writes promptly and any gaps
+    are filled with silence.  go2rtc/HA pulls this mpegts the same way as the
+    video-only serve, so the pull model + cold-start relay are unchanged.
+    ``volume`` is the stateless hot-mic trim (dynamic normalizers regressed the
+    pipe in testing).  File recording (snapshots/diagnostics) is always -c copy."""
     time_args = ["-t", str(int(max_seconds))] if max_seconds else []
 
-    def _mpegts_audio_dest(target: str, listen: bool) -> list:
-        # Silence-base mix into mpegts (see docstring): a continuous a-law-rate
-        # anullsrc keeps the AAC encoder fed from t=0 so the PMT writes despite
-        # sparse battery PCMA; real audio mixes over the 0-valued silence
-        # (normalize=0 -> no-op when audio is present).
-        return [
-            "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono",
-            "-filter_complex",
-            ("[0:a]aresample=async=1[a0];"
-             "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
-             f"volume={audio_gain_db}dB[aout]"),
-            "-map", "0:v:0", "-map", "[aout]",
-            "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
-            *time_args, "-f", "mpegts", *(["-listen", "1"] if listen else []), target,
-        ]
-
-    _ts_file = bool(output_path) and output_path.rsplit(".", 1)[-1].lower() in ("ts", "mpegts", "m2ts")
     if rtsp_push_url and rtsp_push_url.startswith("http"):
         if sdes_audio:
-            dest_args = _mpegts_audio_dest(rtsp_push_url, listen=True)
+            dest_args = [
+                # Silence-base mix: a continuous a-law-rate anullsrc keeps the AAC
+                # encoder fed from t=0 so the mpegts PMT writes promptly on sparse
+                # battery PCMA; real audio mixes over the 0-valued silence
+                # (normalize=0 -> no-op when audio is present).
+                "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono",
+                "-filter_complex",
+                ("[0:a]aresample=async=1[a0];"
+                 "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
+                 f"volume={audio_gain_db}dB[aout]"),
+                "-map", "0:v:0", "-map", "[aout]",
+                "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
+                *time_args,
+                "-f", "mpegts", "-listen", "1",
+                rtsp_push_url,
+            ]
         else:
             dest_args = [
                 "-c:v", "copy", "-an",
@@ -257,10 +254,9 @@ def _build_sdes_serve_cmd(
             "-f", "rtsp", "-rtsp_transport", "tcp",
             rtsp_push_url,
         ]
-    elif output_path and sdes_audio and _ts_file:
-        # Recording to an mpegts file with audio hits the same PMT-stall risk.
-        dest_args = _mpegts_audio_dest(output_path, listen=False)
     elif output_path:
+        # File recording (snapshots, diagnostics) is always a plain copy of the
+        # narrowed SDP - the audio mix is for the live serve, not file capture.
         dest_args = ["-c", "copy", *time_args, output_path]
     else:
         dest_args = [*time_args, "-f", "null", "/dev/null"]
@@ -2722,6 +2718,20 @@ class CameraMixin(_CameraControlsMixin):
         if ov is not None:
             return bool(ov)
         return os.environ.get("AIDOT_SDES_FAST_LIVEPLAY", "").strip().lower() not in (
+            "0", "false", "no", "off")
+
+    def _resolve_sdes_serve_audio(self) -> bool:
+        """Whether to include audio in the SDES camera serve.
+
+        **Default ON** for app-parity (the official app plays camera audio). The
+        serve feeds the AAC encoder a continuous silence base (anullsrc + amix) so
+        sparse battery PCMA streams cleanly through the mpegts mux. Per-camera
+        ``sdes_audio`` (via ``start_keepalive``) wins; else the
+        ``AIDOT_SDES_SERVE_AUDIO`` env (falsy = 0/false/no/off disables)."""
+        opt = getattr(self, "_sdes_audio_opt", None)
+        if opt is not None:
+            return bool(opt)
+        return os.environ.get("AIDOT_SDES_SERVE_AUDIO", "").strip().lower() not in (
             "0", "false", "no", "off")
 
     def _resolve_sdes_skip_turn(self) -> bool:
@@ -10042,11 +10052,7 @@ class CameraMixin(_CameraControlsMixin):
             if out_dir:
                 os.makedirs(out_dir, exist_ok=True)
         # Build the ffmpeg command (single source of truth: _build_sdes_serve_cmd).
-        # Audio is opt-in (opt wins over env, default off) because the AAC encoder
-        # can starve on sparse battery PCMA and stall the shared mpegts PMT.
-        _sdes_audio = getattr(self, "_sdes_audio_opt", None)
-        if _sdes_audio is None:
-            _sdes_audio = os.environ.get("AIDOT_SDES_SERVE_AUDIO", "0") == "1"
+        _sdes_audio = self._resolve_sdes_serve_audio()
         try:
             _sdes_gain_db = float(os.environ.get("AIDOT_SDES_AUDIO_GAIN_DB", "-8"))
         except (ValueError, TypeError):
