@@ -4,6 +4,54 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.9.0]
+
+Observability, connection-speed, and a large internal decomposition. Motivated
+by diagnosing a buffering camera down to a marginal Wi-Fi link, then trimming
+cold-start latency toward app-parity. All streaming changes were live-validated
+on real DTLS and SDES cameras.
+
+### Added
+- **`WebRTCSession.get_stats()`** — a best-effort connection-health snapshot: the
+  nominated ICE candidate pair (host/srflx/relay/prflx — the relay-vs-direct
+  signal) plus inbound RTP packet loss / jitter. Fully guarded against
+  aiortc/aioice internal drift.
+- **`CameraStatus.wifi_rssi`** — parses the cloud `networkRssi` (dBm) into camera
+  status, so a marginal camera link is visible without a packet capture.
+- **`scripts/camera_diag.py`** — a maintained on-hardware probe: handshake time,
+  time-to-first-frame, per-second decoded-fps timeline + gaps, nominated ICE
+  path, RTP health, and Wi-Fi RSSI.
+
+### Changed
+- **DTLS fast-liveplay (default on).** Skips the up-to-2s `livePlayResp` wait on
+  the DTLS open path (the official app never waits for it; it usually times out),
+  while keeping the full ICE/TURN/DTLS handshake — so remote/relay viewing is
+  unaffected, unlike the broader `fast_connect`. ~2s off a cold LAN open
+  (12.8s→10.7s measured). Disable via `AIDOT_DTLS_FAST_LIVEPLAY=0` or per-camera
+  `_dtls_fast_liveplay_opt`.
+- **HTTP ICE config is cached** until just before its server-provided `ttl`
+  (capped at 1h), saving the ~2s `iceConfig` fetch on a re-open after the warm
+  session lapses. Honoring the explicit ttl guarantees no expired TURN
+  credentials are reused.
+- **Stall-triggered keyframe (PLI)** on the DTLS serve loop: a one-shot PLI when
+  muxed frames stall (a dropped GOP on a jittery link), re-armed only when frames
+  resume so a no-consumer freeze can't spam the camera. `AIDOT_STALL_PLI_S`.
+- **Offline-device LAN errors downgraded to debug.** Connect-failed / read-status
+  / unresponsive-keepalive messages on the light control channel are expected for
+  an offline/powered-off/stale-IP device (the reconnect chain retries and
+  availability is reflected in entity state), so they no longer log at
+  ERROR/WARNING.
+
+### Internal
+- **`camera/client.py` decomposed 10,575 → 3,646 lines (-65%).** The two
+  ~3.5k-line stream-open state machines moved to mixin modules
+  (`webrtc_open.py`, `sdes_open.py`) that `CameraMixin` inherits — behaviour-
+  preserving (each method body byte-identical to the original), validated by
+  ruff, the full suite, and live DTLS + SDES streams.
+- **aioice compatibility guard** (`test_aioice_compat.py`) + an `aioice>=0.9,<0.12`
+  pin: the high-port nomination patch and stream diagnostics read private aioice
+  internals, so a breaking bump now fails loudly instead of silently degrading.
+
 ## [0.8.0]
 
 Milestone release. The cloud TURN relay path is now empirically validated for a
