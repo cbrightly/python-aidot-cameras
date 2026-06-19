@@ -220,7 +220,10 @@ class DeviceClient(CameraMixin):
             self._connect_and_login = self.status.online
         except Exception as e:
             self._connect_and_login = False
-            _LOGGER.warning(f"{self._TAG}:connect device error: {e}")
+            # Expected for an offline / powered-off / stale-IP device; the
+            # reconnect chain retries and availability is reflected in entity
+            # state, so this is debug noise, not a warning.
+            _LOGGER.debug(f"{self._TAG}:connect device error: {e}")
         finally:
             self._connecting = False
 
@@ -328,7 +331,8 @@ class DeviceClient(CameraMixin):
             _LOGGER.info(f"{self._TAG}:connect success: {self._ip_address}")
             await self.send_action(self.syncProperties, CONF_GET_DEV_ATTR_REQ)
         except (BrokenPipeError, ConnectionResetError, Exception) as e:
-            _LOGGER.error(f"{self.device_id} login read status error {e}")
+            # Device dropped the control connection (offline/asleep); recoverable.
+            _LOGGER.debug(f"{self.device_id} login read status error {e}")
 
     # TCP readily coalesces packets (no message framing), so handle carefully.
     async def receive_data(self) -> None:
@@ -345,7 +349,9 @@ class DeviceClient(CameraMixin):
                 _LOGGER.debug(f"{self._TAG}:Receive task cancelled")
                 raise
             except (BrokenPipeError, ConnectionResetError, asyncio.IncompleteReadError) as e:
-                _LOGGER.error(f"{self._TAG}:read status error {e}")
+                # Connection closed by the device (offline/asleep); reset() below
+                # schedules a reconnect, so this is expected debug noise.
+                _LOGGER.debug(f"{self._TAG}:read status error {e}")
                 asyncio.get_running_loop().call_soon(
                     lambda: asyncio.create_task(self.reset())
                 )
@@ -437,7 +443,9 @@ class DeviceClient(CameraMixin):
             return -1
         try:
             if self.ping_count >= 3:
-                _LOGGER.error(
+                # Device stopped answering keepalives (offline/asleep); reset()
+                # reconnects, so this is expected debug noise, not an error.
+                _LOGGER.debug(
                     f"{self._TAG}:Device unresponsive within 90 seconds, disconnecting."
                 )
                 await self.reset()
