@@ -249,12 +249,12 @@ class TutkStreamSession:
             try:
                 av.avClientStop(self._av_index)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_recv_loop', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", '_recv_loop', exc_info=True)
         if self._sid >= 0:
             try:
                 iotc.IOTC_Session_Close(self._sid)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_recv_loop', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", '_recv_loop', exc_info=True)
         _LOGGER.debug("TUTK: recv loop exited")
 
     async def stop(self) -> None:

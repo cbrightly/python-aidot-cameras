@@ -193,7 +193,7 @@ class _WebRTCOpenMixin:
             try:
                 await self.async_wake_camera()
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_async_open_webrtc_stream_impl', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_async_open_webrtc_stream_impl', exc_info=True)
 
         if not use_sdes:
             try:
@@ -1105,7 +1105,7 @@ class _WebRTCOpenMixin:
                 except RuntimeError:
                     raise
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception", '_http_keepalive', exc_info=True)
+                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_http_keepalive', exc_info=True)
 
         # ------------------------------------------------------------------ #
         # Branch: SDES-SRTP cameras use ffmpeg; DTLS cameras use aiortc
@@ -1441,7 +1441,7 @@ class _WebRTCOpenMixin:
                 _hdr = struct.pack("<IIqII4x", _seq, 5156, _ts_ms, 0, 0)
                 _dc_ref.send(_hdr)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_send_avio_heartbeat', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_avio_heartbeat', exc_info=True)
 
         def _send_avio_audiostart(_dc_ref) -> None:
             # IOTYPE_USER_IPCAM_AUDIOSTART = 768 (AVIOCTRLDEFs.java:154).
@@ -1460,7 +1460,7 @@ class _WebRTCOpenMixin:
                 _hdr = struct.pack("<IIqII4x", _seq, 768, _ts_ms, len(_payload), 0)
                 _dc_ref.send(_hdr + _payload)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_send_avio_audiostart', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_avio_audiostart', exc_info=True)
 
         def _send_avio_speaker(_dc_ref, start: bool) -> None:
             # IOTYPE_USER_IPCAM_SPEAKERSTART = 848 / SPEAKERSTOP = 849
@@ -1507,7 +1507,7 @@ class _WebRTCOpenMixin:
                     else:
                         _status(f"DC[remote:{channel.label}] RX text {message!r}")
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception", '_on_remote_dc_message', exc_info=True)
+                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_on_remote_dc_message', exc_info=True)
 
         track_tasks: list = []
         _kvs_dc = None
@@ -1617,7 +1617,7 @@ class _WebRTCOpenMixin:
                     else:
                         _status(f"DC[{_dc_label}] RX text {message!r}")
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception", '_on_kvs_dc_message', exc_info=True)
+                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_on_kvs_dc_message', exc_info=True)
 
             # Periodic readyState diagnostic - last run had no "DC OPEN"
             # log line, so we want to see whether readyState ever transitions
@@ -1679,7 +1679,7 @@ class _WebRTCOpenMixin:
                         while True:
                             await track.recv()
                     except Exception:
-                        _LOGGER.debug("camera %s: swallowed exception", '_drain_audio', exc_info=True)
+                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_drain_audio', exc_info=True)
                 t = asyncio.ensure_future(_drain_audio())
                 track_tasks.append(t)
             elif track.kind == "video":
@@ -1767,7 +1767,7 @@ class _WebRTCOpenMixin:
                     _LOGGER.debug(
                         "highport-fix: scoped to this DTLS camera connection")
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_on_track', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_on_track', exc_info=True)
 
 
         _sdp = pc.localDescription.sdp
@@ -2723,7 +2723,7 @@ class _WebRTCOpenMixin:
                                     _NPFp(algorithm="sha-256", value=_real_fp)
                                 ]
                         except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception", '_np_accept_cam_cert', exc_info=True)
+                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_np_accept_cam_cert', exc_info=True)
 
                     # Diag: log PC/ICE state at patch-application time so we
                     # can see whether DTLS handshake has *already* started by

@@ -302,13 +302,13 @@ def _compress_sdp_for_camera(sdp: str) -> str:
                     try:
                         seen["H264/90000_pt"] = ln.split(":")[1].split(" ")[0]
                     except Exception:
-                        _LOGGER.debug("camera %s: swallowed exception", 'keep', exc_info=True)
+                        _LOGGER.debug("swallowed exception in %s", 'keep', exc_info=True)
                 elif "H265/90000" in ln and seen.get("H265/90000") is None:
                     keep(ln, "H265/90000")
                     try:
                         seen["H265/90000_pt"] = ln.split(":")[1].split(" ")[0]
                     except Exception:
-                        _LOGGER.debug("camera %s: swallowed exception", 'keep', exc_info=True)
+                        _LOGGER.debug("swallowed exception in %s", 'keep', exc_info=True)
                 elif "apt=" in ln:
                     try:
                         apt = ln.split("apt=")[1].strip()
@@ -499,7 +499,7 @@ def _terminate_proc(proc) -> None:
         if proc.returncode is None:
             proc.terminate()
     except Exception:
-        _LOGGER.debug("camera %s: swallowed exception", '_terminate_proc', exc_info=True)
+        _LOGGER.debug("swallowed exception in %s", '_terminate_proc', exc_info=True)
 
 
 _XDG_CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
@@ -918,7 +918,7 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                 out.mux(pkt)
                 progress[0] = _t.monotonic()
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_flush_video', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", '_flush_video', exc_info=True)
 
     def _flush_audio(drain=False):
         if not have_audio:
@@ -961,11 +961,11 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                             _g.sample_rate = 8000
                             fr = _g
                         except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception", '_flush_audio', exc_info=True)
+                            _LOGGER.debug("swallowed exception in %s", '_flush_audio', exc_info=True)
                     for rfr in resampler.resample(fr):  # 8k PCMA -> 48k fltp
                         fifo.write(rfr)
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception", '_flush_audio', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", '_flush_audio', exc_info=True)
         while True:
             fr = fifo.read(1024)   # AAC wants 1024-sample frames
             if fr is None:
@@ -1009,7 +1009,7 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                     out.mux(opkt)
                     progress[0] = _t.monotonic()
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_flush_audio', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", '_flush_audio', exc_info=True)
 
     while not stop_flag.is_set():
         _flush_video()
@@ -1022,11 +1022,11 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
             for opkt in aenc.encode(None):  # flush
                 out.mux(opkt)
     except Exception:
-        _LOGGER.debug("camera %s: swallowed exception", '_dtls_av_mux_run', exc_info=True)
+        _LOGGER.debug("swallowed exception in %s", '_dtls_av_mux_run', exc_info=True)
     try:
         out.close()
     except Exception:
-        _LOGGER.debug("camera %s: swallowed exception", '_dtls_av_mux_run', exc_info=True)
+        _LOGGER.debug("swallowed exception in %s", '_dtls_av_mux_run', exc_info=True)
 
 
 def _h264_has_keyframe(data: bytes) -> bool:
@@ -1170,7 +1170,7 @@ def _mqtt_session_sync(
         try:
             client.disconnect()
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception", '_on_log', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", '_on_log', exc_info=True)
         return [], status
 
     if not status["connected"]:
@@ -1182,7 +1182,7 @@ def _mqtt_session_sync(
         try:
             client.disconnect()
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception", '_on_log', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", '_on_log', exc_info=True)
         return [], status
 
     _LOGGER.info("_mqtt_session: connected to %s:%d clientId=%s", hostname, port, client_id)
@@ -1199,7 +1199,7 @@ def _mqtt_session_sync(
         try:
             on_ready(status)
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception", '_on_log', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", '_on_log', exc_info=True)
 
     collected = []
     deadline  = _time.monotonic() + duration
@@ -1222,7 +1222,7 @@ def _mqtt_session_sync(
                         try:
                             client.disconnect()
                         except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception", '_on_log', exc_info=True)
+                            _LOGGER.debug("swallowed exception in %s", '_on_log', exc_info=True)
                         return collected, status
                     pub_topic, pub_payload = out
                     client.publish(pub_topic, pub_payload)
@@ -1235,13 +1235,13 @@ def _mqtt_session_sync(
             try:
                 on_message(*item)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_on_log', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", '_on_log', exc_info=True)
 
     client.loop_stop()
     try:
         client.disconnect()
     except Exception:
-        _LOGGER.debug("camera %s: swallowed exception", '_mqtt_session_sync', exc_info=True)
+        _LOGGER.debug("swallowed exception in %s", '_mqtt_session_sync', exc_info=True)
     return collected, status
 
 
@@ -1566,7 +1566,7 @@ async def _mqtt_get_playback_server_info(
                 pl["serverIP"] = pl.get("serverIP") or pl.get("serverIp")
                 result_holder.append(pl)
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception", '_check', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", '_check', exc_info=True)
 
     await _mqtt_session(
         mqtt_url, mqtt_user, mqtt_pwd, client_id,
