@@ -18,7 +18,7 @@ import av
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from aidot.camera.protocol import _dtls_av_mux_run  # noqa: E402
+from aidot.camera.protocol import _dtls_av_mux_run
 
 SR = 8000
 PKT_SAMPLES = 320          # 40 ms PCMA packets (matches measured wire framing)
