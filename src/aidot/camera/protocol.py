@@ -897,6 +897,8 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
         have_audio = False
     v0 = [None]
     a_pts = [0]
+    a_rtp0 = [None]      # first audio RTP timestamp (8 kHz units), for gap detection
+    a_in = [0]           # 8 kHz samples emitted to the resampler so far (incl. concealed)
     vstarted = [False]
 
     def _flush_video():
@@ -934,7 +936,35 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                     data, _ts = aq.get_nowait()
                 except _q.Empty:
                     break
+                # Lock audio to its RTP clock.  The camera's PCMA RTP timestamp is
+                # an 8 kHz sample count; on packet loss it jumps ahead of the
+                # samples we've actually decoded.  Without filling that gap the
+                # audio timeline silently COMPRESSES (the lost time vanishes), so
+                # audio runs ahead of the RTP-timestamped video -> growing A/V
+                # desync and player jitter-buffer resyncs, heard as choppiness.
+                # Conceal the gap with silence (PLC) through the same stateful
+                # resampler, mirroring what the video path does with its 90 kHz
+                # timestamps.  Lossless streams have _gap == 0 (no-op).
+                if _np is not None:
+                    if a_rtp0[0] is None:
+                        a_rtp0[0] = int(_ts)
+                    _expected = (int(_ts) - a_rtp0[0]) & 0xFFFFFFFF
+                    _gap = _expected - a_in[0]
+                    if _gap < 0 or _gap > 8000 * 5:
+                        a_in[0] = _expected  # wrap / stream reset -> resync, no fill
+                    elif _gap >= 160:  # >= 20 ms missing: conceal with silence
+                        try:
+                            _sil = _np.zeros((1, int(_gap)), dtype=_np.int16)
+                            _sfr = av.AudioFrame.from_ndarray(
+                                _sil, format="s16", layout="mono")
+                            _sfr.sample_rate = 8000
+                            for _rfr in resampler.resample(_sfr):
+                                fifo.write(_rfr)
+                            a_in[0] += int(_gap)
+                        except Exception:
+                            _LOGGER.debug("swallowed exception in %s", '_flush_audio', exc_info=True)
                 for fr in adec.decode(av.Packet(data)):
+                    _ndec = fr.samples
                     fr.pts = None
                     if _np is not None:
                         try:
@@ -964,6 +994,7 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                             _LOGGER.debug("swallowed exception in %s", '_flush_audio', exc_info=True)
                     for rfr in resampler.resample(fr):  # 8k PCMA -> 48k fltp
                         fifo.write(rfr)
+                    a_in[0] += _ndec
         except Exception:
             _LOGGER.debug("swallowed exception in %s", '_flush_audio', exc_info=True)
         while True:
