@@ -54,6 +54,27 @@ goes straight to webrtcReq/ICE — **on by default**, matching the official app
 (which never waits for `livePlayResp`). Role-reversal models (A001064) are always
 excluded. Disable with `AIDOT_SDES_FAST_LIVEPLAY` in `{0,false,no,off}`.
 
+The **DTLS** path has the targeted equivalent (0.9.0): `dtls_fast_liveplay`
+(`AIDOT_DTLS_FAST_LIVEPLAY` env / `_dtls_fast_liveplay_opt`) skips only the
+up-to-2 s `livePlayResp` wait while keeping the full ICE/TURN/DTLS handshake — so
+remote/relay viewing is unaffected (unlike `fast_connect`, which also strips
+TURN). **On by default**; ~2 s off a cold LAN open. Separately, the HTTP ICE
+config is cached until just before its server-provided `ttl` (capped 1 h), saving
+the ~2 s `iceConfig` fetch on a re-open after the warm session lapses.
+
+### Diagnostics
+
+- `WebRTCSession.get_stats()` (0.9.0) — best-effort connection-health snapshot:
+  the nominated ICE candidate pair (host/srflx/relay/prflx — relay-vs-direct) plus
+  inbound RTP packets received/lost and jitter. Audio counters are reliable; the
+  *video* count is undercounted (this path bridges video outside aiortc's RTP
+  receiver — trust decoded-frame rate for video health).
+- `CameraStatus.wifi_rssi` (0.9.0) — the camera's cloud-reported Wi-Fi RSSI (dBm),
+  surfaced by HA as a diagnostic sensor; the fastest way to spot a marginal link.
+- `scripts/camera_diag.py` — maintained on-hardware probe: handshake time,
+  time-to-first-frame, per-second fps timeline + gaps, nominated ICE path, RTP
+  health, RSSI. `python scripts/camera_diag.py --name <substr>`.
+
 ### Adaptive fast-with-fallback (SDES keepalive, opt-in)
 
 For SDES cameras the keepalive loop can run an **adaptive** strategy
