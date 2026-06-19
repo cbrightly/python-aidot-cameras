@@ -2784,6 +2784,26 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         return os.environ.get("AIDOT_SDES_FAST_LIVEPLAY", "").strip().lower() not in (
             "0", "false", "no", "off")
 
+    def _resolve_dtls_fast_liveplay(self) -> bool:
+        """Whether to skip the DTLS path's ~2 s livePlayResp blocking wait.
+
+        The targeted analogue of [[_resolve_sdes_fast_liveplay]] for DTLS
+        (A000088) cameras: skip ONLY the livePlayResp accept/reject wait while
+        keeping the full ICE/TURN/DTLS handshake (so remote/relay viewing is
+        unaffected, unlike the broader ``_fast_connect`` which also strips TURN).
+
+        **Default ON** - the official app never waits for/parses livePlayResp,
+        and the wait was measured as the dominant LAN cold-start cost (~2 s, paid
+        in full on the common timeout). The only thing lost is fast-fail on an
+        outright camera refusal (livePlay=0), which is rare and then surfaces as
+        an ICE failure instead. Disable via ``AIDOT_DTLS_FAST_LIVEPLAY`` in
+        {0,false,no,off} or per-camera ``_dtls_fast_liveplay_opt`` (opt wins)."""
+        opt = getattr(self, "_dtls_fast_liveplay_opt", None)
+        if opt is not None:
+            return bool(opt)
+        return os.environ.get("AIDOT_DTLS_FAST_LIVEPLAY", "").strip().lower() not in (
+            "0", "false", "no", "off")
+
     def _resolve_sdes_serve_audio(self) -> bool:
         """Whether to include audio in the SDES camera serve.
 

@@ -1012,13 +1012,17 @@ class _WebRTCOpenMixin:
             # (parity-confirmed).  AIDOT_FAST_CONNECT skips it and proceeds to
             # SDP/ICE immediately - losing fast-fail on rejection (rare; ICE then
             # fails instead) in exchange for ~2 s off every LAN connect.
-            if _fast_connect:
+            # Skip the ~2s livePlayResp wait when either fast_connect (the broad
+            # mode that also strips TURN) OR the targeted DTLS fast-liveplay
+            # (default-on, app-parity, keeps TURN/ICE intact) is in effect.
+            if _fast_connect or self._resolve_dtls_fast_liveplay():
                 _LOGGER.info(
-                    "signaling-wait[%s] livePlayResp skipped (fast_connect)",
-                    self.device_id)
+                    "signaling-wait[%s] livePlayResp skipped (%s)",
+                    self.device_id,
+                    "fast_connect" if _fast_connect else "dtls_fast_liveplay")
                 _status(
-                    "AIDOT_FAST_CONNECT: skipping livePlayResp wait (~2s) -"
-                    " proceeding to SDP/ICE (app-parity, no fast-fail on reject)"
+                    "skipping livePlayResp wait (~2s) - proceeding to SDP/ICE"
+                    " (app-parity, no fast-fail on reject)"
                 )
             else:
                 # Instrumented: how long this wait actually costs (it returns as
