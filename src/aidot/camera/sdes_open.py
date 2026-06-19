@@ -151,7 +151,7 @@ class _SdesOpenMixin:
                 if len(_p) == 4 and all(x.isdigit() and 0 <= int(x) <= 255 for x in _p):
                     _public_ip = _cand_pub
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception", '_open_sdes_stream', exc_info=True)
+            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_open_sdes_stream', exc_info=True)
 
         # Build TURN server list for _sdes_ice_server_list from ice_config if
         # available.  The camera's ICE agent uses these to gather its own relay
@@ -192,7 +192,7 @@ class _SdesOpenMixin:
                             "Password": _entry.get("credential") or "",
                         })
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception", '_open_sdes_stream', exc_info=True)
+            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_open_sdes_stream', exc_info=True)
 
         # --- TURN relay allocation helper ------------------------------------ #
         # Defined BEFORE the offer so relay IP/port can be embedded in the
@@ -781,13 +781,13 @@ class _SdesOpenMixin:
                             try:
                                 _seen["H264/90000_pt"] = _ln.split(":")[1].split(" ")[0]
                             except Exception:
-                                _LOGGER.debug("camera %s: swallowed exception", '_k', exc_info=True)
+                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_k', exc_info=True)
                         elif "H265/90000" in _ln and _seen.get("H265/90000") is None:
                             _k(_ln, "H265/90000")
                             try:
                                 _seen["H265/90000_pt"] = _ln.split(":")[1].split(" ")[0]
                             except Exception:
-                                _LOGGER.debug("camera %s: swallowed exception", '_k', exc_info=True)
+                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_k', exc_info=True)
                         elif "apt=" in _ln:
                             try:
                                 _apt = _ln.split("apt=")[1].strip()
@@ -878,7 +878,7 @@ class _SdesOpenMixin:
                                 "Password": str(_e.get("Password") or ""),
                             })
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception", '_k', exc_info=True)
+                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_k', exc_info=True)
             # Allocate TURN relay if not already done before offer build.
             # When ice_config provided TURN entries, pre-allocation already ran
             # and _relay_addrs is populated - skip to avoid double-allocation.
@@ -1193,13 +1193,13 @@ class _SdesOpenMixin:
                     _hp_host = _m_hp.group(1)
                     _hp_port = int(_m_hp.group(2) or 3478)
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception", '_open_sdes_stream', exc_info=True)
+            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_open_sdes_stream', exc_info=True)
         _hp_stun = b'\x00\x01\x00\x00\x21\x12\xa4\x42' + os.urandom(12)
         for _hp_sock in (_audio_sock, _video_sock):
             try:
                 _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port))
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_send_sdes_ice_cand', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_sdes_ice_cand', exc_info=True)
         # Punch to TURN allocation port (5349) as well so port-restricted NAT
         # allows traffic from either TURN port (3478 STUN or 5349 allocation).
         _hp_port2 = 5349
@@ -1208,7 +1208,7 @@ class _SdesOpenMixin:
                 try:
                     _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port2))
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception", '_send_sdes_ice_cand', exc_info=True)
+                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_sdes_ice_cand', exc_info=True)
         _status(
             f"NAT hole-punch: sent from audio={audio_port}"
             f" video={video_port} → {_hp_host}:{_hp_port}"
@@ -1260,7 +1260,7 @@ class _SdesOpenMixin:
             try:
                 _rsock.setblocking(False)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_is_self_peer_ip', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_is_self_peer_ip', exc_info=True)
         while time.monotonic() < _stun_deadline:
             # Idle-exit: threshold depends on whether we've seen any STUN yet
             idle = time.monotonic() - _last_pkt_t
@@ -1398,7 +1398,7 @@ class _SdesOpenMixin:
                                 _sock.sendto(_resp, _src)
                             _stun_count += 1
                         except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception", '_is_self_peer_ip', exc_info=True)
+                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_is_self_peer_ip', exc_info=True)
                 else:
                     # Non-STUN packet = SRTP arriving - ICE is done, hand off to ffmpeg now
                     _srtp_detected = True
@@ -1409,7 +1409,7 @@ class _SdesOpenMixin:
             try:
                 _rsock.setblocking(True)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_is_self_peer_ip', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_is_self_peer_ip', exc_info=True)
         if _stun_count:
             _status(f"ICE: responded to {_stun_count} STUN binding request(s)")
         elif not _srtp_detected:
@@ -1479,7 +1479,7 @@ class _SdesOpenMixin:
                 try:
                     _hp_sock_r.sendto(_hp_stun, (_hp_host, _hp_port))
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception", '_is_self_peer_ip', exc_info=True)
+                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_is_self_peer_ip', exc_info=True)
             # Retry STUN window (8 s)
             _stun_deadline = time.monotonic() + 8.0
             _last_pkt_t = time.monotonic()
@@ -1518,7 +1518,7 @@ class _SdesOpenMixin:
                             _sk_r.sendto(_resp_r, _src_r)
                             _stun_count += 1
                         except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception", '_is_self_peer_ip', exc_info=True)
+                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_is_self_peer_ip', exc_info=True)
                     else:
                         _srtp_detected = True
                         break
@@ -1554,7 +1554,7 @@ class _SdesOpenMixin:
                 _pre_ans = answer_fut.result()
                 _pre_launch_answer_sdp = (_pre_ans or {}).get("sdp", "")
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_is_self_peer_ip', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_is_self_peer_ip', exc_info=True)
         if _pre_launch_answer_sdp:
             _LOGGER.debug(
                 "_open_sdes_stream: camera webrtcResp answer SDP (len=%d)",
@@ -1873,7 +1873,7 @@ class _SdesOpenMixin:
             try:
                 sock.sendto(_req, cam_addr)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_send_use_candidate', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_use_candidate', exc_info=True)
 
         if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:
             for _c_ip, _c_port in _cam_ice_cands:
@@ -2100,14 +2100,14 @@ class _SdesOpenMixin:
                                     _talk_state["speaker_on"] = True
                                     _status("SDES talk: sent SPEAKERSTART(848) (bridge thread)")
                                 except Exception:
-                                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                         elif _talk_state.get("speaker_on") and not _talk_state.get("want_speaker"):
                             try:
                                 _cmd_chan[0](849, b'\x00' * 8)  # SPEAKERSTOP
                                 _talk_state["speaker_on"] = False
                                 _status("SDES talk: sent SPEAKERSTOP(849) (bridge thread)")
                             except Exception:
-                                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
 
                     # RTCP PLI (Picture Loss Indication) - forces camera to
                     # resend IDR + VPS/SPS/PPS so ffmpeg gets codec params.
@@ -2177,13 +2177,13 @@ class _SdesOpenMixin:
                             )
                             _pli_sent = True
                         except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                         if not _pli_sent:
                             try:
                                 _bridge_fn._cam_srtp_sock.sendto(
                                     _pli_raw, _bridge_fn._cam_srtp_src)
                             except Exception:
-                                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                         _bridge_fn._last_pli_ts = _time_br.time()
                         _pli_n = getattr(_bridge_fn, '_pli_count', 0) + 1
                         _bridge_fn._pli_count = _pli_n
@@ -2245,7 +2245,7 @@ class _SdesOpenMixin:
                                             _csrc,
                                         )
                                     except Exception:
-                                        _LOGGER.debug("camera %s: swallowed exception", '_persistent_sdes_cmd', exc_info=True)
+                                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_persistent_sdes_cmd', exc_info=True)
 
                                 _cmd_chan[0] = _persistent_sdes_cmd
                             except Exception as _dw_e:
@@ -2275,7 +2275,7 @@ class _SdesOpenMixin:
                                 _re_key, _AES_re2.MODE_CBC, _re_iv
                             ).encrypt(_pad_re2(_re_plain, 16))
                         except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                         for _rp in [_re_enc, _re_plain]:
                             if _rp is None:
                                 continue
@@ -2286,7 +2286,7 @@ class _SdesOpenMixin:
                                     _trigger_bsrc,
                                 )
                             except Exception:
-                                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                         _last_trigger_ts = _time_br.time()
 
                     for _bs in _rl:
@@ -2439,14 +2439,14 @@ class _SdesOpenMixin:
                                                     (_br_ci, _br_cp),
                                                 )
                                             except Exception:
-                                                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                                     _status(
                                         f"bridge: late USE-CANDIDATE sent (audio+video) to"
                                         f" {len(_bridge_uc_info['cands'])} camera candidate(s)"
                                         " (answer arrived after bridge started)"
                                     )
                             except Exception:
-                                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                         elif len(_bpkt) >= 20 and _bpkt[4:8] == _STUN_MAGIC_BR:
                             # STUN BindingSuccess (0x0101) from camera: ICE complete.
                             # Send AES-128-CBC encrypted SESSION_MODE_REQ (AVIO LIVING).
@@ -2503,7 +2503,7 @@ class _SdesOpenMixin:
                                             f" → {_bsrc[0]}:{_bsrc[1]}"
                                         )
                                     except Exception:
-                                        _LOGGER.debug("camera %s: swallowed exception", '_persistent_sdes_cmd', exc_info=True)
+                                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_persistent_sdes_cmd', exc_info=True)
                                 _avio_living_sent = True
                                 _last_trigger_ts = _time_br.time()
                                 _trigger_bs   = _bs
@@ -2880,12 +2880,12 @@ class _SdesOpenMixin:
                                         _bs.sendto(_rr_sess.protect_rtcp(_rr_pkt), _bsrc)
                                         _rtcp_sent = True
                                     except Exception:
-                                        _LOGGER.debug("camera %s: swallowed exception", '_persistent_sdes_cmd', exc_info=True)
+                                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_persistent_sdes_cmd', exc_info=True)
                                     if not _rtcp_sent:
                                         try:
                                             _bs.sendto(_rr_pkt, _bsrc)
                                         except Exception:
-                                            _LOGGER.debug("camera %s: swallowed exception", '_enc_c8_sctp', exc_info=True)
+                                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_enc_c8_sctp', exc_info=True)
                                     if _bridge_fn._tutk_count == 1:
                                         _status(
                                             f"SDES: sent RTCP RR to camera"
@@ -2917,7 +2917,7 @@ class _SdesOpenMixin:
                                                     f" ({len(_pd_plain)}B PCMA)"
                                                 )
                                         except Exception:
-                                            _LOGGER.debug("camera %s: swallowed exception", '_enc_c8_sctp', exc_info=True)
+                                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_enc_c8_sctp', exc_info=True)
                                 continue
 
                             # Standard SRTP/SRTCP demux by RTP payload type.
@@ -2955,11 +2955,11 @@ class _SdesOpenMixin:
                                 try:
                                     _lo_a.sendto(_bpkt, ('127.0.0.1', _lo_audio_port))
                                 except Exception:
-                                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                                 try:
                                     _lo_v.sendto(_bpkt, ('127.0.0.1', _lo_video_port))
                                 except Exception:
-                                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                                 continue
                             _pt = _pt_byte & 0x7F
                             if _pt in (96, 97, 98):
@@ -3138,7 +3138,7 @@ class _SdesOpenMixin:
                                 )
                                 _media_progress[0] = _time_br.monotonic()
                             except Exception:
-                                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                     # Periodic ICE controlling check: re-send USE-CANDIDATE every 2.5 s.
                     # Keeps the camera in ICE "Completed" state and satisfies consent
                     # refresh (RFC 7675).  Also handles the case where the initial
@@ -3159,11 +3159,11 @@ class _SdesOpenMixin:
                 try:
                     _lo_a.close()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                 try:
                     _lo_v.close()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
 
         _br_first_di_logged = False
         _br_first_srtp_logged = False
@@ -3222,11 +3222,11 @@ class _SdesOpenMixin:
                 try:
                     _rsock.close()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
             try:
                 os.unlink(sdp_path)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
             outgoing_q.put_nowait(None)   # stop MQTT thread
             raise CameraMixin._SdesNoAnswerError()
         elif (_cam_echo_received
@@ -3309,7 +3309,7 @@ class _SdesOpenMixin:
                     f"SDES: narrowed ffmpeg SDP to video pt={_vpt}"
                     f" ({'H265' if int(_vpt) == 97 else 'H264'})")
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_open_sdes_stream', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_open_sdes_stream', exc_info=True)
         _LOGGER.info("SDES ffmpeg cmd: %s", " ".join(cmd))
         if _ffmpeg_path() is None:
             # ffmpeg is not installed - clean up and surface a clear error
@@ -3318,11 +3318,11 @@ class _SdesOpenMixin:
                 try:
                     _rsock.close()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
             try:
                 os.unlink(sdp_path)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
             outgoing_q.put_nowait(None)   # stop MQTT thread
             raise RuntimeError(
                 "ffmpeg not found - install ffmpeg to stream SDES-SRTP cameras.\n"
@@ -3343,11 +3343,11 @@ class _SdesOpenMixin:
                 try:
                     _rsock.close()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
             try:
                 os.unlink(sdp_path)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_bridge_fn', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
             outgoing_q.put_nowait(None)   # stop MQTT thread
             raise RuntimeError(
                 "ffmpeg not found - install ffmpeg to stream SDES-SRTP cameras.\n"
@@ -3591,11 +3591,11 @@ class _SdesOpenMixin:
                     try:
                         _rsock.close()
                     except Exception:
-                        _LOGGER.debug("camera %s: swallowed exception", '_udp_port_bound', exc_info=True)
+                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_udp_port_bound', exc_info=True)
                 try:
                     os.unlink(sdp_path)
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception", '_udp_port_bound', exc_info=True)
+                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_udp_port_bound', exc_info=True)
                 outgoing_q.put_nowait(None)   # signal MQTT thread to exit
                 raise CameraMixin._SdesNoAnswerError()
             else:
@@ -3654,7 +3654,7 @@ class _SdesOpenMixin:
                                         + (" [m=app]" if _dc_answer_has_app else "")
                                     )
                         except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception", '_late_second_answer_task', exc_info=True)
+                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_late_second_answer_task', exc_info=True)
                     _spawn_bg(_late_second_answer_task())
 
         return SdesSession(

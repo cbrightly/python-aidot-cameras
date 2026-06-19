@@ -291,7 +291,7 @@ class CloudPlaybackSession:
                 self._writer.close()
                 await self._writer.wait_closed()
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
             self._writer = None
             self._reader = None
 
@@ -480,6 +480,6 @@ class LiveStreamSession:
                 self._writer.close()
                 await self._writer.wait_closed()
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_cleanup', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", '_cleanup', exc_info=True)
             self._writer = None
             self._reader = None
