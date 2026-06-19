@@ -1467,7 +1467,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             try:
                 self.status.update_from_camera_attributes({attr: value})
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", 'async_set_device_attribute', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_set_device_attribute', exc_info=True)
         return ok
 
     async def async_trigger_device_action(
@@ -1542,7 +1542,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             try:
                 await self.async_wake_camera()
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", 'async_get_camera_attributes', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_get_camera_attributes', exc_info=True)
 
         smarthome_auth = await self._async_get_smarthome_auth()
         mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
@@ -1929,7 +1929,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 try:
                     _os.unlink(_tmp_ts)
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception", 'async_snapshot', exc_info=True)
+                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_snapshot', exc_info=True)
 
         # ── DTLS path: on_frame callback delivers frames from aiortc ─────── #
         frame_event = _asyncio.Event()
@@ -2002,21 +2002,21 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             try:
                 await g_task
             except (asyncio.CancelledError, Exception):
-                _LOGGER.debug("camera %s: swallowed exception", 'async_stop_streaming', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_stop_streaming', exc_info=True)
         await self._deregister_go2rtc()
         session, self._stream_session = self._stream_session, None
         if session is not None:
             try:
                 await session.stop()
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", 'async_stop_streaming', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_stop_streaming', exc_info=True)
         task, self._stream_task = self._stream_task, None
         if task is not None and not task.done():
             task.cancel()
             try:
                 await task
             except (asyncio.CancelledError, Exception):
-                _LOGGER.debug("camera %s: swallowed exception", 'async_stop_streaming', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_stop_streaming', exc_info=True)
         # Reap a persistent-MQTT stream drain that no session stopped (e.g. an
         # open cancelled mid-handshake) so its handler is removed from the shared
         # connection and its blocked executor thread is released.
@@ -2041,13 +2041,13 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             try:
                 outq.put_nowait(None)   # release the executor thread in outgoing_q.get
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_reap_stream_drain', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_reap_stream_drain', exc_info=True)
         if not drain.done():
             drain.cancel()
         try:
             await drain
         except (asyncio.CancelledError, Exception):
-            _LOGGER.debug("camera %s: swallowed exception", '_reap_stream_drain', exc_info=True)
+            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_reap_stream_drain', exc_info=True)
 
     async def async_start_motion_polling(
         self, callback: Callable, interval: float = 30.0, lookback_s: int = 600,
@@ -2087,7 +2087,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             try:
                 await task
             except (asyncio.CancelledError, Exception):
-                _LOGGER.debug("camera %s: swallowed exception", 'async_stop_motion_polling', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_stop_motion_polling', exc_info=True)
 
     async def _motion_poll_loop(self, lookback_s: int) -> None:
         """Background: poll the cloud event list; fire callback on newly-recorded events."""
@@ -2241,7 +2241,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         try:
             await self.async_wait_serve_ready(timeout=40.0)
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception", '_register_with_go2rtc', exc_info=True)
+            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_register_with_go2rtc', exc_info=True)
         if not (self._streaming_active and self._go2rtc_url and self._keepalive_rtsp_url):
             return
         name = f"aidot_{self.device_id[:12]}"
@@ -2254,7 +2254,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 _LOGGER.info(
                     "camera %s: preferring go2rtc stream -> %s", self.device_id, url)
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception", '_register_with_go2rtc', exc_info=True)
+            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_register_with_go2rtc', exc_info=True)
 
     async def _deregister_go2rtc(self) -> None:
         """Remove this camera's stream from go2rtc (best-effort)."""
@@ -2269,7 +2269,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             async with aiohttp.ClientSession() as _s2:
                 await Go2rtcClient(_s2, base).remove_stream(name)
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception", '_deregister_go2rtc', exc_info=True)
+            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_deregister_go2rtc', exc_info=True)
 
     async def async_wait_serve_ready(self, timeout: float = 20.0) -> bool:
         """Wait until the DTLS serve is bound + serving (or ``timeout``).
@@ -2520,7 +2520,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 try:
                     await session.stop()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception", '_sdes_keepalive_loop', exc_info=True)
+                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_sdes_keepalive_loop', exc_info=True)
                 self._streaming_active = False
                 self._keepalive_rtsp_url = None
                 self._serve_ready.clear()
@@ -2540,7 +2540,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             try:
                 await session.stop()
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_sdes_keepalive_loop', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_sdes_keepalive_loop', exc_info=True)
 
             # Adaptive bookkeeping: a fast attempt that never delivered media
             # latches the loop onto the full relay path for its remaining opens.
@@ -2651,7 +2651,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             try:
                 await session.stop()
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_on_frame', exc_info=True)
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_on_frame', exc_info=True)
 
             if self._streaming_active:
                 # Reset backoff if this session produced frames (a normal drop
@@ -2707,7 +2707,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                         except Exception:
                             pass  # full -> drop (PLI re-arms a GOP)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", '_tap_put', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", '_tap_put', exc_info=True)
             return _orig_put(task, *a, **k)
 
         _qd.put = _tap_put
@@ -3229,7 +3229,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     try:
                         wfile.close()
                     except Exception:
-                        _LOGGER.debug("camera %s: swallowed exception", '_pc_dead', exc_info=True)
+                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_pc_dead', exc_info=True)
                     wfile = None
                     mux_thread.join(timeout=2.0)
                     mux_thread = stop_flag = None
@@ -3248,7 +3248,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     try:
                         wfile.close()
                     except Exception:
-                        _LOGGER.debug("camera %s: swallowed exception", '_pc_dead', exc_info=True)
+                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_pc_dead', exc_info=True)
                 if mux_thread is not None:
                     mux_thread.join(timeout=2.0)
                 _terminate_proc(proc)  # never orphan ffmpeg on teardown
@@ -3256,7 +3256,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 try:
                     await session.stop()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception", '_pc_dead', exc_info=True)
+                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_pc_dead', exc_info=True)
 
             if cancelled:
                 return
