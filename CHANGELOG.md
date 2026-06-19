@@ -4,6 +4,29 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.9.1]
+
+Logging and packaging hygiene; no behavioural change to streaming.
+
+### Fixed
+- **Swallowed-exception debug logs now identify the camera.** Every
+  `_LOGGER.debug("camera %s: swallowed exception", ...)` site across the camera
+  modules was filling `%s` with the *function-name literal* instead of a device
+  id, so logs read `camera stop: swallowed exception` and never said which
+  camera. The 70 sites where a device id is in scope now log
+  `camera <id>: swallowed exception in <func>` (via `getattr(self, "device_id",
+  "?")` — these are except blocks, so they must never raise); the 35 sites with
+  no device id in scope (the `SdesSession`/`WebRTCSession` classes carry none,
+  plus module-level functions and non-`self` closures) drop the misleading
+  `camera %s` framing and log `swallowed exception in <func>`.
+
+### Changed
+- **Core runtime dependencies now have conservative lower bounds**
+  (`aiohttp>=3.9`, `cryptography>=42.0`, `pycryptodome>=3.20`, `dacite>=1.8`),
+  so a fresh install can't resolve an ancient release. No upper caps — under
+  Home Assistant, HA core pins `aiohttp`/`cryptography` itself and a cap would
+  fight its resolver.
+
 ## [0.9.0]
 
 Observability, connection-speed, and a large internal decomposition. Motivated
