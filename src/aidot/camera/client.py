@@ -537,6 +537,12 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         # Cache slot for Leedarson smarthome auth (mqttUser, mqttPassword, userId)
         # Fetched lazily via _async_get_smarthome_auth()
         self._smarthome_auth: Optional[dict] = None
+        # Cache for the HTTP ICE/TURN config.  Each TURN entry carries a server
+        # ``ttl`` (Unix epoch), so caching until just before it is safe and saves
+        # the ~2s fetch on repeat cold opens.  Reset on token refresh below
+        # (credentials are bound to the access token).
+        self._cached_ice_config: Optional[dict] = None
+        self._ice_config_expiry: float = 0.0
         # Async callback (set by AidotClient) that refreshes the access token and
         # updates the shared login_info in place, so camera HTTP calls can recover
         # from a 21026 "Please login again" instead of failing silently.
@@ -717,7 +723,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         self._smarthome_auth = None
         self._mqtt_url = None
         self._cached_ice_config = None
-        self._ice_config_fetched_at = 0.0
+        self._ice_config_expiry = 0.0
         try:
             return bool(await cb())
         except Exception as exc:
@@ -3575,8 +3581,17 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         Calls ``/v29/api/webrtc/iceConfig?forceRefresh=0`` using the same
         Appid/Token headers used by all other AiDot platform API calls.
         Returns a dict with ``app`` / ``dev`` keys on success, or ``None``.
+
+        Cached between cold opens until just before the server-provided ttl, so
+        a re-open (after the warm-hold lapses) skips this ~2s fetch.
         """
         import aiohttp
+
+        if self._cached_ice_config is not None and time.time() < self._ice_config_expiry:
+            _LOGGER.debug(
+                "async_get_ice_config_http: cached config (%.0fs left)",
+                self._ice_config_expiry - time.time())
+            return self._cached_ice_config
 
         token = (
             self._user_info.get("accessToken")
@@ -3607,10 +3622,43 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                             resp.status, url,
                         )
                         return None
-                    return await resp.json(content_type=None)
+                    cfg = await resp.json(content_type=None)
+                    self._cache_ice_config(cfg)
+                    return cfg
         except Exception as exc:
             _LOGGER.warning("async_get_ice_config_http failed: %s", exc)
             return None
+
+    def _cache_ice_config(self, cfg: "Any") -> None:
+        """Cache the ICE config until just before the soonest TURN ``ttl``.
+
+        Each entry carries a ``ttl`` Unix epoch; cache until ``min(ttl) - 60s``,
+        capped at +1h so any mid-life server-side credential rotation is still
+        picked up promptly.  No usable ttl -> don't cache (fail safe to the prior
+        always-fetch behaviour).  Never caches an already-expired config."""
+        ttls: "list[float]" = []
+
+        def _walk(o: "Any") -> None:
+            if isinstance(o, dict):
+                v = o.get("ttl")
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 1_000_000_000:
+                    ttls.append(float(v))
+                for x in o.values():
+                    _walk(x)
+            elif isinstance(o, list):
+                for x in o:
+                    _walk(x)
+
+        _walk(cfg)
+        if not ttls:
+            return
+        now = time.time()
+        expiry = min(min(ttls) - 60.0, now + 3600.0)
+        if expiry <= now:
+            return
+        self._cached_ice_config = cfg
+        self._ice_config_expiry = expiry
+        _LOGGER.debug("async_get_ice_config_http: cached for %.0fs", expiry - now)
 
     @staticmethod
     def generate_webrtc_peer_id(
