@@ -15,12 +15,17 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
 ]
+# Conservative lower bounds only - no upper caps. When installed under Home
+# Assistant, HA core pins aiohttp/cryptography itself; an upper cap here would
+# fight HA's resolver on the box. Floors just exclude ancient releases while
+# leaving the consumer (or HA) free to use a newer version. Bump a floor only
+# after re-validating against it.
 dependencies = [
-    "aiohttp",
+    "aiohttp>=3.9",
     "paho-mqtt>=2.0",
-    "cryptography",
-    "pycryptodome",
-    "dacite",
+    "cryptography>=42.0",
+    "pycryptodome>=3.20",
+    "dacite>=1.8",
 ]
 
 [project.optional-dependencies]
