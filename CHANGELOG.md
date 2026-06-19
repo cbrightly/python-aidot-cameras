@@ -4,6 +4,24 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.9.2]
+
+### Fixed
+- **Choppy DTLS camera audio under packet loss.** The DTLS A/V mux timestamped
+  audio purely by accumulated decoded-sample count (`a_pts += fr.samples`) and
+  discarded the PCMA RTP timestamp it had already captured. The video path locks
+  to its 90 kHz RTP timestamps, but audio did not — so any lost audio packet made
+  the lost time *vanish* and the remaining samples concatenate, compressing the
+  audio timeline. Over a live stream this runs audio progressively ahead of the
+  video and forces the player's jitter buffer to resync, heard as choppy audio.
+  (A zero-loss lab capture sounded fine, which is why this hid behind earlier
+  fixes.) The mux now anchors audio to its RTP clock and conceals a detected gap
+  (≥ 20 ms) with silence through the resampler — mirroring the video path — so
+  audio stays time-locked and lost time becomes a brief honest silence instead of
+  permanent A/V drift. Lossless streams are unaffected (the gap is zero, a no-op).
+  An offline regression probe that drives the real mux with synthetic loss is at
+  `scripts/audio_mux_probe.py`.
+
 ## [0.9.1]
 
 Logging and packaging hygiene; no behavioural change to streaming.
