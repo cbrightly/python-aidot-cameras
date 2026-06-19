@@ -102,7 +102,7 @@ class CameraStatusData(DeviceStatusData):
             try:
                 self.battery_remaining = int(v)
             except (ValueError, TypeError):
-                _LOGGER.debug("camera %s: swallowed exception", 'update', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", 'update', exc_info=True)
         if (v := attr.get("Occupancy")) is not None:
             self.occupancy = bool(int(v))
         if (v := attr.get("SDcardStatus")) is not None:
@@ -111,7 +111,7 @@ class CameraStatusData(DeviceStatusData):
             try:
                 self.wifi_rssi = int(v)
             except (ValueError, TypeError):
-                _LOGGER.debug("camera %s: swallowed exception", 'update', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", 'update', exc_info=True)
 
     # Cloud "properties" keys that belong to lights, not cameras.  A camera's
     # image "Dimming" must not be read as a light brightness (and could TypeError
@@ -163,7 +163,7 @@ class CameraDeviceInformation(DeviceInformation):
                             if isinstance(codes, list):
                                 self.ptz_directions = [int(c) for c in codes]
                         except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception", '__init__', exc_info=True)
+                            _LOGGER.debug("swallowed exception in %s", '__init__', exc_info=True)
 
 
 @dataclass

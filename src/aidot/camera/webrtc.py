@@ -106,7 +106,7 @@ class WebRTCSession:
             if self._audio_sender is not None:
                 self._audio_sender.replaceTrack(None)
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception", 'async_stop_talk', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", 'async_stop_talk', exc_info=True)
         self._talk_holder["provider"] = None
         return True
 
@@ -185,18 +185,18 @@ class WebRTCSession:
                 self._talk_holder["was_active"] = False
                 await asyncio.sleep(0.4)   # let the DataChannel deliver SPEAKERSTOP
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
         for task in self._track_tasks:
             task.cancel()
         if self._recorder is not None:
             try:
                 await self._recorder.stop()
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
         # Send None sentinel to stop the MQTT session in its thread
         self._outgoing_q.put_nowait(None)
         await self._pc.close()
         try:
             await asyncio.wait_for(self._mqtt_fut, timeout=5.0)
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception", 'stop', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
