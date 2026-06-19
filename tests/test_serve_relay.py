@@ -11,9 +11,31 @@ import sys
 import threading
 import time
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from aidot.camera.protocol import _ServeRelay, _grab_free_port, _rewrite_serve_port
+
+
+@pytest.fixture(autouse=True)
+def _real_sockets():
+    """Bind real localhost TCP ports in this module regardless of the env.
+
+    In CI only bare pytest is installed, so nothing interferes. Locally,
+    pytest-socket arrives transitively (via pytest-homeassistant-custom-component,
+    whose pytest_runtest_setup hook disables sockets before every test) and would
+    fail every test here. Re-enable sockets for this module; the plugin re-disables
+    before the next test, so other tests keep their default deny-by-default posture.
+    No-op when pytest-socket is absent (e.g. CI).
+    """
+    try:
+        import pytest_socket
+    except ImportError:
+        yield
+        return
+    pytest_socket.enable_socket()
+    yield
 
 
 def test_rewrite_serve_port_swaps_only_the_port():
