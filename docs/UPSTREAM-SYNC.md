@@ -45,6 +45,35 @@ To pull a single fix in isolation instead of a full merge, cherry-pick it:
 git cherry-pick <upstream-sha>
 ```
 
+## Fork operations & release safety
+
+This repo is a GitHub fork of upstream and publishes to PyPI, so a few operational
+guards keep work on this account and prevent footguns:
+
+- **Sync upstream only on `main`.** `git merge upstream/main` works on `main`
+  (upstream is an ancestor there). Run it on any other branch and git reports
+  "refusing to merge unrelated histories" — that branch just lacks the link
+  commit. Switch to `main` first.
+- **Never run `git merge -s ours upstream/main` again.** The `ours` link was a
+  one-time operation, valid only because content was already synced to `eef1630`.
+  Re-using it would silently mark genuine upstream fixes as merged and drop them.
+  The ongoing workflow is a plain `git merge upstream/main`.
+- **`gh` defaults to the upstream parent repo.** Because `upstream` is configured,
+  `gh pr …` will target `AiDot-Development-Team` unless pinned. This repo sets
+  `gh repo set-default cbrightly/python-aidot-cameras`; pass `--repo cbrightly/...`
+  if in doubt.
+- **Pushes to the `upstream` remote are disabled** (`git remote set-url --push
+  upstream DISABLE`) so nothing lands on the upstream account by accident. To
+  contribute a fix upstream, push to your own fork of it instead (see below).
+- **`main` is branch-protected** against force-push and deletion. History rewrites
+  on `main` are blocked; normal pushes and merges still work.
+- **Don't cut a no-op release.** The published wheel ships only `src/aidot/` plus
+  `README.md`. Before bumping the version, confirm one of those actually changed
+  since the last tag (`git diff --stat <last-tag>..HEAD -- src README.md`) —
+  otherwise the new version is byte-identical to the last and just burns a PyPI
+  number (which can't be reused). A new GitHub *Release* is what triggers the
+  PyPI publish.
+
 ## Divergence map (what still conflicts on a merge)
 
 Measured against upstream `0.3.53`. Our changes split into a purely additive
