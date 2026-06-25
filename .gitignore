@@ -205,8 +205,6 @@ sidecar/
 # Internal development planning notes
 plan.md
 
-# AI session memory (local only)
-
 # Reverse-engineering and validation docs (contain LAN IPs and internal architecture notes)
 docs/APK_DTLS_WEBRTC.md
 docs/CAMERA_LIFECYCLE_PARITY.md
