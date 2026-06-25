@@ -10,14 +10,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Third-party actions are pinned to full commit SHAs (not moving tags); the
+# trailing comment records the human-readable version. Dependabot
+# (github-actions ecosystem) proposes SHA bumps.
 jobs:
   # Lint is pure-Python; run it on Ubuntu (fast). node24-runtime actions.
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5        # node24
-      - uses: actions/setup-python@v6    # node24
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24)
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6 (node24)
         with:
           python-version: "3.13"
       - run: pip install ruff
@@ -33,13 +36,30 @@ jobs:
     name: Type check (mypy, informational)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5        # node24
-      - uses: actions/setup-python@v6    # node24
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24)
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6 (node24)
         with:
           python-version: "3.13"
       - run: pip install mypy
       - name: Mypy (non-blocking)
         run: mypy src/ || true
+
+  # Build the distribution and validate its metadata on every push/PR, so a
+  # packaging break (bad pyproject, missing file, bad metadata) is caught here
+  # rather than only when a Release fires the publish workflow.
+  build:
+    name: Build & check package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24)
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6 (node24)
+        with:
+          python-version: "3.13"
+      - name: Build sdist + wheel and check metadata
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          twine check dist/*
 
   # Tests run inside an Alpine (musl) container - the SAME libc Home Assistant
   # OS / Container uses - so the native deps (aiortc / av / pylibsrtp, all via
@@ -51,7 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     container: python:3.13-alpine
     steps:
-      - uses: actions/checkout@v5        # node24 (mandatory in a musl container)
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24, mandatory in a musl container)
       # git for checkout; small build toolchain as a safety net for any
       # transitive dep that lacks a musllinux wheel (the heavy ones all have them).
       - name: System deps

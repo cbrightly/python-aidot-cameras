@@ -1,9 +1,11 @@
 name: Publish to PyPI
 
+# Publishing is triggered ONLY by a published GitHub Release. (workflow_dispatch
+# was removed deliberately: this job holds id-token: write for PyPI Trusted
+# Publishing, so the trigger surface is kept as small as possible.)
 on:
   release:
     types: [published]
-  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -18,9 +20,24 @@ jobs:
     environment: pypi
     permissions:
       id-token: write
+    # Third-party actions are pinned to full commit SHAs (not moving tags) so a
+    # repointed/compromised tag cannot run in this token-minting job. Dependabot
+    # (github-actions ecosystem) keeps these current.
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+      # Fail fast if the release tag and the packaged version disagree: a
+      # mismatch would publish the wrong version, or hard-fail as a PyPI
+      # duplicate. Tags are vX.Y.Z; pyproject carries X.Y.Z.
+      - name: Verify tag matches pyproject version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          proj="$(grep -m1 '^version = ' pyproject.toml | sed -E 's/^version = "(.*)"/\1/')"
+          echo "release tag: ${tag}   pyproject: ${proj}"
+          if [ "${tag}" != "${proj}" ]; then
+            echo "::error::release tag (${tag}) does not match pyproject version (${proj})"
+            exit 1
+          fi
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
         with:
           python-version: "3.13"
       - name: Build sdist and wheel
@@ -28,4 +45,4 @@ jobs:
           pip install build
           python -m build
       - name: Publish
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1 (v1.14.0)
