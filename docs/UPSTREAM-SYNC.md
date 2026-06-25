@@ -5,19 +5,50 @@ This repo is a camera-capable fork of the lights-only upstream
 the entire `aidot.camera` subpackage (WebRTC/SDES streaming, two-way audio, PTZ,
 LAN control) and also modifies several of upstream's own files in place.
 
-## Current state (the problem)
+## Status: shared ancestry established
 
-The fork's git history was rewritten at fork time, so it has **no common
-ancestor** with upstream. That breaks integration two ways:
+The fork's history was originally rewritten and had **no common ancestor** with
+upstream, so `git merge upstream/main` refused to run ("unrelated histories")
+and the fork showed as "N commits behind" — where N was simply upstream's whole
+history, none of it in our ancestry. Content was already current (our tree was
+synced through upstream's HEAD `eef1630`); only the git *link* was missing.
 
-1. **No shared history** → `git merge upstream/main` refuses to run ("unrelated
-   histories"). There is no `merge`/`pull` path at all today, only manual
-   cherry-pick.
-2. **In-place layout divergence** → even cherry-picks conflict, because our
-   changes live *inside* upstream's files (and methods), not only in additive
-   new files.
+That link was established **non-destructively** with a one-time merge that records
+upstream as a parent without changing our tree:
 
-Measured against upstream `0.3.53` (PyPI sdist), the divergence splits cleanly:
+```bash
+git merge -s ours --allow-unrelated-histories upstream/main
+```
+
+The `ours` strategy keeps our tree byte-for-byte and only records the ancestry
+(correct here precisely because the content was already synced to `eef1630`). It
+is a normal fast-forward commit on `main` — no history rewrite, no force-push.
+
+## Normal sync, going forward
+
+Because upstream is now a real ancestor, syncing is an ordinary merge:
+
+```bash
+git fetch upstream
+git log main..upstream/main --oneline   # new upstream commits since our last sync
+git merge upstream/main                  # brings in only those new commits
+```
+
+The merge-base is `eef1630`, so a future `git merge` applies only commits upstream
+adds *after* it — conflicting only in the upstream-derived files we still modify
+in place (see the divergence map below). The additive `aidot/camera/**` subpackage
+is never touched by upstream and never conflicts.
+
+To pull a single fix in isolation instead of a full merge, cherry-pick it:
+
+```bash
+git cherry-pick <upstream-sha>
+```
+
+## Divergence map (what still conflicts on a merge)
+
+Measured against upstream `0.3.53`. Our changes split into a purely additive
+subpackage and in-place edits to upstream's own files; only the latter conflict.
 
 | area | upstream | ours | nature |
 | --- | --- | --- | --- |
@@ -30,72 +61,10 @@ Measured against upstream `0.3.53` (PyPI sdist), the divergence splits cleanly:
 | `models/**` | — | new | entirely ours |
 | `login_const.py` | 16 | 16 | identical |
 
-To see how far behind we are at any time (run where upstream git is reachable):
+## Cut divergence (makes future merges near-clean)
 
-```bash
-git fetch upstream
-git log eef1630..upstream/main --oneline   # eef1630 = last content-level sync point
-```
-
-## Target architecture: re-root + cut divergence
-
-The chosen direction is to **re-establish a shared ancestor with upstream**
-(so merges work again) and then **drive the in-place divergence down** (so those
-merges stay clean).
-
-### Why not "invert to a dependency"
-
-Depending on upstream as a PyPI package (`python-aidot`, which is published) and
-shipping only an extension was evaluated and set aside. The additive
-`aidot.camera` subpackage would suit it, but our **in-place edits to upstream's
-files** would each have to become a whole-method subclass override or a
-monkeypatch — upstream's `AidotClient.get_device_client()` even hardcodes
-`DeviceClient(...)` with no factory hook. Whole-method overrides go **silently
-stale** when upstream patches that method (you'd drop the fix without a
-conflict to review). A *clean* inversion would need upstream to expose
-extension seams — i.e. upstream action — which we deliberately do not depend on.
-Cutting divergence (below) keeps the door open to revisit this later without
-ever needing upstream.
-
-### Step 1 — Re-root onto upstream's history (one-time)
-
-This rewrites `main`'s history and requires a force-push, so it must be a
-deliberate, announced operation. **Run it where upstream git is reachable** (a
-plain clone outside the scoped sandbox), on a scratch branch first, never
-straight onto `main`.
-
-```bash
-git remote add upstream https://github.com/AiDot-Development-Team/python-AiDot.git
-git fetch upstream
-
-# Replay our commits on top of upstream's history so upstream becomes a real
-# ancestor (preserves our commit granularity; resolve conflicts once):
-git switch -c reroot main
-git rebase --onto upstream/main --root reroot
-#   …resolve conflicts. The file layout differs, so expect them in the
-#     upstream-derived files above; the aidot/camera/** additions apply clean.
-
-# Validate the tree is unchanged vs the current published main BEFORE adopting it:
-git diff main reroot        # should be empty (history changed, content identical)
-pytest -q                    # full suite must pass
-
-# Only after review + an announced window:
-#   git branch -f main reroot && git push --force-with-lease origin main
-```
-
-After this, upstream commits are genuine ancestors and the merge path is normal.
-
-### Step 2 — Normal sync, forever after
-
-```bash
-git fetch upstream
-git merge upstream/main      # conflicts only in files we still modify in place
-```
-
-### Step 3 — Cut divergence (ongoing, makes Step 2 near-clean)
-
-Each conflict in Step 2 comes from a change living *inside* an upstream method.
-Move those out so upstream's files trend back toward vanilla:
+Every merge conflict comes from a change living *inside* an upstream method. To
+shrink that surface, move those out so upstream's files trend back toward vanilla:
 
 - Replace in-method hooks with thin, overridable seams. e.g. the
   `if "IPC" in model: return` guard inside `async_login`, the raw-attr line in
@@ -106,23 +75,10 @@ Move those out so upstream's files trend back toward vanilla:
 - Goal: upstream-derived files contain only upstream's code plus minimal,
   clearly-marked attach points — so an upstream bump touches only their lines.
 
-The closer divergence gets to zero, the cleaner future merges are — and the
-smaller (and safer) a future inversion-to-dependency would become.
-
-## Interim: pulling a single fix before the re-root
-
-Until Step 1 lands, the only option is cherry-pick (layout conflicts expected):
-
-```bash
-git fetch upstream
-git log eef1630..upstream/main --oneline
-git cherry-pick <commit-sha>
-#   …upstream's device_client.py logic largely lives in our
-#     aidot/camera/client.py + aidot/device_client.py; map by hand if needed.
-```
-
-After absorbing upstream up to a new point, update the `eef1630` reference above
-so the next sync knows the baseline.
+The smaller the divergence, the cleaner future merges are. (This is also what a
+future "depend on upstream as a package" inversion would need — it was evaluated
+and set aside because, today, our in-place edits would require fragile
+whole-method overrides or upstream-side extension hooks.)
 
 ## Pushing a fix TO upstream
 
@@ -137,9 +93,11 @@ git push <your-upstream-fork> fix-xyz         # then open a PR to AiDot-Developm
 
 `git format-patch` / `git am` work too when the file layout matches.
 
-## Do not
+## Notes
 
-- `git merge upstream/main` **before** the re-root — no common ancestor; it
-  refuses as unrelated histories.
-- Run the re-root force-push straight onto `main`, or outside an announced
-  window — it rewrites published history.
+- The `-s ours` link is correct only because our content was synced through
+  `eef1630`. If you ever fall behind upstream's HEAD, sync the content first
+  (merge/cherry-pick) before relying on the ancestry — never use `-s ours` to
+  paper over unmerged upstream changes; it would silently mark them as merged.
+- Re-running the link is unnecessary: once `upstream/main` is an ancestor, plain
+  `git merge upstream/main` is the workflow.
