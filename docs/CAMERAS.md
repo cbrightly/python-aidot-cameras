@@ -93,18 +93,20 @@ camera per session. The relay pre-allocation itself is also separately skippable
 the fast path via `AIDOT_SDES_SKIP_TURN_PREALLOC` (it does two synchronous TURN
 Allocate round-trips, ~2-3 s, unused on a LAN).
 
-### Connection reuse (`AIDOT_PERSISTENT_MQTT`, opt-in)
+### Connection reuse (`AIDOT_PERSISTENT_MQTT`, on by default)
 
 Historically every device command, attribute fetch, and **stream open** opened
 and tore down its own cloud MQTT WebSocket. The official app instead keeps ONE
-persistent connection per login session and reuses it for everything. When
-`AIDOT_PERSISTENT_MQTT` is set, `_PersistentMqtt` holds a single account-level
+persistent connection per login session and reuses it for everything. By default
+(matching the app), `_PersistentMqtt` holds a single account-level
 connection (the broker binds auth to the one authorized `client_id`, so there can
 only be one), subscribes once, replays subscriptions on reconnect, and carries
 commands, attributes, AND the stream-open signaling — without tearing down on
 stream stop. This removes the per-open connect churn that otherwise rate-limits
 the cloud account; a live 7-camera soak showed SDES `NO_MEDIA` dropping from
-~57 % to ~11 % with the flag on. Opt-in, default off.
+~57 % to ~11 % with the flag on. On by default; disable with `AIDOT_PERSISTENT_MQTT`
+in `{0,false,no,off}` or per-camera `_persistent_mqtt_opt=False` (the explicit opt
+always wins).
 
 ### Connection reliability (DTLS / A000088)
 
