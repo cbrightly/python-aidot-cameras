@@ -3,14 +3,14 @@
 Control AIDOT WiFi lights **and cameras** from Python.
 
 This is a camera-capable fork of the upstream lights-only
-[`python-aidot`](https://github.com/Aidot-Development-Team/python-aidot). It adds
+[`python-aidot`](https://github.com/AiDot-Development-Team/python-AiDot). It adds
 live WebRTC video streaming (DTLS and SDES-SRTP paths), snapshots, PTZ, camera
 controls, cloud recordings/thumbnails, and two-way (push-to-talk) audio.
 
 This repository is the **library** (distribution name `python-aidot-cameras`).
 The Home Assistant custom component (`custom_components/aidot/`) lives in the
 companion integration repo
-[`cbrightly/hass-AiDot`](https://github.com/cbrightly/hass-AiDot), which depends
+[`cbrightly/hass-aidot-cameras`](https://github.com/cbrightly/hass-aidot-cameras), which depends
 on this library.
 
 ## Library install
@@ -62,7 +62,7 @@ snapshots, recordings, motion polling, two-way audio, and LAN-direct media).
 
 The Home Assistant custom component (`custom_components/aidot/`) is **not** part
 of this library repo - it lives in the companion integration repo
-[`cbrightly/hass-AiDot`](https://github.com/cbrightly/hass-AiDot), which depends
+[`cbrightly/hass-aidot-cameras`](https://github.com/cbrightly/hass-aidot-cameras), which depends
 on this library. See that repo for installing the component (via HACS or by
 copying `custom_components/aidot/`).
 
@@ -97,7 +97,9 @@ chosen to work out of the box; override only when tuning.
 | `AIDOT_FAST_CONNECT` | Enables LAN-direct "fast connect" mode (STUN-only, skips several cloud signaling waits) when set to a truthy value. | unset (off) |
 | `AIDOT_PERSISTENT_MQTT` | Reuse ONE account-level persistent MQTT connection for device commands, attribute fetches, AND stream-open signaling (matching the official app) instead of connecting per operation, cutting cloud connect churn. **On by default** (the app's behaviour; live soak cut SDES NO_MEDIA ~57%→~19%); set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_SDES_ADAPTIVE` | Adaptive fast-with-fallback for the SDES keepalive loop: try the fast path first (skip livePlay waits + TURN relay pre-alloc) and fall back to the full relay path if a fast attempt delivers no media. A per-device cache skips the fast attempt on later views once it has failed for a camera. Truthy value enables. | unset (off) |
+| `AIDOT_SDES_SKIP_TURN_PREALLOC` | Skip the SDES TURN relay pre-allocation (~2–3 s of cold-start latency) so signaling goes straight out with the host candidate instead of waiting on a relay address. Saves time on a LAN at the cost of no relay fallback for a camera on a different segment / behind strict NAT; the rest of the SDES handshake is left intact. Experimental, opt-in (truthy = `1`/`true`/`yes`/`on`). | unset (off) |
 | `AIDOT_SDES_FAST_LIVEPLAY` | Don't block on the `livePlayResp` wait for eligible SDES cameras (~4.5 s faster cold start), going straight to webrtcReq/ICE — what the official app does (it never waits for livePlayResp). Role-reversal models (A001064 PTZ) always excluded for correctness. **On by default**; set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
+| `AIDOT_DTLS_FAST_LIVEPLAY` | The DTLS (A000088) analogue of `AIDOT_SDES_FAST_LIVEPLAY`: skip only the `livePlayResp` wait (the dominant LAN cold-start cost, ~2 s) while keeping the full ICE/TURN/DTLS handshake, so remote/relay viewing is unaffected. The only thing lost is fast-fail on an outright camera refusal (rare), which then surfaces as an ICE failure instead. **On by default**; set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_SERVE_RELAY` | Holds the public stream port via an internal relay that proxies to ffmpeg, so the first (cold) view connects instead of failing while ffmpeg can't pre-bind the port. Set to `0` to serve ffmpeg directly. | `1` (enabled) |
 | `AIDOT_MAX_CONCURRENT_OPENS` | Caps how many stream opens run concurrently. | `2` |
 | `AIDOT_MAX_CONCURRENT_STREAMS` | Caps how many cameras stream at once. | `3` |
@@ -108,6 +110,7 @@ chosen to work out of the box; override only when tuning.
 | `AIDOT_BUSY_RETRY_S` | Delay, in seconds, before retrying when a camera reports busy. | `45` |
 | `AIDOT_LIVESTREAM_PARAM` | Set to `0` to skip the cloud `liveStreamParam` pre-connect that provisions battery cameras' live-stream sessions before signaling (without it, battery cameras like the L2 models reject streaming with `-50019`). | `1` (enabled) |
 | `AIDOT_GOP_PLI_S` | Interval, in seconds, between PLI (keyframe) requests. | `2.0` |
+| `AIDOT_STALL_PLI_S` | If muxed frames stall for this many seconds (a dropped GOP on a jittery link, e.g. a weak-RSSI camera), request an IDR keyframe immediately instead of waiting out the full `AIDOT_GOP_PLI_S` cadence, so playback recovers sooner. Fires at most once per stall episode. Mains DTLS cameras only; `0` disables. | `1.0` |
 | `AIDOT_SDES_PLI_GAPS` | Comma-separated second offsets for the early PLI (keyframe-request) burst on SDES cameras, to pull the first keyframe in faster on cold start. | `0,1.5,2,3` |
 | `AIDOT_AUDIO_TARGET_DBFS` | Target loudness (dBFS) for two-way audio normalization. | `-15` |
 | `AIDOT_AUDIO_MAXGAIN_DB` | Maximum gain (dB) applied by the audio normalizer. | `30` |
