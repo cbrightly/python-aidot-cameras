@@ -45,7 +45,7 @@ STILL UNVERIFIED (manual - need official app / physical access):
   `battery_remaining is None` → eligible; everything else stays cloud.
 - **Local-first dispatch with cloud fallback** per operation (timeout/error → cloud).
 
-## Phase 2 - hass-AiDot integration
+## Phase 2 - hass-aidot-cameras integration
 - Route control (PTZ via `trackingMode`, switches, selects, numbers) through the
   local client for eligible cameras only; cloud for the rest.
 - **Opt-in config toggle**: "Use local camera control (experimental)".
