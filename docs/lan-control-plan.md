@@ -13,7 +13,7 @@ path on this hardware.
 - **10000/TCP** - control: stateful, AES-ECB, session-based. `loginReq` (auth) →
   `getDevAttr`/`setDevAttr`/`ping`/`setDevAttrNotif`. Same protocol as the lights.
 
-## Phase 0 - RESULT: PASS with mandated constraints (validated 2026-06-12, .225 A000088)
+## Phase 0 - RESULT: PASS with mandated constraints (validated 2026-06-12, A000088)
 1. **Concurrency = SINGLE SESSION.** A 2nd loginReq instantly evicts the 1st (broken
    pipe). => persistent held socket impossible; design MUST be short-lived
    connect -> login -> cmd(s) -> close, one in-flight session per camera.
@@ -72,5 +72,5 @@ STILL UNVERIFIED (manual - need official app / physical access):
   (PTZ), `MotionDetection_*`, `nightVisionMode`, `sirenRing`, `LedOnOff`, `Occupancy`,
   `Battery_remaining`, plus stream-negotiation fields (`liveType`, `enableSdes`,
   `isDTLS`) used only for the cloud video path.
-- Fleet probed: Bedroom M3 Pro / Deck / M3 Pro v2 (`LK.IPC.A000088`) all
+- Fleet probed: three M3 Pro cameras (`LK.IPC.A000088`) all
   `liveType=2` WebRTC, wired (`battery=None`), answer unicast + local login.
