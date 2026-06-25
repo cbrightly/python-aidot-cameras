@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # Keep the SHA-pinned GitHub Actions in ci.yml / publish.yml current. Dependabot
+  # opens PRs that bump the pinned SHA and update the trailing version comment.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+
+  # Python deps are intentionally NOT managed here: pyproject pins conservative
+  # lower bounds only (no upper caps) and, under Home Assistant, HA core pins
+  # aiohttp/cryptography transitively. A floor is bumped manually after
+  # re-validating. Add a "pip" ecosystem block if that policy ever changes.
