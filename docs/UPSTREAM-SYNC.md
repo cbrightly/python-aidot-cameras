@@ -73,6 +73,11 @@ guards keep work on this account and prevent footguns:
   otherwise the new version is byte-identical to the last and just burns a PyPI
   number (which can't be reused). A new GitHub *Release* is what triggers the
   PyPI publish.
+- **Publishing requires manual approval.** A published `v*` Release starts the
+  workflow, but it pauses at the `pypi` environment for a reviewer approval before
+  anything reaches PyPI — approve the deployment in the Actions run (self-review is
+  allowed, so a solo maintainer can approve their own). Doing nothing publishes
+  nothing.
 
 ## Divergence map (what still conflicts on a merge)
 
