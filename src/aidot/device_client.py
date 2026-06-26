@@ -442,6 +442,17 @@ def _parse_video_payload(data: bytes) -> List[VideoFrame]:
     return frames
 
 
+def _select_ice_servers(ice_servers: list, fast_connect: bool) -> list:
+    """LAN-direct (fast_connect) uses host candidates only: returning an empty
+    server list makes aiortc's setLocalDescription skip the STUN/TURN gather
+    stall (~5s on Google STUN binding) and emit the offer immediately. The
+    camera's own host candidate wins on-subnet. Non-fast_connect is unchanged
+    (STUN+TURN preserved for WAN/relay)."""
+    if fast_connect:
+        return []
+    return ice_servers
+
+
 def _build_stun_binding_success_response(
     *,
     transaction_id: bytes,
@@ -6458,26 +6469,14 @@ class DeviceClient(object):
             f"  relay×{len(_turn_entries)}: {_turn_entries}"
         )
         if _fast_connect:
-            # Strip TURN URIs so aiortc's setLocalDescription doesn't block on a
-            # TURN Allocate round-trip during ICE gathering — the LAN host
-            # candidate then connects in ~1 s.  Keep STUN (cheap, no allocate).
-            _stun_only = []
-            for _srv in _ice_servers:
-                _su = [
-                    u for u in (_srv.urls if isinstance(_srv.urls, list) else [_srv.urls])
-                    if not str(u).startswith(("turn:", "turns:"))
-                ]
-                if _su:
-                    _stun_only.append(
-                        RTCIceServer(urls=_su, username=_srv.username,
-                                     credential=_srv.credential)
-                    )
-            _ice_servers = _stun_only or [
-                RTCIceServer(urls=["stun:stun.l.google.com:19302"])
-            ]
+            # LAN-direct: host candidates only.  Stripping TURN alone still left
+            # aiortc's setLocalDescription stalling ~5s on the Google STUN binding
+            # (measured 2026-06-25).  Dropping STUN too lets the offer go out
+            # immediately; the camera's host candidate wins on-subnet.
+            _ice_servers = _select_ice_servers(_ice_servers, _fast_connect)
             _status(
-                "AIDOT_FAST_CONNECT: stripped TURN (STUN-only, LAN-direct) -"
-                f" {len(_ice_servers)} ICE server(s), no relay gather stall"
+                "AIDOT_FAST_CONNECT: host-only ICE -"
+                f" {len(_ice_servers)} ICE server(s), no STUN/TURN gather stall"
             )
         pc = RTCPeerConnection(
             configuration=RTCConfiguration(iceServers=_ice_servers)
