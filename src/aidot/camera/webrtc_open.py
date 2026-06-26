@@ -16,7 +16,7 @@ import time
 import logging
 from typing import Callable, Optional
 
-from ..exceptions import AidotCameraBusy
+from ..exceptions import AidotCameraBusy, AidotCameraNotReady
 from .models import VideoFrame
 from .webrtc import WebRTCSession
 from .protocol import (
@@ -37,6 +37,68 @@ from .protocol import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def _keyframe_prompter(send_pli, first_frame, interval: float = 0.7,
+                             max_tries: int = 8) -> int:
+    """Send an RTCP PLI (keyframe request) immediately and then every `interval`
+    seconds until `first_frame` is set or `max_tries` PLIs have been sent.
+    Handles a lost first PLI instead of waiting for the next natural IDR.
+    `send_pli` may be sync or a coroutine function. Returns PLIs sent."""
+    sent = 0
+    for _ in range(max_tries):
+        try:
+            res = send_pli()
+            if asyncio.iscoroutine(res):
+                await res
+        except Exception:
+            pass
+        sent += 1
+        if first_frame.is_set():
+            return sent
+        try:
+            await asyncio.wait_for(first_frame.wait(), timeout=interval)
+            return sent
+        except TimeoutError:
+            continue
+    return sent
+
+
+def _narrow_pc_ice(ice_servers, *, host_only: bool) -> list:
+    """Return the LOCAL RTCPeerConnection's ICE server list for fast_connect.
+
+    When `host_only` is set the local pc gathers host candidates only, so
+    setLocalDescription returns immediately instead of blocking aioice's ~5s
+    srflx gather timeout on networks where the outbound STUN query is
+    unanswered.  A live A/B (2026-06-26) confirmed the ~5s is a *fixed timeout*,
+    not server count or a slow server: deduping or using a single fast STUN both
+    still took ~5020ms, while host-only took ~16ms.
+
+    This narrows ONLY the local pc.  `ice_servers` is the source of the
+    camera-facing webrtcReq IceServerList, which must keep its STUN entries
+    (emptying it starves the camera's own ICE agent), so this function never
+    mutates the input and the caller keeps the two lists separate.
+
+    Returns [] for host-only, else a shallow copy of `ice_servers`.
+    """
+    if host_only:
+        return []
+    return list(ice_servers)
+
+
+async def _wait_or_event(ev: "asyncio.Event", timeout: float) -> bool:
+    """Sleep up to `timeout` seconds, returning as soon as `ev` is set.
+
+    An interruptible poll cadence: same spacing as a bare ``asyncio.sleep`` when
+    `ev` is unset, but wakes immediately once it fires (e.g. the connect loop
+    waking the instant connectionState reaches "connected" instead of waiting out
+    the remainder of a fixed 0.1s tick).  Returns True if the event fired within
+    the window, else False after the full timeout."""
+    try:
+        await asyncio.wait_for(ev.wait(), timeout=timeout)
+        return True
+    except TimeoutError:
+        return False
 
 
 class _WebRTCOpenMixin:
@@ -70,9 +132,10 @@ class _WebRTCOpenMixin:
         Protocol (confirmed from live MQTT capture, 2025-03 / 2026-03):
           1. Subscribe ``iot/v1/c/{userId}/#`` on the authorised MQTT clientId
           2. Publish to ``iot/v1/s/{userId}/IPC/getIceConfigReq`` (server-side wake)
-             → wait 2 s for broker session init
+             → wait up to 12 s for the camera to signal awake (``camera_ready_ev``)
           3. Publish to ``iot/v1/s/{userId}/IPC/livePlayReq`` (camera-side arm)
-             → wait 0.5 s for camera WebRTC subsystem to arm
+             → optionally wait up to 0.5 s for the livePlayReq echo
+               (skipped by default under dtls_fast_liveplay)
           4. Create peer connection (aiortc or SDES SDP), add recvonly tracks
           5. Generate SDP offer → publish to ``iot/v1/s/{userId}/IPC/webrtcReq``
           6. Receive ``IPC/webrtcResp`` on ``iot/v1/c/{userId}/#`` → set remote description
@@ -996,9 +1059,11 @@ class _WebRTCOpenMixin:
             _status(f"livePlayReq sent  peerid={peer_id}")
             # Wait for the broker to echo livePlayReq back (confirms delivery).
             # Proceed as soon as the echo arrives; fall through after 0.5 s.
-            # AIDOT_FAST_CONNECT skips this too (the echo often just times out,
-            # costing a flat 0.5 s); we proceed straight to SDP/ICE.
-            if not _fast_connect:
+            # Skipped under the same predicate as the livePlayResp wait below
+            # (fast_connect OR default-on dtls_fast_liveplay): the echo often
+            # just times out, costing a flat 0.5 s, and on timeout we proceed to
+            # SDP/ICE regardless - so skipping matches the common-case behaviour.
+            if not self._skip_dtls_signaling_wait(_fast_connect):
                 try:
                     await asyncio.wait_for(liveplay_echo_ev.wait(), timeout=0.5)
                 except TimeoutError:
@@ -1015,7 +1080,7 @@ class _WebRTCOpenMixin:
             # Skip the ~2s livePlayResp wait when either fast_connect (the broad
             # mode that also strips TURN) OR the targeted DTLS fast-liveplay
             # (default-on, app-parity, keeps TURN/ICE intact) is in effect.
-            if _fast_connect or self._resolve_dtls_fast_liveplay():
+            if self._skip_dtls_signaling_wait(_fast_connect):
                 _LOGGER.info(
                     "signaling-wait[%s] livePlayResp skipped (%s)",
                     self.device_id,
@@ -1304,6 +1369,12 @@ class _WebRTCOpenMixin:
             f"ICE servers: STUN={_stun_url}"
             f"  relay×{len(_turn_entries)}: {_turn_entries}"
         )
+        # Local-pc ICE servers default to the same list the camera receives.
+        # fast_connect may narrow the LOCAL pc's gather (TURN-strip, and the
+        # opt-in host-only) WITHOUT touching _ice_servers, which still feeds the
+        # camera-facing webrtcReq IceServerList below (emptying that breaks the
+        # camera's own ICE agent -> no connectivity).
+        _pc_ice_servers = _ice_servers
         if _fast_connect:
             # Strip TURN URIs so aiortc's setLocalDescription doesn't block on a
             # TURN Allocate round-trip during ICE gathering - the LAN host
@@ -1326,8 +1397,24 @@ class _WebRTCOpenMixin:
                 "AIDOT_FAST_CONNECT: stripped TURN (STUN-only, LAN-direct) -"
                 f" {len(_ice_servers)} ICE server(s), no relay gather stall"
             )
+            # Opt-in (default off): narrow the LOCAL pc to host candidates only.
+            # On networks where the outbound srflx STUN query goes unanswered,
+            # aioice's gather blocks the full ~5s timeout (aioice/ice.py:1041,
+            # asyncio.wait(..., timeout=5)) before completing with host
+            # candidates anyway; host-only skips that, so setLocalDescription
+            # returns in ~15ms.  The camera-facing webrtcReq IceServerList (built
+            # from _ice_servers below) is left untouched, so the camera still
+            # gathers STUN.  Safe only on-subnet (the host candidate must be
+            # routable to the camera) - off-subnet/strict-NAT users need srflx,
+            # so default stays STUN-only.  See _narrow_pc_ice for the A/B that
+            # showed dedupe/single-STUN do NOT help (the 5s is a fixed timeout).
+            _host_only = os.environ.get("AIDOT_FAST_CONNECT_HOST_ONLY") == "1"
+            _pc_ice_servers = _narrow_pc_ice(_ice_servers, host_only=_host_only)
+            if _host_only:
+                _status("AIDOT_FAST_CONNECT_HOST_ONLY: local pc host-only "
+                        "(camera IceServerList keeps STUN; on-subnet only)")
         pc = RTCPeerConnection(
-            configuration=RTCConfiguration(iceServers=_ice_servers)
+            configuration=RTCConfiguration(iceServers=_pc_ice_servers)
         )
         # Audio: sendrecv WITHOUT a real audio sender.  Empirical findings
         # from 2026-04-26 testing (commits aa341a1b, aeaea893):
@@ -1683,44 +1770,56 @@ class _WebRTCOpenMixin:
                 t = asyncio.ensure_future(_drain_audio())
                 track_tasks.append(t)
             elif track.kind == "video":
-                # Request an IDR keyframe immediately via RTCP PLI so we start
-                # decoding from a complete frame.  Without this, if the camera's
-                # first IDR arrived before our SRTP path was ready (seq gap at
-                # the start), H264 decoding silently drops every subsequent
-                # delta frame and we receive zero decoded frames.
-                async def _request_keyframe() -> None:
-                    # aiortc 1.14 changed _send_rtcp_pli(media_ssrc) to require
-                    # the remote SSRC.  The SSRC is only known once RTP starts
-                    # arriving, so poll getSynchronizationSources() briefly and
-                    # send PLI for each discovered source.
-                    for _attempt in range(10):  # up to ~5s
-                        await asyncio.sleep(0.5)
-                        try:
-                            _recv = next(
-                                (r for r in pc.getReceivers() if r.track is track),
-                                None,
-                            )
-                            if _recv is None:
-                                continue
-                            _ssrcs = [
-                                s.source
-                                for s in _recv.getSynchronizationSources()
-                            ]
-                            if not _ssrcs:
-                                continue
-                            for _ssrc in _ssrcs:
-                                await _recv._send_rtcp_pli(_ssrc)
-                            _status(
-                                f"video track: sent RTCP PLI (keyframe request)"
-                                f" ssrc={_ssrcs}"
-                            )
+                # Request an IDR keyframe via RTCP PLI so we start decoding from
+                # a complete frame.  Without this, if the camera's first IDR
+                # arrived before our SRTP path was ready (seq gap at the start),
+                # H264 decoding silently drops every subsequent delta frame and
+                # we receive zero decoded frames.  Previously a SINGLE PLI was
+                # sent once an SSRC appeared (and only after a 0.5s sleep); if
+                # that PLI was lost, decoding stalled until the next natural IDR
+                # (seconds of black on cold start).  Drive it with
+                # _keyframe_prompter instead: fire immediately and repeat every
+                # 0.5s until the first frame is decoded, so a lost PLI is retried.
+                _first_video_frame = asyncio.Event()
+
+                async def _send_pli_once() -> None:
+                    # aiortc 1.14 requires the remote SSRC for _send_rtcp_pli;
+                    # the SSRC is only known once RTP starts arriving.  No-op
+                    # (no receiver/SSRC yet) until RTP flows - the prompter
+                    # retries on its own cadence.
+                    try:
+                        _recv = next(
+                            (r for r in pc.getReceivers() if r.track is track),
+                            None,
+                        )
+                        if _recv is None:
                             return
-                        except Exception as _pli_exc:
-                            _LOGGER.debug("RTCP PLI attempt failed: %s", _pli_exc)
-                    _LOGGER.debug("RTCP PLI: no SSRC discovered within 5s")
-                _spawn_bg(_request_keyframe())
+                        _ssrcs = [
+                            s.source for s in _recv.getSynchronizationSources()
+                        ]
+                        if not _ssrcs:
+                            return
+                        for _ssrc in _ssrcs:
+                            await _recv._send_rtcp_pli(_ssrc)
+                        _status(
+                            f"video track: sent RTCP PLI (keyframe request)"
+                            f" ssrc={_ssrcs}"
+                        )
+                    except Exception as _pli_exc:
+                        _LOGGER.debug("RTCP PLI attempt failed: %s", _pli_exc)
+
+                _spawn_bg(_keyframe_prompter(
+                    _send_pli_once, _first_video_frame,
+                    interval=0.5, max_tries=12,
+                ))
                 if on_frame is not None:
-                    t = asyncio.ensure_future(_webrtc_consume_video(track, on_frame))
+                    def _on_frame_signal(_f, _on_frame=on_frame):
+                        # First decoded frame stops the PLI prompter.
+                        _first_video_frame.set()
+                        return _on_frame(_f)
+                    t = asyncio.ensure_future(
+                        _webrtc_consume_video(track, _on_frame_signal)
+                    )
                     track_tasks.append(t)
 
         recorder = None
@@ -1748,7 +1847,13 @@ class _WebRTCOpenMixin:
         # Create SDP offer and publish webrtcReq
         # ------------------------------------------------------------------ #
         offer = await pc.createOffer()
+        _gather_t0 = asyncio.get_running_loop().time()
         await pc.setLocalDescription(offer)
+        _status(
+            "ICE gather (setLocalDescription) took "
+            f"{(asyncio.get_running_loop().time() - _gather_t0) * 1000.0:.0f}ms"
+            f" ({len(_pc_ice_servers)} local ICE server(s))"
+        )
         _LOGGER.debug(
             "webrtc: SDP offer (first 500 chars):\n%s",
             pc.localDescription.sdp[:500],
@@ -2783,6 +2888,12 @@ class _WebRTCOpenMixin:
                     _offer_video_pts = set(_ol.split()[3:])
                     break
 
+            # Set by _aiortc_answer when the camera returns a DC-only answer
+            # (both audio and video rejected = media declined, encoder cold).
+            # The open then fast-retries via AidotCameraNotReady (Unit 3) rather
+            # than letting DTLS co-fail into the generic 15s-gated retry.
+            _media_declined = [False]
+
             def _aiortc_answer(sdp: str) -> str:
                 """Produce a 3-section answer SDP for aiortc (audio/H264/DC),
                 in aiortc's fixed transceiver order regardless of how the camera
@@ -2944,11 +3055,11 @@ class _WebRTCOpenMixin:
                     _bundle_mids.append('2')
                 _bundle_str = 'a=group:BUNDLE ' + ' '.join(_bundle_mids)
                 if _dc_only_audio or _dc_only_video:
+                    _media_declined[0] = True
                     _status(
                         f"DC-only answer: audio_rejected={_dc_only_audio}"
                         f" video_rejected={_dc_only_video} → {_bundle_str}"
-                        " (camera declined media; accepted to fail cleanly into"
-                        " retry - DC-only co-fails DTLS, no stream)"
+                        " (camera declined media; encoder not ready - fast-retry)"
                     )
                 if 'a=group:BUNDLE' in sdp2:
                     sdp2 = _re_ans.sub(
@@ -2959,6 +3070,17 @@ class _WebRTCOpenMixin:
                 return sdp2
 
             _aiortc_sdp = _aiortc_answer(_ans_sdp)
+
+            if _media_declined[0]:
+                # Camera answered cleanly but declined media (DC-only): its
+                # encoder is still cold.  Tear down and raise so the serve loop
+                # fast-retries in a bounded burst instead of letting DTLS
+                # co-fail into the full 15s-gated generic retry.
+                try:
+                    await pc.close()
+                except Exception:
+                    pass
+                raise AidotCameraNotReady(self.device_id)
 
             try:
                 await pc.setRemoteDescription(
@@ -3312,7 +3434,10 @@ class _WebRTCOpenMixin:
                     outgoing_q.put_nowait((_rr_webrtc_resp_topic, _rr_webrtc_resp_payload))
                 for _rr_ice_p in _rr_ice_payloads:
                     outgoing_q.put_nowait(_rr_ice_p)
-            await asyncio.sleep(0.1)
+            # Interruptible 0.1s poll tick: wake the instant the connection
+            # completes (connected_ev set synchronously in the state handler)
+            # instead of waiting out the remaining sleep.
+            await _wait_or_event(connected_ev, 0.1)
 
         if pc.connectionState not in ("connected", "completed"):
             outgoing_q.put_nowait(None)

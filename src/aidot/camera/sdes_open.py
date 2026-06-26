@@ -34,6 +34,18 @@ from .protocol import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def _sdes_echo_wait_timeout(skip_liveplay: bool) -> float:
+    """Seconds to block on the camera's webrtcReq echo before proceeding.
+
+    The echo only ever arrives for role-reversal models (e.g. A001064), which
+    need the resulting webrtcResp and run with ``skip_liveplay`` False (they are
+    hard-excluded from sdes_fast_liveplay) - they keep the full 2.0s wait.  For
+    A001513-class cameras (``skip_liveplay`` True, the default) the echo never
+    arrives and the webrtcResp-building branch is dead/redundant, so don't block
+    on it (saves ~2s of cold-start dead time)."""
+    return 0.0 if skip_liveplay else 2.0
+
+
 class _SdesOpenMixin:
     async def _open_sdes_stream(
         self,
@@ -623,16 +635,18 @@ class _SdesOpenMixin:
         # webrtcReq.  The echo confirms the MQTT pipeline to this device is live
         # and the broker session is registered.  Fall through after 5 s if it
         # never arrives (same safety as the old fixed 0.5 s sleep, but adaptive).
-        # SDES fast-liveplay (opt-in via sdes_fast_liveplay): instrumentation showed
-        # the echo and livePlayResp waits BOTH always time out for the SDES cameras
-        # measured (echo/resp never arrive) yet streaming succeeds - i.e. ~6 s of
-        # dead padding.  When the flag is on, cap the echo wait short and skip the
+        # SDES fast-liveplay (sdes_fast_liveplay, DEFAULT ON since 0.7.32 - the
+        # official app fire-and-forgets too): instrumentation showed the echo and
+        # livePlayResp waits BOTH always time out for the SDES cameras measured
+        # (echo/resp never arrive) yet streaming succeeds - i.e. ~6 s of dead
+        # padding.  When on (the default), cap the echo wait short and skip the
         # livePlayResp wait; the full ICE/TURN/SCTP handshake is untouched.  This
         # is the SDES path's OWN livePlay waits (the DTLS gate above never runs for
         # SDES: use_sdes is True there).  VALIDATED in a 3 h live soak (15 SDES
-        # opens across battery cameras, flag engaged on all, 0 churn / 0 fail,
-        # ~4.5 s signaling saved); kept off by default pending broader multi-day
-        # use (per-open + near-term stability proven, long-haul not yet).
+        # opens across battery cameras, 0 churn / 0 fail, ~4.5 s signaling saved)
+        # and shipped default-on across 0.8/0.9.x.  Role-reversal models
+        # (_NO_FAST_LIVEPLAY_MODELS, e.g. A001064) are always excluded; disable
+        # elsewhere via AIDOT_SDES_FAST_LIVEPLAY={0,false,no,off}.
         _skip_lp = self._resolve_sdes_fast_liveplay()
         _echo_timeout = 1.5 if _skip_lp else 5.0
         _echo_t0 = time.monotonic()
@@ -856,9 +870,13 @@ class _SdesOpenMixin:
         _webrtc_resp_sdes_topic: "Optional[str]" = None
         _webrtc_resp_sdes: "Optional[str]" = None
         _sdes_webrtcresp_sent = False   # True once we actually publish the SDES webrtcResp
+        # Only role-reversal models (A001064, _skip_lp False) echo our webrtcReq
+        # and need the webrtcResp built below; for A001513-class (_skip_lp True,
+        # default) the echo never arrives, so don't block ~2s on it.
         try:
             await _asyncio.wait_for(
-                _asyncio.shield(_echo_fut), timeout=2.0
+                _asyncio.shield(_echo_fut),
+                timeout=_sdes_echo_wait_timeout(_skip_lp),
             )
             _cam_echo_received = True
             _status("camera webrtcReq echo received - building webrtcResp")
@@ -2796,8 +2814,9 @@ class _SdesOpenMixin:
                                         # Without DCEP_OPEN (PPID=50), LIVING arrives on an
                                         # unregistered stream and is silently discarded by the
                                         # camera's SCTP application layer (SACK confirms transport
-                                        # delivery, but no audio/video results). The DTLS path
-                                        # (lines ~4589-4617) does exactly this sleep - required.
+                                        # delivery, but no audio/video results). The DTLS path in
+                                        # client.py (the COOKIE-ECHO/COOKIE-ACK + DCEP_OPEN handler)
+                                        # does exactly this sleep - required.
                                         try:
                                             _cak8 = _sctp_pkt(_sctp['peer_tag'], _sctp_chunk(0x0B, 0, b''))
                                             _bs.sendto(_enc_c8_sctp(_cak8), _bsrc)
@@ -3599,8 +3618,9 @@ class _SdesOpenMixin:
                 outgoing_q.put_nowait(None)   # signal MQTT thread to exit
                 raise CameraMixin._SdesNoAnswerError()
             else:
-                # isDTLS='0': this camera cannot do DTLS so falling back is
-                # pointless.  Some SDES cameras (e.g. LK.IPC.A001064) start
+                # isDTLS='0': DTLS fallback is disabled by camera flags (NOT that
+                # the camera lacks DTLS - see the NOTE above), so there is nothing
+                # to fall back to.  Some SDES cameras (e.g. LK.IPC.A001064) start
                 # streaming SRTP directly to our ports without sending a
                 # webrtcResp SDP answer.  Keep ffmpeg running - it already
                 # has the SRTP key it needs from the offered SDP, and the

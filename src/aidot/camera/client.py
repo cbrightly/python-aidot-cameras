@@ -8,7 +8,7 @@ import time
 import asyncio
 from typing import Any, Callable, List, Optional
 
-from ..exceptions import AidotCameraBusy
+from ..exceptions import AidotCameraBusy, AidotCameraNotReady
 from ..login_const import APP_ID as _AIDOT_APP_ID
 
 # Wire/protocol constants live in constants.py; re-imported here so all
@@ -93,6 +93,37 @@ def _spawn_bg(coro):
     _BG_TASKS.add(_t)
     _t.add_done_callback(_BG_TASKS.discard)
     return _t
+
+
+def _retry_policy(failure_kind: str, burst_attempt: int, *,
+                  burst_delay: float = 3.0, burst_max: int = 4,
+                  base_gate: float = 15.0) -> "tuple[float, bool]":
+    """Return (delay_seconds, bypass_open_gate) for the DTLS serve retry.
+
+    A clean 'not_ready' decline (camera awake but encoder still cold - a DC-only
+    WebRTC answer) gets a bounded fast burst (burst_delay x burst_max) that
+    bypasses the 15s inter-attempt gate, then falls back to the normal gate so a
+    persistently-declining camera is not hammered.  Every other failure keeps
+    the unchanged 15s behaviour."""
+    if failure_kind == "not_ready" and burst_attempt <= burst_max:
+        return (burst_delay, True)
+    return (base_gate, False)
+
+
+def _open_gate_delay(last_open_at: float, now: float, open_gate: float) -> float:
+    """Seconds to wait before the next open to honour the inter-attempt gate.
+
+    The DTLS serve loop spaces OPEN attempts >= open_gate apart, keyed to the
+    PREVIOUS open's start (`last_open_at`).  Returns 0 when there is no prior
+    open (`last_open_at` is the 0.0 sentinel - monotonic time is never 0) or the
+    gate has already elapsed (e.g. after a long healthy session that just died,
+    so it reopens immediately), else the remaining gate time.  This is the sole
+    reconnect-spacing mechanism: a fast death still gets spaced a full gate from
+    its open-start (anti-hammer), so no separate post-death delay is needed."""
+    if not last_open_at:
+        return 0.0
+    remaining = open_gate - (now - last_open_at)
+    return remaining if remaining > 0 else 0.0
 
 
 _FFMPEG_MISSING_MSG = (
@@ -543,6 +574,14 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         # (credentials are bound to the access token).
         self._cached_ice_config: Optional[dict] = None
         self._ice_config_expiry: float = 0.0
+        # Cache for batchGetDeviceUserInfo.  Unlike ICE config there is no server
+        # ttl, so cap with a fixed TTL (see _DEVICE_USER_INFO_TTL): the extracted
+        # numeric userId/uuid are account-static, and the LAN-IP field is vestigial
+        # (a stale IP at worst skips one redundant user/connect).  On a warm reopen
+        # this is the only otherwise-uncached HTTP round-trip.  Reset on token
+        # refresh below (the request is access-token authenticated).
+        self._cached_device_user_info: Optional[dict] = None
+        self._device_user_info_expiry: float = 0.0
         # Async callback (set by AidotClient) that refreshes the access token and
         # updates the shared login_info in place, so camera HTTP calls can recover
         # from a 21026 "Please login again" instead of failing silently.
@@ -724,6 +763,8 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         self._mqtt_url = None
         self._cached_ice_config = None
         self._ice_config_expiry = 0.0
+        self._cached_device_user_info = None
+        self._device_user_info_expiry = 0.0
         try:
             return bool(await cb())
         except Exception as exc:
@@ -1085,6 +1126,20 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             "Content-Type": "application/json",
         }
 
+    _DEVICE_USER_INFO_TTL = 300.0  # seconds; no server ttl, so a fixed cap
+
+    def _store_device_user_info(self, item: "Optional[dict]") -> "Optional[dict]":
+        """Cache the extracted per-device user info and return it (pass-through).
+
+        Used at every success return of [[async_get_device_user_info]] so caching
+        happens at one site.  A falsy/None item is NOT cached (fail-safe to a
+        re-fetch next open).  TTL-bounded by `_DEVICE_USER_INFO_TTL` since there
+        is no server-provided ttl."""
+        if item:
+            self._cached_device_user_info = item
+            self._device_user_info_expiry = time.time() + self._DEVICE_USER_INFO_TTL
+        return item
+
     async def async_get_device_user_info(
         self,
         all_device_ids: Optional[List[str]] = None,
@@ -1103,6 +1158,11 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 an empty result. Pass the full list from the account's device
                 listing if available.
         """
+        if (self._cached_device_user_info is not None
+                and time.time() < self._device_user_info_expiry):
+            _LOGGER.debug("device_user_info: cache hit (%.0fs left)",
+                          self._device_user_info_expiry - time.time())
+            return self._cached_device_user_info
         import aiohttp
         ids = all_device_ids or [self.device_id]
         try:
@@ -1140,7 +1200,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             # Find the entry for this device
             if isinstance(data, dict):
                 item = data.get(self.device_id) or next(iter(data.values()), None)
-                return item
+                return self._store_device_user_info(item)
             if isinstance(data, list):
                 for item in data:
                     # Server may use "deviceId", "devId", or "id" as the device
@@ -1158,7 +1218,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                             "batchGetDeviceUserInfo matched device %s: keys=%s",
                             self.device_id, sorted(item.keys()),
                         )
-                        return item
+                        return self._store_device_user_info(item)
                 # No exact match found - log which device IDs were present so
                 # the caller can diagnose why the lookup failed.  Falling back
                 # to data[0] will return the wrong camera's userId, which
@@ -1175,7 +1235,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     " TURN credentials)",
                     self.device_id, _found_ids,
                 )
-                return data[0] if data else None
+                return self._store_device_user_info(data[0] if data else None)
         except Exception as exc:
             _LOGGER.error("async_get_device_user_info failed for %s: %s",
                           self.device_id, exc)
@@ -2791,12 +2851,14 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             "0", "false", "no", "off")
 
     def _resolve_dtls_fast_liveplay(self) -> bool:
-        """Whether to skip the DTLS path's ~2 s livePlayResp blocking wait.
+        """Whether to skip the DTLS path's livePlayReq-echo + livePlayResp waits.
 
         The targeted analogue of [[_resolve_sdes_fast_liveplay]] for DTLS
-        (A000088) cameras: skip ONLY the livePlayResp accept/reject wait while
-        keeping the full ICE/TURN/DTLS handshake (so remote/relay viewing is
-        unaffected, unlike the broader ``_fast_connect`` which also strips TURN).
+        (A000088) cameras.  Consumed by [[_skip_dtls_signaling_wait]], which gates
+        BOTH the ~0.5 s livePlayReq-echo wait and the ~2 s livePlayResp
+        accept/reject wait, while keeping the full ICE/TURN/DTLS handshake (so
+        remote/relay viewing is unaffected, unlike the broader ``_fast_connect``
+        which also strips TURN).
 
         **Default ON** - the official app never waits for/parses livePlayResp,
         and the wait was measured as the dominant LAN cold-start cost (~2 s, paid
@@ -2809,6 +2871,18 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             return bool(opt)
         return os.environ.get("AIDOT_DTLS_FAST_LIVEPLAY", "").strip().lower() not in (
             "0", "false", "no", "off")
+
+    def _skip_dtls_signaling_wait(self, fast_connect: bool) -> bool:
+        """Whether the DTLS open skips its livePlayReq-echo AND livePlayResp waits.
+
+        Both waits proceed to SDP/ICE on timeout anyway, so they are skipped
+        together under one predicate (keeping them in lock-step): the broad
+        ``fast_connect`` mode, or the targeted default-on
+        [[_resolve_dtls_fast_liveplay]] (app-parity).  Unifying the condition
+        fixes a drift where the 0.5s echo wait skipped only on ``fast_connect``
+        while the 2s livePlayResp wait below it also honoured dtls_fast_liveplay,
+        so the default path still paid the 0.5s echo wait that usually times out."""
+        return bool(fast_connect) or self._resolve_dtls_fast_liveplay()
 
     def _resolve_sdes_serve_audio(self) -> bool:
         """Whether to include audio in the SDES camera serve.
@@ -3042,6 +3116,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         # session_end_delay().
         _pacer = ReconnectPacer(_MIN_DELAY, _MAX_DELAY)
         _last_open_at = 0.0  # monotonic of the previous open attempt (0 = none yet)
+        _not_ready_burst = 0  # consecutive DC-only (encoder-cold) declines
         loop = asyncio.get_running_loop()
         while self._streaming_active:
             # Thread-safe queues: taps run on the loop, the A/V mux in a thread.
@@ -3050,10 +3125,13 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             self._serve_ready.clear()  # fresh (cold) session: not ready until bound
             # Hard inter-attempt gate (APK parity): never start an open within
             # _open_gate seconds of the previous one, regardless of the backoff.
-            _since_open = loop.time() - _last_open_at
-            if _last_open_at and _since_open < _open_gate:
+            # This is the SOLE reconnect-spacing mechanism (no separate post-death
+            # sleep) - after a healthy session it has long elapsed, so a clean
+            # death reopens immediately; a fast death still owes the full gate.
+            _gate_wait = _open_gate_delay(_last_open_at, loop.time(), _open_gate)
+            if _gate_wait:
                 try:
-                    await asyncio.sleep(_open_gate - _since_open)
+                    await asyncio.sleep(_gate_wait)
                 except asyncio.CancelledError:
                     return
             _last_open_at = loop.time()
@@ -3075,6 +3153,27 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 except asyncio.CancelledError:
                     return
                 continue
+            except AidotCameraNotReady:
+                # Camera answered cleanly but declined media (DC-only answer):
+                # its encoder is still cold and warming up.  Fast-retry in a
+                # bounded burst (3s x4) that bypasses the 15s inter-attempt gate
+                # so we catch the encoder the moment it comes up, then fall back
+                # to the gate so a persistently-cold camera isn't hammered.  The
+                # burst counter resets only on a successful open (below).
+                _not_ready_burst += 1
+                _delay, _bypass = _retry_policy("not_ready", _not_ready_burst)
+                if _bypass:
+                    _last_open_at = 0.0  # clear the gate for the fast burst
+                _LOGGER.info(
+                    "DTLS serve: camera %s not ready (encoder cold) -"
+                    " retry %.0fs [%s]",
+                    self.device_id, _delay, "burst" if _bypass else "gate",
+                )
+                try:
+                    await asyncio.sleep(_delay)
+                except asyncio.CancelledError:
+                    return
+                continue
             except Exception as exc:
                 _delay = _pacer.fail_delay()
                 _LOGGER.warning(
@@ -3088,6 +3187,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 continue
 
             _pacer.reset()
+            _not_ready_burst = 0  # clean open: reset the encoder-cold burst
             self._stream_session = session
             pc = session._pc
             # PC-dead test for the serve loop.  closed/failed are terminal at
@@ -3271,11 +3371,11 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     self.device_id,
                 )
                 return
-            if self._streaming_active:
-                try:
-                    await asyncio.sleep(_MIN_DELAY)
-                except asyncio.CancelledError:
-                    return
+            # No separate post-death delay: loop back to the top open-gate, which
+            # spaces attempts from the previous open-start.  After a healthy
+            # session the gate has elapsed (immediate reopen); a fast death still
+            # owes the full gate there.  (Was a hardcoded 15s sleep that ignored
+            # AIDOT_DTLS_RETRY_GATE_S and added dead latency after healthy drops.)
 
     async def _spawn_dtls_serve_ffmpeg(self, serve_url: Optional[str], stdin_fd: int):
         """Launch ffmpeg to serve the mux thread's MPEG-TS (read from ``stdin_fd``)
