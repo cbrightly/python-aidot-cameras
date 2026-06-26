@@ -64,6 +64,28 @@ async def _keyframe_prompter(send_pli, first_frame, interval: float = 0.7,
     return sent
 
 
+def _narrow_pc_ice(ice_servers, *, host_only: bool) -> list:
+    """Return the LOCAL RTCPeerConnection's ICE server list for fast_connect.
+
+    When `host_only` is set the local pc gathers host candidates only, so
+    setLocalDescription returns immediately instead of blocking aioice's ~5s
+    srflx gather timeout on networks where the outbound STUN query is
+    unanswered.  A live A/B (2026-06-26) confirmed the ~5s is a *fixed timeout*,
+    not server count or a slow server: deduping or using a single fast STUN both
+    still took ~5020ms, while host-only took ~16ms.
+
+    This narrows ONLY the local pc.  `ice_servers` is the source of the
+    camera-facing webrtcReq IceServerList, which must keep its STUN entries
+    (emptying it starves the camera's own ICE agent), so this function never
+    mutates the input and the caller keeps the two lists separate.
+
+    Returns [] for host-only, else a shallow copy of `ice_servers`.
+    """
+    if host_only:
+        return []
+    return list(ice_servers)
+
+
 class _WebRTCOpenMixin:
     async def _async_open_webrtc_stream_impl(
         self,
@@ -1329,6 +1351,12 @@ class _WebRTCOpenMixin:
             f"ICE servers: STUN={_stun_url}"
             f"  relay×{len(_turn_entries)}: {_turn_entries}"
         )
+        # Local-pc ICE servers default to the same list the camera receives.
+        # fast_connect may narrow the LOCAL pc's gather (TURN-strip, and the
+        # opt-in host-only) WITHOUT touching _ice_servers, which still feeds the
+        # camera-facing webrtcReq IceServerList below (emptying that breaks the
+        # camera's own ICE agent -> no connectivity).
+        _pc_ice_servers = _ice_servers
         if _fast_connect:
             # Strip TURN URIs so aiortc's setLocalDescription doesn't block on a
             # TURN Allocate round-trip during ICE gathering - the LAN host
@@ -1351,8 +1379,24 @@ class _WebRTCOpenMixin:
                 "AIDOT_FAST_CONNECT: stripped TURN (STUN-only, LAN-direct) -"
                 f" {len(_ice_servers)} ICE server(s), no relay gather stall"
             )
+            # Opt-in (default off): narrow the LOCAL pc to host candidates only.
+            # On networks where the outbound srflx STUN query goes unanswered,
+            # aioice's gather blocks the full ~5s timeout (aioice/ice.py:1041,
+            # asyncio.wait(..., timeout=5)) before completing with host
+            # candidates anyway; host-only skips that, so setLocalDescription
+            # returns in ~15ms.  The camera-facing webrtcReq IceServerList (built
+            # from _ice_servers below) is left untouched, so the camera still
+            # gathers STUN.  Safe only on-subnet (the host candidate must be
+            # routable to the camera) - off-subnet/strict-NAT users need srflx,
+            # so default stays STUN-only.  See _narrow_pc_ice for the A/B that
+            # showed dedupe/single-STUN do NOT help (the 5s is a fixed timeout).
+            _host_only = os.environ.get("AIDOT_FAST_CONNECT_HOST_ONLY") == "1"
+            _pc_ice_servers = _narrow_pc_ice(_ice_servers, host_only=_host_only)
+            if _host_only:
+                _status("AIDOT_FAST_CONNECT_HOST_ONLY: local pc host-only "
+                        "(camera IceServerList keeps STUN; on-subnet only)")
         pc = RTCPeerConnection(
-            configuration=RTCConfiguration(iceServers=_ice_servers)
+            configuration=RTCConfiguration(iceServers=_pc_ice_servers)
         )
         # Audio: sendrecv WITHOUT a real audio sender.  Empirical findings
         # from 2026-04-26 testing (commits aa341a1b, aeaea893):
@@ -1785,7 +1829,13 @@ class _WebRTCOpenMixin:
         # Create SDP offer and publish webrtcReq
         # ------------------------------------------------------------------ #
         offer = await pc.createOffer()
+        _gather_t0 = asyncio.get_running_loop().time()
         await pc.setLocalDescription(offer)
+        _status(
+            "ICE gather (setLocalDescription) took "
+            f"{(asyncio.get_running_loop().time() - _gather_t0) * 1000.0:.0f}ms"
+            f" ({len(_pc_ice_servers)} local ICE server(s))"
+        )
         _LOGGER.debug(
             "webrtc: SDP offer (first 500 chars):\n%s",
             pc.localDescription.sdp[:500],
