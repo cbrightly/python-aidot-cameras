@@ -1,5 +1,9 @@
 # python-aidot-cameras
 
+[![PyPI version](https://img.shields.io/pypi/v/python-aidot-cameras)](https://pypi.org/project/python-aidot-cameras/)
+[![Python versions](https://img.shields.io/pypi/pyversions/python-aidot-cameras)](https://pypi.org/project/python-aidot-cameras/)
+[![License: MIT](https://img.shields.io/pypi/l/python-aidot-cameras)](LICENSE)
+
 Control AIDOT WiFi lights **and cameras** from Python.
 
 This is a camera-capable fork of the upstream lights-only
@@ -35,6 +39,21 @@ For the latest unreleased code, install straight from the GitHub repo instead:
 pip install "git+https://github.com/cbrightly/python-aidot-cameras"
 # add live WebRTC streaming, snapshots, and two-way audio:
 pip install "python-aidot-cameras[webrtc] @ git+https://github.com/cbrightly/python-aidot-cameras"
+```
+
+## Standalone CLI: `aidot-go2rtc`
+
+Bridge a camera into [go2rtc](https://github.com/AlexxIT/go2rtc) (or any
+RTSP/HTTP consumer) **without Home Assistant**. Installing the package provides
+the `aidot-go2rtc` console script; for an isolated tool install use pipx or uv:
+
+```bash
+pipx install "python-aidot-cameras[webrtc]"
+# or:
+uv tool install "python-aidot-cameras[webrtc]"
+
+aidot-go2rtc --list                  # discover cameras + their transport
+aidot-go2rtc <device_id> '{output}'  # stream one camera (as a go2rtc exec: source)
 ```
 
 ## Usage
