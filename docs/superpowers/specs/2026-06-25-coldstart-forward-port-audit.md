@@ -47,7 +47,23 @@ removed. Every v0.5.15-unique fix cluster was checked against v0.9.2:
   fast-retry burst in the DTLS serve loop (Unit 3, serve side).
 - `tests/` — `test_keyframe_prompter.py`, `test_retry_policy.py` (pure-helper unit tests).
 
-Full suite: 218 passed, 1 skipped. Ruff clean.
+Full suite: 219 passed, 1 skipped. Ruff clean.
+
+## Live validation (2026-06-26, v0.9.2 + this branch)
+
+- **Happy path (hardware):** cold-opened two DTLS cameras (A000088 "M3 Pro v2",
+  "Bedroom M3 Pro") with the worktree code. Both returned a full media answer
+  (`video/mid=1=sendonly`), connected at ~9.3s and served at ~10.3s — Unit 2's
+  prompter and the Unit 3 wiring caused no regression to the normal open.
+- **DC-only cold-decline (the Unit 3 trigger):** did **not** reproduce — both
+  cameras' encoders were already warm (not in deep sleep), so neither returned a
+  DC-only answer. The real trigger depends on the camera's internal sleep state,
+  which isn't controllable on demand.
+- **Burst behaviour (deterministic):** `tests/test_dtls_not_ready_burst.py`
+  drives the **real** `_dtls_serve_loop_inner` with a synthetic
+  `AidotCameraNotReady` and confirms it fast-retries at 3s x4 (gate bypassed),
+  logging `retry 3s [burst]`, then falls back to `retry 15s [gate]` — proving the
+  serve-loop counter management end-to-end without needing a cold camera.
 
 ## Follow-up (not in this branch)
 
