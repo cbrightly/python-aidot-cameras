@@ -26,7 +26,15 @@ is a normal fast-forward commit on `main` — no history rewrite, no force-push.
 
 ## Normal sync, going forward
 
-Because upstream is now a real ancestor, syncing is an ordinary merge:
+The `upstream` remote is not configured in a fresh clone — add it once before any
+of the commands below:
+
+```bash
+git remote add upstream https://github.com/AiDot-Development-Team/python-AiDot
+```
+
+Because upstream is already a real ancestor (the merge-base is `eef1630`), syncing
+is then an ordinary merge:
 
 ```bash
 git fetch upstream
@@ -58,11 +66,11 @@ guards keep work on this account and prevent footguns:
   one-time operation, valid only because content was already synced to `eef1630`.
   Re-using it would silently mark genuine upstream fixes as merged and drop them.
   The ongoing workflow is a plain `git merge upstream/main`.
-- **`gh` defaults to the upstream parent repo.** Because `upstream` is configured,
-  `gh pr …` will target `AiDot-Development-Team` unless pinned. This repo sets
-  `gh repo set-default cbrightly/python-aidot-cameras`; pass `--repo cbrightly/...`
-  if in doubt.
-- **Pushes to the `upstream` remote are disabled** (`git remote set-url --push
+- **If you add an `upstream` remote, `gh` may default to the parent repo.** With
+  `upstream` configured, `gh pr …` can target `AiDot-Development-Team` unless
+  pinned. Set `gh repo set-default cbrightly/python-aidot-cameras`; pass
+  `--repo cbrightly/...` if in doubt.
+- **When you add `upstream`, disable pushes to it** (`git remote set-url --push
   upstream DISABLE`) so nothing lands on the upstream account by accident. To
   contribute a fix upstream, push to your own fork of it instead (see below).
 - **`main` is branch-protected** against force-push and deletion. History rewrites

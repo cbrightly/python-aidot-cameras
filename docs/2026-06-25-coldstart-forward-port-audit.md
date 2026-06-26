@@ -32,7 +32,7 @@ removed. Every v0.5.15-unique fix cluster was checked against v0.9.2:
 
 | Unit | v0.9.2 status | Decision |
 |---|---|---|
-| **1 — host-only ICE in fast_connect** | PARTIAL — fast_connect already strips TURN (STUN-only); the big ICE win is already banked. Host-only is additive, DTLS-only, and overrides a deliberate "keep STUN (cheap, no allocate)" choice. | **Deferred** — needs a live A/B on v0.9.2 before overriding a shipped decision for an unmeasured delta. |
+| **1 — host-only ICE in fast_connect** | PARTIAL — fast_connect already strips TURN (STUN-only); the big ICE win is already banked. Host-only is additive, DTLS-only, and overrides a deliberate "keep STUN (cheap, no allocate)" choice. | Deferred at audit time; **RESOLVED 2026-06-26** — A/B ran, shipped opt-in/default-off as `AIDOT_FAST_CONNECT_HOST_ONLY` (see Follow-up below). |
 | **2 — earlier + repeated PLI** | ABSENT — sends a single PLI (delayed 0.5s); a lost PLI stalls until the next natural IDR. | **Ported.** |
 | **3 — fast-retry on DC-only decline** | PARTIAL — DC-only *detection* exists, but a decline eats the full 15s gate. | **Ported** (burst only; reuses existing detection). |
 | **4 — active serve-ready bind probe** | SUPERSEDED — already a frame-progress wait; a TCP probe would be consumed by `-listen 1` and tear down the serve. | **Dropped** (would regress). |
@@ -80,9 +80,10 @@ All three A000088 DTLS cameras were cold-opened with the worktree code.
 Live A/B on M3 Pro v2 (warm, on-subnet), measuring `setLocalDescription`
 ICE-gather time and total connect time across four local-pc ICE configs.
 The camera-facing webrtcReq `IceServerList` was held constant (STUN) in every
-arm — only the **local** `RTCPeerConnection`'s `iceServers` were narrowed, via
-`AIDOT_FAST_CONNECT_PC_ICE`. 3 rounds, 8s cooldown between opens (rapid reopen
-without cooldown causes camera-side recovery flakiness that is not ICE-related).
+arm — only the **local** `RTCPeerConnection`'s `iceServers` were narrowed, via a
+throwaway test-only env var (`AIDOT_FAST_CONNECT_PC_ICE`, NOT shipped). 3 rounds,
+8s cooldown between opens (rapid reopen without cooldown causes camera-side
+recovery flakiness that is not ICE-related).
 
 | local-pc ICE | servers | gather | connect | connected |
 |--------------|---------|--------|---------|-----------|
@@ -116,7 +117,8 @@ without cooldown causes camera-side recovery flakiness that is not ICE-related).
    not a host-only defect.
 
 **Decision.** Ship host-only as an **opt-in, default-off** flag
-(`AIDOT_FAST_CONNECT_PC_ICE=host`, legacy alias `AIDOT_FAST_CONNECT_HOST_ONLY=1`),
+`AIDOT_FAST_CONNECT_HOST_ONLY=1` (the only flag shipped; the dedupe/google/host
+A/B knob `AIDOT_FAST_CONNECT_PC_ICE` was a test scaffold and was dropped),
 default stays STUN-only. Rationale: the ~5s win is real and repeatable on-subnet,
 but host-only drops srflx/relay fallback, so an off-subnet / strict-NAT
 `fast_connect` user MUST keep STUN+TURN. Opt-in/default-off respects the
