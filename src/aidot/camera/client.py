@@ -1828,7 +1828,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 return None
             mime = _MIME.get(entry.get("type"), "video/mp4")
             _LOGGER.debug(
-                "getEventVideoUrl resolved for %s: type=%s mime=%s url=%s",
+                "getEventVideoUrl resolved for %s: type=%s mime=%s url=%.100s",
                 self.device_id, entry.get("type"), mime, url,
             )
             return url, mime
@@ -1893,7 +1893,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 return None
 
             url = items[0].get("picUrl")
-            _LOGGER.debug("Latest thumbnail for %s: %s", self.device_id, url)
+            _LOGGER.debug("Latest thumbnail for %s: %.100s", self.device_id, url)
             return url or None
 
         except Exception as exc:
