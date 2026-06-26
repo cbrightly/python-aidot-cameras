@@ -19,6 +19,7 @@ of scope. Steady-state serving is already cheap (~0.7% of one core, `-c copy`).
 | **ICE candidate gather** | **~5s** | aiortc `setLocalDescription` stalls on Google STUN binding even in fast_connect (TURN stripped, STUN kept) |
 | WebRTC handshake → connected | ~1-2s | normal |
 | **connect → first keyframe** | **~5s** | single PLI fired ~1s after connect; if lost, waits for next natural IDR |
+| **serve-ready bind wait** | **~2s** | blind `sleep(2.0)` (`device_client.py:4825`) after first muxed frame before signaling `_serve_ready` so HA can pull |
 | **media-decline retries** | **+15s each** | camera returns DC-only answer (encoder not ready); serve loop retries on the 15s gate; repeated declines → ~70s |
 
 Two of these (~5s gather, ~5s keyframe) are paid on *every* cold start; the 15s-gated
@@ -26,14 +27,15 @@ media-decline retries cause the ~70s outliers.
 
 ## Goals / non-goals
 
-- **Goal:** shave the consistent ~5–7s overhead AND eliminate the ~70s outliers
-  (worst case → ~15–20s), without making a flaky camera worse.
+- **Goal:** shave the consistent ~9–12s of fixed/stalled overhead (ICE gather, PLI
+  wait, serve-ready bind) AND eliminate the ~70s outliers (worst case → ~15–20s),
+  without making a flaky camera worse.
 - **Non-goals (YAGNI):** prewarm-on-motion tuning, SDES cold-start, the battery-wake
   time itself, new user-facing config beyond what's already there.
 
 ## Architecture
 
-Three focused, **independently-shippable** changes (separate commits, any revertable
+Four focused, **independently-shippable** changes (separate commits, any revertable
 alone), each fronted by a small **pure helper** extracted from the 13k-line
 `device_client.py` so the logic is unit-testable. New exception
 `AidotCameraNotReady(AidotError)` in `exceptions.py`. No behavior change outside the
@@ -83,6 +85,22 @@ alone), each fronted by a small **pure helper** extracted from the 13k-line
   granularity), worst case ~15–20s instead of ~70s.
 - **Risk:** medium, fully isolated to the clean-decline case + unit-tested policy.
 
+### Unit 4 — Active serve-ready detection (consistent ~2s)
+
+- **Change:** the DTLS serve signals `_serve_ready` (which gates HA's URL fetch) after
+  a blind `sleep(2.0)` "let ffmpeg analyze input + bind" (`device_client.py:4825`).
+  Replace with an **active bind probe**: poll the ffmpeg `-listen` socket until it
+  accepts a TCP connection, then signal ready.
+- **Why it can't just be deleted:** if HA pulls before ffmpeg binds, it gets
+  connection-refused and waits ~40s for its next retry. The active probe is *safer*
+  than the 2s guess — it confirms the bind instead of hoping 2s was enough.
+- **Extract** `_await_listen_bound(host, port, timeout=5.0) -> bool` — unit-testable
+  against a throwaway listening socket.
+- **Also (minor, free):** tighten the 0.3s tap-install poll (`:4781`) and 0.2s
+  first-muxed-frame poll (`:4822`) to ~0.1s. Sub-second each; same safety bounds.
+- **Risk:** low. Falls back to signaling ready at `timeout` if the probe never
+  succeeds (no worse than today).
+
 ## Testing
 
 **Unit (pytest, in existing `tests/`):**
@@ -92,6 +110,8 @@ alone), each fronted by a small **pure helper** extracted from the 13k-line
   attempt 5 → `(15s, gate)`; `hard_failure`/`busy` → today's values unchanged.
 - `_keyframe_prompter`: fires immediately, repeats at interval, stops on keyframe,
   honors `max_tries`.
+- `_await_listen_bound`: returns True once a throwaway listening socket accepts;
+  returns False at timeout when nothing listens (signals ready anyway, no regression).
 
 **Live validation (`profile_coldstart.py`, Deck/DTLS, several runs each side):**
 - Good path: ICE-gather stall ~5s → <1s.
@@ -108,5 +128,12 @@ alone), each fronted by a small **pure helper** extracted from the 13k-line
 ## New surface area
 
 - `exceptions.py`: `class AidotCameraNotReady(AidotError)`.
-- Helpers: `_build_ice_servers`, `_keyframe_prompter`, `_retry_policy`.
+- Helpers: `_build_ice_servers`, `_keyframe_prompter`, `_retry_policy`,
+  `_await_listen_bound`.
 - No new env vars.
+
+## Expected impact (cumulative, good path)
+
+~14s → ~5–6s good path (Units 1+2+4 remove ~5+5+2s of fixed/stalled time, minus
+irreducible ~3s wake + ~1-2s handshake + real keyframe latency). Outlier path
+~70s → ~15–20s (Unit 3). Numbers to be confirmed live with `profile_coldstart.py`.
