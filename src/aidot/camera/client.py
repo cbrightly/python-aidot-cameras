@@ -2822,12 +2822,14 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             "0", "false", "no", "off")
 
     def _resolve_dtls_fast_liveplay(self) -> bool:
-        """Whether to skip the DTLS path's ~2 s livePlayResp blocking wait.
+        """Whether to skip the DTLS path's livePlayReq-echo + livePlayResp waits.
 
         The targeted analogue of [[_resolve_sdes_fast_liveplay]] for DTLS
-        (A000088) cameras: skip ONLY the livePlayResp accept/reject wait while
-        keeping the full ICE/TURN/DTLS handshake (so remote/relay viewing is
-        unaffected, unlike the broader ``_fast_connect`` which also strips TURN).
+        (A000088) cameras.  Consumed by [[_skip_dtls_signaling_wait]], which gates
+        BOTH the ~0.5 s livePlayReq-echo wait and the ~2 s livePlayResp
+        accept/reject wait, while keeping the full ICE/TURN/DTLS handshake (so
+        remote/relay viewing is unaffected, unlike the broader ``_fast_connect``
+        which also strips TURN).
 
         **Default ON** - the official app never waits for/parses livePlayResp,
         and the wait was measured as the dominant LAN cold-start cost (~2 s, paid

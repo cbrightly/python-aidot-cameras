@@ -63,8 +63,10 @@ def _pack(msgtype: int, body: bytes) -> bytes:
     return struct.pack(">Hhi", _MAGIC, msgtype, len(body)) + body
 
 
-async def _read_frame(reader: asyncio.StreamReader, timeout: float) -> dict:
-    """Read one 8-byte-header AES frame; return the decoded JSON dict."""
+async def _read_frame(reader: asyncio.StreamReader, timeout: float) -> bytes:
+    """Read one 8-byte-header frame; return the raw (still-encrypted) body bytes.
+
+    The caller decrypts and parses the JSON (the AES key lives on the client)."""
     header = await asyncio.wait_for(reader.readexactly(8), timeout)
     _magic, _mtype, bodysize = struct.unpack(">HHI", header)
     body = await asyncio.wait_for(reader.readexactly(bodysize), timeout)
