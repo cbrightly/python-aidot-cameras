@@ -95,8 +95,8 @@ The library reads the following environment variables.
 
 ### Credentials
 
-Used by the credential helper (`aidot.credentials`); they take priority over any
-stored credentials file. See [`src/aidot/credentials.py`](src/aidot/credentials.py).
+Used by the credential helper (`aidot_cameras.credentials`); they take priority over any
+stored credentials file. See [`src/aidot_cameras/credentials.py`](src/aidot_cameras/credentials.py).
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
@@ -106,7 +106,7 @@ stored credentials file. See [`src/aidot/credentials.py`](src/aidot/credentials.
 
 ### Camera streaming / tuning
 
-Optional knobs read by the camera client (`aidot.camera.client`). Defaults are
+Optional knobs read by the camera client (`aidot_cameras.camera.client`). Defaults are
 chosen to work out of the box; override only when tuning.
 
 | Variable | Purpose | Default |

@@ -16,7 +16,7 @@ not merged into the active code path.  Each section explains:
 ### What it does
 
 Three improvements to `TutkStreamSession._start_sync` (the TUTK C SDK P2P path in
-`src/aidot/device_client.py`) were researched from the `LdsTutkChannel.java` class in
+`src/aidot_cameras/device_client.py`) were researched from the `LdsTutkChannel.java` class in
 a decompiled AiDot APK:
 
 #### 1a. License-key initialisation (`TUTK_SDK_Set_License_Key`)
