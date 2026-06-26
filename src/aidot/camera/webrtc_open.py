@@ -1043,9 +1043,11 @@ class _WebRTCOpenMixin:
             _status(f"livePlayReq sent  peerid={peer_id}")
             # Wait for the broker to echo livePlayReq back (confirms delivery).
             # Proceed as soon as the echo arrives; fall through after 0.5 s.
-            # AIDOT_FAST_CONNECT skips this too (the echo often just times out,
-            # costing a flat 0.5 s); we proceed straight to SDP/ICE.
-            if not _fast_connect:
+            # Skipped under the same predicate as the livePlayResp wait below
+            # (fast_connect OR default-on dtls_fast_liveplay): the echo often
+            # just times out, costing a flat 0.5 s, and on timeout we proceed to
+            # SDP/ICE regardless - so skipping matches the common-case behaviour.
+            if not self._skip_dtls_signaling_wait(_fast_connect):
                 try:
                     await asyncio.wait_for(liveplay_echo_ev.wait(), timeout=0.5)
                 except TimeoutError:
@@ -1062,7 +1064,7 @@ class _WebRTCOpenMixin:
             # Skip the ~2s livePlayResp wait when either fast_connect (the broad
             # mode that also strips TURN) OR the targeted DTLS fast-liveplay
             # (default-on, app-parity, keeps TURN/ICE intact) is in effect.
-            if _fast_connect or self._resolve_dtls_fast_liveplay():
+            if self._skip_dtls_signaling_wait(_fast_connect):
                 _LOGGER.info(
                     "signaling-wait[%s] livePlayResp skipped (%s)",
                     self.device_id,
