@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any, Callable, List, Optional
 
 from .aes_utils import aes_encrypt, aes_decrypt, aes_ecb_encrypt_str_key, aes_ecb_decrypt_str_key
-from .exceptions import AidotCameraBusy
+from .exceptions import AidotCameraBusy, AidotCameraNotReady
 from .const import (
     CONF_AES_KEY,
     CONF_ASCNUMBER,
@@ -508,6 +508,20 @@ async def _keyframe_prompter(send_pli, first_frame, interval: float = 0.7,
         except asyncio.TimeoutError:
             continue
     return sent
+
+
+def _retry_policy(failure_kind: str, burst_attempt: int, *,
+                  burst_delay: float = 3.0, burst_max: int = 4,
+                  base_gate: float = 15.0) -> "tuple[float, bool]":
+    """Return (delay_seconds, bypass_open_gate) for the DTLS serve retry.
+
+    A clean 'not_ready' decline (camera awake but encoder cold) gets a bounded
+    fast burst (burst_delay x burst_max) that bypasses the 15s inter-attempt
+    gate, then falls back to the normal gate. Every other failure keeps the
+    unchanged 15s behavior."""
+    if failure_kind == "not_ready" and burst_attempt <= burst_max:
+        return (burst_delay, True)
+    return (base_gate, False)
 
 
 def _build_stun_binding_success_response(
@@ -4766,6 +4780,7 @@ class DeviceClient(object):
         _open_gate = float(os.environ.get("AIDOT_DTLS_RETRY_GATE_S", "15"))
         retry_delay = _MIN_DELAY
         _last_open_at = 0.0  # monotonic of the previous open attempt (0 = none yet)
+        _not_ready_burst = 0  # consecutive clean media-declines (encoder cold)
         loop = asyncio.get_running_loop()
         while self._streaming_active:
             # Thread-safe queues: taps run on the loop, the A/V mux in a thread.
@@ -4785,6 +4800,25 @@ class DeviceClient(object):
                 session = await self.async_open_webrtc_stream(on_frame=lambda _f: None)
             except asyncio.CancelledError:
                 return
+            except AidotCameraNotReady:
+                # Camera awake but encoder not ready (clean DC-only decline).
+                # Fast-retry a bounded burst (bypassing the 15s gate), then fall
+                # back to the gate if it keeps declining (assume genuinely flaky).
+                _not_ready_burst += 1
+                _delay, _bypass = _retry_policy("not_ready", _not_ready_burst)
+                if _bypass:
+                    _last_open_at = 0.0  # next open skips the inter-attempt gate
+                else:
+                    _not_ready_burst = 0  # fell back; reset for the next cold cycle
+                _LOGGER.info(
+                    "DTLS serve: %s not ready (encoder cold) - retry in %.0fs",
+                    self.device_id, _delay,
+                )
+                try:
+                    await asyncio.sleep(_delay)
+                except asyncio.CancelledError:
+                    return
+                continue
             except AidotCameraBusy as busy:
                 # Another viewer holds the camera's single slot. Retry on a short
                 # interval (not the 5-min backoff) so it reconnects promptly once
@@ -4812,6 +4846,7 @@ class DeviceClient(object):
                 continue
 
             retry_delay = _MIN_DELAY
+            _not_ready_burst = 0  # clean open; reset the cold-encoder burst counter
             self._stream_session = session
             pc = session._pc
             # PC-dead test for the serve loop.  closed/failed are terminal at
@@ -8346,6 +8381,7 @@ class DeviceClient(object):
                     _offer_video_pts = set(_ol.split()[3:])
                     break
 
+            _media_declined = [False]  # set if the camera returns a DC-only answer
             def _aiortc_answer(sdp: str) -> str:
                 """Produce a 3-section answer SDP for aiortc (audio/H264/DC),
                 in aiortc's fixed transceiver order regardless of how the camera
@@ -8507,11 +8543,11 @@ class DeviceClient(object):
                     _bundle_mids.append('2')
                 _bundle_str = 'a=group:BUNDLE ' + ' '.join(_bundle_mids)
                 if _dc_only_audio or _dc_only_video:
+                    _media_declined[0] = True
                     _status(
                         f"DC-only answer: audio_rejected={_dc_only_audio}"
                         f" video_rejected={_dc_only_video} → {_bundle_str}"
-                        " (camera declined media; accepted to fail cleanly into"
-                        " retry - DC-only co-fails DTLS, no stream)"
+                        " (camera declined media; encoder not ready - fast retry)"
                     )
                 if 'a=group:BUNDLE' in sdp2:
                     sdp2 = _re_ans.sub(
@@ -8522,6 +8558,15 @@ class DeviceClient(object):
                 return sdp2
 
             _aiortc_sdp = _aiortc_answer(_ans_sdp)
+            if _media_declined[0]:
+                # Camera awake but media pipeline cold. Close the half-open pc and
+                # surface a distinct error so the DTLS serve loop fast-retries
+                # instead of waiting the full 15s inter-attempt gate.
+                try:
+                    await pc.close()
+                except Exception:
+                    pass
+                raise AidotCameraNotReady(self.device_id)
 
             try:
                 await pc.setRemoteDescription(
