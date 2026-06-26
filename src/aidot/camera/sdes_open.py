@@ -34,6 +34,18 @@ from .protocol import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def _sdes_echo_wait_timeout(skip_liveplay: bool) -> float:
+    """Seconds to block on the camera's webrtcReq echo before proceeding.
+
+    The echo only ever arrives for role-reversal models (e.g. A001064), which
+    need the resulting webrtcResp and run with ``skip_liveplay`` False (they are
+    hard-excluded from sdes_fast_liveplay) - they keep the full 2.0s wait.  For
+    A001513-class cameras (``skip_liveplay`` True, the default) the echo never
+    arrives and the webrtcResp-building branch is dead/redundant, so don't block
+    on it (saves ~2s of cold-start dead time)."""
+    return 0.0 if skip_liveplay else 2.0
+
+
 class _SdesOpenMixin:
     async def _open_sdes_stream(
         self,
@@ -858,9 +870,13 @@ class _SdesOpenMixin:
         _webrtc_resp_sdes_topic: "Optional[str]" = None
         _webrtc_resp_sdes: "Optional[str]" = None
         _sdes_webrtcresp_sent = False   # True once we actually publish the SDES webrtcResp
+        # Only role-reversal models (A001064, _skip_lp False) echo our webrtcReq
+        # and need the webrtcResp built below; for A001513-class (_skip_lp True,
+        # default) the echo never arrives, so don't block ~2s on it.
         try:
             await _asyncio.wait_for(
-                _asyncio.shield(_echo_fut), timeout=2.0
+                _asyncio.shield(_echo_fut),
+                timeout=_sdes_echo_wait_timeout(_skip_lp),
             )
             _cam_echo_received = True
             _status("camera webrtcReq echo received - building webrtcResp")

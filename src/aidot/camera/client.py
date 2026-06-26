@@ -574,6 +574,14 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         # (credentials are bound to the access token).
         self._cached_ice_config: Optional[dict] = None
         self._ice_config_expiry: float = 0.0
+        # Cache for batchGetDeviceUserInfo.  Unlike ICE config there is no server
+        # ttl, so cap with a fixed TTL (see _DEVICE_USER_INFO_TTL): the extracted
+        # numeric userId/uuid are account-static, and the LAN-IP field is vestigial
+        # (a stale IP at worst skips one redundant user/connect).  On a warm reopen
+        # this is the only otherwise-uncached HTTP round-trip.  Reset on token
+        # refresh below (the request is access-token authenticated).
+        self._cached_device_user_info: Optional[dict] = None
+        self._device_user_info_expiry: float = 0.0
         # Async callback (set by AidotClient) that refreshes the access token and
         # updates the shared login_info in place, so camera HTTP calls can recover
         # from a 21026 "Please login again" instead of failing silently.
@@ -755,6 +763,8 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         self._mqtt_url = None
         self._cached_ice_config = None
         self._ice_config_expiry = 0.0
+        self._cached_device_user_info = None
+        self._device_user_info_expiry = 0.0
         try:
             return bool(await cb())
         except Exception as exc:
@@ -1116,6 +1126,20 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             "Content-Type": "application/json",
         }
 
+    _DEVICE_USER_INFO_TTL = 300.0  # seconds; no server ttl, so a fixed cap
+
+    def _store_device_user_info(self, item: "Optional[dict]") -> "Optional[dict]":
+        """Cache the extracted per-device user info and return it (pass-through).
+
+        Used at every success return of [[async_get_device_user_info]] so caching
+        happens at one site.  A falsy/None item is NOT cached (fail-safe to a
+        re-fetch next open).  TTL-bounded by `_DEVICE_USER_INFO_TTL` since there
+        is no server-provided ttl."""
+        if item:
+            self._cached_device_user_info = item
+            self._device_user_info_expiry = time.time() + self._DEVICE_USER_INFO_TTL
+        return item
+
     async def async_get_device_user_info(
         self,
         all_device_ids: Optional[List[str]] = None,
@@ -1134,6 +1158,11 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 an empty result. Pass the full list from the account's device
                 listing if available.
         """
+        if (self._cached_device_user_info is not None
+                and time.time() < self._device_user_info_expiry):
+            _LOGGER.debug("device_user_info: cache hit (%.0fs left)",
+                          self._device_user_info_expiry - time.time())
+            return self._cached_device_user_info
         import aiohttp
         ids = all_device_ids or [self.device_id]
         try:
@@ -1171,7 +1200,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             # Find the entry for this device
             if isinstance(data, dict):
                 item = data.get(self.device_id) or next(iter(data.values()), None)
-                return item
+                return self._store_device_user_info(item)
             if isinstance(data, list):
                 for item in data:
                     # Server may use "deviceId", "devId", or "id" as the device
@@ -1189,7 +1218,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                             "batchGetDeviceUserInfo matched device %s: keys=%s",
                             self.device_id, sorted(item.keys()),
                         )
-                        return item
+                        return self._store_device_user_info(item)
                 # No exact match found - log which device IDs were present so
                 # the caller can diagnose why the lookup failed.  Falling back
                 # to data[0] will return the wrong camera's userId, which
@@ -1206,7 +1235,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     " TURN credentials)",
                     self.device_id, _found_ids,
                 )
-                return data[0] if data else None
+                return self._store_device_user_info(data[0] if data else None)
         except Exception as exc:
             _LOGGER.error("async_get_device_user_info failed for %s: %s",
                           self.device_id, exc)
