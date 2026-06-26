@@ -16,7 +16,7 @@ import time
 import logging
 from typing import Callable, Optional
 
-from ..exceptions import AidotCameraBusy
+from ..exceptions import AidotCameraBusy, AidotCameraNotReady
 from .models import VideoFrame
 from .webrtc import WebRTCSession
 from .protocol import (
@@ -37,6 +37,31 @@ from .protocol import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def _keyframe_prompter(send_pli, first_frame, interval: float = 0.7,
+                             max_tries: int = 8) -> int:
+    """Send an RTCP PLI (keyframe request) immediately and then every `interval`
+    seconds until `first_frame` is set or `max_tries` PLIs have been sent.
+    Handles a lost first PLI instead of waiting for the next natural IDR.
+    `send_pli` may be sync or a coroutine function. Returns PLIs sent."""
+    sent = 0
+    for _ in range(max_tries):
+        try:
+            res = send_pli()
+            if asyncio.iscoroutine(res):
+                await res
+        except Exception:
+            pass
+        sent += 1
+        if first_frame.is_set():
+            return sent
+        try:
+            await asyncio.wait_for(first_frame.wait(), timeout=interval)
+            return sent
+        except TimeoutError:
+            continue
+    return sent
 
 
 class _WebRTCOpenMixin:
@@ -1683,44 +1708,56 @@ class _WebRTCOpenMixin:
                 t = asyncio.ensure_future(_drain_audio())
                 track_tasks.append(t)
             elif track.kind == "video":
-                # Request an IDR keyframe immediately via RTCP PLI so we start
-                # decoding from a complete frame.  Without this, if the camera's
-                # first IDR arrived before our SRTP path was ready (seq gap at
-                # the start), H264 decoding silently drops every subsequent
-                # delta frame and we receive zero decoded frames.
-                async def _request_keyframe() -> None:
-                    # aiortc 1.14 changed _send_rtcp_pli(media_ssrc) to require
-                    # the remote SSRC.  The SSRC is only known once RTP starts
-                    # arriving, so poll getSynchronizationSources() briefly and
-                    # send PLI for each discovered source.
-                    for _attempt in range(10):  # up to ~5s
-                        await asyncio.sleep(0.5)
-                        try:
-                            _recv = next(
-                                (r for r in pc.getReceivers() if r.track is track),
-                                None,
-                            )
-                            if _recv is None:
-                                continue
-                            _ssrcs = [
-                                s.source
-                                for s in _recv.getSynchronizationSources()
-                            ]
-                            if not _ssrcs:
-                                continue
-                            for _ssrc in _ssrcs:
-                                await _recv._send_rtcp_pli(_ssrc)
-                            _status(
-                                f"video track: sent RTCP PLI (keyframe request)"
-                                f" ssrc={_ssrcs}"
-                            )
+                # Request an IDR keyframe via RTCP PLI so we start decoding from
+                # a complete frame.  Without this, if the camera's first IDR
+                # arrived before our SRTP path was ready (seq gap at the start),
+                # H264 decoding silently drops every subsequent delta frame and
+                # we receive zero decoded frames.  Previously a SINGLE PLI was
+                # sent once an SSRC appeared (and only after a 0.5s sleep); if
+                # that PLI was lost, decoding stalled until the next natural IDR
+                # (seconds of black on cold start).  Drive it with
+                # _keyframe_prompter instead: fire immediately and repeat every
+                # 0.5s until the first frame is decoded, so a lost PLI is retried.
+                _first_video_frame = asyncio.Event()
+
+                async def _send_pli_once() -> None:
+                    # aiortc 1.14 requires the remote SSRC for _send_rtcp_pli;
+                    # the SSRC is only known once RTP starts arriving.  No-op
+                    # (no receiver/SSRC yet) until RTP flows - the prompter
+                    # retries on its own cadence.
+                    try:
+                        _recv = next(
+                            (r for r in pc.getReceivers() if r.track is track),
+                            None,
+                        )
+                        if _recv is None:
                             return
-                        except Exception as _pli_exc:
-                            _LOGGER.debug("RTCP PLI attempt failed: %s", _pli_exc)
-                    _LOGGER.debug("RTCP PLI: no SSRC discovered within 5s")
-                _spawn_bg(_request_keyframe())
+                        _ssrcs = [
+                            s.source for s in _recv.getSynchronizationSources()
+                        ]
+                        if not _ssrcs:
+                            return
+                        for _ssrc in _ssrcs:
+                            await _recv._send_rtcp_pli(_ssrc)
+                        _status(
+                            f"video track: sent RTCP PLI (keyframe request)"
+                            f" ssrc={_ssrcs}"
+                        )
+                    except Exception as _pli_exc:
+                        _LOGGER.debug("RTCP PLI attempt failed: %s", _pli_exc)
+
+                _spawn_bg(_keyframe_prompter(
+                    _send_pli_once, _first_video_frame,
+                    interval=0.5, max_tries=12,
+                ))
                 if on_frame is not None:
-                    t = asyncio.ensure_future(_webrtc_consume_video(track, on_frame))
+                    def _on_frame_signal(_f, _on_frame=on_frame):
+                        # First decoded frame stops the PLI prompter.
+                        _first_video_frame.set()
+                        return _on_frame(_f)
+                    t = asyncio.ensure_future(
+                        _webrtc_consume_video(track, _on_frame_signal)
+                    )
                     track_tasks.append(t)
 
         recorder = None
@@ -2783,6 +2820,12 @@ class _WebRTCOpenMixin:
                     _offer_video_pts = set(_ol.split()[3:])
                     break
 
+            # Set by _aiortc_answer when the camera returns a DC-only answer
+            # (both audio and video rejected = media declined, encoder cold).
+            # The open then fast-retries via AidotCameraNotReady (Unit 3) rather
+            # than letting DTLS co-fail into the generic 15s-gated retry.
+            _media_declined = [False]
+
             def _aiortc_answer(sdp: str) -> str:
                 """Produce a 3-section answer SDP for aiortc (audio/H264/DC),
                 in aiortc's fixed transceiver order regardless of how the camera
@@ -2944,11 +2987,11 @@ class _WebRTCOpenMixin:
                     _bundle_mids.append('2')
                 _bundle_str = 'a=group:BUNDLE ' + ' '.join(_bundle_mids)
                 if _dc_only_audio or _dc_only_video:
+                    _media_declined[0] = True
                     _status(
                         f"DC-only answer: audio_rejected={_dc_only_audio}"
                         f" video_rejected={_dc_only_video} → {_bundle_str}"
-                        " (camera declined media; accepted to fail cleanly into"
-                        " retry - DC-only co-fails DTLS, no stream)"
+                        " (camera declined media; encoder not ready - fast-retry)"
                     )
                 if 'a=group:BUNDLE' in sdp2:
                     sdp2 = _re_ans.sub(
@@ -2959,6 +3002,17 @@ class _WebRTCOpenMixin:
                 return sdp2
 
             _aiortc_sdp = _aiortc_answer(_ans_sdp)
+
+            if _media_declined[0]:
+                # Camera answered cleanly but declined media (DC-only): its
+                # encoder is still cold.  Tear down and raise so the serve loop
+                # fast-retries in a bounded burst instead of letting DTLS
+                # co-fail into the full 15s-gated generic retry.
+                try:
+                    await pc.close()
+                except Exception:
+                    pass
+                raise AidotCameraNotReady(self.device_id)
 
             try:
                 await pc.setRemoteDescription(
