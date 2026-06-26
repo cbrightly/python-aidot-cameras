@@ -8,7 +8,7 @@ import time
 import asyncio
 from typing import Any, Callable, List, Optional
 
-from ..exceptions import AidotCameraBusy
+from ..exceptions import AidotCameraBusy, AidotCameraNotReady
 from ..login_const import APP_ID as _AIDOT_APP_ID
 
 # Wire/protocol constants live in constants.py; re-imported here so all
@@ -93,6 +93,21 @@ def _spawn_bg(coro):
     _BG_TASKS.add(_t)
     _t.add_done_callback(_BG_TASKS.discard)
     return _t
+
+
+def _retry_policy(failure_kind: str, burst_attempt: int, *,
+                  burst_delay: float = 3.0, burst_max: int = 4,
+                  base_gate: float = 15.0) -> "tuple[float, bool]":
+    """Return (delay_seconds, bypass_open_gate) for the DTLS serve retry.
+
+    A clean 'not_ready' decline (camera awake but encoder still cold - a DC-only
+    WebRTC answer) gets a bounded fast burst (burst_delay x burst_max) that
+    bypasses the 15s inter-attempt gate, then falls back to the normal gate so a
+    persistently-declining camera is not hammered.  Every other failure keeps
+    the unchanged 15s behaviour."""
+    if failure_kind == "not_ready" and burst_attempt <= burst_max:
+        return (burst_delay, True)
+    return (base_gate, False)
 
 
 _FFMPEG_MISSING_MSG = (
@@ -3042,6 +3057,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         # session_end_delay().
         _pacer = ReconnectPacer(_MIN_DELAY, _MAX_DELAY)
         _last_open_at = 0.0  # monotonic of the previous open attempt (0 = none yet)
+        _not_ready_burst = 0  # consecutive DC-only (encoder-cold) declines
         loop = asyncio.get_running_loop()
         while self._streaming_active:
             # Thread-safe queues: taps run on the loop, the A/V mux in a thread.
@@ -3075,6 +3091,27 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 except asyncio.CancelledError:
                     return
                 continue
+            except AidotCameraNotReady:
+                # Camera answered cleanly but declined media (DC-only answer):
+                # its encoder is still cold and warming up.  Fast-retry in a
+                # bounded burst (3s x4) that bypasses the 15s inter-attempt gate
+                # so we catch the encoder the moment it comes up, then fall back
+                # to the gate so a persistently-cold camera isn't hammered.  The
+                # burst counter resets only on a successful open (below).
+                _not_ready_burst += 1
+                _delay, _bypass = _retry_policy("not_ready", _not_ready_burst)
+                if _bypass:
+                    _last_open_at = 0.0  # clear the gate for the fast burst
+                _LOGGER.info(
+                    "DTLS serve: camera %s not ready (encoder cold) -"
+                    " retry %.0fs [%s]",
+                    self.device_id, _delay, "burst" if _bypass else "gate",
+                )
+                try:
+                    await asyncio.sleep(_delay)
+                except asyncio.CancelledError:
+                    return
+                continue
             except Exception as exc:
                 _delay = _pacer.fail_delay()
                 _LOGGER.warning(
@@ -3088,6 +3125,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 continue
 
             _pacer.reset()
+            _not_ready_burst = 0  # clean open: reset the encoder-cold burst
             self._stream_session = session
             pc = session._pc
             # PC-dead test for the serve loop.  closed/failed are terminal at
