@@ -45,6 +45,12 @@ webrtc = [
     "Pillow",
 ]
 
+[project.scripts]
+# Standalone bridge: stream an AiDot camera into go2rtc (or any RTSP/HTTP
+# consumer) without Home Assistant. Streaming needs the `webrtc` extra
+# (aiortc et al.); `--list` works with the core deps alone.
+aidot-go2rtc = "aidot.__main__:main"
+
 [project.urls]
 Homepage = "https://github.com/cbrightly/python-aidot-cameras"
 "Issue Tracker" = "https://github.com/cbrightly/python-aidot-cameras/issues"
