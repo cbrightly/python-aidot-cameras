@@ -446,7 +446,8 @@ class DeviceClient(CameraMixin):
                 # Device stopped answering keepalives (offline/asleep); reset()
                 # reconnects, so this is expected debug noise, not an error.
                 _LOGGER.debug(
-                    f"{self._TAG}:Device unresponsive within 90 seconds, disconnecting."
+                    f"{self._TAG}:Device unresponsive within "
+                    f"{self.heart_time * 3} seconds, disconnecting."
                 )
                 await self.reset()
                 return -1
