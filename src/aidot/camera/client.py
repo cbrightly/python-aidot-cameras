@@ -110,6 +110,22 @@ def _retry_policy(failure_kind: str, burst_attempt: int, *,
     return (base_gate, False)
 
 
+def _open_gate_delay(last_open_at: float, now: float, open_gate: float) -> float:
+    """Seconds to wait before the next open to honour the inter-attempt gate.
+
+    The DTLS serve loop spaces OPEN attempts >= open_gate apart, keyed to the
+    PREVIOUS open's start (`last_open_at`).  Returns 0 when there is no prior
+    open (`last_open_at` is the 0.0 sentinel - monotonic time is never 0) or the
+    gate has already elapsed (e.g. after a long healthy session that just died,
+    so it reopens immediately), else the remaining gate time.  This is the sole
+    reconnect-spacing mechanism: a fast death still gets spaced a full gate from
+    its open-start (anti-hammer), so no separate post-death delay is needed."""
+    if not last_open_at:
+        return 0.0
+    remaining = open_gate - (now - last_open_at)
+    return remaining if remaining > 0 else 0.0
+
+
 _FFMPEG_MISSING_MSG = (
     "ffmpeg not found on PATH; install ffmpeg to enable recording/transcoding.\n"
     "  Ubuntu/Debian:    sudo apt install ffmpeg\n"
@@ -2825,6 +2841,18 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         return os.environ.get("AIDOT_DTLS_FAST_LIVEPLAY", "").strip().lower() not in (
             "0", "false", "no", "off")
 
+    def _skip_dtls_signaling_wait(self, fast_connect: bool) -> bool:
+        """Whether the DTLS open skips its livePlayReq-echo AND livePlayResp waits.
+
+        Both waits proceed to SDP/ICE on timeout anyway, so they are skipped
+        together under one predicate (keeping them in lock-step): the broad
+        ``fast_connect`` mode, or the targeted default-on
+        [[_resolve_dtls_fast_liveplay]] (app-parity).  Unifying the condition
+        fixes a drift where the 0.5s echo wait skipped only on ``fast_connect``
+        while the 2s livePlayResp wait below it also honoured dtls_fast_liveplay,
+        so the default path still paid the 0.5s echo wait that usually times out."""
+        return bool(fast_connect) or self._resolve_dtls_fast_liveplay()
+
     def _resolve_sdes_serve_audio(self) -> bool:
         """Whether to include audio in the SDES camera serve.
 
@@ -3066,10 +3094,13 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             self._serve_ready.clear()  # fresh (cold) session: not ready until bound
             # Hard inter-attempt gate (APK parity): never start an open within
             # _open_gate seconds of the previous one, regardless of the backoff.
-            _since_open = loop.time() - _last_open_at
-            if _last_open_at and _since_open < _open_gate:
+            # This is the SOLE reconnect-spacing mechanism (no separate post-death
+            # sleep) - after a healthy session it has long elapsed, so a clean
+            # death reopens immediately; a fast death still owes the full gate.
+            _gate_wait = _open_gate_delay(_last_open_at, loop.time(), _open_gate)
+            if _gate_wait:
                 try:
-                    await asyncio.sleep(_open_gate - _since_open)
+                    await asyncio.sleep(_gate_wait)
                 except asyncio.CancelledError:
                     return
             _last_open_at = loop.time()
@@ -3309,11 +3340,11 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     self.device_id,
                 )
                 return
-            if self._streaming_active:
-                try:
-                    await asyncio.sleep(_MIN_DELAY)
-                except asyncio.CancelledError:
-                    return
+            # No separate post-death delay: loop back to the top open-gate, which
+            # spaces attempts from the previous open-start.  After a healthy
+            # session the gate has elapsed (immediate reopen); a fast death still
+            # owes the full gate there.  (Was a hardcoded 15s sleep that ignored
+            # AIDOT_DTLS_RETRY_GATE_S and added dead latency after healthy drops.)
 
     async def _spawn_dtls_serve_ffmpeg(self, serve_url: Optional[str], stdin_fd: int):
         """Launch ffmpeg to serve the mux thread's MPEG-TS (read from ``stdin_fd``)
