@@ -215,3 +215,11 @@ docs/SIDECAR_SCOPE.md
 docs/VALIDATION_2026-05-30.md
 docs/WEBRTC_BASELINE.md
 docs/official_camera_network_calls.md
+
+# aidot-go2rtc bridge: local secrets / generated artifacts — never commit
+auto.crt
+auto.key
+*.crt
+*.key
+token.json
+aidot_token.json
