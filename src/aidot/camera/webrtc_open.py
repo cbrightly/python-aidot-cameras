@@ -59,7 +59,7 @@ async def _keyframe_prompter(send_pli, first_frame, interval: float = 0.7,
         try:
             await asyncio.wait_for(first_frame.wait(), timeout=interval)
             return sent
-        except asyncio.TimeoutError:
+        except TimeoutError:
             continue
     return sent
 
@@ -2820,6 +2820,12 @@ class _WebRTCOpenMixin:
                     _offer_video_pts = set(_ol.split()[3:])
                     break
 
+            # Set by _aiortc_answer when the camera returns a DC-only answer
+            # (both audio and video rejected = media declined, encoder cold).
+            # The open then fast-retries via AidotCameraNotReady (Unit 3) rather
+            # than letting DTLS co-fail into the generic 15s-gated retry.
+            _media_declined = [False]
+
             def _aiortc_answer(sdp: str) -> str:
                 """Produce a 3-section answer SDP for aiortc (audio/H264/DC),
                 in aiortc's fixed transceiver order regardless of how the camera
@@ -2981,11 +2987,11 @@ class _WebRTCOpenMixin:
                     _bundle_mids.append('2')
                 _bundle_str = 'a=group:BUNDLE ' + ' '.join(_bundle_mids)
                 if _dc_only_audio or _dc_only_video:
+                    _media_declined[0] = True
                     _status(
                         f"DC-only answer: audio_rejected={_dc_only_audio}"
                         f" video_rejected={_dc_only_video} → {_bundle_str}"
-                        " (camera declined media; accepted to fail cleanly into"
-                        " retry - DC-only co-fails DTLS, no stream)"
+                        " (camera declined media; encoder not ready - fast-retry)"
                     )
                 if 'a=group:BUNDLE' in sdp2:
                     sdp2 = _re_ans.sub(
@@ -2996,6 +3002,17 @@ class _WebRTCOpenMixin:
                 return sdp2
 
             _aiortc_sdp = _aiortc_answer(_ans_sdp)
+
+            if _media_declined[0]:
+                # Camera answered cleanly but declined media (DC-only): its
+                # encoder is still cold.  Tear down and raise so the serve loop
+                # fast-retries in a bounded burst instead of letting DTLS
+                # co-fail into the full 15s-gated generic retry.
+                try:
+                    await pc.close()
+                except Exception:
+                    pass
+                raise AidotCameraNotReady(self.device_id)
 
             try:
                 await pc.setRemoteDescription(
