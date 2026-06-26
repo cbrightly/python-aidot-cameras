@@ -453,6 +453,38 @@ def _select_ice_servers(ice_servers: list, fast_connect: bool) -> list:
     return ice_servers
 
 
+def _dtls_serve_host_port(serve_url):
+    """'http://127.0.0.1:8997/cam.ts' -> ('127.0.0.1', 8997); falsy -> (None, None)."""
+    from urllib.parse import urlparse
+    if not serve_url:
+        return (None, None)
+    u = urlparse(serve_url)
+    return (u.hostname or "127.0.0.1", u.port)
+
+
+async def _await_listen_bound(host: str, port: int, timeout: float = 5.0) -> bool:
+    """Poll until a TCP connect to (host, port) succeeds, i.e. the ffmpeg
+    -listen serve socket is actually bound and accepting. Replaces a blind
+    sleep(2.0). Returns False if not bound within `timeout` (caller proceeds
+    anyway, no worse than the old guess)."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        try:
+            _r, _w = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=0.5
+            )
+            _w.close()
+            try:
+                await _w.wait_closed()
+            except Exception:
+                pass
+            return True
+        except (OSError, asyncio.TimeoutError):
+            await asyncio.sleep(0.1)
+    return False
+
+
 def _build_stun_binding_success_response(
     *,
     transaction_id: bytes,
@@ -4824,11 +4856,17 @@ class DeviceClient(object):
                     # hand HA a working URL (no 40s connection-refused retry gap).
                     if not self._serve_ready.is_set():
                         _p0 = progress[0]
-                        for _ in range(40):  # up to ~8s for the first muxed frames
-                            await asyncio.sleep(0.2)
+                        for _ in range(80):  # up to ~8s for the first muxed frames
+                            await asyncio.sleep(0.1)
                             if progress[0] > _p0:
                                 break
-                        await asyncio.sleep(2.0)  # let ffmpeg analyze input + bind
+                        # Replace a blind sleep(2.0) with an active probe: signal
+                        # ready as soon as ffmpeg's -listen socket actually binds
+                        # (saves ~2s; safer than guessing).  Falls through at
+                        # timeout so a non-listen serve_url never wedges.
+                        _sh, _sp = _dtls_serve_host_port(serve_url)
+                        if _sp is not None:
+                            await _await_listen_bound(_sh, _sp, timeout=5.0)
                         self._serve_ready.set()
                     # Wait for ffmpeg to exit (go2rtc disconnect) or idle release.
                     while self._streaming_active and proc.returncode is None:
