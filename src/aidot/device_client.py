@@ -485,6 +485,31 @@ async def _await_listen_bound(host: str, port: int, timeout: float = 5.0) -> boo
     return False
 
 
+async def _keyframe_prompter(send_pli, first_frame, interval: float = 0.7,
+                             max_tries: int = 8) -> int:
+    """Send an RTCP PLI (keyframe request) immediately and then every `interval`
+    seconds until `first_frame` is set or `max_tries` PLIs have been sent.
+    Handles a lost first PLI instead of waiting for the next natural IDR.
+    `send_pli` may be sync or a coroutine function. Returns PLIs sent."""
+    sent = 0
+    for _ in range(max_tries):
+        try:
+            res = send_pli()
+            if asyncio.iscoroutine(res):
+                await res
+        except Exception:
+            pass
+        sent += 1
+        if first_frame.is_set():
+            return sent
+        try:
+            await asyncio.wait_for(first_frame.wait(), timeout=interval)
+            return sent
+        except asyncio.TimeoutError:
+            continue
+    return sent
+
+
 def _build_stun_binding_success_response(
     *,
     transaction_id: bytes,
@@ -6830,6 +6855,8 @@ class DeviceClient(object):
         else:
             _status("offer: SCTP datachannel skipped (model in _NO_DATACHANNEL_MODELS)")
 
+        # Set on the first decoded video frame so the keyframe prompter can stop.
+        _first_video_frame = asyncio.Event()
         @pc.on("track")
         def _on_track(track) -> None:
             if track.kind == "audio":
@@ -6878,39 +6905,42 @@ class DeviceClient(object):
                 # first IDR arrived before our SRTP path was ready (seq gap at
                 # the start), H264 decoding silently drops every subsequent
                 # delta frame and we receive zero decoded frames.
-                async def _request_keyframe() -> None:
-                    # aiortc 1.14 changed _send_rtcp_pli(media_ssrc) to require
-                    # the remote SSRC.  The SSRC is only known once RTP starts
-                    # arriving, so poll getSynchronizationSources() briefly and
-                    # send PLI for each discovered source.
-                    for _attempt in range(10):  # up to ~5s
-                        await asyncio.sleep(0.5)
-                        try:
-                            _recv = next(
-                                (r for r in pc.getReceivers() if r.track is track),
-                                None,
-                            )
-                            if _recv is None:
-                                continue
-                            _ssrcs = [
-                                s.source
-                                for s in _recv.getSynchronizationSources()
-                            ]
-                            if not _ssrcs:
-                                continue
-                            for _ssrc in _ssrcs:
-                                await _recv._send_rtcp_pli(_ssrc)
+                async def _send_pli_once() -> None:
+                    # aiortc 1.14 requires the remote SSRC, only known once RTP
+                    # starts arriving; no-op until then (the prompter retries).
+                    try:
+                        _recv = next(
+                            (r for r in pc.getReceivers() if r.track is track),
+                            None,
+                        )
+                        if _recv is None:
+                            return
+                        _ssrcs = [
+                            s.source for s in _recv.getSynchronizationSources()
+                        ]
+                        for _ssrc in _ssrcs:
+                            await _recv._send_rtcp_pli(_ssrc)
+                        if _ssrcs:
                             _status(
                                 f"video track: sent RTCP PLI (keyframe request)"
                                 f" ssrc={_ssrcs}"
                             )
-                            return
-                        except Exception as _pli_exc:
-                            _LOGGER.debug("RTCP PLI attempt failed: %s", _pli_exc)
-                    _LOGGER.debug("RTCP PLI: no SSRC discovered within 5s")
-                asyncio.ensure_future(_request_keyframe())
+                    except Exception as _pli_exc:
+                        _LOGGER.debug("RTCP PLI attempt failed: %s", _pli_exc)
+                # Fire immediately and repeat (0.5s) until the first frame decodes
+                # or ~6s, so a lost first PLI doesn't cost a whole GOP of latency.
+                asyncio.ensure_future(
+                    _keyframe_prompter(_send_pli_once, _first_video_frame,
+                                       interval=0.5, max_tries=12)
+                )
                 if on_frame is not None:
-                    t = asyncio.ensure_future(_webrtc_consume_video(track, on_frame))
+                    def _on_frame_signal(_f):
+                        if not _first_video_frame.is_set():
+                            _first_video_frame.set()
+                        return on_frame(_f)
+                    t = asyncio.ensure_future(
+                        _webrtc_consume_video(track, _on_frame_signal)
+                    )
                     track_tasks.append(t)
 
         recorder = None
