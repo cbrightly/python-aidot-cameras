@@ -56,3 +56,12 @@ class AidotCameraBusy(AidotError):
         if desc:
             msg += f" ({desc})"
         super().__init__(msg)
+
+
+class AidotCameraNotReady(AidotError):
+    """Camera answered cleanly but declined media (encoder not ready yet) - a
+    DC-only WebRTC answer that rejects both audio and video, leaving only the
+    data channel.  Distinct from AidotCameraBusy (terminal) and from hard
+    failures: the camera is awake and answering, its media pipeline just isn't
+    up.  The DTLS serve loop fast-retries this in a bounded burst instead of
+    waiting the full 15s inter-attempt gate."""
