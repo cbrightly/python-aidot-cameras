@@ -137,3 +137,29 @@ alone), each fronted by a small **pure helper** extracted from the 13k-line
 ~14s → ~5–6s good path (Units 1+2+4 remove ~5+5+2s of fixed/stalled time, minus
 irreducible ~3s wake + ~1-2s handshake + real keyframe latency). Outlier path
 ~70s → ~15–20s (Unit 3). Numbers to be confirmed live with `profile_coldstart.py`.
+
+## Validation results (2026-06-25, live on Deck / A000088, DTLS)
+
+Implemented on branch `aidot-coldstart-opt` (4 units + 1 fix), 95 unit tests pass.
+
+**Confirmed wins (reproducible across runs):**
+- **Host-only ICE (Unit 1):** `webrtcReq` now goes out at ~3.0–3.5s (right after
+  camera wake) vs ~7.8s before — the ~5s Google-STUN gather stall is gone. WebRTC
+  reaches `connected` at **~4.4–4.9s vs ~9s baseline**.
+- **Repeated PLI (Unit 2):** PLIs observed firing every 0.5s until first frame /
+  bound, as designed.
+- **Regression found & fixed:** the first host-only implementation also emptied the
+  *camera-facing* IceServerList (`IceServerList×0`), and the camera then never
+  answered (`no webrtcResp in 30s`). Fixed by keeping `_ice_servers` STUN-only for
+  the camera and using a separate host-only list only for the local aiortc config.
+  Post-fix the camera answers ~0.4s after the offer.
+
+**Not client-addressable (dominant residual):**
+- After WebRTC connects, the camera's **encoder deep-sleep warmup** can withhold
+  video for ~5s (warm) up to ~22–26s (deep sleep) before any RTP flows. PLIs are
+  sent but ignored until the encoder spins up. Observed total cold-start ~27–30s in
+  these (heavily-re-woken) runs; within the variable baseline range (14.5–70s).
+
+**Not exercised in these runs:** Unit 3 (media-decline fast-retry) needs a DC-only
+decline, which didn't occur; Unit 4 (serve-ready bind probe) runs after frames flow.
+Both are unit-tested. Recommend confirming in real Home Assistant over time.
