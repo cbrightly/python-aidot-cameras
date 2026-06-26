@@ -86,6 +86,21 @@ def _narrow_pc_ice(ice_servers, *, host_only: bool) -> list:
     return list(ice_servers)
 
 
+async def _wait_or_event(ev: "asyncio.Event", timeout: float) -> bool:
+    """Sleep up to `timeout` seconds, returning as soon as `ev` is set.
+
+    An interruptible poll cadence: same spacing as a bare ``asyncio.sleep`` when
+    `ev` is unset, but wakes immediately once it fires (e.g. the connect loop
+    waking the instant connectionState reaches "connected" instead of waiting out
+    the remainder of a fixed 0.1s tick).  Returns True if the event fired within
+    the window, else False after the full timeout."""
+    try:
+        await asyncio.wait_for(ev.wait(), timeout=timeout)
+        return True
+    except TimeoutError:
+        return False
+
+
 class _WebRTCOpenMixin:
     async def _async_open_webrtc_stream_impl(
         self,
@@ -3419,7 +3434,10 @@ class _WebRTCOpenMixin:
                     outgoing_q.put_nowait((_rr_webrtc_resp_topic, _rr_webrtc_resp_payload))
                 for _rr_ice_p in _rr_ice_payloads:
                     outgoing_q.put_nowait(_rr_ice_p)
-            await asyncio.sleep(0.1)
+            # Interruptible 0.1s poll tick: wake the instant the connection
+            # completes (connected_ev set synchronously in the state handler)
+            # instead of waiting out the remaining sleep.
+            await _wait_or_event(connected_ev, 0.1)
 
         if pc.connectionState not in ("connected", "completed"):
             outgoing_q.put_nowait(None)
