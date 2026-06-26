@@ -12,8 +12,8 @@ Repo convention: no pytest-asyncio; drive coroutines with asyncio.run().
 import asyncio
 import types
 
-from aidot.camera.client import CameraMixin
-from aidot.exceptions import AidotCameraNotReady
+from aidot_cameras.camera.client import CameraMixin
+from aidot_cameras.exceptions import AidotCameraNotReady
 
 
 class _Ready:
@@ -46,12 +46,12 @@ def test_dtls_serve_loop_bursts_then_falls_back(caplog, monkeypatch):
         if d >= 15.0:
             raise asyncio.CancelledError
 
-    monkeypatch.setattr("aidot.camera.client.asyncio.sleep", _fake_sleep)
+    monkeypatch.setattr("aidot_cameras.camera.client.asyncio.sleep", _fake_sleep)
 
     async def _run():
         await types.MethodType(CameraMixin._dtls_serve_loop_inner, fake)()
 
-    with caplog.at_level("INFO", logger="aidot.camera.client"):
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         asyncio.run(_run())
 
     msgs = [r.getMessage() for r in caplog.records]

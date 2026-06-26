@@ -9,7 +9,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from aidot.camera.go2rtc import Go2rtcClient, prefer_go2rtc
+from aidot_cameras.camera.go2rtc import Go2rtcClient, prefer_go2rtc
 
 
 class _Resp:

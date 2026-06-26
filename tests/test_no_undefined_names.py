@@ -16,7 +16,7 @@ import pytest
 
 _SRC = (
     pathlib.Path(__file__).resolve().parent.parent
-    / "src" / "aidot" / "device_client.py"
+    / "src" / "aidot_cameras" / "device_client.py"
 )
 
 # Names pyflakes can't resolve because they're bound in an inner runtime scope

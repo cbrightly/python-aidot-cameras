@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-from aidot.camera.protocol import ReconnectPacer, next_backoff
+from aidot_cameras.camera.protocol import ReconnectPacer, next_backoff
 
 _BASE = 10.0
 _CAP = 300.0

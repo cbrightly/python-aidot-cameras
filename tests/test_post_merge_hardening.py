@@ -14,11 +14,11 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 
-from aidot.camera.client import CameraMixin, CameraStatusData
-from aidot.client import _is_camera
-from aidot.device_client import DeviceClient, DeviceStatusData
-from aidot.discover import Discover
-from aidot.models.device_client_model import DeviceAttr
+from aidot_cameras.camera.client import CameraMixin, CameraStatusData
+from aidot_cameras.client import _is_camera
+from aidot_cameras.device_client import DeviceClient, DeviceStatusData
+from aidot_cameras.discover import Discover
+from aidot_cameras.models.device_client_model import DeviceAttr
 
 
 DEVICE = {

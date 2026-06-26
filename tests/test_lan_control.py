@@ -9,8 +9,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import pytest
 
-from aidot.aes_utils import aes_decrypt, aes_encrypt
-from aidot.camera.lan_control import (
+from aidot_cameras.aes_utils import aes_decrypt, aes_encrypt
+from aidot_cameras.camera.lan_control import (
     ATTR_KEYS,
     CameraLanClient,
     CameraLanError,

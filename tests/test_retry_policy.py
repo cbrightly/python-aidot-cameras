@@ -4,7 +4,7 @@ Returns (delay_seconds, bypass_open_gate) for the DTLS serve retry.  A clean
 'not_ready' decline (DC-only answer: encoder cold) gets a bounded fast burst
 that bypasses the 15s inter-attempt gate, then falls back to the gate.
 """
-from aidot.camera.client import _retry_policy
+from aidot_cameras.camera.client import _retry_policy
 
 
 def test_not_ready_uses_burst_then_falls_back():

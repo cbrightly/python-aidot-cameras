@@ -1,4 +1,4 @@
-"""Unit tests for the aidot-go2rtc CLI (aidot.__main__).
+"""Unit tests for the aidot-go2rtc CLI (aidot_cameras.__main__).
 
 No network: only the pure helpers and the argparse validation paths that
 fail before any asyncio.run()/cloud call are exercised. The streaming paths
@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import pytest
 
-from aidot.__main__ import _env_bool, _read_token_file, _write_token_file, main
+from aidot_cameras.__main__ import _env_bool, _read_token_file, _write_token_file, main
 
 
 def test_env_bool_tristate(monkeypatch):

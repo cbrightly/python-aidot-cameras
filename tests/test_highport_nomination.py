@@ -18,7 +18,7 @@ import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot.device_client import (
+from aidot_cameras.device_client import (
     _highport_nomination_decision,
     _install_highport_nomination_patch,
 )

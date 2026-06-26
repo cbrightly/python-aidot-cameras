@@ -147,8 +147,8 @@ try:
     from ..device_client import DeviceStatusData
 except ImportError as _exc:  # pragma: no cover - ordering contract violation
     raise ImportError(
-        "aidot.camera.client must be imported via aidot.device_client "
-        "(import aidot first); keep the camera import block in "
+        "aidot_cameras.camera.client must be imported via aidot_cameras.device_client "
+        "(import aidot_cameras first); keep the camera import block in "
         "device_client.py below the DeviceStatusData/DeviceInformation "
         "definitions"
     ) from _exc

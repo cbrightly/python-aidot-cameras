@@ -82,4 +82,4 @@ jobs:
           pip install -e ".[webrtc]" pytest pytest-cov
       # Coverage is informational (term-missing report); it does not gate the build.
       - name: Run unit tests
-        run: pytest tests/ -q --cov=aidot --cov-report=term-missing
+        run: pytest tests/ -q --cov=aidot_cameras --cov-report=term-missing

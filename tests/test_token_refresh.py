@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot.device_client import DeviceClient
+from aidot_cameras.device_client import DeviceClient
 
 
 def test_is_auth_error_detects_21026_and_login_again():

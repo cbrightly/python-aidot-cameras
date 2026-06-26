@@ -14,7 +14,7 @@ import time
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import aidot.camera.client as cc
+import aidot_cameras.camera.client as cc
 
 
 def _bare():

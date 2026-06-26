@@ -11,8 +11,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot.device_client import _terminal_webrtc_ack, _WEBRTC_TERMINAL_ACK_CODES
-from aidot.exceptions import AidotCameraBusy, AidotError
+from aidot_cameras.device_client import _terminal_webrtc_ack, _WEBRTC_TERMINAL_ACK_CODES
+from aidot_cameras.exceptions import AidotCameraBusy, AidotError
 
 
 def test_detects_minus_50002_max_streams():

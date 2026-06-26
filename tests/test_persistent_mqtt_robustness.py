@@ -15,9 +15,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import aidot.camera.protocol as proto
-import aidot.camera.client as cc
-from aidot.camera.protocol import _PersistentMqtt
+import aidot_cameras.camera.protocol as proto
+import aidot_cameras.camera.client as cc
+from aidot_cameras.camera.protocol import _PersistentMqtt
 
 _CAM = next(v for v in vars(cc).values()
             if isinstance(v, type) and "_get_persistent_mqtt" in v.__dict__)

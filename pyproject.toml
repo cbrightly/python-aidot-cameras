@@ -49,7 +49,7 @@ webrtc = [
 # Standalone bridge: stream an AiDot camera into go2rtc (or any RTSP/HTTP
 # consumer) without Home Assistant. Streaming needs the `webrtc` extra
 # (aiortc et al.); `--list` works with the core deps alone.
-aidot-go2rtc = "aidot.__main__:main"
+aidot-go2rtc = "aidot_cameras.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/cbrightly/python-aidot-cameras"
@@ -59,7 +59,7 @@ Homepage = "https://github.com/cbrightly/python-aidot-cameras"
 where = ["src"]
 
 [tool.setuptools.package-data]
-aidot = ["py.typed"]
+aidot_cameras = ["py.typed"]
 
 [tool.ruff]
 target-version = "py311"
@@ -93,4 +93,4 @@ ignore = [
 # Inherited ffmpeg streaming engine is process-based (Popen / subprocess poll /
 # SDP file write); a full non-blocking refactor needs on-device testing. The
 # engine is split across several camera/* modules, so this applies package-wide.
-"src/aidot/camera/*.py" = ["ASYNC110", "ASYNC220", "ASYNC221", "ASYNC230"]
+"src/aidot_cameras/camera/*.py" = ["ASYNC110", "ASYNC220", "ASYNC221", "ASYNC230"]

@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import aidot.device_client as dc_mod
+import aidot_cameras.device_client as dc_mod
 
 DeviceClient = dc_mod.DeviceClient
 

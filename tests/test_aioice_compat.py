@@ -20,7 +20,7 @@ import inspect
 
 from aioice import ice
 
-from aidot.camera.protocol import _install_highport_nomination_patch
+from aidot_cameras.camera.protocol import _install_highport_nomination_patch
 
 
 def test_connection_internals_used_by_highport_patch():

@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot.device_client import WebRTCSession, _make_talk_audio_track
+from aidot_cameras.device_client import WebRTCSession, _make_talk_audio_track
 
 
 class _MockDC:

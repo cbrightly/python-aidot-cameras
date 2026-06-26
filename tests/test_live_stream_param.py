@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
-import aidot.camera.client as cc
+import aidot_cameras.camera.client as cc
 
 # The camera mixin class that defines the builder (avoid hard-coding the name).
 _CAM = next(v for v in vars(cc).values()
