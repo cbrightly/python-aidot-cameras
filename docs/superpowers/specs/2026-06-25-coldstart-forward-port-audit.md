@@ -75,9 +75,53 @@ All three A000088 DTLS cameras were cold-opened with the worktree code.
   (gate bypassed) then falls back to `retry 15s [gate]` — locking in the serve-loop
   counter management as a regression test.
 
-## Follow-up (not in this branch)
+## Follow-up — Unit 1 host-only ICE A/B (RESOLVED 2026-06-26)
 
-Unit 1 (host-only ICE): live-measure cold-start connect time on v0.9.2 with
-`fast_connect` STUN-only vs host-only on a same-subnet camera. Only adopt
-host-only if it shows a real, repeatable win — and scope it so a
-not-perfectly-on-subnet `fast_connect` user keeps a STUN fallback.
+Live A/B on M3 Pro v2 (warm, on-subnet), measuring `setLocalDescription`
+ICE-gather time and total connect time across four local-pc ICE configs.
+The camera-facing webrtcReq `IceServerList` was held constant (STUN) in every
+arm — only the **local** `RTCPeerConnection`'s `iceServers` were narrowed, via
+`AIDOT_FAST_CONNECT_PC_ICE`. 3 rounds, 8s cooldown between opens (rapid reopen
+without cooldown causes camera-side recovery flakiness that is not ICE-related).
+
+| local-pc ICE | servers | gather | connect | connected |
+|--------------|---------|--------|---------|-----------|
+| STUN (current default) | 9 (Google + 8× Arnoo STUN) | ~5018ms | ~7.2s | 3/3 |
+| dedupe (unique URLs)   | 2 (Google + 1 Arnoo)      | ~5020ms | ~7.1s | 3/3 |
+| google (single STUN)   | 1                          | ~5020ms | ~7.1s | 3/3 |
+| host-only              | 0 (host candidates only)   | **~16ms** | **~2.2s** | 3/3 |
+
+**Findings.**
+
+1. **Where outbound STUN is unanswered, `fast_connect` eats a ~5s gather stall
+   on every open.** On this test network every DTLS open paid ~5s in
+   `setLocalDescription`. This is environment-specific, not universal (see
+   finding 2) — but it is exactly the on-subnet / STUN-blocked case host-only
+   targets.
+2. **The 5s is a fixed gather timeout, not server count or a slow server.**
+   Deduping to 2 servers and even a single fast Google STUN both still take
+   ~5020ms — refuting the "duplicate/slow-server" hypothesis. Confirmed by
+   reading the installed aioice: `Connection._gather_candidates` runs the srflx
+   query under `asyncio.wait(tasks, timeout=5)` (aioice/ice.py:1041). It returns
+   **early** when the STUN binding response arrives, but waits the **full 5s**
+   when it does not. So on a network where STUN answers fast, gather is fast and
+   there is no stall (and host-only saves little); the ~5020ms here means the
+   srflx query is unanswered/blocked, after which aioice completes gathering with
+   host candidates anyway.
+3. **srflx contributes nothing to the connection on-subnet.** Connect time is
+   identical (~2s of real work via **host** candidates) across all srflx arms;
+   the 5s is pure dead weight here. Only `host-only` removes it (~5s faster).
+4. **No reliability penalty on-subnet with cooldown.** All arms connected 3/3.
+   The earlier 1/4 host-only result was a rapid-reopen (no-cooldown) artifact,
+   not a host-only defect.
+
+**Decision.** Ship host-only as an **opt-in, default-off** flag
+(`AIDOT_FAST_CONNECT_PC_ICE=host`, legacy alias `AIDOT_FAST_CONNECT_HOST_ONLY=1`),
+default stays STUN-only. Rationale: the ~5s win is real and repeatable on-subnet,
+but host-only drops srflx/relay fallback, so an off-subnet / strict-NAT
+`fast_connect` user MUST keep STUN+TURN. Opt-in/default-off respects the
+maintainer's "keep STUN (cheap, no allocate)" note while giving on-subnet home
+users (the common AiDot case) the win. The `dedupe`/`google` modes are NOT
+shipped — they showed no benefit. The `_pc_ice_servers` / `_ice_servers`
+separation (local-pc narrowing without touching the camera IceServerList) is the
+load-bearing fix and is covered by a regression test.
