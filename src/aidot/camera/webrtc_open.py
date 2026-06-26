@@ -117,9 +117,10 @@ class _WebRTCOpenMixin:
         Protocol (confirmed from live MQTT capture, 2025-03 / 2026-03):
           1. Subscribe ``iot/v1/c/{userId}/#`` on the authorised MQTT clientId
           2. Publish to ``iot/v1/s/{userId}/IPC/getIceConfigReq`` (server-side wake)
-             → wait 2 s for broker session init
+             → wait up to 12 s for the camera to signal awake (``camera_ready_ev``)
           3. Publish to ``iot/v1/s/{userId}/IPC/livePlayReq`` (camera-side arm)
-             → wait 0.5 s for camera WebRTC subsystem to arm
+             → optionally wait up to 0.5 s for the livePlayReq echo
+               (skipped by default under dtls_fast_liveplay)
           4. Create peer connection (aiortc or SDES SDP), add recvonly tracks
           5. Generate SDP offer → publish to ``iot/v1/s/{userId}/IPC/webrtcReq``
           6. Receive ``IPC/webrtcResp`` on ``iot/v1/c/{userId}/#`` → set remote description

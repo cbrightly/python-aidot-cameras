@@ -238,7 +238,7 @@ def _compress_sdp_for_camera(sdp: str) -> str:
     cameras to drop the MQTT session immediately on receipt - the embedded
     MQTT buffer overflows.
 
-    Keeps: v=, s=, m=, c=, a=group, a=msid-semantic, a=mid, direction
+    Keeps: v=, o=, s=, t=, m=, c=, a=group, a=msid-semantic, a=mid, direction
     (sendrecv/recvonly/sendonly), a=ice-ufrag, a=ice-pwd, a=ice-options,
     a=fingerprint, a=setup, a=crypto, a=ssrc cname (first per section),
     a=candidate (UDP only), a=rtpmap (PCMU/PCMA/AAC/opus only on audio,

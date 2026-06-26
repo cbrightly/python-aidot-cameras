@@ -200,7 +200,7 @@ class TutkStreamSession:
         #    *pnActualFrameSize, *pnExpectedFrameSize,
         #    pFrameInfo, nFrameInfoBufSize,
         #    *pnActualFrameInfoSize, *pnFrameIndex)
-        BUF_SIZE     = 131072   # 128 KB - matches TutkManager.VIDEO_BUF_SIZE (100000)
+        BUF_SIZE     = 131072   # 128 KiB - exceeds TutkManager.VIDEO_BUF_SIZE (100000) so a full frame fits
         frame_buf    = ctypes.create_string_buffer(BUF_SIZE)
         info_buf     = ctypes.create_string_buffer(ctypes.sizeof(FrameInfo))
         actual_sz    = ctypes.c_int(0)

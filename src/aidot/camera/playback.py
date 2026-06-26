@@ -427,7 +427,8 @@ class LiveStreamSession:
                         _LOGGER.warning("LiveStreamSession: heartbeat error: %s", exc)
                         break
 
-                # Read next frame with a deadline matching the heartbeat interval.
+                # Read next frame with a deadline of two heartbeat intervals
+                # (tolerates one missed heartbeat before declaring a timeout).
                 try:
                     hdr, payload = await asyncio.wait_for(
                         _read_frame(self._reader),

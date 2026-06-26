@@ -33,6 +33,8 @@ STILL UNVERIFIED (manual - need official app / physical access):
   other; if it only uses cloud, they coexist.) Verify before wide rollout.
 
 ## Phase 1 - Library: local control transport
+> Status: partially landed — `CameraLanClient` exists (`src/aidot/camera/lan_control.py`,
+> shipped in 0.7.33). Treat the items below as the original plan, not all unstarted.
 - `CameraLanClient`: **short-lived sessions only** (Phase 0: single-session channel,
   no push). Per control op (or burst): unicast-discover → connect `:10000` → AES login
   → get/setDevAttr → idle-close after ~2-5s. Serialize: one in-flight session/camera,
