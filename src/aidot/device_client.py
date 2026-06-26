@@ -6567,17 +6567,34 @@ class DeviceClient(object):
             f"  relay×{len(_turn_entries)}: {_turn_entries}"
         )
         if _fast_connect:
-            # LAN-direct: host candidates only.  Stripping TURN alone still left
-            # aiortc's setLocalDescription stalling ~5s on the Google STUN binding
-            # (measured 2026-06-25).  Dropping STUN too lets the offer go out
-            # immediately; the camera's host candidate wins on-subnet.
-            _ice_servers = _select_ice_servers(_ice_servers, _fast_connect)
+            # LAN-direct: gather host candidates ONLY locally so aiortc's
+            # setLocalDescription doesn't stall ~5s on the Google STUN binding
+            # (measured 2026-06-25).  CRUCIAL: keep STUN (TURN stripped) in the
+            # camera-facing IceServerList built below from _ice_servers — an empty
+            # IceServerList makes the camera never answer webrtcReq.
+            _stun_only = []
+            for _srv in _ice_servers:
+                _su = [
+                    u for u in (_srv.urls if isinstance(_srv.urls, list) else [_srv.urls])
+                    if not str(u).startswith(("turn:", "turns:"))
+                ]
+                if _su:
+                    _stun_only.append(
+                        RTCIceServer(urls=_su, username=_srv.username,
+                                     credential=_srv.credential)
+                    )
+            _ice_servers = _stun_only or [
+                RTCIceServer(urls=["stun:stun.l.google.com:19302"])
+            ]
+            _pc_ice_servers = _select_ice_servers(_ice_servers, _fast_connect)
             _status(
-                "AIDOT_FAST_CONNECT: host-only ICE -"
-                f" {len(_ice_servers)} ICE server(s), no STUN/TURN gather stall"
+                "AIDOT_FAST_CONNECT: host-only local gather"
+                f" (camera IceServerList STUN-only, {len(_ice_servers)} server(s))"
             )
+        else:
+            _pc_ice_servers = _ice_servers
         pc = RTCPeerConnection(
-            configuration=RTCConfiguration(iceServers=_ice_servers)
+            configuration=RTCConfiguration(iceServers=_pc_ice_servers)
         )
         # Audio: sendrecv WITHOUT a real audio sender.  Empirical findings
         # from 2026-04-26 testing (commits aa341a1b, aeaea893):
