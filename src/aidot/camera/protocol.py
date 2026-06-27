@@ -142,13 +142,9 @@ def _install_highport_nomination_patch() -> bool:
     an incompatible aioice). FAIL-SAFE: any failure to install degrades to the
     unpatched upstream path - it never breaks the WebRTC connect.
 
-    Disable with ``AIDOT_DISABLE_HIGHPORT_FIX=1`` (used to measure the baseline).
     Safe to call repeatedly and process-wide: the override self-gates on the
     consecutive-pair signature, so non-A000088 connects are untouched.
     """
-    import os
-    if os.environ.get("AIDOT_DISABLE_HIGHPORT_FIX"):
-        return False
     try:
         from aioice import ice as _aioice
         if getattr(_aioice.Connection, "_aidot_highport_patched", False):

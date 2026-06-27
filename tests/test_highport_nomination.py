@@ -98,7 +98,6 @@ def _use_candidate(ice, conn, pair, nominate):
 
 
 def test_install_idempotent_and_active():
-    os.environ.pop("AIDOT_DISABLE_HIGHPORT_FIX", None)
     assert _install_highport_nomination_patch() is True
     from aioice import ice
     assert getattr(ice.Connection, "_aidot_highport_patched", False) is True
@@ -108,7 +107,6 @@ def test_install_idempotent_and_active():
 def test_lite_remote_forces_use_candidate_on_highest_only():
     # The REAL A000088 case: ICE-lite -> aioice passes nominate=False. We must
     # FORCE USE-CANDIDATE onto the highest port and keep it off the lower.
-    os.environ.pop("AIDOT_DISABLE_HIGHPORT_FIX", None)
     _install_highport_nomination_patch()
     from aioice import ice
     cl = [_pair("10.0.0.5", 60500), _pair("10.0.0.5", 60501)]
@@ -119,7 +117,6 @@ def test_lite_remote_forces_use_candidate_on_highest_only():
 
 def test_aggressive_remote_suppresses_lower_keeps_highest():
     # Non-lite case: aioice passes nominate=True on both -> suppress the lower.
-    os.environ.pop("AIDOT_DISABLE_HIGHPORT_FIX", None)
     _install_highport_nomination_patch()
     from aioice import ice
     cl = [_pair("10.0.0.5", 60500), _pair("10.0.0.5", 60501)]
@@ -130,7 +127,6 @@ def test_aggressive_remote_suppresses_lower_keeps_highest():
 
 def test_single_candidate_passthrough():
     # <2 ports -> never override aioice's own decision (both values).
-    os.environ.pop("AIDOT_DISABLE_HIGHPORT_FIX", None)
     _install_highport_nomination_patch()
     from aioice import ice
     cl = [_pair("10.0.0.5", 60500)]
@@ -142,7 +138,6 @@ def test_single_candidate_passthrough():
 def test_noop_when_controlled():
     # If we are NOT controlling, build_request never sets USE-CANDIDATE; confirm
     # our wrapper does not change that.
-    os.environ.pop("AIDOT_DISABLE_HIGHPORT_FIX", None)
     _install_highport_nomination_patch()
     from aioice import ice
     cl = [_pair("10.0.0.5", 60500), _pair("10.0.0.5", 60501)]
@@ -154,7 +149,6 @@ def test_untagged_connection_is_a_strict_noop():
     # SCOPING GUARANTEE: a connection NOT tagged `_aidot_highport` (every SDES
     # camera and non-camera device) keeps aioice's native nomination untouched -
     # the override never fires on it, even with a forceable consecutive pair.
-    os.environ.pop("AIDOT_DISABLE_HIGHPORT_FIX", None)
     _install_highport_nomination_patch()
     from aioice import ice
     cl = [_pair("10.0.0.5", 60500), _pair("10.0.0.5", 60501)]
@@ -162,14 +156,6 @@ def test_untagged_connection_is_a_strict_noop():
     # Untagged -> USE-CANDIDATE follows aioice's own `nominate`, not our decision.
     assert _use_candidate(ice, conn, cl[0], nominate=True) is True   # not suppressed
     assert _use_candidate(ice, conn, cl[1], nominate=False) is False  # not forced
-
-
-def test_disabled_via_env_returns_false():
-    os.environ["AIDOT_DISABLE_HIGHPORT_FIX"] = "1"
-    try:
-        assert _install_highport_nomination_patch() is False
-    finally:
-        os.environ.pop("AIDOT_DISABLE_HIGHPORT_FIX", None)
 
 
 if __name__ == "__main__":
