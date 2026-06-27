@@ -273,8 +273,8 @@ class _WebRTCOpenMixin:
             # live DTLS socket). aioice's aggressive nomination of BOTH ports made
             # the camera latch the lower one and withhold DTLS - the dominant ~25%
             # failure. A/B on M3 Pro v2: high-port-only ~87% vs ~25% baseline vs
-            # ~12% low-port. Self-gating no-op for non-A000088 peers; disable via
-            # AIDOT_DISABLE_HIGHPORT_FIX=1. See _install_highport_nomination_patch.
+            # ~12% low-port. Self-gating no-op for non-A000088 peers.
+            # See _install_highport_nomination_patch.
             _install_highport_nomination_patch()
 
             # Allow DTLS 1.0 client hellos.  L2_162 (A001513) and likely other

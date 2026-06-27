@@ -116,10 +116,8 @@ socket). The library forces `USE-CANDIDATE` onto the highest remote port, which
 lifts the per-attempt connect rate from ~25% to ~75-87%. The fix is **scoped to
 DTLS-camera connections only** - SDES cameras and non-camera devices are a strict
 no-op. Combined with retries (`--webrtc-retries`, default 5, jittered backoff)
-the effective connect rate is high.
-
-- **Escape hatch:** set `AIDOT_DISABLE_HIGHPORT_FIX=1` to disable the nomination
-  override and use upstream aioice behavior (used to measure the baseline).
+the effective connect rate is high. The fix is unconditional (it self-gates to
+A000088 DTLS connections, so it is a strict no-op everywhere else).
 
 If a camera is already serving its maximum number of viewers it returns a
 terminal ack (`-50002` / `-50015`); the library raises `AidotCameraBusy` and
@@ -221,3 +219,30 @@ the bandwidth-heavy media therefore stays on the LAN.
   (MQTT + STUN/TURN). Only the *media* is LAN-direct; the *handshake* is not.
 - **Connect is per-attempt probabilistic** for DTLS cameras; rely on retries (the
   high-port nomination fix substantially raises the per-attempt rate).
+
+## Advanced tuning environment variables
+
+These finer-grained knobs are read by the camera client but rarely need changing
+— the defaults are tuned to work out of the box. The headline streaming knobs
+(concurrency caps, fast-connect, persistent MQTT, serve relay, etc.) are in the
+[README](../README.md#camera-streaming--tuning); the ones below are the deeper
+internals.
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `AIDOT_STREAM_IDLE_S` | Seconds of stream idle before an idle release. | `120` |
+| `AIDOT_SDES_IDLE_RELEASE` | Set to `0` to disable idle release for SDES streams. | `1` (enabled) |
+| `AIDOT_ICE_DISCONNECT_S` | ICE-disconnect debounce, in seconds, before tearing down. | `8` |
+| `AIDOT_DTLS_RETRY_GATE_S` | Minimum spacing, in seconds, between DTLS open retries. | `15` |
+| `AIDOT_BUSY_RETRY_S` | Delay, in seconds, before retrying when a camera reports busy. | `45` |
+| `AIDOT_GOP_PLI_S` | Interval, in seconds, between PLI (keyframe) requests. | `2.0` |
+| `AIDOT_STALL_PLI_S` | If muxed frames stall for this many seconds (a dropped GOP on a jittery link), request an IDR keyframe immediately instead of waiting out the full `AIDOT_GOP_PLI_S` cadence. Mains DTLS cameras only; `0` disables. | `1.0` |
+| `AIDOT_SDES_PLI_GAPS` | Comma-separated second offsets for the early PLI burst on SDES cameras, to pull the first keyframe in faster on cold start. | `0,1.5,2,3` |
+| `AIDOT_SDES_SERVE_AUDIO` | Serve audio on SDES cameras (a silence-base mix keeps the audio encoder fed so battery-camera audio streams smoothly). Set to `0`/`false`/`no`/`off` to disable. | on |
+| `AIDOT_SDES_AUDIO_GAIN_DB` | Gain (dB) applied when SDES audio is served. | `-8` |
+| `AIDOT_AUDIO_TARGET_DBFS` | Target loudness (dBFS) for two-way audio normalization. | `-15` |
+| `AIDOT_AUDIO_MAXGAIN_DB` | Maximum gain (dB) applied by the audio normalizer. | `30` |
+| `AIDOT_AUDIO_MINGAIN_DB` | Minimum gain (dB) applied by the audio normalizer. | `-12` |
+| `AIDOT_AUDIO_GATE_DBFS` | Noise-gate threshold (dBFS) for two-way audio. | `-45` |
+| `AIDOT_FAST_CONNECT_HOST_ONLY` | Within `AIDOT_FAST_CONNECT`, narrows only the local `RTCPeerConnection` to host candidates (skips the ~5 s srflx gather stall). **On-subnet only** — drops srflx/relay fallback. Opt-in. | unset (off) |
+| `AIDOT_SPROP_DIR` | Directory where captured SPS/PPS (sprop) parameter sets are cached. Set to a writable path if the default location is read-only. | `<package dir>` |

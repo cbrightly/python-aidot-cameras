@@ -4,6 +4,24 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing patch versions published to PyPI via GitHub Releases.
 
+## [0.9.3]
+
+### Changed
+- **The high-port ICE nomination fix is now unconditional.** The A000088/DTLS
+  connect path forces USE-CANDIDATE onto the highest remote port (measured
+  ~87% connect success versus ~10% without). This was previously gated behind a
+  `AIDOT_DISABLE_HIGHPORT_FIX` debug escape hatch; the gate and its environment
+  variable have been removed, since disabling the fix only ever degraded connect
+  reliability. The override still self-scopes to tagged DTLS connections, so SDES
+  cameras and non-camera devices are untouched.
+
+### Documentation
+- Decluttered the README environment-variable table down to the knobs most
+  worth tuning. The finer-grained internal knobs (audio normalization,
+  keyframe/PLI cadence, retry timing, SDES audio, idle release, the sprop cache
+  path) now live under a dedicated "Advanced tuning environment variables"
+  section in [`docs/CAMERAS.md`](docs/CAMERAS.md).
+
 ## [0.9.2]
 
 ### Fixed

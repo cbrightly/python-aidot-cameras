@@ -86,19 +86,9 @@ class _SdesOpenMixin:
         import base64
         import subprocess
 
-        # _open_sdes_stream runs in its own scope, so recompute the fast-connect
-        # flag here (same precedence as the parent open path: explicit per-camera
-        # option set via start_keepalive, else the AIDOT_FAST_CONNECT env var).
-        # Without this the SDES path NameErrors on every open (regression fixed
-        # 2026-06-07: the SDES TURN-skip gates reference _fast_connect).
-        _fast_connect = getattr(self, "_fast_connect_opt", None)
-        if _fast_connect is None:
-            _fast_connect = os.environ.get("AIDOT_FAST_CONNECT", "").strip().lower() in (
-                "1", "true", "yes", "on",
-            )
         # SDES path: fast_connect's wait-skips / TURN-strip destabilise the SCTP
         # handshake (session churns ~every 60-90s -> live view drops to snapshot),
-        # so always use the full, stable handshake here.
+        # so the SDES path always uses the full, stable handshake.
         _fast_connect = False
 
         user_id = user_id or str(self.user_id)
