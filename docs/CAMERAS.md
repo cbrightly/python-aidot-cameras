@@ -223,10 +223,28 @@ the bandwidth-heavy media therefore stays on the LAN.
 ## Advanced tuning environment variables
 
 These finer-grained knobs are read by the camera client but rarely need changing
-— the defaults are tuned to work out of the box. The headline streaming knobs
-(concurrency caps, fast-connect, persistent MQTT, serve relay, etc.) are in the
-[README](../README.md#camera-streaming--tuning); the ones below are the deeper
-internals.
+— the defaults are tuned to work out of the box. The headline user-facing knobs
+(concurrency caps, fast-connect, and battery-camera live-stream provisioning) are
+in the [README](../README.md#camera-streaming--tuning); everything below — the
+on-by-default connection optimizations and the deeper media/timing internals — is
+documented here.
+
+### Signaling & connection optimizations
+
+These shape how a stream connects. The first four are **on by default** (they
+match the official app and cut cold-start latency); the last two are opt-in
+experiments. Each is explained in depth in the sections above.
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `AIDOT_SDES_FAST_LIVEPLAY` | Skip the `livePlayResp` wait on eligible SDES cameras and go straight to webrtcReq/ICE (~4.5 s faster cold start), matching the official app. Role-reversal models (A001064 PTZ) are always excluded. Set to `0`/`false`/`no`/`off` to disable. | on |
+| `AIDOT_DTLS_FAST_LIVEPLAY` | The DTLS (A000088) analogue: skip the `livePlayReq`-echo and `livePlayResp` waits while keeping the full ICE/TURN/DTLS handshake, so remote/relay viewing is unaffected. Set to `0`/`false`/`no`/`off` to disable. | on |
+| `AIDOT_PERSISTENT_MQTT` | Reuse one account-level persistent MQTT connection for commands, attribute fetches, and stream-open signaling (matching the official app) instead of connecting per operation. Set to `0`/`false`/`no`/`off` to disable. | on |
+| `AIDOT_SERVE_RELAY` | Hold the public stream port via an internal relay that proxies to ffmpeg, so the first (cold) view connects instead of failing while ffmpeg can't pre-bind the port. Set to `0` to serve ffmpeg directly. | `1` (enabled) |
+| `AIDOT_SDES_ADAPTIVE` | Adaptive fast-with-fallback for the SDES keepalive loop: try the fast path first, then fall back to the full relay path if a fast attempt delivers no media (a per-device cache skips the fast attempt on later views once it has failed). | unset (off) |
+| `AIDOT_SDES_SKIP_TURN_PREALLOC` | Skip the SDES TURN relay pre-allocation (~2-3 s of cold-start latency) so signaling goes straight out with the host candidate. Faster on a LAN, at the cost of no relay fallback for a camera on a different segment / behind strict NAT. | unset (off) |
+
+### Media, audio & timing internals
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
