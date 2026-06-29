@@ -12,8 +12,11 @@ Priority order:
 """
 
 import json
+import logging
 import os
 import stat
+
+_LOGGER = logging.getLogger(__name__)
 
 def _xdg_config_home() -> str:
     """Return the XDG base config dir, honoring XDG_CONFIG_HOME (per the spec)."""
@@ -26,7 +29,7 @@ def _xdg_config_home() -> str:
 _CONFIG_DIR = os.path.join(_xdg_config_home(), "aidot")
 _DEFAULT_CREDS_FILE = os.path.join(_CONFIG_DIR, "credentials.json")
 _ENC_FILE = os.path.join(_CONFIG_DIR, "credentials.enc")
-_KEY_FILE = os.path.join(_CONFIG_DIR, ".key")
+_KEY_FILE = os.environ.get("AIDOT_CRED_KEY_FILE") or os.path.join(_CONFIG_DIR, ".key")
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -146,6 +149,18 @@ def _save_encrypted(
     payload = json.dumps({"username": username, "password": password,
                           "country": country}).encode()
     _write_secret(enc_path, Fernet(key).encrypt(payload))
+
+    # Co-locating the key with the ciphertext means the encryption adds little
+    # over file permissions: anyone who can read one can read the other.  Warn
+    # and point at AIDOT_CRED_KEY_FILE to relocate the key off this directory.
+    if os.path.dirname(os.path.abspath(key_path)) == os.path.dirname(os.path.abspath(enc_path)):
+        _LOGGER.warning(
+            "credentials: key %s sits in the same directory as ciphertext %s, "
+            "so encryption adds little over file permissions; set "
+            "AIDOT_CRED_KEY_FILE to a path outside this directory (ideally a "
+            "separate secret store) to harden at-rest protection.",
+            key_path, enc_path,
+        )
 
 
 def _load_plain(path: str) -> dict:
