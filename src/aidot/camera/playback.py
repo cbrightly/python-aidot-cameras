@@ -9,6 +9,7 @@ them and are re-exported from client.py.
 import asyncio
 import json
 import logging
+import os
 import random
 import ssl
 import struct
@@ -26,6 +27,35 @@ from .constants import (
 from .models import VideoFrame
 
 _LOGGER = logging.getLogger(__name__)
+
+_PLAYBACK_TLS_VERIFY_ENV = "AIDOT_PLAYBACK_TLS_VERIFY"
+
+
+def _playback_ssl_context() -> ssl.SSLContext:
+    """SSL context for the playback/live TCP stream.
+
+    The camera presents a self-signed certificate, so the historical behavior is
+    to skip verification.  Set AIDOT_PLAYBACK_TLS_VERIFY=1 to opt into full
+    certificate + hostname verification (requires a trust anchor the camera's
+    cert chains to); otherwise we keep the permissive default but warn, since an
+    unverified stream is exposed to an on-path MITM that can read or tamper with
+    the decrypted video.
+    """
+    ctx = ssl.create_default_context()
+    if os.environ.get(_PLAYBACK_TLS_VERIFY_ENV):
+        ctx.check_hostname = True
+        ctx.verify_mode = ssl.CERT_REQUIRED
+    else:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        _LOGGER.warning(
+            "playback: TLS certificate verification is DISABLED; the live/playback "
+            "stream is not authenticated and is exposed to on-path tampering. Set "
+            "%s=1 to enable verification once a trust anchor for the camera's "
+            "certificate is available.",
+            _PLAYBACK_TLS_VERIFY_ENV,
+        )
+    return ctx
 
 
 def _pack_frame(cmd: int, payload: bytes, sequence: Optional[int] = None) -> bytes:
@@ -328,9 +358,7 @@ class LiveStreamSession:
 
         try:
             if self._use_tls:
-                ssl_ctx = ssl.create_default_context()
-                ssl_ctx.check_hostname = False
-                ssl_ctx.verify_mode    = ssl.CERT_NONE
+                ssl_ctx = _playback_ssl_context()
             else:
                 ssl_ctx = None
 

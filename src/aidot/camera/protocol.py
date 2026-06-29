@@ -8,6 +8,7 @@ imports client.py -- the import edge is one-way (client -> protocol).
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -610,6 +611,55 @@ def _sdes_serve_port(url: "Optional[str]") -> "Optional[int]":
         return None
 
 
+_ALLOW_LAN_SERVE_ENV = "AIDOT_ALLOW_LAN_SERVE"
+
+
+def _serve_host(url: "Optional[str]") -> "Optional[str]":
+    """Extract the host from a serve URL (``http://0.0.0.0:PORT/x.ts`` -> ``0.0.0.0``).
+
+    Returns None if missing/unparseable.  Pure (unit-testable)."""
+    if not url:
+        return None
+    rest = url.split("://", 1)[1] if "://" in url else url
+    hostport = rest.split("/", 1)[0]
+    if not hostport:
+        return None
+    if hostport.startswith("["):                       # [ipv6]:port
+        return hostport[1:].split("]", 1)[0]
+    return hostport.rsplit(":", 1)[0] if ":" in hostport else hostport
+
+
+def _is_loopback_serve_host(host: "Optional[str]") -> bool:
+    """True if host is loopback / unset (nothing exposed beyond this machine)."""
+    if not host:
+        return True
+    h = host.strip("[]")
+    if h == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def _warn_lan_serve(host: "Optional[str]", *, context: str) -> None:
+    """Warn when DECRYPTED media is about to be served on a non-loopback bind.
+
+    Decrypted camera media on a non-loopback host is reachable, with NO
+    authentication, by anyone on that network.  Silence with
+    ``AIDOT_ALLOW_LAN_SERVE=1`` once the exposure is understood."""
+    if _is_loopback_serve_host(host):
+        return
+    if os.environ.get(_ALLOW_LAN_SERVE_ENV, "").strip().lower() in ("1", "true", "yes", "on"):
+        return
+    _LOGGER.warning(
+        "%s: serving DECRYPTED camera media on host %r with NO authentication - "
+        "anyone who can reach that address can view the stream. Bind to "
+        "127.0.0.1/localhost, or set %s=1 to acknowledge and silence this.",
+        context, host, _ALLOW_LAN_SERVE_ENV,
+    )
+
+
 class _ServeRelay:
     """Keep a public TCP serve port continuously connectable while the real
     server (ffmpeg ``-listen 1``) comes and goes on an internal port.
@@ -652,6 +702,7 @@ class _ServeRelay:
         """Bind the public port and begin accepting.  Raises OSError on bind."""
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        _warn_lan_serve(self._host, context="serve-relay")
         s.bind((self._host, self._public_port))
         s.listen(8)
         s.settimeout(0.5)

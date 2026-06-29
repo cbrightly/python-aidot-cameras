@@ -2334,17 +2334,43 @@ class _WebRTCOpenMixin:
                     certificate_digest as _rr_cert_fp,
                 )
 
+                # Optional certificate pinning. The camera echoes OUR fingerprint
+                # in its SDP, so signaling carries no trustworthy value to verify
+                # the camera against — by default we accept whatever cert it
+                # presents (needed for the role-reversal handshake to complete).
+                # AIDOT_DTLS_PINNED_FP lets an operator pin the camera's real
+                # sha-256 fingerprint (colon-separated hex, as aiortc formats it);
+                # when set, a mismatching cert fails the handshake instead.
+                _pinned_fp = (os.environ.get("AIDOT_DTLS_PINNED_FP") or "").strip()
+                if not _pinned_fp:
+                    _LOGGER.warning(
+                        "camera %s: DTLS peer certificate is NOT authenticated "
+                        "(signaling echoes our own fingerprint); the media channel "
+                        "is exposed to an on-path MITM. Set AIDOT_DTLS_PINNED_FP to "
+                        "the camera's sha-256 fingerprint to enforce verification.",
+                        getattr(self, "device_id", "?"),
+                    )
+
                 def _accept_camera_cert(self, remote_params):
-                    """Accept camera's actual DTLS cert (echo-reversal fingerprint fix)."""
+                    """Verify (if pinned) or accept the camera's actual DTLS cert."""
                     try:
                         _cam_cert = self._ssl.get_peer_certificate(
                             as_cryptography=True
                         )
                         if _cam_cert is not None:
                             _real_fp = _rr_cert_fp(_cam_cert, "sha-256")
+                            if _pinned_fp:
+                                if _real_fp.upper() != _pinned_fp.upper():
+                                    raise ValueError(
+                                        "DTLS fingerprint mismatch: camera "
+                                        f"presented {_real_fp}, pinned "
+                                        f"{_pinned_fp}"
+                                    )
                             remote_params.fingerprints[:] = [
                                 _RRFp(algorithm="sha-256", value=_real_fp)
                             ]
+                    except ValueError:
+                        raise  # pinned-fingerprint mismatch: fail the handshake
                     except Exception:
                         pass  # cert retrieval failed; skip verification
 
@@ -2819,6 +2845,21 @@ class _WebRTCOpenMixin:
                         certificate_digest as _np_cert_fp,
                     )
 
+                    # See AIDOT_DTLS_PINNED_FP note above: optional pinning,
+                    # otherwise accept-any with a one-time warning.
+                    _np_pinned_fp = (
+                        os.environ.get("AIDOT_DTLS_PINNED_FP") or ""
+                    ).strip()
+                    if not _np_pinned_fp:
+                        _LOGGER.warning(
+                            "camera %s: DTLS peer certificate is NOT authenticated "
+                            "(signaling echoes our own fingerprint); the media "
+                            "channel is exposed to an on-path MITM. Set "
+                            "AIDOT_DTLS_PINNED_FP to the camera's sha-256 "
+                            "fingerprint to enforce verification.",
+                            getattr(self, "device_id", "?"),
+                        )
+
                     def _np_accept_cam_cert(self, remote_params):
                         try:
                             _cam_cert = self._ssl.get_peer_certificate(
@@ -2826,9 +2867,18 @@ class _WebRTCOpenMixin:
                             )
                             if _cam_cert is not None:
                                 _real_fp = _np_cert_fp(_cam_cert, "sha-256")
+                                if _np_pinned_fp:
+                                    if _real_fp.upper() != _np_pinned_fp.upper():
+                                        raise ValueError(
+                                            "DTLS fingerprint mismatch: camera "
+                                            f"presented {_real_fp}, pinned "
+                                            f"{_np_pinned_fp}"
+                                        )
                                 remote_params.fingerprints[:] = [
                                     _NPFp(algorithm="sha-256", value=_real_fp)
                                 ]
+                        except ValueError:
+                            raise  # pinned-fingerprint mismatch: fail handshake
                         except Exception:
                             _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_np_accept_cam_cert', exc_info=True)
 
