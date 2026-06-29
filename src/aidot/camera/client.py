@@ -56,6 +56,8 @@ from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixi
     _save_sprop,
     _inject_sprop,
     _sdes_serve_port,
+    _serve_host,
+    _warn_lan_serve,
     _ServeRelay,
     _rewrite_serve_port,
     _grab_free_port,
@@ -253,6 +255,9 @@ def _build_sdes_serve_cmd(
     ``volume`` is the stateless hot-mic trim (dynamic normalizers regressed the
     pipe in testing).  File recording (snapshots/diagnostics) is always -c copy."""
     time_args = ["-t", str(int(max_seconds))] if max_seconds else []
+
+    if rtsp_push_url:
+        _warn_lan_serve(_serve_host(rtsp_push_url), context="sdes-serve")
 
     if rtsp_push_url and rtsp_push_url.startswith("http"):
         if sdes_audio:

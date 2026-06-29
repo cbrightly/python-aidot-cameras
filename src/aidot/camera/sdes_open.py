@@ -1186,7 +1186,7 @@ class _SdesOpenMixin:
         # binding requests from the camera.  Sending a minimal STUN binding-
         # request packet to an external host forces the router to create a NAT
         # entry so the camera's probes are forwarded to our sockets.
-        _hp_host = "3.230.182.123"   # fallback: Arnoo TURN server
+        _hp_host = None
         _hp_port = 3478
         try:
             if _sdes_turn_entries:
@@ -1204,26 +1204,45 @@ class _SdesOpenMixin:
                     _hp_port = int(_m_hp.group(2) or 3478)
         except Exception:
             _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_open_sdes_stream', exc_info=True)
+        # When the cloud supplied no TURN entry, fall back to the vendor's TURN
+        # server only to open a NAT mapping.  This sends a STUN packet to a
+        # hardcoded third-party host; AIDOT_SDES_HOLEPUNCH_HOST overrides it
+        # (set it empty to disable the hardcoded fallback entirely).
+        if not _hp_host:
+            _hp_env = os.environ.get("AIDOT_SDES_HOLEPUNCH_HOST")
+            if _hp_env is not None:
+                _hp_host = _hp_env.strip() or None
+            else:
+                _hp_host = "3.230.182.123"   # fallback: Arnoo TURN server
+                _LOGGER.warning(
+                    "camera %s: no TURN entry from cloud; NAT hole-punch will send "
+                    "a STUN packet to the hardcoded vendor host %s. Set "
+                    "AIDOT_SDES_HOLEPUNCH_HOST to override (empty to disable).",
+                    getattr(self, "device_id", "?"), _hp_host,
+                )
         _hp_stun = b'\x00\x01\x00\x00\x21\x12\xa4\x42' + os.urandom(12)
-        for _hp_sock in (_audio_sock, _video_sock):
-            try:
-                _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port))
-            except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_sdes_ice_cand', exc_info=True)
-        # Punch to TURN allocation port (5349) as well so port-restricted NAT
-        # allows traffic from either TURN port (3478 STUN or 5349 allocation).
         _hp_port2 = 5349
-        if _hp_port != _hp_port2:
+        if not _hp_host:
+            _status("NAT hole-punch: skipped (no TURN host)")
+        else:
             for _hp_sock in (_audio_sock, _video_sock):
                 try:
-                    _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port2))
+                    _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port))
                 except Exception:
                     _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_sdes_ice_cand', exc_info=True)
-        _status(
-            f"NAT hole-punch: sent from audio={audio_port}"
-            f" video={video_port} → {_hp_host}:{_hp_port}"
-            + (f" and :{_hp_port2}" if _hp_port != _hp_port2 else "")
-        )
+            # Punch to TURN allocation port (5349) as well so port-restricted NAT
+            # allows traffic from either TURN port (3478 STUN or 5349 allocation).
+            if _hp_port != _hp_port2:
+                for _hp_sock in (_audio_sock, _video_sock):
+                    try:
+                        _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port2))
+                    except Exception:
+                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_sdes_ice_cand', exc_info=True)
+            _status(
+                f"NAT hole-punch: sent from audio={audio_port}"
+                f" video={video_port} → {_hp_host}:{_hp_port}"
+                + (f" and :{_hp_port2}" if _hp_port != _hp_port2 else "")
+            )
 
         def _is_self_peer_ip(_ip: "Optional[str]") -> bool:
             if not _ip:

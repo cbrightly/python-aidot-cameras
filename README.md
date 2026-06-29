@@ -120,3 +120,18 @@ audio, idle release, the sprop cache path) are documented in
 | `AIDOT_PERSISTENT_MQTT` | Reuse ONE account-level persistent MQTT connection for commands, attribute fetches, and stream-open signaling (matching the official app) instead of connecting per operation. **On by default** (live soak cut SDES NO_MEDIA ~57%→~19%); set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_SERVE_RELAY` | Hold the public stream port via an internal relay that proxies to ffmpeg, so the first (cold) view connects instead of failing while ffmpeg can't pre-bind the port. Set to `0` to serve ffmpeg directly. | `1` (enabled) |
 | `AIDOT_LIVESTREAM_PARAM` | Set to `0` to skip the cloud `liveStreamParam` pre-connect that provisions battery cameras' live-stream sessions before signaling (without it, battery cameras like the L2 models reject streaming with `-50019`). | `1` (enabled) |
+
+### Security hardening
+
+Opt-in knobs that tighten the camera transport. Defaults preserve current
+behavior (the firmware's signaling doesn't carry verifiable material, so strict
+modes are off until you pin a value); each emits a one-time warning when left at
+the permissive default.
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `AIDOT_DTLS_PINNED_FP` | Pin the camera's DTLS certificate `sha-256` fingerprint (colon-separated hex). When set, a camera presenting a different cert fails the handshake instead of being accepted. The camera echoes our own fingerprint over signaling, so without a pin the media channel is **not** authenticated against an on-path MITM. | unset (accept-any + warn) |
+| `AIDOT_PLAYBACK_TLS_VERIFY` | Set to `1` to require full certificate + hostname verification on the TCP playback/live-stream TLS connection. Needs a trust anchor the camera's cert chains to; off by default because the camera presents a self-signed cert. | unset (no verification + warn) |
+| `AIDOT_ALLOW_LAN_SERVE` | Silences the warning emitted when decrypted media is served on a non-loopback bind (e.g. `0.0.0.0`), where any host on the LAN can read the unencrypted stream. Set when an exposed bind is intentional. | unset (warn on non-loopback) |
+| `AIDOT_SDES_HOLEPUNCH_HOST` | Override the NAT hole-punch target used when the cloud supplies no TURN entry. By default a STUN packet goes to a hardcoded vendor TURN host; set this to a host of your choice, or empty (`AIDOT_SDES_HOLEPUNCH_HOST=`) to disable the hardcoded fallback entirely. | unset (hardcoded vendor host + warn) |
+| `AIDOT_CRED_KEY_FILE` | Path to the Fernet key file for stored credentials. Point it outside `~/.config/aidot/` (ideally a separate secret store) so the key isn't co-located with the ciphertext. | `~/.config/aidot/.key` |
