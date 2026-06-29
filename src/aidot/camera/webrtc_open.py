@@ -1936,10 +1936,12 @@ class _WebRTCOpenMixin:
                 _entry["Password"] = _srv.credential
             _ice_server_list.append(_entry)
 
-        import random as _rnd_psk_dtls
+        # Use a CSPRNG: the PSK is media-keying material carried over signaling,
+        # so it must not come from the predictable Mersenne-Twister (random).
+        import secrets as _secrets_psk_dtls
         _psk_charset_dtls = "123456789abcdef"
         _psk_dtls = "".join(
-            _psk_charset_dtls[_rnd_psk_dtls.randint(0, len(_psk_charset_dtls) - 1)]
+            _secrets_psk_dtls.choice(_psk_charset_dtls)
             for _ in range(64)
         )
 
@@ -2927,8 +2929,13 @@ class _WebRTCOpenMixin:
                 if _cur2:
                     _secs2.append(_cur2)
 
-                _audio_secs = [s for s in _secs2 if s and s[0].startswith('m=audio')]
-                _video_secs = [s for s in _secs2 if s and s[0].startswith('m=video')]
+                # A valid m= line is "m=<media> <port> <proto> <fmt>..." (>=4
+                # tokens).  Drop malformed/forged sections here so the later
+                # s[0].split()[1] / [3:] accesses cannot raise IndexError on an
+                # attacker-influenced answer (an unguarded IndexError here would
+                # crash the connect coroutine -> repeatable stream DoS).
+                _audio_secs = [s for s in _secs2 if s and s[0].startswith('m=audio') and len(s[0].split()) >= 4]
+                _video_secs = [s for s in _secs2 if s and s[0].startswith('m=video') and len(s[0].split()) >= 4]
                 _app_secs   = [s for s in _secs2 if s and s[0].startswith('m=application')]
 
                 def _set_mid(_sec: list, _mid: str) -> list:

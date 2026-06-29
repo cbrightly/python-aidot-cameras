@@ -429,10 +429,12 @@ class _SdesOpenMixin:
 
         # --- Generate PSK before SDP (must precede SDP building) ------------- #
         # PSK is injected into SDP as a=psk: and into wPayload.psk.
-        import random as _rnd_psk_early
+        # Use a CSPRNG: the PSK is media-keying material carried over signaling,
+        # so it must not come from the predictable Mersenne-Twister (random).
+        import secrets as _secrets_psk_early
         _psk_charset_req = "123456789abcdef"
         _psk_value_req = "".join(
-            _psk_charset_req[_rnd_psk_early.randint(0, len(_psk_charset_req) - 1)]
+            _secrets_psk_early.choice(_psk_charset_req)
             for _ in range(64)
         )
 
