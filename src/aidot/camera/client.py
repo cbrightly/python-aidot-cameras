@@ -1181,9 +1181,6 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     body = await resp.json(content_type=None)
                     status = resp.status
 
-            # Store the raw response so callers can inspect it for diagnostics.
-            self._last_batch_response = body
-
             # Server may return a bare JSON array OR {"data": [...]} / {"data": {}}
             if isinstance(body, list):
                 data = body
