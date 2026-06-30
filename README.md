@@ -17,6 +17,18 @@ companion integration repo
 [`cbrightly/hass-aidot-cameras`](https://github.com/cbrightly/hass-aidot-cameras), which depends
 on this library.
 
+## Supported cameras
+
+The streaming transport is auto-selected per camera from its model id:
+
+- **A000088** (M3 Pro) — DTLS-SRTP, wired/mains.
+- **A001513** ("L2") — SDES-SRTP, **battery** (woken on demand; validated end-to-end).
+- **A001064** (PTZ) — SDES-SRTP, wired/mains (role-reversal handshake).
+
+Other battery models (A001108, A001360) are recognized in code with the same
+battery handling. See [`docs/CAMERAS.md`](docs/CAMERAS.md#supported-cameras) for
+the authoritative table and per-model notes.
+
 ## Library install
 
 Install from PyPI (the simplest, recommended method):
@@ -134,4 +146,4 @@ the permissive default.
 | `AIDOT_PLAYBACK_TLS_VERIFY` | Set to `1` to require full certificate + hostname verification on the TCP playback/live-stream TLS connection. Needs a trust anchor the camera's cert chains to; off by default because the camera presents a self-signed cert. | unset (no verification + warn) |
 | `AIDOT_ALLOW_LAN_SERVE` | Silences the warning emitted when decrypted media is served on a non-loopback bind (e.g. `0.0.0.0`), where any host on the LAN can read the unencrypted stream. Set when an exposed bind is intentional. | unset (warn on non-loopback) |
 | `AIDOT_SDES_HOLEPUNCH_HOST` | Override the NAT hole-punch target used when the cloud supplies no TURN entry. By default a STUN packet goes to a hardcoded vendor TURN host; set this to a host of your choice, or empty (`AIDOT_SDES_HOLEPUNCH_HOST=`) to disable the hardcoded fallback entirely. | unset (hardcoded vendor host + warn) |
-| `AIDOT_CRED_KEY_FILE` | Path to the Fernet key file for stored credentials. Point it outside `~/.config/aidot/` (ideally a separate secret store) so the key isn't co-located with the ciphertext. | `~/.config/aidot/.key` |
+| `AIDOT_CRED_KEY_FILE` | Path to the Fernet key file for stored credentials. Point it outside the config dir (ideally a separate secret store) so the key isn't co-located with the ciphertext. Applies to the default credentials path only (ignored when an explicit `creds_path` is passed). | `$XDG_CONFIG_HOME/aidot/.key` (falls back to `~/.config/aidot/.key`) |

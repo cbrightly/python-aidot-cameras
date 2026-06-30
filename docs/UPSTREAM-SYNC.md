@@ -5,24 +5,28 @@ This repo is a camera-capable fork of the lights-only upstream
 the entire `aidot.camera` subpackage (WebRTC/SDES streaming, two-way audio, PTZ,
 LAN control) and also modifies several of upstream's own files in place.
 
-## Status: shared ancestry established
+## Status: ancestry link needs re-establishing
 
-The fork's history was originally rewritten and had **no common ancestor** with
-upstream, so `git merge upstream/main` refused to run ("unrelated histories")
-and the fork showed as "N commits behind" — where N was simply upstream's whole
-history, none of it in our ancestry. Content was already current (our tree was
-synced through upstream's HEAD `eef1630`); only the git *link* was missing.
+`main`'s history was recently re-launched as a single clean linear history. That
+curation dropped the previous ancestry-link merge commits, so `main` no longer
+records upstream as a parent and `git merge upstream/main` will again refuse to
+run ("unrelated histories") until the link is re-created. Content is unaffected —
+our tree is still synced through upstream's HEAD `eef1630`; only the git *link* is
+missing again.
 
-That link was established **non-destructively** with a one-time merge that records
-upstream as a parent without changing our tree:
+Re-establish it **non-destructively** with a one-time merge that records upstream
+as a parent without changing our tree:
 
 ```bash
+git remote add upstream https://github.com/AiDot-Development-Team/python-AiDot  # if not present
+git fetch upstream
 git merge -s ours --allow-unrelated-histories upstream/main
 ```
 
 The `ours` strategy keeps our tree byte-for-byte and only records the ancestry
-(correct here precisely because the content was already synced to `eef1630`). It
-is a normal fast-forward commit on `main` — no history rewrite, no force-push.
+(valid precisely because the content is already synced to `eef1630`). It is a
+normal commit on `main` — no force-push. After this one-time link, the "Normal
+sync, going forward" workflow below applies.
 
 ## Normal sync, going forward
 
@@ -62,9 +66,10 @@ guards keep work on this account and prevent footguns:
   (upstream is an ancestor there). Run it on any other branch and git reports
   "refusing to merge unrelated histories" — that branch just lacks the link
   commit. Switch to `main` first.
-- **Never run `git merge -s ours upstream/main` again.** The `ours` link was a
-  one-time operation, valid only because content was already synced to `eef1630`.
-  Re-using it would silently mark genuine upstream fixes as merged and drop them.
+- **Run `git merge -s ours upstream/main` exactly once to re-establish the link**
+  (see Status above — the recent history re-launch dropped it), valid only because
+  content is already synced to `eef1630`. After that one time, never re-use it:
+  re-running would silently mark genuine upstream fixes as merged and drop them.
   The ongoing workflow is a plain `git merge upstream/main`.
 - **If you add an `upstream` remote, `gh` may default to the parent repo.** With
   `upstream` configured, `gh pr …` can target `AiDot-Development-Team` unless
@@ -73,8 +78,10 @@ guards keep work on this account and prevent footguns:
 - **When you add `upstream`, disable pushes to it** (`git remote set-url --push
   upstream DISABLE`) so nothing lands on the upstream account by accident. To
   contribute a fix upstream, push to your own fork of it instead (see below).
-- **`main` is branch-protected** against force-push and deletion. History rewrites
-  on `main` are blocked; normal pushes and merges still work.
+- **`main` is branch-protected** against force-push and deletion, so normal pushes
+  and merges are the day-to-day path. Intentional history maintenance (the kind
+  that re-launched `main`) requires the maintainer to temporarily lift the
+  force-push guard and restore it immediately after — it is not a routine action.
 - **Don't cut a no-op release.** The published wheel ships only `src/aidot/` plus
   `README.md`. Before bumping the version, confirm one of those actually changed
   since the last tag (`git diff --stat <last-tag>..HEAD -- src README.md`) —

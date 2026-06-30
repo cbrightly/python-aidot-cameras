@@ -1,5 +1,11 @@
 # Cold-start forward-port onto v0.9.2 — audit & decisions
 
+> **Historical artifact.** This dated audit predates the `main` history re-launch
+> and references commit SHAs, tags (e.g. `v0.5.15`), and working branches
+> (`camera-main`, `forward-port-coldstart`) that no longer exist. The decisions
+> are preserved for context; the git references are not resolvable on the current
+> history.
+
 **Date:** 2026-06-25
 **Context:** Four cold-start optimizations ("Units 1–4") were built and live-validated
 on the v0.5.15 monolithic `device_client.py` lineage (branch `camera-main`).
