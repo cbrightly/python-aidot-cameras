@@ -5,17 +5,15 @@ This repo is a camera-capable fork of the lights-only upstream
 the entire `aidot.camera` subpackage (WebRTC/SDES streaming, two-way audio, PTZ,
 LAN control) and also modifies several of upstream's own files in place.
 
-## Status: ancestry link needs re-establishing
+## Status: shared ancestry established
 
-`main`'s history was recently re-launched as a single clean linear history. That
-curation dropped the previous ancestry-link merge commits, so `main` no longer
-records upstream as a parent and `git merge upstream/main` will again refuse to
-run ("unrelated histories") until the link is re-created. Content is unaffected —
-our tree is still synced through upstream's HEAD `eef1630`; only the git *link* is
-missing again.
+The merge-base with `upstream/main` is `eef1630` (upstream's current HEAD), so the
+fork is **not** behind upstream and `git merge upstream/main` works normally.
 
-Re-establish it **non-destructively** with a one-time merge that records upstream
-as a parent without changing our tree:
+Background: a history re-launch dropped the previous ancestry-link merge commits,
+which made the fork briefly show as "N commits behind" again. The link was
+re-established **non-destructively** with a one-time merge that records upstream as
+a parent without changing our tree:
 
 ```bash
 git remote add upstream https://github.com/AiDot-Development-Team/python-AiDot  # if not present
@@ -24,9 +22,10 @@ git merge -s ours --allow-unrelated-histories upstream/main
 ```
 
 The `ours` strategy keeps our tree byte-for-byte and only records the ancestry
-(valid precisely because the content is already synced to `eef1630`). It is a
-normal commit on `main` — no force-push. After this one-time link, the "Normal
-sync, going forward" workflow below applies.
+(valid precisely because the content was already synced to `eef1630`). It is a
+normal commit on `main` — no force-push. If a future history rewrite ever drops
+the link again, re-run exactly that one-time merge; otherwise the "Normal sync,
+going forward" workflow below applies.
 
 ## Normal sync, going forward
 
