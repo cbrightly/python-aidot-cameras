@@ -26,7 +26,7 @@ the SDK operates in demo mode (limited session count and potential frame-count c
 A license key was extracted from the APK and stored as the module-level constant
 `_TUTK_LICENSE_KEY`.
 
-*Code at the time of research (commit 8350553):*
+*Code at the time of research (the reverted TUTK-init change):*
 
 ```python
 iotc.TUTK_SDK_Set_License_Key.restype  = ctypes.c_int
@@ -95,7 +95,7 @@ initialisation sequence cannot be exercised and could not be validated.
 The base `TutkStreamSession` scaffolding (load TUTK native libs, connect P2P via
 `IOTC_Connect_ByUID_Parallel`, receive frames via `avRecvFrameData2`) remains in the
 codebase for future `liveType=0` camera support.  Only the *incremental improvements*
-added in commit `8350553` were reverted.
+in the reverted TUTK-init change (the snippet above) were dropped.
 
 ### Test results
 
@@ -110,8 +110,9 @@ added in commit `8350553` were reverted.
 
 To re-enable for a `liveType=0` camera:
 
-1. Re-apply the changes from commit `8350553` to `TutkStreamSession`, or add them as
-   a new commit referencing this document.
+1. Re-apply the reverted TUTK-init changes to `TutkStreamSession` (the
+   `TUTK_SDK_Set_License_Key` / `IOTC_Setup_Session_Alive_Timeout` / CONNECTION_CHECK_REQ
+   / 24-byte IPCAM_START sequence shown above), as a new commit referencing this document.
 2. Obtain `libIOTCAPIs.so` and `libAVAPIs.so` from the TUTK SDK distribution or an
    extracted AiDot APK and place them accessible to the HA Python process.
 3. Verify the camera's `batchGetDeviceUserInfo` response returns a `p2pId`.
@@ -121,37 +122,25 @@ To re-enable for a `liveType=0` camera:
 
 ---
 
-## 2. TCP TLS Certificate Validation (`CERT_OPTIONAL` in `LiveStreamSession`)
+## 2. TCP TLS Certificate Validation (`LiveStreamSession` playback)
 
-### What it does
+### Current behavior (shipped)
 
 `LiveStreamSession` (the TCP binary playback protocol used for recorded video) opens
-an optional TLS connection to the camera's playback server.  When TLS is enabled, the
-SSL context is configured with `ssl.CERT_OPTIONAL` rather than `ssl.CERT_NONE`:
+a TLS connection to the camera's playback server via `_playback_ssl_context()` in
+`src/aidot/camera/playback.py`. Because the camera presents a self-signed certificate,
+the default skips verification (`ssl.CERT_NONE`) and emits a one-time warning. Set
+`AIDOT_PLAYBACK_TLS_VERIFY=1` to require full certificate **and** hostname verification
+(`ssl.CERT_REQUIRED` + `check_hostname`), which needs a trust anchor the camera's cert
+chains to. See the "Security hardening" table in the README.
 
-```python
-ssl_ctx.verify_mode = ssl.CERT_OPTIONAL
-```
+### History
 
-`CERT_OPTIONAL` validates the certificate chain when the camera presents a verifiable
-CA-signed cert, while still accepting self-signed certs.  `CERT_NONE` skips validation
-entirely.
-
-### Why it was written
-
-Cameras with CA-signed certs benefit from chain validation without requiring embedded
-CA cert pinning.  `CERT_OPTIONAL` is a forward-compatible default: it silently accepts
-self-signed certs today, and will validate automatically if future firmware switches to
-CA-issued certs.
-
-### Current status: ACTIVE (not reverted)
-
-Unlike the TUTK improvements above, `CERT_OPTIONAL` is **not** a `liveType=0`-only
-change.  `LiveStreamSession` is also used for recorded-video playback on the active
-cameras.  Reverting to `CERT_NONE` would be a strict security downgrade on live code.
-
-This section is included to explain why `CERT_OPTIONAL` was retained when the other
-commit `8350553` changes were reverted.
+An earlier iteration used `ssl.CERT_OPTIONAL` (validate when the camera presents a
+CA-signed cert, accept self-signed otherwise). That has been superseded by the explicit
+opt-in model above: a `CERT_NONE` default with a warning, plus `AIDOT_PLAYBACK_TLS_VERIFY`
+for callers that can provide a trust anchor. `CERT_OPTIONAL` is no longer used anywhere
+in the codebase.
 
 ---
 

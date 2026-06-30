@@ -2,7 +2,40 @@
 
 All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
-date-less, incrementing patch versions published to PyPI via GitHub Releases.
+date-less, incrementing versions published to PyPI via GitHub Releases.
+
+## [0.10.0]
+
+### Security
+- **CSPRNG for media-keying material.** The SDES/DTLS pre-shared key carried over
+  signaling is now generated using the `secrets` module instead of the
+  predictable Mersenne-Twister `random`, removing a key-predictability weakness.
+- **SDP-rewrite DoS guard.** The serve-port SDP rewrite now validates `m=audio`/
+  `m=video` section shape before indexing, so a malformed/truncated SDP can no
+  longer crash the rewrite.
+- **Credential key separation.** `AIDOT_CRED_KEY_FILE` lets you store the Fernet
+  key for encrypted credentials outside the config directory, so the key is no
+  longer necessarily co-located with the ciphertext (a warning is emitted when it
+  is). Honors `XDG_CONFIG_HOME`; applies to the default credentials path.
+
+### Added
+- **Opt-in transport hardening** (all default to prior behavior and emit a
+  one-time warning when left permissive):
+  - `AIDOT_DTLS_PINNED_FP` — pin the camera's DTLS `sha-256` fingerprint; a
+    mismatching certificate fails the handshake instead of being accepted.
+  - `AIDOT_PLAYBACK_TLS_VERIFY=1` — require full certificate + hostname
+    verification on the TCP playback/live-stream TLS connection.
+  - `AIDOT_ALLOW_LAN_SERVE` — acknowledge/silence the warning emitted when
+    decrypted media is served on a non-loopback bind.
+  - `AIDOT_SDES_HOLEPUNCH_HOST` — override the NAT hole-punch host used when the
+    cloud supplies no TURN entry (set empty to disable the hardcoded fallback).
+- **Supported-cameras documentation** — a model/transport/power table in
+  `docs/CAMERAS.md` (and a short list in the README), covering A000088 (DTLS),
+  A001513 (SDES, battery / "L2"), and A001064 (SDES, PTZ).
+
+### Removed
+- Dropped the write-only `_last_batch_response` attribute (a dead store with no
+  readers).
 
 ## [0.9.3]
 

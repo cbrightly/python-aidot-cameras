@@ -4,6 +4,21 @@ This fork adds live streaming, snapshots, cloud recordings, real-time-ish motion
 events, and two-way (push-to-talk) audio for AiDot/Leedarson cameras, on top of
 the upstream lights-only library.
 
+## Supported cameras
+
+The transport is auto-selected per camera from its model id (`LK.IPC.*`):
+
+| Model (`LK.IPC.*`) | Type | Transport | Power | Notes |
+| --- | --- | --- | --- | --- |
+| A000088 | M3 Pro (incl. A000088-1) | DTLS-SRTP | Wired/mains | Advertises two consecutive ICE ports; the high-port nomination fix applies. |
+| A001513 | "L2" battery cam | SDES-SRTP | Battery | Needs the `liveStreamParam` pre-connect + AVIO keepalive; woken on demand. Validated end-to-end. |
+| A001064 | PTZ | SDES-SRTP | Wired/mains | Role-reversal handshake; excluded from SDES fast-liveplay for correctness. |
+| A001108, A001360 | battery cams | SDES-SRTP | Battery | Same battery handling as A001513 (recognized in code; not validated on the reference account). |
+
+Battery models sleep between events and are woken on demand; mains-powered models
+also expose the LAN-direct control path. Any other `LK.IPC.*` model defaults to
+the SDES-SRTP path.
+
 ## Streaming
 
 Cameras use WebRTC over the AiDot/Leedarson MQTT signaling channel (an
