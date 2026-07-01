@@ -245,7 +245,12 @@ class AidotClient:
         except AidotUserOrPassIncorrect:
             raise
         except aiohttp.ClientError as e:
-            _LOGGER.error("async_post_login ClientError %s  response=%s", e, response_data)
+            # Do NOT log response_data: the login body carries accessToken /
+            # refreshToken. Log only the status code the server returned.
+            _LOGGER.error(
+                "async_post_login ClientError %s (code=%s)",
+                e, (response_data or {}).get(CONF_CODE),
+            )
             raise
 
     async def _async_fetch_user_config(self) -> None:
@@ -298,9 +303,12 @@ class AidotClient:
                 self.login_info["mqttPassword"] = pwd
                 _LOGGER.info("_async_fetch_user_config: mqttPassword stored (len=%d)", len(pwd))
             else:
+                # Do NOT log `body`: the userConfig response often still carries
+                # the live mqttPassword under an unexpected key, which is exactly
+                # when this branch fires. Log the key names only.
                 _LOGGER.warning(
                     "_async_fetch_user_config: mqttPassword not found in response. "
-                    "keys=%s  body=%s", list(data.keys()), body
+                    "keys=%s", list(data.keys())
                 )
             # Also extract MQTT clientId if provided.
             client_id = data.get("mqttClientId") or mqtt_block.get("clientId") or ""
@@ -408,7 +416,11 @@ class AidotClient:
             response.raise_for_status()
             return response_data
         except aiohttp.ClientError as e:
-            _LOGGER.error("async_get ClientError %s %s", e, response_data)
+            # Do NOT log response_data: /devices carries per-device aesKey and
+            # password. Log the response code only.
+            _LOGGER.error(
+                "async_get ClientError %s (code=%s)", e, response_data.get(CONF_CODE)
+            )
             code = response_data.get(CONF_CODE)
             if code == ServerErrorCode.TOKEN_EXPIRED:
                 if not _retry:

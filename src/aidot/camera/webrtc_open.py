@@ -39,6 +39,47 @@ from .protocol import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def _normalize_fingerprint(value: str) -> str:
+    """Normalize a sha-256 fingerprint for comparison.
+
+    Accepts either the colon-separated uppercase hex aiortc emits or an operator-
+    supplied pin that may differ in case, contain/omit colons, or carry stray
+    whitespace. Reduces both to lowercase hex with no separators.
+    """
+    return value.replace(":", "").replace(" ", "").strip().lower()
+
+
+def _dtls_pin_matches(real_fp: str, pinned_fp: str) -> bool:
+    """True if a cert's fingerprint matches the pin (format-insensitive)."""
+    return _normalize_fingerprint(real_fp) == _normalize_fingerprint(pinned_fp)
+
+
+def _verified_dtls_fingerprint(cam_cert, pinned_fp: str, cert_fp_fn) -> Optional[str]:
+    """Return the peer cert's sha-256 fingerprint, enforcing the pin if set.
+
+    Fails CLOSED under pinning: if a pin is configured, a missing peer cert or a
+    fingerprint that does not match the pin raises ``ValueError`` (which the
+    caller propagates to fail the DTLS handshake). Any error computing the
+    fingerprint is the caller's responsibility to treat as a failure when pinned.
+
+    Returns the fingerprint string, or ``None`` when no cert is present and no
+    pin is configured (accept-any default — the caller may skip verification).
+    """
+    if cam_cert is None:
+        if pinned_fp:
+            raise ValueError(
+                "DTLS peer presented no certificate; cannot verify against pin"
+            )
+        return None
+    real_fp = cert_fp_fn(cam_cert, "sha-256")
+    if pinned_fp and not _dtls_pin_matches(real_fp, pinned_fp):
+        raise ValueError(
+            f"DTLS fingerprint mismatch: camera presented {real_fp}, "
+            f"pinned {pinned_fp}"
+        )
+    return real_fp
+
+
 async def _keyframe_prompter(send_pli, first_frame, interval: float = 0.7,
                              max_tries: int = 8) -> int:
     """Send an RTCP PLI (keyframe request) immediately and then every `interval`
@@ -1221,7 +1262,15 @@ class _WebRTCOpenMixin:
                     await asyncio.wait_for(mqtt_fut, timeout=5.0)
                 except Exception:
                     pass   # MQTT thread exit errors don't affect the retry
-                return await self.async_open_webrtc_stream(
+                # Call the UNGATED impl, not the public async_open_webrtc_stream:
+                # we are already holding the global open-gate permit (acquired in
+                # async_open_webrtc_stream), and the gate's semaphore is not
+                # reentrant. Re-entering the public method here would try to
+                # acquire a second permit and deadlock whenever the gate is
+                # saturated (two SDES->DTLS fallbacks at once, or
+                # AIDOT_MAX_CONCURRENT_OPENS=1). The impl runs the same handshake
+                # under the permit we already hold.
+                return await self._async_open_webrtc_stream_impl(
                     on_frame,
                     stream_id=stream_id,
                     timeout=timeout,
@@ -2352,27 +2401,33 @@ class _WebRTCOpenMixin:
                     )
 
                 def _accept_camera_cert(self, remote_params):
-                    """Verify (if pinned) or accept the camera's actual DTLS cert."""
+                    """Verify (if pinned) or accept the camera's actual DTLS cert.
+
+                    Fails CLOSED when AIDOT_DTLS_PINNED_FP is set: a missing cert
+                    or any error computing/comparing the fingerprint fails the
+                    handshake rather than silently accepting an unverified peer.
+                    """
                     try:
                         _cam_cert = self._ssl.get_peer_certificate(
                             as_cryptography=True
                         )
-                        if _cam_cert is not None:
-                            _real_fp = _rr_cert_fp(_cam_cert, "sha-256")
-                            if _pinned_fp:
-                                if _real_fp.upper() != _pinned_fp.upper():
-                                    raise ValueError(
-                                        "DTLS fingerprint mismatch: camera "
-                                        f"presented {_real_fp}, pinned "
-                                        f"{_pinned_fp}"
-                                    )
+                        _real_fp = _verified_dtls_fingerprint(
+                            _cam_cert, _pinned_fp, _rr_cert_fp
+                        )
+                        if _real_fp is not None:
                             remote_params.fingerprints[:] = [
                                 _RRFp(algorithm="sha-256", value=_real_fp)
                             ]
                     except ValueError:
-                        raise  # pinned-fingerprint mismatch: fail the handshake
+                        raise  # pin mismatch / no cert under pin: fail the handshake
                     except Exception:
-                        pass  # cert retrieval failed; skip verification
+                        if _pinned_fp:
+                            raise  # fail closed: never accept an unverifiable cert
+                        _LOGGER.debug(
+                            "camera %s: DTLS cert retrieval failed; accept-any "
+                            "(unpinned)", getattr(self, "device_id", "?"),
+                            exc_info=True,
+                        )
 
                 for _rr_tc in pc.getTransceivers():
                     _rr_tc.receiver.transport._validate_peer_identity = (
@@ -2837,7 +2892,16 @@ class _WebRTCOpenMixin:
             # Apply DTLS cert bypass - always, whenever we patched
             # fingerprints (camera's empty-fingerprint quirk applies on
             # every webrtcResp from this firmware family).
-            if _fp_subs:
+            # Install our peer-cert validator when EITHER the camera's empty-
+            # fingerprint quirk needs the workaround (_fp_subs) OR a pin is
+            # configured. Pinning must be enforced even when the camera sent a
+            # REAL fingerprint: that fingerprint rides attacker-influenceable
+            # signaling, so a MITM can present a well-formed value matching its
+            # own cert and aiortc's native check would pass. Gating the pin on
+            # _fp_subs (empty-fingerprint only) left it silently inert for cameras
+            # that present a real fingerprint.
+            _np_pinned_fp = (os.environ.get("AIDOT_DTLS_PINNED_FP") or "").strip()
+            if _fp_subs or _np_pinned_fp:
                 import types as _np_types
                 try:
                     from aiortc.rtcdtlstransport import (
@@ -2845,11 +2909,6 @@ class _WebRTCOpenMixin:
                         certificate_digest as _np_cert_fp,
                     )
 
-                    # See AIDOT_DTLS_PINNED_FP note above: optional pinning,
-                    # otherwise accept-any with a one-time warning.
-                    _np_pinned_fp = (
-                        os.environ.get("AIDOT_DTLS_PINNED_FP") or ""
-                    ).strip()
                     if not _np_pinned_fp:
                         _LOGGER.warning(
                             "camera %s: DTLS peer certificate is NOT authenticated "
@@ -2865,21 +2924,18 @@ class _WebRTCOpenMixin:
                             _cam_cert = self._ssl.get_peer_certificate(
                                 as_cryptography=True
                             )
-                            if _cam_cert is not None:
-                                _real_fp = _np_cert_fp(_cam_cert, "sha-256")
-                                if _np_pinned_fp:
-                                    if _real_fp.upper() != _np_pinned_fp.upper():
-                                        raise ValueError(
-                                            "DTLS fingerprint mismatch: camera "
-                                            f"presented {_real_fp}, pinned "
-                                            f"{_np_pinned_fp}"
-                                        )
+                            _real_fp = _verified_dtls_fingerprint(
+                                _cam_cert, _np_pinned_fp, _np_cert_fp
+                            )
+                            if _real_fp is not None:
                                 remote_params.fingerprints[:] = [
                                     _NPFp(algorithm="sha-256", value=_real_fp)
                                 ]
                         except ValueError:
-                            raise  # pinned-fingerprint mismatch: fail handshake
+                            raise  # pin mismatch / no cert under pin: fail handshake
                         except Exception:
+                            if _np_pinned_fp:
+                                raise  # fail closed: never accept an unverifiable cert
                             _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_np_accept_cam_cert', exc_info=True)
 
                     # Diag: log PC/ICE state at patch-application time so we

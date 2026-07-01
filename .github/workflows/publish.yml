@@ -11,8 +11,25 @@ permissions:
   contents: read
 
 jobs:
+  # Gate the release on a green test run so a broken build can never publish to
+  # PyPI (the publish job holds id-token: write). Mirrors ci.yml's Alpine/musl
+  # test job - the same libc the target runtime uses.
+  test:
+    name: Unit tests (Alpine / musl)
+    runs-on: ubuntu-latest
+    container: python:3.13-alpine
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5 (node24)
+      - name: System deps
+        run: apk add --no-cache git gcc musl-dev libffi-dev
+      - name: Install package + test deps
+        run: pip install -e ".[webrtc]" pytest pytest-asyncio
+      - name: Run tests
+        run: pytest tests/ -q
+
   publish:
     name: Build and publish
+    needs: test
     runs-on: ubuntu-latest
     # Trusted Publishing: register this repo + workflow (publish.yml) +
     # environment (pypi) under the python-aidot-cameras project on pypi.org.
@@ -42,7 +59,9 @@ jobs:
           python-version: "3.13"
       - name: Build sdist and wheel
         run: |
-          pip install build
+          pip install build twine
           python -m build
+      - name: Validate distribution metadata
+        run: twine check dist/*
       - name: Publish
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1 (v1.14.0)
