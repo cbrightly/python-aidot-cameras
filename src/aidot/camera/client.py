@@ -213,6 +213,7 @@ def _save_frame_as_jpeg(image_data: Any, output_path: str) -> bool:
                 ],
                 input=image_data.tobytes(),
                 capture_output=True,
+                timeout=15,  # bound the hang; a wedged ffmpeg must not block forever
             )
             return r.returncode == 0
     except Exception as exc:
@@ -1929,7 +1930,6 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         # ── SDES path: stream briefly to a temp TS file, extract one JPEG ──── #
         if self.is_sdes_camera:
             import os as _os
-            import subprocess as _sp
             import tempfile as _tf
 
             with _tf.NamedTemporaryFile(suffix=".ts", delete=False) as _tmpf:
@@ -1970,17 +1970,33 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 if _ffmpeg_path() is None:
                     _LOGGER.error("async_snapshot SDES: %s", _FFMPEG_MISSING_MSG)
                     return False
-                _ffmpeg_snap = _sp.run(
-                    ["ffmpeg", "-y", "-i", _tmp_ts,
-                     "-frames:v", "1", "-f", "image2", output_path],
-                    capture_output=True, timeout=15,
+                # Async subprocess (not subprocess.run): a synchronous ffmpeg
+                # here blocks the whole event loop - every camera, keepalive and
+                # MQTT drain - for up to the timeout.
+                _snap_proc = await _asyncio.create_subprocess_exec(
+                    "ffmpeg", "-y", "-i", _tmp_ts,
+                    "-frames:v", "1", "-f", "image2", output_path,
+                    stdout=_asyncio.subprocess.DEVNULL,
+                    stderr=_asyncio.subprocess.PIPE,
                 )
-                if _ffmpeg_snap.returncode == 0 and _os.path.exists(output_path):
+                try:
+                    _, _snap_err = await _asyncio.wait_for(
+                        _snap_proc.communicate(), timeout=15
+                    )
+                except TimeoutError:
+                    _snap_proc.kill()
+                    await _snap_proc.communicate()
+                    _LOGGER.warning(
+                        "async_snapshot SDES: ffmpeg frame extract timed out for %s",
+                        self.device_id,
+                    )
+                    return False
+                if _snap_proc.returncode == 0 and _os.path.exists(output_path):
                     return True
                 _LOGGER.warning(
                     "async_snapshot SDES: ffmpeg frame extract failed for %s: %s",
                     self.device_id,
-                    _ffmpeg_snap.stderr.decode(errors="replace")[-200:],
+                    (_snap_err or b"").decode(errors="replace")[-200:],
                 )
                 return False
             except Exception as _snap_exc:
@@ -2032,7 +2048,11 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
 
         if captured[0] is None:
             return False
-        return _save_frame_as_jpeg(captured[0], output_path)
+        # _save_frame_as_jpeg does a blocking PIL encode (or a blocking ffmpeg
+        # fallback); run it off the event loop so it can't stall other cameras.
+        return await _asyncio.get_running_loop().run_in_executor(
+            None, _save_frame_as_jpeg, captured[0], output_path
+        )
 
     async def async_start_streaming(self) -> None:
         """Start a persistent background WebRTC stream that updates latest_jpeg.

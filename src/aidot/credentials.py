@@ -173,9 +173,20 @@ def _load_plain(path: str) -> dict:
 
 
 def _write_secret(path: str, data: bytes) -> None:
-    """Write binary data to path with 0600 permissions."""
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "wb") as f:
+    """Write binary data to path, created atomically with 0600 permissions."""
+    d = os.path.dirname(os.path.abspath(path))
+    os.makedirs(d, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)  # restrict the config dir too (best-effort)
+    except OSError:
+        pass
+    # Create with 0600 from the start so the secret is never briefly
+    # world/group-readable under the process umask (a chmod-after-open leaves a
+    # window where another local user could read the key/ciphertext).
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
         f.write(data)
         f.write(b"\n")
+    # If the file pre-existed with looser perms, O_CREAT's mode was ignored;
+    # tighten it explicitly.
     os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)

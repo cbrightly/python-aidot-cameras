@@ -59,6 +59,11 @@ ATTR_KEYS = {
 }
 
 
+# Control-channel bodies are small JSON; reject anything wildly larger than that
+# so a hostile/broken LAN peer can't drive memory exhaustion via the size field.
+_MAX_FRAME_BODY = 1024 * 1024  # 1 MiB
+
+
 def _pack(msgtype: int, body: bytes) -> bytes:
     return struct.pack(">Hhi", _MAGIC, msgtype, len(body)) + body
 
@@ -69,6 +74,12 @@ async def _read_frame(reader: asyncio.StreamReader, timeout: float) -> bytes:
     The caller decrypts and parses the JSON (the AES key lives on the client)."""
     header = await asyncio.wait_for(reader.readexactly(8), timeout)
     _magic, _mtype, bodysize = struct.unpack(">HHI", header)
+    # Cap the server-supplied body size: `bodysize` is an unsigned 32-bit field
+    # (up to ~4 GiB) from a LAN host, and control-channel bodies are small JSON.
+    # Reject an implausibly large frame instead of allocating on a malicious or
+    # malfunctioning peer (mirrors the 4 MiB cap in playback._read_frame).
+    if bodysize > _MAX_FRAME_BODY:
+        raise ValueError(f"LAN control frame body too large: {bodysize} bytes")
     body = await asyncio.wait_for(reader.readexactly(bodysize), timeout)
     return body  # caller decrypts (key is on the client)
 

@@ -8,11 +8,13 @@ imports client.py -- the import edge is one-way (client -> protocol).
 """
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
 import os
 import random
+import re
 import select
 import socket
 import struct
@@ -552,7 +554,14 @@ def _build_sprop(sps: bytes, pps: bytes) -> str:
 
 
 def _sprop_cache_path(devid: str) -> str:
-    return os.path.join(_SPROP_DIR, f"{devid}.sprop")
+    # `devid` originates from the cloud/device and is interpolated into a
+    # filesystem path, so a value containing "/", "\\", ".." or an absolute path
+    # could escape _SPROP_DIR (arbitrary read/write). Reduce it to a safe,
+    # collision-resistant filename component.
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", devid or "")
+    if not safe or len(devid or "") > 128:
+        safe = hashlib.sha256((devid or "").encode("utf-8", "replace")).hexdigest()
+    return os.path.join(_SPROP_DIR, f"{safe}.sprop")
 
 
 def _load_sprop(devid: str) -> "Optional[str]":

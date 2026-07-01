@@ -30,6 +30,24 @@ from .constants import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def _as_int(v: Any) -> Optional[int]:
+    """Coerce a cloud-supplied attr value to int, or None if not numeric.
+
+    Cloud/device attributes are untrusted: a non-numeric value must be skipped,
+    not raise ValueError/TypeError out of the status-refresh path.
+    """
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return None
+
+
+def _as_bool(v: Any) -> Optional[bool]:
+    """Coerce a 0/1 (int or numeric string) attr to bool, or None if not numeric."""
+    i = _as_int(v)
+    return None if i is None else bool(i)
+
+
 class CameraStatusData(DeviceStatusData):
     """Core status plus camera fields; accepts both typed-model and dict updates."""
 
@@ -74,44 +92,41 @@ class CameraStatusData(DeviceStatusData):
         # feeders either strip them (update_from_camera_attributes) or have
         # already applied them via the model (receive_data raw-dict pass).
         # Camera attributes
-        if (v := attr.get("MotionDetection_Enable")) is not None:
-            self.motion_detection = bool(int(v))
-        if (v := attr.get("MotionDetection_Sen")) is not None:
-            self.motion_sensitivity = int(v)
-        if (v := attr.get("LedOnOff")) is not None:
-            self.status_led = bool(int(v))
-        if (v := attr.get("micEnable")) is not None:
-            self.microphone = bool(int(v))
+        # Every conversion goes through _as_int/_as_bool so a malformed value
+        # from the cloud (e.g. "on" where 0/1 is expected) is skipped rather than
+        # raising out of update() and aborting the whole status refresh.
+        if (b := _as_bool(attr.get("MotionDetection_Enable"))) is not None:
+            self.motion_detection = b
+        if (i := _as_int(attr.get("MotionDetection_Sen"))) is not None:
+            self.motion_sensitivity = i
+        if (b := _as_bool(attr.get("LedOnOff"))) is not None:
+            self.status_led = b
+        if (b := _as_bool(attr.get("micEnable"))) is not None:
+            self.microphone = b
         if (v := attr.get("nightVisionMode")) is not None:
-            try:
-                nv = int(v)
+            nv = _as_int(v)
+            if nv is not None:
                 self.night_vision_mode = {0: "auto", 1: "on", 2: "off"}.get(nv, str(nv))
-            except (ValueError, TypeError):
+            else:
                 # Camera may send string "on"/"off"/"auto" instead of 0/1/2
                 self.night_vision_mode = str(v)
-        if (v := attr.get("nightVisionIRLight")) is not None:
-            self.ir_light = bool(int(v))
-        if (v := attr.get("LightOnOff")) is not None:
-            self.floodlight = bool(int(v))
-        if (v := attr.get("trackingMode")) is not None:
-            self.ptz_tracking = bool(int(v))
-        if (v := attr.get("SoundLevel")) is not None:
-            self.speaker_volume = int(v)
+        if (b := _as_bool(attr.get("nightVisionIRLight"))) is not None:
+            self.ir_light = b
+        if (b := _as_bool(attr.get("LightOnOff"))) is not None:
+            self.floodlight = b
+        if (b := _as_bool(attr.get("trackingMode"))) is not None:
+            self.ptz_tracking = b
+        if (i := _as_int(attr.get("SoundLevel"))) is not None:
+            self.speaker_volume = i
         # Diagnostic / read-only
-        if (v := attr.get("Battery_remaining")) is not None:
-            try:
-                self.battery_remaining = int(v)
-            except (ValueError, TypeError):
-                _LOGGER.debug("swallowed exception in %s", 'update', exc_info=True)
-        if (v := attr.get("Occupancy")) is not None:
-            self.occupancy = bool(int(v))
+        if (i := _as_int(attr.get("Battery_remaining"))) is not None:
+            self.battery_remaining = i
+        if (b := _as_bool(attr.get("Occupancy"))) is not None:
+            self.occupancy = b
         if (v := attr.get("SDcardStatus")) is not None:
             self.sd_card_status = str(v)
-        if (v := attr.get("networkRssi")) is not None:
-            try:
-                self.wifi_rssi = int(v)
-            except (ValueError, TypeError):
-                _LOGGER.debug("swallowed exception in %s", 'update', exc_info=True)
+        if (i := _as_int(attr.get("networkRssi"))) is not None:
+            self.wifi_rssi = i
 
     # Cloud "properties" keys that belong to lights, not cameras.  A camera's
     # image "Dimming" must not be read as a light brightness (and could TypeError

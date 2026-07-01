@@ -4,6 +4,45 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.10.1]
+
+### Fixed
+- **Deadlock opening a stream on the SDES→DTLS fallback.** When a camera declared
+  SDES but actually required DTLS, the fallback re-entered the *public*
+  `async_open_webrtc_stream` while already holding the non-reentrant open-gate
+  permit — hanging forever whenever the gate was saturated (two such cameras
+  opening at once, or `AIDOT_MAX_CONCURRENT_OPENS=1`). It now calls the ungated
+  impl under the permit it already holds.
+- **DTLS fingerprint pinning failed open.** With `AIDOT_DTLS_PINNED_FP` set, the
+  pin was silently skipped when the camera presented a real (non-empty)
+  fingerprint — the check was gated on the empty-fingerprint workaround — and it
+  accepted any certificate when the peer cert was missing or the digest raised.
+  The pin is now enforced whenever it is set (independent of the workaround) and
+  **fails closed**: a missing cert or a fingerprint error fails the handshake.
+  Comparison is now colon/whitespace/case-insensitive. Unit tests added.
+- **Secrets no longer written to logs.** The login response (access/refresh
+  tokens), the userConfig body (MQTT password), and device-list bodies /
+  per-device records (device `aesKey`/`password`) were logged on error or at
+  DEBUG; they now emit only status codes / redacted identifiers.
+- **`async_snapshot` no longer blocks the event loop.** It ran ffmpeg
+  synchronously (and a no-timeout ffmpeg on the Pillow-missing path), freezing
+  every camera/keepalive/MQTT drain for up to the timeout. It now uses an async
+  subprocess with a timeout and offloads the blocking JPEG encode to an executor.
+
+### Security / hardening
+- Cap the LAN-control frame body size (an unbounded 32-bit length was a
+  memory-exhaustion vector from a hostile/malfunctioning LAN peer).
+- Sanitize the cloud-supplied `devid` before using it as the sprop cache
+  filename (path-traversal hardening).
+- Coerce cloud attribute values defensively so a malformed value can no longer
+  crash the status-refresh path.
+- Write credential/key files atomically at mode `0600` (no chmod-after-create
+  window) and restrict the config directory to `0700`.
+
+### CI
+- Gate PyPI publishing on a green test run and run `twine check` before upload,
+  so a red build can no longer publish.
+
 ## [0.10.0]
 
 ### Security

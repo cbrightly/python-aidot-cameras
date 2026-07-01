@@ -200,7 +200,13 @@ class DeviceClient(CameraMixin):
             self.ping_data = None
             self.heart_time = 10
 
-        _LOGGER.debug(f"{self._TAG}:{device}")
+        # Log a redacted subset only: the raw device record carries aesKey and
+        # password, which must not reach logs even at DEBUG.
+        if isinstance(device, dict):
+            _LOGGER.debug(
+                "%s: device id=%s modelId=%s",
+                self._TAG, device.get("id"), device.get("modelId"),
+            )
         self._init_camera_state(device, user_info)
 
     async def connect(self, ip_address) -> None:
