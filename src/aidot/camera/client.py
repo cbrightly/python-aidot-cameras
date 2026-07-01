@@ -67,6 +67,7 @@ from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixi
     _h264_has_keyframe,
     _mqtt_session_sync,
     _mqtt_session,
+    _mqtt_session_with_status,
     _mqtt_get_playback_server_info,
     _ip_looks_ascii_garbled,
     _normalize_bundle_ice_credentials,
@@ -93,8 +94,32 @@ _BG_TASKS: set = set()
 def _spawn_bg(coro):
     _t = asyncio.ensure_future(coro)
     _BG_TASKS.add(_t)
-    _t.add_done_callback(_BG_TASKS.discard)
+
+    def _done(task):
+        _BG_TASKS.discard(task)
+        # Retrieve the exception so a failing background task doesn't surface as
+        # an unhandled "Task exception was never retrieved" at GC time; log it.
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                _LOGGER.debug("aidot background task failed: %r", exc, exc_info=exc)
+
+    _t.add_done_callback(_done)
     return _t
+
+
+def _mqtt_publish_delivered(status) -> bool:
+    """True if an MQTT command reached the broker (connection up, no error).
+
+    Distinguishes a genuine fire-and-forget publish (broker connected, the device
+    simply doesn't ACK) from a refused/failed connection - which returns an empty
+    message list too, and must NOT be reported as "sent".
+    """
+    if not status:
+        return True  # no status available: preserve prior best-effort behavior
+    if status.get("error"):
+        return False
+    return status.get("connected", True) is not False
 
 
 def _retry_policy(failure_kind: str, burst_attempt: int, *,
@@ -1418,14 +1443,14 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     "_mqtt_device_cmd: persistent MQTT failed (%s); falling back "
                     "to a per-op session for %s", _st.get("error"), device_id,
                 )
-                messages = await _mqtt_session(
+                messages, _st = await _mqtt_session_with_status(
                     mqtt_url, mqtt_user, mqtt_pwd, client_id,
                     subscribe_topics=sub_topics,
                     publish_items=publish_items,
                     duration=timeout,
                 )
         else:
-            messages = await _mqtt_session(
+            messages, _st = await _mqtt_session_with_status(
                 mqtt_url, mqtt_user, mqtt_pwd, client_id,
                 subscribe_topics=sub_topics,
                 publish_items=publish_items,
@@ -1449,10 +1474,13 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 _LOGGER.debug("device cmd ack 200 (inner): topic=%s", topic)
                 return True
 
-        # Fire-and-forget fallback: if we published successfully and got ANY
-        # broker delivery confirmation (no MQTT error), treat as success.
-        # The official app uses a delivery callback, not a device response.
-        if messages is not None:
+        # Fire-and-forget fallback: the official app uses a delivery callback,
+        # not a device response, so a published command with no 200-ack is
+        # normal. But only treat it as success if the broker connection actually
+        # succeeded - a refused/failed connection returns an empty message list
+        # too, and reporting that as "sent" makes HA show a state change that
+        # never reached the camera.
+        if messages is not None and _mqtt_publish_delivered(_st):
             _LOGGER.debug(
                 "device cmd: sent (no explicit 200-ack on %s, %d msgs total) "
                 "- treating as sent-ok (official app is fire-and-forget)",

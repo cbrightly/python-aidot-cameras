@@ -274,9 +274,25 @@ class CameraLanClient:
         }
         writer.write(_pack(1, aes_encrypt(json.dumps(msg).encode(), self._key)))
         await writer.drain()
-        resp = json.loads(aes_decrypt(await _read_frame(reader, timeout=8.0), self._key))
-        ack = (resp.get("ack") or {}).get("code")
+        try:
+            resp = json.loads(
+                aes_decrypt(await _read_frame(reader, timeout=8.0), self._key)
+            )
+            ack = (resp.get("ack") or {}).get("code")
+        except Exception as exc:
+            # A host that can't produce a response we can decrypt with the
+            # device's real AES key is not the camera (e.g. a LAN peer that
+            # spoofed this devId in discovery - discovery is unauthenticated).
+            # Mark ineligible so control falls back to the cloud instead of
+            # repeatedly targeting a bogus/broken host.
+            self._eligible = False
+            raise CameraLanError(
+                f"{self.device_id}: login response undecryptable (wrong host?)"
+            ) from exc
         if ack != 200:
+            # The real device rejected our key-authenticated login; stop using
+            # the LAN path and revert to cloud.
+            self._eligible = False
             raise CameraLanError(f"{self.device_id}: login rejected ack={ack}")
         return (resp.get("payload") or {}).get("ascNumber", 1)
 
