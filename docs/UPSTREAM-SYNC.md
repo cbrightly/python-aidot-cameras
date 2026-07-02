@@ -8,7 +8,9 @@ LAN control) and also modifies several of upstream's own files in place.
 ## Status: shared ancestry established
 
 The merge-base with `upstream/main` is `eef1630` (upstream's current HEAD), so the
-fork is **not** behind upstream and `git merge upstream/main` works normally.
+fork is **not** behind upstream and `git merge upstream/main` works normally. The
+package uses upstream's flat `aidot/` layout (not `src/aidot/`) so upstream edits
+land on matching paths and merges apply cleanly.
 
 Background: a history re-launch dropped the previous ancestry-link merge commits,
 which made the fork briefly show as "N commits behind" again. The link was
@@ -83,7 +85,7 @@ guards keep work on this account and prevent footguns:
   force-push guard and restore it immediately after - it is not a routine action.
 - **Don't cut a no-op release.** The published wheel ships only `aidot/` plus
   `README.md`. Before bumping the version, confirm one of those actually changed
-  since the last tag (`git diff --stat <last-tag>..HEAD -- src README.md`) -
+  since the last tag (`git diff --stat <last-tag>..HEAD -- aidot README.md`) -
   otherwise the new version is byte-identical to the last and just burns a PyPI
   number (which can't be reused). A new GitHub *Release* is what triggers the
   PyPI publish.
