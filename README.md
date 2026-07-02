@@ -21,9 +21,9 @@ on this library.
 
 The streaming transport is auto-selected per camera from its model id:
 
-- **A000088** (M3 Pro) — DTLS-SRTP, wired/mains.
-- **A001513** ("L2") — SDES-SRTP, **battery** (woken on demand; validated end-to-end).
-- **A001064** (PTZ) — SDES-SRTP, wired/mains (role-reversal handshake).
+- **A000088** (M3 Pro) - DTLS-SRTP, wired/mains.
+- **A001513** ("L2") - SDES-SRTP, **battery** (woken on demand; validated end-to-end).
+- **A001064** (PTZ) - SDES-SRTP, wired/mains (role-reversal handshake).
 
 Other battery models (A001108, A001360) are recognized in code with the same
 battery handling. See [`docs/CAMERAS.md`](docs/CAMERAS.md#supported-cameras) for
@@ -40,7 +40,7 @@ pip install python-aidot-cameras
 pip install python-aidot-cameras[webrtc]
 ```
 
-`[webrtc]` pulls in the extra dependencies (aiortc, av, …) needed for live
+`[webrtc]` pulls in the extra dependencies (aiortc, av, ...) needed for live
 streaming, snapshots, and two-way audio. Without it you still get lights plus
 the camera cloud/control APIs, but not live media.
 
@@ -124,12 +124,12 @@ audio, idle release, the sprop cache path) are documented in
 | --- | --- | --- |
 | `AIDOT_MAX_CONCURRENT_OPENS` | Caps how many stream opens run concurrently across all cameras. | `2` |
 | `AIDOT_MAX_CONCURRENT_STREAMS` | Caps how many cameras stream at once. | `3` |
-| `AIDOT_FAST_CONNECT` | Enable LAN-direct "fast connect" (STUN-only, skips several cloud signaling waits) when truthy. On-LAN only — off-subnet/strict-NAT viewers must leave it off. | unset (off) |
-| `AIDOT_SDES_SKIP_TURN_PREALLOC` | Skip the SDES TURN relay pre-allocation (~2–3 s of cold-start latency) so signaling goes straight out with the host candidate. Faster on a LAN, at the cost of no relay fallback for a camera on a different segment / behind strict NAT. Experimental, opt-in (truthy = `1`/`true`/`yes`/`on`). | unset (off) |
+| `AIDOT_FAST_CONNECT` | Enable LAN-direct "fast connect" (STUN-only, skips several cloud signaling waits) when truthy. On-LAN only - off-subnet/strict-NAT viewers must leave it off. | unset (off) |
+| `AIDOT_SDES_SKIP_TURN_PREALLOC` | Skip the SDES TURN relay pre-allocation (~2-3 s of cold-start latency) so signaling goes straight out with the host candidate. Faster on a LAN, at the cost of no relay fallback for a camera on a different segment / behind strict NAT. Experimental, opt-in (truthy = `1`/`true`/`yes`/`on`). | unset (off) |
 | `AIDOT_SDES_ADAPTIVE` | Adaptive fast-with-fallback for the SDES keepalive loop: try the fast path first and fall back to the full relay path if a fast attempt delivers no media. A per-device cache skips the fast attempt on later views once it has failed. Truthy value enables. | unset (off) |
 | `AIDOT_SDES_FAST_LIVEPLAY` | Don't block on the `livePlayResp` wait for eligible SDES cameras (~4.5 s faster cold start). Role-reversal models (A001064 PTZ) always excluded for correctness. **On by default**; set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_DTLS_FAST_LIVEPLAY` | The DTLS (A000088) analogue: skip the `livePlayReq`-echo and `livePlayResp` waits (the dominant LAN cold-start cost) while keeping the full ICE/TURN/DTLS handshake, so remote/relay viewing is unaffected. **On by default**; set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
-| `AIDOT_PERSISTENT_MQTT` | Reuse ONE account-level persistent MQTT connection for commands, attribute fetches, and stream-open signaling (matching the official app) instead of connecting per operation. **On by default** (live soak cut SDES NO_MEDIA ~57%→~19%); set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
+| `AIDOT_PERSISTENT_MQTT` | Reuse ONE account-level persistent MQTT connection for commands, attribute fetches, and stream-open signaling (matching the official app) instead of connecting per operation. **On by default** (live soak cut SDES NO_MEDIA ~57%->~19%); set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_SERVE_RELAY` | Hold the public stream port via an internal relay that proxies to ffmpeg, so the first (cold) view connects instead of failing while ffmpeg can't pre-bind the port. Set to `0` to serve ffmpeg directly. | `1` (enabled) |
 | `AIDOT_LIVESTREAM_PARAM` | Set to `0` to skip the cloud `liveStreamParam` pre-connect that provisions battery cameras' live-stream sessions before signaling (without it, battery cameras like the L2 models reject streaming with `-50019`). | `1` (enabled) |
 

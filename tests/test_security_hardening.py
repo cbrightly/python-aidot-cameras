@@ -11,7 +11,7 @@ from aidot.camera.models import _as_bool, _as_int
 from aidot.camera.protocol import _SPROP_DIR, _sprop_cache_path
 
 
-# ── models: malformed cloud attrs are skipped, not fatal ──────────────────────
+# -- models: malformed cloud attrs are skipped, not fatal ----------------------
 
 def test_as_int_coerces_or_none():
     assert _as_int("5") == 5
@@ -29,7 +29,7 @@ def test_as_bool_coerces_or_none():
     assert _as_bool(None) is None
 
 
-# ── sprop cache: devid can't escape the cache dir ─────────────────────────────
+# -- sprop cache: devid can't escape the cache dir -----------------------------
 
 @pytest.mark.parametrize("devid", ["../../etc/passwd", "/etc/passwd", "a/b/c", "..", "x\\y"])
 def test_sprop_path_stays_in_cache_dir(devid):
@@ -43,7 +43,7 @@ def test_sprop_path_normal_devid_preserved():
     assert os.path.basename(p) == "LK-IPC-A000088-abc123.sprop"
 
 
-# ── LAN control: oversized frame body is rejected before allocation ───────────
+# -- LAN control: oversized frame body is rejected before allocation -----------
 
 def test_read_frame_rejects_oversized_body():
     async def _run():

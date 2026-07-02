@@ -7,7 +7,7 @@ pure dead reconnect latency. The fix removes the bottom sleep and relies solely
 on the top gate, now factored into `_open_gate_delay`.
 
 These tests pin the gate math that makes that removal safe: a fast death still
-gets spaced ≥ gate seconds from the previous open-start (anti-hammer preserved),
+gets spaced >= gate seconds from the previous open-start (anti-hammer preserved),
 while a healthy long session reopens immediately.
 
 Repo convention: pure helper, plain unit test.

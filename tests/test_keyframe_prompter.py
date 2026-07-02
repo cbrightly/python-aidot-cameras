@@ -1,4 +1,4 @@
-"""Unit 2: earlier + repeated PLI — _keyframe_prompter.
+"""Unit 2: earlier + repeated PLI - _keyframe_prompter.
 
 v0.9.2 sends a single PLI once an SSRC is discovered (and delays it 0.5s); a lost
 PLI then waits for the next natural IDR.  This helper fires immediately and

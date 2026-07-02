@@ -1,4 +1,4 @@
-"""Unit 3: media-decline fast-retry policy — _retry_policy.
+"""Unit 3: media-decline fast-retry policy - _retry_policy.
 
 Returns (delay_seconds, bypass_open_gate) for the DTLS serve retry.  A clean
 'not_ready' decline (DC-only answer: encoder cold) gets a bounded fast burst

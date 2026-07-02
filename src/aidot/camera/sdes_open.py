@@ -201,7 +201,7 @@ class _SdesOpenMixin:
         # offer's c= and m= lines.  Pure-SDES cameras (no ICE) read the OFFER's
         # c= address and stream SRTP there directly - if we put the relay address
         # in the offer, the camera's SRTP reaches us through port-restricted NAT.
-        _relay_addrs: dict = {}  # sock → (relay_ip, relay_port, realm, nonce, t_host, t_port, key)
+        _relay_addrs: dict = {}  # sock -> (relay_ip, relay_port, realm, nonce, t_host, t_port, key)
 
         def _turn_allocate_udp(_ta_sock, _ta_host, _ta_port, _ta_user, _ta_pass):
             """RFC 5766 TURN relay allocation with long-term credential auth.
@@ -223,9 +223,9 @@ class _SdesOpenMixin:
                 _patched = _m[:2] + _st_ta.pack('!H', len(_m) - 20 + 24) + _m[4:]
                 return _hm.new(_k, _patched, _ha.sha1).digest()
 
-            # Step 1: unauthenticated Allocate → get REALM and NONCE from 401
+            # Step 1: unauthenticated Allocate -> get REALM and NONCE from 401
             _tid1 = os.urandom(12)
-            _b1 = _a(0x0019, b'\x11\x00\x00\x00')  # REQUESTED-TRANSPORT = UDP(17), RFC 5766 §14.7 protocol in MSB
+            _b1 = _a(0x0019, b'\x11\x00\x00\x00')  # REQUESTED-TRANSPORT = UDP(17), RFC 5766 section 14.7 protocol in MSB
             _r1 = b'\x00\x03' + _st_ta.pack('!H', len(_b1)) + _MAGIC_TA + _tid1 + _b1
             try:
                 _ta_sock.sendto(_r1, (_ta_host, _ta_port))
@@ -273,7 +273,7 @@ class _SdesOpenMixin:
                 _a(0x0006, _ta_user)                  # USERNAME
                 + _a(0x0014, _realm_ta)               # REALM
                 + _a(0x0015, _nonce_ta)               # NONCE
-                + _a(0x0019, b'\x11\x00\x00\x00')     # REQUESTED-TRANSPORT = UDP, RFC 5766 §14.7 protocol in MSB
+                + _a(0x0019, b'\x11\x00\x00\x00')     # REQUESTED-TRANSPORT = UDP, RFC 5766 section 14.7 protocol in MSB
             )
             _h2 = b'\x00\x03' + _st_ta.pack('!H', len(_b2) + 24) + _MAGIC_TA + _tid2
             _b2 += _a(0x0008, _stun_message_integrity(_key_ta, _h2 + _b2))  # MESSAGE-INTEGRITY
@@ -380,7 +380,7 @@ class _SdesOpenMixin:
                             )
                             _status(
                                 f"TURN relay pre-allocated (offer): {_pre_name}"
-                                f" → {_r_ip_pre}:{_r_port_pre}"
+                                f" -> {_r_ip_pre}:{_r_port_pre}"
                             )
             except Exception as _pre_exc:
                 _LOGGER.warning("TURN pre-allocation error: %s", _pre_exc)
@@ -511,7 +511,7 @@ class _SdesOpenMixin:
             "s=-\r\n"
             f"t=0 0\r\n{_bundle_hdr_line}"
             # audio m-section
-            # a=crypto MUST precede ICE attributes (RFC 4568 §9.1) so that
+            # a=crypto MUST precede ICE attributes (RFC 4568 section 9.1) so that
             # linear-parsing camera firmware recognises this as an SDES offer
             # rather than a pure-ICE offer and does not discard the key.
             f"m=audio {_offer_audio_port} RTP/SAVPF 0 8\r\n"
@@ -930,7 +930,7 @@ class _SdesOpenMixin:
                                     _status(
                                         f"TURN relay allocated (echo fallback): "
                                         f"{'audio' if _alloc_sock_e is _audio_sock else 'video'}"
-                                        f" → {_r_ip_e}:{_r_port_e}"
+                                        f" -> {_r_ip_e}:{_r_port_e}"
                                     )
                 except Exception as _relay_early_exc:
                     _LOGGER.warning(
@@ -1138,7 +1138,7 @@ class _SdesOpenMixin:
                                 _status(
                                     f"TURN relay allocated: "
                                     f"{'audio' if _alloc_sock is _audio_sock else 'video'}"
-                                    f" → {_r_ip}:{_r_port}"
+                                    f" -> {_r_ip}:{_r_port}"
                                 )
                             else:
                                 _LOGGER.warning(
@@ -1240,7 +1240,7 @@ class _SdesOpenMixin:
                         _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_sdes_ice_cand', exc_info=True)
             _status(
                 f"NAT hole-punch: sent from audio={audio_port}"
-                f" video={video_port} → {_hp_host}:{_hp_port}"
+                f" video={video_port} -> {_hp_host}:{_hp_port}"
                 + (f" and :{_hp_port2}" if _hp_port != _hp_port2 else "")
             )
 
@@ -1566,7 +1566,7 @@ class _SdesOpenMixin:
 
         # --- Harvest camera's webrtcResp answer (may have arrived during STUN window) --- #
         # The asyncio event loop was blocked by the synchronous STUN loop.  Any
-        # call_soon_threadsafe(answer_fut.set_result, …) from the MQTT thread is
+        # call_soon_threadsafe(answer_fut.set_result, ...) from the MQTT thread is
         # queued but hasn't fired yet.  One asyncio cycle resolves it.
         await asyncio.sleep(0)
         _pre_launch_answer_sdp: str = ""
@@ -1634,7 +1634,7 @@ class _SdesOpenMixin:
             # We are the SCTP client (proactive INIT), camera is server.
             _dc_answer_has_app = "m=application" in _pre_launch_answer_sdp
             _sctp = {
-                'state': 'CLOSED',    # INIT_SENT → COOKIE_ECHOED → ESTABLISHED → DONE
+                'state': 'CLOSED',    # INIT_SENT -> COOKIE_ECHOED -> ESTABLISHED -> DONE
                 'local_tag': 0,       # our verification tag (sent in INIT)
                 'peer_tag': 0,        # camera's verification tag (from INIT-ACK)
                 'local_tsn': 0,       # our TSN counter
@@ -1783,7 +1783,7 @@ class _SdesOpenMixin:
         def _sctp_init_ack_pkt():
             import struct as _st_sc
             import random as _r_sc
-            # RFC 4960 §5.2.1: reuse local_tag/tsn from our INIT in simultaneous open
+            # RFC 4960 section 5.2.1: reuse local_tag/tsn from our INIT in simultaneous open
             if _sctp['local_tag'] == 0:
                 _sctp['local_tag'] = _r_sc.randint(1, 0xFFFFFFFF)
                 _sctp['local_tsn'] = _r_sc.randint(1, 0xFFFFFFFF)
@@ -1885,7 +1885,7 @@ class _SdesOpenMixin:
             _mi     = _hm_uc.new(cam_pwd.encode(), _mi_in, _hs_uc.sha1).digest()
             _mi_a   = _st_uc.pack('!HH', 0x0008, 20) + _mi
             _total  = len(_attrs) + len(_mi_a)
-            # FINGERPRINT (RFC 5389 §15.5): CRC32 XOR 0x5354554E, after MI.
+            # FINGERPRINT (RFC 5389 section 15.5): CRC32 XOR 0x5354554E, after MI.
             # KVS SDK silently drops binding requests without a valid FINGERPRINT.
             # MI is computed with length=_total (end-of-MI); FINGERPRINT uses
             # length=_total+8.  The camera strips FINGERPRINT before verifying MI,
@@ -1929,14 +1929,14 @@ class _SdesOpenMixin:
         # --- Bridge thread: keep reservation sockets open for ICE + SRTP ----- #
         # The camera's ICE agent sends STUN Binding Requests to audio_port and
         # video_port AFTER this point.  If we close those sockets and let ffmpeg
-        # bind them, ffmpeg cannot respond to STUN → ICE fails → camera never
-        # sends SRTP → 0-byte output file.
+        # bind them, ffmpeg cannot respond to STUN -> ICE fails -> camera never
+        # sends SRTP -> 0-byte output file.
         #
         # Fix: allocate fresh loopback ports for ffmpeg, rewrite the SDP to point
         # at those ports, and keep the original sockets alive in a bridge thread
         # that:
-        #   • responds to STUN Binding Requests on the original sockets
-        #   • forwards all non-STUN packets (SRTP) to ffmpeg's loopback ports
+        #   - responds to STUN Binding Requests on the original sockets
+        #   - forwards all non-STUN packets (SRTP) to ffmpeg's loopback ports
         # When the session ends, SdesSession.stop() closes the original sockets,
         # which causes the bridge thread's select() to raise and it exits cleanly.
         import threading as _threading_br
@@ -2072,7 +2072,7 @@ class _SdesOpenMixin:
                     # pinned at ~18 s regardless of motion (brief tap-past 18.3 s vs
                     # sustained 40 s motion 17.6 s), while raw-0xC8 heartbeats *were*
                     # firing.  The official app sends this via DataChannel.customSend
-                    # (= SCTP) on a 10 s timer (f0.java Z2() → CMD_AVIO_CTRL_HEARTHEAT_REQ).
+                    # (= SCTP) on a 10 s timer (f0.java Z2() -> CMD_AVIO_CTRL_HEARTHEAT_REQ).
                     #
                     # Gating on dcep_sock confines this to the encrypted-SCTP path
                     # (battery SDES cams), which is where the watchdog bites and where
@@ -2101,7 +2101,7 @@ class _SdesOpenMixin:
                             _status(
                                 f"SDES: sent AVIO HEARTBEAT(5156) via SCTP"
                                 f" TSN={(_sctp['local_tsn']-1) & 0xFFFFFFFF}"
-                                f" → {_hb_src[0]}:{_hb_src[1]}"
+                                f" -> {_hb_src[0]}:{_hb_src[1]}"
                             )
                         except Exception as _hb_e:
                             _status(f"SDES: SCTP heartbeat send failed: {_hb_e}")
@@ -2219,11 +2219,11 @@ class _SdesOpenMixin:
                         if _pli_n <= len(_pli_gaps):
                             _status(
                                 f"SDES: sent RTCP PLI #{_pli_n}"
-                                f" → SSRC=0x{_pli_media_ssrc:08x}"
+                                f" -> SSRC=0x{_pli_media_ssrc:08x}"
                                 f" ({'SRTCP' if _pli_sent else 'plain'})"
                             )
 
-                    # DCEP_WAIT → send LIVING 300ms after DCEP_OPEN.
+                    # DCEP_WAIT -> send LIVING 300ms after DCEP_OPEN.
                     # Camera needs time to register stream 0 before LIVING arrives.
                     if (_sctp.get('state') == 'DCEP_WAIT'
                             and _time_br.time() - _sctp.get('dcep_sent_ts', 0.0) >= 0.3):
@@ -2237,7 +2237,7 @@ class _SdesOpenMixin:
                                 _sdes_probe_received = True
                                 _last_hb_ts = _time_br.time()
                                 _status(
-                                    f"SDES DC: DCEP_WAIT → LIVING(5376)"
+                                    f"SDES DC: DCEP_WAIT -> LIVING(5376)"
                                     f" TSN={_sctp['local_tsn']-1}"
                                     f" (300ms after DCEP_OPEN)"
                                 )
@@ -2508,7 +2508,7 @@ class _SdesOpenMixin:
                                     from Crypto.Util.Padding import pad as _pad_tk
                                     _aes_key = _our_tx_srtp_key_audio[:16].encode('ascii')
                                     _aes_iv  = (_cam_key_audio or _our_tx_srtp_key_audio)[:16].encode('ascii')
-                                    _padded  = _pad_tk(_avio_plain, 16)  # PKCS#7 → 64B
+                                    _padded  = _pad_tk(_avio_plain, 16)  # PKCS#7 -> 64B
                                     _trigger_enc = _AES_tk.new(
                                         _aes_key, _AES_tk.MODE_CBC, _aes_iv
                                     ).encrypt(_padded)
@@ -2529,7 +2529,7 @@ class _SdesOpenMixin:
                                         _status(
                                             f"SDES: sent trigger ({_label})"
                                             f" len={_sz}"
-                                            f" → {_bsrc[0]}:{_bsrc[1]}"
+                                            f" -> {_bsrc[0]}:{_bsrc[1]}"
                                         )
                                     except Exception:
                                         _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_persistent_sdes_cmd', exc_info=True)
@@ -2566,7 +2566,7 @@ class _SdesOpenMixin:
                             # Plain SCTP over UDP: srcPort=dstPort=5000 (0x1388).
                             # Camera is a=setup:active (SCTP client - initiates INIT).
                             # We are SCTP server: wait for camera's INIT, reply INIT-ACK,
-                            # then complete: COOKIE-ECHO → COOKIE-ACK →
+                            # then complete: COOKIE-ECHO -> COOKIE-ACK ->
                             # DATA_CHANNEL_OPEN + SESSION_MODE_REQ(5376).
                             # Check for any SCTP-like packet: first 4 bytes are
                             # srcPort(2B) + dstPort(2B) in SCTP common header.
@@ -2617,7 +2617,7 @@ class _SdesOpenMixin:
                                             _status(
                                                 f"SDES DC: plain INIT-ACK"
                                                 f" (cookie {len(cookie)}B)"
-                                                f" → sent COOKIE-ECHO"
+                                                f" -> sent COOKIE-ECHO"
                                             )
                                         except Exception as _sce:
                                             _status(f"SCTP COOKIE-ECHO failed: {_sce}")
@@ -2680,8 +2680,8 @@ class _SdesOpenMixin:
                             # TUTK SFrame detection (A001064 / _use_plain_rtp):
                             # The camera sends TUTK-framed data instead of SRTP.
                             # Wire-capture analysis (2026-05-02) confirmed:
-                            #   byte0=0xC8 → TUTK audio SFrame
-                            #   byte0=0xC9 → TUTK video SFrame (expected)
+                            #   byte0=0xC8 -> TUTK audio SFrame
+                            #   byte0=0xC9 -> TUTK video SFrame (expected)
                             # TUTK SFrame header (12 bytes):
                             #   [0]   type   (0xC8=audio, 0xC9=video)
                             #   [1]   channel/flags
@@ -2765,10 +2765,10 @@ class _SdesOpenMixin:
                                         )
                                         if _pd_plain is not None:
                                             _status(
-                                                f"bridge: TUTK decrypt → "
+                                                f"bridge: TUTK decrypt -> "
                                                 f" plain_all={_pd_plain.hex()}"
                                             )
-                                # ── Encrypted SCTP state machine (SDES path) ──
+                                # -- Encrypted SCTP state machine (SDES path) --
                                 # Camera sends SCTP handshake (INIT, COOKIE-ECHO, DATA)
                                 # wrapped in 0xC8 AES-128-CBC frames. Handle before
                                 # forwarding to ffmpeg.
@@ -2787,7 +2787,7 @@ class _SdesOpenMixin:
 
                                     _sct = _sctp['state']
                                     if _pd_ct8 == 0x01 and _sct in ('CLOSED', 'INIT_SENT', 'COOKIE_WAIT'):
-                                        # Camera SCTP INIT (or retransmit) → send encrypted INIT-ACK.
+                                        # Camera SCTP INIT (or retransmit) -> send encrypted INIT-ACK.
                                         # Handle retransmits in COOKIE_WAIT: re-send INIT-ACK
                                         # (our first may have been lost).
                                         _sc_p = _sctp_parse_init(_pd_plain)
@@ -2799,14 +2799,14 @@ class _SdesOpenMixin:
                                                 _sctp['state'] = 'COOKIE_WAIT'
                                                 _status(
                                                     f"SDES DC: INIT(peer=0x{_sc_p:08x})"
-                                                    f" → INIT-ACK {len(_iak_bytes)}B"
+                                                    f" -> INIT-ACK {len(_iak_bytes)}B"
                                                     f" to {_bsrc[0]}:{_bsrc[1]}"
                                                     f" plain={_iak_plain.hex()}"
                                                 )
                                             except Exception as _sce8:
                                                 _status(f"SDES DC: enc INIT-ACK err: {_sce8}")
                                     elif _pd_ct8 == 0x02 and _sct in ('INIT_SENT', 'COOKIE_WAIT'):
-                                        # Camera SCTP INIT-ACK → send encrypted COOKIE-ECHO
+                                        # Camera SCTP INIT-ACK -> send encrypted COOKIE-ECHO
                                         _sc_ck = _sctp_parse_init_ack(_pd_plain)
                                         if _sc_ck:
                                             try:
@@ -2815,12 +2815,12 @@ class _SdesOpenMixin:
                                                 _status(
                                                     f"SDES DC: enc INIT-ACK"
                                                     f" (cookie {len(_sc_ck)}B)"
-                                                    f" → sent enc COOKIE-ECHO"
+                                                    f" -> sent enc COOKIE-ECHO"
                                                 )
                                             except Exception as _sce8:
                                                 _status(f"SDES DC: enc COOKIE-ECHO err: {_sce8}")
                                     elif _pd_ct8 == 0x0A and _sct in ('COOKIE_WAIT', 'COOKIE_ECHOED'):
-                                        # Camera COOKIE-ECHO → send COOKIE-ACK + DCEP_OPEN,
+                                        # Camera COOKIE-ECHO -> send COOKIE-ACK + DCEP_OPEN,
                                         # then wait 300ms before sending LIVING (PPID=53).
                                         # Without DCEP_OPEN (PPID=50), LIVING arrives on an
                                         # unregistered stream and is silently discarded by the
@@ -2839,20 +2839,20 @@ class _SdesOpenMixin:
                                             _sctp['dcep_src'] = _bsrc
                                             _status(
                                                 "SDES DC: COOKIE-ECHO"
-                                                " → COOKIE-ACK + DCEP_OPEN(50),"
+                                                " -> COOKIE-ACK + DCEP_OPEN(50),"
                                                 " waiting 300ms before LIVING"
                                             )
                                         except Exception as _sce8:
                                             _status(f"SDES DC: enc COOKIE-ACK err: {_sce8}")
                                     elif _pd_ct8 == 0x0B and _sct == 'COOKIE_ECHOED':
-                                        # Camera COOKIE-ACK → send encrypted LIVING only
+                                        # Camera COOKIE-ACK -> send encrypted LIVING only
                                         try:
                                             _lv8 = _sctp_data(53, _session_mode_req_msg())
                                             _bs.sendto(_enc_c8_sctp(_sctp_pkt(_sctp['peer_tag'], _lv8)), _bsrc)
                                             _sctp['state'] = 'DONE'
                                             _sdes_probe_received = True
                                             _last_hb_ts = _time_br.time()
-                                            _status("SDES DC: enc COOKIE-ACK → sent enc LIVING")
+                                            _status("SDES DC: enc COOKIE-ACK -> sent enc LIVING")
                                         except Exception as _sce8:
                                             _status(f"SDES DC: enc LIVING err: {_sce8}")
                                     elif _pd_ct8 == 0x00 and _sct == 'DONE':
@@ -2942,7 +2942,7 @@ class _SdesOpenMixin:
                                             if not _br_first_audio_logged:
                                                 _br_first_audio_logged = True
                                                 _status(
-                                                    f"bridge: first SDES audio → ffmpeg"
+                                                    f"bridge: first SDES audio -> ffmpeg"
                                                     f" loopback:{_lo_audio_port}"
                                                     f" ({len(_pd_plain)}B PCMA)"
                                                 )
@@ -2975,7 +2975,7 @@ class _SdesOpenMixin:
                                 # forward encrypted SRTCP, ffmpeg reads the
                                 # encrypted NTP/RTP sender-info bytes as garbage
                                 # and uses them to rebase its internal clock,
-                                # producing wildly wrong DTS (≈ Unix epoch µs).
+                                # producing wildly wrong DTS (~ Unix epoch us).
                                 # Drop encrypted SRTCP entirely; ffmpeg works fine
                                 # without RTCP SR - it uses only RTP timestamps.
                                 if _use_plain_rtp:
@@ -3027,7 +3027,7 @@ class _SdesOpenMixin:
                                 _status(
                                     f"bridge: first SRTP from"
                                     f" {_bsrc[0]}:{_bsrc[1]} pt={_pt}"
-                                    f" → {_kind} loopback:{_btgt}"
+                                    f" -> {_kind} loopback:{_btgt}"
                                     f"  byte0=0x{_b0:02x} byte1=0x{_pt_byte:02x}"
                                     f" seq={_seq16} ts={_ts32}"
                                     f" ssrc={_ssrc32}"
@@ -3097,7 +3097,7 @@ class _SdesOpenMixin:
                                                 policy=_rx_pol
                                             )
                                             self._cold_phase("first-media")
-                                            _status("bridge: SRTP RX session ready (cam→us)")
+                                            _status("bridge: SRTP RX session ready (cam->us)")
                                         except Exception as _srx_e:
                                             _status(f"bridge: SRTP RX init failed: {_srx_e}")
                                 if _bridge_fn._srtp_rx_sess is not None:
@@ -3142,7 +3142,7 @@ class _SdesOpenMixin:
                                                     f"-sets for {self.device_id}")
                                         _bridge_fn._sprop_done = True
                             # Rebase RTP timestamps to start near 0.  Camera picks a
-                            # random starting timestamp (RFC 3550 §5.1); the 90 kHz
+                            # random starting timestamp (RFC 3550 section 5.1); the 90 kHz
                             # video clock can be near 2^32 and wraps, producing huge
                             # or negative DTS values that the MPEG-TS muxer drops.
                             # Subtracting the first-seen timestamp per-stream gives
@@ -3221,7 +3221,7 @@ class _SdesOpenMixin:
         _bridge_thread.start()
         _status(
             f"bridge thread started - camera sockets audio={audio_port}"
-            f" video={video_port} → ffmpeg loopback {_lo_audio_port}/{_lo_video_port}"
+            f" video={video_port} -> ffmpeg loopback {_lo_audio_port}/{_lo_video_port}"
         )
 
         # --- DTLS fallback: echo-reversal camera did not do ICE or SRTP ----- #
@@ -3404,9 +3404,9 @@ class _SdesOpenMixin:
                     _socket_br.AF_INET, _socket_br.SOCK_DGRAM)
                 try:
                     _s_pb.bind(('127.0.0.1', port))
-                    return False   # bound cleanly → port was free
+                    return False   # bound cleanly -> port was free
                 except OSError:
-                    return True    # EADDRINUSE → ffmpeg is listening
+                    return True    # EADDRINUSE -> ffmpeg is listening
                 finally:
                     _s_pb.close()
             except Exception:

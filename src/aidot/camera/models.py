@@ -138,7 +138,7 @@ class CameraStatusData(DeviceStatusData):
 
         Accepts either a setDevAttrNotif ``attr`` dict or a cloud device
         ``properties`` dict - both share the same camera attribute keys
-        (Battery_remaining, Occupancy, SDcardStatus, MotionDetection_*, …).
+        (Battery_remaining, Occupancy, SDcardStatus, MotionDetection_*, ...).
         """
         self.update({
             k: v for k, v in attrs.items()

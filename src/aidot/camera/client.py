@@ -363,10 +363,10 @@ def _build_sdes_serve_cmd(
 # Use DeviceClient.async_open_live_stream() to obtain an instance.
 #
 # Protocol source: classes.jar.decompiled.zip / TutkManager.java
-#   IOTC_Connect_ByUID_Parallel(uid, sid) → nSID
-#   avClientStart2(nSID, "admin", "admin123", ...) → avIndex
-#   avSendIOCtrl(avIndex, 511, ...) → start video (IOTYPE_USER_IPCAM_START)
-#   avRecvFrameData2(avIndex, ...) → frame data loop
+#   IOTC_Connect_ByUID_Parallel(uid, sid) -> nSID
+#   avClientStart2(nSID, "admin", "admin123", ...) -> avIndex
+#   avSendIOCtrl(avIndex, 511, ...) -> start video (IOTYPE_USER_IPCAM_START)
+#   avRecvFrameData2(avIndex, ...) -> frame data loop
 #
 # Requires: libIOTCAPIs.so + libAVAPIs.so from the TUTK SDK.
 # Obtain them from the TUTK SDK distribution or an extracted AiDot APK.
@@ -380,7 +380,7 @@ def _build_sdes_serve_cmd(
 # Manages a single live-stream TCP session for a Leedarson/AiDot camera.
 # Use DeviceClient.async_open_live_stream() to obtain an instance.
 #
-# Protocol source: iOS LDSXplayer startRealPlay → LDSTCPManager
+# Protocol source: iOS LDSXplayer startRealPlay -> LDSTCPManager
 #   connectHost:port:sessionId:aesKey:heartbeat:msg:cmd:subCmd:cmdParam:tls:
 #
 # Wire format: same 37-byte header + payload as CloudPlaybackSession, but:
@@ -596,7 +596,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         self._raw_device: dict = device
 
         # Seed camera/diagnostic status from the cloud device "properties" payload
-        # (Battery_remaining, Occupancy, SDcardStatus, MotionDetection_*, …).  This
+        # (Battery_remaining, Occupancy, SDcardStatus, MotionDetection_*, ...).  This
         # is the authoritative, always-current source the official app itself reads
         # - cameras do not push these reliably over MQTT - so sensors populate
         # immediately on load, before any poll.  No-op for devices without it.
@@ -723,7 +723,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
 
         The device-list payload carries every camera attribute under
         ``properties`` (battery, SD-card, occupancy, motion/night-vision
-        settings, …) plus a top-level ``online`` flag.  This is the reliable,
+        settings, ...) plus a top-level ``online`` flag.  This is the reliable,
         always-current source the official app reads, so HA populates camera
         sensors and control-entity states from it instead of an MQTT push the
         camera never sends.  Returns the updated status.
@@ -1249,7 +1249,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
 
         Tries several sources in order:
           1. POST /v21/devices/batchGetDeviceUserInfo       (AiDot platform API)
-          2. POST /v5/deviceController/getP2pId?deviceId=…  (Leedarson smarthome)
+          2. POST /v5/deviceController/getP2pId?deviceId=...  (Leedarson smarthome)
           3. AiDot v32 IPC device detail                    (fallback)
         """
         import aiohttp
@@ -1517,7 +1517,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             "payload": inner,
         })
         pub_topic = f"iot/v1/c/{device_id}/device/setDevAttrReq"
-        _LOGGER.info("setDevAttrReq: %s=%s → %s  seq=%s", attr, value, device_id, seq)
+        _LOGGER.info("setDevAttrReq: %s=%s -> %s  seq=%s", attr, value, device_id, seq)
         ok = await self._mqtt_device_cmd(
             pub_topic, payload, timeout=timeout, ack_keyword="setDevAttr")
         if ok:
@@ -1562,7 +1562,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             },
         })
         pub_topic = f"iot/v1/s/{user_id}/device/devActionReq"
-        _LOGGER.info("devActionReq: %s %s → %s", action, params, device_id)
+        _LOGGER.info("devActionReq: %s %s -> %s", action, params, device_id)
         return await self._mqtt_device_cmd(
             pub_topic, payload, timeout=timeout, ack_keyword="devAction")
 
@@ -1927,7 +1927,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         """
         import asyncio as _asyncio
 
-        # ── SDES path: stream briefly to a temp TS file, extract one JPEG ──── #
+        # -- SDES path: stream briefly to a temp TS file, extract one JPEG ---- #
         if self.is_sdes_camera:
             import os as _os
             import tempfile as _tf
@@ -2009,7 +2009,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 except Exception:
                     _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_snapshot', exc_info=True)
 
-        # ── DTLS path: on_frame callback delivers frames from aiortc ─────── #
+        # -- DTLS path: on_frame callback delivers frames from aiortc ------- #
         frame_event = _asyncio.Event()
         captured: list = [None]  # stores PIL Image or ndarray once decoded
 
@@ -2382,7 +2382,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         open_timeout: float = 30.0,
         retries: int = 3,
     ) -> bool:
-        """Play viewer→camera (push-to-talk / announce) audio through the speaker.
+        """Play viewer->camera (push-to-talk / announce) audio through the speaker.
 
         ``pcm_provider()`` is polled every 20 ms and must return 320 bytes of s16le
         PCM @ 8 kHz mono (a short/empty frame is padded to silence) and ``None``
@@ -2578,13 +2578,13 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                         break
                     if _idle_on and _serve_port is not None:
                         _present = self._sdes_serve_consumer_present(_serve_port)
-                        if _present:  # True → a viewer is pulling; stay alive
+                        if _present:  # True -> a viewer is pulling; stay alive
                             _last_consumer = time.monotonic()
                         elif _idle_release_due(_present, _last_consumer,
                                                time.monotonic(), _idle_secs):
                             _idle_release = True
                             break
-                        # _present is None (unreadable table) → don't release
+                        # _present is None (unreadable table) -> don't release
             except asyncio.CancelledError:
                 _done.cancel()
                 self._stream_session = None
@@ -2836,7 +2836,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         """Serve idle-release window (seconds). A per-camera ``stream_idle_s``
         (set via start_keepalive) overrides the ``AIDOT_STREAM_IDLE_S`` env
         default of 120 s.  <= 0 means *never* idle-release (keep the warm session
-        for instant re-views — sensible for mains cameras, which have no battery
+        for instant re-views - sensible for mains cameras, which have no battery
         cost; note it holds a concurrent-stream slot for the camera's lifetime)."""
         opt = getattr(self, "_stream_idle_opt", None)
         if opt is not None:
@@ -3124,7 +3124,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         import queue as _queue
         serve_url = self._keepalive_rtsp_url
         # APK parity: the official app gates re-connects to ~15 s (f0.java I1=15000)
-        # and never hammers.  We previously floored at 5 s and a partial-success →
+        # and never hammers.  We previously floored at 5 s and a partial-success ->
         # reset path could drop the effective spacing even lower, pounding a flaky
         # A000088 camera fast enough to wedge its DTLS stack (ICE completes but DTLS
         # never fires until a power-cycle).  Floor the backoff at the 15 s gate and,
@@ -3233,7 +3233,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     elif _t - _disc_since[0] >= _DISC_DEBOUNCE:
                         return True
                 else:
-                    _disc_since[0] = None  # connected/connecting → reset debounce
+                    _disc_since[0] = None  # connected/connecting -> reset debounce
                 return False
 
             for _ in range(40):  # ~12s for the receiver/track(s) to exist
@@ -3436,7 +3436,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             _LOGGER.warning("DTLS serve: ffmpeg launch failed: %s", exc)
             return None
 
-    # ── PTZ physical pan/tilt (A001064) ─────────────────────────────────── #
+    # -- PTZ physical pan/tilt (A001064) ----------------------------------- #
     # Uses IOCtrl cmd=4097 (IOTYPE_USER_IPCAM_PTZ_COMMAND) - NOT MQTT.
     # DTLS path: sent via WebRTC DataChannel. SDES path: sent via encrypted
     # SCTP cmd_chan. Requires an active stream session (_stream_session).
@@ -3573,11 +3573,11 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         # Returns a running TutkStreamSession, or None on failure.
         #
         # Protocol: TUTK IOTC P2P (confirmed from classes.jar.decompiled.zip).
-        #   p2pId (TUTK UID) ← POST /v21/devices/batchGetDeviceUserInfo
-        #   IOTC_Connect_ByUID_Parallel(uid) → nSID
-        #   avClientStart2(nSID, "admin", "admin123") → avIndex
-        #   avSendIOCtrl(avIndex, 511, ...) → start video stream
-        #   avRecvFrameData2(avIndex, ...) → frame loop
+        #   p2pId (TUTK UID) <- POST /v21/devices/batchGetDeviceUserInfo
+        #   IOTC_Connect_ByUID_Parallel(uid) -> nSID
+        #   avClientStart2(nSID, "admin", "admin123") -> avIndex
+        #   avSendIOCtrl(avIndex, 511, ...) -> start video stream
+        #   avRecvFrameData2(avIndex, ...) -> frame loop
         #
         # Requires libIOTCAPIs.so + libAVAPIs.so from the TUTK SDK.
 
