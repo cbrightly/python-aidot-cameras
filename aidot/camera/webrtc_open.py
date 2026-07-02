@@ -992,32 +992,13 @@ class _WebRTCOpenMixin:
                         "lowPowerActiveState HTTP failed for %s: %s", device_id, _we
                     )
 
-            async def _http_keepalive() -> None:
-                # setKeepAliveTime keeps the camera in active state for 25 s
-                # after wake (n.java:224 - keepAliveTime=25, not 20).
-                # Without this call the camera's built-in timer may return it
-                # to sleep before SCTP + LIVING completes (~10-15 s).
-                try:
-                    import aiohttp as _aiohttp_k
-                    async with _aiohttp_k.ClientSession() as _ks:
-                        async with _ks.post(
-                            f"{self._aidot_v32_base}/devices/{device_id}"
-                            "/setKeepAliveTime",
-                            json={"keepAliveTime": 25},
-                            headers=self._aidot_headers(),
-                            timeout=_aiohttp_k.ClientTimeout(total=8),
-                        ) as _kr:
-                            _LOGGER.debug(
-                                "setKeepAliveTime HTTP %d for %s",
-                                _kr.status, device_id,
-                            )
-                except Exception as _ke:
-                    _LOGGER.debug(
-                        "setKeepAliveTime HTTP failed for %s: %s", device_id, _ke
-                    )
-
             _spawn_bg(_http_wake())
-            _spawn_bg(_http_keepalive())
+            # setKeepAliveTime keeps the camera active for ~25 s after wake so the
+            # SCTP + LIVING handshake can complete. For BATTERY cameras a renewal
+            # loop (CameraMixin._keepalive_renew_loop, started by start_keepalive)
+            # then re-issues it every 20 s for the whole view - app parity so the
+            # camera doesn't return to sleep mid-stream.
+            _spawn_bg(self._async_set_keep_alive())
 
             outgoing_q.put_nowait(
                 (f"iot/v1/s/{user_id}/IPC/getIceConfigReq", _ice_req_payload)
