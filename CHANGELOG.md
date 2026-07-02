@@ -4,6 +4,18 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.10.2]
+
+### Changed
+- **Repository re-aligned to a flat `aidot/` layout** (from `src/aidot/`) to match
+  the upstream project's paths, and **downstream git ancestry with upstream
+  (`AiDot-Development-Team/python-AiDot`) was established**, so future upstream
+  changes can be merged directly (`git fetch upstream && git merge upstream/main`).
+
+  Marker release only: **no functional or API change.** The published wheel ships
+  the identical `aidot/` package (imports and behaviour are the same as 0.10.1);
+  this release exists to record the maintenance/layout milestone in the changelog.
+
 ## [0.10.1]
 
 ### Fixed
