@@ -19,7 +19,7 @@ class _CameraControlsMixin:
 
     async def async_set_motion_detection(self, enabled: bool) -> bool:
         """Enable or disable the camera's motion detection."""
-        # MotionDetection_Enable is read as getString() in IpcServiceImpl → use str
+        # MotionDetection_Enable is read as getString() in IpcServiceImpl -> use str
         return await self.async_set_device_attribute(
             "MotionDetection_Enable", "1" if enabled else "0")
 
@@ -108,7 +108,7 @@ class _CameraControlsMixin:
         speed:     0-255, default 4 (matches app default)
         preset:    preset slot for "goto" command
 
-        Source: a.java d1() / f0.java A2() → avSendIOCtrl(4097, 8B payload)
+        Source: a.java d1() / f0.java A2() -> avSendIOCtrl(4097, 8B payload)
         Payload: [direction_code, speed, preset, 0, 0, 0, 0, 0]
 
         Direction codes (AVIOCTRLDEFs.java):
@@ -128,7 +128,7 @@ class _CameraControlsMixin:
             return False
         ok = session._avio_cmd(4097, payload)
         _LOGGER.debug(
-            "PTZ %s (code=%d speed=%d preset=%d) → %s",
+            "PTZ %s (code=%d speed=%d preset=%d) -> %s",
             direction, code, speed, preset, "sent" if ok else "no channel yet",
         )
         return ok
@@ -144,7 +144,7 @@ class _CameraControlsMixin:
         mirroring the official app's HD/SD toggle.  Rides the active stream
         session (SETSTREAMCTRL=800), so the camera must be streaming.
 
-        Source: f0.java g3() → X2(800, SetStreamCtrlReq.parseContent(0, quality)).
+        Source: f0.java g3() -> X2(800, SetStreamCtrlReq.parseContent(0, quality)).
         Payload <IB3x> = channel(0) + quality byte + 3 reserved.
         """
         q = _STREAM_QUALITY.get(quality.lower())
@@ -158,7 +158,7 @@ class _CameraControlsMixin:
             return False
         ok = session._avio_cmd(SETSTREAMCTRL_CMD, payload)
         _LOGGER.debug(
-            "set resolution %s (quality=%d) → %s",
+            "set resolution %s (quality=%d) -> %s",
             quality, q, "sent" if ok else "no channel yet",
         )
         return ok

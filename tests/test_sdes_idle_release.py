@@ -101,25 +101,25 @@ _IDLE = 120.0
 
 
 def test_consumer_present_never_releases():
-    # present=True → a viewer is pulling, even long past the idle window
+    # present=True -> a viewer is pulling, even long past the idle window
     assert _idle_release_due(True, last_consumer=0.0, now=10_000.0,
                              idle_secs=_IDLE) is False
 
 
 def test_unknown_table_never_releases():
-    # present=None → /proc unreadable (non-Linux) → fail-safe, never release
+    # present=None -> /proc unreadable (non-Linux) -> fail-safe, never release
     assert _idle_release_due(None, last_consumer=0.0, now=10_000.0,
                              idle_secs=_IDLE) is False
 
 
 def test_no_consumer_within_window_holds():
-    # no consumer but still inside the idle window → keep trying
+    # no consumer but still inside the idle window -> keep trying
     assert _idle_release_due(False, last_consumer=1000.0, now=1090.0,
                              idle_secs=_IDLE) is False
 
 
 def test_no_consumer_past_window_releases():
-    # no consumer for longer than the idle window → release the orphan
+    # no consumer for longer than the idle window -> release the orphan
     assert _idle_release_due(False, last_consumer=1000.0, now=1121.0,
                              idle_secs=_IDLE) is True
 

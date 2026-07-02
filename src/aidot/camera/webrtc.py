@@ -71,7 +71,7 @@ class WebRTCSession:
     async def async_start_talk(
         self, pcm_provider: "Callable[[], Optional[bytes]]"
     ) -> bool:
-        """Begin two-way audio (push-to-talk): stream viewer→camera audio + open speaker.
+        """Begin two-way audio (push-to-talk): stream viewer->camera audio + open speaker.
 
         ``pcm_provider()`` is polled once per 20 ms and must return 320 bytes of
         signed-16-bit little-endian PCM @ 8 kHz mono (or ``None``/short for silence);

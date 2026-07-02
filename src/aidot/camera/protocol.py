@@ -328,7 +328,7 @@ def _compress_sdp_for_camera(sdp: str) -> str:
 
 
 def _make_talk_audio_track(pcm_provider: Callable[[], "Optional[bytes]"]):
-    """Build an aiortc MediaStreamTrack that emits viewer→camera talk audio.
+    """Build an aiortc MediaStreamTrack that emits viewer->camera talk audio.
 
     Mirrors the official app (f0.java:695): a real audio track is present on the
     PeerConnection from the start, so the camera sees a genuine sender.  The
@@ -1185,7 +1185,7 @@ def _mqtt_session_sync(
     conn_ev = threading.Event()
     status  = {"connected": False, "rc": None, "rc_str": "", "error": None, "log": []}
 
-    # Build client - handle paho ≥2.0 (VERSION2) and <2.0
+    # Build client - handle paho >=2.0 (VERSION2) and <2.0
     try:
         client = _paho.Client(
             callback_api_version=_paho.CallbackAPIVersion.VERSION2,
@@ -1203,7 +1203,7 @@ def _mqtt_session_sync(
         client.tls_set_context(ctx)
 
     def _on_connect(c, ud, flags, reason_code, props=None):
-        # paho ≥2 passes ReasonCode; paho <2 passes int
+        # paho >=2 passes ReasonCode; paho <2 passes int
         try:
             rc = int(reason_code)
         except (TypeError, ValueError):
@@ -1742,7 +1742,7 @@ def _upgrade_sctp(sdp: str) -> str:
     RFC 8841 (and cameras / modern browsers) expect:
         m=application 9 UDP/DTLS/SCTP webrtc-datachannel
         a=sctp-port:5000
-        a=max-message-size:65536   ← required by RFC 8841 §4.3.1
+        a=max-message-size:65536   <- required by RFC 8841 section 4.3.1
     """
     import re as _re
     out = []
@@ -1759,7 +1759,7 @@ def _upgrade_sctp(sdp: str) -> str:
 def _normalize_bundle_ice_credentials(sdp: str) -> str:
     """Unify all m-section ICE credentials to match the BUNDLE master (mid:0).
 
-    RFC 8843 §7.1.3 requires all bundled m-sections to carry the same
+    RFC 8843 section 7.1.3 requires all bundled m-sections to carry the same
     ice-ufrag and ice-pwd.  aiortc generates a separate ICETransport per
     transceiver, giving each a unique credential pair.  Cameras that
     validate this requirement silently reject offers with mismatched

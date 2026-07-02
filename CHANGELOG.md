@@ -7,15 +7,15 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 ## [0.10.1]
 
 ### Fixed
-- **Deadlock opening a stream on the SDES→DTLS fallback.** When a camera declared
+- **Deadlock opening a stream on the SDES->DTLS fallback.** When a camera declared
   SDES but actually required DTLS, the fallback re-entered the *public*
   `async_open_webrtc_stream` while already holding the non-reentrant open-gate
-  permit — hanging forever whenever the gate was saturated (two such cameras
+  permit - hanging forever whenever the gate was saturated (two such cameras
   opening at once, or `AIDOT_MAX_CONCURRENT_OPENS=1`). It now calls the ungated
   impl under the permit it already holds.
 - **DTLS fingerprint pinning failed open.** With `AIDOT_DTLS_PINNED_FP` set, the
   pin was silently skipped when the camera presented a real (non-empty)
-  fingerprint — the check was gated on the empty-fingerprint workaround — and it
+  fingerprint - the check was gated on the empty-fingerprint workaround - and it
   accepted any certificate when the peer cert was missing or the digest raised.
   The pin is now enforced whenever it is set (independent of the workaround) and
   **fails closed**: a missing cert or a fingerprint error fails the handshake.
@@ -60,15 +60,15 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 ### Added
 - **Opt-in transport hardening** (all default to prior behavior and emit a
   one-time warning when left permissive):
-  - `AIDOT_DTLS_PINNED_FP` — pin the camera's DTLS `sha-256` fingerprint; a
+  - `AIDOT_DTLS_PINNED_FP` - pin the camera's DTLS `sha-256` fingerprint; a
     mismatching certificate fails the handshake instead of being accepted.
-  - `AIDOT_PLAYBACK_TLS_VERIFY=1` — require full certificate + hostname
+  - `AIDOT_PLAYBACK_TLS_VERIFY=1` - require full certificate + hostname
     verification on the TCP playback/live-stream TLS connection.
-  - `AIDOT_ALLOW_LAN_SERVE` — acknowledge/silence the warning emitted when
+  - `AIDOT_ALLOW_LAN_SERVE` - acknowledge/silence the warning emitted when
     decrypted media is served on a non-loopback bind.
-  - `AIDOT_SDES_HOLEPUNCH_HOST` — override the NAT hole-punch host used when the
+  - `AIDOT_SDES_HOLEPUNCH_HOST` - override the NAT hole-punch host used when the
     cloud supplies no TURN entry (set empty to disable the hardcoded fallback).
-- **Supported-cameras documentation** — a model/transport/power table in
+- **Supported-cameras documentation** - a model/transport/power table in
   `docs/CAMERAS.md` (and a short list in the README), covering A000088 (DTLS),
   A001513 (SDES, battery / "L2"), and A001064 (SDES, PTZ).
 
@@ -100,13 +100,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 - **Choppy DTLS camera audio under packet loss.** The DTLS A/V mux timestamped
   audio purely by accumulated decoded-sample count (`a_pts += fr.samples`) and
   discarded the PCMA RTP timestamp it had already captured. The video path locks
-  to its 90 kHz RTP timestamps, but audio did not — so any lost audio packet made
+  to its 90 kHz RTP timestamps, but audio did not - so any lost audio packet made
   the lost time *vanish* and the remaining samples concatenate, compressing the
   audio timeline. Over a live stream this runs audio progressively ahead of the
   video and forces the player's jitter buffer to resync, heard as choppy audio.
   (A zero-loss lab capture sounded fine, which is why this hid behind earlier
   fixes.) The mux now anchors audio to its RTP clock and conceals a detected gap
-  (≥ 20 ms) with silence through the resampler — mirroring the video path — so
+  (>= 20 ms) with silence through the resampler - mirroring the video path - so
   audio stays time-locked and lost time becomes a brief honest silence instead of
   permanent A/V drift. Lossless streams are unaffected (the gap is zero, a no-op).
   An offline regression probe that drives the real mux with synthetic loss is at
@@ -123,7 +123,7 @@ Logging and packaging hygiene; no behavioural change to streaming.
   id, so logs read `camera stop: swallowed exception` and never said which
   camera. The 70 sites where a device id is in scope now log
   `camera <id>: swallowed exception in <func>` (via `getattr(self, "device_id",
-  "?")` — these are except blocks, so they must never raise); the 35 sites with
+  "?")` - these are except blocks, so they must never raise); the 35 sites with
   no device id in scope (the `SdesSession`/`WebRTCSession` classes carry none,
   plus module-level functions and non-`self` closures) drop the misleading
   `camera %s` framing and log `swallowed exception in <func>`.
@@ -131,7 +131,7 @@ Logging and packaging hygiene; no behavioural change to streaming.
 ### Changed
 - **Core runtime dependencies now have conservative lower bounds**
   (`aiohttp>=3.9`, `cryptography>=42.0`, `pycryptodome>=3.20`, `dacite>=1.8`),
-  so a fresh install can't resolve an ancient release. No upper caps — under
+  so a fresh install can't resolve an ancient release. No upper caps - under
   Home Assistant, HA core pins `aiohttp`/`cryptography` itself and a cap would
   fight its resolver.
 
@@ -143,22 +143,22 @@ cold-start latency toward app-parity. All streaming changes were live-validated
 on real DTLS and SDES cameras.
 
 ### Added
-- **`WebRTCSession.get_stats()`** — a best-effort connection-health snapshot: the
-  nominated ICE candidate pair (host/srflx/relay/prflx — the relay-vs-direct
+- **`WebRTCSession.get_stats()`** - a best-effort connection-health snapshot: the
+  nominated ICE candidate pair (host/srflx/relay/prflx - the relay-vs-direct
   signal) plus inbound RTP packet loss / jitter. Fully guarded against
   aiortc/aioice internal drift.
-- **`CameraStatus.wifi_rssi`** — parses the cloud `networkRssi` (dBm) into camera
+- **`CameraStatus.wifi_rssi`** - parses the cloud `networkRssi` (dBm) into camera
   status, so a marginal camera link is visible without a packet capture.
-- **`scripts/camera_diag.py`** — a maintained on-hardware probe: handshake time,
+- **`scripts/camera_diag.py`** - a maintained on-hardware probe: handshake time,
   time-to-first-frame, per-second decoded-fps timeline + gaps, nominated ICE
   path, RTP health, and Wi-Fi RSSI.
 
 ### Changed
 - **DTLS fast-liveplay (default on).** Skips the up-to-2s `livePlayResp` wait on
   the DTLS open path (the official app never waits for it; it usually times out),
-  while keeping the full ICE/TURN/DTLS handshake — so remote/relay viewing is
+  while keeping the full ICE/TURN/DTLS handshake - so remote/relay viewing is
   unaffected, unlike the broader `fast_connect`. ~2s off a cold LAN open
-  (12.8s→10.7s measured). Disable via `AIDOT_DTLS_FAST_LIVEPLAY=0` or per-camera
+  (12.8s->10.7s measured). Disable via `AIDOT_DTLS_FAST_LIVEPLAY=0` or per-camera
   `_dtls_fast_liveplay_opt`.
 - **HTTP ICE config is cached** until just before its server-provided `ttl`
   (capped at 1h), saving the ~2s `iceConfig` fetch on a re-open after the warm
@@ -174,9 +174,9 @@ on real DTLS and SDES cameras.
   ERROR/WARNING.
 
 ### Internal
-- **`camera/client.py` decomposed 10,575 → 3,646 lines (-65%).** The two
+- **`camera/client.py` decomposed 10,575 -> 3,646 lines (-65%).** The two
   ~3.5k-line stream-open state machines moved to mixin modules
-  (`webrtc_open.py`, `sdes_open.py`) that `CameraMixin` inherits — behaviour-
+  (`webrtc_open.py`, `sdes_open.py`) that `CameraMixin` inherits - behaviour-
   preserving (each method body byte-identical to the original), validated by
   ruff, the full suite, and live DTLS + SDES streams.
 - **aioice compatibility guard** (`test_aioice_compat.py`) + an `aioice>=0.9,<0.12`
@@ -194,9 +194,9 @@ found in a pre-release review.
 - **Persistent-MQTT stream drain no longer leaks an executor thread.** The drain
   blocks an executor thread on `outgoing_q.get` until a `None` sentinel arrives.
   Cancelling the drain future (the previous teardown behaviour, 0.7.36) cannot
-  interrupt that blocked thread, so a stream open cancelled mid-handshake — or a
+  interrupt that blocked thread, so a stream open cancelled mid-handshake - or a
   second open that replaced a prior one without an intervening
-  `async_stop_streaming` — left the thread (and its handler on the shared
+  `async_stop_streaming` - left the thread (and its handler on the shared
   connection) pinned forever, eventually exhausting the shared default
   `ThreadPoolExecutor`. Teardown and every new open now reap via
   `_reap_stream_drain`, which pushes the `outgoing_q` sentinel to release the
@@ -225,7 +225,7 @@ found in a pre-release review.
   executor thread blocked in `stderr.read()` on a wedged ffmpeg is released instead
   of leaked.
 - **Removed a duplicate `CONF_LOGIN_INFO` definition** in `const.py` (a dead
-  `"login_info"` shadowed by `"loginInfo"`); no behaviour change — the effective
+  `"login_info"` shadowed by `"loginInfo"`); no behaviour change - the effective
   value was always `"loginInfo"`, which the v1.1.3 login_info migration expects.
 
 ### Validated
@@ -251,7 +251,7 @@ found in a pre-release review.
 ### Added
 - **Per-camera served-audio gain (`start_keepalive(sdes_audio_gain_db=...)`).**
   The SDES served-audio gain (default `-8` dB) can now be set per camera by the
-  caller, in addition to the `AIDOT_SDES_AUDIO_GAIN_DB` env — so a Home Assistant
+  caller, in addition to the `AIDOT_SDES_AUDIO_GAIN_DB` env - so a Home Assistant
   install (which can't set env vars) can expose it as an option. New
   `_resolve_sdes_audio_gain_db` resolver (opt wins over env; bad value falls back
   to the default). (#73)
@@ -266,7 +266,7 @@ found in a pre-release review.
   silence, so audio from battery cameras streams smoothly. New
   `_resolve_sdes_serve_audio` resolver (per-camera `sdes_audio` opt wins over the
   `AIDOT_SDES_SERVE_AUDIO` env; falsy `{0,false,no,off}` disables). File recording
-  (snapshots, diagnostics) is unaffected — always a plain `-c copy`. Soak-validated
+  (snapshots, diagnostics) is unaffected - always a plain `-c copy`. Soak-validated
   across the battery fleet (video + audio on every open). `AIDOT_SDES_AUDIO_GAIN_DB`
   (default `-8`) trims the hot mic. (#72)
 
@@ -276,12 +276,12 @@ found in a pre-release review.
 - **SDES teardown no longer hangs on a wedged ffmpeg.** `SdesSession.stop()` read
   ffmpeg's drained stderr with a blocking `proc.stderr.read()` on the event loop;
   if the killed ffmpeg hadn't fully exited (zombie / stuck in uninterruptible I/O
-  — the no-media degradation case), the read never reached EOF and hung the whole
+  - the no-media degradation case), the read never reached EOF and hung the whole
   teardown, wedging `async_cleanup` / `async_stop_streaming` / `close()`. It now
   runs in the executor under a 2 s timeout, so a wedged ffmpeg can't stall the
   close. (#71)
 - **Cameras no longer hammer the light-protocol TCP:10000 login.** That control
-  channel is lights-only — cameras use the separate `CameraLanClient` for local
+  channel is lights-only - cameras use the separate `CameraLanClient` for local
   control and get their LAN IP from WebRTC signaling. When a discovered IP slipped
   the `_is_camera` gate, `async_login` would log in to a port the camera doesn't
   serve, fail with `login read status error 0 bytes read`, and re-fire every
@@ -294,7 +294,7 @@ found in a pre-release review.
 
 ### Changed
 - **SDES fast-liveplay is now ON by default (`AIDOT_SDES_FAST_LIVEPLAY`).** The
-  official app never waits for/parses `livePlayResp` — it fires `livePlayReq` and
+  official app never waits for/parses `livePlayResp` - it fires `livePlayReq` and
   goes straight to the WebRTC offer/ICE. We now match that by default (~4.5 s
   faster SDES cold start) instead of blocking on the echo/ack. Role-reversal
   models (`_NO_FAST_LIVEPLAY_MODELS`, e.g. A001064) remain hard-excluded for
@@ -309,7 +309,7 @@ found in a pre-release review.
   session isn't blocked.** Previously the DTLS `stop()` closed the PeerConnection
   without sending SPEAKERSTOP when talk was active (stall/error/`async_speak`
   paths), and even the clean path closed the transport immediately after
-  SPEAKERSTOP without letting it flush — leaving the camera's speaker/talk channel
+  SPEAKERSTOP without letting it flush - leaving the camera's speaker/talk channel
   bound to the dead session, so the app's (or HA's) next push-to-talk got `851`
   "mic occupied". Now: DTLS `stop()` sends SPEAKERSTOP(849), idles the track, and
   waits a short flush window before closing the PC whenever talk was active
@@ -321,9 +321,9 @@ found in a pre-release review.
 
 ### Changed
 - **Persistent MQTT connection reuse is now ON by default
-  (`AIDOT_PERSISTENT_MQTT`).** This is exactly how the official app behaves — one
+  (`AIDOT_PERSISTENT_MQTT`).** This is exactly how the official app behaves - one
   persistent connection per login session for commands, attributes, and stream
-  signaling — and the live soak validated it cuts SDES `NO_MEDIA` from ~57% to
+  signaling - and the live soak validated it cuts SDES `NO_MEDIA` from ~57% to
   ~19% with no regression (battery cameras roughly doubled their media-delivery
   rate). It is also safer than connect-per-op, which can collide on the single
   authorized client_id. Disable with `AIDOT_PERSISTENT_MQTT` in `{0,false,no,off}`
@@ -334,17 +334,17 @@ found in a pre-release review.
 
 ### Changed
 - **Persistent MQTT now also carries the stream-open signaling
-  (`AIDOT_PERSISTENT_MQTT`) — Phase 2.** When enabled, the WebRTC stream open no
+  (`AIDOT_PERSISTENT_MQTT`) - Phase 2.** When enabled, the WebRTC stream open no
   longer spins up its own connect-per-stream MQTT session; it subscribes and
   registers its handler on the SAME account-level persistent connection that
   commands/attributes use (the stream's `mqtt_cid` IS the authorized
   `mqttClientId`, so it is literally the same connection), drains its outgoing
-  queue through it, and does NOT tear the connection down on stop — matching the
+  queue through it, and does NOT tear the connection down on stop - matching the
   app, which keeps one connection for everything. This removes the per-open
   connect churn that was rate-limiting the cloud account.
   **Soak-validated (live, 7-camera round-robin):** SDES `NO_MEDIA` dropped from
-  **57% → 11%** (n=63 → n=28) and the connect RuntimeErrors went 6 → ~0, with no
-  per-camera regression — including the previously-worst battery camera going
+  **57% -> 11%** (n=63 -> n=28) and the connect RuntimeErrors went 6 -> ~0, with no
+  per-camera regression - including the previously-worst battery camera going
   from ~15% to ~71% media delivery. The flag is still opt-in (default off);
   `_PersistentMqtt` gained `add_handler`/`remove_handler`/`publish`/`subscribe`
   for the long-lived stream consumer. (#67)
@@ -353,14 +353,14 @@ found in a pre-release review.
 
 ### Added
 - **Persistent MQTT connection reuse for commands + attributes
-  (`AIDOT_PERSISTENT_MQTT`, opt-in, default off) — Phase 1.** Historically every
+  (`AIDOT_PERSISTENT_MQTT`, opt-in, default off) - Phase 1.** Historically every
   device command (PTZ/settings) and every attribute fetch opened and tore down its
   own cloud MQTT WebSocket; the official app instead keeps ONE persistent
   connection per login session (LDSBaseMqttServiceImpl) and reuses it for
   everything. When enabled, the new `_PersistentMqtt` holds one account-level
   connection (the broker binds auth to the single authorized client_id, so there
   can only be one), subscribes once, replays subscriptions on reconnect, and routes
-  `_mqtt_device_cmd` + `async_get_camera_attributes` through it — cutting the
+  `_mqtt_device_cmd` + `async_get_camera_attributes` through it - cutting the
   per-command and per-5-min-attribute-poll connect churn that can trip cloud
   rate-limiting across multiple cameras. The stream-open signaling path is
   unchanged (it uses per-session client_ids) and is a later phase. Connection is
@@ -379,11 +379,11 @@ found in a pre-release review.
   regardless of camera reachability: a LAN-direct camera gets the fast connect; a
   strict-NAT / non-LAN camera loses one fast attempt then connects via the relay. A
   **per-device cache** (`_fast_path_unavailable`) latches a camera that failed the
-  fast path so later views skip straight to the full path — bounding the
+  fast path so later views skip straight to the full path - bounding the
   fast-timeout penalty to once per camera per session. Role-reversal models keep
   their `sdes_fast_liveplay` exclusion. Enable with `AIDOT_SDES_ADAPTIVE=1` or
   `start_keepalive(sdes_adaptive=True)`. **Default off pending real-world
-  fast-failure-rate data** — a fast *failure* costs ~40 s (the grace) before
+  fast-failure-rate data** - a fast *failure* costs ~40 s (the grace) before
   fallback while success saves ~7 s, so the failure rate must be characterised on
   real fleets before this becomes a default. Live-validated on the dev-box LAN:
   fast success on mains A001064 (first-media 16.1 s) and battery A001513 (9.96 s)
@@ -397,12 +397,12 @@ found in a pre-release review.
   the blocking TURN relay pre-allocation on the SDES path for LAN-direct cameras.
   Before building the offer the SDES path does two synchronous RFC-5766 Allocate
   round-trips (audio + video) to the cloud TURN server so the offer can carry a
-  relay address — but on a LAN the camera's host candidate wins and that relay is
+  relay address - but on a LAN the camera's host candidate wins and that relay is
   never used. Measured live, the pre-allocation costs ~2-3 s normally and **~4 s
   when the Allocate times out** (which it does from networks that can't reach the
   TURN server), all for `allocated=0`. Skipping it removes that dead wait. The
   cost is now always instrumented (`signaling-wait[...] sdes-turn-prealloc
-  elapsed=...`), and `_fast_connect` is unchanged (still force-off for SDES) — this
+  elapsed=...`), and `_fast_connect` is unchanged (still force-off for SDES) - this
   flag skips *only* the relay pre-allocation, leaving the SCTP-arming handshake
   intact. Validated live on A001513 (skip on: 9.8 MB over a 130 s hold, 0 SCTP
   churn, healthy heartbeats throughout). Per-camera `sdes_skip_turn` (via
@@ -413,13 +413,13 @@ found in a pre-release review.
 ### Fixed
 - **livePlayResp was never matched, so its wait always timed out.** The handler
   matched the response on `devId`, but the camera's livePlayResp payload carries
-  no `devId` — it echoes back our exact `peerid`. The wait therefore always ran
+  no `devId` - it echoes back our exact `peerid`. The wait therefore always ran
   to its full timeout (and the camera's reject `code` was never read). The match
   now keys on the echoed `peerid` (falling back to `devId`), so the wait returns
   the instant the response arrives (live: `elapsed=0ms arrived=True`).
 - **Spurious aborts on transient/unknown livePlay codes.** With the response now
   actually parsed, the previously-dead reject path could fire on any non-OK code
-  — including `-50019` ("not ready"), which battery cameras emit routinely and
+  - including `-50019` ("not ready"), which battery cameras emit routinely and
   recover from via ICE. All three reject sites (one SDES, two DTLS) now fast-fail
   *only* on an unambiguous refusal (`livePlay=0`); other non-OK codes (incl.
   `-50019`) are logged as transient and the handshake proceeds. Validated live:
@@ -431,11 +431,11 @@ found in a pre-release review.
 - **SDES fast-liveplay degraded the A001064 (role-reversal PTZ) camera and is now
   excluded from it.** That model's handshake has the camera echo our offer back
   as its own webrtcReq before doing ICE, so it must be armed *before* our
-  webrtcReq — and the flag sends webrtcReq ~4.5 s earlier, which dropped its media
+  webrtcReq - and the flag sends webrtcReq ~4.5 s earlier, which dropped its media
   reliability (a live A/B showed 2/2 media with the flag off vs 1/2 with it on;
   the flag's soak validation covered only the A001513 battery cameras). The flag
   now never applies to role-reversal models (`_NO_FAST_LIVEPLAY_MODELS`,
-  currently `LK.IPC.A001064`) regardless of the option/env — they keep the full
+  currently `LK.IPC.A001064`) regardless of the option/env - they keep the full
   livePlay waits. A001513 cameras still get the ~4.5 s saving. (#60)
 
 ## [0.7.23]
@@ -443,20 +443,20 @@ found in a pre-release review.
 ### Changed
 - **SDES fast-liveplay (`AIDOT_SDES_FAST_LIVEPLAY` / `sdes_fast_liveplay`) is now
   validated in soak** and relabelled from "experimental/unvalidated, may
-  destabilise" to **validated (opt-in, default off)**. A 3-hour live soak — 15
+  destabilise" to **validated (opt-in, default off)**. A 3-hour live soak - 15
   SDES opens across battery cameras, the flag engaging on every one, **0 churn /
-  0 fail**, with the ~4.5 s signaling saving holding throughout — confirmed it
+  0 fail**, with the ~4.5 s signaling saving holding throughout - confirmed it
   doesn't break the handshake or cause near-term churn (it keeps the full
   ICE/TURN/SCTP handshake; only the always-timing-out echo/livePlayResp acks are
   shortened). **Kept off by default** pending broader multi-day use: per-open and
   near-term stability are proven, long-haul sustained stability is not yet.
-  Docs/labels only — no behaviour change. (#59)
+  Docs/labels only - no behaviour change. (#59)
 
 ## [0.7.22]
 
 ### Fixed
 - **The experimental SDES fast-liveplay flag (0.7.21) was dead code for SDES
-  cameras** — its gate lived inside the DTLS-only `if not use_sdes:` block, so it
+  cameras** - its gate lived inside the DTLS-only `if not use_sdes:` block, so it
   never ran for the SDES cameras it targets (explaining the earlier "no effect").
   Moved the gate into the SDES open path where the SDES livePlay waits actually
   live, so it now engages.
@@ -466,10 +466,10 @@ found in a pre-release review.
   not just the livePlayResp wait.** Instrumentation (see below) showed that for
   the SDES cameras measured, both the livePlayReq-echo wait (5 s) and the
   livePlayResp wait (1 s) **always time out** (echo/resp never arrive) yet
-  streaming succeeds — ~6 s of dead padding. With the flag on, the echo wait is
-  capped at 1.5 s and the livePlayResp wait is skipped: **~6 s → ~1.5 s of
+  streaming succeeds - ~6 s of dead padding. With the flag on, the echo wait is
+  capped at 1.5 s and the livePlayResp wait is skipped: **~6 s -> ~1.5 s of
   signaling (a deterministic ~4.5 s saving)**, with the full ICE/TURN/SCTP
-  handshake untouched. Still EXPERIMENTAL/off by default — stability over a real
+  handshake untouched. Still EXPERIMENTAL/off by default - stability over a real
   soak is unverified; enable to test and watch for SDES session churn.
 
 ### Added
@@ -481,15 +481,15 @@ found in a pre-release review.
 ## [0.7.21]
 
 ### Added (experimental)
-- **`AIDOT_SDES_FAST_LIVEPLAY` / `start_keepalive(sdes_fast_liveplay=...)`** — an
+- **`AIDOT_SDES_FAST_LIVEPLAY` / `start_keepalive(sdes_fast_liveplay=...)`** - an
   **experimental, unvalidated** opt-in that skips *only* the ~2 s `livePlayResp`
   blocking wait for SDES cameras, keeping the full ICE/TURN/SCTP handshake (the
-  part whose skipping destabilises SDES — which is why full `fast_connect` stays
+  part whose skipping destabilises SDES - which is why full `fast_connect` stays
   forced off for SDES). Theory: shaves ~2 s off the SDES cold start without the
   SCTP churn that full fast-connect causes. **Off by default.** A clean synthetic
   A/B was not achievable (SDES cameras degrade on rapid reconnects and the
   available test cameras are battery / role-reversal), so this needs a real-world
-  soak before any default change — **may destabilise SDES; enable at your own
+  soak before any default change - **may destabilise SDES; enable at your own
   risk and watch for session churn.** (#55)
 
 ## [0.7.20]
@@ -505,19 +505,19 @@ found in a pre-release review.
 
 ### Added
 - **Cold-start instrumentation.** `_cold_phase()` logs greppable
-  `cold-start[<device>] <phase> +<ms>` markers (webrtcReq → first-media →
+  `cold-start[<device>] <phase> +<ms>` markers (webrtcReq -> first-media ->
   serving) on both serve paths, so a cold connect's timeline is measurable
   without a debugger. Best-effort: never raises, no-op when no open is in flight.
 - **Warm-hold option.** `start_keepalive(stream_idle_s=...)` overrides
   `AIDOT_STREAM_IDLE_S` (default 120 s); `<= 0` keeps the warm WebRTC session
-  forever so re-views are instant — intended for mains cameras (it holds a
+  forever so re-views are instant - intended for mains cameras (it holds a
   concurrent-stream slot + continuous decrypt for the camera's lifetime, so stay
   within `AIDOT_MAX_CONCURRENT_STREAMS`, default 3). Default behaviour unchanged.
 
 ### Changed
 - **Denser SDES startup PLI burst** so the first decodable keyframe arrives
   sooner on a cold open: keyframe requests now ramp 0 / 1.5 / 3.5 / 6.5 s then
-  the same 30 s safety PLI (was 3 PLIs at a flat 5 s → first IDR up to ~10 s).
+  the same 30 s safety PLI (was 3 PLIs at a flat 5 s -> first IDR up to ~10 s).
   Tunable/revertable via `AIDOT_SDES_PLI_GAPS`. (#52)
 
 ## [0.7.18]
@@ -525,8 +525,8 @@ found in a pre-release review.
 ### Fixed
 - **Cold-start blank video: the first view of an idle camera (or the first view
   after an HA restart) could fail to load.** go2rtc pulls the library's local
-  `ffmpeg -f mpegts -listen 1` socket before ffmpeg has bound it — ffmpeg only
-  opens its `-listen` output after probing input, which needs the ~16–25 s WebRTC
+  `ffmpeg -f mpegts -listen 1` socket before ffmpeg has bound it - ffmpeg only
+  opens its `-listen` output after probing input, which needs the ~16-25 s WebRTC
   handshake to deliver the first frames. go2rtc hit `ECONNREFUSED`, retried for
   ~200 ms, then gave up, so the card stayed blank until a second attempt. The
   library now holds the public serve port for the whole session via a small relay
@@ -556,7 +556,7 @@ found in a pre-release review.
 
 ### Documentation
 - Documented the `AIDOT_LIVESTREAM_PARAM` environment variable in the README's
-  environment-variable reference — the knob added in 0.7.15 to gate the
+  environment-variable reference - the knob added in 0.7.15 to gate the
   `liveStreamParam` cloud pre-connect that provisions battery cameras (set `0` to
   disable). No code changes. (#45)
 
@@ -565,10 +565,10 @@ found in a pre-release review.
 ### Fixed
 - **Battery cameras (A001513/A001108/A001360, e.g. the L2 models) produced no live
   media.** They rejected every MQTT `livePlayReq` with code `-50019` ("not ready")
-  and never ran ICE — even fresh-rebooted, app-closed, and uncontended — while
+  and never ran ICE - even fresh-rebooted, app-closed, and uncontended - while
   mains cameras of the same model streamed fine. Root cause: the official app
   performs a cloud pre-connect the library skipped (`KVSPreConnectStrategy.
-  fetchKvsParams` → `POST /api/ipc/liveStream/liveStreamParam`) that provisions the
+  fetchKvsParams` -> `POST /api/ipc/liveStream/liveStreamParam`) that provisions the
   live-stream session and brings the camera online before signaling. The library
   now makes that call for battery cameras at the start of the open path; the
   existing MQTT/SDES signaling then succeeds and decrypted RTP flows. Best-effort,
@@ -585,8 +585,8 @@ found in a pre-release review.
 - **Jittered reconnect backoff** (`next_backoff` in `camera/protocol.py`): the SDES
   keepalive, JPEG streaming, and DTLS serve loops now use equal-jitter exponential
   backoff (with a hard floor at each loop's existing minimum) instead of a lockstep
-  `delay *= 2`. Randomized spread stops a degraded camera — or a fleet reconnecting
-  at once — from synchronizing into reconnect storms / cloud rate-limiting. The
+  `delay *= 2`. Randomized spread stops a degraded camera - or a fleet reconnecting
+  at once - from synchronizing into reconnect storms / cloud rate-limiting. The
   loops also escalate backoff only when a session opens but never delivers media
   (the camera-degradation case) and reset after a session that streamed; the
   decrypted-RTP liveness watchdog still drives *when* to restart. (#41)
@@ -599,7 +599,7 @@ found in a pre-release review.
 ### Fixed
 - **SDES H.265 streaming recorded 0-byte video** (#39): SDES cameras stream H.264
   (pt=96) *or* H.265 (pt=97), varying per session, but the generated SDP listed
-  both (`m=video ... 96 97`) — so ffmpeg bound its depacketizer to the first
+  both (`m=video ... 96 97`) - so ffmpeg bound its depacketizer to the first
   payload type (H.264) and silently dropped the camera's H.265 packets. The
   bridge now records the camera's actual video payload type on the first video
   RTP packet and narrows the ffmpeg SDP to that single codec before launch
@@ -619,7 +619,7 @@ found in a pre-release review.
   H.264/H.265 depacketization; when go2rtc is absent the existing ffmpeg serve
   (e.g. Home Assistant HLS) is used unchanged. `start_keepalive(go2rtc_url=...)`
   registers the stream, `stream_rtsp_url` prefers the go2rtc pull URL, and the
-  stream is deregistered on stop. Best-effort throughout — go2rtc errors never
+  stream is deregistered on stop. Best-effort throughout - go2rtc errors never
   break the fallback path. (#37)
 - `scripts/go2rtc_serve.py`: dev harness that drives the go2rtc serve path
   without Home Assistant.
@@ -633,10 +633,10 @@ found in a pre-release review.
 - Finished decomposing the monolithic `camera/client.py` into focused modules
   (data models + TUTK session, playback/WebRTC sessions, SDES session,
   device-control setter mixin, stateless protocol helpers, SDP transforms).
-  Behavior-preserving: all existing imports keep working via re-exports. (#29–#35)
+  Behavior-preserving: all existing imports keep working via re-exports. (#29-#35)
 
-> Validated live end-to-end through a real go2rtc server (camera → library serve
-> → go2rtc → ffprobe: H.264 1280x720 + AAC) in addition to the mocked unit suite
+> Validated live end-to-end through a real go2rtc server (camera -> library serve
+> -> go2rtc -> ffprobe: H.264 1280x720 + AAC) in addition to the mocked unit suite
 > (`tests/test_go2rtc.py`, 8 cases).
 
 ## [0.7.11]
@@ -646,8 +646,8 @@ found in a pre-release review.
   live in `aidot/camera/constants.py` and are re-imported into `client.py`
   (behavior-preserving; all existing imports keep working).
 - Renamed the worst cryptic private STUN/TURN helper closures for readability
-  (`_mi_ta` → `_stun_message_integrity`, `_br_a`/`_si_a` → `_build_stun_attr`,
-  `_rr_accept_cam_cert` → `_accept_camera_cert`). No behavior change.
+  (`_mi_ta` -> `_stun_message_integrity`, `_br_a`/`_si_a` -> `_build_stun_attr`,
+  `_rr_accept_cam_cert` -> `_accept_camera_cert`). No behavior change.
 
 ### Fixed
 - `GETSTREAMCTRL_CMD` is re-exported from `aidot.camera.client` again (it is the
