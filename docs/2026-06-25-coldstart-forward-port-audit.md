@@ -10,7 +10,7 @@
 **Context:** Four cold-start optimizations ("Units 1-4") were built and live-validated
 on the v0.5.15 monolithic `device_client.py` lineage (branch `camera-main`).
 This branch (`forward-port-coldstart`, off `origin/main` v0.9.2) forward-ports
-only what is genuinely missing from the modular `src/aidot/camera/` package.
+only what is genuinely missing from the modular `aidot/camera/` package.
 
 ## Why an audit first
 
@@ -45,11 +45,11 @@ removed. Every v0.5.15-unique fix cluster was checked against v0.9.2:
 
 ## What this branch changes
 
-- `src/aidot/exceptions.py` - add `AidotCameraNotReady`.
-- `src/aidot/camera/webrtc_open.py` - `_keyframe_prompter` helper + prompter-driven
+- `aidot/exceptions.py` - add `AidotCameraNotReady`.
+- `aidot/camera/webrtc_open.py` - `_keyframe_prompter` helper + prompter-driven
   PLI with a first-frame signal (Unit 2); `_media_declined` flag + raise
   `AidotCameraNotReady` on a DC-only answer (Unit 3, webrtc side).
-- `src/aidot/camera/client.py` - `_retry_policy` helper + `except AidotCameraNotReady`
+- `aidot/camera/client.py` - `_retry_policy` helper + `except AidotCameraNotReady`
   fast-retry burst in the DTLS serve loop (Unit 3, serve side).
 - `tests/` - `test_keyframe_prompter.py`, `test_retry_policy.py` (pure-helper unit tests).
 

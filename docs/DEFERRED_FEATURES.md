@@ -16,7 +16,7 @@ not merged into the active code path.  Each section explains:
 ### What it does
 
 Three improvements to `TutkStreamSession._start_sync` (the TUTK C SDK P2P path in
-`src/aidot/device_client.py`) were researched from the `LdsTutkChannel.java` class in
+`aidot/device_client.py`) were researched from the `LdsTutkChannel.java` class in
 a decompiled AiDot APK:
 
 #### 1a. License-key initialisation (`TUTK_SDK_Set_License_Key`)
@@ -128,7 +128,7 @@ To re-enable for a `liveType=0` camera:
 
 `LiveStreamSession` (the TCP binary playback protocol used for recorded video) opens
 a TLS connection to the camera's playback server via `_playback_ssl_context()` in
-`src/aidot/camera/playback.py`. Because the camera presents a self-signed certificate,
+`aidot/camera/playback.py`. Because the camera presents a self-signed certificate,
 the default skips verification (`ssl.CERT_NONE`) and emits a one-time warning. Set
 `AIDOT_PLAYBACK_TLS_VERIFY=1` to require full certificate **and** hostname verification
 (`ssl.CERT_REQUIRED` + `check_hostname`), which needs a trust anchor the camera's cert

@@ -104,7 +104,7 @@ The library reads the following environment variables.
 ### Credentials
 
 Used by the credential helper (`aidot.credentials`); they take priority over any
-stored credentials file. See [`src/aidot/credentials.py`](src/aidot/credentials.py).
+stored credentials file. See [`aidot/credentials.py`](aidot/credentials.py).
 
 | Variable | Purpose | Default |
 | --- | --- | --- |

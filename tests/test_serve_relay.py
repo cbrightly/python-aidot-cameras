@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aidot.camera.protocol import _ServeRelay, _grab_free_port, _rewrite_serve_port
 

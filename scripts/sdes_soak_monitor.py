@@ -35,7 +35,7 @@ import sys
 import time
 from collections import defaultdict
 
-# library log signatures (see src/aidot/camera/client.py)
+# library log signatures (see aidot/camera/client.py)
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _TS = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 _COLD = re.compile(r"cold-start\[([0-9a-f]+)\] (.+?) \+(\d+)ms")

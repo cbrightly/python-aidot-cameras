@@ -81,7 +81,7 @@ guards keep work on this account and prevent footguns:
   and merges are the day-to-day path. Intentional history maintenance (the kind
   that re-launched `main`) requires the maintainer to temporarily lift the
   force-push guard and restore it immediately after - it is not a routine action.
-- **Don't cut a no-op release.** The published wheel ships only `src/aidot/` plus
+- **Don't cut a no-op release.** The published wheel ships only `aidot/` plus
   `README.md`. Before bumping the version, confirm one of those actually changed
   since the last tag (`git diff --stat <last-tag>..HEAD -- src README.md`) -
   otherwise the new version is byte-identical to the last and just burns a PyPI

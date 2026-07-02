@@ -42,7 +42,7 @@ jobs:
           python-version: "3.13"
       - run: pip install mypy
       - name: Mypy (non-blocking)
-        run: mypy src/ || true
+        run: mypy aidot/ || true
 
   # Build the distribution and validate its metadata on every push/PR, so a
   # packaging break (bad pyproject, missing file, bad metadata) is caught here
