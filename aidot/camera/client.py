@@ -529,6 +529,14 @@ def _get_stream_slots() -> "asyncio.Semaphore":
 
 
 
+# Battery cameras re-sleep on their own low-power timer ~25 s after the last
+# keep-alive, even mid-view. Renew setKeepAliveTime INSIDE that window so there
+# is no sleep gap (the official app renews every 30 s, which leaves a ~5 s gap
+# against the 25 s window). See CameraMixin._keepalive_renew_loop.
+_KEEPALIVE_WINDOW_S = 25
+_KEEPALIVE_RENEW_S = 20
+
+
 class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
     """All camera/streaming methods, mixed into DeviceClient via inheritance."""
 
@@ -2099,6 +2107,13 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 await task
             except (asyncio.CancelledError, Exception):
                 _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_stop_streaming', exc_info=True)
+        ka_task, self._keepalive_task = getattr(self, "_keepalive_task", None), None
+        if ka_task is not None and not ka_task.done():
+            ka_task.cancel()
+            try:
+                await ka_task
+            except (asyncio.CancelledError, Exception):
+                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_stop_streaming', exc_info=True)
         # Reap a persistent-MQTT stream drain that no session stopped (e.g. an
         # open cancelled mid-handshake) so its handler is removed from the shared
         # connection and its blocked executor thread is released.
@@ -2208,6 +2223,46 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             except asyncio.CancelledError:
                 return
 
+    async def _async_set_keep_alive(self, keep_alive_s: int = _KEEPALIVE_WINDOW_S) -> None:
+        """POST setKeepAliveTime so a battery camera stays awake for keep_alive_s
+        seconds. Best-effort (errors swallowed). Wire format matches the app
+        (n.java: keepAliveTime=25)."""
+        try:
+            import aiohttp as _aiohttp
+            async with _aiohttp.ClientSession() as _s:
+                async with _s.post(
+                    f"{self._aidot_v32_base}/devices/{self.device_id}/setKeepAliveTime",
+                    json={"keepAliveTime": keep_alive_s},
+                    headers=self._aidot_headers(),
+                    timeout=_aiohttp.ClientTimeout(total=8),
+                ) as _r:
+                    _LOGGER.debug(
+                        "setKeepAliveTime HTTP %d for %s", _r.status, self.device_id
+                    )
+        except Exception as _exc:
+            _LOGGER.debug(
+                "setKeepAliveTime HTTP failed for %s: %s", self.device_id, _exc
+            )
+
+    async def _keepalive_renew_loop(self) -> None:
+        """Renew setKeepAliveTime while a BATTERY camera is streaming (app parity).
+
+        The camera's own low-power timer returns it to sleep ~25 s after the last
+        keep-alive even mid-view, so a one-shot keep-alive at open lets the stream
+        drop partway through. The official app renews it throughout a live view;
+        we renew every _KEEPALIVE_RENEW_S seconds (inside the 25 s window, so no
+        sleep gap). Mains cameras never sleep, so this is battery-only."""
+        if not self.is_battery_camera:
+            return
+        try:
+            while self._streaming_active:
+                await asyncio.sleep(_KEEPALIVE_RENEW_S)
+                if not self._streaming_active:
+                    break
+                await self._async_set_keep_alive()
+        except asyncio.CancelledError:
+            pass
+
     async def start_keepalive(
         self,
         rtsp_push_url: Optional[str] = None,
@@ -2282,6 +2337,9 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         self._keepalive_rtsp_url = rtsp_push_url
         self._go2rtc_url = go2rtc_url
         self._streaming_active = True
+        # App parity: keep a battery camera awake for the whole view (mains cams
+        # never sleep, so the loop is a no-op there). Cancelled in stop.
+        self._keepalive_task = asyncio.ensure_future(self._keepalive_renew_loop())
         if self.is_sdes_camera:
             self._stream_task = asyncio.ensure_future(self._sdes_keepalive_loop())
         elif rtsp_push_url and rtsp_push_url.startswith("http"):
