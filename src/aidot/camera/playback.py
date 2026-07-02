@@ -29,6 +29,7 @@ from .models import VideoFrame
 _LOGGER = logging.getLogger(__name__)
 
 _PLAYBACK_TLS_VERIFY_ENV = "AIDOT_PLAYBACK_TLS_VERIFY"
+_PLAYBACK_TLS_WARNED = False  # module-level once-guard for the insecure-default warning
 
 
 def _playback_ssl_context() -> ssl.SSLContext:
@@ -48,13 +49,16 @@ def _playback_ssl_context() -> ssl.SSLContext:
     else:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        _LOGGER.warning(
-            "playback: TLS certificate verification is DISABLED; the live/playback "
-            "stream is not authenticated and is exposed to on-path tampering. Set "
-            "%s=1 to enable verification once a trust anchor for the camera's "
-            "certificate is available.",
-            _PLAYBACK_TLS_VERIFY_ENV,
-        )
+        global _PLAYBACK_TLS_WARNED
+        if not _PLAYBACK_TLS_WARNED:
+            _PLAYBACK_TLS_WARNED = True
+            _LOGGER.warning(
+                "playback: TLS certificate verification is DISABLED; the "
+                "live/playback stream is not authenticated and is exposed to "
+                "on-path tampering. Set %s=1 to enable verification once a trust "
+                "anchor for the camera's certificate is available. (logged once)",
+                _PLAYBACK_TLS_VERIFY_ENV,
+            )
     return ctx
 
 
@@ -140,6 +144,7 @@ class CloudPlaybackSession:
         client_id: str,
         start_ts_s: int,
         on_frame: Callable[[VideoFrame], None],
+        use_tls: bool = False,
     ) -> None:
         self._server_ip   = server_ip
         self._server_port = server_port
@@ -148,6 +153,10 @@ class CloudPlaybackSession:
         self._client_id   = client_id
         self._start_ts    = start_ts_s
         self._on_frame    = on_frame
+        # Opt-in TLS for the cloud-playback TCP stream. Default False preserves
+        # the historical plaintext behavior (the cloud playback server may not
+        # speak TLS on this port); pass True once verified against a live server.
+        self._use_tls     = use_tls
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
         self._running  = False
@@ -157,8 +166,9 @@ class CloudPlaybackSession:
 
     async def _connect_and_login(self) -> bool:
         try:
+            ssl_ctx = _playback_ssl_context() if self._use_tls else None
             self._reader, self._writer = await asyncio.open_connection(
-                self._server_ip, self._server_port
+                self._server_ip, self._server_port, ssl=ssl_ctx
             )
         except OSError as exc:
             _LOGGER.error(

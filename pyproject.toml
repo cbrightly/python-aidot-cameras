@@ -79,7 +79,7 @@ ignore = [
     "RET504", "RET505", "RET506",            # return-style: stylistic
     "PERF203", "PERF401",                    # try/except in loop, manual comprehension: stylistic
     "PIE810",                                # multiple startswith/endswith: stylistic
-    "RUF001", "RUF003", "RUF059",            # ambiguous-unicode (intentional ×), unused-unpacked: cosmetic
+    "RUF001", "RUF003", "RUF059",            # ambiguous-unicode (intentional x), unused-unpacked: cosmetic
     "B904",                                  # raise-without-from: traceback-chaining style (not enforced)
     "B008",
 ]

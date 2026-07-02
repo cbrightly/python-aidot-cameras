@@ -65,13 +65,13 @@ don't have to be re-discovered):
 The `livePlayResp` wait returns as soon as the response arrives; its timeout is
 only paid when the camera never answers. `sdes_fast_liveplay`
 (`AIDOT_SDES_FAST_LIVEPLAY` env / `sdes_fast_liveplay=` kwarg) skips this wait and
-goes straight to webrtcReq/ICE — **on by default**, matching the official app
+goes straight to webrtcReq/ICE - **on by default**, matching the official app
 (which never waits for `livePlayResp`). Role-reversal models (A001064) are always
 excluded. Disable with `AIDOT_SDES_FAST_LIVEPLAY` in `{0,false,no,off}`.
 
 The **DTLS** path has the targeted equivalent (0.9.0): `dtls_fast_liveplay`
 (`AIDOT_DTLS_FAST_LIVEPLAY` env / `_dtls_fast_liveplay_opt`) skips only the
-up-to-2 s `livePlayResp` wait while keeping the full ICE/TURN/DTLS handshake — so
+up-to-2 s `livePlayResp` wait while keeping the full ICE/TURN/DTLS handshake - so
 remote/relay viewing is unaffected (unlike `fast_connect`, which also strips
 TURN). **On by default**; ~2 s off a cold LAN open. Separately, the HTTP ICE
 config is cached until just before its server-provided `ttl` (capped 1 h), saving
@@ -79,14 +79,14 @@ the ~2 s `iceConfig` fetch on a re-open after the warm session lapses.
 
 ### Diagnostics
 
-- `WebRTCSession.get_stats()` (0.9.0) — best-effort connection-health snapshot:
-  the nominated ICE candidate pair (host/srflx/relay/prflx — relay-vs-direct) plus
+- `WebRTCSession.get_stats()` (0.9.0) - best-effort connection-health snapshot:
+  the nominated ICE candidate pair (host/srflx/relay/prflx - relay-vs-direct) plus
   inbound RTP packets received/lost and jitter. Audio counters are reliable; the
   *video* count is undercounted (this path bridges video outside aiortc's RTP
-  receiver — trust decoded-frame rate for video health).
-- `CameraStatus.wifi_rssi` (0.9.0) — the camera's cloud-reported Wi-Fi RSSI (dBm),
+  receiver - trust decoded-frame rate for video health).
+- `CameraStatus.wifi_rssi` (0.9.0) - the camera's cloud-reported Wi-Fi RSSI (dBm),
   surfaced by HA as a diagnostic sensor; the fastest way to spot a marginal link.
-- `scripts/camera_diag.py` — maintained on-hardware probe: handshake time,
+- `scripts/camera_diag.py` - maintained on-hardware probe: handshake time,
   time-to-first-frame, per-second fps timeline + gaps, nominated ICE path, RTP
   health, RSSI. `python scripts/camera_diag.py --name <substr>`.
 
@@ -98,9 +98,9 @@ tries the fast path (skip the livePlay waits + the TURN relay pre-allocation) wi
 a short 45 s open timeout / 40 s media grace. If that attempt delivers no media it
 **falls back** to the full, patient relay path for the rest of the loop. It is
 off by default because a fast *failure* costs ~40 s (the grace) before fallback
-while a fast *success* saves only ~7 s — the real-world failure rate should be
+while a fast *success* saves only ~7 s - the real-world failure rate should be
 characterised before making it a default. This makes fast-by-default safe regardless of
-reachability — a LAN-direct camera gets the fast connect; a strict-NAT / non-LAN
+reachability - a LAN-direct camera gets the fast connect; a strict-NAT / non-LAN
 camera loses one fast attempt then connects over the relay. A per-device cache
 (`_fast_path_unavailable`) remembers a camera whose fast attempt failed so later
 views skip straight to the full path, bounding the fast-timeout cost to once per
@@ -116,7 +116,7 @@ persistent connection per login session and reuses it for everything. By default
 (matching the app), `_PersistentMqtt` holds a single account-level
 connection (the broker binds auth to the one authorized `client_id`, so there can
 only be one), subscribes once, replays subscriptions on reconnect, and carries
-commands, attributes, AND the stream-open signaling — without tearing down on
+commands, attributes, AND the stream-open signaling - without tearing down on
 stream stop. This removes the per-open connect churn that otherwise rate-limits
 the cloud account; a live 7-camera soak showed SDES `NO_MEDIA` dropping from
 ~57 % to ~11 % with the flag on. On by default; disable with `AIDOT_PERSISTENT_MQTT`
@@ -167,7 +167,7 @@ await session.async_start_talk(pcm_provider)   # provider() -> 320B s16le PCM (2
 await session.async_stop_talk()
 ```
 
-…or the higher-level helper, which opens a session, plays the clip, and tears
+...or the higher-level helper, which opens a session, plays the clip, and tears
 down (used by the Home Assistant `aidot.talk` service):
 
 ```python
@@ -196,7 +196,7 @@ the library sends `SPEAKERSTOP(849)` and gives the transport a brief flush windo
 before closing it, so the camera actually frees its speaker/talk channel. Without
 this the channel stays bound to the dead session and the next push-to-talk (ours
 or the official app's) gets `851` "mic occupied". This runs on every teardown
-path where talk was active — not just a clean `async_stop_talk`.
+path where talk was active - not just a clean `async_stop_talk`.
 
 ## Motion events
 
@@ -238,7 +238,7 @@ the bandwidth-heavy media therefore stays on the LAN.
 ## Advanced tuning environment variables
 
 These finer-grained knobs are read by the camera client but rarely need changing
-— the defaults are tuned to work out of the box. The headline streaming knobs
+- the defaults are tuned to work out of the box. The headline streaming knobs
 (concurrency caps, fast-connect, persistent MQTT, serve relay, etc.) are in the
 [README](../README.md#camera-streaming--tuning); the ones below are the deeper
 internals.
@@ -259,5 +259,5 @@ internals.
 | `AIDOT_AUDIO_MAXGAIN_DB` | Maximum gain (dB) applied by the audio normalizer. | `30` |
 | `AIDOT_AUDIO_MINGAIN_DB` | Minimum gain (dB) applied by the audio normalizer. | `-12` |
 | `AIDOT_AUDIO_GATE_DBFS` | Noise-gate threshold (dBFS) for two-way audio. | `-45` |
-| `AIDOT_FAST_CONNECT_HOST_ONLY` | Within `AIDOT_FAST_CONNECT`, narrows only the local `RTCPeerConnection` to host candidates (skips the ~5 s srflx gather stall). **On-subnet only** — drops srflx/relay fallback. Opt-in. | unset (off) |
+| `AIDOT_FAST_CONNECT_HOST_ONLY` | Within `AIDOT_FAST_CONNECT`, narrows only the local `RTCPeerConnection` to host candidates (skips the ~5 s srflx gather stall). **On-subnet only** - drops srflx/relay fallback. Opt-in. | unset (off) |
 | `AIDOT_SPROP_DIR` | Directory where captured SPS/PPS (sprop) parameter sets are cached. Set to a writable path if the default location is read-only. | `<package dir>` |

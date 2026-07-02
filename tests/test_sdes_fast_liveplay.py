@@ -22,7 +22,7 @@ def _cam():
 
 
 def test_default_on(monkeypatch):
-    # default ON (matches the app — it never waits for livePlayResp)
+    # default ON (matches the app - it never waits for livePlayResp)
     monkeypatch.delenv("AIDOT_SDES_FAST_LIVEPLAY", raising=False)
     assert _cam()._resolve_sdes_fast_liveplay() is True
 

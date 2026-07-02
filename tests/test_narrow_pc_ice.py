@@ -1,11 +1,11 @@
-"""Unit 1: host-only local-pc ICE narrowing — _narrow_pc_ice.
+"""Unit 1: host-only local-pc ICE narrowing - _narrow_pc_ice.
 
 A live A/B (2026-06-26) showed fast_connect's ~5s gather stall is a fixed aioice
 srflx timeout (host-only ~16ms vs ~5020ms for STUN, regardless of server count).
 host-only is opt-in/default-off because it drops srflx fallback (on-subnet only).
 
-The load-bearing invariant — and the regression that bit twice (v0.5.15 and again
-this session) — is that narrowing the LOCAL pc must NOT touch the camera-facing
+The load-bearing invariant - and the regression that bit twice (v0.5.15 and again
+this session) - is that narrowing the LOCAL pc must NOT touch the camera-facing
 webrtcReq IceServerList source list.  These tests pin that: host_only returns []
 while the input STUN list is left intact and STUN-bearing.
 """

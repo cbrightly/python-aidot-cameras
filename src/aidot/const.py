@@ -230,7 +230,7 @@ class ServerErrorCode(IntEnum):
     USER_PWD_INCORRECT = 560080
 
 
-# ── Cloud API credentials ──────────────────────────────────────────────────── #
+# -- Cloud API credentials ---------------------------------------------------- #
 
 from .login_const import APP_ID  # noqa: E402, F401 - back-compat re-export
 from .login_const import API_URL_TEMPLATE as _API_URL_TEMPLATE, DEFAULT_REGION as _DEFAULT_REGION  # noqa: E402

@@ -11,7 +11,7 @@ Design constraints (validated against LK.IPC.A000088 firmware):
   AES-ECB-encrypted JSON body, keyed by the device's 16-char ``aesKey``.
 * It is **single-session**: a second ``loginReq`` evicts the first.  So this client
   never holds a socket open - every operation is a short-lived
-  *connect → login → command(s) → close*, serialized by a per-camera lock.
+  *connect -> login -> command(s) -> close*, serialized by a per-camera lock.
 * The camera acks changes with ``setDevAttrResp`` but emits no ``setDevAttrNotif``,
   so there is no push; status is obtained by polling :meth:`async_get_attributes`.
 * Only cameras that advertise ``localCtrFlag == 1`` on unicast discovery AND are
@@ -89,7 +89,7 @@ async def discover_unicast(ip: str, timeout: float = 2.0) -> Optional[dict]:
 
     Cameras ignore the broadcast sweep but answer a unicast probe.  Returns the
     ``payload`` dict (``devId``, ``mac``, ``productModel``, ``lanMode``,
-    ``localCtrFlag`` …) or ``None`` if nothing answered.
+    ``localCtrFlag`` ...) or ``None`` if nothing answered.
     """
     msg = {
         "protocolVer": "2.0.0",
@@ -274,9 +274,25 @@ class CameraLanClient:
         }
         writer.write(_pack(1, aes_encrypt(json.dumps(msg).encode(), self._key)))
         await writer.drain()
-        resp = json.loads(aes_decrypt(await _read_frame(reader, timeout=8.0), self._key))
-        ack = (resp.get("ack") or {}).get("code")
+        try:
+            resp = json.loads(
+                aes_decrypt(await _read_frame(reader, timeout=8.0), self._key)
+            )
+            ack = (resp.get("ack") or {}).get("code")
+        except Exception as exc:
+            # A host that can't produce a response we can decrypt with the
+            # device's real AES key is not the camera (e.g. a LAN peer that
+            # spoofed this devId in discovery - discovery is unauthenticated).
+            # Mark ineligible so control falls back to the cloud instead of
+            # repeatedly targeting a bogus/broken host.
+            self._eligible = False
+            raise CameraLanError(
+                f"{self.device_id}: login response undecryptable (wrong host?)"
+            ) from exc
         if ack != 200:
+            # The real device rejected our key-authenticated login; stop using
+            # the LAN path and revert to cloud.
+            self._eligible = False
             raise CameraLanError(f"{self.device_id}: login rejected ack={ack}")
         return (resp.get("payload") or {}).get("ascNumber", 1)
 

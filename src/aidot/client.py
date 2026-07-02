@@ -126,7 +126,7 @@ class AidotClient:
             self._base_url = API_URL_TEMPLATE.format(region=self._region)
             # Token loaded from storage: schedule a proactive refresh shortly
             # after startup.  Exact remaining TTL is unknown, so pass a short
-            # synthetic TTL (120s → 78-138s delay) to catch tokens that are
+            # synthetic TTL (120s -> 78-138s delay) to catch tokens that are
             # already near expiry.  After the refresh fires, _schedule_proactive_refresh
             # sets the next cycle at the proper 90%-of-TTL interval.
             _LOGGER.info("AidotClient: stored token loaded, scheduling startup proactive refresh")
