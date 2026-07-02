@@ -63,7 +63,7 @@ def _verified_dtls_fingerprint(cam_cert, pinned_fp: str, cert_fp_fn) -> Optional
     fingerprint is the caller's responsibility to treat as a failure when pinned.
 
     Returns the fingerprint string, or ``None`` when no cert is present and no
-    pin is configured (accept-any default — the caller may skip verification).
+    pin is configured (accept-any default - the caller may skip verification).
     """
     if cam_cert is None:
         if pinned_fp:
@@ -173,15 +173,15 @@ class _WebRTCOpenMixin:
         Protocol (confirmed from live MQTT capture, 2025-03 / 2026-03):
           1. Subscribe ``iot/v1/c/{userId}/#`` on the authorised MQTT clientId
           2. Publish to ``iot/v1/s/{userId}/IPC/getIceConfigReq`` (server-side wake)
-             → wait up to 12 s for the camera to signal awake (``camera_ready_ev``)
+             -> wait up to 12 s for the camera to signal awake (``camera_ready_ev``)
           3. Publish to ``iot/v1/s/{userId}/IPC/livePlayReq`` (camera-side arm)
-             → optionally wait up to 0.5 s for the livePlayReq echo
+             -> optionally wait up to 0.5 s for the livePlayReq echo
                (skipped by default under dtls_fast_liveplay)
           4. Create peer connection (aiortc or SDES SDP), add recvonly tracks
-          5. Generate SDP offer → publish to ``iot/v1/s/{userId}/IPC/webrtcReq``
-          6. Receive ``IPC/webrtcResp`` on ``iot/v1/c/{userId}/#`` → set remote description
+          5. Generate SDP offer -> publish to ``iot/v1/s/{userId}/IPC/webrtcReq``
+          6. Receive ``IPC/webrtcResp`` on ``iot/v1/c/{userId}/#`` -> set remote description
           7. Exchange ICE candidates on ``iot/v1/s/{userId}/IPC/iceCandidateReq``
-          8. Receive media tracks → call ``on_frame`` for each VideoFrame
+          8. Receive media tracks -> call ``on_frame`` for each VideoFrame
 
         Topic routing: ALL IPC publish messages (getIceConfigReq, livePlayReq,
         webrtcReq, iceCandidateReq) go to ``iot/v1/s/{userId}/IPC/...``.
@@ -208,8 +208,8 @@ class _WebRTCOpenMixin:
             responsible for calling ``session.stop()`` after the desired
             duration; max_seconds is ignored on the DTLS path.
         force_sdes : bool or None
-            Override transport auto-detection.  ``True`` → SDES path,
-            ``False`` → DTLS path, ``None`` → auto (uses ``is_sdes_camera``).
+            Override transport auto-detection.  ``True`` -> SDES path,
+            ``False`` -> DTLS path, ``None`` -> auto (uses ``is_sdes_camera``).
 
         Returns
         -------
@@ -539,7 +539,7 @@ class _WebRTCOpenMixin:
         live_play_topic  = f"iot/v1/s/{user_id}/IPC/livePlayReq"
 
         # ------------------------------------------------------------------ #
-        # MQTT ↔ asyncio bridge
+        # MQTT <-> asyncio bridge
         # ------------------------------------------------------------------ #
         outgoing_q:       _q_mod.Queue    = _q_mod.Queue()
         answer_fut:        asyncio.Future = loop.create_future()
@@ -627,7 +627,7 @@ class _WebRTCOpenMixin:
             # Fire camera_ready_ev the moment the camera appears on MQTT - either via its
             # explicit wake-ACK (lowPowerActiveStateResp), any message on the device channel,
             # OR any message on the user channel whose payload identifies our device.
-            # LK.IPC.A001064 (and similar) responds on the user channel (iot/v1/c/{userId}/…)
+            # LK.IPC.A001064 (and similar) responds on the user channel (iot/v1/c/{userId}/...)
             # rather than the device channel, so the old topic-prefix check never fired -
             # causing the 17-second getIceConfigReq timeout overhead every session.
             if (method == "lowPowerActiveStateResp"
@@ -922,7 +922,7 @@ class _WebRTCOpenMixin:
         # is always sent before webrtcReq.  Without this step the broker echoes
         # webrtcReq back to us but never routes it to the camera.
         #
-        # Skipped on SDES→DTLS fallback retries (_skip_ice_config=True): the
+        # Skipped on SDES->DTLS fallback retries (_skip_ice_config=True): the
         # camera is already awake from the SDES attempt so the wake phase is
         # unnecessary; skipping saves up to 17 s of timeout overhead.
         # ------------------------------------------------------------------ #
@@ -1121,7 +1121,7 @@ class _WebRTCOpenMixin:
             # rejects start-play, continuing to SDP/ICE causes large STUN churn
             # but no media.  Fail fast with the concrete code.
             # MEASURED (2026-06-07, live A/B): this up-to-2 s wait is the DOMINANT
-            # cold-start cost (camera-awake → ICE-servers ≈ 2.5 s = 0.5 s echo +
+            # cold-start cost (camera-awake -> ICE-servers ~ 2.5 s = 0.5 s echo +
             # 2.0 s here).  The official app does NOT wait for/parse livePlayResp
             # (parity-confirmed).  AIDOT_FAST_CONNECT skips it and proceeds to
             # SDP/ICE immediately - losing fast-fail on rejection (rare; ICE then
@@ -1424,7 +1424,7 @@ class _WebRTCOpenMixin:
         _turn_entries = [s.urls for s in _ice_servers[1:]]
         _status(
             f"ICE servers: STUN={_stun_url}"
-            f"  relay×{len(_turn_entries)}: {_turn_entries}"
+            f"  relayx{len(_turn_entries)}: {_turn_entries}"
         )
         # Local-pc ICE servers default to the same list the camera receives.
         # fast_connect may narrow the LOCAL pc's gather (TURN-strip, and the
@@ -1489,12 +1489,12 @@ class _WebRTCOpenMixin:
         # Audio: sendrecv WITHOUT a real audio sender.  Empirical findings
         # from 2026-04-26 testing (commits aa341a1b, aeaea893):
         #
-        #   recvonly             → camera tears down at ~22s after SCTP up
+        #   recvonly             -> camera tears down at ~22s after SCTP up
         #                          (REMOTE-initiated DTLS Alert)
-        #   sendrecv, no track   → camera patient-waits indefinitely
+        #   sendrecv, no track   -> camera patient-waits indefinitely
         #                          (no remote tear-down within test window)
         #   sendrecv + silent
-        #     PCMA RTP track     → camera tears down at ~24s after SCTP up
+        #     PCMA RTP track     -> camera tears down at ~24s after SCTP up
         #                          (REMOTE-initiated DTLS Alert)
         #
         # Sendrecv flips a "viewer is a real client" gate in the camera's
@@ -1539,11 +1539,11 @@ class _WebRTCOpenMixin:
         # A000088 showed the camera answers with FOUR BUNDLE'd m-sections:
         #   mid:0  audio      sendrecv  PCMA/8000
         #   mid:1  H264 video sendonly  PT 127 + RTX 124
-        #   mid:2  H265 video sendonly  PT 98  + RTX 99   ← separate section!
+        #   mid:2  H265 video sendonly  PT 98  + RTX 99   <- separate section!
         #   mid:3  datachannel sctp-port:5000
         # Our old 3-section offer (audio/video/DC at mids 0/1/2) caused the
         # camera's H265 answer on mid:2 to collide with our DC declaration
-        # (application ≠ video), so the answer-rebuild stubbed it as DC and
+        # (application != video), so the answer-rebuild stubbed it as DC and
         # discarded H265 entirely.  The camera never got confirmation that
         # video negotiation succeeded and sent nothing on mid:1 either.
         # H265 mid:2 is INJECTED as a synthetic SDP text section via
@@ -1554,7 +1554,7 @@ class _WebRTCOpenMixin:
         # (audio/H264/H265/DC) from the sent SDP; aiortc only manages the
         # 3 sections it knows about (audio mid:0 / H264 mid:1 / DC mid:2).
         # Before calling setRemoteDescription, the answer is stripped of the
-        # H265 stub and DC is renumbered from mid:3 → mid:2.
+        # H265 stub and DC is renumbered from mid:3 -> mid:2.
         # SCTP data channel - KVS firmware ALWAYS opens SCTP regardless of
         # whether m=application is in the negotiated answer.  Decoded the
         # post-handshake 0x17 records as SCTP INIT chunks (srcPort=5000
@@ -1579,7 +1579,7 @@ class _WebRTCOpenMixin:
                 _frame = _hdr + _payload
                 _dc_ref.send(_frame)
                 _status(
-                    f"DC[{_label_for_log}] OPEN → sent AVIO LIVING (5376)"
+                    f"DC[{_label_for_log}] OPEN -> sent AVIO LIVING (5376)"
                     f" {len(_frame)}B seq=0x{_seq:08x}"
                 )
             except Exception as _dc_send_exc:
@@ -1709,7 +1709,7 @@ class _WebRTCOpenMixin:
                     # The official KVS Android client uses DCEP
                     # (createDataChannel with default Init), so the camera
                     # registers stream 0 only after receiving DATA_CHANNEL_OPEN
-                    # (PPID=50, RFC 8832 §5.1).  Our pre-negotiated DC skips
+                    # (PPID=50, RFC 8832 section 5.1).  Our pre-negotiated DC skips
                     # DCEP, so AVIO LIVING (PPID=51) arrives on an unregistered
                     # stream and is silently discarded at the application layer
                     # (SCTP SACK confirms transport delivery, but no response).
@@ -1748,7 +1748,7 @@ class _WebRTCOpenMixin:
                     # - AUDIOSTART (768) every 10 s: prevents camera's ~25 s
                     #   audio watchdog.  Camera negotiates audio as sendrecv;
                     #   aiortc's sender emits RTCP SR with packet_count=0, which
-                    #   the camera reads as "viewer not sending audio → stop
+                    #   the camera reads as "viewer not sending audio -> stop
                     #   sending audio".  Periodic AUDIOSTART keeps audio alive.
                     async def _heartbeat_loop() -> None:
                         try:
@@ -1787,7 +1787,7 @@ class _WebRTCOpenMixin:
                     except Exception:
                         _cur = "<error>"
                     if _cur != _last:
-                        _status(f"DC[{_dc_label}] readyState: {_last} → {_cur}")
+                        _status(f"DC[{_dc_label}] readyState: {_last} -> {_cur}")
                         _last = _cur
                     if _cur in ("open", "closed"):
                         break
@@ -1804,7 +1804,7 @@ class _WebRTCOpenMixin:
                 # The audio transceiver is sendrecv (no actual sender track).
                 # aiortc's RTCRtpSender fires RTCP SR every ~1 s with
                 # packet_count=0.  Camera firmware interprets 25 s of
-                # zero-packet SR as "viewer not transmitting audio → stop
+                # zero-packet SR as "viewer not transmitting audio -> stop
                 # sending audio to them."  We patch the sender's _send_rtcp
                 # to a no-op so no SR reaches the camera.
                 #
@@ -1824,7 +1824,7 @@ class _WebRTCOpenMixin:
                                 pass
                             _t.sender._send_rtcp = _noop_rtcp
                             _status(
-                                "audio sender: _send_rtcp patched → no-op"
+                                "audio sender: _send_rtcp patched -> no-op"
                                 " (suppresses 0-packet SR audio watchdog)"
                             )
                             break
@@ -2066,7 +2066,7 @@ class _WebRTCOpenMixin:
                 "liveMqtt": 1,
                 "encOffer": 1,
                 # powerType/p2pCache: per docs/official_camera_network_calls.md
-                # §5.2, both fields are present on every webrtcReq.  Defaults
+                # section 5.2, both fields are present on every webrtcReq.  Defaults
                 # used here match the fallback behaviour in the decompiled
                 # reference app when IPC device info is unavailable.
                 "powerType": _live_power_type,
@@ -2076,7 +2076,7 @@ class _WebRTCOpenMixin:
         outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
         self._cold_phase("webrtcReq")
         _status(f"webrtcReq sent  peerid={peer_id}"
-                f"  IceServerList×{len(_ice_server_list)}"
+                f"  IceServerListx{len(_ice_server_list)}"
                 f"  payload={len(webrtc_req_payload)}B")
 
         # GAP B (APK parity): the official app re-publishes webrtcReq up to ~3x,
@@ -2390,7 +2390,7 @@ class _WebRTCOpenMixin:
             # The camera echoes our fingerprint in its SDP.  When the camera
             # (DTLS active/client) presents its own self-signed certificate during
             # the handshake, aiortc's _validate_peer_identity would compare the
-            # camera's cert digest against our echoed fingerprint → always fails,
+            # camera's cert digest against our echoed fingerprint -> always fails,
             # leaving the DTLS transport in State.FAILED and producing 0 frames.
             #
             # Patch each DTLS transport to overwrite the stored fingerprint with
@@ -2406,7 +2406,7 @@ class _WebRTCOpenMixin:
 
                 # Optional certificate pinning. The camera echoes OUR fingerprint
                 # in its SDP, so signaling carries no trustworthy value to verify
-                # the camera against — by default we accept whatever cert it
+                # the camera against - by default we accept whatever cert it
                 # presents (needed for the role-reversal handshake to complete).
                 # AIDOT_DTLS_PINNED_FP lets an operator pin the camera's real
                 # sha-256 fingerprint (colon-separated hex, as aiortc formats it);
@@ -2482,7 +2482,7 @@ class _WebRTCOpenMixin:
             # no-op in practice for this model, but is kept for correctness in case
             # a future firmware version uses its own credentials.  Without the
             # substitution, any camera that does generate different credentials would
-            # cause every STUN probe to fail auth → ICE stuck checking.
+            # cause every STUN probe to fail auth -> ICE stuck checking.
             _cam_counter_sdp = (camera_offer_fut.result() or {}).get("sdp", "")
             _cam_ice_ufrag: str | None = None
             _cam_ice_pwd:   str | None = None
@@ -2531,20 +2531,20 @@ class _WebRTCOpenMixin:
                 _rr_synth_sdp = _rr_re.sub(
                     r'a=ice-pwd:[^\r\n]*', _cam_ice_pwd, _rr_synth_sdp
                 )
-            # Camera sends media to us → its answer direction is sendonly.
+            # Camera sends media to us -> its answer direction is sendonly.
             _rr_synth_sdp = _rr_synth_sdp.replace('a=recvonly\r\n', 'a=sendonly\r\n')
             # DTLS setup role depends on whether the camera is echo-only or real-reversal.
             # Echo-only (e.g. LK.IPC.A001064): camera never sends its own webrtcResp, so
             # we cannot know its DTLS preference.  We declare setup:passive in our
             # webrtcResp, making the camera DTLS active/ICE-controlling.  The camera then
-            # allocates a TURN relay and sends iceCandidateReq → ICE connects via relay.
+            # allocates a TURN relay and sends iceCandidateReq -> ICE connects via relay.
             # Tell aiortc the remote is DTLS active so aiortc becomes passive/server.
-            # RFC 5763: remote=active → local=passive (server).
+            # RFC 5763: remote=active -> local=passive (server).
             #
             # Real role-reversal (camera sent setup:passive in its second webrtcResp):
             # we send setup:active so we are DTLS client and initiate the ClientHello.
             # Tell aiortc the remote is passive so aiortc becomes active/client.
-            # RFC 5763: remote=passive → local=active (client).
+            # RFC 5763: remote=passive -> local=active (client).
             _rr_synth_sdp = _rr_synth_sdp.replace(
                 'a=setup:actpass\r\n',
                 'a=setup:active\r\n' if _rr_echo_only else 'a=setup:passive\r\n'
@@ -2576,10 +2576,10 @@ class _WebRTCOpenMixin:
 
             # Send webrtcResp so the camera knows our DTLS fingerprint and ICE params.
             # setup value is role-dependent (see comment above the synth-SDP replace):
-            #   echo-only  → setup:passive (we are DTLS server; camera is DTLS client/
+            #   echo-only  -> setup:passive (we are DTLS server; camera is DTLS client/
             #                               ICE-controlling; camera allocates relay and
-            #                               sends iceCandidateReq → ICE via TURN relay)
-            #   real-reversal → setup:active (we initiate DTLS ClientHello after ICE)
+            #                               sends iceCandidateReq -> ICE via TURN relay)
+            #   real-reversal -> setup:active (we initiate DTLS ClientHello after ICE)
             # aiortc generates SDPs with \r\n so a simple replace is safe here.
             _rr_setup_val = "passive" if _rr_echo_only else "active"
             _rr_answer_sdp = _normalize_bundle_ice_credentials(
@@ -2606,7 +2606,7 @@ class _WebRTCOpenMixin:
                     # (e.g. LK.IPC.A001064) parses wPayload.answer.sdp to
                     # extract our ICE credentials and candidates; without this
                     # the camera cannot form valid STUN binding requests and
-                    # never initiates ICE connectivity checks → ICE closed.
+                    # never initiates ICE connectivity checks -> ICE closed.
                     "wPayload": {
                         "peerid": peer_id,
                         "answer": {"type": "answer", "sdp": _rr_answer_sdp},
@@ -2694,7 +2694,7 @@ class _WebRTCOpenMixin:
             )
             _status("Answer m-sections (%d): %s" % (len(_ans_mlines), " | ".join(_ans_mlines)))
             # Log negotiated direction per m-section so we can see whether
-            # camera renegotiated audio sendrecv→sendonly (or kept sendrecv).
+            # camera renegotiated audio sendrecv->sendonly (or kept sendrecv).
             # Also expose ssrc/msid lines - useful when diagnosing why media
             # doesn't flow even though signaling completes.
             try:
@@ -2739,10 +2739,10 @@ class _WebRTCOpenMixin:
                 _ans_sdp = _ans_sdp_patched
 
             # ---- Rebuild answer m-sections to match offer's mid+kind ------------ #
-            # A001064 firmware violates RFC 3264 §6 in three observed ways:
+            # A001064 firmware violates RFC 3264 section 6 in three observed ways:
             #   1. Drops rejected m-sections entirely instead of port=0.
             #   2. Replaces a rejected section with a different KIND (e.g.
-            #      datachannel → second video for H265).
+            #      datachannel -> second video for H265).
             #   3. Adds m-sections for kinds we never offered (e.g. extra
             #      H265 video at mid:2 when offer was audio+video only).
             # aiortc enforces strict count + kind match.  Rebuild the answer
@@ -2780,7 +2780,7 @@ class _WebRTCOpenMixin:
             _setup_ln     = _first_attr(_ans_sdp, "a=setup:")
 
             _ans_lines = _ans_sdp.splitlines()
-            _ans_sections: dict = {}      # mid → list[str] of section's lines
+            _ans_sections: dict = {}      # mid -> list[str] of section's lines
             _ans_header: list = []
             _cur_block: list = []
             _cur_mid: str = ""
@@ -3083,7 +3083,7 @@ class _WebRTCOpenMixin:
                 _dc_only_video = False
                 _dc_only_audio = False
 
-                # 1. audio → mid:0
+                # 1. audio -> mid:0
                 if _audio_secs:
                     if _audio_secs[0][0].split()[1] == '0':
                         # Full datachannel-only answer: the camera also rejected
@@ -3095,7 +3095,7 @@ class _WebRTCOpenMixin:
                         # always present in our offer.  Flag it so mid:0 is also
                         # EXCLUDED from BUNDLE below (aiortc rejects a port-0
                         # section inside the BUNDLE group).  Verified offline:
-                        # audio+video stubs WITH rtpmap → SRD accepted.
+                        # audio+video stubs WITH rtpmap -> SRD accepted.
                         _astub = ['m=audio 0 UDP/TLS/RTP/SAVPF 0',
                                   'c=IN IP4 0.0.0.0', 'a=mid:0']
                         for _xa in (_ice_ufrag_ln, _ice_pwd_ln, _fp_ln, _setup_ln):
@@ -3108,7 +3108,7 @@ class _WebRTCOpenMixin:
                     else:
                         _out_secs.append(_set_mid(_audio_secs[0], '0'))
 
-                # 2. real video → mid:1 (pick best PT overlap with our offer)
+                # 2. real video -> mid:1 (pick best PT overlap with our offer)
                 _best_video = None
                 _best_overlap = -1
                 for _vs in _video_secs:
@@ -3155,7 +3155,7 @@ class _WebRTCOpenMixin:
                     _out_secs.append(_vstub)
                     _dc_only_video = True
 
-                # 3. datachannel → mid:2
+                # 3. datachannel -> mid:2
                 if _app_secs:
                     _out_secs.append(_set_mid(_app_secs[0], '2'))
                 else:
@@ -3192,7 +3192,7 @@ class _WebRTCOpenMixin:
                     _media_declined[0] = True
                     _status(
                         f"DC-only answer: audio_rejected={_dc_only_audio}"
-                        f" video_rejected={_dc_only_video} → {_bundle_str}"
+                        f" video_rejected={_dc_only_video} -> {_bundle_str}"
                         " (camera declined media; encoder not ready - fast-retry)"
                     )
                 if 'a=group:BUNDLE' in sdp2:
@@ -3245,7 +3245,7 @@ class _WebRTCOpenMixin:
                         # Log id() of dtls/ice transports per transceiver:
                         # if BUNDLE merged correctly, all transceivers share
                         # the SAME RTCDtlsTransport + RTCIceTransport
-                        # objects.  Different ids ⇒ BUNDLE failed and aiortc
+                        # objects.  Different ids => BUNDLE failed and aiortc
                         # is running parallel transports - RTP would arrive
                         # on whichever transport's DTLS is up but the
                         # decoder receivers may be bound to the other one.
@@ -3396,7 +3396,7 @@ class _WebRTCOpenMixin:
 
         @pc.on("connectionstatechange")
         async def _on_conn_state() -> None:
-            _status(f"WebRTC connectionState → {pc.connectionState}")
+            _status(f"WebRTC connectionState -> {pc.connectionState}")
             if pc.connectionState == "failed":
                 # Dump per-transceiver DTLS + ICE state so we can see which
                 # transport actually failed and why.  aiortc transitions
@@ -3422,11 +3422,11 @@ class _WebRTCOpenMixin:
 
         @pc.on("iceconnectionstatechange")
         async def _on_ice_state() -> None:
-            _status(f"ICE connectionState → {pc.iceConnectionState}")
+            _status(f"ICE connectionState -> {pc.iceConnectionState}")
 
         @pc.on("icegatheringstatechange")
         async def _on_ice_gather() -> None:
-            _LOGGER.info("webrtc: ICE gatheringState → %s", pc.iceGatheringState)
+            _LOGGER.info("webrtc: ICE gatheringState -> %s", pc.iceGatheringState)
 
         deadline = time.monotonic() + timeout
         _last_ice_log = time.monotonic()

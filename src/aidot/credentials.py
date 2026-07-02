@@ -32,7 +32,7 @@ _ENC_FILE = os.path.join(_CONFIG_DIR, "credentials.enc")
 _KEY_FILE = os.environ.get("AIDOT_CRED_KEY_FILE") or os.path.join(_CONFIG_DIR, ".key")
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# -- Public API ---------------------------------------------------------------
 
 def load_credentials(creds_path: str | None = None) -> dict:
     """Return {"username": ..., "password": ..., "country": ...}.
@@ -74,9 +74,9 @@ def load_credentials(creds_path: str | None = None) -> dict:
 
     raise FileNotFoundError(
         "No credentials found. Options:\n"
-        "  • Set AIDOT_USERNAME / AIDOT_PASSWORD / AIDOT_COUNTRY env vars\n"
-        "  • Run with --save-credentials to store them encrypted\n"
-        f"  • Place credentials.json in {_CONFIG_DIR}"
+        "  - Set AIDOT_USERNAME / AIDOT_PASSWORD / AIDOT_COUNTRY env vars\n"
+        "  - Run with --save-credentials to store them encrypted\n"
+        f"  - Place credentials.json in {_CONFIG_DIR}"
     )
 
 
@@ -106,7 +106,7 @@ def delete_credentials(creds_path: str | None = None) -> None:
                 pass
 
 
-# ── Internal helpers ─────────────────────────────────────────────────────────
+# -- Internal helpers ---------------------------------------------------------
 
 def _fernet():
     try:

@@ -16,7 +16,7 @@ from aidot.camera.lan_control import _MAGIC, CameraLanClient, CameraLanError
 from aidot.camera.playback import CloudPlaybackSession
 
 
-# ── _mqtt_device_cmd no longer reports success on a failed broker connection ──
+# -- _mqtt_device_cmd no longer reports success on a failed broker connection --
 
 def test_mqtt_publish_delivered_semantics():
     assert _mqtt_publish_delivered(None) is True             # no status: prior behavior
@@ -26,7 +26,7 @@ def test_mqtt_publish_delivered_semantics():
     assert _mqtt_publish_delivered({"error": "timeout"}) is False   # connect error
 
 
-# ── CloudPlaybackSession TLS is opt-in, default off ───────────────────────────
+# -- CloudPlaybackSession TLS is opt-in, default off ---------------------------
 
 def _cloud_session(use_tls):
     return CloudPlaybackSession(
@@ -44,7 +44,7 @@ def test_cloud_playback_tls_opt_in():
     assert _cloud_session(True)._use_tls is True
 
 
-# ── LAN control: a login we can't complete de-eligibilities the client ────────
+# -- LAN control: a login we can't complete de-eligibilities the client --------
 
 class _FakeWriter:
     def write(self, _data):

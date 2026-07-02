@@ -7,10 +7,10 @@ WebRTC (`liveType=2`) and stays cloud-MQTT-signaled; there is no clean local vid
 path on this hardware.
 
 ## Ports recap
-- **6666/UDP** - discovery: stateless, no auth. Encrypted `devDiscoveryReq` →
+- **6666/UDP** - discovery: stateless, no auth. Encrypted `devDiscoveryReq` ->
   one `devDiscoveryResp` (`devId`, `mac`, `productModel`, `lanMode`, `localCtrFlag`).
   Cameras answer **unicast only**, not broadcast (only A000088 firmware answers at all).
-- **10000/TCP** - control: stateful, AES-ECB, session-based. `loginReq` (auth) →
+- **10000/TCP** - control: stateful, AES-ECB, session-based. `loginReq` (auth) ->
   `getDevAttr`/`setDevAttr`/`ping`/`setDevAttrNotif`. Same protocol as the lights.
 
 ## Phase 0 - RESULT: PASS with mandated constraints (validated 2026-06-12, A000088)
@@ -33,19 +33,19 @@ STILL UNVERIFIED (manual - need official app / physical access):
   other; if it only uses cloud, they coexist.) Verify before wide rollout.
 
 ## Phase 1 - Library: local control transport
-> Status: partially landed — `CameraLanClient` exists (`src/aidot/camera/lan_control.py`,
+> Status: partially landed - `CameraLanClient` exists (`src/aidot/camera/lan_control.py`,
 > shipped in 0.7.33). Treat the items below as the original plan, not all unstarted.
 - `CameraLanClient`: **short-lived sessions only** (Phase 0: single-session channel,
-  no push). Per control op (or burst): unicast-discover → connect `:10000` → AES login
-  → get/setDevAttr → idle-close after ~2-5s. Serialize: one in-flight session/camera,
+  no push). Per control op (or burst): unicast-discover -> connect `:10000` -> AES login
+  -> get/setDevAttr -> idle-close after ~2-5s. Serialize: one in-flight session/camera,
   never hold. Status = poll via a short-lived `getDevAttr` on an interval (no notif push).
 - Add **unicast probing** to `Discover` (send to known device IPs, not just the
   broadcast) - fixes camera discoverability generally.
 - **Credential bootstrap**: fetch + cache `aesKey`/`password` once from cloud (reuse
   the existing `credentials` cache).
 - **Eligibility gate**: `localCtrFlag==1` AND answers unicast AND
-  `battery_remaining is None` → eligible; everything else stays cloud.
-- **Local-first dispatch with cloud fallback** per operation (timeout/error → cloud).
+  `battery_remaining is None` -> eligible; everything else stays cloud.
+- **Local-first dispatch with cloud fallback** per operation (timeout/error -> cloud).
 
 ## Phase 2 - hass-aidot-cameras integration
 - Route control (PTZ via `trackingMode`, switches, selects, numbers) through the
@@ -58,7 +58,7 @@ STILL UNVERIFIED (manual - need official app / physical access):
 - Reuse the 0.6.1 reconnect/backoff/teardown patterns (don't reintroduce flapping).
 - **Never hold a socket to battery/sleeping cams**; short-lived connect-cmd-close for
   control, keepalive only for confirmed-wired models that benefit from push status.
-- VLAN/unreachable → silent graceful fallback, no log spam.
+- VLAN/unreachable -> silent graceful fallback, no log spam.
 - Unit tests + a live smoke test mirroring the existing one.
 
 ## Phase 4 - Rollout

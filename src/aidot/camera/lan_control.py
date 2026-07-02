@@ -11,7 +11,7 @@ Design constraints (validated against LK.IPC.A000088 firmware):
   AES-ECB-encrypted JSON body, keyed by the device's 16-char ``aesKey``.
 * It is **single-session**: a second ``loginReq`` evicts the first.  So this client
   never holds a socket open - every operation is a short-lived
-  *connect → login → command(s) → close*, serialized by a per-camera lock.
+  *connect -> login -> command(s) -> close*, serialized by a per-camera lock.
 * The camera acks changes with ``setDevAttrResp`` but emits no ``setDevAttrNotif``,
   so there is no push; status is obtained by polling :meth:`async_get_attributes`.
 * Only cameras that advertise ``localCtrFlag == 1`` on unicast discovery AND are
@@ -89,7 +89,7 @@ async def discover_unicast(ip: str, timeout: float = 2.0) -> Optional[dict]:
 
     Cameras ignore the broadcast sweep but answer a unicast probe.  Returns the
     ``payload`` dict (``devId``, ``mac``, ``productModel``, ``lanMode``,
-    ``localCtrFlag`` …) or ``None`` if nothing answered.
+    ``localCtrFlag`` ...) or ``None`` if nothing answered.
     """
     msg = {
         "protocolVer": "2.0.0",

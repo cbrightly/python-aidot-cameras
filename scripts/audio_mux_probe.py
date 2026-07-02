@@ -113,7 +113,7 @@ def analyze(y, sr, expected_in_samples):
     jumps = int(np.sum(d > 0.5))  # |delta|>0.5 of full-scale in one sample @48k
     print(f"    out {dur:6.2f}s (in {exp_dur:5.2f}s, drift {dur - exp_dur:+.2f}s) | "
           f"env median {med:6.1f} dBFS | dropouts(20ms) {drop:3d} | "
-          f"pump σ {pump:4.1f} dB | big-jumps {jumps:4d}")
+          f"pump sigma {pump:4.1f} dB | big-jumps {jumps:4d}")
 
 
 def case(name, **kw):
