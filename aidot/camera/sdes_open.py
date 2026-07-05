@@ -3174,16 +3174,24 @@ class _SdesOpenMixin:
                     # refresh (RFC 7675).  Also handles the case where the initial
                     # USE-CANDIDATE (sent right after the STUN window) was lost.
                     _br_now = _time_br.monotonic()
-                    if _cam_ice_cands and (_br_now - _br_last_uc) >= 2.5:
+                    # Relay-only battery cams (LAN IP unknown) answer AFTER the STUN
+                    # window and send no probes, so the in-window proactive send saw
+                    # empty _cam_ice_* and the probe-gated late-send above never runs.
+                    # Fall back to the creds parsed late into _bridge_uc_info so this
+                    # ungated periodic tick still nominates them.  [SDES-LATECREDS-FIX]
+                    _uc_cands = _cam_ice_cands or _bridge_uc_info.get("cands")
+                    _uc_cufrag = _cam_ice_ufrag or _bridge_uc_info.get("ufrag")
+                    _uc_cpwd = _cam_ice_pwd or _bridge_uc_info.get("pwd")
+                    if _uc_cands and _uc_cufrag and _uc_cpwd and (_br_now - _br_last_uc) >= 2.5:
                         _br_last_uc = _br_now
-                        for _c_ip, _c_port in _cam_ice_cands:
+                        for _c_ip, _c_port in _uc_cands:
                             _send_use_candidate(
                                 _audio_sock, _ufrag_a, _pwd_a,
-                                _cam_ice_ufrag, _cam_ice_pwd, (_c_ip, _c_port),
+                                _uc_cufrag, _uc_cpwd, (_c_ip, _c_port),
                             )
                             _send_use_candidate(
                                 _video_sock, _ufrag_v, _pwd_v,
-                                _cam_ice_ufrag, _cam_ice_pwd, (_c_ip, _c_port),
+                                _uc_cufrag, _uc_cpwd, (_c_ip, _c_port),
                             )
             finally:
                 try:
