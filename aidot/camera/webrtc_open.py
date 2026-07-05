@@ -301,8 +301,8 @@ class _WebRTCOpenMixin:
 
         if not use_sdes:
             try:
-                from aiortc import RTCPeerConnection, RTCSessionDescription
-                from aiortc.sdp import candidate_from_sdp
+                from aidot._vendor.aiortc import RTCPeerConnection, RTCSessionDescription
+                from aidot._vendor.aiortc.sdp import candidate_from_sdp
             except ImportError:
                 raise ImportError(
                     "aiortc is required for WebRTC streaming. "
@@ -327,7 +327,7 @@ class _WebRTCOpenMixin:
             # that negotiate DTLS 1.2 still get DTLS 1.2; this only widens
             # the floor.
             try:
-                from aiortc.rtcdtlstransport import RTCCertificate as _AidotRTCCert
+                from aidot._vendor.aiortc.rtcdtlstransport import RTCCertificate as _AidotRTCCert
                 if not getattr(_AidotRTCCert, "_aidot_dtls10_patched", False):
                     _orig_create_ctx = _AidotRTCCert._create_ssl_context
                     _DTLS1_VERSION = 0xFEFF  # not exposed in pyOpenSSL; raw OpenSSL constant
@@ -1288,7 +1288,7 @@ class _WebRTCOpenMixin:
         # ------------------------------------------------------------------ #
         import logging as _logging_dtls
         _logging_dtls.getLogger("aioice").setLevel(_logging_dtls.DEBUG)
-        from aiortc import RTCConfiguration, RTCIceServer
+        from aidot._vendor.aiortc import RTCConfiguration, RTCIceServer
 
         def _sanitize_ice_uris(uris):
             """Remove ?transport= from stun: URIs - invalid per RFC 7064."""
@@ -1874,7 +1874,7 @@ class _WebRTCOpenMixin:
         recorder = None
         if output_path:
             try:
-                from aiortc.contrib.media import MediaRecorder
+                from aidot._vendor.aiortc.contrib.media import MediaRecorder
                 recorder = MediaRecorder(output_path)
 
                 _video_recorded = [False]
@@ -2378,7 +2378,7 @@ class _WebRTCOpenMixin:
             # ICE connects), but does NOT require setRemoteDescription first.
             import types as _types
             try:
-                from aiortc.rtcdtlstransport import (
+                from aidot._vendor.aiortc.rtcdtlstransport import (
                     RTCDtlsFingerprint as _RRFp,
                     certificate_digest as _rr_cert_fp,
                 )
@@ -2904,7 +2904,7 @@ class _WebRTCOpenMixin:
             if _fp_subs or _np_pinned_fp:
                 import types as _np_types
                 try:
-                    from aiortc.rtcdtlstransport import (
+                    from aidot._vendor.aiortc.rtcdtlstransport import (
                         RTCDtlsFingerprint as _NPFp,
                         certificate_digest as _np_cert_fp,
                     )
