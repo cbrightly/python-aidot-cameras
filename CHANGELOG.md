@@ -4,6 +4,22 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.10.3]
+
+### Fixed
+- **Installable under Home Assistant 2026.7 (PyAV 17).** HA 2026.7 pins `av==17`,
+  but stock `aiortc` caps `av<17`, so `python-aidot-cameras[webrtc]` was
+  unsatisfiable there - Home Assistant reported *"Requirements for aidot not
+  found"* and the integration failed to load (confirmed on a live HA 2026.7.1
+  box). `aiortc` is now **vendored** at `aidot/_vendor/aiortc` (byte-identical to
+  aiortc 1.14.0) so its `av<17` packaging cap no longer gates installation, and
+  the `[webrtc]` extra depends on aiortc's own runtime deps with the PyAV ceiling
+  widened to `<18`. aiortc runs unchanged on av 17 (verified: import + H.264
+  encode round-trip), so streaming behavior is unaffected. Validated under HA
+  2026.7.1's exact `package_constraints.txt` (`av==17.0.1`): the previous release
+  is *"unsatisfiable"*, this one installs and imports cleanly. Revert to the stock
+  `aiortc` dependency once upstream widens the pin.
+
 ## [0.10.2]
 
 ### Changed

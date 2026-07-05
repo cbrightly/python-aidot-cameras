@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "python-aidot-cameras"
-version = "0.10.2"
+version = "0.10.3"
 description = "Control AiDot/Leedarson WiFi lights and cameras (WebRTC streaming, two-way audio, PTZ, controls)"
 readme = "README.md"
 license = "MIT"
@@ -30,17 +30,24 @@ dependencies = [
 
 [project.optional-dependencies]
 webrtc = [
-    "aiortc>=1.9.0",
-    # aioice arrives transitively via aiortc, but we monkeypatch its private
-    # internals (Connection.build_request / _check_list / _nominated) for the
-    # A000088 high-port nomination fix and read them for stream diagnostics.
-    # Pin the tested range so a surprise bump that reshapes those internals is
-    # caught at install/CI (test_aioice_compat.py) instead of silently degrading
-    # streaming. Widen this deliberately after re-validating the patch.
-    "aioice>=0.9.0,<0.12",
-    "av",
-    "pylibsrtp",
-    "pyopenssl",
+    # Streaming uses aiortc, VENDORED at aidot/_vendor/aiortc (byte-identical to
+    # aiortc 1.14.0, only vendored so Home Assistant 2026.7's pinned av==17 is
+    # satisfiable - stock aiortc caps av<17, which makes [webrtc] uninstallable
+    # there). These are aiortc's own runtime deps; the PyAV ceiling is widened to
+    # <18 (av 17 verified compatible: import + H.264 encode round-trip). Drop the
+    # vendor and depend on stock aiortc again once upstream widens the pin.
+    "av>=14.0.0,<18.0.0",
+    # aioice stays external: we monkeypatch its private internals
+    # (Connection.build_request / _check_list / _nominated) for the A000088
+    # high-port nomination fix and read them for stream diagnostics. Pin the
+    # tested range (>=0.10.1 is aiortc's floor) so a surprise bump that reshapes
+    # those internals is caught at install/CI (test_aioice_compat.py).
+    "aioice>=0.10.1,<0.12",
+    "pylibsrtp>=0.10.0",
+    "pyopenssl>=25.0.0",
+    "cryptography>=44.0.0",
+    "pyee>=13.0.0",
+    "google-crc32c>=1.1",
     "numpy",
     "Pillow",
 ]
@@ -62,9 +69,16 @@ include = ["aidot*"]
 [tool.setuptools.package-data]
 aidot = ["py.typed"]
 
+[tool.coverage.run]
+# Vendored third-party code (aiortc) is exercised via streaming, not our tests;
+# keep it out of the coverage report so the numbers reflect our own code.
+omit = ["aidot/_vendor/*"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 88
+# Vendored third-party code (aiortc) is shipped byte-identical; never lint/format it.
+extend-exclude = ["aidot/_vendor"]
 
 [tool.ruff.lint]
 # High-signal rules only; opinionated style (quotes, trailing commas, missing
