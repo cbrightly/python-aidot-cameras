@@ -69,9 +69,16 @@ include = ["aidot*"]
 [tool.setuptools.package-data]
 aidot = ["py.typed"]
 
+[tool.coverage.run]
+# Vendored third-party code (aiortc) is exercised via streaming, not our tests;
+# keep it out of the coverage report so the numbers reflect our own code.
+omit = ["aidot/_vendor/*"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 88
+# Vendored third-party code (aiortc) is shipped byte-identical; never lint/format it.
+extend-exclude = ["aidot/_vendor"]
 
 [tool.ruff.lint]
 # High-signal rules only; opinionated style (quotes, trailing commas, missing
