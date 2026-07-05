@@ -4,6 +4,40 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.0]
+
+### Fixed
+- **Relay-only SDES (battery) cameras stream again.** These cameras (e.g.
+  A001513, whose real LAN IP the cloud does not expose) answer with their ICE
+  credentials after the initial STUN nomination window and send no connectivity
+  probes of their own, so neither the in-window nor the probe-gated deferred
+  `USE-CANDIDATE` send ever nominated their relay candidates - no SRTP media
+  flowed and the serve failed with *"Could not find codec parameters (h264,
+  none)"*. The ungated periodic `USE-CANDIDATE` re-sender now falls back to the
+  late-parsed credentials, so relay-only cameras are nominated without needing a
+  probe. Verified live on an A001513: 0/2 streaming before, 3/3 after. (#112)
+- **`_mqtt_device_cmd` no longer reports success on a refused broker
+  connection.** A failed MQTT connection now surfaces as a failure instead of a
+  phantom success. Validated live: `setDevAttrReq` toggles return `True` only on
+  a real seq-matched camera ACK. (#107)
+- **Background stream tasks retrieve and log their exceptions** instead of
+  producing *"exception was never retrieved"* warnings. (#107)
+
+### Changed
+- **The DTLS 1.0 downgrade is self-scoped to this library's sessions.** The
+  OpenSSL minimum-version override for DTLS-1.0 camera firmware now applies only
+  to peer connections whose certificate carries the library's tag, so other
+  aiortc peer connections in the same process keep the DTLS 1.2 floor. Validated
+  live on A000088 (DTLS 1.2) and A001513 (SDES + SCTP datachannel): both connect
+  and stream, 0 DTLS errors. (#107)
+- **A LAN login that cannot complete with the device's AES key marks the host
+  ineligible** and falls back to cloud control (spoofed/broken hosts no longer
+  wedge local control). (#107)
+
+### Added
+- **Opt-in TLS for `CloudPlaybackSession`** via `use_tls=` (default `False`,
+  current plaintext behavior unchanged), with a warn-once when disabled. (#107)
+
 ## [0.10.3]
 
 ### Fixed

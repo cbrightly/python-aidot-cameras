@@ -356,12 +356,20 @@ class _WebRTCOpenMixin:
                                     self._key
                                 )
                             _ctx = _orig_create_ctx(self, srtp_profiles)
-                        try:
-                            _ctx.set_min_proto_version(_DTLS1_VERSION)
-                        except Exception as _e:
-                            _LOGGER.warning(
-                                "DTLS 1.0 enable failed: %s", _e
-                            )
+                        # Self-scoped: only lower the DTLS floor for certificates
+                        # WE tagged for an aidot camera session (tagged right
+                        # after RTCPeerConnection creation below). Other aiortc
+                        # peer connections in the same process (e.g. another Home
+                        # Assistant integration) use untagged certs and keep the
+                        # modern DTLS 1.2 floor - the class-level patch is now a
+                        # no-op for them.
+                        if getattr(self, "_aidot_dtls10", False):
+                            try:
+                                _ctx.set_min_proto_version(_DTLS1_VERSION)
+                            except Exception as _e:
+                                _LOGGER.warning(
+                                    "DTLS 1.0 enable failed: %s", _e
+                                )
                         return _ctx
                     _AidotRTCCert._create_ssl_context = _aidot_create_ssl_context
                     _AidotRTCCert._aidot_dtls10_patched = True
@@ -1465,6 +1473,19 @@ class _WebRTCOpenMixin:
         pc = RTCPeerConnection(
             configuration=RTCConfiguration(iceServers=_pc_ice_servers)
         )
+        # Tag THIS pc's DTLS certificate(s) so the self-scoped DTLS-1.0 floor
+        # (see _aidot_create_ssl_context) applies only to aidot camera sessions,
+        # not to other aiortc peer connections in the same process. Best-effort:
+        # if aiortc's internal layout changes, the tag is simply absent and the
+        # session keeps the default DTLS 1.2 floor.
+        try:
+            for _aidot_cert in (
+                getattr(pc, "_RTCPeerConnection__certificates", None) or []
+            ):
+                _aidot_cert._aidot_dtls10 = True
+        except Exception:
+            _LOGGER.debug("camera %s: could not tag DTLS cert for 1.0 scope",
+                          getattr(self, "device_id", "?"), exc_info=True)
         # Audio: sendrecv WITHOUT a real audio sender.  Empirical findings
         # from 2026-04-26 testing (commits aa341a1b, aeaea893):
         #
