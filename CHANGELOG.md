@@ -4,6 +4,21 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.1]
+
+### Fixed
+- **Keepalive retries no longer chase cloud-offline cameras.** When an open
+  fails and the cloud has explicitly reported the device offline, the
+  reconnect loops now hold - re-checking the online flag every 30 s
+  (`AIDOT_OFFLINE_RECHECK_S`) and probing one real open only every 600 s
+  (`AIDOT_OFFLINE_PROBE_S`) - instead of retrying on the normal backoff
+  cadence. Each retry against a dead camera consumed an open-gate slot for
+  the full 30 s signaling timeout; observed live (HA 2026.7.1), two unpowered
+  A000088s cycling that way pushed a healthy camera's cold open past two
+  minutes. Retries resume within one recheck of the device coming back
+  online. First attempts are never delayed, and devices whose online state
+  was never reported by the cloud are unaffected.
+
 ## [0.11.0]
 
 ### Fixed

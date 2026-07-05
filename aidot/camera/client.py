@@ -86,6 +86,13 @@ from .protocol import (  # noqa: F401 - re-exported for device_client / back-com
 
 _LOGGER = logging.getLogger(__name__)
 
+# Offline keepalive pause (see CameraMixin._backoff_or_offline_pause): while the
+# cloud explicitly reports a device offline, failed-open retries re-check the
+# flag every RECHECK seconds and only probe a real open every PROBE seconds,
+# instead of consuming an open-gate slot on the normal reconnect cadence.
+_OFFLINE_RECHECK_S = float(os.environ.get("AIDOT_OFFLINE_RECHECK_S", "30"))
+_OFFLINE_PROBE_S = float(os.environ.get("AIDOT_OFFLINE_PROBE_S", "600"))
+
 # Strong refs to fire-and-forget tasks: asyncio only keeps weak refs, so a
 # discarded task can be garbage-collected mid-flight. Discarded on completion.
 _BG_TASKS: set = set()
@@ -761,7 +768,55 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             self.status.update_from_camera_attributes(props)
         if device.get("online") is not None:
             self.status.online = bool(device.get("online"))
+            # The cloud explicitly reported reachability - only then may the
+            # keepalive loops trust an offline flag (see
+            # _backoff_or_offline_pause; DeviceStatusData.online defaults to
+            # False, which must not read as "offline").
+            self._cloud_online_explicit = True
         return self.status
+
+    async def _backoff_or_offline_pause(self, delay: float) -> None:
+        """Sleep a reconnect backoff, extended while the device is cloud-offline.
+
+        Normal case (device online, or the cloud never reported an online
+        flag): plain ``asyncio.sleep(delay)`` - behavior unchanged.
+
+        When an open just failed AND the cloud has explicitly reported the
+        device offline (``update_status_from_device`` saw ``online: false``),
+        hold here instead of retrying on the pacer cadence: re-check the flag
+        every ``AIDOT_OFFLINE_RECHECK_S`` (default 30 s) and resume the moment
+        it flips back on, or fall through after ``AIDOT_OFFLINE_PROBE_S``
+        (default 600 s) so one probe open still runs in case the cloud flag is
+        stale.  This keeps a dead/unpowered camera from consuming an open-gate
+        slot every backoff cycle and starving live cameras' cold opens
+        (observed live: two unpowered A000088s cycling 30 s open attempts
+        pushed a healthy camera's cold open past two minutes).
+        """
+        if self.status.online or not getattr(self, "_cloud_online_explicit", False):
+            await asyncio.sleep(delay)
+            return
+        _LOGGER.info(
+            "keepalive[%s]: device is cloud-offline - pausing open retries "
+            "(recheck %.0fs, probe %.0fs)",
+            self.device_id, _OFFLINE_RECHECK_S, _OFFLINE_PROBE_S,
+        )
+        _t0 = time.monotonic()
+        while (_elapsed := time.monotonic() - _t0) < _OFFLINE_PROBE_S:
+            await asyncio.sleep(
+                min(_OFFLINE_RECHECK_S, max(0.1, _OFFLINE_PROBE_S - _elapsed))
+            )
+            if not getattr(self, "_streaming_active", False):
+                return
+            if self.status.online:
+                _LOGGER.info(
+                    "keepalive[%s]: device back online - resuming opens",
+                    self.device_id,
+                )
+                return
+        _LOGGER.debug(
+            "keepalive[%s]: offline probe interval elapsed - probing one open",
+            self.device_id,
+        )
 
     # -- Camera helpers ------------------------------------------------------ #
 
@@ -2560,7 +2615,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     self.device_id, _delay, exc,
                 )
                 try:
-                    await asyncio.sleep(_delay)
+                    await self._backoff_or_offline_pause(_delay)
                 except asyncio.CancelledError:
                     return
                 continue
@@ -2735,7 +2790,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     self.device_id, _delay, exc,
                 )
                 try:
-                    await asyncio.sleep(_delay)
+                    await self._backoff_or_offline_pause(_delay)
                 except asyncio.CancelledError:
                     return
                 continue
@@ -3231,7 +3286,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     self.device_id, _delay, exc,
                 )
                 try:
-                    await asyncio.sleep(_delay)
+                    await self._backoff_or_offline_pause(_delay)
                 except asyncio.CancelledError:
                     return
                 continue
