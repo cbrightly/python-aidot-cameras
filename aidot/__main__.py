@@ -102,9 +102,17 @@ def _install_token_cache(client: AidotClient, path: str) -> None:
     """
     def _cb() -> None:
         try:
-            _write_token_file(path, client.login_info)
+            _write_token_file(path, client.serializable_login_info())
             _LOGGER.debug("Cached refreshed token to %s", path)
-        except OSError as exc:
+        except (OSError, TypeError) as exc:
+            # TypeError: a defensive belt-and-suspenders catch alongside
+            # serializable_login_info() itself - if a future runtime-only key
+            # is ever added to login_info without also being added to
+            # RUNTIME_ONLY_LOGIN_INFO_KEYS, this keeps a caching bug from
+            # ever propagating out of a callback and interrupting a token
+            # refresh that had otherwise already succeeded (confirmed live:
+            # this exact TypeError - "Object of type Lock is not JSON
+            # serializable" - previously escaped this callback uncaught).
             _LOGGER.warning("Could not cache refreshed token to %s: %s", path, exc)
 
     client.set_token_fresh_cb(_cb)
@@ -149,8 +157,10 @@ async def _make_client(session: aiohttp.ClientSession) -> AidotClient:
     if token_file:
         _install_token_cache(client, token_file)
         try:
-            await loop.run_in_executor(None, _write_token_file, token_file, client.login_info)
-        except OSError as exc:
+            await loop.run_in_executor(
+                None, _write_token_file, token_file, client.serializable_login_info()
+            )
+        except (OSError, TypeError) as exc:
             _LOGGER.warning("Could not seed token cache %s: %s", token_file, exc)
     return client
 

@@ -4,6 +4,22 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.2]
+
+### Fixed
+- **A token refresh could crash instead of persisting.** `login_info` is also
+  used as the account-shared cache for the persistent-MQTT connection and
+  its guarding `asyncio.Lock` (`_get_persistent_mqtt` - one connection per
+  account, the default since 2026-06-17). Anything that serialized
+  `login_info` directly - this library's own standalone CLI, or a consuming
+  integration's config-entry storage - hit `TypeError: Object of type Lock
+  is not JSON serializable` once that connection existed, silently failing
+  to persist a freshly rotated token. Confirmed live: a standalone
+  `aidot-go2rtc` run's token-refresh callback threw exactly this.
+  `AidotClient.serializable_login_info()` is a new JSON-safe view (excludes
+  the two runtime-only keys) that the CLI's own token cache now uses; any
+  other caller persisting `login_info` should switch to it too.
+
 ## [0.11.1]
 
 ### Fixed
