@@ -10,6 +10,10 @@ from typing import Any, Callable, List, Optional
 
 from ..exceptions import AidotCameraBusy, AidotCameraNotReady
 from ..login_const import APP_ID as _AIDOT_APP_ID
+from ..const import (
+    LOGIN_INFO_PERSISTENT_MQTT_KEY,
+    LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
+)
 
 # Wire/protocol constants live in constants.py; re-imported here so all
 # in-module references (and any external importers) keep resolving.
@@ -3096,7 +3100,12 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         li = self._user_info if isinstance(getattr(self, "_user_info", None), dict) else None
         if li is None:
             return None
-        pm = li.get("_persistent_mqtt")
+        # These two keys are deliberately live runtime objects (a connection,
+        # its guarding lock), NOT persistable state - see
+        # RUNTIME_ONLY_LOGIN_INFO_KEYS and AidotClient.serializable_login_info(),
+        # which strips them before this shared dict is ever written to
+        # disk/config storage.
+        pm = li.get(LOGIN_INFO_PERSISTENT_MQTT_KEY)
         if pm is not None:
             return pm
         # Serialize get-or-create. Without this, two concurrent first-callers
@@ -3105,9 +3114,9 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         # clobbering the first and orphaning a connection on the single-client_id
         # broker. dict.setdefault is atomic (no await between create and insert),
         # so every caller for this account shares the one lock.
-        lock = li.setdefault("_persistent_mqtt_lock", asyncio.Lock())
+        lock = li.setdefault(LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY, asyncio.Lock())
         async with lock:
-            pm = li.get("_persistent_mqtt")  # re-check under the lock
+            pm = li.get(LOGIN_INFO_PERSISTENT_MQTT_KEY)  # re-check under the lock
             if pm is not None:
                 return pm
             smarthome_auth = await self._async_get_smarthome_auth()
@@ -3119,7 +3128,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 return None
             from .protocol import _PersistentMqtt
             pm = _PersistentMqtt(mqtt_url, mqtt_user, mqtt_pwd, client_id)
-            li["_persistent_mqtt"] = pm
+            li[LOGIN_INFO_PERSISTENT_MQTT_KEY] = pm
             return pm
 
     @staticmethod

@@ -230,6 +230,21 @@ class ServerErrorCode(IntEnum):
     USER_PWD_INCORRECT = 560080
 
 
+# AidotClient.login_info is also used as the account-shared cache for the
+# persistent-MQTT connection + its guarding asyncio.Lock (see
+# camera/client.py's _get_persistent_mqtt: one connection per account,
+# looked up on this same shared dict via DeviceClient._user_info - the
+# identical object, not a copy). Those are live runtime objects, never
+# persistable state. Anything that serializes login_info to disk (this
+# library's own standalone CLI, or an integration's config-entry storage)
+# must exclude these keys first - see AidotClient.serializable_login_info().
+LOGIN_INFO_PERSISTENT_MQTT_KEY = "_persistent_mqtt"
+LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY = "_persistent_mqtt_lock"
+RUNTIME_ONLY_LOGIN_INFO_KEYS = frozenset(
+    {LOGIN_INFO_PERSISTENT_MQTT_KEY, LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY}
+)
+
+
 # -- Cloud API credentials ---------------------------------------------------- #
 
 from .login_const import APP_ID  # noqa: E402, F401 - back-compat re-export

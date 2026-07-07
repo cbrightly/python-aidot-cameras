@@ -38,6 +38,7 @@ from .const import (
     SUPPORTED_COUNTRYS,
     DEFAULT_COUNTRY_CODE,
     CONF_IS_OWNER,
+    RUNTIME_ONLY_LOGIN_INFO_KEYS,
     ServerErrorCode,
 )
 
@@ -345,6 +346,28 @@ class AidotClient:
             if response_data.get(CONF_CODE) == ServerErrorCode.LOGIN_INVALID:
                 raise AidotAuthFailed
             return None
+
+    def serializable_login_info(self) -> dict[str, Any]:
+        """A JSON-safe copy of ``login_info`` for persisting to disk/config storage.
+
+        ``login_info`` doubles as the account-shared cache for the
+        persistent-MQTT connection and its guarding ``asyncio.Lock`` (see
+        ``camera/client.py``'s ``_get_persistent_mqtt``, which reads/writes
+        this identical dict object via ``DeviceClient._user_info``) - live
+        runtime objects that raise ``TypeError: Object of type Lock is not
+        JSON serializable`` if ever handed to ``json.dump`` directly.
+        Confirmed live: a token-refresh callback that persisted the raw
+        ``login_info`` dict hit exactly this once a persistent MQTT
+        connection was active (the default since 2026-06-17).
+
+        Anything that persists ``login_info`` - this library's own
+        standalone CLI, or an integration's config-entry storage - should
+        call this instead of serializing ``login_info`` directly.
+        """
+        return {
+            k: v for k, v in self.login_info.items()
+            if k not in RUNTIME_ONLY_LOGIN_INFO_KEYS
+        }
 
     async def async_ensure_token(self) -> bool:
         """Force a fresh access token for camera/smarthome HTTP calls.
