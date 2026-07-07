@@ -123,6 +123,13 @@ the cloud account; a live 7-camera soak showed SDES `NO_MEDIA` dropping from
 in `{0,false,no,off}` or per-camera `_persistent_mqtt_opt=False` (the explicit opt
 always wins).
 
+**Persisting `login_info` yourself?** This connection (and its guarding lock)
+live on the same `login_info` dict `AidotClient` hands you - a live
+`asyncio.Lock` isn't JSON-serializable, so once this connection exists,
+`json.dump(client.login_info, ...)` raises `TypeError`. Use
+`AidotClient.serializable_login_info()` instead of serializing `login_info`
+directly; it returns the same dict with the runtime-only keys excluded.
+
 ### Connection reliability (DTLS / A000088)
 
 A000088 cameras advertise **two consecutive ICE ports** `[P, P+1]` and only

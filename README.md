@@ -64,9 +64,17 @@ pipx install "python-aidot-cameras[webrtc]"
 # or:
 uv tool install "python-aidot-cameras[webrtc]"
 
+export AIDOT_USERNAME=... AIDOT_PASSWORD=...   # or AIDOT_TOKEN_FILE, see below
 aidot-go2rtc --list                  # discover cameras + their transport
 aidot-go2rtc <device_id> '{output}'  # stream one camera (as a go2rtc exec: source)
 ```
+
+Authenticates via `AIDOT_USERNAME`/`AIDOT_PASSWORD` (`AIDOT_COUNTRY`, default
+`US`) - a dedicated login is recommended for long-running standalone use, so
+it doesn't fight Home Assistant over a shared rotating refresh token. Set
+`AIDOT_TOKEN_FILE=/path/to/token.json` to cache the login across restarts;
+token rotations are written back automatically. Run `aidot-go2rtc --help` for
+the full list of authentication and stream env vars.
 
 ## Usage
 
