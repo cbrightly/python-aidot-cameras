@@ -1219,7 +1219,12 @@ def _mqtt_session_sync(
                    else str(msg.payload))
         msg_q.put((msg.topic, payload))
 
-    def _on_disconnect(c, ud, disconnect_flags=None, reason_code=None, props=None):
+    def _on_disconnect(c, ud, *args):
+        # paho >=2 calls (disconnect_flags, reason_code, properties); paho <2
+        # calls (rc,).  Pull the reason code from whichever slot it lands in so
+        # the log is truthful on both (a fixed 5-arg signature put paho 1.x's rc
+        # in disconnect_flags and logged reason_code as None).
+        reason_code = args[1] if len(args) >= 2 else (args[0] if args else None)
         # If _on_connect was never fired (WebSocket upgrade failed, auth refused
         # at TCP level, etc.) signal conn_ev now so the caller doesn't time out.
         if not conn_ev.is_set():
