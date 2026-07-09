@@ -4,6 +4,48 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.3]
+
+Hardening pass from a broad correctness + security review of the core modules.
+
+### Security
+- **MQTT broker password no longer logged.** `getServerUrlConfig`'s
+  no-`mqttServerUrl` fallback logged the entire response body (which contains
+  `mqttPassword`) at WARNING; it now logs only the non-sensitive key names,
+  matching the redaction the adjacent debug log already used.
+- **Token cache is written atomically at 0600.** The standalone CLI wrote the
+  token file with umask-default perms before `chmod 0600` (a brief
+  world-readable window) and truncated the existing file before serializing (a
+  serialization failure destroyed the valid token). It now writes to a `0600`
+  temp file and `os.replace`s it into place, so perms are never widened and the
+  previous token survives any write failure.
+
+### Fixed
+- **Corrupt token cache no longer crashes the CLI.** `_make_client` now catches
+  a bad/partial token file and falls back to username/password login instead of
+  raising an uncaught `json.JSONDecodeError` at startup.
+- **DTLS `async_snapshot` honors its bool contract.** Its open call was outside
+  the try/except, so a busy-camera open raised out of a method documented to
+  return `True`/`False`; it now returns `False` like the SDES branch.
+- **SDES restart after an SRTP key change no longer produces a dead stream.**
+  The ffmpeg-restart path now updates the shared process holder, so the bridge
+  thread does not mistake the restarted ffmpeg for an exited one and starve it.
+- **LAN attribute reads fail cleanly.** `async_get_attributes` raises
+  `CameraLanError` (not an unguarded `IndexError`) when a camera logs in but
+  never answers the attribute query, preserving the cloud-fallback contract.
+- **Motion dedup evicts oldest, not arbitrary.** The `_motion_seen` memory
+  bound is now insertion-ordered, so trimming keeps the most-recent uids and
+  in-window events stay deduplicated.
+- **Resource leaks on error paths closed.** Several terminal raises / loop exits
+  now release what they held: the connect-per-stream MQTT session thread + its
+  broker connection (DTLS media-declined and livePlay=0 refusals in both the
+  DTLS and SDES open paths), and the cloud-playback TCP socket (login-failure
+  returns and receive-loop exit now tear down via a shared cleanup).
+
+### Changed
+- Harmonized the persistent-MQTT `NO_MEDIA` soak figure between README and
+  `docs/CAMERAS.md` (`~57% -> ~11-19%` across soaks).
+
 ## [0.11.2]
 
 ### Fixed

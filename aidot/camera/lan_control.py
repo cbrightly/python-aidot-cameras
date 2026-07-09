@@ -309,6 +309,10 @@ class CameraLanClient:
                                      "attr": [], "channel": "tcp", "ascNumber": asc},
                          "tst": int(time.time() * 1000), "deviceId": self.device_id})]
         replies = await self._session(build)
+        if not replies:
+            raise CameraLanError(
+                f"{self.device_id}: no reply to attribute query"
+            )
         return (replies[0].get("payload") or {}).get("attr") or {}
 
     async def async_set_attributes(self, attr: dict) -> bool:

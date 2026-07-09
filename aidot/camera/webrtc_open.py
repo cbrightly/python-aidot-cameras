@@ -1156,6 +1156,7 @@ class _WebRTCOpenMixin:
                     # transient on battery cameras and recover via ICE; abort
                     # there would spuriously kill otherwise-good streams.
                     if _lp_on == 0:
+                        outgoing_q.put_nowait(None)   # stop MQTT thread (avoid orphan)
                         raise RuntimeError(
                             f"livePlay refused by camera (livePlay=0, code={_lp_code})"
                         )
@@ -1207,6 +1208,7 @@ class _WebRTCOpenMixin:
                     _lp_code2 = int(_lp_resp2.get("code", 200))
                     _lp_on2   = int(_lp_resp2.get("livePlay", 1))
                     if _lp_on2 == 0:
+                        outgoing_q.put_nowait(None)   # stop MQTT thread (avoid orphan)
                         raise RuntimeError(
                             f"livePlay refused by camera (livePlay=0, code={_lp_code2})"
                         )
@@ -3210,6 +3212,7 @@ class _WebRTCOpenMixin:
                 # encoder is still cold.  Tear down and raise so the serve loop
                 # fast-retries in a bounded burst instead of letting DTLS
                 # co-fail into the full 15s-gated generic retry.
+                outgoing_q.put_nowait(None)   # stop MQTT thread (avoid orphan)
                 try:
                     await pc.close()
                 except Exception:

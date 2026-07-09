@@ -80,3 +80,23 @@ def test_network_helpers_are_callable():
     assert inspect.iscoroutinefunction(discover_subnet)
     sig = inspect.signature(discover_subnet)
     assert list(sig.parameters) == ["cidr24", "timeout", "concurrency"]
+
+
+def test_get_attributes_empty_replies_raises_lanerror():
+    # If the camera accepts login but never answers getDevAttrReq (read timeout),
+    # _session returns [] - async_get_attributes must raise CameraLanError (the
+    # contract callers rely on for cloud fallback), not an unguarded IndexError.
+    import asyncio
+
+    c = CameraLanClient(DEVICE, USER, ip="192.0.2.10")
+
+    async def _empty(_build):
+        return []
+
+    c._session = _empty
+
+    async def _go():
+        with pytest.raises(CameraLanError):
+            await c.async_get_attributes()
+
+    asyncio.run(_go())
