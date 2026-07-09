@@ -193,15 +193,18 @@ class CloudPlaybackSession:
             )
         except TimeoutError:
             _LOGGER.error("Cloud playback: login response timed out")
+            await self._cleanup()
             return False
         except Exception as exc:
             _LOGGER.error("Cloud playback: login read error: %s", exc)
+            await self._cleanup()
             return False
 
         if hdr["cmd"] != _CMD_LOGIN_RES:
             _LOGGER.error(
                 "Cloud playback: unexpected login response cmd=0x%04x", hdr["cmd"]
             )
+            await self._cleanup()
             return False
 
         try:
@@ -211,6 +214,7 @@ class CloudPlaybackSession:
                     "Cloud playback: login rejected code=%s body=%s",
                     body_obj.get("code"), body_obj,
                 )
+                await self._cleanup()
                 return False
         except (json.JSONDecodeError, ValueError):
             pass  # some firmware sends no JSON body - treat as success
@@ -292,6 +296,13 @@ class CloudPlaybackSession:
             else:
                 _LOGGER.warning("Cloud playback: unexpected stream result=%d", result)
 
+        # Loop exited on end-of-stream or a receive error/timeout (not via an
+        # external stop(), which cancels this task and owns its own teardown).
+        # Tear down here so the heartbeat loop wakes to a closed writer and
+        # exits, and the socket is not left open until stop() is called.
+        self._running = False
+        await self._cleanup()
+
     async def start(self) -> bool:
         self._running = True
         if not await self._connect_and_login():
@@ -326,12 +337,19 @@ class CloudPlaybackSession:
                     pass
         self._hb_task = None
         self._rx_task = None
+        await self._cleanup()
+
+    async def _cleanup(self) -> None:
+        # Close the TCP writer and drop the reader/writer refs. Nulling the
+        # writer makes a subsequent stop() (or a second call) a safe no-op, so
+        # this is the single teardown path shared by the login-failure returns,
+        # the receive-loop exit, and stop().
         if self._writer is not None:
             try:
                 self._writer.close()
                 await self._writer.wait_closed()
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", '_cleanup', exc_info=True)
             self._writer = None
             self._reader = None
 

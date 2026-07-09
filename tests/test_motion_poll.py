@@ -24,7 +24,7 @@ class _FakeDC:
         self._call = 0
         self._motion_active = True
         self._motion_cb = None
-        self._motion_seen = set()
+        self._motion_seen: dict = {}  # insertion-ordered set (dict keys); see CameraMixin
         self._motion_interval = 0.01  # fast for the test
 
     async def async_get_cloud_recordings(self, *a, **k):

@@ -38,6 +38,8 @@ from .const import (
     SUPPORTED_COUNTRYS,
     DEFAULT_COUNTRY_CODE,
     CONF_IS_OWNER,
+    LOGIN_INFO_PERSISTENT_MQTT_KEY,
+    LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
     RUNTIME_ONLY_LOGIN_INFO_KEYS,
     ServerErrorCode,
 )
@@ -567,7 +569,12 @@ class AidotClient:
         # Close the account-shared persistent MQTT connection, if one was opened
         # (AIDOT_PERSISTENT_MQTT). Stored on the shared login_info by the camera
         # command/attr paths; closing here stops its background paho loop.
-        pm = self.login_info.pop("_persistent_mqtt", None) if isinstance(self.login_info, dict) else None
+        pm = None
+        if isinstance(self.login_info, dict):
+            pm = self.login_info.pop(LOGIN_INFO_PERSISTENT_MQTT_KEY, None)
+            # Also drop the lock so the asyncio.Lock does not linger on the
+            # account-shared login_info after close.
+            self.login_info.pop(LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY, None)
         if pm is not None:
             try:
                 pm.close()

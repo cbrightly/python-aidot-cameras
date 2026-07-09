@@ -695,7 +695,9 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         self._motion_active: bool = False
         self._motion_cb: Optional[Callable] = None
         self._motion_task: Optional["asyncio.Task[None]"] = None
-        self._motion_seen: set = set()
+        # Insertion-ordered set (dict keys) so the memory-bound trim can evict
+        # the OLDEST uids deterministically rather than arbitrary ones.
+        self._motion_seen: dict = {}
         self._motion_interval: float = 30.0
 
     # -- Pre-0.6 core API, kept for existing consumers ----------------------- #
@@ -1020,9 +1022,12 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             if not mqtt_host:
                 # Fall back to the regional MQTT broker URL known to work from
                 # the AiDot web client: wss://{region}-mqtt.arnoo.com:8443/mqtt
+                # Redacted: `data`/`body` carries mqttPassword; log only the
+                # non-sensitive key names present, mirroring the hasPwd-style
+                # redaction of the debug log below.
                 _LOGGER.warning(
                     "getServerUrlConfig returned no mqttServerUrl; "
-                    "using regional fallback. body=%s", body
+                    "using regional fallback. keys=%s", sorted(data)
                 )
                 mqtt_host = f"wss://{self._region}-mqtt.arnoo.com:8443/mqtt"
 
@@ -2116,11 +2121,16 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     return
             frame_event.set()
 
-        session = await self.async_open_webrtc_stream(
-            on_frame=_on_frame,
-            timeout=timeout,
-            status_callback=status_callback,
-        )
+        try:
+            session = await self.async_open_webrtc_stream(
+                on_frame=_on_frame,
+                timeout=timeout,
+                status_callback=status_callback,
+            )
+        except Exception as _snap_exc:
+            _LOGGER.error(
+                "async_snapshot DTLS failed for %s: %s", self.device_id, _snap_exc)
+            return False
         try:
             try:
                 await _asyncio.wait_for(frame_event.wait(), timeout=timeout)
@@ -2243,7 +2253,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         if self._motion_task is not None and not self._motion_task.done():
             return
         self._motion_active = True
-        self._motion_seen = set()
+        self._motion_seen = {}
         self._motion_task = asyncio.ensure_future(self._motion_poll_loop(lookback_s))
 
     async def async_stop_motion_polling(self) -> None:
@@ -2273,7 +2283,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     uid = it.get("eventUuid") or it.get("eventId") or it.get("recordId")
                     if not uid or uid in self._motion_seen:
                         continue
-                    self._motion_seen.add(uid)
+                    self._motion_seen[uid] = None
                     fresh.append(it)
                 if primed and fresh and self._motion_cb is not None:
                     for it in sorted(fresh, key=lambda x: x.get("eventTime") or 0):
@@ -2285,7 +2295,9 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                             _LOGGER.debug("motion callback raised", exc_info=True)
                 primed = True
                 if len(self._motion_seen) > 1000:  # bound memory
-                    self._motion_seen = set(list(self._motion_seen)[-400:])
+                    # Keep the 400 most-recent uids (insertion order), evicting
+                    # the oldest so still-in-window events stay deduplicated.
+                    self._motion_seen = dict.fromkeys(list(self._motion_seen)[-400:])
             except asyncio.CancelledError:
                 return
             except Exception as exc:

@@ -672,6 +672,15 @@ class _SdesOpenMixin:
                 # proceed rather than abort on a code we can't classify as terminal
                 # (genuine terminal rejects are still caught on the webrtcResp ack).
                 if _lp_on_sdes == 0:
+                    # Match the sibling raises: close the reserved sockets and
+                    # signal the MQTT thread before propagating.  (No sdp_path
+                    # unlink here - it is not created until later, below.)
+                    for _rsock in (_audio_sock, _video_sock):
+                        try:
+                            _rsock.close()
+                        except Exception:
+                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                    outgoing_q.put_nowait(None)   # stop MQTT thread
                     raise RuntimeError(
                         f"livePlay refused by camera (livePlay=0, code={_lp_code_sdes})")
                 elif _lp_code_sdes not in (0, 200):
@@ -3604,6 +3613,12 @@ class _SdesOpenMixin:
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.PIPE,
                         )
+                        # Point the shared holder at the live proc immediately.
+                        # The bridge thread polls _proc_holder[0]; if it still
+                        # sees the terminated old proc it logs "stream ended",
+                        # breaks, and closes the loopback sockets - starving the
+                        # restarted ffmpeg (0-frame stream).
+                        _proc_holder[0] = proc
                         _status("ffmpeg restarted with camera's SRTP keys")
         except TimeoutError:
             if _cam_echo_received:

@@ -118,8 +118,8 @@ connection (the broker binds auth to the one authorized `client_id`, so there ca
 only be one), subscribes once, replays subscriptions on reconnect, and carries
 commands, attributes, AND the stream-open signaling - without tearing down on
 stream stop. This removes the per-open connect churn that otherwise rate-limits
-the cloud account; a live 7-camera soak showed SDES `NO_MEDIA` dropping from
-~57 % to ~11 % with the flag on. On by default; disable with `AIDOT_PERSISTENT_MQTT`
+the cloud account; live 7-camera soaks showed SDES `NO_MEDIA` dropping from
+~57 % to ~11-19 % with the flag on. On by default; disable with `AIDOT_PERSISTENT_MQTT`
 in `{0,false,no,off}` or per-camera `_persistent_mqtt_opt=False` (the explicit opt
 always wins).
 
