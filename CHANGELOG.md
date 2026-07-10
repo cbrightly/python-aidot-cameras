@@ -4,6 +4,23 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.4]
+
+### Changed
+- **Lowered the `paho-mqtt` floor from `>=2.0` to `>=1.6.1`.** The MQTT client
+  already ran on both paho generations - each `Client()` site falls back when
+  `CallbackAPIVersion` is absent, and the callbacks accept a v1 `int` or a v2
+  `ReasonCode` - so this only widens what can satisfy the dependency, useful
+  where another package pins `paho-mqtt==1.6.1` (e.g. Home Assistant's
+  custom-component test tooling). Validated live on 1.6.1: a real camera streams
+  end-to-end. 2.x environments are unaffected (pip still resolves the highest).
+
+### Fixed
+- **Disconnect reason code is now truthful under paho 1.x.** The signaling MQTT
+  client's `on_disconnect` used a fixed 5-arg (v2) signature, so paho 1.x's
+  3-arg call landed the reason code in the wrong slot and logged it as `None`.
+  It now reads the reason code from whichever position the installed paho passes.
+
 ## [0.11.3]
 
 Hardening pass from a broad correctness + security review of the core modules.

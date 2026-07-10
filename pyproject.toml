@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "python-aidot-cameras"
-version = "0.11.3"
+version = "0.11.4"
 description = "Control AiDot/Leedarson WiFi lights and cameras (WebRTC streaming, two-way audio, PTZ, controls)"
 readme = "README.md"
 license = "MIT"
@@ -22,7 +22,7 @@ classifiers = [
 # after re-validating against it.
 dependencies = [
     "aiohttp>=3.9",
-    "paho-mqtt>=2.0",
+    "paho-mqtt>=1.6.1",
     "cryptography>=42.0",
     "pycryptodome>=3.20",
     "dacite>=1.8",
