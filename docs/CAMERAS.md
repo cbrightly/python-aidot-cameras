@@ -155,6 +155,14 @@ library sends this automatically (matching the official app's `DataChannel`
 keepalive timer), so battery streams hold while the camera is awake - validated
 at 72 s / 49 s holds on two A001513 cameras.
 
+Separately, a battery camera runs its own low-power timer that returns it to
+sleep ~25 s after the last cloud keep-alive, **even mid-view** - so a one-shot
+keep-alive at open would let the stream drop partway through. For the duration of
+a battery stream the library re-issues the cloud `setKeepAliveTime`
+(`keepAliveTime=25`) every 20 s - inside that 25 s window, so there is no sleep
+gap - matching the official app, which renews it throughout a live view. Mains
+cameras never sleep, so this loop runs only for battery models.
+
 Battery cameras sleep between events. The library wakes them on demand via the
 cloud **HTTP low-power endpoint** (`async_wake_camera()`, also fired automatically
 at the start of a stream open) in addition to the MQTT `lowPowerActiveStateReq` -

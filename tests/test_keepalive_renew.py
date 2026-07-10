@@ -53,6 +53,37 @@ def test_renew_loop_swallows_cancel():
     o._async_set_keep_alive.assert_not_awaited()
 
 
+def test_start_renew_is_noop_for_mains_cameras():
+    # Mains cameras never sleep - no throwaway task should be scheduled.
+    o = _obj(battery=False)
+    with patch("aidot.camera.client.asyncio.ensure_future") as ef:
+        CameraMixin._start_keepalive_renew(o)
+    ef.assert_not_called()
+
+
+def test_start_renew_cancels_a_still_running_prior_loop():
+    # Re-view within the renew sleep window must not orphan the prior loop.
+    o = _obj(battery=True)
+    prior = MagicMock()
+    prior.done.return_value = False
+    o._keepalive_task = prior
+    with patch("aidot.camera.client.asyncio.ensure_future", return_value="new") as ef:
+        CameraMixin._start_keepalive_renew(o)
+    prior.cancel.assert_called_once()   # old loop stopped
+    ef.assert_called_once()             # exactly one new loop
+    assert o._keepalive_task == "new"
+
+
+def test_cancel_renew_stops_the_loop_and_clears_the_ref():
+    o = _obj(battery=True)
+    task = MagicMock()
+    task.done.return_value = False
+    o._keepalive_task = task
+    CameraMixin._cancel_keepalive_renew(o)
+    task.cancel.assert_called_once()
+    assert o._keepalive_task is None
+
+
 def test_set_keep_alive_posts_expected_request():
     o = MagicMock()
     o.device_id = "cam1"
