@@ -4,6 +4,27 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.5]
+
+### Added
+- **Battery cameras stay awake for the whole live view (app parity).** A battery
+  camera's low-power timer returns it to sleep ~25 s after the last cloud
+  keep-alive, even mid-view, so a one-shot keep-alive at open let the stream drop
+  partway through. A battery-only renew loop now re-issues `setKeepAliveTime`
+  every 20 s (inside the 25 s window, so no sleep gap) for the duration of a
+  battery stream, matching the official app; mains cameras never sleep and are
+  skipped. Validated live on an A001513/L2 (renewals on the 20 s cadence). See
+  the battery section of [`docs/CAMERAS.md`](docs/CAMERAS.md).
+
+### Fixed
+- **Keep-alive renew loop is single-instance and cleaned up on every exit path.**
+  The renew task is battery-gated (mains cameras no longer schedule a throwaway
+  no-op task); a re-view within the renew window cancels any still-running loop
+  before starting a new one (no orphaned loops left POSTing `setKeepAliveTime`);
+  the SDES/DTLS idle-release paths cancel it; and the `async_start_streaming`
+  entry point starts it too, so a battery camera streamed via that path is
+  renewed as well.
+
 ## [0.11.4]
 
 ### Changed
