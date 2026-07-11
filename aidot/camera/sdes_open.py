@@ -790,7 +790,10 @@ class _SdesOpenMixin:
         )
 
         sdp_path = await asyncio.get_running_loop().run_in_executor(
-            None, _make_sdp_tempfile, _inject_sprop(ffmpeg_sdp, self.device_id))
+            # _inject_sprop reads the sprop cache from disk; keep it inside the
+            # executor (not as an eagerly-evaluated arg) so the blocking open()
+            # does not run on the event loop.
+            None, lambda: _make_sdp_tempfile(_inject_sprop(ffmpeg_sdp, self.device_id)))
         _cl(os.unlink, sdp_path)   # released with the sockets on a cancelled open
 
         # --- Send webrtcReq BEFORE releasing reservation sockets ------------- #
@@ -1772,7 +1775,7 @@ class _SdesOpenMixin:
                 )
             try:
                 await asyncio.get_running_loop().run_in_executor(
-                    None, _write_text_file, sdp_path, _inject_sprop(_updated_sdp, self.device_id))
+                    None, lambda: _write_text_file(sdp_path, _inject_sprop(_updated_sdp, self.device_id)))
             except Exception as _sdp_exc:
                 _LOGGER.warning("_open_sdes_stream: could not rewrite SDP: %s", _sdp_exc)
 
@@ -2070,7 +2073,7 @@ class _SdesOpenMixin:
             )
         try:
             await asyncio.get_running_loop().run_in_executor(
-                None, _write_text_file, sdp_path, _inject_sprop(_br_sdp, self.device_id))
+                None, lambda: _write_text_file(sdp_path, _inject_sprop(_br_sdp, self.device_id)))
         except Exception as _br_sdp_exc:
             _LOGGER.warning("bridge: could not rewrite SDP: %s", _br_sdp_exc)
 

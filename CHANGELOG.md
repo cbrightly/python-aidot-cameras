@@ -4,6 +4,29 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.7]
+
+### Fixed
+- **No more blocking file read on the event loop.** The SDES SDP builder read the
+  sprop cache from disk (`_inject_sprop` -> `_load_sprop` -> `open()`) as an
+  eagerly-evaluated argument to `run_in_executor`, so the blocking `open()` ran on
+  the event loop - which Home Assistant flags as "a blocking call ... causing
+  stability issues". The read now runs inside the executor at all three SDP-write
+  sites.
+
+### Changed
+- **Capped the vendored aiortc per-packet loggers.** `aiortc`'s RTP receiver and
+  sender log every media packet at DEBUG; enabling DEBUG on the parent `aidot`
+  logger to diagnose the integration turned that into thousands of lines per
+  second (in one capture, ~99% of all log lines). `aidot._vendor.aiortc.rtcrtp`
+  `receiver`/`sender` are now capped at INFO by default (an explicit user level is
+  respected), so `aidot` DEBUG stays useful and the diagnostically valuable aiortc
+  DEBUG (DTLS, ICE, SCTP/DCEP) still flows.
+- **Demoted a benign warning to debug.** "ignoring ASCII-encoded IP ... from
+  device dict" is a handled cloud quirk (the camera's LAN IP comes from WebRTC
+  signaling, not that field) and is not actionable, so it no longer logs at
+  WARNING.
+
 ## [0.11.6]
 
 ### Fixed
