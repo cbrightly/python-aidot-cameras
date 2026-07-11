@@ -4,6 +4,54 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.6]
+
+### Fixed
+- **A cancelled SDES cold open no longer leaks sockets, a thread and a temp
+  file.** Opening an SDES (battery) camera reserves two UDP sockets, starts a
+  bridge thread, launches ffmpeg and writes a temp SDP, then hands them to the
+  `SdesSession` that owns their teardown. If the 25-70 s handshake was cancelled
+  (e.g. Home Assistant abandons a slow cold open) before that hand-off, none of
+  it had an owner, so every abandoned attempt leaked two file descriptors, a
+  thread and a `/tmp` SDP - eventually `OSError: Too many open files`. The open
+  is now split into a wrapper that releases each resource (via an `ExitStack`)
+  unless the session was actually returned.
+- **Expired-token recovery on event-video and thumbnail fetches.** The cloud
+  recording-list and MQTT-URL calls already refreshed the auth token and retried
+  once on a `21026` ("please login again") error, but `getEventVideoUrl` and the
+  latest-thumbnail fetch did not - so a snapshot or media request that happened
+  to land on an expired token failed silently. They now use the same
+  refresh-and-retry path.
+- **Truncated H.264 parameter sets are dropped instead of cached corrupt.** When
+  a STAP-A aggregation packet advertises a NAL longer than the packet itself
+  (frame loss or relay truncation), the SPS/PPS parser bounded the slice to the
+  packet so a short, corrupt parameter set is no longer cached (which could keep
+  a camera showing no video until the cache was cleared).
+- **Fire-and-forget client tasks are held by a strong reference.** The ICE-config
+  prefetch and the sync `cleanup()` path scheduled work with a bare
+  `create_task`; asyncio keeps only a weak reference, so either could be
+  garbage-collected mid-flight. They now go through the same `_spawn_bg` helper
+  the rest of the library uses.
+
+### Changed
+- Replaced a non-ASCII token in an internal docstring with its ASCII gloss.
+
+### Known / deferred
+- **Snapshot during a live stream can briefly interrupt that stream** (recovers
+  within the ~30 s watchdog). On the default persistent-MQTT transport a second
+  concurrent open on the same camera reaps the single signaling-drain slot the
+  live stream is using. The same slot is *correctly* reaped when an internal
+  reconnect loop reopens a dead session, and the streaming flag cannot tell the
+  two apart - the safe fix is a per-session drain-ownership change that needs
+  live concurrent-open validation, so it is held for a dedicated release.
+- **A transient MQTT broker blip can end a stream's signaling early** on the
+  non-default per-stream transport (`AIDOT_PERSISTENT_MQTT` off), where the
+  session runs for the stream's lifetime. The default persistent transport is
+  unaffected; on the default path only short one-shot signaling exchanges use
+  this code. The safe fix (resubscribe on reconnect plus suppressing the
+  end-of-loop sentinel) changes signaling behaviour and needs live
+  broker-disconnect validation, so it is held for a dedicated release.
+
 ## [0.11.5]
 
 ### Added
