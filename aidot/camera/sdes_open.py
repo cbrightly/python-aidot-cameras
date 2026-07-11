@@ -47,9 +47,38 @@ def _sdes_echo_wait_timeout(skip_liveplay: bool) -> float:
 
 
 class _SdesOpenMixin:
-    async def _open_sdes_stream(
+    async def _open_sdes_stream(self, **kwargs) -> "SdesSession":
+        """Allocate-and-hand-off wrapper around _open_sdes_stream_impl.
+
+        The impl reserves two UDP sockets, starts a bridge thread, launches
+        ffmpeg and writes a temp SDP, then hands them to the returned
+        SdesSession (whose stop() releases them).  If the cold open is cancelled
+        mid-handshake (25-70s) - or raises before that hand-off - none of that
+        has an owner yet, so a plain call leaks the fds, the thread and a /tmp
+        file on every cancelled attempt (eventually "Too many open files").
+        The impl registers each resource on an ExitStack as it is allocated;
+        close the stack unless the impl actually returned a session.
+        """
+        from contextlib import ExitStack
+
+        _cleanup = ExitStack()
+        _ok = False
+        try:
+            _session = await self._open_sdes_stream_impl(_cleanup=_cleanup, **kwargs)
+            _ok = True
+            return _session
+        finally:
+            if not _ok:
+                # Closing the reservation sockets also unblocks the bridge
+                # thread's recv so it exits; ffmpeg is killed and the SDP file
+                # unlinked.  LIFO, and every callback swallows so this never
+                # masks the original CancelledError/exception.
+                _cleanup.close()
+
+    async def _open_sdes_stream_impl(
         self,
         *,
+        _cleanup=None,
         peer_id: str,
         user_id: str,
         device_id: str,
@@ -120,16 +149,45 @@ class _SdesOpenMixin:
         def _seq() -> str:
             return f"ap{random.randint(1000000, 9999999)}"
 
+        # Register a resource with the wrapper's cleanup stack so it is released
+        # if the cold open is cancelled/raises before the SdesSession takes
+        # ownership.  Each step swallows so ExitStack.close() can never mask the
+        # original CancelledError/exception.  No-op if called without a stack.
+        def _cl(fn, *a):
+            if _cleanup is None:
+                return
+            def _run():
+                try:
+                    fn(*a)
+                except Exception:
+                    _LOGGER.debug(
+                        "camera %s: swallowed sdes-open cleanup step",
+                        getattr(self, "device_id", "?"), exc_info=True,
+                    )
+            _cleanup.callback(_run)
+
+        def _reap(p):
+            try:
+                p.kill()
+            except Exception:
+                pass
+            try:
+                p.poll()   # reap the killed child so it does not linger as a zombie
+            except Exception:
+                pass
+
         # --- Allocate UDP ports and determine local IP ---------------------- #
         import socket as _socket
 
         _audio_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
         _audio_sock.bind(("0.0.0.0", 0))
         audio_port = _audio_sock.getsockname()[1]
+        _cl(_audio_sock.close)   # also unblocks the bridge thread's recv on cleanup
 
         _video_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
         _video_sock.bind(("0.0.0.0", 0))
         video_port = _video_sock.getsockname()[1]
+        _cl(_video_sock.close)
 
         # Use the outbound interface toward 8.8.8.8 to find our local IP.
         # connect() on a UDP socket does not send any packet.
@@ -733,6 +791,7 @@ class _SdesOpenMixin:
 
         sdp_path = await asyncio.get_running_loop().run_in_executor(
             None, _make_sdp_tempfile, _inject_sprop(ffmpeg_sdp, self.device_id))
+        _cl(os.unlink, sdp_path)   # released with the sockets on a cancelled open
 
         # --- Send webrtcReq BEFORE releasing reservation sockets ------------- #
         # ICE cameras (e.g. LK.IPC.A001064) send STUN binding requests to our
@@ -3384,6 +3443,7 @@ class _SdesOpenMixin:
                 stderr=subprocess.PIPE,
             )
             _proc_holder[0] = proc
+            _cl(_reap, proc)   # kill ffmpeg if the open is cancelled before hand-off
         except FileNotFoundError:
             # ffmpeg is not installed - clean up and surface a clear error.
             for _rsock in (_audio_sock, _video_sock):
