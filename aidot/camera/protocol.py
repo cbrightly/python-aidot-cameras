@@ -536,6 +536,11 @@ def _extract_param_sets_from_rtp(pkt: bytes) -> dict:
         while i + 2 <= len(payload):
             size = int.from_bytes(payload[i:i + 2], "big")
             i += 2
+            if i + size > len(payload):
+                # Truncated STAP-A: the advertised NAL size runs past the end of
+                # the packet, so the remaining bytes are garbage.  Stop rather
+                # than slice a short NAL and cache a corrupt SPS/PPS.
+                break
             nal = payload[i:i + size]
             i += size
             if nal:
