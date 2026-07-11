@@ -668,7 +668,10 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             # as the octets, e.g. "49.57.50.46" == ASCII of "192.").
             _ip_str = str(_dev_ip_init)
             if _ip_looks_ascii_garbled(_ip_str):
-                _LOGGER.warning(
+                # Benign, handled cloud quirk (not actionable by the user): the
+                # camera's LAN IP comes from WebRTC signaling, not this field.
+                # Debug, not warning, so it does not read as a problem in the log.
+                _LOGGER.debug(
                     "DeviceClient %s: ignoring ASCII-encoded IP %r from device dict "
                     "(cloud stored IP bytes as ASCII chars; real IP unknown)",
                     device.get("id") or device.get("devId"), _ip_str,
