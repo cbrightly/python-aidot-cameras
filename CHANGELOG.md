@@ -4,6 +4,16 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.8]
+
+### Changed
+- **A camera that the cloud reports offline no longer drips WARNINGs.** The serve
+  and keepalive loops already throttle open retries for a cloud-offline device
+  (the offline pause), but still logged each failed probe at WARNING - so a
+  dead/unpowered camera produced a steady trickle of "open failed ... (retry ...)"
+  warnings. Those open failures now log at DEBUG while the device is explicitly
+  cloud-offline; a genuine failure on an online camera still warns.
+
 ## [0.11.7]
 
 ### Fixed

@@ -792,6 +792,16 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             self._cloud_online_explicit = True
         return self.status
 
+    def _open_fail_logger(self):
+        """Pick the log level for a stream-open failure in the serve/keepalive
+        loops: WARNING for a genuine failure, but DEBUG when the cloud has
+        explicitly reported the device offline.  A dead/unpowered camera is
+        already throttled to ~probe cadence by _backoff_or_offline_pause, so its
+        expected open failures should not drip WARNINGs into the log every probe.
+        """
+        _offline = (not self.status.online) and getattr(self, "_cloud_online_explicit", False)
+        return _LOGGER.debug if _offline else _LOGGER.warning
+
     async def _backoff_or_offline_pause(self, delay: float) -> None:
         """Sleep a reconnect backoff, extended while the device is cloud-offline.
 
@@ -2732,7 +2742,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                         "falling back to full relay path", self.device_id,
                         _FAST_OPEN_TIMEOUT)
                 _delay = _pacer.fail_delay()
-                _LOGGER.warning(
+                self._open_fail_logger()(
                     "SDES keepalive: stream open failed for %s (retry in %.0fs): %s",
                     self.device_id, _delay, exc,
                 )
@@ -2908,7 +2918,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 continue
             except Exception as exc:
                 _delay = _pacer.fail_delay()
-                _LOGGER.warning(
+                self._open_fail_logger()(
                     "Stream open failed for %s (retry in %.0fs): %s",
                     self.device_id, _delay, exc,
                 )
@@ -3409,7 +3419,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 continue
             except Exception as exc:
                 _delay = _pacer.fail_delay()
-                _LOGGER.warning(
+                self._open_fail_logger()(
                     "DTLS serve: open failed for %s (retry %.0fs): %s",
                     self.device_id, _delay, exc,
                 )
