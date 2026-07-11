@@ -2254,6 +2254,20 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         except (asyncio.CancelledError, Exception):
             _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_reap_stream_drain', exc_info=True)
 
+    def _release_stream_drain_to_session(self):
+        """Hand ownership of the persistent-MQTT signaling drain to the session
+        that just opened successfully.
+
+        The returned WebRTCSession/SdesSession reaps its own outgoing_q + mqtt_fut
+        on stop(); ``_stream_mqtt_drain``/``_stream_mqtt_outq`` are only a backstop
+        for a drain whose open was cancelled *before* a session took ownership.
+        Clearing the slot on hand-off means a concurrent open on this same camera
+        (e.g. a snapshot taken during a live view) no longer reaps - and so no
+        longer kills - the live session's drain; the slot from then on only ever
+        holds a genuinely orphaned (cancelled mid-handshake) drain."""
+        self._stream_mqtt_drain = None
+        self._stream_mqtt_outq = None
+
     async def async_start_motion_polling(
         self, callback: Callable, interval: float = 30.0, lookback_s: int = 600,
     ) -> None:

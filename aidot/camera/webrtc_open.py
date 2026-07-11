@@ -1209,7 +1209,7 @@ class _WebRTCOpenMixin:
         # ------------------------------------------------------------------ #
         if use_sdes:
             try:
-                return await self._open_sdes_stream(
+                _sdes_session = await self._open_sdes_stream(
                     peer_id=peer_id,
                     user_id=user_id,
                     device_id=device_id,
@@ -1237,6 +1237,13 @@ class _WebRTCOpenMixin:
                     rtsp_push_url=rtsp_push_url,
                     talk=talk,
                 )
+                # Success: the SdesSession now owns outgoing_q + mqtt_fut and
+                # reaps them on stop(); clear the backstop slot so a concurrent
+                # open on this camera cannot reap this live session's drain.
+                # (On _SdesNoAnswerError the await raises before this runs, so the
+                # DTLS-fallback path below keeps the slot for its own hand-off.)
+                self._release_stream_drain_to_session()
+                return _sdes_session
             except CameraMixin._SdesNoAnswerError:
                 # Camera reported enableSdes='1' but did not respond to our SDES
                 # offer.  iOS telemetry shows models such as LK.IPC.A001064 can
@@ -3572,6 +3579,10 @@ class _WebRTCOpenMixin:
         _LOGGER.info(
             "WebRTC stream open for %s (peerid=%s)", device_id, peer_id
         )
+        # Ownership of the signaling drain passes to this session (its stop()
+        # reaps outgoing_q + mqtt_fut); clear the backstop slot so a concurrent
+        # open on this camera cannot reap this live session's drain.
+        self._release_stream_drain_to_session()
         return WebRTCSession(
             pc=pc,
             outgoing_q=outgoing_q,
