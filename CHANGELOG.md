@@ -32,25 +32,24 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   `create_task`; asyncio keeps only a weak reference, so either could be
   garbage-collected mid-flight. They now go through the same `_spawn_bg` helper
   the rest of the library uses.
+- **A snapshot taken during a live view no longer interrupts that view.** On the
+  default persistent-MQTT transport a second concurrent open on the same camera
+  (a snapshot while streaming) reaped the single signaling-drain slot the live
+  stream was using, freezing it until the ~30 s watchdog restarted it. Each
+  session already reaps its own drain on stop, so ownership is now handed to the
+  session on a successful open and the backstop slot is cleared; a concurrent
+  open can no longer reap a live session's drain, while a genuinely orphaned
+  (cancelled mid-handshake) drain is still released.
+- **A transient MQTT broker drop no longer ends a stream's signaling early.** On
+  the non-default per-stream transport (`AIDOT_PERSISTENT_MQTT` off) the signaling
+  session runs for the whole lifetime of a stream, so a brief broker blip - which
+  paho reconnects from automatically - used to tear the stream down. The receive
+  loop now ends only on a disconnect that happens before the first successful
+  connect; a later drop is left to paho's auto-reconnect, and subscriptions are
+  re-established on every connect so the reconnected client is not deaf.
 
 ### Changed
 - Replaced a non-ASCII token in an internal docstring with its ASCII gloss.
-
-### Known / deferred
-- **Snapshot during a live stream can briefly interrupt that stream** (recovers
-  within the ~30 s watchdog). On the default persistent-MQTT transport a second
-  concurrent open on the same camera reaps the single signaling-drain slot the
-  live stream is using. The same slot is *correctly* reaped when an internal
-  reconnect loop reopens a dead session, and the streaming flag cannot tell the
-  two apart - the safe fix is a per-session drain-ownership change that needs
-  live concurrent-open validation, so it is held for a dedicated release.
-- **A transient MQTT broker blip can end a stream's signaling early** on the
-  non-default per-stream transport (`AIDOT_PERSISTENT_MQTT` off), where the
-  session runs for the stream's lifetime. The default persistent transport is
-  unaffected; on the default path only short one-shot signaling exchanges use
-  this code. The safe fix (resubscribe on reconnect plus suppressing the
-  end-of-loop sentinel) changes signaling behaviour and needs live
-  broker-disconnect validation, so it is held for a dedicated release.
 
 ## [0.11.5]
 
