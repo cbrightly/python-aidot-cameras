@@ -536,6 +536,11 @@ def _extract_param_sets_from_rtp(pkt: bytes) -> dict:
         while i + 2 <= len(payload):
             size = int.from_bytes(payload[i:i + 2], "big")
             i += 2
+            if i + size > len(payload):
+                # Truncated STAP-A: the advertised NAL size runs past the end of
+                # the packet, so the remaining bytes are garbage.  Stop rather
+                # than slice a short NAL and cache a corrupt SPS/PPS.
+                break
             nal = payload[i:i + size]
             i += size
             if nal:
@@ -1211,6 +1216,16 @@ def _mqtt_session_sync(
         status["connected"] = (rc == 0)
         status["rc"]        = rc
         status["rc_str"]    = str(reason_code)
+        if rc == 0:
+            # (Re)subscribe on EVERY successful connect.  paho's loop_start
+            # auto-reconnects after a transient drop, but with clean_session the
+            # broker retains no subscriptions, so a reconnected client would be
+            # deaf unless they are re-established here rather than only once below.
+            for _sub in subscribe_topics:
+                try:
+                    c.subscribe(_sub)
+                except Exception:
+                    _LOGGER.debug("_mqtt_session: resubscribe failed for %s", _sub, exc_info=True)
         conn_ev.set()
 
     def _on_message(c, ud, msg):
@@ -1228,10 +1243,23 @@ def _mqtt_session_sync(
         # If _on_connect was never fired (WebSocket upgrade failed, auth refused
         # at TCP level, etc.) signal conn_ev now so the caller doesn't time out.
         if not conn_ev.is_set():
+            # Never connected (WS upgrade failed, auth refused at TCP level, ...):
+            # unblock the caller and end the receive loop - the connect failed.
             status["connected"] = False
             status["rc_str"]    = f"disconnect-before-connect rc={reason_code}"
             conn_ev.set()
-        msg_q.put(None)   # sentinel to unblock the receive loop
+            msg_q.put(None)   # sentinel: end the receive loop
+            return
+        # Already connected once: this is a transient drop.  paho's loop_start
+        # auto-reconnects and _on_connect re-subscribes, so DON'T end the receive
+        # loop here - a broker blip must not tear down a long-lived stream's
+        # signaling (the non-persistent transport runs one session for the whole
+        # stream).  A real teardown ends the loop via the outgoing-queue None
+        # sentinel or the duration deadline instead.
+        _LOGGER.debug(
+            "_mqtt_session: transient disconnect rc=%s (paho will reconnect)",
+            reason_code,
+        )
 
     def _on_log(c, ud, level, buf):
         if len(status["log"]) < 500:
@@ -1279,9 +1307,9 @@ def _mqtt_session_sync(
 
     _LOGGER.info("_mqtt_session: connected to %s:%d clientId=%s", hostname, port, client_id)
 
-    for topic in subscribe_topics:
-        client.subscribe(topic)
-        _LOGGER.debug("_mqtt_session: subscribed %s", topic)
+    # Subscriptions are (re)established in _on_connect so they survive a paho
+    # auto-reconnect; nothing to subscribe here.
+    _LOGGER.debug("_mqtt_session: subscribed (in on_connect) %s", subscribe_topics)
 
     for pub_topic, pub_payload in publish_items:
         client.publish(pub_topic, pub_payload)

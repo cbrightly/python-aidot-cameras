@@ -984,7 +984,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
 
         Mirrors the official app's wake (DeviceWakeUpRepos.k()), which fires the
         HTTP wake so a sleeping camera (no live MQTT session) still gets the signal
-        through the cloud, and retries on failure (n.java onError "正在重试").  The
+        through the cloud, and retries on failure (n.java onError "retrying").  The
         MQTT ``lowPowerActiveStateReq`` is also published by the streaming /
         attribute paths; this adds the reliable cloud-side channel.  Non-battery
         cameras are always reachable, so this is a no-op for them.
@@ -1894,7 +1894,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
 
         _MIME = {1: "video/mp4", 2: "application/x-mpegURL"}
 
-        try:
+        async def _fetch():
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     f"{self._aidot_v32_base}/playback/getEventVideoUrl",
@@ -1905,7 +1905,12 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     headers=self._aidot_headers(),
                     timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
-                    body = await resp.json(content_type=None)
+                    return await resp.json(content_type=None)
+
+        try:
+            body = await _fetch()
+            if self._is_auth_error(body) and await self._async_refresh_auth_token():
+                body = await _fetch()  # retry once with the refreshed token
 
             _LOGGER.debug("getEventVideoUrl raw for %s uuid=%s: %s", self.device_id, event_uuid, body)
 
@@ -1966,7 +1971,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         end_ts = int(time.time() * 1000)
         start_ts = end_ts - 30 * 86_400_000  # look back 30 days
 
-        try:
+        async def _fetch():
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     f"{self._aidot_v32_base}/playback/eventRecordingList",
@@ -1980,7 +1985,12 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     headers=self._aidot_headers(),
                     timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
-                    body = await resp.json(content_type=None)
+                    return await resp.json(content_type=None)
+
+        try:
+            body = await _fetch()
+            if self._is_auth_error(body) and await self._async_refresh_auth_token():
+                body = await _fetch()  # retry once with the refreshed token
 
             _LOGGER.debug("thumbnail eventRecordingList for %s: %s", self.device_id, body)
             if body.get("code") != 200:
@@ -2243,6 +2253,20 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             await drain
         except (asyncio.CancelledError, Exception):
             _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_reap_stream_drain', exc_info=True)
+
+    def _release_stream_drain_to_session(self):
+        """Hand ownership of the persistent-MQTT signaling drain to the session
+        that just opened successfully.
+
+        The returned WebRTCSession/SdesSession reaps its own outgoing_q + mqtt_fut
+        on stop(); ``_stream_mqtt_drain``/``_stream_mqtt_outq`` are only a backstop
+        for a drain whose open was cancelled *before* a session took ownership.
+        Clearing the slot on hand-off means a concurrent open on this same camera
+        (e.g. a snapshot taken during a live view) no longer reaps - and so no
+        longer kills - the live session's drain; the slot from then on only ever
+        holds a genuinely orphaned (cancelled mid-handshake) drain."""
+        self._stream_mqtt_drain = None
+        self._stream_mqtt_outq = None
 
     async def async_start_motion_polling(
         self, callback: Callable, interval: float = 30.0, lookback_s: int = 600,

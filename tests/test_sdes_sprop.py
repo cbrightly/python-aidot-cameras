@@ -52,6 +52,22 @@ def test_stap_a_carries_both():
     assert _extract_param_sets_from_rtp(RTP + stap) == {7: SPS, 8: PPS}
 
 
+def test_stap_a_truncated_size_is_dropped():
+    # Advertised NAL size overruns the packet (frame loss / relay truncation):
+    # the parser must NOT slice a short NAL and cache it as a corrupt SPS.
+    stap = bytes([0x78])
+    stap += (len(SPS) + 50).to_bytes(2, "big") + SPS   # claims 50 extra bytes
+    assert _extract_param_sets_from_rtp(RTP + stap) == {}
+
+
+def test_stap_a_keeps_valid_prefix_before_truncation():
+    # A valid SPS followed by a truncated PPS: keep the SPS, drop the garbage.
+    stap = bytes([0x78])
+    stap += len(SPS).to_bytes(2, "big") + SPS            # valid SPS
+    stap += (len(PPS) + 20).to_bytes(2, "big") + PPS     # truncated PPS
+    assert _extract_param_sets_from_rtp(RTP + stap) == {7: SPS}
+
+
 def test_slice_packet_yields_nothing():
     # NAL type 1 (non-IDR slice) - not a parameter set
     assert _extract_param_sets_from_rtp(RTP + bytes([0x61, 0x00, 0x11])) == {}

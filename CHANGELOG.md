@@ -4,6 +4,53 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.6]
+
+### Fixed
+- **A cancelled SDES cold open no longer leaks sockets, a thread and a temp
+  file.** Opening an SDES (battery) camera reserves two UDP sockets, starts a
+  bridge thread, launches ffmpeg and writes a temp SDP, then hands them to the
+  `SdesSession` that owns their teardown. If the 25-70 s handshake was cancelled
+  (e.g. Home Assistant abandons a slow cold open) before that hand-off, none of
+  it had an owner, so every abandoned attempt leaked two file descriptors, a
+  thread and a `/tmp` SDP - eventually `OSError: Too many open files`. The open
+  is now split into a wrapper that releases each resource (via an `ExitStack`)
+  unless the session was actually returned.
+- **Expired-token recovery on event-video and thumbnail fetches.** The cloud
+  recording-list and MQTT-URL calls already refreshed the auth token and retried
+  once on a `21026` ("please login again") error, but `getEventVideoUrl` and the
+  latest-thumbnail fetch did not - so a snapshot or media request that happened
+  to land on an expired token failed silently. They now use the same
+  refresh-and-retry path.
+- **Truncated H.264 parameter sets are dropped instead of cached corrupt.** When
+  a STAP-A aggregation packet advertises a NAL longer than the packet itself
+  (frame loss or relay truncation), the SPS/PPS parser bounded the slice to the
+  packet so a short, corrupt parameter set is no longer cached (which could keep
+  a camera showing no video until the cache was cleared).
+- **Fire-and-forget client tasks are held by a strong reference.** The ICE-config
+  prefetch and the sync `cleanup()` path scheduled work with a bare
+  `create_task`; asyncio keeps only a weak reference, so either could be
+  garbage-collected mid-flight. They now go through the same `_spawn_bg` helper
+  the rest of the library uses.
+- **A snapshot taken during a live view no longer interrupts that view.** On the
+  default persistent-MQTT transport a second concurrent open on the same camera
+  (a snapshot while streaming) reaped the single signaling-drain slot the live
+  stream was using, freezing it until the ~30 s watchdog restarted it. Each
+  session already reaps its own drain on stop, so ownership is now handed to the
+  session on a successful open and the backstop slot is cleared; a concurrent
+  open can no longer reap a live session's drain, while a genuinely orphaned
+  (cancelled mid-handshake) drain is still released.
+- **A transient MQTT broker drop no longer ends a stream's signaling early.** On
+  the non-default per-stream transport (`AIDOT_PERSISTENT_MQTT` off) the signaling
+  session runs for the whole lifetime of a stream, so a brief broker blip - which
+  paho reconnects from automatically - used to tear the stream down. The receive
+  loop now ends only on a disconnect that happens before the first successful
+  connect; a later drop is left to paho's auto-reconnect, and subscriptions are
+  re-established on every connect so the reconnected client is not deaf.
+
+### Changed
+- Replaced a non-ASCII token in an internal docstring with its ASCII gloss.
+
 ## [0.11.5]
 
 ### Added

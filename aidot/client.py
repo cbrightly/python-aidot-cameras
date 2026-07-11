@@ -50,6 +50,27 @@ _LOGGER = logging.getLogger(__name__)
 # other cloud API calls that use owner+token headers.
 _CLOUD_APP_ID = "68"
 
+# Strong refs to fire-and-forget tasks: asyncio only keeps weak refs, so a
+# discarded task can be garbage-collected mid-flight (see camera/client.py).
+_BG_TASKS: set = set()
+
+
+def _spawn_bg(coro):
+    _t = asyncio.ensure_future(coro)
+    _BG_TASKS.add(_t)
+
+    def _done(task):
+        _BG_TASKS.discard(task)
+        # Retrieve the exception so a failing background task doesn't surface as
+        # an unhandled "Task exception was never retrieved" at GC time; log it.
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                _LOGGER.debug("aidot background task failed: %r", exc, exc_info=exc)
+
+    _t.add_done_callback(_done)
+    return _t
+
 
 def rsa_password_encrypt(message: str) -> str:
     """RSA-encrypt the password using the AiDot public key (for loginWithFreeVerification)."""
@@ -513,9 +534,7 @@ class AidotClient:
             device_client.set_token_refresh_cb(self.async_ensure_token)
             self._device_clients[device_id] = device_client
             # Pre-warm ICE config cache so stream open does not block on this fetch.
-            asyncio.get_running_loop().create_task(
-                _prefetch_ice_config(device_client)
-            )
+            _spawn_bg(_prefetch_ice_config(device_client))
         # Started lazily here as well: __init__ cannot start discovery when
         # constructed outside a running event loop (stored-token sync path).
         if self._discover is None:
@@ -583,7 +602,7 @@ class AidotClient:
 
     def cleanup(self) -> None:
         """Sync entry point: fire-and-forget async_close()."""
-        asyncio.get_running_loop().create_task(self.async_close())
+        _spawn_bg(self.async_close())
 
     async def async_cleanup(self) -> None:
         """Async entry point: close the client and release resources."""
