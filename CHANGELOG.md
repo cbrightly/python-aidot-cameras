@@ -4,6 +4,17 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.9]
+
+### Changed
+- **A camera that never delivers media no longer spams the log.** When an SDES
+  serve completes signaling but no SRTP media ever arrives (NO_MEDIA - e.g. a
+  camera whose media never traverses the TURN relay), ffmpeg emits its expected
+  "could not find codec parameters / output file is empty" stderr on every serve
+  retry. That stderr now logs at debug while no media was received; it stays at
+  WARNING when media WAS flowing (a genuine mid-stream ffmpeg error worth
+  surfacing).
+
 ## [0.11.8]
 
 ### Changed
