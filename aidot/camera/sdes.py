@@ -132,6 +132,29 @@ class SdesSession:
         """time.monotonic() of the last media packet forwarded, 0.0 if none yet."""
         return self._media_progress[0]
 
+    def _log_ffmpeg_stderr(self, stderr_bytes: bytes) -> None:
+        """Log ffmpeg's captured stderr at a level that matches what happened.
+
+        The common NO_MEDIA case - the camera's SRTP never arrives, so ffmpeg
+        finds no keyframe and writes an empty file - would otherwise spam a
+        WARNING on every serve retry for a camera that never delivers media.
+        Demote to debug ONLY when no media ever arrived AND the stderr is that
+        expected shape.  Anything else - media WAS flowing (a genuine mid-stream
+        error), or an unexpected ffmpeg failure with no media (malformed SDP, bad
+        SRTP key, protocol reject) - still logs at WARNING, so real problems are
+        not hidden.  Unknown ffmpeg wording degrades safely to WARNING.
+        """
+        if not stderr_bytes:
+            return
+        text = stderr_bytes.decode(errors="replace")
+        expected_no_media = self.last_media_monotonic == 0.0 and (
+            "Output file is empty" in text
+            or "Could not find codec parameters" in text
+        )
+        (_LOGGER.debug if expected_no_media else _LOGGER.warning)(
+            "ffmpeg SDES stderr:\n%s", text
+        )
+
     @staticmethod
     def is_stalled(
         last_media: float,
@@ -213,8 +236,7 @@ class SdesSession:
                 self._proc.stderr.close()
             except Exception:
                 _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
-        if stderr_bytes:
-            _LOGGER.warning("ffmpeg SDES stderr:\n%s", stderr_bytes.decode(errors="replace"))
+        self._log_ffmpeg_stderr(stderr_bytes)
         import os
         try:
             os.unlink(self._sdp_path)
