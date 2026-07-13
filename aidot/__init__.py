@@ -18,13 +18,21 @@ from .exceptions import (
     InvalidURL,
 )
 
-# The vendored aiortc RTP receiver/sender log EVERY media packet at DEBUG.  When a
-# user enables DEBUG on the parent ``aidot`` logger to diagnose the integration,
-# that becomes thousands of lines per second and floods the logs (in one capture,
-# 99% of all lines).  Cap just those two per-packet loggers at INFO so enabling
-# ``aidot`` DEBUG stays useful - the diagnostically valuable aiortc DEBUG (DTLS,
-# ICE, SCTP/DCEP) still flows.  Respect an explicit level if the user set one.
-for _chatty in ("aidot._vendor.aiortc.rtcrtpreceiver", "aidot._vendor.aiortc.rtcrtpsender"):
+# Cap the per-packet loggers that flood the log at DEBUG.  When a user enables
+# DEBUG on the parent ``aidot`` logger to diagnose the integration, these emit
+# thousands of lines per second (in one capture, 99% of all lines) - and on a
+# microSD Home Assistant host that log I/O can starve the recorder.  Cap them at
+# INFO so enabling ``aidot`` DEBUG stays useful; the diagnostically valuable
+# DEBUG (DTLS, SCTP/DCEP, ICE connection state) still flows.  This covers both the
+# vendored aiortc RTP receiver/sender AND the external ``aioice`` package's
+# per-STUN/TURN-packet loggers (aioice is a real dependency, not vendored, so it
+# is not under ``aidot._vendor``).  Respect an explicit level if the user set one.
+for _chatty in (
+    "aidot._vendor.aiortc.rtcrtpreceiver",
+    "aidot._vendor.aiortc.rtcrtpsender",
+    "aioice.ice",
+    "aioice.turn",
+):
     _lg = _logging.getLogger(_chatty)
     if _lg.level == _logging.NOTSET:
         _lg.setLevel(_logging.INFO)
