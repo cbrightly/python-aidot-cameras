@@ -4,6 +4,17 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.10]
+
+### Changed
+- **Capped the external `aioice` per-packet loggers too.** 0.11.7 capped the
+  vendored aiortc RTP loggers, but `aioice` (the ICE/STUN library, a real
+  dependency - not vendored) logs every STUN/TURN packet at DEBUG, so an active
+  WebRTC connection still flooded the log when `aidot` DEBUG was enabled. On a
+  microSD Home Assistant host that log I/O can starve the recorder. `aioice.ice`
+  and `aioice.turn` are now capped at INFO by default (explicit user level
+  respected); useful ICE connection-state DEBUG still flows.
+
 ## [0.11.9]
 
 ### Changed
