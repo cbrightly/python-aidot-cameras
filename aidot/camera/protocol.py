@@ -79,6 +79,13 @@ def _build_stun_binding_success_response(
 
 _WEBRTC_TERMINAL_ACK_CODES = (-50002, -50015)
 
+# If a post-connect MQTT drop stays disconnected longer than this (seconds) with
+# no successful paho reconnect, the receive loop ends the session rather than
+# polling a dead socket until the full duration deadline.  Long enough to ride
+# out an ordinary network blip + paho's auto-reconnect, short enough that a
+# terminal drop (session taken over, revoked creds, broker gone) fails fast.
+_MQTT_RECONNECT_GRACE = 20.0
+
 
 def _terminal_webrtc_ack(msg: dict):
     """Return ``(code, desc)`` if ``msg`` is a webrtcResp carrying a TERMINAL ack
@@ -1188,7 +1195,8 @@ def _mqtt_session_sync(
 
     msg_q   = _queue.Queue()
     conn_ev = threading.Event()
-    status  = {"connected": False, "rc": None, "rc_str": "", "error": None, "log": []}
+    status  = {"connected": False, "rc": None, "rc_str": "", "error": None,
+               "log": [], "disconnected_since": None}
 
     # Build client - handle paho >=2.0 (VERSION2) and <2.0
     try:
@@ -1217,6 +1225,9 @@ def _mqtt_session_sync(
         status["rc"]        = rc
         status["rc_str"]    = str(reason_code)
         if rc == 0:
+            # Successful (re)connect: a prior drop (if any) has recovered, so the
+            # receive loop must not fail it fast - clear the disconnect marker.
+            status["disconnected_since"] = None
             # (Re)subscribe on EVERY successful connect.  paho's loop_start
             # auto-reconnects after a transient drop, but with clean_session the
             # broker retains no subscriptions, so a reconnected client would be
@@ -1250,14 +1261,21 @@ def _mqtt_session_sync(
             conn_ev.set()
             msg_q.put(None)   # sentinel: end the receive loop
             return
-        # Already connected once: this is a transient drop.  paho's loop_start
-        # auto-reconnects and _on_connect re-subscribes, so DON'T end the receive
-        # loop here - a broker blip must not tear down a long-lived stream's
-        # signaling (the non-persistent transport runs one session for the whole
-        # stream).  A real teardown ends the loop via the outgoing-queue None
-        # sentinel or the duration deadline instead.
+        # Already connected once: this is (so far) a transient drop.  paho's
+        # loop_start auto-reconnects and _on_connect re-subscribes AND clears
+        # disconnected_since, so a brief blip must NOT tear down a long-lived
+        # stream's signaling (the non-persistent transport runs one session for
+        # the whole stream).  But a drop that never recovers - session taken over
+        # (rc=142) when the account's persistent client reclaims the clientId,
+        # revoked creds, broker gone - would otherwise leave the receive loop
+        # polling a dead socket until the full duration deadline.  Record when the
+        # drop began; the loop ends the session once it has persisted past
+        # _MQTT_RECONNECT_GRACE.  (dict single-key set/get is atomic under the GIL,
+        # so no lock is needed across the paho thread and the receive loop.)
+        if status.get("disconnected_since") is None:
+            status["disconnected_since"] = time.monotonic()
         _LOGGER.debug(
-            "_mqtt_session: transient disconnect rc=%s (paho will reconnect)",
+            "_mqtt_session: disconnect rc=%s (awaiting paho reconnect)",
             reason_code,
         )
 
@@ -1326,6 +1344,18 @@ def _mqtt_session_sync(
     while True:
         remaining = deadline - _time.monotonic()
         if remaining <= 0:
+            break
+        # End the session if a post-connect drop never recovered: a terminal
+        # disconnect delivers no further messages, so without this the loop would
+        # poll a dead socket (and the caller's camera signaling would silently
+        # stall) until the full duration deadline.
+        _ds = status.get("disconnected_since")
+        if _ds is not None and (_time.monotonic() - _ds) > _MQTT_RECONNECT_GRACE:
+            _LOGGER.warning(
+                "_mqtt_session: MQTT disconnected >%.0fs with no reconnect "
+                "(rc=%s) - ending session; camera signaling can no longer arrive",
+                _MQTT_RECONNECT_GRACE, status.get("rc_str"),
+            )
             break
         try:
             item = msg_q.get(timeout=min(remaining, 0.1))

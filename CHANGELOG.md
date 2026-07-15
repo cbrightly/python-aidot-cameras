@@ -4,6 +4,29 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.11]
+
+### Fixed
+- **MQTT signaling session now ends promptly on a terminal disconnect.** The
+  per-stream MQTT session (`_mqtt_session_sync`) only terminated its receive loop
+  on a disconnect that happened *before* the first connect; a drop *after*
+  connecting was always treated as transient. So a permanent post-connect
+  disconnect - the account's persistent client reclaiming the same clientId
+  (rc=142 "session taken over"), revoked credentials, or the broker going away -
+  left the loop polling a dead socket until the full duration deadline, silently
+  starving the camera of signaling (answer SDP, ICE, renewals). The loop now
+  records when a post-connect drop begins, clears it on a successful reconnect,
+  and ends the session with a WARNING once the disconnect has persisted past a
+  short reconnect grace (`_MQTT_RECONNECT_GRACE`, 20 s) - transient blips still
+  ride through paho's auto-reconnect unharmed.
+
+### Changed
+- **Removed the self-defeating `aioice` force-DEBUG on the DTLS path.** Every DTLS
+  open set the `aioice` logger to DEBUG, which both flooded the log and was
+  already neutralized by the package-init cap that holds `aioice.ice` /
+  `aioice.turn` at INFO. Dropped it at the source; to debug ICE, set the `aioice`
+  logger level explicitly (that overrides the NOTSET-guarded cap).
+
 ## [0.11.10]
 
 ### Changed
