@@ -82,3 +82,53 @@ def test_disconnect_before_connect_ends_session(monkeypatch):
     )
     assert messages == []
     assert status["connected"] is False
+
+
+def test_terminal_disconnect_ends_session_before_deadline(monkeypatch):
+    """A post-connect drop that never reconnects must end the session via the
+    reconnect grace, not poll a dead socket until the full duration deadline."""
+    monkeypatch.setattr(proto, "_MQTT_RECONNECT_GRACE", 0.15)
+
+    def driver(c):
+        c.on_connect(c, None, {}, 0)                         # connected
+        c.on_message(c, None, _FakeMsg("t/before", b"x"))   # delivered pre-drop
+        time.sleep(0.02)
+        c.on_disconnect(c, None, 142)                       # terminal drop; NO reconnect
+
+    _install_fake_client(monkeypatch, driver)
+
+    t0 = time.monotonic()
+    messages, status = proto._mqtt_session_sync(
+        "wss://broker.example/mqtt", "u", "p", "cid",
+        ["t/a"], [], 30.0,          # 30s duration - must NOT wait this long
+    )
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 5.0, f"terminal disconnect should end fast, took {elapsed:.1f}s"
+    assert ("t/before", "x") in messages                    # pre-drop message still collected
+    assert status["disconnected_since"] is not None         # the drop was recorded
+
+
+def test_reconnect_within_grace_keeps_session(monkeypatch):
+    """A drop that reconnects within the grace clears disconnected_since, so the
+    receive loop must NOT fail the session fast (guards the transient path)."""
+    monkeypatch.setattr(proto, "_MQTT_RECONNECT_GRACE", 0.5)
+    outgoing = queue.Queue()
+
+    def driver(c):
+        c.on_connect(c, None, {}, 0)
+        c.on_disconnect(c, None, 7)                         # blip
+        time.sleep(0.05)                                   # < grace
+        c.on_connect(c, None, {}, 0)                       # recovered
+        c.on_message(c, None, _FakeMsg("t/after", b"live"))
+        time.sleep(0.05)
+        outgoing.put_nowait(None)                          # clean stop
+
+    _install_fake_client(monkeypatch, driver)
+
+    messages, status = proto._mqtt_session_sync(
+        "wss://broker.example/mqtt", "u", "p", "cid",
+        ["t/a"], [], 30.0, outgoing_queue=outgoing,
+    )
+    assert ("t/after", "live") in messages                  # survived the blip
+    assert status["disconnected_since"] is None             # cleared on reconnect

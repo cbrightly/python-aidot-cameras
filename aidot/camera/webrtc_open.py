@@ -1284,8 +1284,11 @@ class _WebRTCOpenMixin:
         # ------------------------------------------------------------------ #
         # aiortc peer connection (DTLS-SRTP path)
         # ------------------------------------------------------------------ #
-        import logging as _logging_dtls
-        _logging_dtls.getLogger("aioice").setLevel(_logging_dtls.DEBUG)
+        # NOTE: do NOT force aioice to DEBUG here.  It floods the log on every DTLS
+        # open, and the package-init cap (aidot/__init__.py) holds aioice.ice /
+        # aioice.turn at INFO anyway, so forcing DEBUG was both self-defeating and
+        # noisy.  To debug ICE, set the aioice logger level explicitly (that
+        # overrides the NOTSET-guarded cap).
         from aidot._vendor.aiortc import RTCConfiguration, RTCIceServer
 
         def _sanitize_ice_uris(uris):
