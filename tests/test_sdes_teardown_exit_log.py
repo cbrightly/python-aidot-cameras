@@ -15,8 +15,10 @@ in flight, or a positive ffmpeg error code even during teardown) is still
 unexpected -> WARNING.
 """
 import asyncio
+import inspect
 import logging
 
+import aidot.camera.sdes_open as sdes_open
 from aidot.camera.sdes_open import _classify_ffmpeg_exit
 from aidot.camera.sdes import SdesSession
 
@@ -37,6 +39,26 @@ def test_error_code_during_teardown_still_warns():
 
 def test_sigterm_death_during_teardown_is_quiet():
     assert _classify_ffmpeg_exit(-15, True) <= logging.INFO
+
+
+def test_reap_sets_teardown_flag_before_kill():
+    # _reap() (the cold-open kill site) is a closure nested deep inside
+    # _open_sdes_stream_impl, so it cannot be called in isolation.  The
+    # other three kill sites (SdesSession.stop(), the key-restart proc
+    # replace, the DTLS-fallback abort) all set _teardown_holder[0] = True
+    # BEFORE terminating the proc, so the bridge thread can never observe
+    # the exit code with the flag still False.  Assert _reap's source
+    # follows the same ordering: the flag-set must appear before p.kill().
+    src = inspect.getsource(sdes_open)
+    start = src.index("def _reap(p):")
+    end = src.index("# --- Allocate UDP ports", start)
+    block = src[start:end]
+    flag_pos = block.index("_teardown_holder[0] = True")
+    kill_pos = block.index("p.kill()")
+    assert flag_pos < kill_pos, (
+        "_reap must set the teardown flag before killing the proc, "
+        "matching the other three locally-initiated kill sites"
+    )
 
 
 class _FakeProc:

@@ -184,21 +184,22 @@ class _SdesOpenMixin:
             _cleanup.callback(_run)
 
         def _reap(p):
+            # This is a locally-initiated kill (cold open cancelled/raised
+            # before hand-off) - flag it so the bridge observe loop treats the
+            # resulting signal death as expected, not a WARNING-worthy crash.
+            # Set first (before the kill/reap below), matching the other
+            # kill sites, so the bridge thread can never observe the exit
+            # code with the flag still False.
+            try:
+                _teardown_holder[0] = True
+            except Exception:
+                pass
             try:
                 p.kill()
             except Exception:
                 pass
             try:
                 p.poll()   # reap the killed child so it does not linger as a zombie
-            except Exception:
-                pass
-            # This is a locally-initiated kill (cold open cancelled/raised
-            # before hand-off) - flag it so the bridge observe loop treats the
-            # resulting signal death as expected, not a WARNING-worthy crash.
-            # Set last (after the kill/reap, which are correctness-critical and
-            # must never be skipped even if this best-effort flag-set raises).
-            try:
-                _teardown_holder[0] = True
             except Exception:
                 pass
 
