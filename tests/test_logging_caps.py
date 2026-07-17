@@ -44,28 +44,43 @@ def test_aioice_loggers_capped_to_warning():
 
 def test_aidot_debug_does_not_unleash_the_aiortc_packet_firehose():
     # Even with the parent 'aidot' logger at DEBUG, the per-packet DEBUG is off.
-    logging.getLogger("aidot").setLevel(logging.DEBUG)
-    for name in INFO_CAPPED:
-        assert not logging.getLogger(name).isEnabledFor(logging.DEBUG), f"{name} still emits DEBUG"
+    aidot_logger = logging.getLogger("aidot")
+    original_level = aidot_logger.level
+    try:
+        aidot_logger.setLevel(logging.DEBUG)
+        for name in INFO_CAPPED:
+            assert not logging.getLogger(name).isEnabledFor(logging.DEBUG), f"{name} still emits DEBUG"
+    finally:
+        aidot_logger.setLevel(original_level)
 
 
 def test_aidot_debug_does_not_unleash_the_aioice_info_flood():
     # Even with the parent 'aidot' logger at DEBUG, aioice's INFO flood is off.
-    logging.getLogger("aidot").setLevel(logging.DEBUG)
-    for name in WARNING_CAPPED:
-        assert not logging.getLogger(name).isEnabledFor(logging.INFO), f"{name} still emits INFO"
+    aidot_logger = logging.getLogger("aidot")
+    original_level = aidot_logger.level
+    try:
+        aidot_logger.setLevel(logging.DEBUG)
+        for name in WARNING_CAPPED:
+            assert not logging.getLogger(name).isEnabledFor(logging.INFO), f"{name} still emits INFO"
+    finally:
+        aidot_logger.setLevel(original_level)
 
 
 def test_cap_respects_an_explicit_user_level():
     # A user who explicitly sets a level (e.g. to re-enable aioice INFO for
-    # debugging) must not have it silently overridden by the cap.
+    # debugging) must not have it silently overridden by the cap. Use ERROR
+    # for every logger under test - a level distinct from both cap targets
+    # (INFO and WARNING) - so a removed/broken NOTSET guard would actually
+    # fail this test instead of passing by coincidence (e.g. an INFO_CAPPED
+    # logger explicitly set to INFO would still read INFO after a broken cap
+    # unconditionally set it to INFO too).
     for name in INFO_CAPPED + WARNING_CAPPED:
         lg = logging.getLogger(name)
         original_level = lg.level
         try:
-            lg.setLevel(logging.INFO)
+            lg.setLevel(logging.ERROR)
             _cap_external_loggers()
-            assert lg.level == logging.INFO, f"{name} explicit level was overridden"
+            assert lg.level == logging.ERROR, f"{name} explicit level was overridden"
         finally:
             lg.setLevel(original_level)
 

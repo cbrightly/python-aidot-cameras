@@ -110,7 +110,7 @@ _OFFLINE_PROBE_S = float(os.environ.get("AIDOT_OFFLINE_PROBE_S", "600"))
 # Resets the instant an open succeeds, via the same ReconnectPacer.reset() the
 # loop already calls on success (attempt -> 0, so _in_slow_probe is false again
 # with no separate state to clear).
-_SLOW_PROBE_THRESHOLD = int(os.environ.get("AIDOT_DTLS_SLOW_PROBE_THRESHOLD", "10"))
+_SLOW_PROBE_THRESHOLD = int(os.environ.get("AIDOT_DTLS_SLOW_PROBE_THRESHOLD", "5"))
 _SLOW_PROBE_INTERVAL_S = float(os.environ.get("AIDOT_DTLS_SLOW_PROBE_INTERVAL_S", "600"))
 _SLOW_PROBE_LOG_EVERY = int(os.environ.get("AIDOT_DTLS_SLOW_PROBE_LOG_EVERY", "6"))
 # Sleep increment for the slow-probe wait: never one blocking
