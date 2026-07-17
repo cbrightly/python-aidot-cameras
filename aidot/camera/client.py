@@ -117,6 +117,26 @@ _SLOW_PROBE_LOG_EVERY = int(os.environ.get("AIDOT_DTLS_SLOW_PROBE_LOG_EVERY", "6
 # asyncio.sleep(interval) call, so stop() is not delayed by up to 10 minutes.
 _SLOW_PROBE_SLEEP_CHUNK_S = float(os.environ.get("AIDOT_DTLS_SLOW_PROBE_CHUNK_S", "5"))
 
+
+def _parse_env_float(name: str, default: float) -> float:
+    """Parse a float env var, falling back to ``default`` on any missing or
+    malformed value (matches the try/except idiom used by
+    _get_webrtc_open_gate / _get_stream_slots below for AIDOT_MAX_CONCURRENT_*
+    rather than raising at import time)."""
+    try:
+        return float(os.environ.get(name, str(default)))
+    except (ValueError, TypeError):
+        return default
+
+
+# DTLS serve-open timeout: how long a single async_open_webrtc_stream() call
+# in the serve loop is allowed to take before giving up. Left at the
+# _async_open_webrtc_stream_impl default (30.0s) so battery cameras that need
+# the full window to wake still work; tunable via
+# AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S for operators who want faster-failing
+# retries against a known-dead camera.
+_DTLS_SERVE_OPEN_TIMEOUT_S = _parse_env_float("AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S", 30.0)
+
 # Strong refs to fire-and-forget tasks: asyncio only keeps weak refs, so a
 # discarded task can be garbage-collected mid-flight. Discarded on completion.
 _BG_TASKS: set = set()
@@ -3499,7 +3519,9 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     return
             _last_open_at = loop.time()
             try:
-                session = await self.async_open_webrtc_stream(on_frame=lambda _f: None)
+                session = await self.async_open_webrtc_stream(
+                    on_frame=lambda _f: None, timeout=_DTLS_SERVE_OPEN_TIMEOUT_S,
+                )
             except asyncio.CancelledError:
                 return
             except AidotCameraBusy as busy:
