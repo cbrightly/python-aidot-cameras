@@ -4,6 +4,41 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.12]
+
+### Fixed
+- **An idle DTLS camera no longer floods the log or burns CPU.** A DTLS camera
+  (model IPC.A000088) that the cloud still reports online but that never answers
+  WebRTC was retried indefinitely; each attempt drove the vendored H.264 decoder
+  over corrupt frames, emitting one "H264Decoder() failed to decode" WARNING per
+  frame (172 in one 11-minute capture) plus a steady stream of `aioice.ice` INFO.
+  The serve path no longer feeds that decoder at all - the served H.264 already
+  comes from a pre-decode tap and is muxed as a copy, so the decode was pure
+  discarded work - and a lightweight keyframe/gap canary at DEBUG replaces it for
+  link-health visibility.
+- **`aioice.ice` / `aioice.turn` are capped at WARNING instead of INFO.** The
+  prior INFO cap could not suppress the flood, which is itself INFO-level ICE
+  connectivity-check state transitions; aioice emits nothing at WARNING or above,
+  so the flood is silenced with no loss of a real warning. Set the logger level
+  explicitly to restore ICE INFO for debugging (the NOTSET-guarded cap respects
+  it).
+- **The vendored H.264 decode-failure WARNING is rate-limited.** On the live-view
+  path, where decode still runs, a corrupt stream no longer emits one WARNING per
+  frame; the first passes through and subsequent failures collapse into a
+  periodic summary carrying the suppressed count.
+- **Expected ffmpeg teardown no longer logs a spurious WARNING.** A
+  locally-initiated SDES bridge teardown SIGKILLs an ffmpeg that will not exit on
+  a dead UDP input; that signal death (-9) is now logged at DEBUG when it follows
+  a local teardown, while genuinely unexpected exits stay at WARNING.
+
+### Changed
+- **Retries for a persistently-unreachable idle DTLS camera now back off
+  further.** After a threshold of consecutive failed opens (default 5,
+  `AIDOT_DTLS_SLOW_PROBE_THRESHOLD`) the retry cadence widens to a slow probe and
+  the per-attempt WARNING becomes a periodic summary; a successful open resets it
+  immediately. This covers the idle-but-cloud-online case the existing offline
+  pause did not.
+
 ## [0.11.11]
 
 ### Fixed
