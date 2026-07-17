@@ -4,6 +4,26 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.13]
+
+### Fixed
+- **The SDES bridge no longer breaks its own stream during a key-restart.** When
+  a camera's answer SRTP key differs from the offered key, the SDES ffmpeg bridge
+  restarts ffmpeg. The bridge's process-observe loop could see the OLD
+  (terminated) process exit during the restart window and break - tearing down
+  the bridge, closing the loopback sockets, and starving the freshly restarted
+  ffmpeg, which turned a fast key-restart into a 40-60s reconnect and a visible
+  stream break. The observe loop now consults the teardown flag (added in
+  0.11.12) and does not break on an expected local teardown; it resumes once the
+  new process is live, and still breaks promptly on a genuine ffmpeg crash.
+
+### Changed
+- **The DTLS serve-open timeout is now tunable.** The per-attempt WebRTC open
+  timeout for a served DTLS camera was hard-pinned at 30 s. It is now
+  configurable via `AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S` (default 30, unchanged), so
+  operators can fail faster on a known-dead camera. A malformed value falls back
+  to the default.
+
 ## [0.11.12]
 
 ### Fixed
