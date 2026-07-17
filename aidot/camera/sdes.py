@@ -34,6 +34,7 @@ class SdesSession:
         cmd_chan=None,
         talk_state=None,
         media_progress=None,
+        teardown_requested=None,
     ) -> None:
         self._proc       = proc
         self._sdp_path   = sdp_path
@@ -47,6 +48,19 @@ class SdesSession:
         # that stopped sending (battery teardown ~49-72s) and reconnect - ffmpeg
         # itself never exits on a dead UDP input, so wait_done() alone would hang.
         self._media_progress = media_progress if media_progress is not None else [0.0]
+        # Mutable one-element list shared with the bridge thread: [0] flips True
+        # the moment ANY locally-initiated ffmpeg-kill path fires (this stop(),
+        # the cold-open _reap(), the key-restart proc replace, or the DTLS-
+        # fallback abort - all in sdes_open.py).  The bridge observe loop reads
+        # it to tell an expected signal death (SIGTERM/SIGKILL from our own
+        # teardown - a battery cam's ffmpeg cannot exit on a dead UDP input) from
+        # an unexpected ffmpeg crash, so only the latter logs at WARNING.  A
+        # plain list (not threading.Event) matches the _proc_holder /
+        # _media_progress sharing pattern already used with the bridge thread;
+        # list item assignment is atomic under the GIL.
+        self._teardown_requested = (
+            teardown_requested if teardown_requested is not None else [False]
+        )
         # Mutable one-element list shared with the bridge thread.  Bridge sets
         # [0] to a callable(cmd, payload) once the SCTP channel is up.
         self._cmd_chan   = cmd_chan if cmd_chan is not None else [None]
@@ -203,6 +217,10 @@ class SdesSession:
                 await asyncio.sleep(0.3)
             self._talk_state["stop"] = True
             self._talk_state["provider"] = None
+        # Flag this as a locally-initiated teardown BEFORE signalling ffmpeg, so
+        # the bridge thread's observe loop never races a look at a stale False
+        # if it polls the exit code immediately after terminate()/kill().
+        self._teardown_requested[0] = True
         self._proc.terminate()
         _stop_loop = asyncio.get_running_loop()
         try:

@@ -46,6 +46,23 @@ def _sdes_echo_wait_timeout(skip_liveplay: bool) -> float:
     return 0.0 if skip_liveplay else 2.0
 
 
+def _classify_ffmpeg_exit(rc: int, teardown_requested: bool) -> int:
+    """Log level for the bridge observe loop's "ffmpeg exited" line.
+
+    Teardown here is SIGTERM-first with a SIGKILL fallback (SdesSession.stop(),
+    the cold-open _reap(), the key-restart proc replace, and the DTLS-fallback
+    abort). A battery camera's ffmpeg cannot exit promptly on a dead UDP input,
+    so a normal locally-initiated stop routinely ends in a signal death (rc < 0,
+    e.g. -9 SIGKILL / -15 SIGTERM) - expected, and should not warn.  Any other
+    non-zero exit - a signal death with no teardown in flight, or a positive
+    ffmpeg error code even during teardown - is unexpected and stays loud.
+    Pure function so the policy is unit-testable without a live bridge thread.
+    """
+    if rc < 0 and teardown_requested:
+        return logging.DEBUG
+    return logging.WARNING
+
+
 class _SdesOpenMixin:
     async def _open_sdes_stream(self, **kwargs) -> "SdesSession":
         """Allocate-and-hand-off wrapper around _open_sdes_stream_impl.
@@ -167,6 +184,16 @@ class _SdesOpenMixin:
             _cleanup.callback(_run)
 
         def _reap(p):
+            # This is a locally-initiated kill (cold open cancelled/raised
+            # before hand-off) - flag it so the bridge observe loop treats the
+            # resulting signal death as expected, not a WARNING-worthy crash.
+            # Set first (before the kill/reap below), matching the other
+            # kill sites, so the bridge thread can never observe the exit
+            # code with the flag still False.
+            try:
+                _teardown_holder[0] = True
+            except Exception:
+                pass
             try:
                 p.kill()
             except Exception:
@@ -2084,6 +2111,14 @@ class _SdesOpenMixin:
         # Proc holder: set to the ffmpeg Popen object after launch so the
         # bridge thread can poll for exit without a NameError race.
         _proc_holder: list = [None]
+        # Teardown holder: [0] flips True the moment ANY locally-initiated
+        # ffmpeg-kill path fires (_reap() above on a cancelled cold open, the
+        # key-restart proc replace, or the DTLS-fallback abort below - plus
+        # SdesSession.stop() once the session is handed off, via the
+        # teardown_requested= kwarg at construction).  The bridge observe loop
+        # reads it via _classify_ffmpeg_exit() to demote an expected signal
+        # death (our own SIGTERM/SIGKILL) from an unexpected ffmpeg crash.
+        _teardown_holder: list = [False]
         # Camera's actual video payload type (96=H.264 / 97=H.265), set by the
         # bridge on the first video RTP packet so the ffmpeg SDP can be narrowed
         # to the matching single codec before ffmpeg is launched.
@@ -2127,9 +2162,18 @@ class _SdesOpenMixin:
                         if _br_rc is not None:
                             if _br_rc != 0:
                                 import logging as _log_br
-                                _log_br.getLogger(__name__).warning(
+                                _br_level = _classify_ffmpeg_exit(
+                                    _br_rc, bool(_teardown_holder[0])
+                                )
+                                _br_msg = (
                                     "SDES bridge: ffmpeg exited with code %d"
-                                    " - stream ended", _br_rc
+                                    " - stopped by teardown"
+                                    if _br_level < _log_br.WARNING else
+                                    "SDES bridge: ffmpeg exited with code %d"
+                                    " - stream ended"
+                                )
+                                _log_br.getLogger(__name__).log(
+                                    _br_level, _br_msg, _br_rc
                                 )
                             break
 
@@ -3634,6 +3678,13 @@ class _SdesOpenMixin:
                         srtp_key_video = _real_key_video
                         _keys_changed = True
                     if _keys_changed:
+                        # Locally-initiated kill (the offered key was wrong;
+                        # restarting ffmpeg with the camera's real key) - flag it
+                        # so the bridge observe loop does not warn on the old
+                        # proc's signal death.  Reset once the NEW proc is live
+                        # (below) so a later, genuine crash of the restarted
+                        # ffmpeg is not silently swallowed as "expected teardown".
+                        _teardown_holder[0] = True
                         proc.terminate()
                         try:
                             proc.wait(timeout=2)
@@ -3682,6 +3733,10 @@ class _SdesOpenMixin:
                         # breaks, and closes the loopback sockets - starving the
                         # restarted ffmpeg (0-frame stream).
                         _proc_holder[0] = proc
+                        # New proc is live and owns the holder; clear the
+                        # teardown flag so this session's NEXT exit (the
+                        # restarted ffmpeg's) is classified fresh.
+                        _teardown_holder[0] = False
                         _status("ffmpeg restarted with camera's SRTP keys")
         except TimeoutError:
             if _cam_echo_received:
@@ -3698,6 +3753,11 @@ class _SdesOpenMixin:
                     f"no webrtcResp in {_sdes_answer_timeout:.0f}s"
                     " - SDES handshake failed; aborting ffmpeg and falling back to DTLS"
                 )
+                # Locally-initiated abort (no answer; giving up on SDES for this
+                # attempt) - flag it so the bridge observe loop does not warn on
+                # the resulting signal death.  Nothing continues to use this
+                # proc/holder afterward, so no reset is needed here.
+                _teardown_holder[0] = True
                 proc.terminate()
                 try:
                     proc.wait(timeout=2)
@@ -3784,4 +3844,5 @@ class _SdesOpenMixin:
             cmd_chan=_cmd_chan,
             talk_state=_talk_state,
             media_progress=_media_progress,
+            teardown_requested=_teardown_holder,
         )
