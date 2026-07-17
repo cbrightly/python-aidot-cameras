@@ -112,8 +112,7 @@ def _run_observe_loop(sock_a, sock_b, proc_holder, teardown_holder,
                 if _bridge_should_break(rc, bool(teardown_holder[0])):
                     return "broke", tick, log_count
                 continue
-            else:
-                exit_logged = False
+            exit_logged = False
     return "exhausted", max_ticks, log_count
 
 
