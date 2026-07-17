@@ -2976,11 +2976,27 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             _LOGGER.debug("PLI request failed: %s", _pli_exc)
 
     @staticmethod
-    def _install_encoded_tap(receiver, out_q, is_video: bool) -> bool:
+    def _install_encoded_tap(receiver, out_q, is_video: bool, serve: bool = False) -> bool:
         """Tee aiortc's depacketized encoded frames (+ RTP timestamp) into a
         thread-safe queue before decode.  Video frames go as
         ``(bytes, timestamp, is_keyframe)``, audio as ``(bytes, timestamp)``.
-        ``out_q`` is a ``queue.Queue`` (the mux runs in a worker thread)."""
+        ``out_q`` is a ``queue.Queue`` (the mux runs in a worker thread).
+
+        When ``serve`` is set, the served H.264 is muxed as ``-c copy`` straight
+        from this tap, so the vendored decoder's output is discarded (the serve
+        loop uses a no-op on_frame).  In that mode we STOP feeding the decoder
+        queue for video DATA frames: decoding them is pure wasted CPU and the
+        sole source of the per-packet decode-failure warning flood.  The None
+        terminator is STILL forwarded so the decoder thread exits cleanly, and
+        audio is left untouched (drained separately).  We must not instead pass
+        ``on_frame=None`` at the receiver level - the decoder thread would keep
+        running and fill the unbounded track queue with nothing draining it.
+
+        Because decode was the only signal that the served H.264 was corrupt, a
+        cheap keyframe-based canary (no decoding) is kept: it counts frames and
+        keyframes, tracks the longest run with no keyframe, and emits a periodic
+        DEBUG summary.  It is O(1) per frame and stays at DEBUG so a corrupt
+        camera can't recreate the very flood this removes."""
         _qd = getattr(receiver, "_RTCRtpReceiver__decoder_queue", None)
         if _qd is None:
             return False
@@ -2990,6 +3006,12 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         if getattr(_qd, "_aidot_tapped", False):
             return True
         _orig_put = _qd.put
+        _skip_decode = bool(serve and is_video)
+        # Served-stream health canary (video-only): observed without decoding.
+        _canary = {"frames": 0, "keyframes": 0, "gap": 0, "max_gap": 0} if _skip_decode else None
+        if _canary is not None:
+            _qd._aidot_serve_canary = _canary
+        _CANARY_LOG_EVERY = 300  # frames (~10-20s of H.264); DEBUG summary cadence
 
         def _tap_put(task, *a, **k):
             try:
@@ -2998,12 +3020,34 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     _d = getattr(_enc, "data", None)
                     _ts = getattr(_enc, "timestamp", None)
                     if _d and _ts is not None:
-                        _item = ((bytes(_d), int(_ts), _h264_has_keyframe(bytes(_d)))
-                                 if is_video else (bytes(_d), int(_ts)))
+                        _b = bytes(_d)
+                        _kf = _h264_has_keyframe(_b) if is_video else False
+                        _item = (_b, int(_ts), _kf) if is_video else (_b, int(_ts))
                         try:
                             out_q.put_nowait(_item)
                         except Exception:
                             pass  # full -> drop (PLI re-arms a GOP)
+                        if _canary is not None:
+                            _canary["frames"] += 1
+                            if _kf:
+                                _canary["keyframes"] += 1
+                                _canary["gap"] = 0
+                            else:
+                                _canary["gap"] += 1
+                                if _canary["gap"] > _canary["max_gap"]:
+                                    _canary["max_gap"] = _canary["gap"]
+                            if _canary["frames"] % _CANARY_LOG_EVERY == 0:
+                                _LOGGER.debug(
+                                    "serve h264 canary: frames=%d keyframes=%d"
+                                    " max_keyframe_gap=%d cur_gap=%d",
+                                    _canary["frames"], _canary["keyframes"],
+                                    _canary["max_gap"], _canary["gap"],
+                                )
+                    if _skip_decode:
+                        # Discarded decode: don't feed the decoder for served
+                        # video data frames (see docstring).  Terminator (task
+                        # is None) still falls through to _orig_put below.
+                        return None
             except Exception:
                 _LOGGER.debug("swallowed exception in %s", '_tap_put', exc_info=True)
             return _orig_put(task, *a, **k)
@@ -3017,6 +3061,12 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
 
         Called repeatedly until the video tap lands; _install_encoded_tap is
         idempotent per receiver, so audio isn't re-wrapped across retries.
+
+        This runs only from the DTLS serve loop, whose on_frame is a no-op and
+        whose output is muxed as H.264 copy from the video tap - so the video
+        tap is installed with serve=True to skip the discarded decode (see
+        _install_encoded_tap).  Audio keeps feeding its decoder (drained
+        separately).
         """
         got_v = False
         got_a = False
@@ -3025,7 +3075,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             if _tr is None:
                 continue
             if _tr.kind == "video" and not got_v:
-                got_v = self._install_encoded_tap(_r, vq, True)
+                got_v = self._install_encoded_tap(_r, vq, True, serve=True)
             elif _tr.kind == "audio" and not got_a:
                 got_a = self._install_encoded_tap(_r, aq, False)
         return got_v
