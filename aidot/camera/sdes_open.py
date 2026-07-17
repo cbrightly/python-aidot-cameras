@@ -63,6 +63,24 @@ def _classify_ffmpeg_exit(rc: int, teardown_requested: bool) -> int:
     return logging.WARNING
 
 
+def _bridge_should_break(rc, teardown_requested: bool) -> bool:
+    """Whether the bridge observe loop should end on this poll() result.
+
+    rc is the held proc's poll() result (None while it is still running).
+    Ending the loop is only correct when ffmpeg has actually exited AND no
+    locally-initiated teardown is in flight for it: a non-None rc seen while
+    teardown_requested is True is the key-restart window (or any other
+    flagged local kill) - the OLD proc's exit, not a reason to stop.  That
+    window always resolves promptly one of two ways, so skipping the break
+    here cannot hang the bridge thread: either the key-restart repoints
+    _proc_holder[0] at the live new proc (next poll() is None again), or a
+    genuine teardown closes the loopback sockets, which makes the loop's
+    select() raise and exit via its own except-break.  Pure function so the
+    policy is unit-testable without a live bridge thread.
+    """
+    return rc is not None and not teardown_requested
+
+
 class _SdesOpenMixin:
     async def _open_sdes_stream(self, **kwargs) -> "SdesSession":
         """Allocate-and-hand-off wrapper around _open_sdes_stream_impl.
@@ -2145,6 +2163,13 @@ class _SdesOpenMixin:
             _trigger_bsrc       = None    # camera addr for trigger
             _sdes_probe_received = False  # True after first 0xC8 probe from camera
             _last_hb_ts         = 0.0     # time of last AVIO HEARTBEAT send
+            # One-shot guard for the "ffmpeg exited" log below: while the held
+            # proc keeps reporting the same stale exit code across a
+            # teardown-window skip (see _bridge_should_break), only the first
+            # tick logs it.  Reset to False whenever the held proc is next
+            # seen alive (poll() None), so a later, genuine exit of THAT proc
+            # still gets its own line.
+            _br_exit_logged = False
             _lo_a = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
             _lo_v = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
             try:
@@ -2155,15 +2180,24 @@ class _SdesOpenMixin:
                         )
                     except Exception:
                         break
-                    # Stop the bridge when ffmpeg exits (normal end or crash).
+                    # Stop the bridge when ffmpeg exits (normal end or crash) -
+                    # but NOT on a stale exit seen during a flagged teardown
+                    # window (key-restart proc replace, stop(), _reap(), the
+                    # DTLS-fallback abort): _bridge_should_break() skips the
+                    # break there, and the loop resolves it either via the
+                    # key-restart's _proc_holder[0] repoint (next poll() None,
+                    # below) or via a genuine teardown closing the loopback
+                    # sockets, which raises out of the select() above.
                     _br_proc = _proc_holder[0]
                     if _br_proc is not None:
                         _br_rc = _br_proc.poll()
                         if _br_rc is not None:
-                            if _br_rc != 0:
+                            _br_teardown_requested = bool(_teardown_holder[0])
+                            if _br_rc != 0 and not _br_exit_logged:
+                                _br_exit_logged = True
                                 import logging as _log_br
                                 _br_level = _classify_ffmpeg_exit(
-                                    _br_rc, bool(_teardown_holder[0])
+                                    _br_rc, _br_teardown_requested
                                 )
                                 _br_msg = (
                                     "SDES bridge: ffmpeg exited with code %d"
@@ -2175,7 +2209,12 @@ class _SdesOpenMixin:
                                 _log_br.getLogger(__name__).log(
                                     _br_level, _br_msg, _br_rc
                                 )
-                            break
+                            if _bridge_should_break(
+                                _br_rc, _br_teardown_requested
+                            ):
+                                break
+                        else:
+                            _br_exit_logged = False
 
                     # AVIO HEARTBEAT (cmd=5156) every 10s, sent as an ENCRYPTED SCTP
                     # DATA chunk (PPID=53) - exactly like LIVING - NOT a raw 0xC8 AVIO
