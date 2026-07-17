@@ -458,6 +458,13 @@ class ReconnectPacer:
         self._rand = rand  # forwarded to next_backoff; injectable for tests
         self._attempt = 0
 
+    @property
+    def attempt(self) -> int:
+        """Consecutive-failure count (read-only). Callers that need to escalate
+        beyond this pacer's own cap (see the DTLS serve loop's slow-probe
+        throttle) key off this instead of duplicating the counter."""
+        return self._attempt
+
     def fail_delay(self) -> float:
         """Delay after a failed OPEN (no session established): the current attempt's
         backoff, then escalate - so the first failure waits exactly ``base``."""

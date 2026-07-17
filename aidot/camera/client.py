@@ -97,6 +97,26 @@ _LOGGER = logging.getLogger(__name__)
 _OFFLINE_RECHECK_S = float(os.environ.get("AIDOT_OFFLINE_RECHECK_S", "30"))
 _OFFLINE_PROBE_S = float(os.environ.get("AIDOT_OFFLINE_PROBE_S", "600"))
 
+# DTLS serve loop slow-probe: an idle-but-cloud-online camera (asleep, wedged
+# firmware, ...) never trips the offline pause above (the cloud keeps reporting
+# it reachable), so its failed opens would otherwise retry FOREVER at the
+# pacer's 300s cap - burning a 30s open timeout every attempt and dripping a
+# WARNING each time (see _open_fail_logger).  After
+# AIDOT_DTLS_SLOW_PROBE_THRESHOLD consecutive open failures (keyed on the
+# ReconnectPacer's attempt count - see _in_slow_probe / _probe_interval below -
+# NOT the cloud-offline flag, which this case never sets), the loop widens its
+# retry interval to AIDOT_DTLS_SLOW_PROBE_INTERVAL_S and downgrades the
+# per-attempt WARNING to a periodic INFO summary (_should_log_slow_probe).
+# Resets the instant an open succeeds, via the same ReconnectPacer.reset() the
+# loop already calls on success (attempt -> 0, so _in_slow_probe is false again
+# with no separate state to clear).
+_SLOW_PROBE_THRESHOLD = int(os.environ.get("AIDOT_DTLS_SLOW_PROBE_THRESHOLD", "10"))
+_SLOW_PROBE_INTERVAL_S = float(os.environ.get("AIDOT_DTLS_SLOW_PROBE_INTERVAL_S", "600"))
+_SLOW_PROBE_LOG_EVERY = int(os.environ.get("AIDOT_DTLS_SLOW_PROBE_LOG_EVERY", "6"))
+# Sleep increment for the slow-probe wait: never one blocking
+# asyncio.sleep(interval) call, so stop() is not delayed by up to 10 minutes.
+_SLOW_PROBE_SLEEP_CHUNK_S = float(os.environ.get("AIDOT_DTLS_SLOW_PROBE_CHUNK_S", "5"))
+
 # Strong refs to fire-and-forget tasks: asyncio only keeps weak refs, so a
 # discarded task can be garbage-collected mid-flight. Discarded on completion.
 _BG_TASKS: set = set()
@@ -162,6 +182,39 @@ def _open_gate_delay(last_open_at: float, now: float, open_gate: float) -> float
         return 0.0
     remaining = open_gate - (now - last_open_at)
     return remaining if remaining > 0 else 0.0
+
+
+def _in_slow_probe(attempt: int, threshold: int) -> bool:
+    """True once `attempt` consecutive DTLS open failures have reached
+    `threshold`: the serve loop should stop hammering an idle-but-cloud-online
+    camera at the pacer's normal cadence and fall back to a slow probe."""
+    return attempt >= threshold
+
+
+def _probe_interval(attempt: int, threshold: int, normal_delay: float,
+                     slow_interval: float) -> float:
+    """Effective DTLS-open retry interval for a failed open.
+
+    Below `threshold` consecutive failures this is just the pacer's own
+    `normal_delay` (unchanged jittered-backoff behaviour). At/after `threshold`
+    it widens to (at least) `slow_interval` - well beyond the pacer's own cap -
+    so a camera that is cloud-online but never actually opens is probed
+    roughly every `slow_interval` seconds instead of retried forever at the
+    pacer's max cadence."""
+    if _in_slow_probe(attempt, threshold):
+        return max(normal_delay, slow_interval)
+    return normal_delay
+
+
+def _should_log_slow_probe(attempt: int, threshold: int, log_every: int) -> bool:
+    """True when a slow-probe open failure should be logged: the moment
+    slow-probe is entered, then every `log_every`th attempt after - so a
+    camera stuck for hours doesn't drip a log line on every single probe."""
+    if not _in_slow_probe(attempt, threshold):
+        return False
+    if log_every <= 0:
+        return True
+    return (attempt - threshold) % log_every == 0
 
 
 _FFMPEG_MISSING_MSG = (
@@ -844,6 +897,23 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             "keepalive[%s]: offline probe interval elapsed - probing one open",
             self.device_id,
         )
+
+    async def _slow_probe_sleep(self, interval: float) -> None:
+        """Sleep `interval` seconds for the DTLS serve loop's slow-probe wait,
+        in `_SLOW_PROBE_SLEEP_CHUNK_S` increments rather than one blocking
+        `asyncio.sleep(interval)` call, re-checking `_streaming_active` each
+        increment.  `interval` can be several minutes; without chunking,
+        `stop()` would have to wait out the whole thing before the loop next
+        checks whether it should keep running.
+        """
+        _t0 = time.monotonic()
+        while True:
+            if not getattr(self, "_streaming_active", False):
+                return
+            _remaining = interval - (time.monotonic() - _t0)
+            if _remaining <= 0:
+                return
+            await asyncio.sleep(min(_SLOW_PROBE_SLEEP_CHUNK_S, _remaining))
 
     # -- Camera helpers ------------------------------------------------------ #
 
@@ -3469,6 +3539,35 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 continue
             except Exception as exc:
                 _delay = _pacer.fail_delay()
+                _attempt = _pacer.attempt
+                _cloud_offline = (
+                    (not self.status.online)
+                    and getattr(self, "_cloud_online_explicit", False)
+                )
+                # Slow-probe throttle: an idle-but-cloud-online camera never
+                # sets _cloud_offline (the cloud keeps reporting it reachable),
+                # so without this it would retry forever at the pacer's cap.
+                # Keyed purely on the pacer's consecutive-failure count, not
+                # the offline flag - a genuinely offline camera already gets a
+                # comparable slow cadence (with early-resume) from
+                # _backoff_or_offline_pause below, so this only engages the
+                # part of the space that pause doesn't already cover.
+                if _in_slow_probe(_attempt, _SLOW_PROBE_THRESHOLD) and not _cloud_offline:
+                    _delay = _probe_interval(
+                        _attempt, _SLOW_PROBE_THRESHOLD, _delay, _SLOW_PROBE_INTERVAL_S)
+                    if _should_log_slow_probe(
+                        _attempt, _SLOW_PROBE_THRESHOLD, _SLOW_PROBE_LOG_EVERY
+                    ):
+                        _LOGGER.info(
+                            "DTLS serve: %s still failing to open after %d"
+                            " attempts - slow-probing every %.0fs (last error: %s)",
+                            self.device_id, _attempt, _delay, exc,
+                        )
+                    try:
+                        await self._slow_probe_sleep(_delay)
+                    except asyncio.CancelledError:
+                        return
+                    continue
                 self._open_fail_logger()(
                     "DTLS serve: open failed for %s (retry %.0fs): %s",
                     self.device_id, _delay, exc,
@@ -3479,6 +3578,9 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     return
                 continue
 
+            # Resetting the pacer's attempt count also clears slow-probe state:
+            # it derives purely from _pacer.attempt, so _in_slow_probe reads
+            # false again on the very next failure sequence.
             _pacer.reset()
             _not_ready_burst = 0  # clean open: reset the encoder-cold burst
             self._stream_session = session
