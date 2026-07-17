@@ -1,6 +1,7 @@
 """AiDot camera and device library."""
 
 import logging as _logging
+import time as _time
 
 from .client import AidotClient
 from .device_client import DeviceClient
@@ -55,6 +56,69 @@ def _cap_external_loggers() -> None:
 
 
 _cap_external_loggers()
+
+# The vendored H.264 decoder logs a WARNING per corrupt/undecodable frame
+# (aidot/_vendor/aiortc/codecs/h264.py:118). A degrading link can therefore
+# log hundreds of identical lines in a few minutes; a live evaluation saw 172
+# in 11 minutes. A level cap cannot help here since the message is already at
+# WARNING, and the message is a corruption canary for a degrading link, so it
+# must not be silenced outright. Instead a rate-limiting filter lets the
+# first WARNING through immediately, suppresses subsequent same-logger
+# WARNINGs within a window, and lets the first WARNING after the window
+# elapses through carrying the suppressed count, so the canary stays visible
+# at a low rate instead of flooding.
+_H264_DECODE_LOGGER_NAME = "aidot._vendor.aiortc.codecs.h264"
+_H264_DECODE_RATE_LIMIT_WINDOW_SECONDS = 30.0
+
+
+class _RateLimitingWarningFilter(_logging.Filter):
+    """Rate-limit WARNING records on the logger it is attached to.
+
+    The first WARNING is let through immediately. Subsequent WARNINGs within
+    ``window_seconds`` of it are suppressed (dropped) but counted. The next
+    WARNING to arrive once the window has elapsed is let through, with its
+    message annotated with how many were suppressed during the window, and a
+    new window begins from that record's time. Records at other levels, and
+    records on other loggers, are never touched.
+
+    ``time_func`` defaults to ``time.monotonic`` but is injectable so tests
+    can drive the window deterministically without real sleeps.
+    """
+
+    def __init__(self, window_seconds: float = _H264_DECODE_RATE_LIMIT_WINDOW_SECONDS, time_func=_time.monotonic) -> None:
+        super().__init__()
+        self._window_seconds = window_seconds
+        self._time_func = time_func
+        self._window_start = None
+        self._suppressed = 0
+
+    def filter(self, record: _logging.LogRecord) -> bool:
+        if record.levelno != _logging.WARNING:
+            return True
+        _now = self._time_func()
+        if self._window_start is None:
+            self._window_start = _now
+            return True
+        if _now - self._window_start < self._window_seconds:
+            self._suppressed += 1
+            return False
+        _suppressed = self._suppressed
+        self._window_start = _now
+        self._suppressed = 0
+        if _suppressed:
+            record.msg = f"{record.getMessage()} (suppressed {_suppressed} similar warning(s) in the last {self._window_seconds:.0f}s)"
+            record.args = ()
+        return True
+
+
+def _install_h264_decode_rate_limit_filter() -> None:
+    """Idempotently attach the rate-limiting filter to the h264 decode logger."""
+    _lg = _logging.getLogger(_H264_DECODE_LOGGER_NAME)
+    if not any(isinstance(_f, _RateLimitingWarningFilter) for _f in _lg.filters):
+        _lg.addFilter(_RateLimitingWarningFilter())
+
+
+_install_h264_decode_rate_limit_filter()
 
 __all__ = [
     "AidotAuthFailed",
