@@ -143,6 +143,17 @@ git push <your-upstream-fork> fix-xyz         # then open a PR to AiDot-Developm
 
 `git format-patch` / `git am` work too when the file layout matches.
 
+### Fixes sent upstream (drop from our divergence once merged)
+
+- **`DeviceStatusData.active_color_mode`** (`device_client.py`) - tracks which
+  color mode is active so RGBW+CCT bulbs report color temp when resting in CCT
+  instead of a stale retained RGB color. This lives in upstream-owned
+  light-decode code, not the camera layer, so it belongs upstream. It shipped in
+  the fork (library 0.11.14 / integration 2.8.14) and was submitted upstream as
+  `AiDot-Development-Team/python-AiDot#6`. When upstream merges it, a plain
+  `git merge upstream/main` brings in their copy - drop ours so it stops counting
+  as fork divergence.
+
 ## Notes
 
 - The `-s ours` link is correct only because our content was synced through
