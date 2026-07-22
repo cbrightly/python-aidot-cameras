@@ -56,6 +56,7 @@ class DeviceStatusData:
     rgbw: tuple[int, int, int, int] = (255, 0, 0, 0)
     cct: int = 2700
     dimming: int = 100
+    active_color_mode: "str | None" = None
 
     def update(self, attr: DeviceAttr) -> None:
         """Update status from DeviceAttr model."""
@@ -81,6 +82,20 @@ class DeviceStatusData:
             self.rgbw = (r, g, b, w)
         if attr.CCT is not None:
             self.cct = attr.CCT
+
+        # Track which color mode is actually active. Bulbs report state as
+        # deltas: a CCT-mode push carries only CCT, an RGB-mode push carries
+        # only RGBW. The getDevAttr login-sync instead returns BOTH the
+        # retained RGBW register and CCT together, which is ambiguous about
+        # which mode is active; that case (and RGBW==0, which is just the
+        # register's power-on default rather than a real color pick) must
+        # update the values above without changing active_color_mode.
+        rgbw_present = attr.RGBW is not None
+        cct_present = attr.CCT is not None
+        if rgbw_present and not cct_present and attr.RGBW != 0:
+            self.active_color_mode = "rgbw"
+        elif cct_present and not rgbw_present:
+            self.active_color_mode = "cct"
 
 
 class DeviceInformation:

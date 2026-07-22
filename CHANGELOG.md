@@ -4,6 +4,19 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.11.14]
+
+### Fixed
+- **RGBW+CCT bulbs no longer report a stale color while resting in white/CCT
+  mode.** These bulbs report state as deltas - a color-temperature change carries
+  only CCT, a color change carries only RGBW - but the login-sync (getDevAttr)
+  returns both the retained RGBW register and CCT together, which is ambiguous.
+  The device status now records the active color mode from unambiguous
+  single-field deltas and leaves it unchanged on the ambiguous both-present sync,
+  so a bulb set to a color temperature is no longer surfaced as its last RGB
+  color. Exposed as `DeviceStatusData.active_color_mode` for the Home Assistant
+  integration to map to color_temp vs rgbw.
+
 ## [0.11.13]
 
 ### Fixed
