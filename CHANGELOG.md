@@ -4,6 +4,25 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.2]
+
+### Fixed
+- **A rotated MQTT password no longer breaks camera signaling permanently.** The
+  broker issues a new MQTT password on every account login and allows one
+  connection at a time, so anything else logging in (the phone app is enough)
+  invalidates the cached one. The cached copy lives in `login_info`, where it
+  short-circuits the credential fetch, so every reconnect reused the dead
+  password and the broker refused it forever (`rc=134`) - which silently killed
+  WebRTC signaling and therefore live video, while snapshots kept working. A
+  credential refusal now clears the cached password and drops the persistent
+  client so the next use fetches a fresh one.
+- **go2rtc stream registrations no longer leak.** go2rtc answers the register
+  call with 400 when it cannot immediately validate the source (a camera that
+  has not started producing yet) but still keeps the stream registered. That was
+  treated as failure, leaving the pull URL unset - and deregistration was gated
+  on that URL, so every such attempt left a dead stream behind with a producer
+  nothing was feeding.
+
 ## [0.12.1]
 
 ### Changed
