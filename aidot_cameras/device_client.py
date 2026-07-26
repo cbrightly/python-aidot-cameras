@@ -169,6 +169,16 @@ class CameraDeviceClient(CameraMixin, _UpstreamDeviceClient):
         refresh, persistent-MQTT cache).  The `to_dict()` fallback keeps the
         two-argument upstream signature usable for light-only devices.
         """
+        # Real cameras report `aesKey: [None]` - a truthy list holding None.
+        # Upstream guards only the list ("if self._device.aesKey:") and then
+        # calls .encode() on the element, so that shape raises AttributeError
+        # for every camera.  Normalize to None so upstream skips the block; the
+        # pre-inversion client guarded the same case ("if key_string is not
+        # None").  Harmless for devices that carry a real key.
+        _aes_key = getattr(device, "aesKey", None)
+        if _aes_key and _aes_key[0] is None:
+            device.aesKey = None
+
         super().__init__(device, user_info)
 
         # Upstream's typed models stay reachable; _init_camera_state overwrites
