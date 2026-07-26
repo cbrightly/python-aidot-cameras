@@ -9,7 +9,7 @@ import asyncio
 from typing import Any, Callable, List, Optional
 
 from ..exceptions import AidotCameraBusy, AidotCameraNotReady
-from ..login_const import APP_ID as _AIDOT_APP_ID
+from ..const import APP_ID as _AIDOT_APP_ID
 from ..const import (
     LOGIN_INFO_PERSISTENT_MQTT_KEY,
     LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
