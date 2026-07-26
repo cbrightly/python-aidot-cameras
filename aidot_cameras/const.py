@@ -10,6 +10,7 @@ from aidot.const import (  # noqa: F401 - deliberate re-export surface
     API_URL_TEMPLATE,
     APP_ID,
     CONF_ACCESS_TOKEN,
+    CONF_AES_KEY,
     CONF_APP_ID,
     CONF_ATTR,
     CONF_CCT,
