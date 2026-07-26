@@ -3515,21 +3515,28 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 _loop.call_soon_threadsafe(_spawn_bg, _retire_and_invalidate(rc))
 
             async def _retire_and_invalidate(rc) -> None:
+                # Deliberately outside the lock.  These are plain dict writes with
+                # no ordering requirement, and a sibling can be holding the lock
+                # across an HTTP credential fetch - taking it here would stall the
+                # invalidation behind that request's timeout for no benefit.
+                for key in LOGIN_INFO_MQTT_PASSWORD_KEYS:
+                    if li.pop(key, None) is not None:
+                        _LOGGER.warning(
+                            "cleared the cached MQTT password after the broker "
+                            "rejected it (rc=%s); it will be re-fetched", rc,
+                        )
+                self._smarthome_auth = None
+                # The URL response is the one that can carry a server-issued
+                # password (strategy 3); leaving it cached would skip that
+                # fallback entirely on the recovery path.
+                self._mqtt_url = None
+                # Note the refusal so a second failure in quick succession backs
+                # off instead of hammering the credential endpoint.
+                self._mqtt_refused_at = _loop.time()
+                # This one DOES need the lock: it is a compare-and-pop against the
+                # get-or-create above, and without it a rebuild that already read
+                # the slot could have its replacement removed instead of ours.
                 async with lock:
-                    for key in LOGIN_INFO_MQTT_PASSWORD_KEYS:
-                        if li.pop(key, None) is not None:
-                            _LOGGER.warning(
-                                "cleared the cached MQTT password after the broker "
-                                "rejected it (rc=%s); it will be re-fetched", rc,
-                            )
-                    self._smarthome_auth = None
-                    # The URL response is the one that can carry a server-issued
-                    # password (strategy 3); leaving it cached would skip that
-                    # fallback entirely on the recovery path.
-                    self._mqtt_url = None
-                    # Note the refusal so a second failure in quick succession
-                    # backs off instead of hammering the credential endpoint.
-                    self._mqtt_refused_at = _loop.time()
                     if li.get(LOGIN_INFO_PERSISTENT_MQTT_KEY) is pm:
                         li.pop(LOGIN_INFO_PERSISTENT_MQTT_KEY, None)
                 # Outside the lock: retire() blocks briefly joining paho's thread.
