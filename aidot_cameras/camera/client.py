@@ -11,6 +11,7 @@ from typing import Any, Callable, List, Optional
 from ..exceptions import AidotCameraBusy, AidotCameraNotReady
 from ..const import APP_ID as _AIDOT_APP_ID
 from ..const import (
+    LOGIN_INFO_MQTT_PASSWORD_KEYS,
     LOGIN_INFO_PERSISTENT_MQTT_KEY,
     LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
 )
@@ -140,6 +141,11 @@ _DTLS_SERVE_OPEN_TIMEOUT_S = _parse_env_float("AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S",
 # Strong refs to fire-and-forget tasks: asyncio only keeps weak refs, so a
 # discarded task can be garbage-collected mid-flight. Discarded on completion.
 _BG_TASKS: set = set()
+
+# Minimum gap between MQTT credential refetches after the broker refused one.
+# One rotation is normal (another login happened); a second refusal that fast
+# means refetching is not helping, so back off rather than loop.
+_MQTT_CREDENTIAL_REFETCH_FLOOR = 30.0
 
 
 def _spawn_bg(coro):
@@ -656,6 +662,11 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
     # Optional LAN control client; when attached, attribute writes go local-first.
     _lan_client = None
 
+    # MQTT credential state, defaulted at class level so the credential path is
+    # safe on any client whose __init__ did not run to completion.
+    _mqtt_credential_refresh_cb = None
+    _mqtt_refused_at = 0.0
+
     def attach_lan_client(self, lan_client) -> None:
         """Route camera attribute writes through ``lan_client`` (local-first,
         cloud-fallback).  Pass an ``aidot.camera.lan_control.CameraLanClient``."""
@@ -709,6 +720,15 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         # updates the shared login_info in place, so camera HTTP calls can recover
         # from a 21026 "Please login again" instead of failing silently.
         self._token_refresh_cb: "Optional[Callable]" = None
+        # Async callback (set by AidotClient) that fetches a fresh MQTT password
+        # into the shared login_info.  The password is deliberately never
+        # persisted (it rotates on every account login), so on a restart from a
+        # stored token there is none until this runs - see
+        # _async_get_smarthome_auth, which calls it before consulting login_info.
+        self._mqtt_credential_refresh_cb: "Optional[Callable]" = None
+        # Loop timestamp of the last broker credential refusal, for the refetch
+        # floor in _async_refresh_mqtt_credential.
+        self._mqtt_refused_at: float = 0.0
         # Raw device dict retained for transport-type detection (isDTLS field)
         self._raw_device: dict = device
 
@@ -944,6 +964,49 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
     def set_token_refresh_cb(self, cb: "Callable") -> None:
         """Register the AidotClient coroutine that refreshes the access token."""
         self._token_refresh_cb = cb
+
+    def set_mqtt_credential_refresh_cb(self, cb: "Callable") -> None:
+        """Register the AidotClient coroutine that re-fetches the MQTT password."""
+        self._mqtt_credential_refresh_cb = cb
+
+    def _shared_mqtt_password(self) -> Optional[str]:
+        """The account's current MQTT password, or None if it holds none.
+
+        Read from the shared ``login_info`` dict, which is the single source of
+        truth: it is what the fetch writes and what a broker refusal clears.
+        """
+        li = self._user_info if isinstance(self._user_info, dict) else {}
+        for key in LOGIN_INFO_MQTT_PASSWORD_KEYS:
+            val = li.get(key)
+            if val:
+                return val
+        return None
+
+    async def _async_refresh_mqtt_credential(self) -> None:
+        """Ask the account client for a fresh MQTT password, if it can supply one.
+
+        Never raises: every caller has fallback strategies, so a failed fetch
+        should degrade rather than break a stream open.
+        """
+        cb = self._mqtt_credential_refresh_cb
+        if cb is None:
+            return
+        # Floor between attempts.  If the freshly fetched password is refused too
+        # - another login rotated again, or the endpoint hands back the same value
+        # - every stream open would otherwise cost another credential request and
+        # another refused connection.  Better to fail this open and let the next
+        # one try than to hammer the vendor's endpoint.
+        since = asyncio.get_running_loop().time() - self._mqtt_refused_at
+        if self._mqtt_refused_at and since < _MQTT_CREDENTIAL_REFETCH_FLOOR:
+            _LOGGER.debug(
+                "skipping MQTT credential refetch: only %.1fs since the last "
+                "refusal (floor %ss)", since, _MQTT_CREDENTIAL_REFETCH_FLOOR,
+            )
+            return
+        try:
+            await cb()
+        except Exception as exc:
+            _LOGGER.debug("MQTT credential refresh failed: %s", exc)
 
     @staticmethod
     def _is_auth_error(data: Any) -> bool:
@@ -1186,15 +1249,35 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         """Fetch MQTT credentials (mqttUser + mqttPassword) for the Arnoo broker.
 
         Strategy order - stops at first success:
-          0. Already cached
-          1. mqttPassword already in AiDot login_info (from _async_fetch_user_config)
+          0. Already cached, and still agreeing with the account-shared login_info
+          1. mqttPassword in AiDot login_info, fetching it first if absent
           2. GET /user/getUser  <- documented SDK step (reqUserAuthInfoWithCallback)
              Returns LDSAuthInfo {userId, mqttUser, mqttPassword, ...}
           3. getServerUrlConfig response side-effect (if MQTT URL not yet fetched)
           4. accessToken as MQTT password (Arnoo broker fallback)
         """
-        if self._smarthome_auth and self._smarthome_auth.get("mqttPassword"):
+        # Strategy 0.  This cache is per device client but the credential is per
+        # account, so the shared login_info wins any disagreement: when a broker
+        # refusal cleared or replaced the account's password, a sibling camera's
+        # cache still holds the dead one, and trusting it would refuse again on
+        # every camera in turn.  Treating the cache as cold whenever it disagrees
+        # makes login_info the single source of truth.
+        _cached_pwd = (self._smarthome_auth or {}).get("mqttPassword")
+        if _cached_pwd and _cached_pwd == self._shared_mqtt_password():
             return self._smarthome_auth
+        # An empty login_info is not automatically "nothing to disagree with": it
+        # is exactly the post-invalidation state, since a refusal pops the shared
+        # password but can only null the cache on the ONE client whose connection
+        # was refused.  So a cache that CAME from login_info is stale here, while
+        # one from /user/getUser or the accessToken fallback is per client and has
+        # no shared counterpart to compare against.  Strategy 1 stamps its source
+        # precisely so the two can be told apart.
+        _cached_src = ((self._smarthome_auth or {}).get("raw") or {}).get("source") or ""
+        _from_shared = _cached_src.startswith("login_info.")
+        if _cached_pwd and self._shared_mqtt_password() is None and not _from_shared:
+            return self._smarthome_auth
+        if _cached_pwd:
+            self._smarthome_auth = None
 
         import aiohttp
 
@@ -1205,9 +1288,15 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             or str(self.user_id)
         )
 
-        # --- Strategy 1: mqttPassword already in AiDot login_info ---
-        # _async_fetch_user_config() stores it under "mqttPassword" or "mqttPwd".
-        for key in ("mqttPassword", "mqttPwd"):
+        # --- Strategy 1: mqttPassword in AiDot login_info, fetched if absent ---
+        # The password is never persisted (it rotates on every account login), so
+        # login_info has none after a restart from a stored token, and a broker
+        # refusal clears it deliberately.  Fetch before reading, or the strategies
+        # below shadow the absence: strategy 4 always "succeeds" with the access
+        # token, which the broker then refuses, and the retry loops forever.
+        if self._shared_mqtt_password() is None:
+            await self._async_refresh_mqtt_credential()
+        for key in LOGIN_INFO_MQTT_PASSWORD_KEYS:
             val = self._user_info.get(key)
             if val:
                 self._smarthome_auth = {
@@ -3403,27 +3492,48 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 return None
             from .protocol import _PersistentMqtt
 
+            # paho fires on_connect on its own network thread; every mutation
+            # below has to be ordered against the get-or-create above, so it is
+            # hopped onto this loop and taken under the same account lock.
+            _loop = asyncio.get_running_loop()
+
             def _invalidate_mqtt_credentials(rc) -> None:
-                """Drop the cached MQTT password so the next use re-fetches it.
+                """Retire the refused client and drop the credential it used.
 
                 The broker rotates this password on every account login and
                 allows one connection at a time, so any other login (the phone
                 app, a second Home Assistant, a script) invalidates ours.  The
                 cached copy lives in login_info, where it short-circuits the
                 credential fetch, so it has to be cleared or every retry reuses
-                the dead password.  The persistent client itself is dropped too,
-                so the next request rebuilds it with fresh credentials.
+                the dead password.
+
+                Runs on paho's network thread, so it only schedules the work: the
+                mutations must be ordered against a concurrent get-or-create, and
+                ``retire()`` calls ``loop_stop()``, which raises if called from
+                the very thread it would join.
                 """
-                from ..const import LOGIN_INFO_MQTT_PASSWORD_KEYS
-                for key in LOGIN_INFO_MQTT_PASSWORD_KEYS:
-                    if li.pop(key, None) is not None:
-                        _LOGGER.warning(
-                            "cleared the cached MQTT password after the broker "
-                            "rejected it (rc=%s); it will be re-fetched", rc,
-                        )
-                self._smarthome_auth = None
-                if li.get(LOGIN_INFO_PERSISTENT_MQTT_KEY) is pm:
-                    li.pop(LOGIN_INFO_PERSISTENT_MQTT_KEY, None)
+                _loop.call_soon_threadsafe(_spawn_bg, _retire_and_invalidate(rc))
+
+            async def _retire_and_invalidate(rc) -> None:
+                async with lock:
+                    for key in LOGIN_INFO_MQTT_PASSWORD_KEYS:
+                        if li.pop(key, None) is not None:
+                            _LOGGER.warning(
+                                "cleared the cached MQTT password after the broker "
+                                "rejected it (rc=%s); it will be re-fetched", rc,
+                            )
+                    self._smarthome_auth = None
+                    # The URL response is the one that can carry a server-issued
+                    # password (strategy 3); leaving it cached would skip that
+                    # fallback entirely on the recovery path.
+                    self._mqtt_url = None
+                    # Note the refusal so a second failure in quick succession
+                    # backs off instead of hammering the credential endpoint.
+                    self._mqtt_refused_at = _loop.time()
+                    if li.get(LOGIN_INFO_PERSISTENT_MQTT_KEY) is pm:
+                        li.pop(LOGIN_INFO_PERSISTENT_MQTT_KEY, None)
+                # Outside the lock: retire() blocks briefly joining paho's thread.
+                await _loop.run_in_executor(None, pm.retire)
 
             pm = _PersistentMqtt(mqtt_url, mqtt_user, mqtt_pwd, client_id,
                                  on_auth_failure=_invalidate_mqtt_credentials)

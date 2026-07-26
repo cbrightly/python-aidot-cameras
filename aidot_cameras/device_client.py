@@ -21,6 +21,7 @@ import logging
 from typing import Any, Optional
 
 from aidot.device_client import DeviceClient as _UpstreamDeviceClient
+from aidot.device_client import DeviceState as _UpstreamDeviceState
 from aidot.device_client import DeviceInformation as _UpstreamDeviceInformation
 from aidot.device_client import DeviceStatusData as _UpstreamDeviceStatusData
 from aidot.models.auth_model import UserInformation
@@ -52,6 +53,11 @@ _LOGGER = logging.getLogger(__name__)
 # from here rather than importing `aidot` directly, which for them is an
 # undeclared transitive dependency.  This is upstream's class, not a subclass.
 DeviceClient = _UpstreamDeviceClient
+
+# Same reasoning for the LAN session state enum: a consumer that wants to know
+# whether a device client is authenticated has to compare against it, and
+# reaching into `aidot` for it means depending on a package it never declared.
+DeviceState = _UpstreamDeviceState
 
 
 class DeviceStatusData(_UpstreamDeviceStatusData):
