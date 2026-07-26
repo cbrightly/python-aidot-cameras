@@ -8,7 +8,7 @@ Repo convention: no pytest-asyncio; drive coroutines with asyncio.run().
 """
 import asyncio
 
-from aidot.camera.webrtc_open import _keyframe_prompter
+from aidot_cameras.camera.webrtc_open import _keyframe_prompter
 
 
 def test_stops_when_first_frame_already_set():

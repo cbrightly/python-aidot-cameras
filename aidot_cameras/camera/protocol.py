@@ -352,7 +352,7 @@ def _make_talk_audio_track(pcm_provider: Callable[[], "Optional[bytes]"]):
     try:
         import fractions
         import av
-        from aidot._vendor.aiortc.mediastreams import MediaStreamTrack
+        from aidot_cameras._vendor.aiortc.mediastreams import MediaStreamTrack
     except ImportError:
         return None
 

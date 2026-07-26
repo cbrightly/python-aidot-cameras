@@ -15,7 +15,7 @@ Repo convention: no pytest-asyncio; these are plain synchronous unit tests.
 """
 import logging
 
-from aidot.camera.client import CameraMixin
+from aidot_cameras.camera.client import CameraMixin
 
 
 # Annex-B H.264 fragments (start code + NAL header byte).  NAL type is low 5
@@ -126,7 +126,7 @@ def test_serve_video_canary_emits_periodic_debug_summary(caplog):
 
     assert CameraMixin._install_encoded_tap(rcv, out_q, True, serve=True)
 
-    with caplog.at_level(logging.DEBUG, logger="aidot.camera.client"):
+    with caplog.at_level(logging.DEBUG, logger="aidot_cameras.camera.client"):
         # 299 frames: no summary yet (cadence is every 300).
         for _ in range(299):
             qd.put(_task(_DELTA))

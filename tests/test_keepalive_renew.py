@@ -7,7 +7,7 @@ the 25 s window; mains cameras never sleep and are skipped.
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from aidot.camera.client import CameraMixin
+from aidot_cameras.camera.client import CameraMixin
 
 
 def _obj(battery=True, streaming=True):
@@ -34,7 +34,7 @@ def test_renew_loop_renews_battery_until_stream_stops():
         if n["i"] >= 3:
             o._streaming_active = False   # stop after the 3rd sleep
 
-    with patch("aidot.camera.client.asyncio.sleep", fake_sleep):
+    with patch("aidot_cameras.camera.client.asyncio.sleep", fake_sleep):
         asyncio.run(CameraMixin._keepalive_renew_loop(o))
     # sleep(renew), sleep(renew), sleep(stop -> break): 2 renewals
     assert o._async_set_keep_alive.await_count == 2
@@ -56,7 +56,7 @@ def test_renew_loop_swallows_cancel():
 def test_start_renew_is_noop_for_mains_cameras():
     # Mains cameras never sleep - no throwaway task should be scheduled.
     o = _obj(battery=False)
-    with patch("aidot.camera.client.asyncio.ensure_future") as ef:
+    with patch("aidot_cameras.camera.client.asyncio.ensure_future") as ef:
         CameraMixin._start_keepalive_renew(o)
     ef.assert_not_called()
 
@@ -67,7 +67,7 @@ def test_start_renew_cancels_a_still_running_prior_loop():
     prior = MagicMock()
     prior.done.return_value = False
     o._keepalive_task = prior
-    with patch("aidot.camera.client.asyncio.ensure_future", return_value="new") as ef:
+    with patch("aidot_cameras.camera.client.asyncio.ensure_future", return_value="new") as ef:
         CameraMixin._start_keepalive_renew(o)
     prior.cancel.assert_called_once()   # old loop stopped
     ef.assert_called_once()             # exactly one new loop

@@ -1,24 +1,34 @@
 """Regression tests for the post-upstream-sync hardening fixes.
 
-Covers: the connect() login gate, reconnect chain dedup/backoff, discovery
-quiescence after close(), the camera filter on discovered IPs, status
-None-defaults, the dict/model update dispatch, and the DeviceClient/
-CameraMixin name-collision tripwire for future upstream merges.
+Covers: discovery quiescence after close(), the camera filter on discovered IPs,
+status None-defaults, the dict/model update dispatch, and the upstream
+DeviceClient / CameraMixin name-collision tripwire for future upstream bumps.
+
+The connect() login gate and the reconnect chain dedup/backoff that this file
+also used to cover were fork-only hardening of a fork-only connect()/login()
+pair.  Upstream owns the connection lifecycle now (a DeviceState machine plus
+its own _reconnect_timer) and we do not override any of it, so those two tests
+were asserting code this package no longer contains; they were dropped rather
+than rewritten against upstream internals.
 """
 
 import asyncio
 import os
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-from aidot.camera.client import CameraMixin, CameraStatusData
-from aidot.client import _is_camera
-from aidot.device_client import DeviceClient, DeviceStatusData
-from aidot.discover import Discover
+from aidot.device_client import DeviceClient as UpstreamDeviceClient
+from aidot.models.auth_model import UserInformation
 from aidot.models.device_client_model import DeviceAttr
+from aidot.models.device_model import DeviceModel
+from aidot.utils import AsyncTimer
+
+from aidot_cameras.camera.client import CameraMixin, CameraStatusData
+from aidot_cameras.client import CameraClient, _is_camera
+from aidot_cameras.device_client import CameraDeviceClient, DeviceStatusData
+from aidot_cameras.discover import Discover
 
 
 DEVICE = {
@@ -34,69 +44,14 @@ USER = {"id": "user1", "region": "us"}
 
 
 def make_dc(device=DEVICE):
-    return DeviceClient(dict(device), dict(USER))
-
-
-# --------------------------------------------------------------------------- #
-# connect() gate
-# --------------------------------------------------------------------------- #
-
-def test_connect_gate_ignores_cloud_seeded_online(monkeypatch):
-    """A swallowed login failure must not report as connected just because
-    the cloud device dict said online=true."""
-    dc = make_dc()
-    dc.status.online = True  # cloud-seeded (update_status_from_device)
-
-    class _W:
-        def get_extra_info(self, _):
-            import socket as _s
-            s = _s.socket()
-            return s
-
-    async def fake_open(*a, **k):
-        return object(), _W()
-
-    async def fake_login(self):
-        return  # login fails silently (exception swallowed inside login())
-
-    monkeypatch.setattr(asyncio, "open_connection", fake_open)
-    monkeypatch.setattr(DeviceClient, "login", fake_login)
-    asyncio.run(dc.connect("127.0.0.1"))
-    assert dc.connect_and_login is False
-
-
-# --------------------------------------------------------------------------- #
-# reconnect chain
-# --------------------------------------------------------------------------- #
-
-def test_schedule_reconnect_single_chain_and_backoff():
-    async def run():
-        dc = make_dc()
-        dc._ip_address = "127.0.0.1"
-        dc._last_login_attempt = time.monotonic()  # recent attempt -> backoff
-
-        dc._schedule_reconnect()
-        first_handle = dc._reconnect_handle
-        assert first_handle is not None
-        assert dc._login_task is None  # backoff floor suppressed immediate login
-
-        dc._schedule_reconnect()  # concurrent reset path
-        assert dc._reconnect_handle is first_handle  # no second chain
-
-        first_handle.cancel()
-
-    asyncio.run(run())
-
-
-def test_schedule_reconnect_noop_after_close():
-    async def run():
-        dc = make_dc()
-        dc._ip_address = "127.0.0.1"
-        dc._is_close = True
-        dc._schedule_reconnect()
-        assert dc._reconnect_handle is None
-
-    asyncio.run(run())
+    # Upstream's constructor takes typed models; the raw dicts still go through
+    # for the camera layer, exactly as CameraClient.get_device_client does.
+    return CameraDeviceClient(
+        DeviceModel.from_json(data=dict(device)),
+        UserInformation.from_json(data=dict(USER)),
+        raw_device=dict(device),
+        login_info=dict(USER),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -117,6 +72,42 @@ def test_discover_quiescent_after_close():
 def test_camera_filter():
     assert _is_camera(make_dc(CAMERA)) is True
     assert _is_camera(make_dc(DEVICE)) is False
+
+
+# --------------------------------------------------------------------------- #
+# teardown
+# --------------------------------------------------------------------------- #
+
+def test_no_reconnect_after_client_close():
+    """Closing the account must silence an already-armed reconnect timer.
+
+    Upstream's DeviceClient.reset() arms a 45s AsyncTimer(callback=async_login)
+    every time a connection drops, and its close() only sets _is_closed - which
+    stops reset() from arming a NEW timer but never cancels the one already
+    ticking.  Left alone, a light re-opens its TCP connection about 45s after
+    the integration was unloaded, leaking a socket, a receive task and a ping
+    timer.  Plain upstream device clients are the exposed case (cameras have
+    their own login gate), so the subject here is an upstream DeviceClient.
+    """
+    async def run():
+        client = CameraClient(None, country_code="US")
+        dc = UpstreamDeviceClient(
+            DeviceModel.from_json(data=dict(DEVICE)),
+            UserInformation.from_json(data=dict(USER)),
+        )
+        fired = []
+        dc._reconnect_timer = AsyncTimer(
+            callback=lambda: fired.append(1), interval=0.05
+        )
+        dc._reconnect_timer.start()
+        client._device_clients[dc.info.dev_id] = dc
+
+        await client.async_close()
+        await asyncio.sleep(0.2)  # well past the armed interval
+
+        assert fired == [], "a reconnect fired after the client was closed"
+
+    asyncio.run(run())
 
 
 # --------------------------------------------------------------------------- #
@@ -167,23 +158,59 @@ def test_camera_state_carry_forward():
 
 
 # --------------------------------------------------------------------------- #
+# camera-only attributes across the upstream receive loop
+# --------------------------------------------------------------------------- #
+
+def test_raw_camera_attrs_survive_upstreams_typed_model(monkeypatch):
+    """The read_data/_notify_status_update pair recovers camera-only keys.
+
+    Upstream's receive loop feeds status from its typed DeviceAttr model, which
+    has no field for Battery_remaining (or Occupancy, SDcardStatus,
+    MotionDetection_*), so those keys are dropped on the way in.  read_data
+    stashes the raw frame and _notify_status_update re-applies payload.attr
+    before the callback fires.  Both are called polymorphically by upstream's
+    receive_data, which is what makes the pair reachable at all.
+    """
+    frame = {"payload": {"attr": {"Battery_remaining": "77", "OnOff": 1}}}
+
+    async def _fake_base_read(self):
+        return frame
+
+    monkeypatch.setattr(UpstreamDeviceClient, "read_data", _fake_base_read)
+    dc = make_dc(CAMERA)
+    assert asyncio.run(dc.read_data()) is frame
+
+    dc._notify_status_update()
+    assert dc.status.battery_remaining == 77
+
+    # The stash is consumed, not just read: a notify that is NOT driven by a
+    # frame (reset(), login) must not re-apply a stale attribute set.
+    dc.status.battery_remaining = None
+    dc._notify_status_update()
+    assert dc.status.battery_remaining is None
+
+
+# --------------------------------------------------------------------------- #
 # upstream-merge tripwire
 # --------------------------------------------------------------------------- #
 
 def test_no_silent_mro_shadowing():
     """If upstream adds a DeviceClient method whose name CameraMixin already
-    defines, the upstream version silently shadows the camera one after a
-    conflict-free merge.  Keep this intersection explicitly reviewed."""
+    defines, the upstream version wins for every name the mixin does not itself
+    define first - a silent behavior change on an upstream version bump.  Keep
+    this intersection explicitly reviewed."""
     intentional = {
-        # device_client.py deliberately overrides/joins these:
+        # CameraDeviceClient (not the mixin) deliberately overrides these, so a
+        # name shared with upstream there is intended, not accidental:
         "__init__",
     }
     # Compare only non-dunder names: interpreter-added dunders vary by
     # Python version (3.13 adds __firstlineno__/__static_attributes__).
-    core = {n for n in DeviceClient.__dict__ if not n.startswith("__")}
+    core = {n for n in UpstreamDeviceClient.__dict__ if not n.startswith("__")}
     camera = {n for n in CameraMixin.__dict__ if not n.startswith("__")}
     collisions = (core & camera) - intentional
     assert collisions == set(), (
-        f"DeviceClient now shadows CameraMixin names {sorted(collisions)}; "
+        f"upstream DeviceClient now shadows CameraMixin names "
+        f"{sorted(collisions)}; "
         "verify intent and update this test's allowlist"
     )

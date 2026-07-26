@@ -4,6 +4,29 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.0]
+
+### Changed
+
+- **BREAKING: this package now extends upstream `python-aidot` instead of forking
+  it, and its import name is `aidot_cameras`.** Upstream ships as a pinned
+  dependency (`python-aidot==0.3.55`) and owns the `aidot` import name again; no
+  upstream file is vendored or edited here. Code that imported `aidot` /
+  `aidot.camera` from this distribution must import `aidot_cameras` /
+  `aidot_cameras.camera` instead. The camera API itself is unchanged.
+- **Non-camera devices are handled entirely by upstream.**
+  `AidotClient.get_device_client()` is the single dispatch seam: cameras get this
+  package's client, and lights, plugs and switches fall through to upstream's own
+  `DeviceClient` with none of this package's code in their call graph.
+- **Taking a new upstream release is now a dependency bump plus a test run**,
+  not a merge. `tests/test_upstream_compat.py` is a seam contract that fails fast
+  and names the exact upstream symbol if a release moves something this package
+  builds on. See `docs/UPSTREAM.md`.
+- The RGBW+CCT `active_color_mode` fix is carried as a narrow, marked override
+  applied only to those bulbs while
+  `AiDot-Development-Team/python-AiDot#6` is open; it is removed once that merges,
+  after which those bulbs also run pure upstream code.
+
 ## [0.11.14]
 
 ### Fixed

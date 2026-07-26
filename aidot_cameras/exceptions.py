@@ -1,40 +1,20 @@
-"""AiDot exception hierarchy."""
+"""Exceptions for the camera layer.
 
+Upstream's exception hierarchy is re-exported so callers have one import site;
+only the camera-specific errors are defined here.
+"""
 
-class AidotError(Exception):
-    """Base exception for all AiDot errors."""
-
-
-class InvalidURL(AidotError):
-    """Invalid URL."""
-
-
-class HTTPError(AidotError):
-    """HTTP request failed."""
-
-
-class InvalidHost(AidotError):
-    """Invalid host."""
-
-
-class AidotAuthTokenExpired(AidotError):
-    """Auth token is invalid or expired."""
-
-
-class AidotAuthFailed(AidotError):
-    """Authentication failed."""
-
-
-class AidotNotLogin(AidotError):
-    """Client is not logged in."""
-
-
-class AidotUserOrPassIncorrect(AidotError):
-    """Username or password is incorrect."""
-
-
-class AidotOSError(AidotError):
-    """OS-level error from the AiDot library."""
+from aidot.exceptions import (  # noqa: F401 - deliberate re-export surface
+    AidotAuthFailed,
+    AidotAuthTokenExpired,
+    AidotError,
+    AidotNotLogin,
+    AidotOSError,
+    AidotUserOrPassIncorrect,
+    HTTPError,
+    InvalidHost,
+    InvalidURL,
+)
 
 
 class AidotCameraBusy(AidotError):

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "python-aidot-cameras"
-version = "0.11.14"
+version = "0.12.0"
 description = "Control AiDot/Leedarson WiFi lights and cameras (WebRTC streaming, two-way audio, PTZ, controls)"
 readme = "README.md"
 license = "MIT"
@@ -21,6 +21,10 @@ classifiers = [
 # leaving the consumer (or HA) free to use a newer version. Bump a floor only
 # after re-validating against it.
 dependencies = [
+    # Upstream lights library: this package EXTENDS it (subclass/override) and
+    # never edits its files, so taking a new upstream release is a version bump
+    # here plus the seam-contract test - not a merge.  See docs/UPSTREAM.md.
+    "python-aidot==0.3.55",
     "aiohttp>=3.9",
     "paho-mqtt>=1.6.1",
     "cryptography>=42.0",
@@ -30,7 +34,7 @@ dependencies = [
 
 [project.optional-dependencies]
 webrtc = [
-    # Streaming uses aiortc, VENDORED at aidot/_vendor/aiortc (byte-identical to
+    # Streaming uses aiortc, VENDORED at aidot_cameras/_vendor/aiortc (byte-identical to
     # aiortc 1.14.0, only vendored so Home Assistant 2026.7's pinned av==17 is
     # satisfiable - stock aiortc caps av<17, which makes [webrtc] uninstallable
     # there). These are aiortc's own runtime deps; the PyAV ceiling is widened to
@@ -56,7 +60,7 @@ webrtc = [
 # Standalone bridge: stream an AiDot camera into go2rtc (or any RTSP/HTTP
 # consumer) without Home Assistant. Streaming needs the `webrtc` extra
 # (aiortc et al.); `--list` works with the core deps alone.
-aidot-go2rtc = "aidot.__main__:main"
+aidot-go2rtc = "aidot_cameras.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/cbrightly/python-aidot-cameras"
@@ -64,21 +68,21 @@ Homepage = "https://github.com/cbrightly/python-aidot-cameras"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["aidot*"]
+include = ["aidot_cameras*"]
 
 [tool.setuptools.package-data]
-aidot = ["py.typed"]
+aidot_cameras = ["py.typed"]
 
 [tool.coverage.run]
 # Vendored third-party code (aiortc) is exercised via streaming, not our tests;
 # keep it out of the coverage report so the numbers reflect our own code.
-omit = ["aidot/_vendor/*"]
+omit = ["aidot_cameras/_vendor/*"]
 
 [tool.ruff]
 target-version = "py311"
 line-length = 88
 # Vendored third-party code (aiortc) is shipped byte-identical; never lint/format it.
-extend-exclude = ["aidot/_vendor"]
+extend-exclude = ["aidot_cameras/_vendor"]
 
 [tool.ruff.lint]
 # High-signal rules only; opinionated style (quotes, trailing commas, missing
@@ -108,4 +112,4 @@ ignore = [
 # Inherited ffmpeg streaming engine is process-based (Popen / subprocess poll /
 # SDP file write); a full non-blocking refactor needs on-device testing. The
 # engine is split across several camera/* modules, so this applies package-wide.
-"aidot/camera/*.py" = ["ASYNC110", "ASYNC220", "ASYNC221", "ASYNC230"]
+"aidot_cameras/camera/*.py" = ["ASYNC110", "ASYNC220", "ASYNC221", "ASYNC230"]

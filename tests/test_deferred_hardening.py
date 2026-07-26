@@ -10,10 +10,10 @@ import struct
 
 import pytest
 
-from aidot.aes_utils import aes_encrypt
-from aidot.camera.client import _mqtt_publish_delivered
-from aidot.camera.lan_control import _MAGIC, CameraLanClient, CameraLanError
-from aidot.camera.playback import CloudPlaybackSession
+from aidot_cameras.crypto import aes_encrypt
+from aidot_cameras.camera.client import _mqtt_publish_delivered
+from aidot_cameras.camera.lan_control import _MAGIC, CameraLanClient, CameraLanError
+from aidot_cameras.camera.playback import CloudPlaybackSession
 
 
 # -- _mqtt_device_cmd no longer reports success on a failed broker connection --

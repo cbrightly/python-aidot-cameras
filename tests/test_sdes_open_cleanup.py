@@ -11,7 +11,7 @@ import types
 
 import pytest
 
-from aidot.camera.client import CameraMixin
+from aidot_cameras.camera.client import CameraMixin
 
 
 def _wrapper_for(impl):

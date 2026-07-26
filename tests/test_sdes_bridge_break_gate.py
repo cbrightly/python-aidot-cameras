@@ -22,8 +22,8 @@ import inspect
 import select
 import socket
 
-import aidot.camera.sdes_open as sdes_open
-from aidot.camera.sdes_open import _bridge_should_break
+import aidot_cameras.camera.sdes_open as sdes_open
+from aidot_cameras.camera.sdes_open import _bridge_should_break
 
 
 # --------------------------------------------------------------------- #

@@ -1,9 +1,9 @@
 """Tests for rate-limiting the vendored H.264 decode-failure WARNING.
 
-``aidot._vendor.aiortc.codecs.h264`` logs a WARNING per corrupt/undecodable
+``aidot_cameras._vendor.aiortc.codecs.h264`` logs a WARNING per corrupt/undecodable
 frame (see h264.py:118). On a degrading link that has been observed to log
 172 identical lines in 11 minutes. The library attaches a rate-limiting
-``logging.Filter`` to that logger at import (aidot/__init__.py): the first
+``logging.Filter`` to that logger at import (aidot_cameras/__init__.py): the first
 WARNING passes immediately, subsequent WARNINGs within a window are
 suppressed and counted, and the first WARNING after the window elapses
 passes through carrying the suppressed count, so the corruption canary
@@ -11,8 +11,8 @@ stays visible without flooding.
 """
 import logging
 
-import aidot  # noqa: F401 - import triggers filter installation
-from aidot import (
+import aidot_cameras  # noqa: F401 - import triggers filter installation
+from aidot_cameras import (
     _H264_DECODE_LOGGER_NAME,
     _RateLimitingWarningFilter,
     _install_h264_decode_rate_limit_filter,
@@ -94,7 +94,7 @@ def test_non_warning_records_pass_through_untouched():
 
 
 def test_unrelated_logger_is_not_touched_by_the_installed_filter():
-    other = logging.getLogger("aidot._vendor.aiortc.codecs.not_h264")
+    other = logging.getLogger("aidot_cameras._vendor.aiortc.codecs.not_h264")
     assert not any(isinstance(f, _RateLimitingWarningFilter) for f in other.filters)
 
 

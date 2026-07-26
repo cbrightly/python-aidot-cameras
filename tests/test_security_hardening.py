@@ -6,9 +6,9 @@ import struct
 
 import pytest
 
-from aidot.camera.lan_control import _MAGIC, _MAX_FRAME_BODY, _read_frame
-from aidot.camera.models import _as_bool, _as_int
-from aidot.camera.protocol import _SPROP_DIR, _sprop_cache_path
+from aidot_cameras.camera.lan_control import _MAGIC, _MAX_FRAME_BODY, _read_frame
+from aidot_cameras.camera.models import _as_bool, _as_int
+from aidot_cameras.camera.protocol import _SPROP_DIR, _sprop_cache_path
 
 
 # -- models: malformed cloud attrs are skipped, not fatal ----------------------

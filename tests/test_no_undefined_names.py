@@ -16,7 +16,7 @@ import pytest
 
 _SRC = (
     pathlib.Path(__file__).resolve().parent.parent
-    / "src" / "aidot" / "device_client.py"
+    / "aidot_cameras" / "camera" / "client.py"
 )
 
 # Names pyflakes can't resolve because they're bound in an inner runtime scope
@@ -26,6 +26,9 @@ _ALLOWLIST = {"_enc_c8_sctp"}
 
 
 def test_device_client_has_no_undefined_names():
+    # Guard against the check going vacuous: pyflakes writes "no such file" to
+    # stderr and leaves stdout empty, so a stale path would silently pass.
+    assert _SRC.is_file(), f"source under test not found: {_SRC}"
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "pyflakes", str(_SRC)],

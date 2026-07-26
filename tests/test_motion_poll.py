@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot.device_client import DeviceClient
+from aidot_cameras.device_client import CameraDeviceClient
 
 
 class _FakeDC:
@@ -43,7 +43,7 @@ def _run(scripts):
     fired = []
     fake = _FakeDC(scripts)
     fake._motion_cb = lambda ev: fired.append(ev["eventUuid"])
-    asyncio.run(DeviceClient._motion_poll_loop(fake, 600))
+    asyncio.run(CameraDeviceClient._motion_poll_loop(fake, 600))
     return fired
 
 

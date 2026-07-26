@@ -6,10 +6,16 @@
 
 Control AIDOT WiFi lights **and cameras** from Python.
 
-This is a camera-capable fork of the upstream lights-only
-[`python-aidot`](https://github.com/AiDot-Development-Team/python-AiDot). It adds
-live WebRTC video streaming (DTLS and SDES-SRTP paths), snapshots, PTZ, camera
-controls, cloud recordings/thumbnails, and two-way (push-to-talk) audio.
+This **extends** the upstream lights-only
+[`python-aidot`](https://github.com/AiDot-Development-Team/python-AiDot), which it
+installs as a dependency rather than forking. It adds live WebRTC video streaming
+(DTLS and SDES-SRTP paths), snapshots, PTZ, camera controls, cloud
+recordings/thumbnails, and two-way (push-to-talk) audio.
+
+Upstream owns the `aidot` import name and handles non-camera devices (lights,
+plugs, switches) with none of this package's code in the path; everything here
+lives under `aidot_cameras`. Taking a new upstream release is a dependency bump
+plus a test run - see [`docs/UPSTREAM.md`](docs/UPSTREAM.md).
 
 This repository is the **library** (distribution name `python-aidot-cameras`).
 The Home Assistant custom component (`custom_components/aidot/`) lives in the
@@ -112,7 +118,7 @@ The library reads the following environment variables.
 ### Credentials
 
 Used by the credential helper (`aidot.credentials`); they take priority over any
-stored credentials file. See [`aidot/credentials.py`](aidot/credentials.py).
+stored credentials file. See [`aidot_cameras/credentials.py`](aidot_cameras/credentials.py).
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
@@ -122,7 +128,7 @@ stored credentials file. See [`aidot/credentials.py`](aidot/credentials.py).
 
 ### Camera streaming / tuning
 
-The most useful knobs read by the camera client (`aidot.camera.client`). Defaults
+The most useful knobs read by the camera client (`aidot_cameras.camera.client`). Defaults
 are chosen to work out of the box; override only when tuning. Finer-grained
 internal knobs (audio normalization, keyframe/PLI cadence, retry timing, SDES
 audio, idle release, the sprop cache path) are documented in

@@ -16,7 +16,7 @@ import struct
 import time
 from typing import Callable, List, Optional
 
-from ..aes_utils import aes_ecb_decrypt_str_key, aes_ecb_encrypt_str_key
+from ..crypto import aes_ecb_decrypt_str_key, aes_ecb_encrypt_str_key
 from .constants import (
     _CMD_HB_REQ, _CMD_HB_RES, _CMD_LOGIN_REQ, _CMD_LOGIN_RES,
     _CMD_PARAM, _CMD_STREAM_REQ, _CMD_STREAM_RES, _CMD_SUBCMD,
