@@ -2645,9 +2645,15 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
 
     async def _deregister_go2rtc(self) -> None:
         """Remove this camera's stream from go2rtc (best-effort)."""
-        base, pull = self._go2rtc_url, self._go2rtc_pull_url
+        base = self._go2rtc_url
         self._go2rtc_pull_url = None
-        if not (base and pull):
+        # Deliberately NOT gated on `pull`: go2rtc answers the register call with
+        # 400 when it cannot immediately validate the source (a camera that has
+        # not started producing yet), yet it still keeps the stream registered.
+        # ensure_stream reports that as failure, so pull stays None - and gating
+        # on it here leaked one dead stream per attempt, which then sat in go2rtc
+        # with a producer nothing was feeding.
+        if not base:
             return
         import aiohttp
         from .go2rtc import Go2rtcClient
@@ -3396,7 +3402,30 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             if not mqtt_url:
                 return None
             from .protocol import _PersistentMqtt
-            pm = _PersistentMqtt(mqtt_url, mqtt_user, mqtt_pwd, client_id)
+
+            def _invalidate_mqtt_credentials(rc) -> None:
+                """Drop the cached MQTT password so the next use re-fetches it.
+
+                The broker rotates this password on every account login and
+                allows one connection at a time, so any other login (the phone
+                app, a second Home Assistant, a script) invalidates ours.  The
+                cached copy lives in login_info, where it short-circuits the
+                credential fetch, so it has to be cleared or every retry reuses
+                the dead password.  The persistent client itself is dropped too,
+                so the next request rebuilds it with fresh credentials.
+                """
+                for key in ("mqttPassword", "mqttPwd"):
+                    if li.pop(key, None) is not None:
+                        _LOGGER.warning(
+                            "cleared the cached MQTT password after the broker "
+                            "rejected it (rc=%s); it will be re-fetched", rc,
+                        )
+                self._smarthome_auth = None
+                if li.get(LOGIN_INFO_PERSISTENT_MQTT_KEY) is pm:
+                    li.pop(LOGIN_INFO_PERSISTENT_MQTT_KEY, None)
+
+            pm = _PersistentMqtt(mqtt_url, mqtt_user, mqtt_pwd, client_id,
+                                 on_auth_failure=_invalidate_mqtt_credentials)
             li[LOGIN_INFO_PERSISTENT_MQTT_KEY] = pm
             return pm
 

@@ -1414,12 +1414,26 @@ class _PersistentMqtt:
     N operations cost ONE connect instead of N. The client_id is account-level,
     so exactly one of these should exist per account (per AidotClient)."""
 
-    def __init__(self, mqtt_url, mqtt_user, mqtt_pwd, client_id, ws_path="/mqtt"):
+    # Connect return codes meaning "these credentials are not acceptable"
+    # rather than "try again later".  4/5 are MQTT 3.1.1 (bad user/pass, not
+    # authorized); 134/135 are the MQTT 5 equivalents (0x86/0x87).  The AiDot
+    # broker rotates the MQTT password on every account login and allows one
+    # connection at a time, so a cached password can go stale at any moment -
+    # a login from the phone app is enough.  Retrying it forever is useless;
+    # the owner has to fetch a fresh credential.
+    _AUTH_REFUSAL_RCS = frozenset({4, 5, 134, 135})
+
+    def __init__(self, mqtt_url, mqtt_user, mqtt_pwd, client_id, ws_path="/mqtt",
+                 on_auth_failure=None):
         self._url = mqtt_url
         self._user = mqtt_user
         self._pwd = mqtt_pwd
         self._cid = client_id
         self._ws_path = ws_path
+        # Invoked (once per instance) when the broker rejects our credentials so
+        # the owner can invalidate its cache and re-authenticate.
+        self._on_auth_failure = on_auth_failure
+        self._auth_failed_reported = False
         self._client = None
         self._host = None
         self._port = None
@@ -1476,6 +1490,21 @@ class _PersistentMqtt:
                 except Exception:
                     _LOGGER.debug("persistent mqtt: resubscribe %s failed", t)
             self._connected.set()
+        elif rc in self._AUTH_REFUSAL_RCS:
+            # Stale credential: paho would retry this password forever.  Tell the
+            # owner once so it can invalidate its cache and re-authenticate.
+            _LOGGER.warning(
+                "persistent mqtt: broker rejected our credentials (rc=%s) - the "
+                "MQTT password has almost certainly been rotated by another "
+                "login; requesting a fresh one", rc,
+            )
+            if self._on_auth_failure and not self._auth_failed_reported:
+                self._auth_failed_reported = True
+                try:
+                    self._on_auth_failure(rc)
+                except Exception:
+                    _LOGGER.debug("persistent mqtt: on_auth_failure raised",
+                                  exc_info=True)
         else:
             _LOGGER.warning("persistent mqtt: broker refused rc=%s", rc)
 
