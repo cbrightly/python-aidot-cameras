@@ -261,3 +261,28 @@ def test_a_refused_persistent_client_stops_reconnecting_and_releases_waiters():
     assert pm._ensure_started_sync(timeout=5.0) is False
     assert time.monotonic() - started < 1.0
     assert pm._client is None
+
+
+def test_a_password_already_leaked_into_a_stored_entry_is_not_carried_forward():
+    # Found on a real account: an entry written by an earlier version still had
+    # the credential at _userConfigRaw.mqtt.password.  That blob is loaded back
+    # verbatim from the stored token, so sanitizing only where the response is
+    # fetched would keep re-persisting the leaked value for the life of the
+    # install.  The serializable view has to strip it too.
+    from aidot_cameras.client import CameraClient
+
+    client = CameraClient.__new__(CameraClient)
+    client.login_info = {
+        "id": "u1",
+        "accessToken": "AT",
+        "mqttPassword": "P",                     # top level, stripped already
+        "_userConfigRaw": {                      # the nested copy, from disk
+            "mqtt": {"password": "P", "clientId": "app-u1"},
+            "mqttPassword": "P",
+            "mqttClientId": "app-u1",
+        },
+    }
+    out = CameraClient.serializable_login_info(client)
+    assert "P" not in repr(out)
+    assert out["_userConfigRaw"]["mqttClientId"] == "app-u1"   # still usable
+    assert out["_userConfigRaw"]["mqtt"]["clientId"] == "app-u1"

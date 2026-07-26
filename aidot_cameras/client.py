@@ -271,12 +271,23 @@ class CameraClient(_UpstreamAidotClient):
         Anything that persists ``login_info`` - this library's own standalone
         CLI, or an integration's config-entry storage - should call this instead
         of serializing ``login_info`` directly.
+
+        The MQTT password is stripped here rather than only where it is fetched.
+        Confirmed live on a real account: an entry written by an earlier version
+        still had the credential nested inside ``_userConfigRaw``, and that blob
+        is loaded back verbatim from the stored token, so sanitizing only on the
+        way in would carry an already-leaked password forward for the life of the
+        install.  Stripping on the way out is the one choke point every persist
+        goes through.
         """
-        return {
+        out = {
             k: v
             for k, v in self.login_info.items()
             if k not in RUNTIME_ONLY_LOGIN_INFO_KEYS
         }
+        if "_userConfigRaw" in out:
+            out["_userConfigRaw"] = _without_mqtt_password(out["_userConfigRaw"])
+        return out
 
     # ---------------------------------------------------------------- #
     # token lifecycle
