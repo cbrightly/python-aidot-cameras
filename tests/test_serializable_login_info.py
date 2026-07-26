@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aidot_cameras.client import AidotClient
 from aidot_cameras.const import (
+    LOGIN_INFO_MQTT_PASSWORD_KEYS,
     LOGIN_INFO_PERSISTENT_MQTT_KEY,
     LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
     RUNTIME_ONLY_LOGIN_INFO_KEYS,
@@ -45,10 +46,11 @@ def test_serializable_login_info_strips_runtime_keys():
     result = c.serializable_login_info()
     assert LOGIN_INFO_PERSISTENT_MQTT_KEY not in result
     assert LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY not in result
-    # Everything else survives unchanged.
+    # The MQTT password is a rotating cache, not state, so it is stripped too -
+    # persisting it made a stale credential survive restarts.  Real account
+    # state survives unchanged.
     assert result == {
         "id": "u1", "accessToken": "tok", "refreshToken": "rtok",
-        "mqttPassword": "mp",
     }
 
 
@@ -66,17 +68,22 @@ def test_serializable_login_info_is_actually_json_dumpable():
     json.dumps(c.serializable_login_info())  # must not raise
 
 
-def test_serializable_login_info_noop_when_no_runtime_keys_present():
-    # Common case (no persistent-MQTT connection created yet): unaffected.
+def test_serializable_login_info_keeps_real_state_when_no_runtime_keys_present():
+    # Common case (no persistent-MQTT connection created yet): only the cached
+    # MQTT password is dropped; every piece of real account state survives.
     c = _client_with_login_info({})
-    assert c.serializable_login_info() == c.login_info
+    result = c.serializable_login_info()
+    assert result == {"id": "u1", "accessToken": "tok", "refreshToken": "rtok"}
+    for key in LOGIN_INFO_MQTT_PASSWORD_KEYS:
+        assert key not in result
 
 
-def test_runtime_only_keys_constant_matches_persistent_mqtt_key_names():
-    # Locks the two literal key names camera/client.py's _get_persistent_mqtt
-    # actually writes (see LOGIN_INFO_PERSISTENT_MQTT_KEY /
-    # LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY) against the shared frozenset, so a
-    # rename on one side without the other can't silently reopen this bug.
+def test_runtime_only_keys_constant_matches_the_key_names_written():
+    # Locks the literal key names camera/client.py actually writes - the
+    # persistent-MQTT client and lock (_get_persistent_mqtt) plus the cached
+    # MQTT password - against the shared frozenset, so a rename on one side
+    # without the other cannot silently reopen either bug.
     assert RUNTIME_ONLY_LOGIN_INFO_KEYS == {
         LOGIN_INFO_PERSISTENT_MQTT_KEY, LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
+        *LOGIN_INFO_MQTT_PASSWORD_KEYS,
     }

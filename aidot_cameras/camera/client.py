@@ -3414,7 +3414,8 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 the dead password.  The persistent client itself is dropped too,
                 so the next request rebuilds it with fresh credentials.
                 """
-                for key in ("mqttPassword", "mqttPwd"):
+                from ..const import LOGIN_INFO_MQTT_PASSWORD_KEYS
+                for key in LOGIN_INFO_MQTT_PASSWORD_KEYS:
                     if li.pop(key, None) is not None:
                         _LOGGER.warning(
                             "cleared the cached MQTT password after the broker "
