@@ -46,6 +46,13 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Upstream's base client, re-exported under its plain name.  `get_device_client`
+# hands one of these back for every non-camera device, so consumers (the Home
+# Assistant integration) need the type to annotate against - and should get it
+# from here rather than importing `aidot` directly, which for them is an
+# undeclared transitive dependency.  This is upstream's class, not a subclass.
+DeviceClient = _UpstreamDeviceClient
+
 
 class DeviceStatusData(_UpstreamDeviceStatusData):
     """Upstream status plus the carried `active_color_mode` tracking."""

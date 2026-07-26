@@ -36,9 +36,11 @@ from aidot.const import (  # noqa: F401 - deliberate re-export surface
     CONF_SERVICE_MODULES,
     CONF_TERMINAL,
     CONF_TOKEN,
+    DEFAULT_COUNTRY_CODE,
     DEFAULT_REGION,
     Identity,
     PUBLIC_KEY_PEM,
+    SUPPORTED_COUNTRY_CODES,
 )
 
 BASE_URL = API_URL_TEMPLATE.format(region=DEFAULT_REGION)
