@@ -1,24 +1,33 @@
 """Regression tests for the post-upstream-sync hardening fixes.
 
-Covers: the connect() login gate, reconnect chain dedup/backoff, discovery
-quiescence after close(), the camera filter on discovered IPs, status
-None-defaults, the dict/model update dispatch, and the DeviceClient/
-CameraMixin name-collision tripwire for future upstream merges.
+Covers: discovery quiescence after close(), the camera filter on discovered IPs,
+status None-defaults, the dict/model update dispatch, and the upstream
+DeviceClient / CameraMixin name-collision tripwire for future upstream bumps.
+
+The connect() login gate and the reconnect chain dedup/backoff that this file
+also used to cover were fork-only hardening of a fork-only connect()/login()
+pair.  Upstream owns the connection lifecycle now (a DeviceState machine plus
+its own _reconnect_timer) and we do not override any of it, so those two tests
+were asserting code this package no longer contains; they were dropped rather
+than rewritten against upstream internals.
 """
 
 import asyncio
 import os
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-from aidot.camera.client import CameraMixin, CameraStatusData
-from aidot.client import _is_camera
-from aidot.device_client import DeviceClient, DeviceStatusData
-from aidot.discover import Discover
+from aidot.device_client import DeviceClient as UpstreamDeviceClient
+from aidot.models.auth_model import UserInformation
 from aidot.models.device_client_model import DeviceAttr
+from aidot.models.device_model import DeviceModel
+
+from aidot_cameras.camera.client import CameraMixin, CameraStatusData
+from aidot_cameras.client import _is_camera
+from aidot_cameras.device_client import CameraDeviceClient, DeviceStatusData
+from aidot_cameras.discover import Discover
 
 
 DEVICE = {
@@ -34,69 +43,14 @@ USER = {"id": "user1", "region": "us"}
 
 
 def make_dc(device=DEVICE):
-    return DeviceClient(dict(device), dict(USER))
-
-
-# --------------------------------------------------------------------------- #
-# connect() gate
-# --------------------------------------------------------------------------- #
-
-def test_connect_gate_ignores_cloud_seeded_online(monkeypatch):
-    """A swallowed login failure must not report as connected just because
-    the cloud device dict said online=true."""
-    dc = make_dc()
-    dc.status.online = True  # cloud-seeded (update_status_from_device)
-
-    class _W:
-        def get_extra_info(self, _):
-            import socket as _s
-            s = _s.socket()
-            return s
-
-    async def fake_open(*a, **k):
-        return object(), _W()
-
-    async def fake_login(self):
-        return  # login fails silently (exception swallowed inside login())
-
-    monkeypatch.setattr(asyncio, "open_connection", fake_open)
-    monkeypatch.setattr(DeviceClient, "login", fake_login)
-    asyncio.run(dc.connect("127.0.0.1"))
-    assert dc.connect_and_login is False
-
-
-# --------------------------------------------------------------------------- #
-# reconnect chain
-# --------------------------------------------------------------------------- #
-
-def test_schedule_reconnect_single_chain_and_backoff():
-    async def run():
-        dc = make_dc()
-        dc._ip_address = "127.0.0.1"
-        dc._last_login_attempt = time.monotonic()  # recent attempt -> backoff
-
-        dc._schedule_reconnect()
-        first_handle = dc._reconnect_handle
-        assert first_handle is not None
-        assert dc._login_task is None  # backoff floor suppressed immediate login
-
-        dc._schedule_reconnect()  # concurrent reset path
-        assert dc._reconnect_handle is first_handle  # no second chain
-
-        first_handle.cancel()
-
-    asyncio.run(run())
-
-
-def test_schedule_reconnect_noop_after_close():
-    async def run():
-        dc = make_dc()
-        dc._ip_address = "127.0.0.1"
-        dc._is_close = True
-        dc._schedule_reconnect()
-        assert dc._reconnect_handle is None
-
-    asyncio.run(run())
+    # Upstream's constructor takes typed models; the raw dicts still go through
+    # for the camera layer, exactly as CameraClient.get_device_client does.
+    return CameraDeviceClient(
+        DeviceModel.from_json(data=dict(device)),
+        UserInformation.from_json(data=dict(USER)),
+        raw_device=dict(device),
+        login_info=dict(USER),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -172,18 +126,21 @@ def test_camera_state_carry_forward():
 
 def test_no_silent_mro_shadowing():
     """If upstream adds a DeviceClient method whose name CameraMixin already
-    defines, the upstream version silently shadows the camera one after a
-    conflict-free merge.  Keep this intersection explicitly reviewed."""
+    defines, the upstream version wins for every name the mixin does not itself
+    define first - a silent behavior change on an upstream version bump.  Keep
+    this intersection explicitly reviewed."""
     intentional = {
-        # device_client.py deliberately overrides/joins these:
+        # CameraDeviceClient (not the mixin) deliberately overrides these, so a
+        # name shared with upstream there is intended, not accidental:
         "__init__",
     }
     # Compare only non-dunder names: interpreter-added dunders vary by
     # Python version (3.13 adds __firstlineno__/__static_attributes__).
-    core = {n for n in DeviceClient.__dict__ if not n.startswith("__")}
+    core = {n for n in UpstreamDeviceClient.__dict__ if not n.startswith("__")}
     camera = {n for n in CameraMixin.__dict__ if not n.startswith("__")}
     collisions = (core & camera) - intentional
     assert collisions == set(), (
-        f"DeviceClient now shadows CameraMixin names {sorted(collisions)}; "
+        f"upstream DeviceClient now shadows CameraMixin names "
+        f"{sorted(collisions)}; "
         "verify intent and update this test's allowlist"
     )

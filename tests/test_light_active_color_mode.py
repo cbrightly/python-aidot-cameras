@@ -7,7 +7,7 @@ together, which is ambiguous about which mode is actually active. This
 must update the retained values but must NOT change active_color_mode.
 """
 
-from aidot.device_client import DeviceStatusData
+from aidot_cameras.device_client import DeviceStatusData
 from aidot.models.device_client_model import DeviceAttr
 
 

@@ -10,24 +10,35 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot.device_client import DeviceClient
+from aidot.models.auth_model import UserInformation
+from aidot.models.device_model import DeviceModel
+
+from aidot_cameras.device_client import CameraDeviceClient
 
 
 def test_is_auth_error_detects_21026_and_login_again():
-    assert DeviceClient._is_auth_error({"code": 21026}) is True
-    assert DeviceClient._is_auth_error({"code": "21026"}) is True
-    assert DeviceClient._is_auth_error({"code": 21027}) is True
-    assert DeviceClient._is_auth_error({"desc": "Please login again."}) is True
+    assert CameraDeviceClient._is_auth_error({"code": 21026}) is True
+    assert CameraDeviceClient._is_auth_error({"code": "21026"}) is True
+    assert CameraDeviceClient._is_auth_error({"code": 21027}) is True
+    assert CameraDeviceClient._is_auth_error({"desc": "Please login again."}) is True
     # Not auth errors:
-    assert DeviceClient._is_auth_error({"code": 200}) is False
-    assert DeviceClient._is_auth_error({"code": 200, "desc": "Success."}) is False
-    assert DeviceClient._is_auth_error(None) is False
-    assert DeviceClient._is_auth_error([]) is False
+    assert CameraDeviceClient._is_auth_error({"code": 200}) is False
+    assert CameraDeviceClient._is_auth_error({"code": 200, "desc": "Success."}) is False
+    assert CameraDeviceClient._is_auth_error(None) is False
+    assert CameraDeviceClient._is_auth_error([]) is False
 
 
 def _make_dc():
+    # Upstream's constructor takes typed models; the camera layer still needs the
+    # raw cloud records, so both are handed over exactly as CameraClient does.
     dev = {"id": "devX", "modelId": "LK.IPC.A001513", "aesKey": [None]}
-    return DeviceClient(dev, {"id": "u1", "accessToken": "stale"})
+    user = {"id": "u1", "accessToken": "stale"}
+    return CameraDeviceClient(
+        DeviceModel.from_json(data=dev),
+        UserInformation.from_json(data=user),
+        raw_device=dev,
+        login_info=dict(user),
+    )
 
 
 def test_refresh_auth_token_invokes_cb_and_clears_caches():

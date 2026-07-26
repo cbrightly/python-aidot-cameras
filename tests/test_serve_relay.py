@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot.camera.protocol import _ServeRelay, _grab_free_port, _rewrite_serve_port
+from aidot_cameras.camera.protocol import _ServeRelay, _grab_free_port, _rewrite_serve_port
 
 
 @pytest.fixture(autouse=True)

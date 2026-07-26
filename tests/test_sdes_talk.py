@@ -19,7 +19,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot.device_client import SdesSession
+from aidot_cameras.device_client import SdesSession
 
 
 class _FakeProc:

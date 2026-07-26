@@ -6,7 +6,7 @@ probe cadence by the offline pause and should not drip WARNINGs every probe.
 """
 import types
 
-from aidot.camera import client as camclient
+from aidot_cameras.camera import client as camclient
 
 
 def _dc(online, explicit):

@@ -10,7 +10,7 @@ Repo convention: no pytest-asyncio; drive with asyncio.run().
 """
 import asyncio
 
-from aidot.camera.webrtc_open import _wait_or_event
+from aidot_cameras.camera.webrtc_open import _wait_or_event
 
 
 def test_returns_true_immediately_when_event_already_set():

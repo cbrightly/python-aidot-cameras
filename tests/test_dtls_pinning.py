@@ -7,7 +7,7 @@ absence of exactly this test is how the earlier fail-open bugs survived.
 
 import pytest
 
-from aidot.camera.webrtc_open import (
+from aidot_cameras.camera.webrtc_open import (
     _dtls_pin_matches,
     _normalize_fingerprint,
     _verified_dtls_fingerprint,

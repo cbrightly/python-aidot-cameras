@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot.device_client import _parse_alarm_event, _CAMERA_ALARM_TYPES
+from aidot_cameras.device_client import _parse_alarm_event, _CAMERA_ALARM_TYPES
 
 
 def test_motion_event_from_attr():

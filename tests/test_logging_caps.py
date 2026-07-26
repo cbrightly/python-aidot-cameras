@@ -1,7 +1,7 @@
 """Importing the library caps the chatty per-packet/per-message loggers.
 
 aiortc's RTP receiver/sender log every media packet at DEBUG, so they are capped
-at INFO: enabling DEBUG on the parent ``aidot`` logger (the normal way to
+at INFO: enabling DEBUG on the parent ``aidot_cameras`` logger (the normal way to
 diagnose the integration) would otherwise unleash thousands of lines per
 second, which on a microSD host can starve the recorder.
 
@@ -16,12 +16,12 @@ respected.
 """
 import logging
 
-import aidot  # noqa: F401 - import triggers the logger caps
-from aidot import _cap_external_loggers
+import aidot_cameras  # noqa: F401 - import triggers the logger caps
+from aidot_cameras import _cap_external_loggers
 
 INFO_CAPPED = (
-    "aidot._vendor.aiortc.rtcrtpreceiver",
-    "aidot._vendor.aiortc.rtcrtpsender",
+    "aidot_cameras._vendor.aiortc.rtcrtpreceiver",
+    "aidot_cameras._vendor.aiortc.rtcrtpsender",
 )
 
 WARNING_CAPPED = (
@@ -43,8 +43,8 @@ def test_aioice_loggers_capped_to_warning():
 
 
 def test_aidot_debug_does_not_unleash_the_aiortc_packet_firehose():
-    # Even with the parent 'aidot' logger at DEBUG, the per-packet DEBUG is off.
-    aidot_logger = logging.getLogger("aidot")
+    # Even with the parent 'aidot_cameras' logger at DEBUG, the per-packet DEBUG is off.
+    aidot_logger = logging.getLogger("aidot_cameras")
     original_level = aidot_logger.level
     try:
         aidot_logger.setLevel(logging.DEBUG)
@@ -55,8 +55,8 @@ def test_aidot_debug_does_not_unleash_the_aiortc_packet_firehose():
 
 
 def test_aidot_debug_does_not_unleash_the_aioice_info_flood():
-    # Even with the parent 'aidot' logger at DEBUG, aioice's INFO flood is off.
-    aidot_logger = logging.getLogger("aidot")
+    # Even with the parent 'aidot_cameras' logger at DEBUG, aioice's INFO flood is off.
+    aidot_logger = logging.getLogger("aidot_cameras")
     original_level = aidot_logger.level
     try:
         aidot_logger.setLevel(logging.DEBUG)

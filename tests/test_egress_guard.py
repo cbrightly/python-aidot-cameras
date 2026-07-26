@@ -1,7 +1,7 @@
 """CLI-EGRESS-001: warn when decrypted media is served on a non-loopback bind."""
 import logging
 
-from aidot.camera.protocol import (
+from aidot_cameras.camera.protocol import (
     _serve_host,
     _is_loopback_serve_host,
     _warn_lan_serve,
@@ -30,14 +30,14 @@ def test_is_loopback_serve_host():
 
 def test_warn_fires_on_non_loopback(caplog, monkeypatch):
     monkeypatch.delenv("AIDOT_ALLOW_LAN_SERVE", raising=False)
-    with caplog.at_level(logging.WARNING, logger="aidot.camera.protocol"):
+    with caplog.at_level(logging.WARNING, logger="aidot_cameras.camera.protocol"):
         _warn_lan_serve("0.0.0.0", context="t")
     assert any("DECRYPTED" in r.getMessage() for r in caplog.records)
 
 
 def test_no_warn_on_loopback(caplog, monkeypatch):
     monkeypatch.delenv("AIDOT_ALLOW_LAN_SERVE", raising=False)
-    with caplog.at_level(logging.WARNING, logger="aidot.camera.protocol"):
+    with caplog.at_level(logging.WARNING, logger="aidot_cameras.camera.protocol"):
         _warn_lan_serve("127.0.0.1", context="t")
         _warn_lan_serve(None, context="t")
     assert not caplog.records
@@ -45,6 +45,6 @@ def test_no_warn_on_loopback(caplog, monkeypatch):
 
 def test_optout_env_silences(caplog, monkeypatch):
     monkeypatch.setenv("AIDOT_ALLOW_LAN_SERVE", "1")
-    with caplog.at_level(logging.WARNING, logger="aidot.camera.protocol"):
+    with caplog.at_level(logging.WARNING, logger="aidot_cameras.camera.protocol"):
         _warn_lan_serve("192.168.1.5", context="t")
     assert not caplog.records

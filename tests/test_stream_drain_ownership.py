@@ -9,7 +9,7 @@ during a live view) no longer reaps, and kills, the live session's drain.
 import asyncio
 import types
 
-from aidot.camera.client import CameraMixin
+from aidot_cameras.camera.client import CameraMixin
 
 
 class _FakeFut:

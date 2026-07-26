@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import aidot.camera.client as cc
+import aidot_cameras.camera.client as cc
 
 _CAM = next(v for v in vars(cc).values()
             if isinstance(v, type) and "_resolve_idle_secs" in v.__dict__)

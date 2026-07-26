@@ -10,7 +10,7 @@ import queue
 import threading
 import time
 
-import aidot.camera.protocol as proto
+import aidot_cameras.camera.protocol as proto
 
 
 class _FakeMsg:

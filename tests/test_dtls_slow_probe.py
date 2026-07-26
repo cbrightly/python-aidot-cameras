@@ -15,14 +15,14 @@ import asyncio
 import time
 from types import SimpleNamespace
 
-import aidot.camera.client as camera_client
-from aidot.camera.client import (
+import aidot_cameras.camera.client as camera_client
+from aidot_cameras.camera.client import (
     CameraMixin,
     _in_slow_probe,
     _probe_interval,
     _should_log_slow_probe,
 )
-from aidot.camera.protocol import ReconnectPacer
+from aidot_cameras.camera.protocol import ReconnectPacer
 
 _THRESHOLD = 5
 _NORMAL_DELAY = 40.0

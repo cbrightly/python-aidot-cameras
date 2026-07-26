@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot.camera.client import _build_sdes_serve_cmd as build
+from aidot_cameras.camera.client import _build_sdes_serve_cmd as build
 
 
 def _idx(cmd, item):

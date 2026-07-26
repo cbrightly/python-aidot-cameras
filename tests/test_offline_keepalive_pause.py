@@ -6,9 +6,9 @@ import asyncio
 import time
 from types import SimpleNamespace
 
-import aidot.camera.client as camera_client
-from aidot.camera.client import CameraMixin
-from aidot.device_client import DeviceStatusData
+import aidot_cameras.camera.client as camera_client
+from aidot_cameras.camera.client import CameraMixin
+from aidot_cameras.device_client import DeviceStatusData
 
 
 def _stub(online: bool, explicit: bool, streaming: bool = True) -> SimpleNamespace:

@@ -11,10 +11,10 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# _SPROP_DIR + sprop helpers live in aidot.camera.protocol after the split;
+# _SPROP_DIR + sprop helpers live in aidot_cameras.camera.protocol after the split;
 # patch the dir there (the module where the helpers read it).
-import aidot.camera.protocol as _proto
-from aidot.device_client import (
+import aidot_cameras.camera.protocol as _proto
+from aidot_cameras.device_client import (
     _extract_param_sets_from_rtp,
     _build_sprop,
     _load_sprop,

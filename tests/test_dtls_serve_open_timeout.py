@@ -1,5 +1,5 @@
 """AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S: env-tunable timeout for the DTLS serve
-loop's async_open_webrtc_stream call (aidot/camera/client.py, ~line 3502).
+loop's async_open_webrtc_stream call (aidot_cameras/camera/client.py, ~line 3502).
 
 Without a ``timeout`` kwarg that call is hard-pinned to the 30.0s default in
 _async_open_webrtc_stream_impl (webrtc_open.py ~146-151); a dead/wedged DTLS
@@ -12,8 +12,8 @@ Repo convention: no pytest-asyncio; drive coroutines with asyncio.run().
 import asyncio
 import types
 
-import aidot.camera.client as camera_client
-from aidot.camera.client import CameraMixin, _parse_env_float
+import aidot_cameras.camera.client as camera_client
+from aidot_cameras.camera.client import CameraMixin, _parse_env_float
 
 
 # --- _parse_env_float: the try/except-fallback idiom used elsewhere in this

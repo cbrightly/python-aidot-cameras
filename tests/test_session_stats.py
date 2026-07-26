@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot.camera.webrtc import WebRTCSession
+from aidot_cameras.camera.webrtc import WebRTCSession
 
 
 def _cand(typ, host, port, transport="udp"):

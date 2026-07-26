@@ -18,9 +18,9 @@ import asyncio
 import inspect
 import logging
 
-import aidot.camera.sdes_open as sdes_open
-from aidot.camera.sdes_open import _classify_ffmpeg_exit
-from aidot.camera.sdes import SdesSession
+import aidot_cameras.camera.sdes_open as sdes_open
+from aidot_cameras.camera.sdes_open import _classify_ffmpeg_exit
+from aidot_cameras.camera.sdes import SdesSession
 
 
 def test_signal_death_during_teardown_is_quiet():

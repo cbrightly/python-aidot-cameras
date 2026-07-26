@@ -10,7 +10,7 @@ import stat
 
 import pytest
 
-from aidot.__main__ import _read_token_file, _write_token_file
+from aidot_cameras.__main__ import _read_token_file, _write_token_file
 
 
 def test_write_token_file_round_trips_and_is_0600(tmp_path):

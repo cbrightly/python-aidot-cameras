@@ -1,4 +1,4 @@
-"""Unit tests for DeviceClient.async_speak - deterministic, no network.
+"""Unit tests for CameraDeviceClient.async_speak - deterministic, no network.
 
 Validates that async_speak reuses a warm talk-capable session, drives the PCM
 provider through to exhaustion (None), and stops talk afterwards; and that it
@@ -13,7 +13,7 @@ import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot.device_client import DeviceClient
+from aidot_cameras.device_client import CameraDeviceClient
 
 
 class _FakeSession:
@@ -45,7 +45,7 @@ class _FakeSession:
 
 
 def _run(dc, provider, **kw):
-    return asyncio.run(DeviceClient.async_speak(dc, provider, **kw))
+    return asyncio.run(CameraDeviceClient.async_speak(dc, provider, **kw))
 
 
 def test_reuses_warm_session_and_drives_provider():

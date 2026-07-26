@@ -9,7 +9,7 @@ webrtcResp branch is dead, so the wait is pure dead time (~2s) and is zeroed.
 The model -> skip_liveplay mapping itself is covered by test_sdes_fast_liveplay
 (A001064 -> False, A001513 -> True); this locks skip_liveplay -> wait timeout.
 """
-from aidot.camera.sdes_open import _sdes_echo_wait_timeout
+from aidot_cameras.camera.sdes_open import _sdes_echo_wait_timeout
 
 
 def test_skip_liveplay_zeros_the_wait():
