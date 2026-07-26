@@ -464,6 +464,13 @@ class CameraClient(_UpstreamAidotClient):
         The HTTP calls themselves are still upstream's ``CloudApi``.
         """
         final_device_list: list[dict[str, Any]] = []
+        # Devices upstream's client cannot construct (no usable aesKey): Zigbee
+        # sub-devices, remotes, and other accessories that were never supported
+        # here.  They are counted and reported once, not warned about
+        # individually - an account with a dozen Zigbee sensors would otherwise
+        # log a dozen WARNINGs on every refresh for devices nothing was ever
+        # going to use.
+        unbuildable: dict[str, int] = {}
         houses = await self._cloud_api.get_houses() or []
         for house in houses:
             if house.get(CONF_IS_OWNER) is False:
@@ -473,11 +480,19 @@ class CameraClient(_UpstreamAidotClient):
                 if _is_camera_device(device) or _upstream_can_build(device):
                     final_device_list.append(device)
                 else:
-                    _LOGGER.warning(
-                        "skipping device %s (%s): no AES key, upstream's device "
-                        "client cannot be built for it",
-                        device.get(CONF_ID), device.get(CONF_MODEL_ID),
+                    model = device.get(CONF_MODEL_ID) or "unknown"
+                    unbuildable[model] = unbuildable.get(model, 0) + 1
+                    _LOGGER.debug(
+                        "skipping device %s (%s): no usable aesKey, upstream's "
+                        "device client cannot be built for it",
+                        device.get(CONF_ID), model,
                     )
+        if unbuildable:
+            _LOGGER.info(
+                "skipped %d device(s) with no usable aesKey (not supported here): %s",
+                sum(unbuildable.values()),
+                ", ".join(f"{m} x{n}" for m, n in sorted(unbuildable.items())),
+            )
 
         product_ids = ",".join(
             sorted(
