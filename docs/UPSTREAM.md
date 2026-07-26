@@ -56,6 +56,42 @@ returns a plain upstream `DeviceClient` for anything that is not a camera, so
 lights run upstream's code with none of ours in the path - except for the
 carried overrides below.
 
+## Upstream is LAN-only, by design
+
+This is the single most important thing to know before proposing a "cloud mode"
+for lights, plugs or switches.  Upstream's transport model is: **the cloud for
+discovery and auth, the LAN for everything else.**
+
+- `aidot.api.cloud_api.CloudApi` exposes only `login`, `refresh_token`,
+  `get_houses`, `get_devices`, `get_products`.  There is **no device-control
+  endpoint** - it is an inventory and authentication API.
+- `DeviceClient.send_dev_attr()` refuses outright unless the LAN session is
+  authenticated: `if self._state != DeviceState.AUTHENTICATED: raise
+  ConnectionError("Device offline")`.  Every setter (`async_set_cct`,
+  `async_set_rgbw`, `async_set_brightness`, `async_turn_on/off`) goes through it.
+- `write_request()` frames an AES-encrypted packet over **TCP:10000**.
+- `status.online` therefore means "the LAN control channel is up", not "the cloud
+  says the device is reachable".  A device that is powered and visible in the
+  AiDot app but not reachable over the LAN is correctly reported offline.
+
+Consequence for consumers: a device off the LAN cannot be controlled at all, and
+its on/off/colour cannot be read.  Do not paper over that by copying the cloud's
+reachability flag onto it - that yields an entity that looks controllable, shows
+a fabricated state, and raises `ConnectionError` when touched.  Report state as
+unknown instead.
+
+**Could a cloud transport be added?** The camera layer does control cameras over
+the account MQTT broker (`iot/v1/c/{deviceId}/device/setDevAttrReq`), and that
+topic is device-generic, so cloud *control* of a bulb is plausible.  But a
+read-only broker probe over a 300 s window on a real account (67 messages,
+`broker connected rc=0`) saw **only camera traffic** - `IPC/iceCandidateReq`,
+`IPC/webrtcResp`, `device/setDevAttrResp`, and camera attributes
+(`LightOnOff`, `siren_level`, `strobe_*`, `warning_*`).  **No bulb ever published
+`OnOff`, `Dimming`, `CCT` or `RGBW`.**  So the cloud carries no light state on
+that account, and a cloud mode could fix availability but never on/off or colour
+- which is worse than reporting the device unreachable.  Re-run
+`tools/cloud_state_probe.py` before revisiting this conclusion.
+
 ## Carried overrides (self-liquidating)
 
 A "carried override" is a fix we needed before upstream shipped it.  Each one is

@@ -4,6 +4,23 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.1]
+
+### Changed
+- **Devices this library cannot build a client for are summarized, not warned
+  about individually.** An account with Zigbee sub-devices, remotes or other
+  accessories that carry no usable `aesKey` logged one WARNING per device on
+  every device-list refresh (21 of them on a real account) for devices that were
+  never supported here. Each is now DEBUG, with a single INFO line naming the
+  models and counts.
+
+### Documented
+- **`docs/UPSTREAM.md` now records that upstream is LAN-only by design**: its
+  cloud API is inventory plus auth with no control endpoint, and every setter
+  refuses unless the LAN session is authenticated. Includes the read-only broker
+  probe evidence showing the cloud carries no bulb state, so consumers do not
+  mistake cloud reachability for controllability.
+
 ## [0.12.0]
 
 ### Changed
