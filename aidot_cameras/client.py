@@ -3,8 +3,9 @@
 ``CameraClient`` extends upstream's ``aidot.client.AidotClient``.  The design
 rule is that our code must not be in the path for a device we did not add
 support for: a light, plug or switch goes through ``super().get_device_client``
-and ends up holding a plain upstream ``DeviceClient`` with no camera code
-anywhere in its call graph.
+and ends up holding a plain upstream ``DeviceClient``, so no camera code RUNS
+in its path.  (The camera package is still imported - importing this module
+imports it unconditionally - so the guarantee is about execution, not imports.)
 
 ``get_device_client`` is the single dispatch seam - upstream constructs device
 clients nowhere else - so it is the only place that decides between a camera
@@ -251,7 +252,20 @@ class CameraClient(_UpstreamAidotClient):
     # ---------------------------------------------------------------- #
 
     def _on_token_refreshed(self) -> None:
-        """Upstream's refresh hook, plus rescheduling the next proactive refresh."""
+        """Sync the rotated token into login_info, then run upstream's hook.
+
+        Upstream writes the new token to ``user_info.accessToken``, a dataclass
+        field; the camera layer reads it out of the shared ``login_info`` dict,
+        which only picks it up when the property getter below runs.  Every
+        refresh funnels through this callback - the reactive one behind
+        ``CloudApi.get()``'s 401 retry as well as our ``async_ensure_token()`` -
+        so this is the one place that guarantees a camera never retries with the
+        token that just expired.
+
+        The sync must happen BEFORE ``super()``, which fires ``_token_fresh_cb``:
+        that callback is what persists the account, and it reads ``login_info``.
+        """
+        _ = self.login_info  # the getter IS the sync; see the property below
         super()._on_token_refreshed()
         self._schedule_proactive_refresh(self._token_ttl())
 
@@ -315,13 +329,21 @@ class CameraClient(_UpstreamAidotClient):
         finally:
             if self._ensure_token_inflight is fut:
                 self._ensure_token_inflight = None
+            # When nobody else joined this single flight, the future's exception
+            # is never consumed and asyncio logs "exception was never retrieved"
+            # at GC time.  The caller already got it re-raised above; retrieve it
+            # here so the future dies clean.
+            if fut.done() and not fut.cancelled():
+                fut.exception()
 
     async def _do_ensure_token(self) -> bool:
         """Refresh the token (refresh-token first, then headless full re-login).
 
-        Both paths update ``user_info`` in place, so ``login_info`` - the same
-        dict every device client holds - carries the new token immediately, and
-        the token-fresh callback fires so the caller persists it.
+        Both paths update ``user_info``, which is a dataclass, so neither one
+        reaches ``login_info`` - the dict every device client holds - on its
+        own.  ``_on_token_refreshed`` does that sync for the refresh path and
+        ``_async_fetch_user_config`` for the re-login path; this method only
+        picks which one to run and reports whether a token is now in hand.
         """
         try:
             if getattr(self.user_info, "refreshToken", ""):
@@ -495,11 +517,13 @@ class CameraClient(_UpstreamAidotClient):
         This is the only place device clients are constructed, upstream or
         here, and therefore the only place that decides which class to use.
         Non-cameras take the ``super()`` path and get a plain upstream
-        ``DeviceClient``: no camera module is imported into their call graph
-        and no camera behavior is attached to them.
+        ``DeviceClient``: no camera code RUNS in their path and no camera
+        behavior is attached to them.  (Importing this module still pulls the
+        camera package in - the guarantee is about execution, not imports.)
         """
         if not _is_camera_device(device):
             device_client = super().get_device_client(device)
+            # CARRIED: drop when python-aidot#6 merges
             self._carry_active_color_mode(device_client)
             return device_client
 
@@ -571,8 +595,10 @@ class CameraClient(_UpstreamAidotClient):
             return  # already carried (get_device_client is called repeatedly)
         if type(status) is not _UpstreamDeviceStatusData:
             # Upstream started using its own subclass: leave it alone rather
-            # than silently dropping whatever it added.
-            _LOGGER.debug(
+            # than silently dropping whatever it added.  Warn, not debug - this
+            # means RGBW+CCT bulbs lost the color-mode tracking and will report
+            # a stale color, which is otherwise invisible at runtime.
+            _LOGGER.warning(
                 "active_color_mode: unexpected status class %s, not carried",
                 type(status).__name__,
             )
@@ -621,6 +647,24 @@ class CameraClient(_UpstreamAidotClient):
         if self._discover is not None:
             self._discover.close()
             self._discover = None
+        # CARRIED: drop when upstream cancels its reconnect timer on close
+        # Upstream's DeviceClient.reset() arms an AsyncTimer(callback=async_login,
+        # interval=45) whenever a connection drops, and close() only sets
+        # _is_closed - which stops reset() from arming a NEW timer but never
+        # cancels the one already ticking.  So a light re-opens its TCP
+        # connection about 45 seconds after the account was closed, leaking a
+        # socket, a receive task and a ping timer past integration unload.
+        # Cameras are shielded by their own async_login gate; plain upstream
+        # device clients are not.  Cancel before super(), which clears the cache.
+        for device_client in self._device_clients.values():
+            reconnect_timer = getattr(device_client, "_reconnect_timer", None)
+            if reconnect_timer is not None:
+                try:
+                    reconnect_timer.cancel()
+                except Exception:
+                    _LOGGER.debug(
+                        "reconnect timer cancel failed", exc_info=True
+                    )
         # Upstream closes and clears the device clients.
         await super().async_close()
         # Close the account-shared persistent MQTT connection, if one was opened.

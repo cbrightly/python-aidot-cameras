@@ -23,9 +23,10 @@ from aidot.device_client import DeviceClient as UpstreamDeviceClient
 from aidot.models.auth_model import UserInformation
 from aidot.models.device_client_model import DeviceAttr
 from aidot.models.device_model import DeviceModel
+from aidot.utils import AsyncTimer
 
 from aidot_cameras.camera.client import CameraMixin, CameraStatusData
-from aidot_cameras.client import _is_camera
+from aidot_cameras.client import CameraClient, _is_camera
 from aidot_cameras.device_client import CameraDeviceClient, DeviceStatusData
 from aidot_cameras.discover import Discover
 
@@ -71,6 +72,42 @@ def test_discover_quiescent_after_close():
 def test_camera_filter():
     assert _is_camera(make_dc(CAMERA)) is True
     assert _is_camera(make_dc(DEVICE)) is False
+
+
+# --------------------------------------------------------------------------- #
+# teardown
+# --------------------------------------------------------------------------- #
+
+def test_no_reconnect_after_client_close():
+    """Closing the account must silence an already-armed reconnect timer.
+
+    Upstream's DeviceClient.reset() arms a 45s AsyncTimer(callback=async_login)
+    every time a connection drops, and its close() only sets _is_closed - which
+    stops reset() from arming a NEW timer but never cancels the one already
+    ticking.  Left alone, a light re-opens its TCP connection about 45s after
+    the integration was unloaded, leaking a socket, a receive task and a ping
+    timer.  Plain upstream device clients are the exposed case (cameras have
+    their own login gate), so the subject here is an upstream DeviceClient.
+    """
+    async def run():
+        client = CameraClient(None, country_code="US")
+        dc = UpstreamDeviceClient(
+            DeviceModel.from_json(data=dict(DEVICE)),
+            UserInformation.from_json(data=dict(USER)),
+        )
+        fired = []
+        dc._reconnect_timer = AsyncTimer(
+            callback=lambda: fired.append(1), interval=0.05
+        )
+        dc._reconnect_timer.start()
+        client._device_clients[dc.info.dev_id] = dc
+
+        await client.async_close()
+        await asyncio.sleep(0.2)  # well past the armed interval
+
+        assert fired == [], "a reconnect fired after the client was closed"
+
+    asyncio.run(run())
 
 
 # --------------------------------------------------------------------------- #

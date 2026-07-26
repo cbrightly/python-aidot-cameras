@@ -59,16 +59,35 @@ carried overrides below.
 ## Carried overrides (self-liquidating)
 
 A "carried override" is a fix we needed before upstream shipped it.  Each one is
-marked in the source with a `# CARRIED:` comment naming the upstream PR, applies
-as narrowly as possible, and is **deleted** once upstream merges the fix - after
-which those devices fall through to pure upstream.
+marked in the source with a `# CARRIED:` comment naming **its own** drop
+condition, applies as narrowly as possible, and is **deleted** once that
+condition is met - after which those devices fall through to pure upstream.
 
 | Override | Upstream PR | Drop when |
 | --- | --- | --- |
 | `active_color_mode` on RGBW+CCT bulbs (reports color temp instead of a stale RGB color) | `AiDot-Development-Team/python-AiDot#6` | that PR merges |
+| `CameraClient.async_close()` cancels each device client's `_reconnect_timer` | not filed yet - see [Inherited upstream defects](#inherited-upstream-defects) | upstream's `DeviceClient.close()` cancels `_reconnect_timer` itself |
 
-Only add a carried override for a fix that has also been submitted upstream, so
-the list trends to zero instead of growing.
+Find every carried site with `grep -rn '# CARRIED:' aidot_cameras/`.  The markers
+do **not** all share one drop condition, so read each one and delete only the
+sites whose condition is now met - a blanket sweep on the PR #6 merge would take
+the reconnect-timer fix with it.  Note that `_carry_active_color_mode` is marked
+at both its definition and its call site; both go together.
+
+Prefer carrying only fixes that have also been submitted upstream, so the list
+trends to zero instead of growing.  Where that is not possible yet, record the
+underlying defect in the section below so the next bump can re-check it.
+
+## Inherited upstream defects
+
+Behavior in the pinned upstream release that this package works around or simply
+accepts.  None of these is our code to fix from the outside; each is listed so a
+version bump can check whether upstream fixed it and the workaround can go.
+
+| Defect | Where | What it costs us |
+| --- | --- | --- |
+| `close()` does not cancel an armed reconnect timer.  `reset()` arms `AsyncTimer(callback=async_login, interval=45)` and `close()` only sets `_is_closed`, which prevents arming a *new* timer but not the one already ticking. | `aidot/device_client.py` `reset()` / `close()` | A non-camera device client reconnects about 45s after the account was closed, leaking a TCP connection, a receive task and a ping timer.  Worked around by the carried override in `CameraClient.async_close()` above.  Worth an upstream PR. |
+| `update_ip_address(ip)` accepts `None`, overwriting a known IP with it, and calls `asyncio.create_task()` unguarded - a `RuntimeError` when no loop is running. | `aidot/device_client.py` `update_ip_address()` | Callers must never pass an unresolved address and must call it from the loop.  Our discovery callback only forwards addresses it actually resolved, and never calls it for cameras at all (a camera would answer TCP:10000's connect and then never reply). |
 
 ## When a seam breaks
 

@@ -127,7 +127,14 @@ def test_device_client_builds_from_typed_models():
     )
     user_info = UserInformation.from_json(data={"id": "u1", "region": "us"})
     client = DeviceClient(device, user_info)
-    assert isinstance(client.status, DeviceStatusData)
+    # EXACT type, not isinstance: CameraClient._carry_active_color_mode swaps
+    # this object for the carried DeviceStatusData subclass only when it is
+    # upstream's own plain class, and skips (with a warning) otherwise.  An
+    # isinstance check stays true for any upstream subclass, so it would keep
+    # this suite green while RGBW+CCT bulbs quietly regressed to a stale color.
+    # Read a failure here as "upstream now builds its own status subclass -
+    # re-check the carried override before relaxing this assertion".
+    assert type(client.status) is DeviceStatusData, type(client.status)
     assert isinstance(client.info, DeviceInformation)
 
 
