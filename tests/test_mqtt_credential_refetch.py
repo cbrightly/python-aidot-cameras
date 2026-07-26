@@ -15,8 +15,6 @@ while snapshots keep working.
 """
 import asyncio
 
-import pytest
-
 from aidot_cameras.device_client import CameraDeviceClient
 
 
@@ -118,8 +116,7 @@ def test_a_cache_with_no_shared_counterpart_is_still_honoured():
     assert auth["mqttPassword"] == "FROM-GETUSER"
 
 
-@pytest.mark.asyncio
-async def test_concurrent_callers_coalesce_into_one_fetch():
+def test_concurrent_callers_coalesce_into_one_fetch():
     # Only the _get_persistent_mqtt path holds a lock; the per-op publish and
     # stream-open paths do not.  Concurrent fetches would each rotate the
     # credential out from under the others.
@@ -135,15 +132,19 @@ async def test_concurrent_callers_coalesce_into_one_fetch():
 
     account._async_fetch_user_config = _fetch_user_config
 
-    await asyncio.gather(*(account.async_ensure_mqtt_credential() for _ in range(5)))
-    assert fetches == [1]
-    # The slot is released, so a later genuine need still fetches.
-    await account.async_ensure_mqtt_credential()
-    assert fetches == [1, 1]
+    async def _drive():
+        await asyncio.gather(
+            *(account.async_ensure_mqtt_credential() for _ in range(5))
+        )
+        assert fetches == [1]
+        # The slot is released, so a later genuine need still fetches.
+        await account.async_ensure_mqtt_credential()
+        assert fetches == [1, 1]
+
+    asyncio.run(_drive())
 
 
-@pytest.mark.asyncio
-async def test_a_failed_shared_fetch_propagates_to_every_joiner():
+def test_a_failed_shared_fetch_propagates_to_every_joiner():
     # A joiner must not conclude "a password is now present" when the flight it
     # waited on failed.
     from aidot_cameras.client import CameraClient
@@ -157,12 +158,15 @@ async def test_a_failed_shared_fetch_propagates_to_every_joiner():
 
     account._async_fetch_user_config = _fetch_user_config
 
-    results = await asyncio.gather(
-        *(account.async_ensure_mqtt_credential() for _ in range(3)),
-        return_exceptions=True,
-    )
-    assert all(isinstance(r, RuntimeError) for r in results), results
-    assert account._user_config_inflight is None
+    async def _drive():
+        results = await asyncio.gather(
+            *(account.async_ensure_mqtt_credential() for _ in range(3)),
+            return_exceptions=True,
+        )
+        assert all(isinstance(r, RuntimeError) for r in results), results
+        assert account._user_config_inflight is None
+
+    asyncio.run(_drive())
 
 
 def test_a_sibling_cache_that_came_from_login_info_is_treated_as_stale():
