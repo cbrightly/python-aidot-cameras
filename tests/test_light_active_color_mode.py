@@ -22,7 +22,9 @@ import asyncio
 
 from aidot.device_client import DeviceClient as UpstreamDeviceClient
 from aidot.device_client import DeviceStatusData as UpstreamDeviceStatusData
+from aidot.models.auth_model import UserInformation
 from aidot.models.device_client_model import DeviceAttr
+from aidot.models.device_model import DeviceModel
 
 import aidot_cameras.client as client_mod
 from aidot_cameras.client import CameraClient
@@ -126,20 +128,37 @@ def test_rgbw_bulb_gets_the_carried_status_on_a_pure_upstream_client():
     assert dc.status.active_color_mode == "cct"
 
 
-def test_carried_status_keeps_state_already_seeded_by_upstream():
+def test_carrying_preserves_state_upstream_already_seeded():
+    """The swap copies the old status object's state onto the new one.
+
+    Upstream seeds status during login (status.online) before anything else
+    holds a reference, so the carry must not start from a blank object.
+    """
+    client = CameraClient(None, country_code="US")
+    dc = UpstreamDeviceClient(
+        DeviceModel.from_json(data=RGBW_BULB),
+        UserInformation.from_json(data={"id": "u1"}),
+    )
+    dc.status.online = True
+    dc.status.cct = 4200
+    client._carry_active_color_mode(dc)
+    assert isinstance(dc.status, DeviceStatusData)
+    assert dc.status.online is True and dc.status.cct == 4200
+
+
+def test_carrying_is_idempotent_across_repeat_dispatch():
     async def _run():
         client = CameraClient(None, country_code="US")
         dc = client.get_device_client(RGBW_BULB)
-        dc.status.online = True
-        # A repeat call must not swap the status object out from under the
-        # values upstream already seeded, nor re-wrap what is already carried.
+        carried = dc.status
+        # get_device_client is called repeatedly by consumers; the second call
+        # must not wrap the already-carried status a second time.
         again = client.get_device_client(RGBW_BULB)
-        return dc, again
+        return dc, again, carried
 
-    dc, again = asyncio.run(_run())
+    dc, again, carried = asyncio.run(_run())
     assert again is dc
-    assert isinstance(dc.status, DeviceStatusData)
-    assert dc.status.online is True
+    assert dc.status is carried
 
 
 def test_cct_only_bulb_stays_exactly_upstream():

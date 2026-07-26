@@ -56,9 +56,8 @@ def test_get_device_client_is_the_dispatch_seam():
         "setup_discover",
         "async_close",
         "_on_token_refreshed",
-        # Called on the client by us or by our CLI.
+        # Called on the client by our CLI (aidot_cameras/__main__.py).
         "set_token_fresh_cb",
-        "remove_device_client",
     ],
 )
 def test_client_methods_we_override_or_call(name):

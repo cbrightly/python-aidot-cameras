@@ -121,6 +121,39 @@ def test_camera_state_carry_forward():
 
 
 # --------------------------------------------------------------------------- #
+# camera-only attributes across the upstream receive loop
+# --------------------------------------------------------------------------- #
+
+def test_raw_camera_attrs_survive_upstreams_typed_model(monkeypatch):
+    """The read_data/_notify_status_update pair recovers camera-only keys.
+
+    Upstream's receive loop feeds status from its typed DeviceAttr model, which
+    has no field for Battery_remaining (or Occupancy, SDcardStatus,
+    MotionDetection_*), so those keys are dropped on the way in.  read_data
+    stashes the raw frame and _notify_status_update re-applies payload.attr
+    before the callback fires.  Both are called polymorphically by upstream's
+    receive_data, which is what makes the pair reachable at all.
+    """
+    frame = {"payload": {"attr": {"Battery_remaining": "77", "OnOff": 1}}}
+
+    async def _fake_base_read(self):
+        return frame
+
+    monkeypatch.setattr(UpstreamDeviceClient, "read_data", _fake_base_read)
+    dc = make_dc(CAMERA)
+    assert asyncio.run(dc.read_data()) is frame
+
+    dc._notify_status_update()
+    assert dc.status.battery_remaining == 77
+
+    # The stash is consumed, not just read: a notify that is NOT driven by a
+    # frame (reset(), login) must not re-apply a stale attribute set.
+    dc.status.battery_remaining = None
+    dc._notify_status_update()
+    assert dc.status.battery_remaining is None
+
+
+# --------------------------------------------------------------------------- #
 # upstream-merge tripwire
 # --------------------------------------------------------------------------- #
 
