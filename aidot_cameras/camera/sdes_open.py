@@ -38,12 +38,20 @@ _LOGGER = logging.getLogger(__name__)
 # The SDP offers both because the camera picks one per session.
 _SDP_ALTERNATE_PT = {96: 97, 97: 96, 0: 8, 8: 0}
 
-# Extra time, on top of the video payload-type wait, to characterise the audio
-# payload type before the serve launches.  Short by design: audio that has not
-# appeared by then is served on a later open (every ffmpeg restart re-runs this
-# wait, and by then the camera has been streaming for a while), which is cheaper
-# than delaying the picture for every silent camera.
-_AUDIO_PT_GRACE_S = 4.0
+# How long to wait for the FIRST media of a session before launching the serve.
+# Nothing useful can happen before then: the payload types are unknown, so the SDP
+# cannot be narrowed, and ffmpeg would bind the wrong depacketizers.  Sized to the
+# documented cold-start window for a battery camera (25-70s).  Measured: a cold
+# session started media at ~21s, which the previous 15s deadline missed entirely -
+# it launched blind with BOTH payload types still unknown, which is what left the
+# audio line advertising PCMU on a PCMA camera.
+_FIRST_MEDIA_WAIT_S = 45.0
+
+# Extra time for the audio payload type once video is known.  Measured on an
+# A001513: audio follows video by 40-70ms, because the camera answers BUNDLE and
+# both share one 5-tuple - so audio is never "late" and this only absorbs jitter.
+# Kept tight so a camera that genuinely sends no audio barely delays the picture.
+_AUDIO_PT_GRACE_S = 1.0
 
 
 def narrow_sdp_payload_types(sdp_text: str, keep_video=None, keep_audio=None) -> str:
@@ -3541,13 +3549,17 @@ class _SdesOpenMixin:
         # picture, while an unnarrowed audio line guarantees the mux never writes its
         # PAT/PMT, which loses the picture AND the audio.  Wait for both, then take
         # whatever has been observed by the deadline.
-        # Two separate budgets on purpose.  Video keeps its original 15s, because
-        # the picture is what the viewer is waiting for.  Audio gets only a short
-        # extra grace on top: sharing one deadline would make a camera that never
-        # sends audio delay the picture from a couple of seconds to the full 15,
-        # which trades the bug for a worse one.
-        _vpt_deadline = time.monotonic() + 15.0
-        while _first_video_pt[0] is None and time.monotonic() < _vpt_deadline:
+        # Wait for the session's first media, then briefly for audio.
+        #
+        # Measured on an A001513: a cold session's media starts at ~21s, and its
+        # video and audio payload types then arrive 40-70ms apart because the camera
+        # answers BUNDLE.  So audio is never "late" relative to video - the old 15s
+        # video deadline simply expired BEFORE any media at all, and the serve
+        # launched with both payload types unknown.  Waiting for first media costs
+        # no picture latency: ffmpeg cannot produce before media exists, and
+        # launching earlier only binds the wrong depacketizers.
+        _media_deadline = time.monotonic() + _FIRST_MEDIA_WAIT_S
+        while _first_video_pt[0] is None and time.monotonic() < _media_deadline:
             await asyncio.sleep(0.1)
         if _serve_audio and _first_audio_pt[0] is None:
             _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
