@@ -3360,16 +3360,19 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
     def _resolve_sdes_serve_audio(self) -> bool:
         """Whether to include audio in the SDES camera serve.
 
-        **Default OFF**, because including it can cost the video entirely.  The
-        mpegts mux writes its PAT/PMT only once EVERY mapped stream has produced a
-        packet, and ``amix`` does not emit until every one of its inputs has
-        delivered a frame - so on a camera that sends no PCMA, the AAC encoder
-        never produces, the PMT is never written, and a consumer gets an accepted
-        connection and then zero bytes.  The continuous ``anullsrc`` silence base
-        was meant to prevent exactly that and does not: verified live on a battery
-        camera, audio on gave 0 bytes across 45 consecutive attach attempts while
-        audio off gave 303 KB of 1280x960 H.264 from the same session, and
-        reordering the mix so the silence drives it did not help.
+        **Default OFF**, because including it costs the video entirely on these
+        cameras.  The mpegts mux writes its PAT/PMT only once EVERY mapped stream
+        has produced a packet, so until the audio stream does, a consumer gets an
+        accepted connection and then zero bytes.
+
+        Verified live on an A001513: audio on gave 0 bytes across repeated attach
+        attempts - including on sessions where the bridge DID observe audio RTP, so
+        this is not simply "the camera sends no PCMA" - while audio off gave up to
+        843 KB of 1280x960 H.264 from the same session on the same host.  The
+        continuous ``anullsrc`` silence base is meant to prevent this and does not;
+        reordering the mix so the silence drives it does not either; and skipping
+        the audio mapping only when no audio was observed does not, because the
+        observed case fails too.  The underlying cause is not yet isolated.
 
         Missing audio is a worse experience than the app; NO VIDEO is a broken
         integration, so video wins the tie.  Turn audio back on per camera with
