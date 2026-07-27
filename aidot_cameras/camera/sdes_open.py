@@ -3141,10 +3141,21 @@ class _SdesOpenMixin:
                                             )
                                             if not _br_first_audio_logged:
                                                 _br_first_audio_logged = True
+                                                # Record the payload type this path
+                                                # SYNTHESISES (_tk_pt, PCMA) so the
+                                                # SDP can be narrowed to it.  Without
+                                                # this the m=audio line keeps
+                                                # advertising "0 8", ffmpeg binds
+                                                # PCMU and discards every packet, and
+                                                # the mpegts PMT is never written - so
+                                                # the consumer gets zero bytes and the
+                                                # VIDEO is lost with the audio.
+                                                _first_audio_pt[0] = _tk_pt
                                                 _status(
                                                     f"bridge: first SDES audio -> ffmpeg"
                                                     f" loopback:{_lo_audio_port}"
                                                     f" ({len(_pd_plain)}B PCMA)"
+                                                    f" pt={_tk_pt}"
                                                 )
                                         except Exception:
                                             _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_enc_c8_sctp', exc_info=True)
@@ -3537,11 +3548,41 @@ class _SdesOpenMixin:
         # video pt, then rewrite the SDP to that single codec before launch.
         # ffmpeg recovers on the next periodic keyframe, so the small spawn delay
         # is harmless.  Falls back to the dual-codec SDP if no video is seen.
-        _vpt_deadline = time.monotonic() + 15.0
-        while _first_video_pt[0] is None and time.monotonic() < _vpt_deadline:
+        # When audio is being served the same wait has to cover the AUDIO payload
+        # type, and for a stricter reason: an unnarrowed video line merely risks the
+        # picture, while an unnarrowed audio line guarantees the mux never writes its
+        # PAT/PMT, which loses the picture AND the audio.  Wait for both, then take
+        # whatever has been observed by the deadline.
+        _pt_deadline = time.monotonic() + 15.0
+
+        def _pts_pending() -> bool:
+            if _first_video_pt[0] is None:
+                return True
+            return _serve_audio and _first_audio_pt[0] is None
+
+        while _pts_pending() and time.monotonic() < _pt_deadline:
             await asyncio.sleep(0.1)
         _vpt = _first_video_pt[0]
         _apt = _first_audio_pt[0]
+        if _serve_audio and _apt is None:
+            # No audio observed in the window, so the line cannot be narrowed and
+            # mapping audio would stall the mux.  Serve video only rather than
+            # serving nothing, and say so.
+            _LOGGER.warning(
+                "camera %s: no audio observed before the serve launched, so the "
+                "audio payload type is unknown; mapping it would stall the mpegts "
+                "mux and serve no video. Continuing without audio.",
+                getattr(self, "device_id", "?"),
+            )
+            _serve_audio = False
+            cmd = _build_sdes_serve_cmd(
+                sdp_path=sdp_path,
+                rtsp_push_url=rtsp_push_url,
+                output_path=output_path,
+                max_seconds=max_seconds,
+                sdes_audio=False,
+                audio_gain_db=self._resolve_sdes_audio_gain_db(),
+            )
         # Audio matters even more than video here.  A multi-PT m-line makes ffmpeg
         # bind the depacketizer to the FIRST payload type and silently discard the
         # rest, and the mpegts mux withholds its PAT/PMT until EVERY mapped stream
