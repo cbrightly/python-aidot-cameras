@@ -3360,16 +3360,27 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
     def _resolve_sdes_serve_audio(self) -> bool:
         """Whether to include audio in the SDES camera serve.
 
-        **Default ON** for app-parity (the official app plays camera audio). The
-        serve feeds the AAC encoder a continuous silence base (anullsrc + amix) so
-        sparse battery PCMA streams cleanly through the mpegts mux. Per-camera
-        ``sdes_audio`` (via ``start_keepalive``) wins; else the
-        ``AIDOT_SDES_SERVE_AUDIO`` env (falsy = 0/false/no/off disables)."""
+        **Default OFF**, because including it can cost the video entirely.  The
+        mpegts mux writes its PAT/PMT only once EVERY mapped stream has produced a
+        packet, and ``amix`` does not emit until every one of its inputs has
+        delivered a frame - so on a camera that sends no PCMA, the AAC encoder
+        never produces, the PMT is never written, and a consumer gets an accepted
+        connection and then zero bytes.  The continuous ``anullsrc`` silence base
+        was meant to prevent exactly that and does not: verified live on a battery
+        camera, audio on gave 0 bytes across 45 consecutive attach attempts while
+        audio off gave 303 KB of 1280x960 H.264 from the same session, and
+        reordering the mix so the silence drives it did not help.
+
+        Missing audio is a worse experience than the app; NO VIDEO is a broken
+        integration, so video wins the tie.  Turn audio back on per camera with
+        ``sdes_audio`` (via ``start_keepalive``), or globally with
+        ``AIDOT_SDES_SERVE_AUDIO=1`` - on a camera that does send audio steadily
+        it works, which is why this stays an option rather than being removed."""
         opt = getattr(self, "_sdes_audio_opt", None)
         if opt is not None:
             return bool(opt)
-        return os.environ.get("AIDOT_SDES_SERVE_AUDIO", "").strip().lower() not in (
-            "0", "false", "no", "off")
+        return os.environ.get("AIDOT_SDES_SERVE_AUDIO", "").strip().lower() in (
+            "1", "true", "yes", "on")
 
     def _resolve_sdes_audio_gain_db(self) -> float:
         """Gain (dB) applied to the served SDES audio (the camera mic runs hot).

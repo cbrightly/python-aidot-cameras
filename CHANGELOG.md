@@ -4,6 +4,22 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.4]
+
+### Fixed
+- **Camera audio no longer costs the video.** The mpegts mux writes its PAT/PMT
+  only once every mapped stream has produced a packet, and `amix` does not emit
+  until every one of its inputs has delivered a frame. On a camera that sends no
+  PCMA, the AAC encoder therefore never produced, the PMT was never written, and a
+  consumer got an accepted connection followed by zero bytes - no video at all,
+  even though signaling was healthy and the library had logged first media. The
+  continuous silence base was meant to prevent exactly this and does not. Measured
+  live on a battery camera: with audio on, 0 bytes across 45 consecutive attach
+  attempts; with audio off, 303 KB of 1280x960 H.264 from the same session.
+  Serve audio is now opt-in (`sdes_audio` per camera, or
+  `AIDOT_SDES_SERVE_AUDIO=1`), because missing audio is a worse experience while
+  no video is a broken integration.
+
 ## [0.12.3]
 
 ### Fixed
