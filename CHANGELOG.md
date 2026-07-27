@@ -31,8 +31,17 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   where no audio arrived in time it served 557 KB of video-only rather than zero.
 - **Audio is on by default again**, since it can no longer cost the picture. The
   0.12.5 warning that enabling it would serve no video is removed, being no longer
-  true. Audio still gets only a short grace on top of the video payload-type wait,
-  so a camera that never sends any does not delay the picture.
+  true.
+
+### Known limitation
+- **Audio is present only when the camera sends some before the serve launches.**
+  It gets a short grace on top of the video payload-type wait, deliberately short
+  so a camera that never sends audio does not delay the picture. A session that
+  misses that window serves video-only until the next ffmpeg restart re-runs the
+  wait. Measured across runs on one battery camera: some sessions carried both
+  tracks (1.2 MB in a capture), others video-only (282 KB). Making this
+  deterministic needs the serve to be upgraded in place once the payload type
+  becomes known, which is not in this release.
 
 ## [0.12.5]
 
