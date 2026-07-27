@@ -4,6 +4,29 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.7]
+
+### Fixed
+- **Camera audio is now reliably present, not a coin flip.** 0.12.6 narrowed the
+  audio payload type but could only do so if the payload type was known before the
+  serve launched, which made audio intermittent. Measuring when media actually
+  arrives showed the assumption behind that was wrong: audio is not late. Video and
+  audio payload types arrive **40-70 ms apart** (the camera answers BUNDLE, so both
+  share one 5-tuple) - what failed was that a cold session's media does not start
+  for ~21 s, and the launch was gated on a 15 s deadline. It expired first, so the
+  serve launched with *both* payload types unknown and the audio line kept
+  advertising PCMU on a PCMA camera.
+
+  The launch now waits for the session's first media (sized to the documented
+  25-70 s cold-start window) rather than to a deadline shorter than the camera's own
+  startup, and the audio grace on top is **tightened from 4 s to 1 s**, since it
+  only has to absorb 40-70 ms of jitter. Waiting for first media costs no picture
+  latency - ffmpeg cannot produce before media exists, and launching earlier only
+  binds the wrong depacketizers.
+
+  Verified live: launch decision at +1.72 s with both payload types known, and a
+  capture of 1032192 bytes carrying an `h264 1280x960` track and an `aac` track.
+
 ## [0.12.6]
 
 ### Fixed
