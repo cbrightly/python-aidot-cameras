@@ -1,13 +1,14 @@
-"""Unit tests for _resolve_sdes_serve_audio - SDES serve audio (default OFF).
+"""Unit tests for _resolve_sdes_serve_audio - SDES serve audio (default ON).
 
-Locks the opt/env precedence (per-camera kwarg wins over AIDOT_SDES_SERVE_AUDIO)
-so the wiring is verifiable without a camera.
+Locks the opt/env precedence (per-camera kwarg wins over AIDOT_SDES_SERVE_AUDIO,
+default on for app-parity) so the wiring is verifiable without a camera.
 
-The default is OFF because mapping audio into the pull serve can cost the video
-entirely: mpegts writes its PAT/PMT only once every mapped stream has produced a
-packet, and amix does not emit until every input has delivered a frame, so a
-camera that sends no PCMA yields an accepted connection and zero bytes. Verified
-live - see the docstring on the method for the measurements.
+The default was briefly OFF because mapping audio served no video at all - the
+audio m-line advertised PCMU while the bridge sends PCMA, so ffmpeg discarded
+every audio packet and the mpegts mux never wrote its PAT/PMT. The audio payload
+type is narrowed now, with a video-only fallback when it cannot be characterised,
+so audio can no longer cost the picture and the default is back on. The narrowing
+itself is covered by test_sdp_payload_type_narrowing.py.
 """
 import os
 import sys
@@ -24,23 +25,21 @@ def _cam():
     return _CAM.__new__(_CAM)
 
 
-def test_default_off_so_a_silent_camera_still_serves_video(monkeypatch):
+def test_default_on_for_app_parity(monkeypatch):
     monkeypatch.delenv("AIDOT_SDES_SERVE_AUDIO", raising=False)
-    assert _cam()._resolve_sdes_serve_audio() is False
+    assert _cam()._resolve_sdes_serve_audio() is True
 
 
-def test_env_enables(monkeypatch):
-    for val in ("1", "true", "yes", "on", " On "):
-        monkeypatch.setenv("AIDOT_SDES_SERVE_AUDIO", val)
-        assert _cam()._resolve_sdes_serve_audio() is True, val
-
-
-def test_env_falsy_or_unknown_stays_off(monkeypatch):
-    # Anything that is not an explicit opt-in leaves video protected: an
-    # unrecognised value must not silently re-enable the mux-stalling path.
-    for val in ("0", "false", "no", "off", "", "anything"):
+def test_env_disables(monkeypatch):
+    for val in ("0", "false", "no", "off", " Off "):
         monkeypatch.setenv("AIDOT_SDES_SERVE_AUDIO", val)
         assert _cam()._resolve_sdes_serve_audio() is False, val
+
+
+def test_env_truthy_or_unknown_stays_on(monkeypatch):
+    for val in ("1", "true", "yes", "on", "", "anything"):
+        monkeypatch.setenv("AIDOT_SDES_SERVE_AUDIO", val)
+        assert _cam()._resolve_sdes_serve_audio() is True, val
 
 
 def test_kwarg_option_wins_over_env(monkeypatch):

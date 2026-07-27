@@ -26,8 +26,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   cannot be characterised before the serve launches, the serve starts video-only
   with a warning instead of mapping a stream that would stall the mux. Verified
   live: with audio enabled the served mpegts now carries an H.264 1280x960 track
-  AND an AAC track where it previously delivered nothing, and on a session where
-  no audio arrived in time it served 557 KB of video-only rather than zero.
+  AND an AAC track where it previously delivered nothing - 1.2 MB in a single
+  capture, more than the 843 KB the video-only path managed - and on a session
+  where no audio arrived in time it served 557 KB of video-only rather than zero.
+- **Audio is on by default again**, since it can no longer cost the picture. The
+  0.12.5 warning that enabling it would serve no video is removed, being no longer
+  true. Audio still gets only a short grace on top of the video payload-type wait,
+  so a camera that never sends any does not delay the picture.
 
 ## [0.12.5]
 

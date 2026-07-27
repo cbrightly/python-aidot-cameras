@@ -3360,30 +3360,25 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
     def _resolve_sdes_serve_audio(self) -> bool:
         """Whether to include audio in the SDES camera serve.
 
-        **Default OFF**, because including it costs the video entirely on these
-        cameras.  The mpegts mux writes its PAT/PMT only once EVERY mapped stream
-        has produced a packet, so until the audio stream does, a consumer gets an
-        accepted connection and then zero bytes.
+        **Default ON** for app-parity (the official app plays camera audio).
 
-        Verified live on an A001513: audio on gave 0 bytes across repeated attach
-        attempts - including on sessions where the bridge DID observe audio RTP, so
-        this is not simply "the camera sends no PCMA" - while audio off gave up to
-        843 KB of 1280x960 H.264 from the same session on the same host.  The
-        continuous ``anullsrc`` silence base is meant to prevent this and does not;
-        reordering the mix so the silence drives it does not either; and skipping
-        the audio mapping only when no audio was observed does not, because the
-        observed case fails too.  The underlying cause is not yet isolated.
+        This was briefly defaulted off, because mapping audio used to serve no
+        video at all: the SDP advertises two payload types per media line and
+        ffmpeg binds the first, so the synthesised PCMA (pt 8) was discarded in
+        favour of the advertised PCMU (pt 0) - and since the mpegts mux withholds
+        its PAT/PMT until every mapped stream has produced a packet, the consumer
+        got zero bytes and lost the picture too.  The audio line is now narrowed to
+        the payload type actually in use, the same way the video line already was,
+        and the serve falls back to video-only if the audio payload type cannot be
+        characterised in time.  So audio can no longer cost the video.
 
-        Missing audio is a worse experience than the app; NO VIDEO is a broken
-        integration, so video wins the tie.  Turn audio back on per camera with
-        ``sdes_audio`` (via ``start_keepalive``), or globally with
-        ``AIDOT_SDES_SERVE_AUDIO=1`` - on a camera that does send audio steadily
-        it works, which is why this stays an option rather than being removed."""
+        Per-camera ``sdes_audio`` (via ``start_keepalive``) wins; else the
+        ``AIDOT_SDES_SERVE_AUDIO`` env (falsy = 0/false/no/off disables)."""
         opt = getattr(self, "_sdes_audio_opt", None)
         if opt is not None:
             return bool(opt)
-        return os.environ.get("AIDOT_SDES_SERVE_AUDIO", "").strip().lower() in (
-            "1", "true", "yes", "on")
+        return os.environ.get("AIDOT_SDES_SERVE_AUDIO", "").strip().lower() not in (
+            "0", "false", "no", "off")
 
     def _resolve_sdes_audio_gain_db(self) -> float:
         """Gain (dB) applied to the served SDES audio (the camera mic runs hot).
