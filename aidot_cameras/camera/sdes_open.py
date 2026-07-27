@@ -3454,12 +3454,32 @@ class _SdesOpenMixin:
             if out_dir:
                 os.makedirs(out_dir, exist_ok=True)
         # Build the ffmpeg command (single source of truth: _build_sdes_serve_cmd).
+        _serve_audio = self._resolve_sdes_serve_audio()
+        if _serve_audio and rtsp_push_url and rtsp_push_url.startswith("http"):
+            # Opting into audio on the pull serve is known to serve NO VIDEO on
+            # these cameras: the mpegts mux writes its PAT/PMT only once every
+            # mapped stream has produced a packet, so a viewer gets an accepted
+            # connection and then nothing.  Measured live on an A001513 - audio
+            # on: 0 bytes across repeated attach attempts, including on sessions
+            # where the bridge did observe audio RTP; audio off, same session and
+            # host: 843 KB of h264 1280x960.  The anullsrc silence base is meant
+            # to prevent this and does not, and reordering the mix so the silence
+            # drives it does not either.  Left as an option because it may work on
+            # a camera with a steady audio stream, but say so plainly rather than
+            # leaving someone to debug a black picture.
+            _LOGGER.warning(
+                "camera %s: serve audio is enabled. On these cameras that is "
+                "known to stall the mpegts mux and serve no video at all. If the "
+                "picture does not appear, disable it (sdes_audio=False, or "
+                "AIDOT_SDES_SERVE_AUDIO=0).",
+                getattr(self, "device_id", "?"),
+            )
         cmd = _build_sdes_serve_cmd(
             sdp_path=sdp_path,
             rtsp_push_url=rtsp_push_url,
             output_path=output_path,
             max_seconds=max_seconds,
-            sdes_audio=self._resolve_sdes_serve_audio(),
+            sdes_audio=_serve_audio,
             audio_gain_db=self._resolve_sdes_audio_gain_db(),
         )
         # --- H.265 fix: narrow the ffmpeg SDP to the camera's actual codec ----

@@ -4,6 +4,17 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.5]
+
+### Changed
+- **Enabling serve audio now says what it costs.** 0.12.4 made audio opt-in
+  because mapping it serves no video on these cameras; opting in was still a
+  silent trap. The serve now logs a warning naming the symptom and how to turn it
+  back off. No behaviour change - and deliberately not a fix: skipping the audio
+  mapping when no audio is observed does not help, because sessions that DO
+  observe audio fail the same way. The cause is not yet isolated, so the honest
+  move is to warn rather than to ship a fix that does not.
+
 ## [0.12.4]
 
 ### Fixed
