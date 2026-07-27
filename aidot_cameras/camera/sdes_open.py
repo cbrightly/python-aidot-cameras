@@ -34,6 +34,54 @@ from .protocol import (
 _LOGGER = logging.getLogger(__name__)
 
 
+# Payload types the ffmpeg SDP advertises per media line, and their alternates.
+# The SDP offers both because the camera picks one per session.
+_SDP_ALTERNATE_PT = {96: 97, 97: 96, 0: 8, 8: 0}
+
+# Extra time, on top of the video payload-type wait, to characterise the audio
+# payload type before the serve launches.  Short by design: audio that has not
+# appeared by then is served on a later open (every ffmpeg restart re-runs this
+# wait, and by then the camera has been streaming for a while), which is cheaper
+# than delaying the picture for every silent camera.
+_AUDIO_PT_GRACE_S = 4.0
+
+
+def narrow_sdp_payload_types(sdp_text: str, keep_video=None, keep_audio=None) -> str:
+    """Rewrite an SDP to advertise a single payload type per media line.
+
+    ffmpeg binds each RTP depacketizer to the FIRST payload type on the m-line and
+    silently discards packets carrying any other one.  The SDP written for the
+    bridge lists both candidates per line (``m=video ... 96 97`` for H.264/H.265,
+    ``m=audio ... 0 8`` for PCMU/PCMA) because which one the camera uses varies per
+    session, so whichever it actually sends has to be promoted before launch.
+
+    Getting this wrong on the VIDEO line costs the picture.  Getting it wrong on the
+    AUDIO line costs the picture too, and less obviously: the mpegts mux withholds
+    its PAT/PMT until every mapped stream has produced a packet, so an audio stream
+    whose packets are all discarded means the consumer receives zero bytes - video
+    included - while every other signal looks healthy.
+
+    ``keep_video`` / ``keep_audio`` of None leaves that line alone.
+    """
+    drop = {_SDP_ALTERNATE_PT[k] for k in (keep_video, keep_audio)
+            if k in _SDP_ALTERNATE_PT}
+    kept = []
+    for line in sdp_text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith("m=video") and keep_video is not None:
+            line = line.replace(" 96 97", f" {keep_video}")
+        elif stripped.startswith("m=audio") and keep_audio is not None:
+            line = line.replace(" 0 8", f" {keep_audio}")
+        elif any(
+            stripped.startswith(f"a={attr}:{pt}{sep}")
+            for pt in drop
+            for attr, sep in (("rtpmap", " "), ("fmtp", " "), ("fmtp", ";"))
+        ):
+            continue
+        kept.append(line)
+    return "".join(kept)
+
+
 def _sdes_echo_wait_timeout(skip_liveplay: bool) -> float:
     """Seconds to block on the camera's webrtcReq echo before proceeding.
 
@@ -2141,6 +2189,11 @@ class _SdesOpenMixin:
         # bridge on the first video RTP packet so the ffmpeg SDP can be narrowed
         # to the matching single codec before ffmpeg is launched.
         _first_video_pt: list = [None]
+        # Same for audio: the ffmpeg SDP advertises BOTH PCMU (0) and PCMA (8),
+        # and ffmpeg binds the depacketizer to the first one listed - so the line
+        # has to be narrowed to the payload type the camera actually sends, the
+        # same way the video line already is.
+        _first_audio_pt: list = [None]
         # Media-liveness: bridge sets [0] = time.monotonic() on every forwarded
         # media packet; the keepalive watchdog reads it via SdesSession to
         # restart a session the camera silently stopped feeding.
@@ -3095,10 +3148,21 @@ class _SdesOpenMixin:
                                             )
                                             if not _br_first_audio_logged:
                                                 _br_first_audio_logged = True
+                                                # Record the payload type this path
+                                                # SYNTHESISES (_tk_pt, PCMA) so the
+                                                # SDP can be narrowed to it.  Without
+                                                # this the m=audio line keeps
+                                                # advertising "0 8", ffmpeg binds
+                                                # PCMU and discards every packet, and
+                                                # the mpegts PMT is never written - so
+                                                # the consumer gets zero bytes and the
+                                                # VIDEO is lost with the audio.
+                                                _first_audio_pt[0] = _tk_pt
                                                 _status(
                                                     f"bridge: first SDES audio -> ffmpeg"
                                                     f" loopback:{_lo_audio_port}"
                                                     f" ({len(_pd_plain)}B PCMA)"
+                                                    f" pt={_tk_pt}"
                                                 )
                                         except Exception:
                                             _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_enc_c8_sctp', exc_info=True)
@@ -3190,6 +3254,7 @@ class _SdesOpenMixin:
                                 )
                             if _kind == "audio" and not _br_first_audio_logged:
                                 _br_first_audio_logged = True
+                                _first_audio_pt[0] = _pt
                                 _status(f"bridge: first audio RTP pt={_pt}")
                                 # Capture the camera's audio return address so the talk
                                 # pump (SdesSession.async_start_talk) can send outbound
@@ -3455,25 +3520,6 @@ class _SdesOpenMixin:
                 os.makedirs(out_dir, exist_ok=True)
         # Build the ffmpeg command (single source of truth: _build_sdes_serve_cmd).
         _serve_audio = self._resolve_sdes_serve_audio()
-        if _serve_audio and rtsp_push_url and rtsp_push_url.startswith("http"):
-            # Opting into audio on the pull serve is known to serve NO VIDEO on
-            # these cameras: the mpegts mux writes its PAT/PMT only once every
-            # mapped stream has produced a packet, so a viewer gets an accepted
-            # connection and then nothing.  Measured live on an A001513 - audio
-            # on: 0 bytes across repeated attach attempts, including on sessions
-            # where the bridge did observe audio RTP; audio off, same session and
-            # host: 843 KB of h264 1280x960.  The anullsrc silence base is meant
-            # to prevent this and does not, and reordering the mix so the silence
-            # drives it does not either.  Left as an option because it may work on
-            # a camera with a steady audio stream, but say so plainly rather than
-            # leaving someone to debug a black picture.
-            _LOGGER.warning(
-                "camera %s: serve audio is enabled. On these cameras that is "
-                "known to stall the mpegts mux and serve no video at all. If the "
-                "picture does not appear, disable it (sdes_audio=False, or "
-                "AIDOT_SDES_SERVE_AUDIO=0).",
-                getattr(self, "device_id", "?"),
-            )
         cmd = _build_sdes_serve_cmd(
             sdp_path=sdp_path,
             rtsp_push_url=rtsp_push_url,
@@ -3490,36 +3536,71 @@ class _SdesOpenMixin:
         # video pt, then rewrite the SDP to that single codec before launch.
         # ffmpeg recovers on the next periodic keyframe, so the small spawn delay
         # is harmless.  Falls back to the dual-codec SDP if no video is seen.
+        # When audio is being served the same wait has to cover the AUDIO payload
+        # type, and for a stricter reason: an unnarrowed video line merely risks the
+        # picture, while an unnarrowed audio line guarantees the mux never writes its
+        # PAT/PMT, which loses the picture AND the audio.  Wait for both, then take
+        # whatever has been observed by the deadline.
+        # Two separate budgets on purpose.  Video keeps its original 15s, because
+        # the picture is what the viewer is waiting for.  Audio gets only a short
+        # extra grace on top: sharing one deadline would make a camera that never
+        # sends audio delay the picture from a couple of seconds to the full 15,
+        # which trades the bug for a worse one.
         _vpt_deadline = time.monotonic() + 15.0
         while _first_video_pt[0] is None and time.monotonic() < _vpt_deadline:
             await asyncio.sleep(0.1)
+        if _serve_audio and _first_audio_pt[0] is None:
+            _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
+            while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:
+                await asyncio.sleep(0.1)
         _vpt = _first_video_pt[0]
-        if _vpt in (96, 97):
-            def _narrow_sdp_to_pt(_sdp_text: str, _keep: int) -> str:
-                _drop = 96 if _keep == 97 else 97
-                _kept = []
-                for _ln in _sdp_text.splitlines(keepends=True):
-                    _s = _ln.lstrip()
-                    if _s.startswith("m=video"):
-                        _ln = _ln.replace(" 96 97", f" {_keep}")
-                    elif (_s.startswith(f"a=rtpmap:{_drop} ")
-                          or _s.startswith(f"a=fmtp:{_drop} ")
-                          or _s.startswith(f"a=fmtp:{_drop};")):
-                        continue
-                    _kept.append(_ln)
-                return "".join(_kept)
+        _apt = _first_audio_pt[0]
+        if _serve_audio and _apt is None:
+            # No audio observed in the window, so the line cannot be narrowed and
+            # mapping audio would stall the mux.  Serve video only rather than
+            # serving nothing, and say so.
+            _LOGGER.warning(
+                "camera %s: no audio observed before the serve launched, so the "
+                "audio payload type is unknown; mapping it would stall the mpegts "
+                "mux and serve no video. Continuing without audio.",
+                getattr(self, "device_id", "?"),
+            )
+            _serve_audio = False
+            cmd = _build_sdes_serve_cmd(
+                sdp_path=sdp_path,
+                rtsp_push_url=rtsp_push_url,
+                output_path=output_path,
+                max_seconds=max_seconds,
+                sdes_audio=False,
+                audio_gain_db=self._resolve_sdes_audio_gain_db(),
+            )
+        # Audio matters even more than video here.  A multi-PT m-line makes ffmpeg
+        # bind the depacketizer to the FIRST payload type and silently discard the
+        # rest, and the mpegts mux withholds its PAT/PMT until EVERY mapped stream
+        # has produced a packet - so an audio line advertising "0 8" (PCMU first)
+        # on a camera that sends PCMA discards every audio packet and the consumer
+        # receives zero bytes.  That takes the video down with it, which is why
+        # enabling serve audio appeared to break streaming outright.
+        if _vpt in (96, 97) or (_serve_audio and _apt in (0, 8)):
             def _read_sdp_file() -> str:
                 with open(sdp_path, encoding="utf-8") as _f_sdp:
                     return _f_sdp.read()
             try:
+                _keep_v = int(_vpt) if _vpt in (96, 97) else None
+                _keep_a = int(_apt) if (_serve_audio and _apt in (0, 8)) else None
                 _cur_sdp = await asyncio.get_running_loop().run_in_executor(
                     None, _read_sdp_file)
                 await asyncio.get_running_loop().run_in_executor(
                     None, _write_text_file, sdp_path,
-                    _narrow_sdp_to_pt(_cur_sdp, int(_vpt)))
+                    narrow_sdp_payload_types(_cur_sdp, _keep_v, _keep_a))
                 _status(
-                    f"SDES: narrowed ffmpeg SDP to video pt={_vpt}"
-                    f" ({'H265' if int(_vpt) == 97 else 'H264'})")
+                    "SDES: narrowed ffmpeg SDP to"
+                    + (f" video pt={_keep_v}"
+                       f" ({'H265' if _keep_v == 97 else 'H264'})"
+                       if _keep_v is not None else "")
+                    + (f" audio pt={_keep_a}"
+                       f" ({'PCMA' if _keep_a == 8 else 'PCMU'})"
+                       if _keep_a is not None else ""))
             except Exception:
                 _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_open_sdes_stream', exc_info=True)
         _LOGGER.info("SDES ffmpeg cmd: %s", " ".join(cmd))

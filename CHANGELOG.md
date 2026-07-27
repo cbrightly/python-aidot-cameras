@@ -4,6 +4,45 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.6]
+
+### Fixed
+- **Camera audio works again, and can no longer cost the video.** Root cause: the
+  SDP handed to ffmpeg advertises two payload types per media line
+  (`m=video ... 96 97` for H.264/H.265, `m=audio ... 0 8` for PCMU/PCMA) because
+  the camera picks one per session. ffmpeg binds each depacketizer to the FIRST
+  payload type listed and silently discards the rest. The bridge synthesises PCMA
+  (pt 8) while the audio line offers PCMU (pt 0) first, so every audio packet was
+  discarded - and because the mpegts mux withholds its PAT/PMT until every mapped
+  stream has produced a packet, the consumer received ZERO bytes, losing the video
+  along with the audio. That is why enabling audio looked like it broke streaming.
+
+  The existing H.265 fix already narrows the video line this way and was never
+  applied to audio; on the TUTK-framed path the video payload type was not
+  recorded either, so neither line was being narrowed there. Both payload types
+  are now recorded and both lines narrowed, and the narrowing is a tested pure
+  function rather than a nested closure.
+- **Audio can never take the picture down again.** If the audio payload type
+  cannot be characterised before the serve launches, the serve starts video-only
+  with a warning instead of mapping a stream that would stall the mux. Verified
+  live: with audio enabled the served mpegts now carries an H.264 1280x960 track
+  AND an AAC track where it previously delivered nothing - 1.2 MB in a single
+  capture, more than the 843 KB the video-only path managed - and on a session
+  where no audio arrived in time it served 557 KB of video-only rather than zero.
+- **Audio is on by default again**, since it can no longer cost the picture. The
+  0.12.5 warning that enabling it would serve no video is removed, being no longer
+  true.
+
+### Known limitation
+- **Audio is present only when the camera sends some before the serve launches.**
+  It gets a short grace on top of the video payload-type wait, deliberately short
+  so a camera that never sends audio does not delay the picture. A session that
+  misses that window serves video-only until the next ffmpeg restart re-runs the
+  wait. Measured across runs on one battery camera: some sessions carried both
+  tracks (1.2 MB in a capture), others video-only (282 KB). Making this
+  deterministic needs the serve to be upgraded in place once the payload type
+  becomes known, which is not in this release.
+
 ## [0.12.5]
 
 ### Changed
