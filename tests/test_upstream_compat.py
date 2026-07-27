@@ -259,3 +259,10 @@ def test_device_state_is_upstreams_own_enum_reexported():
     assert DeviceState is _upstream
     for name in ("IDLE", "AUTHENTICATED"):
         assert hasattr(DeviceState, name), name
+
+
+def test_configure_stream_limits_is_public():
+    # The Home Assistant integration calls this to size the concurrent-serve cap
+    # to its camera count; a cap below the fleet silently starves a camera.
+    import aidot_cameras
+    assert callable(getattr(aidot_cameras, "configure_stream_limits", None))

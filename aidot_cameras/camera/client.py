@@ -571,6 +571,51 @@ def _get_webrtc_open_gate() -> "asyncio.Semaphore":
 
 
 _STREAM_SLOTS: "Optional[asyncio.Semaphore]" = None
+_STREAM_SLOTS_CAP: int = 0
+
+
+def _stream_slots_default() -> int:
+    """The configured cap: an explicit env override, else the built-in default."""
+    try:
+        return max(1, int(os.environ.get("AIDOT_MAX_CONCURRENT_STREAMS", "3")))
+    except (ValueError, TypeError):
+        return 3
+
+
+def configure_stream_limits(max_streams: int) -> int:
+    """Raise the concurrent-serve cap to fit the fleet; return the cap in force.
+
+    The default cap of 3 is a host-protection guard, but it silently STARVES an
+    account with more cameras than that: a camera holds its slot for the life of
+    its serve, so on a fleet of 4 DTLS cameras the fourth waits forever while the
+    other three are kept alive - it simply never streams, with no error anywhere.
+    Confirmed live on a 4-camera fleet, where the library logged "waiting for a
+    stream slot (cap reached)" for the odd one out on every attempt.
+
+    A consumer that knows how many cameras it is about to drive (the Home
+    Assistant integration knows its camera count) should call this so the cap is
+    never below the fleet size.
+
+    ``AIDOT_MAX_CONCURRENT_STREAMS`` still wins when set: an operator who
+    deliberately capped a small host means it, and would rather have cameras take
+    turns than have the host fall over.  The cap only ever grows - shrinking it
+    would strand a camera that already holds a slot.
+    """
+    global _STREAM_SLOTS, _STREAM_SLOTS_CAP
+    if os.environ.get("AIDOT_MAX_CONCURRENT_STREAMS"):
+        _get_stream_slots()          # ensure it exists so the cap is populated
+        return _STREAM_SLOTS_CAP
+    target = max(1, int(max_streams))
+    slots = _get_stream_slots()
+    if target > _STREAM_SLOTS_CAP:
+        for _ in range(target - _STREAM_SLOTS_CAP):
+            slots.release()          # grows the semaphore's permit count
+        _LOGGER.info(
+            "concurrent-serve cap raised from %d to %d to fit the camera fleet",
+            _STREAM_SLOTS_CAP, target,
+        )
+        _STREAM_SLOTS_CAP = target
+    return _STREAM_SLOTS_CAP
 
 
 def _get_stream_slots() -> "asyncio.Semaphore":
@@ -586,13 +631,10 @@ def _get_stream_slots() -> "asyncio.Semaphore":
     -50002 SESSION_EXCEED terminal error, which we mirror separately).  This cap
     is an HA-specific resource guard: HA dashboards can request N cameras at once,
     which a phone never does.  Deliberate divergence, kept for host protection."""
-    global _STREAM_SLOTS
+    global _STREAM_SLOTS, _STREAM_SLOTS_CAP
     if _STREAM_SLOTS is None:
-        try:
-            _n = max(1, int(os.environ.get("AIDOT_MAX_CONCURRENT_STREAMS", "3")))
-        except (ValueError, TypeError):
-            _n = 3
-        _STREAM_SLOTS = asyncio.Semaphore(_n)
+        _STREAM_SLOTS_CAP = _stream_slots_default()
+        _STREAM_SLOTS = asyncio.Semaphore(_STREAM_SLOTS_CAP)
     return _STREAM_SLOTS
 
 

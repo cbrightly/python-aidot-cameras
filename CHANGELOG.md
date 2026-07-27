@@ -4,6 +4,25 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.8]
+
+### Fixed
+- **A camera beyond the concurrency cap never streamed at all.** The cap on
+  concurrently-active serves (`AIDOT_MAX_CONCURRENT_STREAMS`, default 3) is a
+  host-protection guard, but a camera holds its slot for the life of its serve -
+  so on an account with more cameras than the cap, the extras did not queue
+  politely, they simply never played, and nothing surfaced an error. Confirmed
+  live on a fleet with 4 DTLS cameras: the library logged
+  `waiting for a stream slot (cap reached)` for the fourth on every attempt, and
+  that was exactly the camera that would not play in Home Assistant.
+
+### Added
+- `configure_stream_limits(max_streams)`, exported from the package, so a consumer
+  that knows its camera count can raise the cap to fit. The cap only ever grows -
+  shrinking would strand a camera already holding a slot - and an explicit
+  `AIDOT_MAX_CONCURRENT_STREAMS` still wins, since an operator who capped a small
+  host would rather cameras took turns than have the host fall over.
+
 ## [0.12.7]
 
 ### Fixed

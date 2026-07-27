@@ -12,6 +12,7 @@ import time as _time
 
 from .client import AidotClient, CameraClient
 from .device_client import CameraDeviceClient, DeviceInformation, DeviceStatusData
+from .camera.client import configure_stream_limits
 from .discover import CameraDiscover, Discover
 from .exceptions import (
     AidotAuthFailed,
@@ -147,4 +148,5 @@ __all__ = [
     "HTTPError",
     "InvalidHost",
     "InvalidURL",
+    "configure_stream_limits",
 ]
