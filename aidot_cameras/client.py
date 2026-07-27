@@ -14,7 +14,8 @@ camera layer and the CLI depend on and upstream does not provide:
 
 * a stable, mutable ``login_info`` dict (see the property below);
 * ``serializable_login_info()`` for persisting it;
-* ``_async_fetch_user_config()``, which fetches the MQTT password cameras need;
+* ``async_ensure_mqtt_credential()``, which fetches the MQTT password cameras
+  need (never persisted - it rotates on every account login);
 * ``async_ensure_token()``, the refresh hook camera HTTP calls invoke on a
   21026 "Please login again";
 * ``async_get_all_device()`` returning cameras (upstream filters them out);
@@ -61,6 +62,10 @@ _LOGGER = logging.getLogger(__name__)
 # App ID used by the AiDot web/mobile client for /commons/userConfig and
 # other cloud API calls that use owner+token headers.
 _CLOUD_APP_ID = "68"
+
+# Every key /commons/userConfig has been seen to return the MQTT password under.
+# The typo'd "mqqtPwd" is the vendor's, not ours - see the read below.
+_MQTT_PASSWORD_RESPONSE_KEYS = ("mqttPassword", "mqqtPwd", "mqttPwd")
 
 # Strong refs to fire-and-forget tasks: asyncio only keeps weak refs, so a
 # discarded task can be garbage-collected mid-flight (see camera/client.py).
@@ -130,6 +135,26 @@ def _upstream_can_build(device: dict[str, Any]) -> bool:
     return not _aes_key_is_null(device)
 
 
+def _without_mqtt_password(data: Any) -> Any:
+    """A copy of a userConfig response with every MQTT password removed.
+
+    The password is runtime-only by design (it rotates on every account login),
+    so it must not survive inside a nested blob that IS persisted.
+    """
+    if not isinstance(data, dict):
+        return data
+    out = {k: v for k, v in data.items() if k not in _MQTT_PASSWORD_RESPONSE_KEYS}
+    mqtt_block = out.get("mqtt")
+    if isinstance(mqtt_block, dict):
+        out["mqtt"] = {
+            k: v for k, v in mqtt_block.items() if k not in ("password", "pwd")
+        }
+    elif isinstance(mqtt_block, str):
+        # An opaque JSON string that may embed the password; nothing reads it.
+        out.pop("mqtt", None)
+    return out
+
+
 async def _prefetch_ice_config(dc: "CameraDeviceClient") -> None:
     """Background task: warm the HTTP ICE config cache for a camera."""
     try:
@@ -159,6 +184,9 @@ class CameraClient(_UpstreamAidotClient):
         # Single-flight guard so a burst of camera 21026s (all pollers at once)
         # coalesces into ONE token refresh / re-login instead of many.
         self._ensure_token_inflight: "Optional[asyncio.Future]" = None
+        # Same single-flight idiom for the MQTT credential fetch - see
+        # async_ensure_mqtt_credential().
+        self._user_config_inflight: "Optional[asyncio.Future]" = None
         # Upstream keeps the session inside CloudApi only; the camera-side
         # /commons/userConfig fetch needs it directly.
         self.session = session
@@ -180,9 +208,10 @@ class CameraClient(_UpstreamAidotClient):
                 stored = stored.get(CONF_LOGIN_INFO) or {}
             # UserInformation is a strict dataclass: update_from_json() drops
             # any key it has no field for, which is every camera-only key
-            # (mqttPassword, mqttClientId, _userConfigRaw).  Carry them across
-            # a restart on the login_info dict instead, or every reload would
-            # re-fetch MQTT credentials it had already persisted.
+            # (mqttClientId, _userConfigRaw).  Carry those across a restart on
+            # the login_info dict instead.  The MQTT password is deliberately
+            # NOT among them - it is runtime-only, so it is neither written nor
+            # read back, and a camera fetches a fresh one on first use.
             self._login_info.update(
                 {
                     k: v
@@ -210,8 +239,10 @@ class CameraClient(_UpstreamAidotClient):
         Upstream's ``login_info`` is ``user_info.to_dict()``, i.e. a fresh
         ``asdict()`` copy per access, and ``UserInformation`` silently drops any
         key it has no dataclass field for.  The camera layer needs the opposite
-        on both counts: it stores camera-only keys here (mqttPassword,
-        mqttClientId) and it shares ONE dict across every device client on the
+        on both counts: it stores camera-only keys here (mqttClientId, and the
+        rotating mqttPassword, which never leaves memory - see
+        ``serializable_login_info``) and it shares ONE dict across every device
+        client on the
         account so a single persistent-MQTT connection can be cached on it (see
         ``camera/client.py``'s ``_get_persistent_mqtt``).
 
@@ -240,12 +271,23 @@ class CameraClient(_UpstreamAidotClient):
         Anything that persists ``login_info`` - this library's own standalone
         CLI, or an integration's config-entry storage - should call this instead
         of serializing ``login_info`` directly.
+
+        The MQTT password is stripped here rather than only where it is fetched.
+        Confirmed live on a real account: an entry written by an earlier version
+        still had the credential nested inside ``_userConfigRaw``, and that blob
+        is loaded back verbatim from the stored token, so sanitizing only on the
+        way in would carry an already-leaked password forward for the life of the
+        install.  Stripping on the way out is the one choke point every persist
+        goes through.
         """
-        return {
+        out = {
             k: v
             for k, v in self.login_info.items()
             if k not in RUNTIME_ONLY_LOGIN_INFO_KEYS
         }
+        if "_userConfigRaw" in out:
+            out["_userConfigRaw"] = _without_mqtt_password(out["_userConfigRaw"])
+        return out
 
     # ---------------------------------------------------------------- #
     # token lifecycle
@@ -371,6 +413,39 @@ class CameraClient(_UpstreamAidotClient):
         self._schedule_proactive_refresh(self._token_ttl())
         return self.login_info
 
+    async def async_ensure_mqtt_credential(self) -> None:
+        """Fetch a fresh MQTT password, coalescing concurrent callers into one call.
+
+        Camera clients call this whenever the shared ``login_info`` holds no MQTT
+        password, which is the normal state after a restart from a stored token
+        (the password is never persisted) and after the broker refused the one we
+        had.  Several cameras can hit that at once - a stream open racing a
+        command publish - and only the ``_get_persistent_mqtt`` path holds a lock,
+        so without coalescing they would each fire their own ``userConfig``
+        request and each rotate the credential out from under the others.
+        """
+        fut = self._user_config_inflight
+        if fut is not None:
+            await asyncio.shield(fut)
+            return
+        loop = asyncio.get_running_loop()
+        fut = self._user_config_inflight = loop.create_future()
+        try:
+            await self._async_fetch_user_config()
+            if not fut.done():
+                fut.set_result(None)
+        except BaseException as exc:
+            if not fut.done():
+                fut.set_exception(exc)
+            raise
+        finally:
+            if self._user_config_inflight is fut:
+                self._user_config_inflight = None
+            # Nobody may have joined this flight, in which case the exception is
+            # never retrieved and asyncio logs about it at GC time.  Consume it.
+            if fut.done() and not fut.cancelled():
+                fut.exception()
+
     async def _async_fetch_user_config(self) -> None:
         """Fetch /commons/userConfig and store mqttPassword in login_info.
 
@@ -411,8 +486,12 @@ class CameraClient(_UpstreamAidotClient):
             data = body if isinstance(body, dict) else {}
             if isinstance(data.get("data"), dict):
                 data = data["data"]
-            # Always store the raw response for the camera clients to inspect.
-            login_info["_userConfigRaw"] = data
+            # Always store the raw response for the camera clients to inspect -
+            # minus the credential.  Only mqttClientId is ever read back out of
+            # it, and this dict IS persisted (it is not a runtime-only key), so
+            # keeping the password here would write it to storage one level below
+            # the key that was deliberately stripped.
+            login_info["_userConfigRaw"] = _without_mqtt_password(data)
             # Password may be at top level OR nested under an 'mqtt' subkey.
             mqtt_block = data.get("mqtt") or {}
             if isinstance(mqtt_block, str):
@@ -568,6 +647,12 @@ class CameraClient(_UpstreamAidotClient):
             # Let the camera HTTP calls force a token refresh on 21026
             # ("Please login again") and retry.
             device_client.set_token_refresh_cb(self.async_ensure_token)
+            # And let them fetch an MQTT password on demand.  It is never
+            # persisted (it rotates on every account login), so on a restart from
+            # a stored token nothing has fetched one yet.
+            device_client.set_mqtt_credential_refresh_cb(
+                self.async_ensure_mqtt_credential
+            )
             self._device_clients[_device.id] = device_client
             # Pre-warm the ICE config cache so stream open does not block on it.
             _spawn_bg(_prefetch_ice_config(device_client))

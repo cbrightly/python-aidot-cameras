@@ -49,6 +49,7 @@ Keep this list in sync when you add or remove a seam; it is what
 | Camera status / info | subclass `DeviceStatusData`, `DeviceInformation` |
 | Raw cloud records | `DeviceModel.to_dict()`, `UserInformation.to_dict()` |
 | Shared crypto | `aidot.utils.crypto`: `aes_encrypt`, `aes_decrypt`, `aes_decrypt_to_json`, `rsa_encrypt` |
+| Consumer-facing re-exports | `aidot.device_client`: `DeviceClient`, `DeviceState` - handed on under `aidot_cameras.device_client` so a consumer never imports `aidot` itself |
 | Constants | `aidot.const`: `APP_ID`, `PUBLIC_KEY_PEM`, `API_URL_TEMPLATE`, `DEFAULT_REGION`, `Identity`, `CONF_*` |
 
 **Non-camera devices are upstream's job.** `CameraClient.get_device_client`

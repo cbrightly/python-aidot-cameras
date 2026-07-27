@@ -4,6 +4,47 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.3]
+
+### Fixed
+- **Live video survives a restart again.** The MQTT password is a rotating cache,
+  not account state: the broker issues a new one on every account login and
+  allows a single connection, so a stored copy is stale the moment anything else
+  logs in (the phone app is enough). It was nonetheless persisted with the rest
+  of `login_info`, so a dead credential was reloaded from disk on every start and
+  the broker refused it forever (`rc=134`) - which killed WebRTC signaling, and
+  therefore live video, while snapshots kept working. It is now runtime-only.
+- **A missing MQTT password is fetched on demand, not only at login.** Making the
+  password runtime-only exposed the other half of the bug: the fetch had a single
+  caller, the full login, and a restart from a stored token never reaches it (the
+  proactive refresh takes the refresh-token path). Cameras now request one
+  whenever it is absent, coalescing concurrent callers into a single request, with
+  a floor between attempts after a refusal. Without it the credential resolver
+  fell through to its last resort - the access token as an MQTT password - which
+  the broker rejects, so the failure looked like working code.
+- **A credential refusal now heals the whole account, not one camera.** The cached
+  credential is per device client while the credential itself is per account, so
+  a refusal on one camera left every sibling holding the dead password and each
+  one burned its own refusal in turn. The account-shared value is now the single
+  source of truth, and a cache derived from it is treated as stale once it is
+  gone.
+- **A refused MQTT client is shut down instead of retrying forever.** It was only
+  dropped from the account cache; paho's own retry loop kept re-offering the
+  rejected password to the broker for the life of the process, silently, because
+  the refusal is reported once. Retiring it also releases callers that would
+  otherwise wait out a full timeout on a connection that could never open.
+- **The MQTT password no longer reaches storage inside the raw userConfig blob.**
+  That response is kept in `login_info` for its client id and is persisted; the
+  credential is now stripped out of it.
+- **A broker refusal also clears the cached server URL**, so the one response that
+  can carry a server-issued password is re-read on the recovery path instead of
+  being skipped.
+
+### Added
+- `DeviceState` is re-exported from `aidot_cameras.device_client`, so a consumer
+  can tell whether a device client's LAN session is authenticated without
+  importing `aidot` directly - which for consumers is an undeclared dependency.
+
 ## [0.12.2]
 
 ### Fixed

@@ -246,3 +246,16 @@ def test_discover_request_and_response_models():
     assert request.to_dict()
     response = DiscoverResponse.from_json(data=request.to_dict())
     assert hasattr(response, "payload")
+
+
+def test_device_state_is_upstreams_own_enum_reexported():
+    # Consumers compare a device client's private _state against this to tell
+    # whether its LAN session is authenticated.  Re-exported so they need not
+    # import `aidot`, which for them is an undeclared dependency - so it has to
+    # BE upstream's enum, not a copy that could drift out of step with it.
+    from aidot.device_client import DeviceState as _upstream
+    from aidot_cameras.device_client import DeviceState
+
+    assert DeviceState is _upstream
+    for name in ("IDLE", "AUTHENTICATED"):
+        assert hasattr(DeviceState, name), name

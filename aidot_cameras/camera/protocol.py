@@ -1434,6 +1434,17 @@ class _PersistentMqtt:
         # the owner can invalidate its cache and re-authenticate.
         self._on_auth_failure = on_auth_failure
         self._auth_failed_reported = False
+        # Latched by the owner when it retires this instance after a refusal.  A
+        # retired client must stop reconnecting: paho's own retry loop would keep
+        # offering the dead password to the vendor's broker for the life of the
+        # process, and callers still holding it would block on a _connected event
+        # that can never set.
+        self._retired = False
+        # Set when the broker refuses our credentials.  Waiters check it so they
+        # fail fast instead of sitting out a 15s timeout on a connection that is
+        # never coming, and _connected stays clear so nothing publishes into a
+        # socket the broker rejected.
+        self._auth_refused = threading.Event()
         self._client = None
         self._host = None
         self._port = None
@@ -1492,7 +1503,11 @@ class _PersistentMqtt:
             self._connected.set()
         elif rc in self._AUTH_REFUSAL_RCS:
             # Stale credential: paho would retry this password forever.  Tell the
-            # owner once so it can invalidate its cache and re-authenticate.
+            # owner once so it can invalidate its cache, retire this client and
+            # re-authenticate.  Unblock anyone waiting on _connected first - they
+            # would otherwise sit out their full timeout for a connection that is
+            # never coming.
+            self._auth_refused.set()
             _LOGGER.warning(
                 "persistent mqtt: broker rejected our credentials (rc=%s) - the "
                 "MQTT password has almost certainly been rotated by another "
@@ -1527,6 +1542,12 @@ class _PersistentMqtt:
                 _LOGGER.debug("persistent mqtt: handler raised", exc_info=True)
 
     def _ensure_started_sync(self, timeout=15.0):
+        # A retired instance must never rebuild: retire() nulls _client, which on
+        # its own would look exactly like "not started yet" and reconnect with the
+        # credential the broker just refused.  Callers still holding a retired
+        # client get a clean False and fall back to a per-op session.
+        if self._retired:
+            return False
         with self._lock:
             if self._client is None:
                 self._client = self._build()
@@ -1538,7 +1559,18 @@ class _PersistentMqtt:
                     return False
                 self._client.loop_start()  # drives keepalive + auto-reconnect
                 self._started = True
-        return self._connected.wait(timeout)
+        # Wait for either outcome.  paho retries a refused CONNACK on its own
+        # schedule, so without watching _auth_refused every caller would burn the
+        # full timeout before the owner gets a chance to re-authenticate.
+        import time as _time
+        deadline = _time.monotonic() + timeout
+        while True:
+            if self._connected.wait(0.1):
+                return True
+            if self._auth_refused.is_set() or self._retired:
+                return False
+            if _time.monotonic() >= deadline:
+                return False
 
     def _subscribe_sync(self, topics):
         new = []
@@ -1645,6 +1677,24 @@ class _PersistentMqtt:
                 return False
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, functools.partial(_pub))
+
+    def retire(self):
+        """Permanently shut this client down after a credential refusal.
+
+        ``close()`` alone is not enough from the owner's side: paho's retry loop
+        was configured with ``reconnect_delay_set(max_delay=30)``, so a refused
+        client keeps re-offering the dead password to the vendor's broker for the
+        life of the process - and ``_auth_failed_reported`` latches, so it does so
+        silently.  Latching ``_retired`` also releases anyone still waiting on
+        this instance instead of leaving them blocked on a timeout.
+
+        Must not be called from paho's network thread: ``loop_stop()`` there
+        raises ``cannot join current thread``.  The owner schedules it onto the
+        event loop with ``call_soon_threadsafe``.
+        """
+        self._retired = True
+        self._on_auth_failure = None
+        self.close()
 
     def close(self):
         c = self._client

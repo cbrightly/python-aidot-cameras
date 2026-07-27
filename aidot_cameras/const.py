@@ -54,6 +54,18 @@ BASE_URL = API_URL_TEMPLATE.format(region=DEFAULT_REGION)
 # exclude them first - see CameraClient.serializable_login_info().
 LOGIN_INFO_PERSISTENT_MQTT_KEY = "_persistent_mqtt"
 LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY = "_persistent_mqtt_lock"
+
+# The MQTT password is a CACHE, not state, and must never be persisted.  The
+# broker issues a new one on every account login and allows a single connection,
+# so a stored copy is stale the moment anything else logs in (the phone app is
+# enough).  Persisting it made the failure survive restarts: the credential
+# fetch prefers the cached value, so a stale one was reloaded from disk on every
+# start and the broker refused it forever (rc=134), which killed camera
+# signaling while snapshots kept working.  Keeping it runtime-only means each
+# start fetches a fresh one - a single extra HTTP call.
+LOGIN_INFO_MQTT_PASSWORD_KEYS = ("mqttPassword", "mqttPwd")
+
 RUNTIME_ONLY_LOGIN_INFO_KEYS = frozenset(
-    {LOGIN_INFO_PERSISTENT_MQTT_KEY, LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY}
+    {LOGIN_INFO_PERSISTENT_MQTT_KEY, LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
+     *LOGIN_INFO_MQTT_PASSWORD_KEYS}
 )
