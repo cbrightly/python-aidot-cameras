@@ -38,6 +38,13 @@ _LOGGER = logging.getLogger(__name__)
 # The SDP offers both because the camera picks one per session.
 _SDP_ALTERNATE_PT = {96: 97, 97: 96, 0: 8, 8: 0}
 
+# Extra time, on top of the video payload-type wait, to characterise the audio
+# payload type before the serve launches.  Short by design: audio that has not
+# appeared by then is served on a later open (every ffmpeg restart re-runs this
+# wait, and by then the camera has been streaming for a while), which is cheaper
+# than delaying the picture for every silent camera.
+_AUDIO_PT_GRACE_S = 4.0
+
 
 def narrow_sdp_payload_types(sdp_text: str, keep_video=None, keep_audio=None) -> str:
     """Rewrite an SDP to advertise a single payload type per media line.
@@ -3553,15 +3560,18 @@ class _SdesOpenMixin:
         # picture, while an unnarrowed audio line guarantees the mux never writes its
         # PAT/PMT, which loses the picture AND the audio.  Wait for both, then take
         # whatever has been observed by the deadline.
-        _pt_deadline = time.monotonic() + 15.0
-
-        def _pts_pending() -> bool:
-            if _first_video_pt[0] is None:
-                return True
-            return _serve_audio and _first_audio_pt[0] is None
-
-        while _pts_pending() and time.monotonic() < _pt_deadline:
+        # Two separate budgets on purpose.  Video keeps its original 15s, because
+        # the picture is what the viewer is waiting for.  Audio gets only a short
+        # extra grace on top: sharing one deadline would make a camera that never
+        # sends audio delay the picture from a couple of seconds to the full 15,
+        # which trades the bug for a worse one.
+        _vpt_deadline = time.monotonic() + 15.0
+        while _first_video_pt[0] is None and time.monotonic() < _vpt_deadline:
             await asyncio.sleep(0.1)
+        if _serve_audio and _first_audio_pt[0] is None:
+            _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
+            while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:
+                await asyncio.sleep(0.1)
         _vpt = _first_video_pt[0]
         _apt = _first_audio_pt[0]
         if _serve_audio and _apt is None:
