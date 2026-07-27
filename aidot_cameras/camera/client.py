@@ -384,17 +384,9 @@ def _build_sdes_serve_cmd(
                 # (normalize=0 -> no-op when audio is present).
                 "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono",
                 "-filter_complex",
-                # The silence is listed FIRST and drives the duration, and
-                # dropout_transition=0 stops amix waiting on the other input:
-                # with the camera audio first and duration=longest, amix emitted
-                # nothing at all until the sparse PCMA delivered its first frame,
-                # so the AAC encoder produced no packet, so the mpegts mux never
-                # wrote its PAT/PMT - and a consumer got a connection and ZERO
-                # bytes, taking the video down with it.
-                ("[1:a]aresample=async=1:first_pts=0[sil];"
-                 "[0:a]aresample=async=1[a0];"
-                 "[sil][a0]amix=inputs=2:duration=first:dropout_transition=0:"
-                 f"normalize=0,volume={audio_gain_db}dB[aout]"),
+                ("[0:a]aresample=async=1[a0];"
+                 "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
+                 f"volume={audio_gain_db}dB[aout]"),
                 "-map", "0:v:0", "-map", "[aout]",
                 "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
                 *time_args,
