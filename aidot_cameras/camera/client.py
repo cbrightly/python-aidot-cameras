@@ -2,6 +2,7 @@
 
 import json
 import logging
+from urllib.parse import urlparse
 import os
 import random
 import time
@@ -335,6 +336,22 @@ def _save_frame_as_jpeg(image_data: Any, output_path: str) -> bool:
         _LOGGER.warning("async_snapshot: encode failed: %s", exc)
 
     return False
+
+
+def _is_self_referential_source(source: str, stream_name: str) -> bool:
+    """True when registering ``source`` under ``stream_name`` would loop.
+
+    A go2rtc stream whose source is its own RTSP address becomes its own
+    producer: the stream lists a producer, nothing feeds it, and every consumer
+    gets a connection with no media.  That is exactly the shape of a PUSH URL,
+    ``rtsp://host:8554/<stream name>`` - the address the keepalive publishes to.
+    """
+    if not source or not stream_name:
+        return False
+    if not source.lower().startswith(("rtsp://", "rtsps://")):
+        return False
+    path = urlparse(source).path.strip("/")
+    return path == stream_name
 
 
 def _build_sdes_serve_cmd(
@@ -2763,6 +2780,18 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         if not (self._streaming_active and self._go2rtc_url and self._keepalive_rtsp_url):
             return
         name = self._go2rtc_stream_name()
+        if _is_self_referential_source(self._keepalive_rtsp_url, name):
+            # PUSH mode: the keepalive publishes INTO go2rtc, so this URL is
+            # go2rtc's own address for this very stream.  Registering it as the
+            # stream's source makes go2rtc its own producer - a loop that yields
+            # a stream with a producer attached and no media coming out of it.
+            # In push mode the publisher already feeds the stream; there is
+            # nothing to register.
+            _LOGGER.debug(
+                "camera %s: not registering %s with go2rtc - the push URL is that "
+                "stream's own address", self.device_id, name,
+            )
+            return
         try:
             async with aiohttp.ClientSession() as _s2:
                 url = await prefer_go2rtc(
