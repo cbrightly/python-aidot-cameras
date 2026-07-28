@@ -4,6 +4,23 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.9]
+
+### Fixed
+- **Every camera streamed forever after a single view.** The idle-release check
+  asked "is a TCP client connected to the serve port?" - but go2rtc attaches to
+  that port as the stream's PRODUCER and stays attached for as long as the stream
+  is registered, viewer or no viewer. So a peer was always present, the idle
+  window never elapsed, and nothing ever went dormant: open one camera and all of
+  them keep decrypting indefinitely, holding a concurrency slot each and draining
+  battery models. Measured live: five cameras, nobody watching, still producing
+  after 7 minutes against a 5 minute idle window.
+
+  Presence is now asked of go2rtc, which is the only component that knows whether
+  anyone is actually watching (`consumers`), falling back to the socket check when
+  go2rtc is not in use. Unknown still means "do not release", so a host that can
+  answer neither keeps today's behaviour.
+
 ## [0.12.8]
 
 ### Fixed
