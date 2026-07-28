@@ -4,6 +4,23 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.11]
+
+### Fixed
+- **A go2rtc stream could be registered as its own source.** In push mode the
+  keepalive publishes INTO go2rtc, so `_keepalive_rtsp_url` is go2rtc's own
+  address for that stream - and registering it as the stream's source made go2rtc
+  its own producer. The stream then lists a producer, nothing feeds it, and every
+  consumer gets a connection with no media. Observed live: a camera with two
+  producers, one of them its own `rtsp://127.0.0.1:8554/aidot_<id>`, answering
+  HTTP 200 with a zero-byte frame. Registration is now skipped when it would
+  loop - in push mode the publisher already feeds the stream, so there is nothing
+  to register.
+
+  Only reachable by a consumer that passes `go2rtc_url` to `start_keepalive`,
+  which the Home Assistant integration began doing in 2.9.8 so the viewer-aware
+  idle check could work. Anyone on that combination should take this.
+
 ## [0.12.10]
 
 ### Fixed
