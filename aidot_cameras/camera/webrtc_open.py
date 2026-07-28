@@ -1660,6 +1660,22 @@ class _WebRTCOpenMixin:
                     _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_on_remote_dc_message', exc_info=True)
 
         track_tasks: list = []
+
+        def _cancel_track_tasks() -> None:
+            """Cancel the per-session background tasks.
+
+            Only ``WebRTCSession.stop()`` cancels these, and it is reached only
+            when a session is actually returned.  Every failure exit below closes
+            the peer connection and re-raises, which leaves them running - and the
+            AVIO heartbeat loop has no terminal condition (its senders swallow
+            every error), so a camera that fails to open repeatedly accumulates
+            one immortal 10s-tick task per attempt, each pinning the closed
+            RTCPeerConnection graph in memory.
+            """
+            for _t in track_tasks:
+                if not _t.done():
+                    _t.cancel()
+            track_tasks.clear()
         _kvs_dc = None
         if self._offer_should_include_datachannel:
             # Match the official client's label exactly: f0.java:2923 uses
@@ -2346,10 +2362,12 @@ class _WebRTCOpenMixin:
                 _code, _desc = terminal_error_fut.result()
                 _status(f"camera refused: ack {_code} {_desc} - terminal, not retrying")
                 outgoing_q.put_nowait(None)
+                _cancel_track_tasks()
                 await pc.close()
                 raise AidotCameraBusy(_code, _desc)
             _status(f"no webrtcResp in {timeout}s")
             outgoing_q.put_nowait(None)
+            _cancel_track_tasks()
             await pc.close()
             raise RuntimeError(
                 f"async_open_webrtc_stream: no webrtcResp received within {timeout}s"
@@ -2556,6 +2574,7 @@ class _WebRTCOpenMixin:
                     f" {_rr_srd_exc}"
                 )
                 outgoing_q.put_nowait(None)
+                _cancel_track_tasks()
                 await pc.close()
                 raise RuntimeError(
                     f"async_open_webrtc_stream: setRemoteDescription failed:"
@@ -3205,6 +3224,7 @@ class _WebRTCOpenMixin:
                 # co-fail into the full 15s-gated generic retry.
                 outgoing_q.put_nowait(None)   # stop MQTT thread (avoid orphan)
                 try:
+                    _cancel_track_tasks()
                     await pc.close()
                 except Exception:
                     pass
@@ -3347,6 +3367,7 @@ class _WebRTCOpenMixin:
                 )
                 _status(f"setRemoteDescription failed: {exc}")
                 outgoing_q.put_nowait(None)
+                _cancel_track_tasks()
                 await pc.close()
                 raise RuntimeError(
                     f"async_open_webrtc_stream: setRemoteDescription failed: {exc}"
@@ -3569,6 +3590,7 @@ class _WebRTCOpenMixin:
 
         if pc.connectionState not in ("connected", "completed"):
             outgoing_q.put_nowait(None)
+            _cancel_track_tasks()
             await pc.close()
             raise RuntimeError(
                 f"async_open_webrtc_stream: ICE connection not established "

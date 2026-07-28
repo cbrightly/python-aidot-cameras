@@ -45,7 +45,7 @@ _SDP_ALTERNATE_PT = {96: 97, 97: 96, 0: 8, 8: 0}
 # session started media at ~21s, which the previous 15s deadline missed entirely -
 # it launched blind with BOTH payload types still unknown, which is what left the
 # audio line advertising PCMU on a PCMA camera.
-_FIRST_MEDIA_WAIT_S = 45.0
+_FIRST_MEDIA_WAIT_S = 75.0
 
 # Extra time for the audio payload type once video is known.  Measured on an
 # A001513: audio follows video by 40-70ms, because the camera answers BUNDLE and
@@ -3843,26 +3843,57 @@ class _SdesOpenMixin:
                         except Exception:
                             proc.kill()
                         _ts2 = int(time.time())
+                        # Match the PRIMARY SDP on both counts, or this restart
+                        # undoes two fixes at once.
+                        #
+                        # Transport: for _use_plain_rtp models - which is every
+                        # SDES camera this library supports - the bridge decrypts
+                        # and forwards PLAIN RTP, so the primary SDP is RTP/AVP
+                        # with no a=crypto.  Writing RTP/SAVP here makes ffmpeg
+                        # try to authenticate already-decrypted packets: every one
+                        # fails its HMAC check and a working stream drops to zero
+                        # bytes mid-session.
+                        #
+                        # Payload types: hard-coding "0 8" and "96 97" throws away
+                        # the narrowing, and ffmpeg binds the FIRST type on each
+                        # line - so an H.265 camera silently loses all video (and
+                        # with it the PAT/PMT, hence the whole output), and a PCMA
+                        # camera loses its audio.  Both types are known by now.
+                        _proto = "RTP/AVP" if _use_plain_rtp else "RTP/SAVP"
+
+                        def _crypto(key: str) -> str:
+                            if _use_plain_rtp:
+                                return ""
+                            return (f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 "
+                                    f"inline:{key}\r\n")
+
                         _new_sdp = (
                             "v=0\r\n"
                             f"o=- {_ts2} {_ts2} IN IP4 0.0.0.0\r\n"
                             "s=aidot-sdes-rx\r\n"
                             "t=0 0\r\n"
-                            f"m=audio {_lo_audio_port} RTP/SAVP 0 8\r\n"
+                            f"m=audio {_lo_audio_port} {_proto} 0 8\r\n"
                             "c=IN IP4 127.0.0.1\r\n"
-                            f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
+                            f"{_crypto(srtp_key_audio)}"
                             "a=rtpmap:0 PCMU/8000\r\n"
                             "a=rtpmap:8 PCMA/8000\r\n"
                             "a=rtcp-mux\r\n"
-                            f"m=video {_lo_video_port} RTP/SAVP 96 97\r\n"
+                            f"m=video {_lo_video_port} {_proto} 96 97\r\n"
                             "c=IN IP4 127.0.0.1\r\n"
-                            f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
+                            f"{_crypto(srtp_key_video)}"
                             "a=rtpmap:96 H264/90000\r\n"
                             "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
                             "profile-level-id=42e01f\r\n"
                             "a=rtpmap:97 H265/90000\r\n"
                             "a=fmtp:97 level-id=93\r\n"
                             "a=rtcp-mux\r\n"
+                        )
+                        _new_sdp = narrow_sdp_payload_types(
+                            _new_sdp,
+                            keep_video=(_first_video_pt[0]
+                                        if _first_video_pt[0] in (96, 97) else None),
+                            keep_audio=(_first_audio_pt[0]
+                                        if _first_audio_pt[0] in (0, 8) else None),
                         )
                         try:
                             # Re-apply the cached sprop-parameter-sets here too:

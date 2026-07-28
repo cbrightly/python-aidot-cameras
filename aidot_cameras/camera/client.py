@@ -2925,6 +2925,21 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         """
         name = self._go2rtc_stream_name()
         base = self._go2rtc_url
+        if not base:
+            # No go2rtc to ask.  In PUSH mode the fallback below is not merely
+            # unavailable, it is WRONG: the "serve port" is go2rtc's shared RTSP
+            # port (8554), where every camera's own publisher is connected, so the
+            # check reports a viewer for every camera forever and nothing ever
+            # releases.  Answer "unknown" instead of a confident lie - the caller
+            # then holds the stream rather than tearing down a live view, and the
+            # honest way out is for the consumer to pass go2rtc_url.
+            if self._keepalive_rtsp_url and not str(
+                    self._keepalive_rtsp_url).startswith("http"):
+                _LOGGER.debug(
+                    "no go2rtc url and the serve is an RTSP push to a shared "
+                    "port; cannot tell whether anyone is watching",
+                )
+                return None
         if base and name:
             try:
                 import aiohttp
@@ -3692,8 +3707,14 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 self.device_id,
             )
         await slots.acquire()
-        self._serve_relay = self._maybe_start_serve_relay(self._keepalive_rtsp_url)
         try:
+            # Inside the try on purpose: _maybe_start_serve_relay catches OSError
+            # but Thread.start() raises RuntimeError when the host is out of
+            # threads, and escaping here would skip slots.release() and burn a
+            # permit for the life of the process - the cap would silently shrink
+            # until nothing could stream at all.
+            self._serve_relay = self._maybe_start_serve_relay(
+                self._keepalive_rtsp_url)
             await self._dtls_serve_loop_inner()
         finally:
             _relay = self._serve_relay
@@ -3951,6 +3972,8 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     _stall_pli_s = float(os.environ.get("AIDOT_STALL_PLI_S", "1.0"))
                     _last_gop_pli = loop.time()
                     _stall_pli_armed = True
+                    _last_viewer_dtls = loop.time()
+                    _serve_port_dtls = _sdes_serve_port(serve_url) or 0
                     # Wait for ffmpeg to exit (go2rtc disconnect) or idle release.
                     while self._streaming_active and proc.returncode is None:
                         await asyncio.sleep(0.5)
@@ -3968,11 +3991,26 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                             await self._send_video_pli(pc)
                             _last_gop_pli = _now           # also satisfies cadence
                             _stall_pli_armed = False       # one shot per stall
-                        # No consumer -> the pipe fills, the mux blocks, progress
-                        # goes stale.  A real viewer keeps it fresh.  idle_secs<=0
-                        # disables release entirely (keep warm for instant views).
-                        if idle_secs > 0 and _now - progress[0] > idle_secs:
-                            idle_release = True
+                        # Whether anyone is WATCHING.  Pipe-progress staleness
+                        # cannot answer that: the pipe only backs up when nothing
+                        # drains the serve socket, and go2rtc drains it forever as
+                        # the stream's producer, viewer or not.  So progress never
+                        # goes stale, the release never fires, and every DTLS
+                        # camera streams for the life of the process - the same
+                        # defect fixed for the SDES loop, in the other loop.
+                        # Ask go2rtc, and only fall back to staleness when it
+                        # cannot answer.
+                        if idle_secs > 0:
+                            _watching = await self._viewer_present(_serve_port_dtls)
+                            if _watching:
+                                _last_viewer_dtls = _now
+                            elif _watching is False:
+                                if _now - _last_viewer_dtls > idle_secs:
+                                    idle_release = True
+                            elif _now - progress[0] > idle_secs:
+                                # Unknown: keep the old staleness heuristic rather
+                                # than holding the stream open forever.
+                                idle_release = True
                             break
                     # Tear down this ffmpeg+mux cycle before the next.
                     stop_flag.set()
@@ -3999,7 +4037,12 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                         wfile.close()
                     except Exception:
                         _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_pc_dead', exc_info=True)
-                if mux_thread is not None:
+                if mux_thread is not None and mux_thread.is_alive():
+                    # is_alive() guards the never-started case: if Thread.start()
+                    # itself raised, join() raises "cannot join thread before it
+                    # is started", which would replace the real exception AND skip
+                    # the ffmpeg terminate plus session stop below - orphaning the
+                    # process on its serve port and leaking the camera's session.
                     mux_thread.join(timeout=2.0)
                 _terminate_proc(proc)  # never orphan ffmpeg on teardown
                 self._stream_session = None
