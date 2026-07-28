@@ -4,6 +4,41 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.10]
+
+### Fixed
+- **The DTLS cameras never released either - 0.12.9 only fixed half of it.** The
+  DTLS serve loop decided idleness from pipe-progress staleness, which is the same
+  unanswerable question in disguise: the pipe only backs up when nothing drains
+  the serve socket, and go2rtc drains it forever as the producer. On a fleet that
+  is mostly DTLS cameras the 0.12.9 fix therefore changed nothing. Both loops now
+  ask who is watching, and both keep the old heuristic as a fallback when nobody
+  can answer.
+- **The idle check lied in push mode.** With an RTSP push URL the "serve port" is
+  go2rtc's *shared* 8554, where every camera's own publisher is connected - so the
+  socket check reported a viewer for every camera, forever. It now answers
+  "unknown" there instead of a confident wrong "yes".
+- **The SRTP key-restart undid two shipped fixes.** It rebuilds the ffmpeg SDP from
+  scratch and (a) wrote `RTP/SAVP` with `a=crypto` for models where the bridge
+  forwards PLAIN RTP - making ffmpeg fail authentication on every already-decrypted
+  packet, so a working stream dropped to zero bytes mid-session - and (b) discarded
+  the payload-type narrowing, so an H.265 camera lost all video and with it the
+  PAT/PMT and the entire output. The restart now matches the primary SDP on both.
+- **A failed stream slot could be lost permanently.** The serve relay was started
+  outside the `try` that releases the slot; `Thread.start()` raises `RuntimeError`
+  under thread exhaustion, which escaped before the `try` and burned a permit for
+  the life of the process, silently shrinking the cap until nothing could stream.
+- **Teardown could skip itself.** `join()` on a thread that never started raises,
+  replacing the real exception and skipping the ffmpeg terminate and session stop
+  that follow - orphaning ffmpeg on its serve port.
+- **Background tasks leaked on every failed handshake.** Only a successful session
+  cancelled them, so each failed open left an immortal 10s-tick AVIO heartbeat task
+  pinning a closed peer-connection graph. A camera that fails repeatedly grew them
+  without bound.
+- **The cold-start wait was inside the window it waits for.** 45s sat within the
+  documented 25-70s battery cold start, so a camera at the slow end still launched
+  with no payload types known. Now 75s.
+
 ## [0.12.9]
 
 ### Fixed
