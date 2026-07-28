@@ -148,6 +148,13 @@ _BG_TASKS: set = set()
 # means refetching is not helping, so back off rather than loop.
 _MQTT_CREDENTIAL_REFETCH_FLOOR = 30.0
 
+# How often the "is anyone watching" question may actually reach go2rtc. The
+# watchdog loops tick twice a second; asking that often opens a fresh HTTP
+# session per camera per tick against the service that also has to serve the
+# video. Idle release is measured in minutes, so seconds of staleness here costs
+# nothing.
+_VIEWER_CHECK_INTERVAL_S = 10.0
+
 
 def _spawn_bg(coro):
     _t = asyncio.ensure_future(coro)
@@ -2937,6 +2944,10 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         register, deregister and viewer-count paths cannot drift apart."""
         return f"aidot_{self.device_id[:12]}"
 
+    # Cached answer to "is anyone watching", so the watchdog loops can ask on
+    # every tick without hammering go2rtc.
+    _viewer_cache: "tuple[float, Optional[bool]]" = (0.0, None)
+
     async def _viewer_present(self, port: int) -> "Optional[bool]":
         """Is anyone ACTUALLY watching?  True / False / None (unknown).
 
@@ -2952,6 +2963,17 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         Falls back to the TCP-table check when go2rtc is not in use, and returns
         None (never release) if neither can answer.
         """
+        # THROTTLE FIRST.  The DTLS watchdog calls this every 0.5s and the SDES
+        # one on a similar cadence, and the go2rtc query below opens a fresh HTTP
+        # session each time - so an unthrottled check is two requests per second
+        # per camera, forever, against the very service that has to serve the
+        # video.  On a small fleet that is enough load to stop go2rtc answering
+        # at all, which looks exactly like "no video anywhere".
+        _now_mono = time.monotonic()
+        _last, _cached = self._viewer_cache
+        if _now_mono - _last < _VIEWER_CHECK_INTERVAL_S:
+            return _cached
+
         name = self._go2rtc_stream_name()
         base = self._go2rtc_url
         if not base:
@@ -2968,6 +2990,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     "no go2rtc url and the serve is an RTSP push to a shared "
                     "port; cannot tell whether anyone is watching",
                 )
+                self._viewer_cache = (_now_mono, None)
                 return None
         if base and name:
             try:
@@ -2977,10 +3000,14 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 async with aiohttp.ClientSession() as _s:
                     viewers = await Go2rtcClient(_s, base).viewer_count(name)
                 if viewers is not None:
-                    return viewers > 0
+                    _answer = viewers > 0
+                    self._viewer_cache = (_now_mono, _answer)
+                    return _answer
             except Exception as exc:
                 _LOGGER.debug("go2rtc viewer check failed: %s", exc)
-        return self._sdes_serve_consumer_present(port)
+        _answer = self._sdes_serve_consumer_present(port)
+        self._viewer_cache = (_now_mono, _answer)
+        return _answer
 
     async def _sdes_keepalive_loop(self) -> None:
         """Keep the cold-start serve relay alive around the SDES keepalive loop.

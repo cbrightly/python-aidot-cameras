@@ -4,6 +4,20 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.12]
+
+### Fixed
+- **No video at all, caused by 0.12.10's own viewer check.** The DTLS watchdog
+  loops twice a second, and the viewer check added in 0.12.10 sat inside it -
+  opening a fresh HTTP session to go2rtc on every tick. That is two requests per
+  second per camera, aimed at the very service that also has to serve the video;
+  on a small fleet it was enough to stop go2rtc answering at all, so every camera
+  went black while the integration still reported them as streaming.
+
+  The answer is now cached for 10s, so the watchdogs can ask on every tick and
+  go2rtc is asked at most once per camera per interval. Idle release is measured
+  in minutes, so seconds of staleness cost nothing.
+
 ## [0.12.11]
 
 ### Fixed
