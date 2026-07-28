@@ -8,7 +8,6 @@ anywhere. Idle release is measured in minutes, so a few seconds of staleness in
 the answer costs nothing.
 """
 import asyncio
-import time
 
 import aidot_cameras.camera.client as cc
 from aidot_cameras.device_client import CameraDeviceClient
