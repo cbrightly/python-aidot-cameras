@@ -2762,7 +2762,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_register_with_go2rtc', exc_info=True)
         if not (self._streaming_active and self._go2rtc_url and self._keepalive_rtsp_url):
             return
-        name = f"aidot_{self.device_id[:12]}"
+        name = self._go2rtc_stream_name()
         try:
             async with aiohttp.ClientSession() as _s2:
                 url = await prefer_go2rtc(
@@ -2788,7 +2788,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             return
         import aiohttp
         from .go2rtc import Go2rtcClient
-        name = f"aidot_{self.device_id[:12]}"
+        name = self._go2rtc_stream_name()
         try:
             async with aiohttp.ClientSession() as _s2:
                 await Go2rtcClient(_s2, base).remove_stream(name)
@@ -2902,6 +2902,41 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             if _tcp_table_has_established_on_port(_txt, port):
                 found = True
         return found if read_any else None
+
+    def _go2rtc_stream_name(self) -> str:
+        """The go2rtc stream name for this camera - one definition, so the
+        register, deregister and viewer-count paths cannot drift apart."""
+        return f"aidot_{self.device_id[:12]}"
+
+    async def _viewer_present(self, port: int) -> "Optional[bool]":
+        """Is anyone ACTUALLY watching?  True / False / None (unknown).
+
+        Ask go2rtc first when the stream is registered with it, because the serve
+        socket cannot answer this question: go2rtc attaches to the serve as its
+        producer and stays attached for as long as the stream exists, viewer or
+        no viewer.  A TCP peer is therefore always present, idle-release never
+        fires, and every camera keeps streaming indefinitely after a single view -
+        which is what "why are all my cameras streaming?" looks like from outside.
+        Confirmed live: five cameras, no viewers, still producing after 7 minutes
+        against a 5 minute idle window.
+
+        Falls back to the TCP-table check when go2rtc is not in use, and returns
+        None (never release) if neither can answer.
+        """
+        name = self._go2rtc_stream_name()
+        base = self._go2rtc_url
+        if base and name:
+            try:
+                import aiohttp
+
+                from .go2rtc import Go2rtcClient
+                async with aiohttp.ClientSession() as _s:
+                    viewers = await Go2rtcClient(_s, base).viewer_count(name)
+                if viewers is not None:
+                    return viewers > 0
+            except Exception as exc:
+                _LOGGER.debug("go2rtc viewer check failed: %s", exc)
+        return self._sdes_serve_consumer_present(port)
 
     async def _sdes_keepalive_loop(self) -> None:
         """Keep the cold-start serve relay alive around the SDES keepalive loop.
@@ -3019,7 +3054,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                         _stalled = True
                         break
                     if _idle_on and _serve_port is not None:
-                        _present = self._sdes_serve_consumer_present(_serve_port)
+                        _present = await self._viewer_present(_serve_port)
                         if _present:  # True -> a viewer is pulling; stay alive
                             _last_consumer = time.monotonic()
                         elif _idle_release_due(_present, _last_consumer,

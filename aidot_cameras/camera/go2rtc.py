@@ -72,6 +72,29 @@ class Go2rtcClient:
     async def has_stream(self, name: str) -> bool:
         return name in (await self.list_streams())
 
+    async def viewer_count(self, name: str) -> "Optional[int]":
+        """How many CONSUMERS go2rtc has for ``name``; None if it cannot be read.
+
+        This is the only trustworthy answer to "is anyone actually watching?".
+        The serve socket cannot answer it: go2rtc attaches to the serve as its
+        producer and stays attached, so a TCP peer is always present whether or
+        not a viewer exists.  Idle-release keyed on the socket therefore never
+        fires and every camera streams forever after a single view.
+
+        None means unknown (go2rtc unreachable or the stream absent), and callers
+        must fail safe by not releasing on it.
+        """
+        streams = await self.list_streams()
+        entry = streams.get(name)
+        if not isinstance(entry, dict):
+            return None
+        consumers = entry.get("consumers")
+        if consumers is None:
+            return 0          # go2rtc reports null rather than [] when there are none
+        if isinstance(consumers, list):
+            return len(consumers)
+        return None
+
     async def ensure_stream(self, name: str, source: str) -> bool:
         """Register (or replace) ``name`` -> ``source``. Returns True on 200."""
         try:
