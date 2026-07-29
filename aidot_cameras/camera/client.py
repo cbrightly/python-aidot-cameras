@@ -4080,7 +4080,15 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                                 # Unknown: keep the old staleness heuristic rather
                                 # than holding the stream open forever.
                                 idle_release = True
-                            break
+                            # Only an actual idle release ends this serve cycle.
+                            # (This break was unconditional - any idle_secs > 0
+                            # tore down a HEALTHY ffmpeg after one 0.5s tick,
+                            # respawning it forever: ffmpeg died at output-open
+                            # with "Immediate exit requested" and every DTLS
+                            # camera served nothing. stream_idle_s=0 masked it,
+                            # which is why never-release fleets still worked.)
+                            if idle_release:
+                                break
                     # Tear down this ffmpeg+mux cycle before the next.
                     stop_flag.set()
                     try:
