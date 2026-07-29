@@ -925,8 +925,52 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
     except Exception as exc:  # pragma: no cover
         _LOGGER.warning("DTLS A/V mux: PyAV unavailable: %s", exc)
         return
+
+    class _FailFlagWriter:
+        """Write-only stand-in for the pipe that RECORDS write failures.
+
+        FFmpeg's mpegts muxer checks avio write errors lazily: a dead pipe
+        (EPIPE after its ffmpeg exits) makes ``out.mux()`` appear to succeed
+        forever, and the error only surfaces - or hangs - at trailer time.
+        PyAV's pyio callback DOES see each failed ``write``; recording it here
+        lets the mux loop notice within one iteration and exit, instead of an
+        abandoned thread draining the SHARED vq/aq into a dead pipe and
+        starving the next cycle's ffmpeg (the 2026-07 dead-DTLS-video field
+        failure).  Deliberately exposes no seek/tell: the pipe is streaming.
+        """
+
+        def __init__(self, f):
+            self._f = f
+            self.failed = False
+
+        def write(self, b):
+            try:
+                return self._f.write(b)
+            except Exception:
+                self.failed = True
+                raise
+
+        def flush(self):
+            try:
+                self._f.flush()
+            except Exception:
+                self.failed = True
+                raise
+
+        def close(self):
+            self._f.close()
+
+    wsink = _FailFlagWriter(out_fileobj)
     try:
-        out = av.open(out_fileobj, "w", format="mpegts")
+        # max_interleave_delta (default 10s of stream time): with an AAC stream
+        # declared but no audio packets arriving, libavformat's interleave
+        # queue holds EVERY video packet waiting to order them against audio -
+        # zero bytes reach the pipe, the serve ffmpeg starves at its input
+        # probe and never binds its -listen port (field failure 2026-07: all
+        # DTLS cameras dark while the taps were full of frames).  100ms keeps
+        # video flowing whether or not audio ever shows up.
+        out = av.open(wsink, "w", format="mpegts",
+                      options={"max_interleave_delta": "100000"})
     except Exception as exc:
         _LOGGER.warning("DTLS A/V mux: av.open failed: %s", exc)
         return
@@ -975,6 +1019,14 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
     a_rtp0 = [None]      # first audio RTP timestamp (8 kHz units), for gap detection
     a_in = [0]           # 8 kHz samples emitted to the resampler so far (incl. concealed)
     vstarted = [False]
+    # A failed container write is TERMINAL for this mux: the pipe's ffmpeg is
+    # gone (EPIPE) and can never come back for this cycle.  Swallowing it and
+    # looping used to leave abandoned mux threads (the teardown join(2.0) gives
+    # up on a thread blocked in write) racing the NEXT cycle's thread for the
+    # SHARED vq/aq - stealing its frames into a dead pipe, starving the new
+    # ffmpeg at its input probe so it never bound its -listen port.  One dead
+    # write -> exit the thread and leave the queues alone.
+    mux_dead = [False]
 
     def _flush_video():
         while True:
@@ -995,7 +1047,9 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                 out.mux(pkt)
                 progress[0] = _t.monotonic()
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", '_flush_video', exc_info=True)
+                mux_dead[0] = True
+                _LOGGER.debug("DTLS A/V mux: video write failed - ending mux thread", exc_info=True)
+                return
 
     def _flush_audio(drain=False):
         if not have_audio:
@@ -1115,20 +1169,34 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                     out.mux(opkt)
                     progress[0] = _t.monotonic()
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", '_flush_audio', exc_info=True)
+                mux_dead[0] = True
+                _LOGGER.debug("DTLS A/V mux: audio write failed - ending mux thread", exc_info=True)
+                return
 
-    while not stop_flag.is_set():
+    def _dead() -> bool:
+        return mux_dead[0] or wsink.failed
+
+    while not stop_flag.is_set() and not _dead():
         _flush_video()
         _flush_audio()
         _t.sleep(0.005)  # 5 ms - processes audio within 5 ms of arrival vs 20 ms
-    _flush_video()
-    _flush_audio(drain=True)  # final: pad the last partial frame so it flushes
+    if not _dead():
+        _flush_video()
+        _flush_audio(drain=True)  # final: pad the last partial frame so it flushes
     try:
-        if have_audio:
+        if have_audio and not _dead():
             for opkt in aenc.encode(None):  # flush
                 out.mux(opkt)
     except Exception:
         _LOGGER.debug("swallowed exception in %s", '_dtls_av_mux_run', exc_info=True)
+    if _dead():
+        # Close the raw pipe FIRST: the container's trailer flush then fails
+        # fast ("closed file") instead of hanging on the dead pipe.
+        _LOGGER.debug("DTLS A/V mux: sink write failed - ending mux thread")
+        try:
+            wsink.close()
+        except Exception:
+            pass
     try:
         out.close()
     except Exception:
