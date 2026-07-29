@@ -2701,9 +2701,11 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         from a Home Assistant config-entry option, since HA OS can't set env vars).
 
         ``live_stream_param`` toggles the battery-camera cloud pre-connect
-        (liveStreamParam); like ``fast_connect`` it overrides the
-        ``AIDOT_LIVESTREAM_PARAM`` env var, so an integration on HA OS (no env vars)
-        can still disable it per camera.
+        (liveStreamParam), which is **off by default**: it provisions the camera
+        toward AWS KVS and diverts an A001513's media away from the SDES bridge
+        (no video RTP arrives).  Like ``fast_connect`` it overrides the
+        ``AIDOT_LIVESTREAM_PARAM`` env var; set True only to re-enable the
+        pre-connect for a camera that needs it.
 
         ``serve_relay`` toggles the cold-start serve-port relay (holds the public
         serve port connectable through the WebRTC handshake so an eager go2rtc

@@ -237,16 +237,20 @@ class _WebRTCOpenMixin:
         # Battery cameras must have their live-stream session provisioned by the
         # cloud BEFORE MQTT signaling, or the camera rejects livePlayReq with
         # -50019 ("not ready") and never runs ICE -> no media.  App parity:
-        # KVSPreConnectStrategy.fetchKvsParams calls liveStreamParam first.  We
-        # only need the provisioning side effect (we stream over MQTT/SDES, not
-        # AWS KVS).  Mains cameras are always stream-ready, so skip them.
-        # Validated live on L2_170 (A001513): with this call livePlay succeeds and
-        # decrypted RTP flows; without it, persistent -50019.  Controllable like
-        # fast_connect/sdes_audio: start_keepalive(live_stream_param=...) wins,
-        # else the AIDOT_LIVESTREAM_PARAM env var (default on).
+        # KVSPreConnectStrategy.fetchKvsParams calls liveStreamParam first, which
+        # provisions the camera's session toward AWS KVS.  DEFAULT OFF: we stream
+        # over MQTT/SDES, not KVS, and on A001513 "L2" cameras this pre-connect
+        # DIVERTS the camera's media to KVS - the SDES bridge then receives no
+        # video RTP at all (validated live: with the call the L2 serves nothing;
+        # with AIDOT_LIVESTREAM_PARAM=0 it streams h264 1280x960 + PCMA, matching
+        # the pre-0.7 behaviour that always worked).  It was added under #43 to
+        # cure a -50019 ("not ready") livePlayResp, but -50019 is benign - mains
+        # cameras emit it too and recover via ICE - so the pre-connect fixed a
+        # non-bug at the cost of the battery live view.  Kept as an opt-in escape
+        # hatch: start_keepalive(live_stream_param=True) or AIDOT_LIVESTREAM_PARAM=1.
         _lsp = getattr(self, "_live_stream_param_opt", None)
         if _lsp is None:
-            _lsp = os.environ.get("AIDOT_LIVESTREAM_PARAM", "1") != "0"
+            _lsp = os.environ.get("AIDOT_LIVESTREAM_PARAM", "0") != "0"
         if self.is_battery_camera and _lsp:
             _lsp_ok = await self._async_fetch_live_stream_param()
             _LOGGER.debug("camera %s: liveStreamParam provisioned ok=%s",
