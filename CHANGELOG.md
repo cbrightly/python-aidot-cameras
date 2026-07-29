@@ -4,6 +4,23 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.13]
+
+### Fixed
+- **A dormant camera no longer leaves a dead stream in go2rtc.** Idle-release
+  stopped the serve but left the stream registered, pointing at a source that no
+  longer existed - so a viewer attaching while the camera slept got a hard
+  `connection refused` on the serve port instead of a clean miss. In PUSH mode
+  that source was never dialable at all, because the keepalive publishes INTO
+  go2rtc rather than serving over HTTP. Both release paths now deregister, and a
+  failure to do so cannot break going dormant.
+- **A consumer disconnecting is no longer reported as a failure.** ffmpeg returns
+  `AVERROR(EPIPE)` = -32 when its output consumer goes away, and a process exit
+  status is an unsigned byte, so it surfaces as **224**. That is the normal end of
+  a `-listen 1` serve - go2rtc disconnects and ffmpeg exits - but it was logged at
+  WARNING every time, which trains the reader to ignore the log. Real failures
+  still warn.
+
 ## [0.12.12]
 
 ### Fixed

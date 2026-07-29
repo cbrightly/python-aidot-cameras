@@ -102,6 +102,11 @@ def _sdes_echo_wait_timeout(skip_liveplay: bool) -> float:
     return 0.0 if skip_liveplay else 2.0
 
 
+# ffmpeg returns AVERROR(EPIPE) = -32 when its output consumer disappears, and a
+# process exit status is truncated to an unsigned byte: -32 & 0xFF = 224.
+_FFMPEG_EXIT_EPIPE = 224
+
+
 def _classify_ffmpeg_exit(rc: int, teardown_requested: bool) -> int:
     """Log level for the bridge observe loop's "ffmpeg exited" line.
 
@@ -115,6 +120,12 @@ def _classify_ffmpeg_exit(rc: int, teardown_requested: bool) -> int:
     Pure function so the policy is unit-testable without a live bridge thread.
     """
     if rc < 0 and teardown_requested:
+        return logging.DEBUG
+    if rc == _FFMPEG_EXIT_EPIPE:
+        # Broken pipe: the consumer went away. That is the NORMAL end of a
+        # `-listen 1` serve - go2rtc disconnects and ffmpeg exits - so warning
+        # about it trains the reader to ignore real failures. A process exit
+        # status is an unsigned byte, so AVERROR(EPIPE) = -32 surfaces as 224.
         return logging.DEBUG
     return logging.WARNING
 

@@ -3155,6 +3155,19 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 self._cancel_keepalive_renew()
                 self._keepalive_rtsp_url = None
                 self._serve_ready.clear()
+                # Take the stream out of go2rtc too. Leaving it registered
+                # points go2rtc at a source that no longer exists, so a viewer
+                # attaching while the camera is dormant gets a hard refusal
+                # ("connection refused" on the serve port) instead of a clean
+                # "no such stream" - and in push mode that source was never
+                # dialable in the first place. stream_source() re-registers on
+                # the next view.
+                try:
+                    await self._deregister_go2rtc()
+                except Exception:
+                    _LOGGER.debug("camera %s: swallowed exception in %s",
+                                  getattr(self, "device_id", "?"),
+                                  "_deregister_go2rtc", exc_info=True)
                 _LOGGER.debug(
                     "SDES serve: %s idle (no viewer) - released until next view",
                     self.device_id,
@@ -4116,6 +4129,14 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 self._cancel_keepalive_renew()
                 self._keepalive_rtsp_url = None
                 self._serve_ready.clear()
+                # Same as the SDES path: do not leave go2rtc holding a stream
+                # whose source no longer exists.
+                try:
+                    await self._deregister_go2rtc()
+                except Exception:
+                    _LOGGER.debug("camera %s: swallowed exception in %s",
+                                  getattr(self, "device_id", "?"),
+                                  "_deregister_go2rtc", exc_info=True)
                 _LOGGER.debug(
                     "DTLS serve: %s idle (no viewer) - released until next view",
                     self.device_id,
