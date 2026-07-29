@@ -369,6 +369,7 @@ def _build_sdes_serve_cmd(
     max_seconds: Optional[float] = None,
     sdes_audio: bool = False,
     audio_gain_db: float = -8.0,
+    push_video_only: bool = False,
 ) -> list:
     """Build the ffmpeg argv for the SDES bridge serve.
 
@@ -425,8 +426,13 @@ def _build_sdes_serve_cmd(
                 rtsp_push_url,
             ]
     elif rtsp_push_url:
+        # PUSH is G.711 passthrough (-c copy) as always - EXCEPT when the audio
+        # payload type was never observed (push_video_only): announcing an
+        # un-narrowed audio line the server cannot accept kills the whole
+        # publish with 400 Bad Request, so map video only and announce clean.
         dest_args = [
-            "-c", "copy",
+            *(["-map", "0:v:0", "-c:v", "copy"] if push_video_only
+              else ["-c", "copy"]),
             *time_args,
             "-f", "rtsp", "-rtsp_transport", "tcp",
             rtsp_push_url,
