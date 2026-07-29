@@ -4,6 +4,32 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.14]
+
+### Fixed
+- **DTLS cameras serve live video again.** The serve-wait loop's viewer-check
+  block ended in an unconditional `break`, so any positive idle window
+  (`stream_idle_s` / `AIDOT_STREAM_IDLE_S` > 0) tore down a HEALTHY ffmpeg after
+  a single 0.5 s tick and respawned it forever - ffmpeg died at output-open with
+  "Immediate exit requested", go2rtc saw 404s or no data, and every DTLS camera
+  went dark. `stream_idle_s=0` skips the block entirely, which is why
+  never-release configurations kept working and hid the bug. The break now fires
+  only on an actual idle release.
+- **The A/V mux no longer lets missing audio hold video hostage.** The mux
+  declares an AAC stream up front; when no audio packets arrive, libavformat's
+  interleave queue (10 s of stream time by default) buffered EVERY video packet,
+  so the serve ffmpeg starved at its input probe and never bound its `-listen`
+  port. The muxer now runs with `max_interleave_delta=100ms`, so video flows
+  whether or not audio ever shows up.
+- **A dead serve pipe now ends its mux thread instead of starving the next one.**
+  FFmpeg's mpegts muxer surfaces custom-IO write errors lazily (at trailer
+  time), so muxing into a dead pipe appeared to succeed forever. A mux thread
+  abandoned by the teardown's 2 s join then drained the SHARED packet queues
+  into EPIPE, starving the replacement serve (observed live: 17 leaked threads
+  per camera). A write failure recorded at the file-object layer now ends the
+  thread within one iteration, and the raw pipe is closed before the container
+  so the trailer flush fails fast instead of hanging.
+
 ## [0.12.13]
 
 ### Fixed
