@@ -3579,7 +3579,18 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
 
         Per-camera ``sdes_skip_turn`` (set via start_keepalive) wins; else the
         ``AIDOT_SDES_SKIP_TURN_PREALLOC`` env (truthy = 1/true/yes/on), default
-        off.  Only consulted for SDES cameras."""
+        off.  Only consulted for SDES cameras.
+
+        NEVER skipped for a battery camera, whatever the opt/env say: a battery
+        camera sleeps and is woken through the cloud, so it is reached over the
+        TURN relay rather than a host-direct LAN path.  Skipping the relay
+        pre-allocation there means the camera has no reachable path back and
+        sends no media at all (validated live on an A001513: with the relay it
+        streams h264 1280x960, with skip_turn it serves nothing).  The LAN-direct
+        latency win only applies to a mains camera that actually has a host
+        candidate on the HA segment."""
+        if getattr(self, "is_battery_camera", False):
+            return False
         opt = getattr(self, "_sdes_skip_turn_opt", None)
         if opt is not None:
             return bool(opt)
