@@ -33,6 +33,7 @@ from .models import (  # re-exported: data models split into models.py
     CameraDeviceInformation,
     CameraStatusData,
     VideoFrame,
+    _as_int,
 )
 from .tutk import TutkStreamSession  # re-exported (split into tutk.py)
 from .playback import (  # re-exported (split into playback.py)
@@ -906,6 +907,15 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
     # A001513 battery cameras).  Exclude role-reversal models from the flag.
     _NO_FAST_LIVEPLAY_MODELS: frozenset = frozenset({"LK.IPC.A001064"})
 
+    # Models confirmed (2026-05-02) to send TUTK-framed data instead of standard
+    # SRTP: the camera announces an ASCII-printable fake SDES key and sends
+    # packets with a TUTK SFrame header (0xC8 audio / 0xC9 video) and an SSRC
+    # that differs from the one advertised in the SDP.  For these the ffmpeg SDP
+    # uses plain RTP/AVP (no SRTP decryption attempt) and the bridge strips the
+    # TUTK header before forwarding.  Matched by SUBSTRING (see _use_plain_rtp in
+    # sdes_open) so a revision suffix is covered.
+    _PLAIN_RTP_MODELS: frozenset = frozenset({"A001064", "A001513"})
+
     @property
     def _offer_should_include_datachannel(self) -> bool:
         model = getattr(getattr(self, "info", None), "model_id", None)
@@ -917,13 +927,82 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         props = getattr(self, "_raw_device", {}).get("properties") or {}
         return str(props.get("enableSdes", "0")) == "1"
 
+    # Battery / low-power camera models.  ONE list, consumed by
+    # is_battery_camera and (through it) by every battery guard and by the
+    # livePlayReq/webrtcReq ``powerType`` field - it used to be re-typed inline in
+    # three files, which is how a guard drifts out of step with the wire payload.
+    # Source: IpcServiceImpl.java B() - powerType=2 for these models, 1 for wired.
+    # Substring-matched, so a firmware/hardware revision suffix
+    # ("LK.IPC.A001513-1") is covered the way A000088-1 already is on the DTLS
+    # side rather than silently reading as a different, mains-powered model.
+    _BATTERY_MODELS: frozenset = frozenset({"A001513", "A001108", "A001360"})
+
+    def _battery_evidence(self) -> "Optional[bool]":
+        """Does this camera's OWN cloud data say it runs on a battery?
+
+        True when the cloud reports a battery for it, else None ("no evidence" -
+        NOT "mains", since the device-list payload may simply not carry the field
+        yet).  Same signal ``lan_control.is_mains_powered`` inverts: a camera that
+        reports a battery level has a battery.  Never raises - it is read from
+        hot paths - and never returns False, so it can only ever ADD a camera to
+        the battery set, never take a known model out of it.
+        """
+        _raw = getattr(self, "_raw_device", None)
+        _props = _raw.get("properties") if isinstance(_raw, dict) else None
+        if not isinstance(_props, dict):
+            _props = {}
+        # A reported battery level means there is a battery to report.
+        for _key in ("Battery_remaining", "batteryRemaining", "batteryLevel"):
+            if _as_int(_props.get(_key)) is not None:
+                return True
+        # The low-power flag: batteryMode=2 is what a camera that sleeps between
+        # sessions reports (see _async_send_camera_command).  Deliberately NOT
+        # keyed on ``powerType``: that name is also the value we SEND in
+        # livePlayReq, we have never observed the cloud returning it as a device
+        # property, and p2pCache - the field right next to it - reads 2 on every
+        # camera including mains ones.  Reading it here would risk classifying a
+        # mains camera as battery, which would put powerType=2 on ITS wire payload
+        # and can leave an A000088 un-armed.  Evidence has to be unambiguous.
+        if _as_int(_props.get("batteryMode")) == 2:
+            return True
+        # Already-parsed status, for a camera refreshed from an attribute push
+        # rather than from a device-list dict.
+        _status = getattr(self, "status", None)
+        if _as_int(getattr(_status, "battery_remaining", None)) is not None:
+            return True
+        return None
+
     @property
     def is_battery_camera(self) -> bool:
-        """True for battery/low-power models (A001513, A001108, A001360).
-        Source: IpcServiceImpl.java B() - powerType=2 for these models.
+        """True for battery/low-power cameras (powerType=2 in the app's B()).
+
+        Resolved from the camera's own cloud data FIRST (see
+        [[_battery_evidence]]), then from the known-model list
+        ([[_BATTERY_MODELS]]).  Evidence leads because a hardcoded list can only
+        ever name the revisions we have already seen, and a battery camera that
+        is not recognized as one loses every battery protection at once: the SDES
+        TURN relay pre-allocation (its ONLY return path - a camera woken through
+        the cloud has no LAN host candidate), the cloud keep-alive renew, the
+        HTTP wake, and the powerType=2 the camera is told to expect.
+
+        That misdetection presents as "streams from a standalone run but never
+        under Home Assistant", because HA is where the LAN-direct options that
+        strip the relay actually get set - a one-off script leaves them at their
+        (relay-keeping) defaults, so it never trips the guard it is missing.
         """
+        if self._battery_evidence():
+            return True
         model = getattr(getattr(self, "info", None), "model_id", None) or ""
-        return any(m in model for m in ("A001513", "A001108", "A001360"))
+        return any(m in model for m in self._BATTERY_MODELS)
+
+    @property
+    def live_power_type(self) -> int:
+        """The ``powerType`` field for livePlayReq / webrtcReq: 2 battery, 1 wired.
+
+        Source: IpcServiceImpl.java B().  Derived from [[is_battery_camera]] so
+        the value on the wire and the battery guards can never disagree.
+        """
+        return 2 if self.is_battery_camera else 1
 
     def _next_dseq(self) -> int:
         """Next livePlayReq dseq (app parity: Q0() starts at 100, increments)."""
@@ -1204,15 +1283,19 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
     async def _async_fetch_live_stream_param(self) -> bool:
         """Provision the camera's live-stream session via the cloud (app parity).
 
-        Battery cameras waking from deep sleep reject the MQTT ``livePlayReq``
-        with code ``-50019`` ("not ready") and then never run ICE - so no media
-        ever flows - unless the app's pre-connect HTTP call has armed the session
-        first.  The official app (``KVSPreConnectStrategy.fetchKvsParams``) POSTs
-        the device id to ``/api/ipc/liveStream/liveStreamParam``; the cloud
-        provisions the session (and brings the camera online) and returns AWS KVS
-        credentials.  We only need the provisioning side effect - the library
-        streams over the proprietary MQTT/SDES path, not AWS KVS - so the returned
-        credentials are ignored.  Best-effort: returns True on HTTP 200.
+        **Not called** - [[_resolve_live_stream_param]] gates this and always says
+        no; see there for why.  Kept, with its request shape locked down by
+        tests/test_live_stream_param.py, so re-enabling it for a camera that
+        demonstrably needs it is a one-line change rather than a rediscovery.
+
+        The official app (``KVSPreConnectStrategy.fetchKvsParams``) POSTs the
+        device id to ``/api/ipc/liveStream/liveStreamParam``; the cloud provisions
+        the session (and brings the camera online) and returns AWS KVS
+        credentials.  Only the provisioning side effect was ever wanted here - the
+        library streams over the proprietary MQTT/SDES path, not AWS KVS - but
+        that side effect is precisely the problem: the camera then sends its media
+        toward KVS and our bridge receives no video RTP.  Best-effort: returns True
+        on HTTP 200.
         """
         url, headers, body = self._live_stream_param_request()
         return await self._async_post_ok(url, headers, body, label="liveStreamParam")
@@ -2700,12 +2783,14 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         to the ``AIDOT_FAST_CONNECT`` env var; ``True``/``False`` override it (e.g.
         from a Home Assistant config-entry option, since HA OS can't set env vars).
 
-        ``live_stream_param`` toggles the battery-camera cloud pre-connect
-        (liveStreamParam), which is **off by default**: it provisions the camera
-        toward AWS KVS and diverts an A001513's media away from the SDES bridge
-        (no video RTP arrives).  Like ``fast_connect`` it overrides the
-        ``AIDOT_LIVESTREAM_PARAM`` env var; set True only to re-enable the
-        pre-connect for a camera that needs it.
+        ``live_stream_param`` is **accepted but ignored** (a no-op kept so an
+        existing caller doesn't break; it logs one warning if set).  It used to
+        request the battery-camera cloud pre-connect, which provisions the camera
+        toward AWS KVS so its media goes there instead of to the SDES bridge - the
+        session negotiates and then serves no video at all.  Battery cameras were
+        the only ones it applied to, i.e. exactly the ones it breaks, so the
+        decision is now made once in ``_resolve_live_stream_param`` and is "no".
+        Stop passing it; live video does not depend on it.
 
         ``serve_relay`` toggles the cold-start serve-port relay (holds the public
         serve port connectable through the WebRTC handshake so an eager go2rtc
@@ -3609,6 +3694,54 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         except (ValueError, TypeError):
             return -8.0
 
+    def _resolve_live_stream_param(self) -> bool:
+        """Whether to make the cloud ``liveStreamParam`` KVS pre-connect before
+        signaling.  **Always False** - see below; the flag survives only so an
+        existing caller doesn't break.
+
+        The call provisions the camera's live session toward AWS KVS, and the
+        camera then sends its media THERE instead of to our SDES bridge: the
+        session negotiates, the bridge binds, and no video RTP ever arrives.  It
+        is also made for battery cameras ONLY, so the set of cameras it can
+        affect is exactly the set it is known to break.  It was added to cure a
+        ``-50019`` ("not ready") livePlayResp, which 0.12.15 established is
+        benign - mains cameras emit it too and recover via ICE.
+
+        0.12.15 turned it off by default but left the option/env able to turn it
+        back on, which is a foot-gun aimed at one foot: a consumer that surfaces
+        it as a setting (the Home Assistant integration surfaces these options
+        because HA OS cannot set env vars) can re-break every battery camera on
+        the account, and the symptom - a live view that negotiates and then shows
+        nothing, forever - looks nothing like a settings problem.  A standalone
+        run never passes the option, which is exactly why the same library
+        streams an L2 from the CLI and not under HA.
+
+        So the decision now lives here, in one place, and is "no".  Re-enabling
+        it needs a code change plus fresh on-hardware evidence that some camera
+        actually requires it - not a flag flip.  A caller that still asks gets
+        one warning naming the camera, so a stuck install says why in the log
+        instead of silently serving nothing.
+        """
+        if not self.is_battery_camera:
+            # The pre-connect was never made for a mains camera in the first
+            # place; nothing to decide.
+            return False
+        asked = getattr(self, "_live_stream_param_opt", None)
+        if asked is None:
+            asked = os.environ.get("AIDOT_LIVESTREAM_PARAM", "0") != "0"
+        if asked and not getattr(self, "_live_stream_param_warned", False):
+            self._live_stream_param_warned = True
+            _LOGGER.warning(
+                "camera %s: ignoring the liveStreamParam pre-connect request "
+                "(live_stream_param / AIDOT_LIVESTREAM_PARAM).  On a battery "
+                "camera it provisions the session toward AWS KVS and the camera "
+                "sends its media there instead of to this library, so the live "
+                "view negotiates and then serves no video at all.  The setting "
+                "is a no-op - remove it; live video does not depend on it.",
+                self.device_id,
+            )
+        return False
+
     def _resolve_sdes_skip_turn(self) -> bool:
         """EXPERIMENTAL (opt-in, default off): skip the blocking SDES TURN relay
         pre-allocation, for cameras reachable LAN-direct.
@@ -3665,7 +3798,20 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         ``AIDOT_SDES_ADAPTIVE`` env (truthy = 1/true/yes/on), default off. When
         off, the per-attempt override is never set, so the explicit
         ``sdes_fast_liveplay`` / ``sdes_skip_turn`` opts (or their envs) decide -
-        exactly the pre-adaptive behaviour."""
+        exactly the pre-adaptive behaviour.
+
+        NEVER on for a battery camera, whatever the opt/env say - for those it is
+        all cost and no benefit.  The saving adaptive chases is the TURN relay
+        pre-allocation, and [[_resolve_sdes_skip_turn]] force-KEEPS that for a
+        battery camera (it is the only return path to a cloud-woken camera), while
+        fast-liveplay is already on by default.  So a battery "fast" attempt runs
+        the very same handshake as the patient one and differs only in being given
+        45 s to open and a 40 s media grace - inside the documented 25-70 s battery
+        cold-start window.  A slow-but-healthy wake is then scored as a fast-path
+        failure: it latches ``_fast_path_unavailable``, escalates the backoff, and
+        burns a camera-side session on a device that frees them slowly."""
+        if getattr(self, "is_battery_camera", False):
+            return False
         opt = getattr(self, "_sdes_adaptive_opt", None)
         if opt is not None:
             return bool(opt)

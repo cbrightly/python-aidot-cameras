@@ -252,17 +252,22 @@ class _SdesOpenMixin:
         #     0xC9=video), strips the 12-byte TUTK header, synthesizes a
         #     standard RTP header from the TUTK timestamp+SSRC fields, and
         #     forwards the reassembled plain-RTP packet to ffmpeg.
+        # Substring-matched, NOT equality: a revision suffix ("LK.IPC.A001513-1",
+        # the way A000088-1 exists on the DTLS side) is the same firmware and needs
+        # the same framing.  An exact match silently read such a camera as a plain
+        # SRTP model, so ffmpeg tried to decrypt TUTK frames with the announced
+        # fake key and the bridge never stripped the TUTK header - a session that
+        # negotiates and delivers nothing decodable.
         _model_id = getattr(getattr(self, "info", None), "model_id", None) or ""
-        _use_plain_rtp = _model_id in {"LK.IPC.A001064", "LK.IPC.A001513"}
+        _use_plain_rtp = any(m in _model_id for m in self._PLAIN_RTP_MODELS)
         # powerType/p2pCache - IpcServiceImpl.java:B() returns 2 for battery
-        # models (A001513, A001108, A001360); 1 for wired.  All tested cameras
-        # report p2pCache=2 in their setDevAttrNotif device attributes.
+        # models; 1 for wired.  Derived from is_battery_camera (see live_power_type)
+        # so the wire value and the battery guards cannot drift apart.  All tested
+        # cameras report p2pCache=2 in their setDevAttrNotif device attributes.
         # App parity: LivePlayPaylodBean declares these as INT, not String - send
         # ints so a strict camera JSON parser accepts the livePlayReq (battery cams
         # appear stricter; a rejected livePlayReq leaves the cam un-armed).
-        _live_power_type = 2 if any(
-            m in _model_id for m in ("A001513", "A001108", "A001360")
-        ) else 1
+        _live_power_type = self.live_power_type
         _live_p2p_cache = 2
 
         webrtc_req_topic = f"iot/v1/s/{user_id}/IPC/webrtcReq"

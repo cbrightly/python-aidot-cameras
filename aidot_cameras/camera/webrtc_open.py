@@ -235,24 +235,40 @@ class _WebRTCOpenMixin:
 
         use_sdes = force_sdes if force_sdes is not None else self.is_sdes_camera
 
-        # Battery cameras must have their live-stream session provisioned by the
-        # cloud BEFORE MQTT signaling, or the camera rejects livePlayReq with
-        # -50019 ("not ready") and never runs ICE -> no media.  App parity:
-        # KVSPreConnectStrategy.fetchKvsParams calls liveStreamParam first, which
-        # provisions the camera's session toward AWS KVS.  DEFAULT OFF: we stream
-        # over MQTT/SDES, not KVS, and on A001513 "L2" cameras this pre-connect
-        # DIVERTS the camera's media to KVS - the SDES bridge then receives no
-        # video RTP at all (validated live: with the call the L2 serves nothing;
-        # with AIDOT_LIVESTREAM_PARAM=0 it streams h264 1280x960 + PCMA, matching
-        # the pre-0.7 behaviour that always worked).  It was added under #43 to
-        # cure a -50019 ("not ready") livePlayResp, but -50019 is benign - mains
-        # cameras emit it too and recover via ICE - so the pre-connect fixed a
-        # non-bug at the cost of the battery live view.  Kept as an opt-in escape
-        # hatch: start_keepalive(live_stream_param=True) or AIDOT_LIVESTREAM_PARAM=1.
-        _lsp = getattr(self, "_live_stream_param_opt", None)
-        if _lsp is None:
-            _lsp = os.environ.get("AIDOT_LIVESTREAM_PARAM", "0") != "0"
-        if self.is_battery_camera and _lsp:
+        # One line, once per camera, naming the decisions that determine whether
+        # media can arrive at all.  This failure class - a session that negotiates
+        # and then delivers nothing - is almost always one of these resolving the
+        # wrong way (most often a camera not recognized as battery, so the TURN
+        # relay that is its only return path gets skipped), and it is otherwise
+        # invisible: the handshake logs look perfect either way.  Logged at INFO so
+        # a bug report carries it without needing DEBUG re-enabled and the failure
+        # reproduced.
+        if not getattr(self, "_open_profile_logged", False):
+            self._open_profile_logged = True
+            _LOGGER.info(
+                "camera %s: model=%s transport=%s battery=%s (cloud-reported=%s) "
+                "powerType=%d turn-prealloc=%s adaptive=%s",
+                self.device_id,
+                getattr(getattr(self, "info", None), "model_id", None) or "?",
+                "SDES" if use_sdes else "DTLS",
+                self.is_battery_camera,
+                bool(self._battery_evidence()),
+                self.live_power_type,
+                "skipped" if self._resolve_sdes_skip_turn() else "kept",
+                self._resolve_sdes_adaptive(),
+            )
+
+        # The cloud liveStreamParam pre-connect (app parity:
+        # KVSPreConnectStrategy.fetchKvsParams) provisions a battery camera's live
+        # session toward AWS KVS.  We stream over MQTT/SDES, not KVS, so on an
+        # A001513 "L2" the camera then sends its media to KVS and the SDES bridge
+        # receives no video RTP at all - validated live: with the call the L2
+        # serves nothing, without it h264 1280x960 + PCMA.  It is made for battery
+        # cameras only, i.e. exactly the cameras it breaks, so the decision is
+        # centralized (and is "no") in _resolve_live_stream_param - which also
+        # warns a caller that still asks.  Kept as a call site rather than deleted
+        # so re-enabling it for a camera that demonstrably needs it is one line.
+        if self._resolve_live_stream_param():
             _lsp_ok = await self._async_fetch_live_stream_param()
             _LOGGER.debug("camera %s: liveStreamParam provisioned ok=%s",
                           self.device_id, _lsp_ok)
@@ -1055,16 +1071,14 @@ class _WebRTCOpenMixin:
 
         # ------------------------------------------------------------------ #
         # powerType / p2pCache - source: IpcServiceImpl.java:B()
-        # B() returns 2 for battery/low-power models (A001513, A001108, A001360)
-        # and 1 for everything else.  p2pCache is the camera's prop value
-        # (all tested cameras report p2pCache=2).  Both fields appear in
+        # B() returns 2 for battery/low-power cameras and 1 for everything else;
+        # derived from is_battery_camera (see live_power_type) so the wire value
+        # and the battery guards cannot drift apart.  p2pCache is the camera's prop
+        # value (all tested cameras report p2pCache=2).  Both fields appear in
         # livePlayReq, webrtcReq, and the SDES webrtcReq.
-        _live_model_id = getattr(getattr(self, "info", None), "model_id", None) or ""
         # App parity: LivePlayPaylodBean declares powerType/p2pCache as INT (not
         # String) - send ints so a strict camera JSON parser accepts livePlayReq.
-        _live_power_type = 2 if any(
-            m in _live_model_id for m in ("A001513", "A001108", "A001360")
-        ) else 1
+        _live_power_type = self.live_power_type
         _live_p2p_cache = 2  # All cameras report p2pCache:2 in device attrs
 
         # ------------------------------------------------------------------ #
