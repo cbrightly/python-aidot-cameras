@@ -159,6 +159,7 @@ class _WebRTCOpenMixin:
         rtsp_push_url: Optional[str] = None,
         talk_pcm_provider: "Optional[Callable[[], Optional[bytes]]]" = None,
         talk: bool = False,
+        reuse_peer_id: Optional[str] = None,
     ) -> "WebRTCSession":
         """Open a liveType=2 WebRTC stream via MQTT signaling.
 
@@ -497,7 +498,14 @@ class _WebRTCOpenMixin:
         _dtls_fallback_ok = str(_cam_props.get("isDTLS", "1")) != "0"
 
         device_id = self.device_id
-        peer_id   = self.generate_webrtc_peer_id(
+        # A fresh peerid mints a NEW camera-side session, and the camera releases
+        # old ones only slowly (~3-4 min measured), so minting one on every retry
+        # of a failing loop stacks up sessions faster than they drain and can wedge
+        # a battery camera. The official app instead reuses one peerid and resends
+        # the same offer within a single session. ``reuse_peer_id`` lets a caller
+        # (the SDES keepalive loop) hold one peerid across retries; None keeps the
+        # historical mint-per-attempt behaviour for every other caller.
+        peer_id   = reuse_peer_id or self.generate_webrtc_peer_id(
             live_type=2, stream_id=stream_id, sdes=use_sdes
         )
         loop      = asyncio.get_running_loop()
@@ -1212,7 +1220,26 @@ class _WebRTCOpenMixin:
         # Branch: SDES-SRTP cameras use ffmpeg; DTLS cameras use aiortc
         # ------------------------------------------------------------------ #
         if use_sdes:
+            def _raise_if_camera_refused():
+                """Surface a terminal webrtcResp ack on the SDES path too.
+
+                GAP D was only wired into the DTLS branch: the shared message
+                handler records -50002 (max concurrent streams) / -50015 into
+                ``terminal_error_fut`` for BOTH transports, but only the DTLS
+                connect ever read it.  So when a battery camera answered "no
+                free session", the SDES keepalive loop treated it as a generic
+                failure and retried on the short backoff - hammering the very
+                camera that had just said it was full, and registering yet
+                another peerid each time.  Raising AidotCameraBusy lets the
+                loop back off for the camera's release window instead.
+                """
+                if terminal_error_fut.done():
+                    _code, _desc = terminal_error_fut.result()
+                    _status(f"camera refused the stream (code={_code}) - not retrying")
+                    raise AidotCameraBusy(_code, _desc)
+
             try:
+                _raise_if_camera_refused()
                 _sdes_session = await self._open_sdes_stream(
                     peer_id=peer_id,
                     user_id=user_id,
@@ -1248,7 +1275,13 @@ class _WebRTCOpenMixin:
                 # DTLS-fallback path below keeps the slot for its own hand-off.)
                 self._release_stream_drain_to_session()
                 return _sdes_session
+            except AidotCameraBusy:
+                raise
             except CameraMixin._SdesNoAnswerError:
+                # A terminal refusal that lands while we were waiting surfaces
+                # as a no-answer; check before spending a DTLS fallback on a
+                # camera that has already told us it has no free session.
+                _raise_if_camera_refused()
                 # Camera reported enableSdes='1' but did not respond to our SDES
                 # offer.  iOS telemetry shows models such as LK.IPC.A001064 can
                 # have an incorrectly set enableSdes property while actually

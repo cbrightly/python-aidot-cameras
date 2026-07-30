@@ -4,6 +4,30 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.16]
+
+### Fixed
+- **SDES cameras: honour the camera's own "no free session" refusal.** A terminal
+  webrtcResp ack (`-50002` max concurrent streams / `-50015`) was recorded for
+  both transports but only ever acted on by the DTLS path. On the SDES path the
+  camera saying "full" looked like a generic failure, so the keepalive loop
+  retried on the short backoff - and every retry minted a new peerid, i.e. yet
+  another camera-side session - which is self-sustaining and can wedge a battery
+  camera. The SDES branch now raises `AidotCameraBusy` on a terminal ack and the
+  SDES keepalive loop backs off for the full release window, matching the DTLS
+  loops.
+- **SDES keepalive reuses one peerid across its retries** instead of minting a
+  fresh one per attempt. A fresh peerid registers a new camera-side session and
+  the camera frees old ones only slowly, so mint-per-retry stacks up sessions on
+  a failing loop faster than they drain. The loop now holds one peerid across
+  retries (mirroring the official app, which resends within one session) and
+  rotates to a fresh one only after a session that delivered media or after a
+  small reuse cap. The DTLS/mains path is unchanged (different loop; the new
+  `reuse_peer_id` kwarg defaults to None).
+
+Measured on an A001513 (L2): two back-to-back live sessions now both stream
+h264 1280x960 + PCMA where previously the second in a row failed.
+
 ## [0.12.15]
 
 ### Fixed

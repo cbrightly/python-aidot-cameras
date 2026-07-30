@@ -3057,11 +3057,30 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         # lifetime; an integration reload / restart re-probes the fast path.
         _fast_failed = bool(getattr(self, "_fast_path_unavailable", False))
 
+        # Reuse ONE peerid across the retries of this loop instead of minting a
+        # fresh one per attempt. A fresh peerid = a new camera-side session, and
+        # the camera frees old ones only slowly, so mint-per-retry stacks up
+        # sessions on a failing battery camera faster than they drain (measured:
+        # this is how the L2 wedged into a wake-then-sleep loop). Mirrors the
+        # official app, which resends within one session. Rotate to a fresh
+        # peerid after a session that actually delivered media (so the next view
+        # is a clean session) or after _PEERID_MAX_REUSE consecutive dead
+        # attempts (so a poisoned peerid can't wedge us permanently).
+        _PEERID_MAX_REUSE = 3
+        _loop_peer_id = self.generate_webrtc_peer_id(live_type=2, stream_id=0,
+                                                     sdes=True)
+        _peer_reuses = 0
+
         while self._streaming_active:
             if self._serve_relay is not None:
                 # Clear any stale backend from a prior session; the open below
                 # points the relay at this session's fresh internal ffmpeg port.
                 self._serve_relay.set_backend(None)
+            if _peer_reuses >= _PEERID_MAX_REUSE:
+                _loop_peer_id = self.generate_webrtc_peer_id(
+                    live_type=2, stream_id=0, sdes=True)
+                _peer_reuses = 0
+            _peer_reuses += 1
             _use_fast = self._adaptive_next_fast(_adaptive, _fast_failed)
             if _adaptive:
                 self._fast_attempt_override = _use_fast
@@ -3069,10 +3088,31 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 session = await self.async_open_webrtc_stream(
                     rtsp_push_url=self._keepalive_rtsp_url,
                     timeout=(_FAST_OPEN_TIMEOUT if _use_fast else 120.0),
+                    reuse_peer_id=_loop_peer_id,
                 )
             except asyncio.CancelledError:
                 self._fast_attempt_override = None
                 return
+            except AidotCameraBusy as busy:
+                # The camera itself said it has no free session (-50002 max
+                # concurrent streams / -50015). Each retry mints a NEW peerid and
+                # so registers ANOTHER camera-side session, which the camera only
+                # releases slowly - so retrying on the short backoff makes the
+                # shortage worse and can wedge a battery camera into a
+                # wake-then-sleep loop that serves nothing. Wait out the release
+                # window instead. (The DTLS loops have always done this; the SDES
+                # loop silently did not.)
+                self._fast_attempt_override = None
+                _LOGGER.warning(
+                    "SDES keepalive: camera %s refused the stream (%s) - "
+                    "backing off %.0fs so its sessions can be released",
+                    self.device_id, busy, _MAX_DELAY,
+                )
+                try:
+                    await asyncio.sleep(_MAX_DELAY)
+                except asyncio.CancelledError:
+                    return
+                continue
             except Exception as exc:
                 self._fast_attempt_override = None
                 if _use_fast:
@@ -3197,6 +3237,13 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             # Adaptive bookkeeping: a fast attempt that never delivered media
             # latches the loop onto the full relay path for its remaining opens.
             _healthy = session.last_media_monotonic > 0.0
+            if _healthy:
+                # A session that delivered media is a real, cleanly-used session;
+                # the next open should be a fresh one rather than re-offering on a
+                # peerid the camera has already finished with.
+                _loop_peer_id = self.generate_webrtc_peer_id(
+                    live_type=2, stream_id=0, sdes=True)
+                _peer_reuses = 0
             if _use_fast and not _healthy and not _fast_failed:
                 _LOGGER.info(
                     "SDES adaptive[%s]: fast attempt delivered no media - "
