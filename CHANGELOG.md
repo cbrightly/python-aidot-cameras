@@ -78,8 +78,33 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   aborts an open - it is benign on its own, per 0.12.15; only the retry *delay*
   keys on it, and only after a session has already failed to deliver media.
 
-  **Not yet validated on hardware** - the third-consecutive-session case needs a
-  live battery camera. Unit-tested; see `tests/test_wake_readiness_retry.py`.
+  **Validated on hardware** (A001513 under Home Assistant): the camera answers
+  `-50019` and the loop now logs `camera not ready (waking, livePlayResp -50019)
+  and sent no media - fast retry in 3s [1/3]` and re-offers on the same peerid,
+  where before the signal was discarded entirely and the pacer escalated. The
+  retry behaves as designed and is bounded.
+
+  It does **not** by itself make that camera's live view fill in: on the fleet it
+  was measured against, the camera answers `-50019` and sends no media on every
+  attempt of the burst. The remaining cause is upstream of this retry and of
+  every knob in this release - the open profile resolves correctly for that
+  camera (`battery=True (cloud-reported=True) powerType=2 turn-prealloc=kept
+  adaptive=False`), and the identical library and configuration streams the same
+  camera from a different host on the same subnet. See
+  `tests/test_wake_readiness_retry.py`.
+
+### Notes
+- The L2 / battery hardening in this release was measured against a live A001513
+  under Home Assistant. The open profile confirms every decision now resolves
+  correctly for it (`battery=True (cloud-reported=True) powerType=2
+  turn-prealloc=kept adaptive=False`), and a mains SDES camera on the same fleet
+  still reports `battery=False powerType=1 turn-prealloc=skipped` - so the
+  battery detection change does not misclassify mains cameras or alter the
+  `powerType` they are sent. On that particular fleet the battery camera's live
+  view still does not fill in under Home Assistant, for a cause outside this
+  release: the same library and options stream that camera from a second host on
+  the same subnet, so the difference is in the host/network path rather than in
+  these knobs. That is being investigated separately.
 
 ### Added
 - **A one-line open profile per camera, at INFO.** Names the decisions that
