@@ -4,6 +4,37 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.15]
+
+### Fixed
+- **A001513 "L2" battery cameras serve live video again.** The `liveStreamParam`
+  pre-connect - an AWS-KVS provisioning call made only for battery cameras -
+  provisions the camera's session toward KVS, and its media then goes there
+  instead of to the SDES bridge: the session negotiates, the bridge binds, and
+  no video RTP ever arrives. It was added to cure a `-50019` ("not ready")
+  livePlayResp, but `-50019` is benign - mains cameras emit it too and recover
+  via ICE - so it addressed a non-bug at the cost of the battery live view. The
+  pre-connect is now **off by default**; re-enable it per camera with
+  `start_keepalive(live_stream_param=True)` or `AIDOT_LIVESTREAM_PARAM=1`.
+  Measured on an A001513: h264 1280x960 + PCMA, stable across a 180 s probe
+  series, where before there was no media at all.
+- **Battery cameras no longer skip the TURN relay pre-allocation.** A battery
+  camera sleeps, is woken through the cloud, and has no LAN IP, so its media
+  returns over the relay. The LAN-direct optimization (`sdes_skip_turn` /
+  `AIDOT_SDES_SKIP_TURN_PREALLOC`, which Home Assistant's "LAN-direct"
+  connection mode enables) would leave it with no return path. Mains SDES
+  cameras still honour the option.
+- **SDP payload narrowing works for every payload list.** It replaced the
+  literal `" 96 97"`, so it silently stopped narrowing once the plain-RTP video
+  line grew a third payload (98, the second H.265 variant). It now rewrites
+  whatever list the m-line carries and drops the other codecs' `rtpmap`/`fmtp`.
+- **An RTSP push no longer dies when audio is unusable.** Push copies every
+  input stream, so an audio line that could not be narrowed (its payload type
+  was never observed) made the ANNOUNCE fail with `400 Bad Request` and took the
+  whole publish down. Push now maps video only in that case, and the serve
+  command is built once - after the first-media wait resolves the real payload
+  types - so both the narrowing and the push decision see the observed codecs.
+
 ## [0.12.14]
 
 ### Fixed
