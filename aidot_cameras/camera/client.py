@@ -3073,6 +3073,26 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             except asyncio.CancelledError:
                 self._fast_attempt_override = None
                 return
+            except AidotCameraBusy as busy:
+                # The camera itself said it has no free session (-50002 max
+                # concurrent streams / -50015). Each retry mints a NEW peerid and
+                # so registers ANOTHER camera-side session, which the camera only
+                # releases slowly - so retrying on the short backoff makes the
+                # shortage worse and can wedge a battery camera into a
+                # wake-then-sleep loop that serves nothing. Wait out the release
+                # window instead. (The DTLS loops have always done this; the SDES
+                # loop silently did not.)
+                self._fast_attempt_override = None
+                _LOGGER.warning(
+                    "SDES keepalive: camera %s refused the stream (%s) - "
+                    "backing off %.0fs so its sessions can be released",
+                    self.device_id, busy, _MAX_DELAY,
+                )
+                try:
+                    await asyncio.sleep(_MAX_DELAY)
+                except asyncio.CancelledError:
+                    return
+                continue
             except Exception as exc:
                 self._fast_attempt_override = None
                 if _use_fast:

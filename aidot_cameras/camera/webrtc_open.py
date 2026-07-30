@@ -1212,7 +1212,26 @@ class _WebRTCOpenMixin:
         # Branch: SDES-SRTP cameras use ffmpeg; DTLS cameras use aiortc
         # ------------------------------------------------------------------ #
         if use_sdes:
+            def _raise_if_camera_refused():
+                """Surface a terminal webrtcResp ack on the SDES path too.
+
+                GAP D was only wired into the DTLS branch: the shared message
+                handler records -50002 (max concurrent streams) / -50015 into
+                ``terminal_error_fut`` for BOTH transports, but only the DTLS
+                connect ever read it.  So when a battery camera answered "no
+                free session", the SDES keepalive loop treated it as a generic
+                failure and retried on the short backoff - hammering the very
+                camera that had just said it was full, and registering yet
+                another peerid each time.  Raising AidotCameraBusy lets the
+                loop back off for the camera's release window instead.
+                """
+                if terminal_error_fut.done():
+                    _code, _desc = terminal_error_fut.result()
+                    _status(f"camera refused the stream (code={_code}) - not retrying")
+                    raise AidotCameraBusy(_code, _desc)
+
             try:
+                _raise_if_camera_refused()
                 _sdes_session = await self._open_sdes_stream(
                     peer_id=peer_id,
                     user_id=user_id,
@@ -1248,7 +1267,13 @@ class _WebRTCOpenMixin:
                 # DTLS-fallback path below keeps the slot for its own hand-off.)
                 self._release_stream_drain_to_session()
                 return _sdes_session
+            except AidotCameraBusy:
+                raise
             except CameraMixin._SdesNoAnswerError:
+                # A terminal refusal that lands while we were waiting surfaces
+                # as a no-answer; check before spending a DTLS fallback on a
+                # camera that has already told us it has no free session.
+                _raise_if_camera_refused()
                 # Camera reported enableSdes='1' but did not respond to our SDES
                 # offer.  iOS telemetry shows models such as LK.IPC.A001064 can
                 # have an incorrectly set enableSdes property while actually
