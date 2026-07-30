@@ -15,7 +15,7 @@ import random
 import time
 from typing import Callable, Optional  # noqa: F401 - method annotations
 
-from .constants import SDES_SPEAKERSTART_DELAY
+from .constants import _LIVE_PLAY_NOT_READY, SDES_SPEAKERSTART_DELAY
 from .models import VideoFrame  # noqa: F401 - forward-ref annotation
 from .sdes import SdesSession
 from .protocol import (
@@ -879,7 +879,7 @@ class _SdesOpenMixin:
                         f"livePlay refused by camera (livePlay=0, code={_lp_code_sdes})")
                 elif _lp_code_sdes not in (0, 200):
                     _status(f"livePlayResp: non-OK code {_lp_code_sdes}"
-                            f"{' (not ready, transient)' if _lp_code_sdes == -50019 else ''}"
+                            f"{' (not ready, transient)' if _lp_code_sdes == _LIVE_PLAY_NOT_READY else ''}"
                             " - proceeding")
             except TimeoutError:
                 pass

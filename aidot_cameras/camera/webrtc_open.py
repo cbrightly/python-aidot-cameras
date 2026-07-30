@@ -17,6 +17,7 @@ import logging
 from typing import Callable, Optional
 
 from ..exceptions import AidotCameraBusy, AidotCameraNotReady
+from .constants import _LIVE_PLAY_NOT_READY
 from .models import VideoFrame
 from .webrtc import WebRTCSession
 from .protocol import (
@@ -581,6 +582,14 @@ class _WebRTCOpenMixin:
         camera_ready_ev:  asyncio.Event   = asyncio.Event()  # set when camera is on MQTT
         liveplay_echo_ev: asyncio.Event   = asyncio.Event()  # set when livePlayReq echo arrives
         liveplay_resp_fut: asyncio.Future = loop.create_future()  # set on livePlayResp
+        # Per-open record of the camera's livePlayResp code, kept even when nobody
+        # waits for the future.  sdes_fast_liveplay is ON by default, so the SDES
+        # path skips the livePlayResp wait entirely - which meant the one signal a
+        # waking battery camera sends about its own readiness (-50019) was
+        # discarded on exactly the cameras that emit it.  Recorded here, read after
+        # the fact by _live_play_not_ready to classify a session that delivered no
+        # media.  Cleared per open so a stale code can't misclassify a later one.
+        self._last_live_play_code = None
         camera_reconnect_ev: asyncio.Event = asyncio.Event() # set when camera sends device/connect
         # Mutable flag: set True when setDevAttrNotif delivers sptPreconn:1.
         # Confirmed 2026-05-02: both A000088 and A001064 PTZ report
@@ -673,6 +682,11 @@ class _WebRTCOpenMixin:
             if method == "livePlayResp" and (
                     inner.get("peerid") == peer_id
                     or inner.get("devId") == device_id):
+                # Record the code whether or not anyone is waiting on the future
+                # (sdes_fast_liveplay skips that wait by default).  Hopped onto the
+                # loop thread rather than assigned here - this runs on the MQTT
+                # thread.
+                loop.call_soon_threadsafe(self._note_live_play_resp, inner)
                 if not liveplay_resp_fut.done():
                     loop.call_soon_threadsafe(liveplay_resp_fut.set_result, inner)
             # livePlayReq echo: broker/camera confirmed delivery of our livePlayReq.
@@ -1170,7 +1184,7 @@ class _WebRTCOpenMixin:
                     elif _lp_code not in (0, 200):
                         _status(
                             f"livePlayResp: non-OK code {_lp_code}"
-                            f"{' (not ready, transient)' if _lp_code == -50019 else ''}"
+                            f"{' (not ready, transient)' if _lp_code == _LIVE_PLAY_NOT_READY else ''}"
                             " - proceeding"
                         )
                 except TimeoutError:
@@ -1222,7 +1236,7 @@ class _WebRTCOpenMixin:
                     elif _lp_code2 not in (0, 200):
                         _status(
                             f"livePlayResp: non-OK code {_lp_code2}"
-                            f"{' (not ready, transient)' if _lp_code2 == -50019 else ''}"
+                            f"{' (not ready, transient)' if _lp_code2 == _LIVE_PLAY_NOT_READY else ''}"
                             " - proceeding"
                         )
                 except RuntimeError:
