@@ -72,14 +72,19 @@ jobs:
     container: python:3.13-alpine
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24, mandatory in a musl container)
-      # git for checkout; small build toolchain as a safety net for any
-      # transitive dep that lacks a musllinux wheel (the heavy ones all have them).
+      # git for checkout; ffmpeg for the mux-path tests (tests/test_audio_mux_offline.py
+      # and friends exercise the real libavformat pipeline); small build toolchain as a
+      # safety net for any transitive dep that lacks a musllinux wheel (the heavy ones
+      # all have them).
       - name: System deps
-        run: apk add --no-cache git gcc musl-dev libffi-dev
+        run: apk add --no-cache git ffmpeg gcc musl-dev libffi-dev
       - name: Install package + test deps
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[webrtc]" pytest pytest-cov
       # Coverage is informational (term-missing report); it does not gate the build.
+      # The suite includes tests/test_scripts_importable.py, which fails if any
+      # scripts/ harness rots against the installed package (they all silently
+      # broke at the 0.12.0 rename and CI never noticed).
       - name: Run unit tests
-        run: pytest tests/ -q --cov=aidot --cov-report=term-missing
+        run: pytest tests/ -q --cov=aidot_cameras --cov-report=term-missing

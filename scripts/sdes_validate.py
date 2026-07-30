@@ -139,7 +139,7 @@ def _summary(recs):
 async def _run(args):
     creds = load_credentials()
     coll = _Collector()
-    lg = logging.getLogger("aidot.camera.client")
+    lg = logging.getLogger("aidot_cameras.camera.client")
     lg.setLevel(logging.INFO)
     lg.addHandler(coll)
     async with aiohttp.ClientSession() as session:

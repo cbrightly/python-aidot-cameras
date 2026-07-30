@@ -84,6 +84,17 @@ include = ["aidot_cameras*"]
 [tool.setuptools.package-data]
 aidot_cameras = ["py.typed"]
 
+[tool.pytest.ini_options]
+# Test tiers. A bare `pytest tests/` must never touch hardware: the `live`
+# marker (real cameras on the LAN, release gate only) is deselected by
+# default and has to be requested explicitly with `-m live`.
+markers = [
+    "e2e: fake-lab end-to-end tests (fake cloud / MQTT broker / camera / go2rtc)",
+    "live: requires real cameras on the LAN; release-gate tier, never selected by default",
+    "mux: exercises the real ffmpeg/libavformat mux path",
+]
+addopts = "-m 'not live'"
+
 [tool.coverage.run]
 # Vendored third-party code (aiortc) is exercised via streaming, not our tests;
 # keep it out of the coverage report so the numbers reflect our own code.
