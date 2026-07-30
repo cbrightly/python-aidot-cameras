@@ -159,6 +159,7 @@ class _WebRTCOpenMixin:
         rtsp_push_url: Optional[str] = None,
         talk_pcm_provider: "Optional[Callable[[], Optional[bytes]]]" = None,
         talk: bool = False,
+        reuse_peer_id: Optional[str] = None,
     ) -> "WebRTCSession":
         """Open a liveType=2 WebRTC stream via MQTT signaling.
 
@@ -497,7 +498,14 @@ class _WebRTCOpenMixin:
         _dtls_fallback_ok = str(_cam_props.get("isDTLS", "1")) != "0"
 
         device_id = self.device_id
-        peer_id   = self.generate_webrtc_peer_id(
+        # A fresh peerid mints a NEW camera-side session, and the camera releases
+        # old ones only slowly (~3-4 min measured), so minting one on every retry
+        # of a failing loop stacks up sessions faster than they drain and can wedge
+        # a battery camera. The official app instead reuses one peerid and resends
+        # the same offer within a single session. ``reuse_peer_id`` lets a caller
+        # (the SDES keepalive loop) hold one peerid across retries; None keeps the
+        # historical mint-per-attempt behaviour for every other caller.
+        peer_id   = reuse_peer_id or self.generate_webrtc_peer_id(
             live_type=2, stream_id=stream_id, sdes=use_sdes
         )
         loop      = asyncio.get_running_loop()
