@@ -580,7 +580,7 @@ class _SdesOpenMixin:
                             ).digest()
                             _relay_addrs[_pre_sock] = (
                                 _r_ip_pre, _r_port_pre, _r_realm_pre, _r_nonce_pre,
-                                _t_host_pre, _t_port_pre, _r_key_pre,
+                                _t_host_pre, _t_port_pre, _r_key_pre, _t_user_pre,
                             )
                             _status(
                                 f"TURN relay pre-allocated (offer): {_pre_name}"
@@ -2183,6 +2183,73 @@ class _SdesOpenMixin:
             return len(_cands)
 
         if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:
+            # Open the TURN relay's door for the camera BEFORE probing it.
+            #
+            # A TURN server drops everything from a peer until a permission
+            # exists for that peer's address (RFC 5766 s9).  We advertise the
+            # relay as a candidate, but the only thing that ever created a
+            # permission here was a Send indication emitted while HANDLING data
+            # that had already arrived through the relay - which cannot happen
+            # until the permission exists.  That deadlock made the advertised
+            # relay candidate a black hole: measured on a live A001513 whose host
+            # could not be reached directly, ZERO packets ever arrived from the
+            # relay, so the camera had no working path and sent no media at all,
+            # while the same camera streamed to a host it COULD reach directly.
+            # (The DTLS path never hit this because aiortc does full TURN.)
+            def _turn_create_permission(_cp_sock, _cp_peer_ip, _cp_peer_port):
+                """Authenticated CreatePermission for one peer on _cp_sock's relay."""
+                import hashlib as _cp_hashlib
+                import hmac as _cp_hmac
+                import socket as _cp_socket
+                import struct as _cp_struct
+
+                _cp = _relay_addrs.get(_cp_sock)
+                if not _cp or len(_cp) < 8:
+                    return False
+                (_, _, _cp_realm, _cp_nonce, _cp_thost, _cp_tport,
+                 _cp_key, _cp_user) = _cp[:8]
+
+                def _cp_attr(_t, _v):
+                    return (_cp_struct.pack('!HH', _t, len(_v))
+                            + _v + b'\x00' * ((-len(_v)) % 4))
+
+                # XOR-PEER-ADDRESS: family, port ^ magic[:2], addr ^ magic
+                _cp_ip_b = _cp_socket.inet_aton(_cp_peer_ip)
+                _cp_xport = (_cp_peer_port ^ 0x2112) & 0xFFFF
+                _cp_xaddr = bytes(a ^ b for a, b in zip(_cp_ip_b, _STUN_MAGIC, strict=True))
+                _cp_xpa = b'\x00\x01' + _cp_struct.pack('!H', _cp_xport) + _cp_xaddr
+
+                _cp_tid = os.urandom(12)
+                _cp_body = (_cp_attr(0x0012, _cp_xpa)          # XOR-PEER-ADDRESS
+                            + _cp_attr(0x0006, _cp_user)       # USERNAME
+                            + _cp_attr(0x0014, _cp_realm)      # REALM
+                            + _cp_attr(0x0015, _cp_nonce))     # NONCE
+                _cp_hdr = (b'\x00\x08'                        # CreatePermission request
+                           + _cp_struct.pack('!H', len(_cp_body) + 24)
+                           + _STUN_MAGIC + _cp_tid)
+                _cp_mi = _cp_hmac.new(_cp_key, _cp_hdr + _cp_body, _cp_hashlib.sha1).digest()
+                _cp_body += _cp_attr(0x0008, _cp_mi)           # MESSAGE-INTEGRITY
+                _cp_msg = (b'\x00\x08' + _cp_struct.pack('!H', len(_cp_body))
+                           + _STUN_MAGIC + _cp_tid + _cp_body)
+                try:
+                    _cp_sock.sendto(_cp_msg, (_cp_thost, _cp_tport))
+                    return True
+                except Exception:
+                    _LOGGER.debug("CreatePermission send failed", exc_info=True)
+                    return False
+
+            _perm_ok = 0
+            for _c_ip, _c_port in _cam_ice_cands:
+                for _p_sock in (_audio_sock, _video_sock):
+                    if _turn_create_permission(_p_sock, _c_ip, _c_port):
+                        _perm_ok += 1
+            if _perm_ok:
+                _status(
+                    f"TURN: installed {_perm_ok} relay permission(s) for"
+                    f" {len(_cam_ice_cands)} camera candidate(s) - relay path is"
+                    f" now usable if the camera cannot be reached directly"
+                )
+
             for _c_ip, _c_port in _cam_ice_cands:
                 _send_use_candidate(
                     _audio_sock, _ufrag_a, _pwd_a,
