@@ -55,6 +55,32 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   were also re-typed inline in three files; both now derive from one definition, so
   a guard cannot drift out of step with the payload the camera is sent.
 
+- **A waking battery camera gets a fast retry instead of an escalating backoff**
+  (the follow-up left open in 0.12.16: "a rapid third consecutive session can
+  still hit `-50019` (battery wake-readiness)"). The camera answers `livePlayResp`
+  with `-50019` and then sends no media - it was not refusing, it had not finished
+  waking - and the SDES keepalive loop could not tell that apart from a degraded
+  camera, so the pacer escalated (10 s → 300 s) on a camera that would have been
+  ready seconds later. Under a consumer that re-opens per view (HA idle-releases
+  after 120 s), that is the difference between a slow first frame and a live view
+  that never fills in.
+
+  The wake signal was also being **discarded**: `sdes_fast_liveplay` is on by
+  default and skips the `livePlayResp` wait, so on the SDES path - the only path
+  battery cameras use - nothing ever read the code. It is now recorded whenever it
+  arrives, whether or not anything is waiting for it.
+
+  The retry reuses the DTLS serve loop's `_retry_policy`, bounded to the peerid
+  reuse window so the whole burst re-offers on **one** peerid (a fresh peerid
+  registers another camera-side session - the 0.12.16 wedge), then hands back to
+  the normal pacer. Scoped to battery cameras: on a mains camera `-50019` is
+  transient noise and a no-media session really is degraded. `-50019` still never
+  aborts an open - it is benign on its own, per 0.12.15; only the retry *delay*
+  keys on it, and only after a session has already failed to deliver media.
+
+  **Not yet validated on hardware** - the third-consecutive-session case needs a
+  live battery camera. Unit-tested; see `tests/test_wake_readiness_retry.py`.
+
 ### Added
 - **A one-line open profile per camera, at INFO.** Names the decisions that
   determine whether media can arrive at all - model, transport, battery (and

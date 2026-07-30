@@ -21,6 +21,7 @@ from ..const import (
 # in-module references (and any external importers) keep resolving.
 from .constants import (
     _LEEDARSON_APP_ID,
+    _LIVE_PLAY_NOT_READY,
     _SMARTHOME_URL_TEMPLATE,
     GETSTREAMCTRL_CMD,  # noqa: F401 - re-exported for back-compat (public pair; unused in-module)
     SDES_SPEAKERSTART_DELAY,  # noqa: F401 - used by the sdes_open mixin; kept re-exported
@@ -1003,6 +1004,35 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         the value on the wire and the battery guards can never disagree.
         """
         return 2 if self.is_battery_camera else 1
+
+    def _note_live_play_resp(self, payload) -> None:
+        """Record the camera's livePlayResp code for this open (loop thread).
+
+        Called from the signaling dispatcher for every livePlayResp matched to
+        this open, whether or not anything is waiting on the future - which
+        matters because ``sdes_fast_liveplay`` is on by default and skips that
+        wait, so this is the only place the code is seen on the SDES path.
+        Best-effort: a malformed payload leaves the record untouched rather than
+        raising into the dispatcher.
+        """
+        try:
+            self._last_live_play_code = _as_int(payload.get("code"))
+        except (AttributeError, TypeError):
+            _LOGGER.debug("camera %s: unparseable livePlayResp payload",
+                          getattr(self, "device_id", "?"), exc_info=True)
+
+    def _live_play_not_ready(self) -> bool:
+        """Did this open's livePlayResp say the camera is not ready to stream?
+
+        ``-50019`` is NOT a refusal on its own - a camera emits it and then
+        recovers via ICE, which is why 0.12.15 stopped treating it as fatal and
+        why nothing here aborts an open on it.  Its value is post-hoc: pair it
+        with "the session then delivered no media" and you have a waking battery
+        camera that was not ready yet, as distinct from a generic failure.  Only
+        the retry delay keys on it (see the SDES keepalive loop) - never the
+        decision to proceed.
+        """
+        return getattr(self, "_last_live_play_code", None) == _LIVE_PLAY_NOT_READY
 
     def _next_dseq(self) -> int:
         """Next livePlayReq dseq (app parity: Q0() starts at 100, increments)."""
@@ -3156,6 +3186,19 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                                                      sdes=True)
         _peer_reuses = 0
 
+        # Wake-readiness retries.  A battery camera that answers livePlayResp with
+        # -50019 and then sends no media was not refusing - it had not finished
+        # waking.  The pacer cannot tell that apart from a degraded camera, so it
+        # escalated the backoff (10s -> 300s) on a camera that would have been
+        # ready seconds later; under a consumer that re-opens per view, that is the
+        # difference between a slow first frame and a live view that never fills
+        # in.  Give it the same bounded fast burst the DTLS serve loop already has
+        # (_retry_policy), then fall back to the pacer so a persistently-cold
+        # camera is still not hammered.  Bounded to _PEERID_MAX_REUSE so the whole
+        # burst stays on ONE peerid: a fresh peerid registers another camera-side
+        # session, which is what wedged the L2 in the first place (0.12.16).
+        _not_ready_burst = 0
+
         while self._streaming_active:
             if self._serve_relay is not None:
                 # Clear any stale backend from a prior session; the open below
@@ -3342,8 +3385,23 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 # (camera refused / degraded on a rapid reconnect); a session
                 # that streamed fine and then ended (battery teardown, consumer
                 # gone) is a normal lifecycle event and resets to the base interval.
+                # Exception: a battery camera that answered -50019 and then sent
+                # nothing was still waking, not degraded - retry it fast instead.
+                _not_ready_burst = self._next_not_ready_burst(
+                    _healthy, _not_ready_burst)
+                _delay, _fast_retry = self._not_ready_retry_delay(
+                    _not_ready_burst, burst_max=_PEERID_MAX_REUSE)
+                if _fast_retry:
+                    _LOGGER.info(
+                        "SDES %s: camera not ready (waking, livePlayResp %d) and "
+                        "sent no media - fast retry in %.0fs [%d/%d]",
+                        self.device_id, _LIVE_PLAY_NOT_READY, _delay,
+                        _not_ready_burst, _PEERID_MAX_REUSE,
+                    )
+                else:
+                    _delay = _pacer.session_end_delay(healthy=_healthy)
                 try:
-                    await asyncio.sleep(_pacer.session_end_delay(healthy=_healthy))
+                    await asyncio.sleep(_delay)
                 except asyncio.CancelledError:
                     return
 
@@ -3934,6 +3992,35 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         """Whether the next SDES open attempt should use the fast path: only when
         adaptive mode is on and the fast path has not already failed this loop."""
         return bool(adaptive) and not bool(fast_failed)
+
+    def _next_not_ready_burst(self, healthy: bool, burst: int) -> int:
+        """Updated wake-readiness burst counter after a session ended.
+
+        Counts up only while a BATTERY camera keeps answering ``-50019`` and then
+        delivering no media; any other outcome resets it to 0.  Scoped to battery
+        cameras because they are the only ones with a wake-readiness state - on a
+        mains camera ``-50019`` is transient noise and the pacer's judgement
+        (something is degraded) is the right one.
+        """
+        if healthy or not self.is_battery_camera:
+            return 0
+        return burst + 1 if self._live_play_not_ready() else 0
+
+    @staticmethod
+    def _not_ready_retry_delay(burst: int, *,
+                               burst_max: int = 3) -> "tuple[float, bool]":
+        """``(delay, is_fast_retry)`` for a wake-readiness retry.
+
+        Shares [[_retry_policy]] with the DTLS serve loop so both paths agree on
+        what "the camera is still warming up" is worth waiting.  Returns
+        ``(0.0, False)`` when the counter is 0 (not a wake-readiness failure) and
+        ``(_, False)`` once the burst is spent, in both cases handing the decision
+        back to the caller's normal pacer.
+        """
+        if burst <= 0:
+            return (0.0, False)
+        delay, fast = _retry_policy("not_ready", burst, burst_max=burst_max)
+        return (delay, bool(fast))
 
     @staticmethod
     def _adaptive_after_attempt(use_fast: bool, healthy: bool, fast_failed: bool) -> bool:
