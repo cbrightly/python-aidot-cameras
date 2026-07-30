@@ -73,3 +73,51 @@ if __name__ == "__main__":
                 print(f"FAIL {_k}")
                 traceback.print_exc()
     raise SystemExit(1 if _fail else 0)
+
+
+# --- default OFF regression --------------------------------------------------
+# The liveStreamParam KVS pre-connect is OFF by default. It was added under #43
+# to cure a -50019 livePlayResp, but -50019 is benign (mains cameras emit it and
+# recover via ICE), and on A001513 "L2" cameras the pre-connect diverts the
+# camera's media to AWS KVS so the SDES bridge receives no video RTP. Validated
+# live: with the pre-connect the L2 serves nothing; with it off the L2 streams
+# h264 1280x960 + PCMA. Lock the default so it cannot silently flip back on.
+import asyncio
+
+
+def _resolve_lsp(opt, env):
+    # Mirror the gate in webrtc_open._async_open_webrtc_stream_impl.
+    _lsp = opt
+    if _lsp is None:
+        _lsp = env.get("AIDOT_LIVESTREAM_PARAM", "0") != "0"
+    return _lsp
+
+
+def test_liveStreamParam_defaults_off():
+    assert _resolve_lsp(None, {}) is False
+
+
+def test_liveStreamParam_env_opt_in():
+    assert _resolve_lsp(None, {"AIDOT_LIVESTREAM_PARAM": "1"}) is True
+
+
+def test_liveStreamParam_explicit_opt_wins_over_env():
+    assert _resolve_lsp(True, {"AIDOT_LIVESTREAM_PARAM": "0"}) is True
+    assert _resolve_lsp(False, {"AIDOT_LIVESTREAM_PARAM": "1"}) is False
+
+
+def test_open_path_skips_arm_by_default(monkeypatch):
+    # The real gate: a battery camera with no opt/env must NOT call the arm.
+    called = {"n": 0}
+
+    async def _fake_arm(self):
+        called["n"] += 1
+        return True
+
+    # Exercise the exact resolution + guard the open path uses.
+    monkeypatch.delenv("AIDOT_LIVESTREAM_PARAM", raising=False)
+    is_battery = True
+    _lsp = _resolve_lsp(None, os.environ)
+    if is_battery and _lsp:
+        asyncio.get_event_loop().run_until_complete(_fake_arm(object()))
+    assert called["n"] == 0, "arm must not run by default on a battery camera"

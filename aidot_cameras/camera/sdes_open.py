@@ -36,7 +36,9 @@ _LOGGER = logging.getLogger(__name__)
 
 # Payload types the ffmpeg SDP advertises per media line, and their alternates.
 # The SDP offers both because the camera picks one per session.
-_SDP_ALTERNATE_PT = {96: 97, 97: 96, 0: 8, 8: 0}
+# Video payloads the cameras negotiate: 96=H.264, 97/98=H.265 (two variants).
+_SDP_VIDEO_PTS = (96, 97, 98)
+_SDP_AUDIO_PTS = (0, 8)
 
 # How long to wait for the FIRST media of a session before launching the serve.
 # Nothing useful can happen before then: the payload types are unknown, so the SDP
@@ -70,16 +72,33 @@ def narrow_sdp_payload_types(sdp_text: str, keep_video=None, keep_audio=None) ->
     included - while every other signal looks healthy.
 
     ``keep_video`` / ``keep_audio`` of None leaves that line alone.
+
+    Handles any payload list on the m-line (``96 97``, ``96 97 98``, ...): the
+    kept line advertises ONLY the kept payload and the rtpmap/fmtp lines of
+    every dropped payload are removed.  The old implementation replaced the
+    literal ``" 96 97"``, so the day the SDP template grew a third video
+    payload (98, the second H.265 variant) narrowing silently stopped working
+    for it - and an un-narrowed multi-codec SDP makes the RTSP-push ANNOUNCE
+    carry a parameterless H.265 stream that go2rtc rejects with 400.
     """
-    drop = {_SDP_ALTERNATE_PT[k] for k in (keep_video, keep_audio)
-            if k in _SDP_ALTERNATE_PT}
+    drop: set = set()
     kept = []
     for line in sdp_text.splitlines(keepends=True):
         stripped = line.lstrip()
-        if stripped.startswith("m=video") and keep_video is not None:
-            line = line.replace(" 96 97", f" {keep_video}")
-        elif stripped.startswith("m=audio") and keep_audio is not None:
-            line = line.replace(" 0 8", f" {keep_audio}")
+        m_kind = keep = None
+        if stripped.startswith("m=video"):
+            m_kind, keep = "video", keep_video
+        elif stripped.startswith("m=audio"):
+            m_kind, keep = "audio", keep_audio
+        if m_kind is not None and keep is not None:
+            head, _, pts = stripped.partition(" RTP/")
+            proto, _, pt_list = pts.partition(" ")
+            listed = pt_list.split()
+            if str(keep) in listed:
+                drop.update(p for p in listed if p != str(keep))
+                line = (line[: len(line) - len(stripped)]
+                        + f"{head} RTP/{proto} {keep}"
+                        + ("\r\n" if line.endswith("\r\n") else "\n"))
         elif any(
             stripped.startswith(f"a={attr}:{pt}{sep}")
             for pt in drop
@@ -3537,16 +3556,11 @@ class _SdesOpenMixin:
             out_dir = os.path.dirname(output_path)
             if out_dir:
                 os.makedirs(out_dir, exist_ok=True)
-        # Build the ffmpeg command (single source of truth: _build_sdes_serve_cmd).
+        # The ffmpeg command is built once below, AFTER the first-media wait
+        # resolves the real payload types (single source of truth:
+        # _build_sdes_serve_cmd) - so both the SDP narrowing and the push
+        # video-only decision see the observed codecs.
         _serve_audio = self._resolve_sdes_serve_audio()
-        cmd = _build_sdes_serve_cmd(
-            sdp_path=sdp_path,
-            rtsp_push_url=rtsp_push_url,
-            output_path=output_path,
-            max_seconds=max_seconds,
-            sdes_audio=_serve_audio,
-            audio_gain_db=self._resolve_sdes_audio_gain_db(),
-        )
         # --- H.265 fix: narrow the ffmpeg SDP to the camera's actual codec ----
         # The camera streams H.264 (pt=96) OR H.265 (pt=97), varying per session.
         # An m=video line listing both ("96 97") makes ffmpeg bind the RTP
@@ -3578,10 +3592,15 @@ class _SdesOpenMixin:
                 await asyncio.sleep(0.1)
         _vpt = _first_video_pt[0]
         _apt = _first_audio_pt[0]
-        if _serve_audio and _apt is None:
+        # Which single payload type (if any) each line can be narrowed to. Audio
+        # is usable only when its type was actually observed; otherwise the "0 8"
+        # line cannot be narrowed.
+        _keep_v = int(_vpt) if _vpt in _SDP_VIDEO_PTS else None
+        _keep_a = int(_apt) if _apt in _SDP_AUDIO_PTS else None
+        if _serve_audio and _keep_a is None:
             # No audio observed in the window, so the line cannot be narrowed and
-            # mapping audio would stall the mux.  Serve video only rather than
-            # serving nothing, and say so.
+            # mapping audio would stall the mux (pull) or break the ANNOUNCE
+            # (push).  Serve video only rather than serving nothing, and say so.
             _LOGGER.warning(
                 "camera %s: no audio observed before the serve launched, so the "
                 "audio payload type is unknown; mapping it would stall the mpegts "
@@ -3589,14 +3608,22 @@ class _SdesOpenMixin:
                 getattr(self, "device_id", "?"),
             )
             _serve_audio = False
-            cmd = _build_sdes_serve_cmd(
-                sdp_path=sdp_path,
-                rtsp_push_url=rtsp_push_url,
-                output_path=output_path,
-                max_seconds=max_seconds,
-                sdes_audio=False,
-                audio_gain_db=self._resolve_sdes_audio_gain_db(),
-            )
+        # RTSP-PUSH copies EVERY input stream (-c copy). If the audio line was
+        # never narrowed to a single type, its multi-PT ANNOUNCE is rejected by
+        # the RTSP server (400 Bad Request) and takes the whole publish down - so
+        # push must map video only whenever audio is not usable. (Pull already
+        # gates audio via sdes_audio in _build_sdes_serve_cmd.)
+        _is_push = bool(rtsp_push_url) and not rtsp_push_url.startswith("http")
+        _push_video_only = _is_push and _keep_a is None
+        cmd = _build_sdes_serve_cmd(
+            sdp_path=sdp_path,
+            rtsp_push_url=rtsp_push_url,
+            output_path=output_path,
+            max_seconds=max_seconds,
+            sdes_audio=_serve_audio,
+            audio_gain_db=self._resolve_sdes_audio_gain_db(),
+            push_video_only=_push_video_only,
+        )
         # Audio matters even more than video here.  A multi-PT m-line makes ffmpeg
         # bind the depacketizer to the FIRST payload type and silently discard the
         # rest, and the mpegts mux withholds its PAT/PMT until EVERY mapped stream
@@ -3604,13 +3631,11 @@ class _SdesOpenMixin:
         # on a camera that sends PCMA discards every audio packet and the consumer
         # receives zero bytes.  That takes the video down with it, which is why
         # enabling serve audio appeared to break streaming outright.
-        if _vpt in (96, 97) or (_serve_audio and _apt in (0, 8)):
+        if _keep_v is not None or _keep_a is not None:
             def _read_sdp_file() -> str:
                 with open(sdp_path, encoding="utf-8") as _f_sdp:
                     return _f_sdp.read()
             try:
-                _keep_v = int(_vpt) if _vpt in (96, 97) else None
-                _keep_a = int(_apt) if (_serve_audio and _apt in (0, 8)) else None
                 _cur_sdp = await asyncio.get_running_loop().run_in_executor(
                     None, _read_sdp_file)
                 await asyncio.get_running_loop().run_in_executor(
@@ -3619,7 +3644,7 @@ class _SdesOpenMixin:
                 _status(
                     "SDES: narrowed ffmpeg SDP to"
                     + (f" video pt={_keep_v}"
-                       f" ({'H265' if _keep_v == 97 else 'H264'})"
+                       f" ({'H264' if _keep_v == 96 else 'H265'})"
                        if _keep_v is not None else "")
                     + (f" audio pt={_keep_a}"
                        f" ({'PCMA' if _keep_a == 8 else 'PCMU'})"
@@ -3902,7 +3927,7 @@ class _SdesOpenMixin:
                         _new_sdp = narrow_sdp_payload_types(
                             _new_sdp,
                             keep_video=(_first_video_pt[0]
-                                        if _first_video_pt[0] in (96, 97) else None),
+                                        if _first_video_pt[0] in _SDP_VIDEO_PTS else None),
                             keep_audio=(_first_audio_pt[0]
                                         if _first_audio_pt[0] in (0, 8) else None),
                         )

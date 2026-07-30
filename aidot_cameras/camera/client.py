@@ -369,6 +369,7 @@ def _build_sdes_serve_cmd(
     max_seconds: Optional[float] = None,
     sdes_audio: bool = False,
     audio_gain_db: float = -8.0,
+    push_video_only: bool = False,
 ) -> list:
     """Build the ffmpeg argv for the SDES bridge serve.
 
@@ -425,8 +426,13 @@ def _build_sdes_serve_cmd(
                 rtsp_push_url,
             ]
     elif rtsp_push_url:
+        # PUSH is G.711 passthrough (-c copy) as always - EXCEPT when the audio
+        # payload type was never observed (push_video_only): announcing an
+        # un-narrowed audio line the server cannot accept kills the whole
+        # publish with 400 Bad Request, so map video only and announce clean.
         dest_args = [
-            "-c", "copy",
+            *(["-map", "0:v:0", "-c:v", "copy"] if push_video_only
+              else ["-c", "copy"]),
             *time_args,
             "-f", "rtsp", "-rtsp_transport", "tcp",
             rtsp_push_url,
@@ -2695,9 +2701,11 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         from a Home Assistant config-entry option, since HA OS can't set env vars).
 
         ``live_stream_param`` toggles the battery-camera cloud pre-connect
-        (liveStreamParam); like ``fast_connect`` it overrides the
-        ``AIDOT_LIVESTREAM_PARAM`` env var, so an integration on HA OS (no env vars)
-        can still disable it per camera.
+        (liveStreamParam), which is **off by default**: it provisions the camera
+        toward AWS KVS and diverts an A001513's media away from the SDES bridge
+        (no video RTP arrives).  Like ``fast_connect`` it overrides the
+        ``AIDOT_LIVESTREAM_PARAM`` env var; set True only to re-enable the
+        pre-connect for a camera that needs it.
 
         ``serve_relay`` toggles the cold-start serve-port relay (holds the public
         serve port connectable through the WebRTC handshake so an eager go2rtc
@@ -3571,7 +3579,18 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
 
         Per-camera ``sdes_skip_turn`` (set via start_keepalive) wins; else the
         ``AIDOT_SDES_SKIP_TURN_PREALLOC`` env (truthy = 1/true/yes/on), default
-        off.  Only consulted for SDES cameras."""
+        off.  Only consulted for SDES cameras.
+
+        NEVER skipped for a battery camera, whatever the opt/env say: a battery
+        camera sleeps and is woken through the cloud, so it is reached over the
+        TURN relay rather than a host-direct LAN path.  Skipping the relay
+        pre-allocation there means the camera has no reachable path back and
+        sends no media at all (validated live on an A001513: with the relay it
+        streams h264 1280x960, with skip_turn it serves nothing).  The LAN-direct
+        latency win only applies to a mains camera that actually has a host
+        candidate on the HA segment."""
+        if getattr(self, "is_battery_camera", False):
+            return False
         opt = getattr(self, "_sdes_skip_turn_opt", None)
         if opt is not None:
             return bool(opt)
