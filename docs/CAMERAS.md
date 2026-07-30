@@ -11,13 +11,54 @@ The transport is auto-selected per camera from its model id (`LK.IPC.*`):
 | Model (`LK.IPC.*`) | Type | Transport | Power | Notes |
 | --- | --- | --- | --- | --- |
 | A000088 | M3 Pro (incl. A000088-1) | DTLS-SRTP | Wired/mains | Advertises two consecutive ICE ports; the high-port nomination fix applies. |
-| A001513 | "L2" battery cam | SDES-SRTP | Battery | Needs the `liveStreamParam` pre-connect + AVIO keepalive; woken on demand. Validated end-to-end. |
+| A001513 | "L2" battery cam | SDES-SRTP | Battery | AVIO keepalive + cloud keep-alive renew; woken on demand. Must **not** get the `liveStreamParam` pre-connect (see below). Validated end-to-end. |
 | A001064 | PTZ | SDES-SRTP | Wired/mains | Role-reversal handshake; excluded from SDES fast-liveplay for correctness. |
 | A001108, A001360 | battery cams | SDES-SRTP | Battery | Same battery handling as A001513 (recognized in code; not validated on the reference account). |
+
+Model ids are matched by **substring**, so a firmware/hardware revision suffix
+(`LK.IPC.A001513-1`, the way `A000088-1` exists on the DTLS side) resolves to the
+same handling as the base model rather than falling through to the generic path.
 
 Battery models sleep between events and are woken on demand; mains-powered models
 also expose the LAN-direct control path. Any other `LK.IPC.*` model defaults to
 the SDES-SRTP path.
+
+### Battery detection (why it matters)
+
+`is_battery_camera` gates *every* battery protection at once: the SDES TURN relay
+pre-allocation is force-kept (a camera woken through the cloud has no LAN host
+candidate, so the relay is its only return path), the cloud `setKeepAliveTime` is
+renewed mid-view, the HTTP wake fires before signaling, adaptive fast-connect is
+refused, and the camera is told `powerType=2`.
+
+It is therefore resolved from the camera's **own cloud data first** - a numeric
+`Battery_remaining` (the same signal `lan_control.is_mains_powered` inverts), or
+`batteryMode == 2` - and only then from the model list above. A
+battery camera that isn't recognized as one loses all of those protections
+simultaneously, and the resulting failure is asymmetric by consumer: a standalone
+run leaves the LAN-direct options at their relay-keeping defaults and streams
+fine, while Home Assistant - where those options are actually set - gets a session
+that negotiates and never delivers a frame. Evidence can only *add* a camera to
+the battery set; absence of evidence falls through to the list, so a wired camera
+never loses its LAN-direct optimizations.
+
+### The `liveStreamParam` pre-connect is disabled
+
+The official app's `KVSPreConnectStrategy.fetchKvsParams` POSTs to
+`/api/ipc/liveStream/liveStreamParam` before signaling. It was added here to cure
+a `-50019` ("not ready") `livePlayResp` from waking battery cameras - but `-50019`
+is benign (mains cameras emit it too and recover via ICE), and the call's real
+effect is to provision the camera's session toward **AWS KVS**, which is not the
+transport this library uses. The camera then sends its media to KVS: the session
+negotiates, the SDES bridge binds, and no video RTP ever arrives. Validated live
+on an A001513 - with the call it serves nothing, without it h264 1280x960 + PCMA.
+
+Because the call was only ever made for battery cameras, the set of cameras it can
+affect is exactly the set it breaks. So it is not a tunable: the decision lives in
+`_resolve_live_stream_param` and is always "no". `AIDOT_LIVESTREAM_PARAM` and
+`start_keepalive(live_stream_param=...)` are accepted and ignored (one warning if
+set) so an existing caller doesn't break. Re-enabling needs a code change plus
+fresh on-hardware evidence that some camera actually requires it.
 
 ## Streaming
 
@@ -107,6 +148,15 @@ views skip straight to the full path, bounding the fast-timeout cost to once per
 camera per session. The relay pre-allocation itself is also separately skippable on
 the fast path via `AIDOT_SDES_SKIP_TURN_PREALLOC` (it does two synchronous TURN
 Allocate round-trips, ~2-3 s, unused on a LAN).
+
+**Never applied to battery cameras**, whatever the option/env say. The saving
+adaptive chases is the TURN pre-allocation, which is force-kept for a battery
+camera (its only return path), and fast-liveplay is already on by default - so a
+battery "fast" attempt runs the very same handshake as the patient one and differs
+only in being given 45 s to open and a 40 s media grace, *inside* the documented
+25-70 s battery cold-start window. A slow-but-healthy wake would then be scored as
+a fast-path failure: it latches `_fast_path_unavailable`, escalates the backoff,
+and burns a camera-side session on a device that frees them slowly.
 
 ### Connection reuse (`AIDOT_PERSISTENT_MQTT`, on by default)
 

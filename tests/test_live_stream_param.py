@@ -1,10 +1,17 @@
-"""Unit tests for the liveStreamParam provision-request builder.
+"""Unit tests for the liveStreamParam provision-request builder and its gate.
 
-Battery cameras (e.g. L2_170, A001513) must have their live-stream session
-provisioned by the cloud before MQTT signaling, or they reject livePlayReq with
--50019 and never stream. The request shape is exact: a JSON ARRAY body of device
-ids (an object body returns HTTP 500) plus an ``owner`` header. This locks that
-format in. No network: builds the request from a bare instance.
+The builder's request shape is exact: a JSON ARRAY body of device ids (an object
+body returns HTTP 500) plus an ``owner`` header. This locks that format in, for
+the day a camera is found that genuinely needs the call.
+
+The gate itself is now always closed (_resolve_live_stream_param). The
+pre-connect provisions a battery camera's session toward AWS KVS and the camera
+sends its media there instead of to this library, so the live view negotiates and
+then serves no video at all - and battery cameras are the only ones it was ever
+made for. It was added to cure a -50019 ("not ready") livePlayResp, which is
+benign: mains cameras emit it too and recover via ICE.
+
+No network: everything below builds from a bare instance.
 """
 import json
 import os
@@ -60,64 +67,79 @@ def test_auth_headers_carried():
     assert headers.get("terminal") == "app"
 
 
-if __name__ == "__main__":
-    import traceback
-    _fail = 0
-    for _k, _v in sorted(globals().items()):
-        if _k.startswith("test_"):
-            try:
-                _v()
-                print(f"PASS {_k}")
-            except Exception:
-                _fail += 1
-                print(f"FAIL {_k}")
-                traceback.print_exc()
-    raise SystemExit(1 if _fail else 0)
+# --- the gate ----------------------------------------------------------------
+# These call the REAL resolver the open path calls. The previous version of this
+# file re-implemented the gate as a local `_resolve_lsp` helper and asserted
+# against that copy, so the shipped gate was never covered and the copy was free
+# to drift from it - which is how a flag that must stay off stayed "locked" by a
+# test that could not see it.
+
+_GATE = next(v for v in vars(cc).values()
+             if isinstance(v, type) and "_resolve_live_stream_param" in v.__dict__)
 
 
-# --- default OFF regression --------------------------------------------------
-# The liveStreamParam KVS pre-connect is OFF by default. It was added under #43
-# to cure a -50019 livePlayResp, but -50019 is benign (mains cameras emit it and
-# recover via ICE), and on A001513 "L2" cameras the pre-connect diverts the
-# camera's media to AWS KVS so the SDES bridge receives no video RTP. Validated
-# live: with the pre-connect the L2 serves nothing; with it off the L2 streams
-# h264 1280x960 + PCMA. Lock the default so it cannot silently flip back on.
-import asyncio
+class _Info:
+    def __init__(self, model_id):
+        self.model_id = model_id
 
 
-def _resolve_lsp(opt, env):
-    # Mirror the gate in webrtc_open._async_open_webrtc_stream_impl.
-    _lsp = opt
-    if _lsp is None:
-        _lsp = env.get("AIDOT_LIVESTREAM_PARAM", "0") != "0"
-    return _lsp
+def _cam(model_id="LK.IPC.A001513", **attrs):
+    c = _GATE.__new__(_GATE)
+    c.info = _Info(model_id)
+    c.device_id = "DEV1234"
+    for k, v in attrs.items():
+        setattr(c, k, v)
+    return c
 
 
-def test_liveStreamParam_defaults_off():
-    assert _resolve_lsp(None, {}) is False
-
-
-def test_liveStreamParam_env_opt_in():
-    assert _resolve_lsp(None, {"AIDOT_LIVESTREAM_PARAM": "1"}) is True
-
-
-def test_liveStreamParam_explicit_opt_wins_over_env():
-    assert _resolve_lsp(True, {"AIDOT_LIVESTREAM_PARAM": "0"}) is True
-    assert _resolve_lsp(False, {"AIDOT_LIVESTREAM_PARAM": "1"}) is False
-
-
-def test_open_path_skips_arm_by_default(monkeypatch):
-    # The real gate: a battery camera with no opt/env must NOT call the arm.
-    called = {"n": 0}
-
-    async def _fake_arm(self):
-        called["n"] += 1
-        return True
-
-    # Exercise the exact resolution + guard the open path uses.
+def test_gate_closed_by_default(monkeypatch):
     monkeypatch.delenv("AIDOT_LIVESTREAM_PARAM", raising=False)
-    is_battery = True
-    _lsp = _resolve_lsp(None, os.environ)
-    if is_battery and _lsp:
-        asyncio.get_event_loop().run_until_complete(_fake_arm(object()))
-    assert called["n"] == 0, "arm must not run by default on a battery camera"
+    assert _cam()._resolve_live_stream_param() is False
+
+
+def test_gate_stays_closed_for_the_env(monkeypatch):
+    monkeypatch.setenv("AIDOT_LIVESTREAM_PARAM", "1")
+    assert _cam()._resolve_live_stream_param() is False
+
+
+def test_gate_stays_closed_for_an_explicit_opt(monkeypatch):
+    # start_keepalive(live_stream_param=True) - what a consumer that surfaces the
+    # setting passes. It must not be able to re-break a battery camera's video.
+    monkeypatch.delenv("AIDOT_LIVESTREAM_PARAM", raising=False)
+    c = _cam(_live_stream_param_opt=True)
+    assert c._resolve_live_stream_param() is False
+
+
+def test_gate_closed_for_every_battery_model(monkeypatch):
+    monkeypatch.setenv("AIDOT_LIVESTREAM_PARAM", "1")
+    for _m in ("LK.IPC.A001513", "LK.IPC.A001513-1", "LK.IPC.A001108",
+               "LK.IPC.A001360"):
+        c = _cam(_m, _live_stream_param_opt=True)
+        assert c._resolve_live_stream_param() is False, _m
+
+
+def test_gate_closed_for_a_mains_camera(monkeypatch):
+    # The call was never made for a mains camera; the gate agrees.
+    monkeypatch.setenv("AIDOT_LIVESTREAM_PARAM", "1")
+    c = _cam("LK.IPC.A000088", _live_stream_param_opt=True)
+    assert c._resolve_live_stream_param() is False
+
+
+def test_ignored_request_is_warned_once(caplog):
+    # A consumer that set the option gets told why it did nothing, so a live view
+    # that serves no video isn't debugged blind - but only once per camera, not
+    # on every reconnect.
+    c = _cam(_live_stream_param_opt=True)
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            c._resolve_live_stream_param()
+    _warnings = [r for r in caplog.records if "liveStreamParam" in r.getMessage()]
+    assert len(_warnings) == 1
+    assert "DEV1234" in _warnings[0].getMessage()
+
+
+def test_no_warning_when_nobody_asked(monkeypatch, caplog):
+    monkeypatch.delenv("AIDOT_LIVESTREAM_PARAM", raising=False)
+    with caplog.at_level("WARNING"):
+        _cam()._resolve_live_stream_param()
+    assert not [r for r in caplog.records if "liveStreamParam" in r.getMessage()]

@@ -4,6 +4,74 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.17]
+
+### Fixed
+- **L2 / battery cameras that stream from a standalone run but never under Home
+  Assistant.** The same library code took two different paths because the
+  battery-hostile knobs were reachable from a consumer's settings, and a
+  standalone run never sets them. Three of those knobs are now decided by the
+  library instead of by the caller:
+  - **The `liveStreamParam` KVS pre-connect can no longer be turned back on.** It
+    provisions the camera's session toward AWS KVS, so the camera sends its media
+    there instead of to the SDES bridge: the session negotiates, the bridge binds,
+    and no video RTP ever arrives. It is made for **battery cameras only** - i.e.
+    exactly the cameras it breaks - and the `-50019` ("not ready") livePlayResp it
+    was added to cure is benign (mains cameras emit it too and recover via ICE).
+    0.12.15 turned it off by default but left the option/env able to re-enable it,
+    which is a foot-gun aimed at one foot: a consumer that surfaces it as a
+    setting (Home Assistant surfaces these because HA OS cannot set env vars)
+    re-breaks every battery camera on the account, and "negotiates, then shows
+    nothing, forever" looks nothing like a settings problem. The decision now
+    lives in one place and is "no". `AIDOT_LIVESTREAM_PARAM` and
+    `start_keepalive(live_stream_param=...)` are accepted and ignored, logging one
+    warning per camera so a stuck install says why in the log.
+  - **Adaptive fast-connect is refused for battery cameras.** The saving it chases
+    is the TURN relay pre-allocation, which is force-kept for a battery camera
+    (its only return path), and fast-liveplay is already on by default - so a
+    battery "fast" attempt runs the identical handshake and differs only in being
+    given 45 s to open and a 40 s media grace, *inside* the documented 25-70 s
+    battery cold-start window. A slow-but-healthy wake was scored as a fast-path
+    failure: it latched `_fast_path_unavailable`, escalated the backoff, and burnt
+    a camera-side session on a device that frees them slowly.
+  - **Battery cameras are detected from their own cloud data, not just a model
+    list.** `is_battery_camera` now also resolves from a numeric
+    `Battery_remaining` (the signal `lan_control.is_mains_powered` inverts) or
+    `batteryMode == 2`, falling back to the model list when the cloud says
+    nothing. Every battery protection hangs off this one property - the TURN relay
+    pre-allocation, the cloud keep-alive renew, the HTTP wake, the adaptive
+    refusal above, `powerType=2` - so an unlisted battery revision lost all of
+    them at once, and lost them *only* under a consumer that sets the LAN-direct
+    options. Evidence can only add a camera to the battery set, never remove a
+    listed one, so mains cameras keep their optimizations. `powerType` is
+    deliberately not read as evidence (it is a field we send, and its neighbour
+    `p2pCache` reads 2 on every camera).
+- **Model ids are matched consistently by substring.** The plain-RTP (TUTK-framed)
+  set was compared for exact equality, so a revision suffix - `LK.IPC.A001513-1`,
+  the way `A000088-1` already exists on the DTLS side - read as a standard-SRTP
+  camera: ffmpeg then tried to decrypt TUTK frames with the announced fake key and
+  the bridge never stripped the TUTK header, giving a session that negotiates and
+  delivers nothing decodable. The battery-model list and the `powerType` wire value
+  were also re-typed inline in three files; both now derive from one definition, so
+  a guard cannot drift out of step with the payload the camera is sent.
+
+### Added
+- **A one-line open profile per camera, at INFO.** Names the decisions that
+  determine whether media can arrive at all - model, transport, battery (and
+  whether the cloud reported it), `powerType`, whether the TURN pre-allocation was
+  kept or skipped, adaptive on/off. This whole failure class (a session that
+  negotiates and then delivers nothing) is usually one of these resolving the
+  wrong way, and it was otherwise invisible: the handshake logs look identical
+  either way. At INFO so a bug report carries it without having to re-enable DEBUG
+  and reproduce.
+
+### Changed
+- `tests/test_live_stream_param.py`'s regression lock now calls the **real**
+  resolver. It previously re-implemented the gate as a local helper and asserted
+  against that copy, so the shipped gate was uncovered and the copy was free to
+  drift from it - a flag that must stay off was "locked" by a test that could not
+  see it.
+
 ## [0.12.16]
 
 ### Fixed
