@@ -104,7 +104,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["B", "RUF", "SIM", "PERF", "ASYNC", "F811", "PIE", "E731", "E702"]
+# E402: tests legitimately import after pytest.importorskip / sys.path setup.
+"tests/**" = ["B", "RUF", "SIM", "PERF", "ASYNC", "F811", "PIE", "E731", "E702", "E402"]
 # Re-export modules: imports are intentional public re-exports / back-compat shims.
 "__init__.py" = ["F401"]
 # device_client.py re-exports from camera.client mid-file (avoids a circular import).
