@@ -165,6 +165,37 @@ def test_report_write_is_atomic_and_leaves_no_temp(lv, tmp_path):
     assert not (tmp_path / "r.json.tmp").exists(), "temp file left behind"
 
 
+def test_recording_path_clears_a_stale_file_it_owns(lv, tmp_path):
+    stale = tmp_path / "live_abcdef12_1.ts"
+    stale.write_bytes(b"old")
+    out = lv._recording_path(str(tmp_path), "abcdef1234", 1)
+    assert out == str(stale)
+    assert not stale.exists(), "a removable stale file should be cleared"
+
+
+def test_recording_path_falls_back_when_the_stale_file_is_not_ours(lv, tmp_path,
+                                                                  monkeypatch):
+    """/tmp is shared and sticky: another user's leftover must not abort the run.
+
+    This is not hypothetical - it killed a live-validation run on the
+    self-hosted runner, which could not delete recordings a manual run had left
+    in /tmp under a different user.
+    """
+    stale = tmp_path / "live_abcdef12_1.ts"
+    stale.write_bytes(b"someone else's")
+
+    def _denied(_path):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(lv.os, "remove", _denied)
+
+    out = lv._recording_path(str(tmp_path), "abcdef1234", 1)
+
+    assert out != str(stale), "must not reuse a path it cannot clear"
+    assert str(os.getpid()) in out, "fallback should be process-unique"
+    assert stale.read_bytes() == b"someone else's", "must not touch their file"
+
+
 def test_advisory_failure_does_not_block(lv, tmp_path):
     report = {"cameras": [
         _cam(lv, "LK.IPC.A000088", "PASS"),
