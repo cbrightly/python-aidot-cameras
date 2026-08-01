@@ -31,6 +31,7 @@ from ._upstream import (
     DeviceModel,
     UserInformation,
     device_client_args,
+    device_session_authenticated,
 )
 from ._upstream import DeviceState as _UpstreamDeviceState
 
@@ -71,6 +72,18 @@ DeviceClient = _UpstreamDeviceClient
 # one there, so a consumer that wants the answer rather than the enum should
 # call `_upstream.device_session_authenticated(client)`, which works on both.
 DeviceState = _UpstreamDeviceState
+
+# `device_session_authenticated` is imported above and re-exported from here as
+# the PUBLIC way to ask "is this device's LAN session logged in?".
+#
+# Consumers used to answer that by comparing a client's private `_state`
+# against DeviceState.AUTHENTICATED, which is correct only on upstream's typed
+# shape - the dict shape has no `_state` at all, so the comparison silently
+# evaluates False forever and every device looks permanently disconnected.
+# The helper reads whichever signal the installed shape actually maintains
+# (`_state` or the `connect_and_login` property), so a consumer never has to
+# know which upstream is underneath.  Prefer it over DeviceState for any
+# is-it-connected question; DeviceState stays exported for annotations.
 
 
 class DeviceStatusData(_UpstreamDeviceStatusData):
