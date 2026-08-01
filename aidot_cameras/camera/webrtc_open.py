@@ -17,6 +17,7 @@ import logging
 from typing import Callable, Optional
 
 from ..exceptions import AidotCameraBusy, AidotCameraNotReady
+from .constants import _LIVE_PLAY_NOT_READY
 from .models import VideoFrame
 from .webrtc import WebRTCSession
 from .protocol import (
@@ -235,24 +236,40 @@ class _WebRTCOpenMixin:
 
         use_sdes = force_sdes if force_sdes is not None else self.is_sdes_camera
 
-        # Battery cameras must have their live-stream session provisioned by the
-        # cloud BEFORE MQTT signaling, or the camera rejects livePlayReq with
-        # -50019 ("not ready") and never runs ICE -> no media.  App parity:
-        # KVSPreConnectStrategy.fetchKvsParams calls liveStreamParam first, which
-        # provisions the camera's session toward AWS KVS.  DEFAULT OFF: we stream
-        # over MQTT/SDES, not KVS, and on A001513 "L2" cameras this pre-connect
-        # DIVERTS the camera's media to KVS - the SDES bridge then receives no
-        # video RTP at all (validated live: with the call the L2 serves nothing;
-        # with AIDOT_LIVESTREAM_PARAM=0 it streams h264 1280x960 + PCMA, matching
-        # the pre-0.7 behaviour that always worked).  It was added under #43 to
-        # cure a -50019 ("not ready") livePlayResp, but -50019 is benign - mains
-        # cameras emit it too and recover via ICE - so the pre-connect fixed a
-        # non-bug at the cost of the battery live view.  Kept as an opt-in escape
-        # hatch: start_keepalive(live_stream_param=True) or AIDOT_LIVESTREAM_PARAM=1.
-        _lsp = getattr(self, "_live_stream_param_opt", None)
-        if _lsp is None:
-            _lsp = os.environ.get("AIDOT_LIVESTREAM_PARAM", "0") != "0"
-        if self.is_battery_camera and _lsp:
+        # One line, once per camera, naming the decisions that determine whether
+        # media can arrive at all.  This failure class - a session that negotiates
+        # and then delivers nothing - is almost always one of these resolving the
+        # wrong way (most often a camera not recognized as battery, so the TURN
+        # relay that is its only return path gets skipped), and it is otherwise
+        # invisible: the handshake logs look perfect either way.  Logged at INFO so
+        # a bug report carries it without needing DEBUG re-enabled and the failure
+        # reproduced.
+        if not getattr(self, "_open_profile_logged", False):
+            self._open_profile_logged = True
+            _LOGGER.info(
+                "camera %s: model=%s transport=%s battery=%s (cloud-reported=%s) "
+                "powerType=%d turn-prealloc=%s adaptive=%s",
+                self.device_id,
+                getattr(getattr(self, "info", None), "model_id", None) or "?",
+                "SDES" if use_sdes else "DTLS",
+                self.is_battery_camera,
+                bool(self._battery_evidence()),
+                self.live_power_type,
+                "skipped" if self._resolve_sdes_skip_turn() else "kept",
+                self._resolve_sdes_adaptive(),
+            )
+
+        # The cloud liveStreamParam pre-connect (app parity:
+        # KVSPreConnectStrategy.fetchKvsParams) provisions a battery camera's live
+        # session toward AWS KVS.  We stream over MQTT/SDES, not KVS, so on an
+        # A001513 "L2" the camera then sends its media to KVS and the SDES bridge
+        # receives no video RTP at all - validated live: with the call the L2
+        # serves nothing, without it h264 1280x960 + PCMA.  It is made for battery
+        # cameras only, i.e. exactly the cameras it breaks, so the decision is
+        # centralized (and is "no") in _resolve_live_stream_param - which also
+        # warns a caller that still asks.  Kept as a call site rather than deleted
+        # so re-enabling it for a camera that demonstrably needs it is one line.
+        if self._resolve_live_stream_param():
             _lsp_ok = await self._async_fetch_live_stream_param()
             _LOGGER.debug("camera %s: liveStreamParam provisioned ok=%s",
                           self.device_id, _lsp_ok)
@@ -561,10 +578,23 @@ class _WebRTCOpenMixin:
         webrtc_req_echo_fut:  asyncio.Future = loop.create_future()  # set when broker echoes our own webrtcReq back (is_echo=True)
         ice_config_fut:    asyncio.Future = loop.create_future()  # TURN credentials from getIceConfigResp
         ice_q:            asyncio.Queue   = asyncio.Queue()
+        # Non-destructive record of every candidate the camera trickles to us.
+        # The SDES path needs these too (for TURN permissions and nomination) but
+        # must not consume ice_q: the DTLS fallback re-reads that queue, and a
+        # candidate taken by SDES would never reach aiortc.
+        ice_cands_seen:   list            = []
         cam_ip_q:         asyncio.Queue   = asyncio.Queue()  # camera IP from setDevAttrNotif
         camera_ready_ev:  asyncio.Event   = asyncio.Event()  # set when camera is on MQTT
         liveplay_echo_ev: asyncio.Event   = asyncio.Event()  # set when livePlayReq echo arrives
         liveplay_resp_fut: asyncio.Future = loop.create_future()  # set on livePlayResp
+        # Per-open record of the camera's livePlayResp code, kept even when nobody
+        # waits for the future.  sdes_fast_liveplay is ON by default, so the SDES
+        # path skips the livePlayResp wait entirely - which meant the one signal a
+        # waking battery camera sends about its own readiness (-50019) was
+        # discarded on exactly the cameras that emit it.  Recorded here, read after
+        # the fact by _live_play_not_ready to classify a session that delivered no
+        # media.  Cleared per open so a stale code can't misclassify a later one.
+        self._last_live_play_code = None
         camera_reconnect_ev: asyncio.Event = asyncio.Event() # set when camera sends device/connect
         # Mutable flag: set True when setDevAttrNotif delivers sptPreconn:1.
         # Confirmed 2026-05-02: both A000088 and A001064 PTZ report
@@ -657,6 +687,11 @@ class _WebRTCOpenMixin:
             if method == "livePlayResp" and (
                     inner.get("peerid") == peer_id
                     or inner.get("devId") == device_id):
+                # Record the code whether or not anyone is waiting on the future
+                # (sdes_fast_liveplay skips that wait by default).  Hopped onto the
+                # loop thread rather than assigned here - this runs on the MQTT
+                # thread.
+                loop.call_soon_threadsafe(self._note_live_play_resp, inner)
                 if not liveplay_resp_fut.done():
                     loop.call_soon_threadsafe(liveplay_resp_fut.set_result, inner)
             # livePlayReq echo: broker/camera confirmed delivery of our livePlayReq.
@@ -723,6 +758,7 @@ class _WebRTCOpenMixin:
                     return   # candidate for a different camera/session
                 cand = inner.get("candidate") or {}
                 if cand.get("candidate"):
+                    ice_cands_seen.append(cand)
                     loop.call_soon_threadsafe(ice_q.put_nowait, cand)
             elif method == "webrtcReq":
                 # Camera acting as WebRTC offerer (role reversal observed on
@@ -1055,16 +1091,14 @@ class _WebRTCOpenMixin:
 
         # ------------------------------------------------------------------ #
         # powerType / p2pCache - source: IpcServiceImpl.java:B()
-        # B() returns 2 for battery/low-power models (A001513, A001108, A001360)
-        # and 1 for everything else.  p2pCache is the camera's prop value
-        # (all tested cameras report p2pCache=2).  Both fields appear in
+        # B() returns 2 for battery/low-power cameras and 1 for everything else;
+        # derived from is_battery_camera (see live_power_type) so the wire value
+        # and the battery guards cannot drift apart.  p2pCache is the camera's prop
+        # value (all tested cameras report p2pCache=2).  Both fields appear in
         # livePlayReq, webrtcReq, and the SDES webrtcReq.
-        _live_model_id = getattr(getattr(self, "info", None), "model_id", None) or ""
         # App parity: LivePlayPaylodBean declares powerType/p2pCache as INT (not
         # String) - send ints so a strict camera JSON parser accepts livePlayReq.
-        _live_power_type = 2 if any(
-            m in _live_model_id for m in ("A001513", "A001108", "A001360")
-        ) else 1
+        _live_power_type = self.live_power_type
         _live_p2p_cache = 2  # All cameras report p2pCache:2 in device attrs
 
         # ------------------------------------------------------------------ #
@@ -1156,7 +1190,7 @@ class _WebRTCOpenMixin:
                     elif _lp_code not in (0, 200):
                         _status(
                             f"livePlayResp: non-OK code {_lp_code}"
-                            f"{' (not ready, transient)' if _lp_code == -50019 else ''}"
+                            f"{' (not ready, transient)' if _lp_code == _LIVE_PLAY_NOT_READY else ''}"
                             " - proceeding"
                         )
                 except TimeoutError:
@@ -1208,7 +1242,7 @@ class _WebRTCOpenMixin:
                     elif _lp_code2 not in (0, 200):
                         _status(
                             f"livePlayResp: non-OK code {_lp_code2}"
-                            f"{' (not ready, transient)' if _lp_code2 == -50019 else ''}"
+                            f"{' (not ready, transient)' if _lp_code2 == _LIVE_PLAY_NOT_READY else ''}"
                             " - proceeding"
                         )
                 except RuntimeError:
@@ -1267,6 +1301,7 @@ class _WebRTCOpenMixin:
                     sdes_answer_timeout=_sdes_answer_timeout,
                     rtsp_push_url=rtsp_push_url,
                     talk=talk,
+                    ice_cands_seen=ice_cands_seen,
                 )
                 # Success: the SdesSession now owns outgoing_q + mqtt_fut and
                 # reaps them on stop(); clear the backstop slot so a concurrent
@@ -2675,9 +2710,9 @@ class _WebRTCOpenMixin:
             # at the right time so it can initiate STUN checks against us.
             #
             # Key fix: the previous version only sent the first private-LAN host
-            # candidate (e.g. 192.168.1.175), which is unreachable from a remote
+            # candidate (e.g. 192.0.2.175), which is unreachable from a remote
             # camera.  We now send ALL gathered candidates including server-reflexive
-            # ones (e.g. 72.84.199.230 public IP) so a remote camera can reach us
+            # ones (e.g. 198.51.100.30 public IP) so a remote camera can reach us
             # even when NAT traversal without TURN is possible.
             _rr_local_sdp  = pc.localDescription.sdp
             _rr_ice_topic  = f"iot/v1/s/{user_id}/IPC/iceCandidateReq"

@@ -15,7 +15,7 @@ import random
 import time
 from typing import Callable, Optional  # noqa: F401 - method annotations
 
-from .constants import SDES_SPEAKERSTART_DELAY
+from .constants import _LIVE_PLAY_NOT_READY, SDES_SPEAKERSTART_DELAY
 from .models import VideoFrame  # noqa: F401 - forward-ref annotation
 from .sdes import SdesSession
 from .protocol import (
@@ -32,6 +32,10 @@ from .protocol import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Strong references to detached per-session helper tasks, so the event loop
+# cannot garbage-collect one mid-flight.  Entries remove themselves on done.
+_SDES_BACKGROUND_TASKS: set = set()
 
 
 # Payload types the ffmpeg SDP advertises per media line, and their alternates.
@@ -233,6 +237,7 @@ class _SdesOpenMixin:
         sdes_answer_timeout: Optional[float] = None,
         rtsp_push_url: Optional[str] = None,
         talk: bool = False,
+        ice_cands_seen=None,
     ) -> "SdesSession":
         """SDES-SRTP streaming path using a hand-crafted SDP offer and ffmpeg.
 
@@ -262,17 +267,22 @@ class _SdesOpenMixin:
         #     0xC9=video), strips the 12-byte TUTK header, synthesizes a
         #     standard RTP header from the TUTK timestamp+SSRC fields, and
         #     forwards the reassembled plain-RTP packet to ffmpeg.
+        # Substring-matched, NOT equality: a revision suffix ("LK.IPC.A001513-1",
+        # the way A000088-1 exists on the DTLS side) is the same firmware and needs
+        # the same framing.  An exact match silently read such a camera as a plain
+        # SRTP model, so ffmpeg tried to decrypt TUTK frames with the announced
+        # fake key and the bridge never stripped the TUTK header - a session that
+        # negotiates and delivers nothing decodable.
         _model_id = getattr(getattr(self, "info", None), "model_id", None) or ""
-        _use_plain_rtp = _model_id in {"LK.IPC.A001064", "LK.IPC.A001513"}
+        _use_plain_rtp = any(m in _model_id for m in self._PLAIN_RTP_MODELS)
         # powerType/p2pCache - IpcServiceImpl.java:B() returns 2 for battery
-        # models (A001513, A001108, A001360); 1 for wired.  All tested cameras
-        # report p2pCache=2 in their setDevAttrNotif device attributes.
+        # models; 1 for wired.  Derived from is_battery_camera (see live_power_type)
+        # so the wire value and the battery guards cannot drift apart.  All tested
+        # cameras report p2pCache=2 in their setDevAttrNotif device attributes.
         # App parity: LivePlayPaylodBean declares these as INT, not String - send
         # ints so a strict camera JSON parser accepts the livePlayReq (battery cams
         # appear stricter; a rejected livePlayReq leaves the cam un-armed).
-        _live_power_type = 2 if any(
-            m in _model_id for m in ("A001513", "A001108", "A001360")
-        ) else 1
+        _live_power_type = self.live_power_type
         _live_p2p_cache = 2
 
         webrtc_req_topic = f"iot/v1/s/{user_id}/IPC/webrtcReq"
@@ -400,7 +410,11 @@ class _SdesOpenMixin:
         # offer's c= and m= lines.  Pure-SDES cameras (no ICE) read the OFFER's
         # c= address and stream SRTP there directly - if we put the relay address
         # in the offer, the camera's SRTP reaches us through port-restricted NAT.
-        _relay_addrs: dict = {}  # sock -> (relay_ip, relay_port, realm, nonce, t_host, t_port, key)
+        # sock -> (relay_ip, relay_port, realm, nonce, t_host, t_port, key, user).
+        # All eight fields are required: CreatePermission has to re-authenticate
+        # with USERNAME/REALM/NONCE and the long-term-credential key, so any path
+        # that stores a shorter tuple silently disables the relay permission.
+        _relay_addrs: dict = {}
 
         def _turn_allocate_udp(_ta_sock, _ta_host, _ta_port, _ta_user, _ta_pass):
             """RFC 5766 TURN relay allocation with long-term credential auth.
@@ -575,7 +589,7 @@ class _SdesOpenMixin:
                             ).digest()
                             _relay_addrs[_pre_sock] = (
                                 _r_ip_pre, _r_port_pre, _r_realm_pre, _r_nonce_pre,
-                                _t_host_pre, _t_port_pre, _r_key_pre,
+                                _t_host_pre, _t_port_pre, _r_key_pre, _t_user_pre,
                             )
                             _status(
                                 f"TURN relay pre-allocated (offer): {_pre_name}"
@@ -884,7 +898,7 @@ class _SdesOpenMixin:
                         f"livePlay refused by camera (livePlay=0, code={_lp_code_sdes})")
                 elif _lp_code_sdes not in (0, 200):
                     _status(f"livePlayResp: non-OK code {_lp_code_sdes}"
-                            f"{' (not ready, transient)' if _lp_code_sdes == -50019 else ''}"
+                            f"{' (not ready, transient)' if _lp_code_sdes == _LIVE_PLAY_NOT_READY else ''}"
                             " - proceeding")
             except TimeoutError:
                 pass
@@ -1137,7 +1151,7 @@ class _SdesOpenMixin:
                                     ).digest()
                                     _relay_addrs[_alloc_sock_e] = (
                                         _r_ip_e, _r_port_e, _r_realm_e, _r_nonce_e,
-                                        _t_host_e, _t_port_e, _r_key_e,
+                                        _t_host_e, _t_port_e, _r_key_e, _t_user_e,
                                     )
                                     _status(
                                         f"TURN relay allocated (echo fallback): "
@@ -1345,7 +1359,7 @@ class _SdesOpenMixin:
                                 ).digest()
                                 _relay_addrs[_alloc_sock] = (
                                     _r_ip, _r_port, _r_realm, _r_nonce,
-                                    _t_host_r, _t_port_r, _r_key,
+                                    _t_host_r, _t_port_r, _r_key, _t_user_r,
                                 )
                                 _status(
                                     f"TURN relay allocated: "
@@ -2140,6 +2154,20 @@ class _SdesOpenMixin:
                 sock.sendto(_req, cam_addr)
             except Exception:
                 _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_use_candidate', exc_info=True)
+            # Probe the same peer a second time, out of our relay allocation.
+            # These are two different candidate pairs (host->peer and
+            # relay->peer) and ICE validates pairs, not addresses: without the
+            # relayed copy the camera never sees a check whose source is the
+            # relay candidate we advertised, so it never nominates that pair,
+            # never sends media to it, and nothing ever arrives - which also
+            # means the reactive Send-indication path can never bootstrap.
+            # Measured on a live A001513: permissions installed and CONFIRMED
+            # by the TURN server for the camera's host, srflx and relay
+            # addresses, and still ZERO relay-carried inbound packets.
+            # The direct send above is untouched, so directly reachable
+            # cameras behave exactly as before.
+            if not _is_self_peer_ip(cam_addr[0]):
+                _turn_send_indication(sock, cam_addr[0], cam_addr[1], _req)
 
         def _nominate_from_answer_sdp(sdp_text) -> int:
             """Nominate every candidate in ``sdp_text``; return how many.
@@ -2170,6 +2198,11 @@ class _SdesOpenMixin:
                         _cands.append((_m.group(1), int(_m.group(2))))
             if not (_u and _p and _cands):
                 return 0
+            # Open the relay's door before probing, same invariant the setup and
+            # bridge paths hold: a check sent to a peer the relay has no
+            # permission for is discarded, so nominating first would probe a
+            # black hole on any camera we cannot reach directly.
+            _turn_install_permissions(_cands, "answer")
             for _c_ip, _c_port in _cands:
                 _send_use_candidate(
                     _audio_sock, _ufrag_a, _pwd_a, _u, _p, (_c_ip, _c_port))
@@ -2177,7 +2210,185 @@ class _SdesOpenMixin:
                     _video_sock, _ufrag_v, _pwd_v, _u, _p, (_c_ip, _c_port))
             return len(_cands)
 
+        # Open the TURN relay's door for the camera BEFORE probing it.
+        #
+        # A TURN server drops everything from a peer until a permission exists
+        # for that peer's address (RFC 5766 s9).  We advertise the relay as a
+        # candidate, but the only thing that ever created a permission here was
+        # a Send indication emitted while HANDLING data that had already arrived
+        # through the relay - which cannot happen until the permission exists.
+        # That deadlock made the advertised relay candidate a black hole:
+        # measured on a live A001513 whose host could not be reached directly,
+        # ZERO packets ever arrived from the relay, so the camera had no working
+        # path and sent no media at all, while the same camera streamed to a
+        # host it COULD reach directly.  (The DTLS path never hit this because
+        # aiortc does full TURN.)
+        #
+        # Defined at function scope rather than inside the branch below on
+        # purpose: relay-only battery cams (LAN IP unknown) answer AFTER the
+        # STUN window, so they never enter that branch at all and the bridge
+        # thread is the only place their permissions can be installed.
+        def _turn_create_permission(_cp_sock, _cp_peer_ip, _cp_peer_port):
+            """Authenticated CreatePermission for one peer on _cp_sock's relay."""
+            import hashlib as _cp_hashlib
+            import hmac as _cp_hmac
+            import socket as _cp_socket
+            import struct as _cp_struct
+
+            _cp = _relay_addrs.get(_cp_sock)
+            if not _cp or len(_cp) < 8:
+                return False
+            (_, _, _cp_realm, _cp_nonce, _cp_thost, _cp_tport,
+             _cp_key, _cp_user) = _cp[:8]
+
+            def _cp_attr(_t, _v):
+                return (_cp_struct.pack('!HH', _t, len(_v))
+                        + _v + b'\x00' * ((-len(_v)) % 4))
+
+            # XOR-PEER-ADDRESS: family, port ^ magic[:2], addr ^ magic
+            _cp_ip_b = _cp_socket.inet_aton(_cp_peer_ip)
+            _cp_xport = (_cp_peer_port ^ 0x2112) & 0xFFFF
+            _cp_xaddr = bytes(a ^ b for a, b in zip(_cp_ip_b, _STUN_MAGIC, strict=True))
+            _cp_xpa = b'\x00\x01' + _cp_struct.pack('!H', _cp_xport) + _cp_xaddr
+
+            _cp_tid = os.urandom(12)
+            _cp_body = (_cp_attr(0x0012, _cp_xpa)          # XOR-PEER-ADDRESS
+                        + _cp_attr(0x0006, _cp_user)       # USERNAME
+                        + _cp_attr(0x0014, _cp_realm)      # REALM
+                        + _cp_attr(0x0015, _cp_nonce))     # NONCE
+            _cp_hdr = (b'\x00\x08'                        # CreatePermission request
+                       + _cp_struct.pack('!H', len(_cp_body) + 24)
+                       + _STUN_MAGIC + _cp_tid)
+            _cp_mi = _cp_hmac.new(_cp_key, _cp_hdr + _cp_body, _cp_hashlib.sha1).digest()
+            _cp_body += _cp_attr(0x0008, _cp_mi)           # MESSAGE-INTEGRITY
+            _cp_msg = (b'\x00\x08' + _cp_struct.pack('!H', len(_cp_body))
+                       + _STUN_MAGIC + _cp_tid + _cp_body)
+            try:
+                _cp_sock.sendto(_cp_msg, (_cp_thost, _cp_tport))
+                return True
+            except Exception:
+                _LOGGER.debug("CreatePermission send failed", exc_info=True)
+                return False
+
+        def _turn_refresh_allocation(_rf_sock, _rf_lifetime=600):
+            """Refresh _rf_sock's allocation before the server expires it.
+
+            The relay is granted for a limited LIFETIME (measured against this
+            camera's TURN server: 600 s) and the server tears it down silently
+            when it lapses.  Stock libwebrtc, which is what the vendor app
+            runs, keeps a scheduled Refresh for exactly this reason; without
+            one a held session loses its relay mid-stream and the failure looks
+            like the camera stopping rather than the allocation expiring.
+            """
+            import hashlib as _rf_hashlib
+            import hmac as _rf_hmac
+            import struct as _rf_struct
+
+            _rf = _relay_addrs.get(_rf_sock)
+            if not _rf or len(_rf) < 8:
+                return False
+            (_, _, _rf_realm, _rf_nonce, _rf_thost, _rf_tport,
+             _rf_key, _rf_user) = _rf[:8]
+
+            def _rf_attr(_t, _v):
+                return (_rf_struct.pack('!HH', _t, len(_v))
+                        + _v + b'\x00' * ((-len(_v)) % 4))
+
+            _rf_tid = os.urandom(12)
+            _rf_body = (_rf_attr(0x000D, _rf_struct.pack('!I', _rf_lifetime))
+                        + _rf_attr(0x0006, _rf_user)      # USERNAME
+                        + _rf_attr(0x0014, _rf_realm)     # REALM
+                        + _rf_attr(0x0015, _rf_nonce))    # NONCE
+            _rf_hdr = (b'\x00\x04'                       # Refresh request
+                       + _rf_struct.pack('!H', len(_rf_body) + 24)
+                       + _STUN_MAGIC + _rf_tid)
+            _rf_mi = _rf_hmac.new(
+                _rf_key, _rf_hdr + _rf_body, _rf_hashlib.sha1).digest()
+            _rf_body += _rf_attr(0x0008, _rf_mi)          # MESSAGE-INTEGRITY
+            _rf_msg = (b'\x00\x04' + _rf_struct.pack('!H', len(_rf_body))
+                       + _STUN_MAGIC + _rf_tid + _rf_body)
+            try:
+                _rf_sock.sendto(_rf_msg, (_rf_thost, _rf_tport))
+                return True
+            except Exception:
+                _LOGGER.debug("TURN Refresh send failed", exc_info=True)
+                return False
+
+        def _turn_send_indication(_si_sock, _si_peer_ip, _si_peer_port, _si_data):
+            """Send _si_data to a peer THROUGH _si_sock's relay allocation.
+
+            Egress from the relay address is the whole point: ICE validates a
+            candidate PAIR, so a camera can only nominate the relay candidate
+            we advertised if it receives packets whose source IS that relay.
+            Writing straight to the camera from the host socket leaves the
+            advertised relay candidate permanently unvalidated.
+
+            Send indications carry no MESSAGE-INTEGRITY (RFC 5766 s10.2), so
+            this needs the allocation's server address and nothing else.
+            """
+            import struct as _si_struct
+
+            _si = _relay_addrs.get(_si_sock)
+            if not _si or len(_si) < 6:
+                return False
+            _si_thost, _si_tport = _si[4], _si[5]
+
+            def _si_attr(_t, _v):
+                return (_si_struct.pack('!HH', _t, len(_v))
+                        + _v + b'\x00' * ((-len(_v)) % 4))
+
+            try:
+                _si_ip_b = bytes(int(_o) for _o in _si_peer_ip.split('.'))
+            except Exception:
+                return False
+            if len(_si_ip_b) != 4:
+                return False
+            _si_xport = (_si_peer_port ^ 0x2112) & 0xFFFF
+            _si_xaddr = bytes(
+                a ^ b for a, b in zip(_si_ip_b, _STUN_MAGIC, strict=True))
+            _si_xpa = b'\x00\x01' + _si_struct.pack('!H', _si_xport) + _si_xaddr
+
+            _si_body = _si_attr(0x0012, _si_xpa) + _si_attr(0x0013, _si_data)
+            _si_msg = (b'\x00\x16'                     # Send indication
+                       + _si_struct.pack('!H', len(_si_body))
+                       + _STUN_MAGIC + os.urandom(12) + _si_body)
+            try:
+                _si_sock.sendto(_si_msg, (_si_thost, _si_tport))
+                return True
+            except Exception:
+                _LOGGER.debug("TURN Send indication failed", exc_info=True)
+                return False
+
+        def _turn_install_permissions(_ip_cands, _ip_why):
+            """CreatePermission for every camera candidate on both allocations.
+
+            Non-fatal by design: a socket with no allocation is a no-op, so the
+            direct path is untouched.  Returns the number of requests sent.
+            """
+            _perm_ok = 0
+            for _c_ip, _c_port in _ip_cands:
+                for _p_sock in (_audio_sock, _video_sock):
+                    if _turn_create_permission(_p_sock, _c_ip, _c_port):
+                        _perm_ok += 1
+            if _perm_ok:
+                _status(
+                    f"TURN: installed {_perm_ok} relay permission(s) for"
+                    f" {len(_ip_cands)} camera candidate(s) [{_ip_why}] - relay"
+                    f" path is now usable if the camera cannot be reached"
+                    f" directly"
+                )
+            elif _ip_cands and _relay_addrs:
+                _status(
+                    f"TURN: NO relay permission installed for {len(_ip_cands)}"
+                    f" camera candidate(s) [{_ip_why}] despite"
+                    f" {len(_relay_addrs)} allocation(s) - relay path stays a"
+                    f" black hole if the camera cannot be reached directly"
+                )
+            return _perm_ok
+
         if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:
+            _turn_install_permissions(_cam_ice_cands, "setup")
+
             for _c_ip, _c_port in _cam_ice_cands:
                 _send_use_candidate(
                     _audio_sock, _ufrag_a, _pwd_a,
@@ -2318,11 +2529,29 @@ class _SdesOpenMixin:
             import time as _time_br
             _br_prefer_direct_stun = {_audio_sock: False, _video_sock: False}
             _br_last_uc = 0.0
+            _br_last_perm = 0.0     # last CreatePermission install (monotonic)
+            _br_perm_cands = ()     # candidate set those permissions covered
+            # Seeded to now, not 0: the allocation was just created, so the
+            # first refresh belongs one interval out, not on the first tick.
+            _br_last_alloc_refresh = _time_br.monotonic()
+
+            def _br_send_to_cam(_s, _data, _addr, _peer):
+                """Reply to the camera, relayed or direct as the peer requires.
+
+                _addr is where the packet we are answering arrived FROM; when
+                the camera reached us through our relay that is the TURN
+                server, and _peer carries the camera's real address so the
+                payload can be wrapped.  _peer None => plain direct send.
+                """
+                if _peer and _turn_send_indication(_s, _peer[0], _peer[1], _data):
+                    return
+                _s.sendto(_data, _addr)
             _br_stun_resp_count = 0
             _tutk_trigger_sent = False
             _last_trigger_ts    = 0.0     # time of last AVIO LIVING send
             _trigger_bs         = None    # socket used for trigger
             _trigger_bsrc       = None    # camera addr for trigger
+            _trigger_peer       = None    # camera's real addr when relayed
             _sdes_probe_received = False  # True after first 0xC8 probe from camera
             _last_hb_ts         = 0.0     # time of last AVIO HEARTBEAT send
             # One-shot guard for the "ffmpeg exited" log below: while the held
@@ -2626,9 +2855,11 @@ class _SdesOpenMixin:
                                 continue
                             _rsz = len(_rp)
                             try:
-                                _trigger_bs.sendto(
+                                _br_send_to_cam(
+                                    _trigger_bs,
                                     bytes([0xC8, 0x00, _rsz >> 8, _rsz & 0xFF]) + _rp,
                                     _trigger_bsrc,
+                                    _trigger_peer,
                                 )
                             except Exception:
                                 _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
@@ -2676,6 +2907,21 @@ class _SdesOpenMixin:
                                     _br_inner = _br_av
                             if _br_inner:
                                 _bpkt = _br_inner
+
+                        # When this packet came through our relay, _bsrc is the
+                        # TURN server, not the camera.  Everything we send back
+                        # in response therefore has to be wrapped in a Send
+                        # indication addressed to the camera's real address -
+                        # writing raw SRTP or AVIO bytes to the TURN server
+                        # would be parsed as a malformed STUN message and
+                        # dropped.  None when the camera reached us directly,
+                        # which keeps the direct path byte-for-byte unchanged.
+                        _br_cam_peer = (
+                            (_br_turn_peer_ip, _br_turn_peer_port)
+                            if _br_turn_peer_ip and _br_turn_peer_port
+                            and not _is_self_peer_ip(_br_turn_peer_ip)
+                            else None
+                        )
 
                         if (len(_bpkt) >= 20
                                 and _bpkt[4:8] == _STUN_MAGIC_BR
@@ -2793,6 +3039,65 @@ class _SdesOpenMixin:
                             except Exception:
                                 _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                         elif len(_bpkt) >= 20 and _bpkt[4:8] == _STUN_MAGIC_BR:
+                            # CreatePermission response from the TURN server.
+                            # 0x0108 = success (the relay door is open for that
+                            # peer); 0x0118 = error.  438 Stale Nonce is routine
+                            # and recoverable: the server hands back a fresh
+                            # NONCE, so adopt it and retry once.  401 means the
+                            # credentials themselves are wrong, which is worth a
+                            # warning because the relay stays shut.
+                            if _bpkt[:2] in (b'\x01\x08', b'\x01\x18',
+                                             b'\x01\x04', b'\x01\x14'):
+                                _cp_err = 0
+                                _cp_new_nonce = b''
+                                _cp_i = 20
+                                _cp_end = min(
+                                    20 + _st_br.unpack('!H', _bpkt[2:4])[0],
+                                    len(_bpkt),
+                                )
+                                while _cp_i + 4 <= _cp_end:
+                                    _cp_at, _cp_al = _st_br.unpack_from(
+                                        '!HH', _bpkt, _cp_i)
+                                    _cp_v = _bpkt[_cp_i + 4:_cp_i + 4 + _cp_al]
+                                    if _cp_at == 0x0009 and len(_cp_v) >= 4:
+                                        _cp_err = _cp_v[2] * 100 + _cp_v[3]
+                                    elif _cp_at == 0x0015:
+                                        _cp_new_nonce = _cp_v
+                                    _cp_i += 4 + _cp_al + ((-_cp_al) % 4)
+                                _cp_what = ("CreatePermission"
+                                            if _bpkt[1] == 0x08 else "Refresh")
+                                if _bpkt[:2] in (b'\x01\x08', b'\x01\x04'):
+                                    _cp_seen = f"_cp_ok_logged_{_cp_what}"
+                                    if not getattr(_bridge_fn, _cp_seen, False):
+                                        setattr(_bridge_fn, _cp_seen, True)
+                                        _status(
+                                            f"TURN: {_cp_what} confirmed by"
+                                            f" server (success)"
+                                        )
+                                elif _cp_err == 438 and _cp_new_nonce:
+                                    _cp_old = _relay_addrs.get(_bs)
+                                    if _cp_old and len(_cp_old) >= 8:
+                                        _relay_addrs[_bs] = (
+                                            *_cp_old[:3], _cp_new_nonce,
+                                            *_cp_old[4:],
+                                        )
+                                        _status(
+                                            f"TURN: stale nonce on {_cp_what}"
+                                            " - refreshed and retrying"
+                                        )
+                                        # Re-arm both gates: whichever request
+                                        # hit the stale nonce, the fresh one
+                                        # should be used immediately.
+                                        _br_last_perm = 0.0
+                                        _br_perm_cands = ()
+                                        _br_last_alloc_refresh = 0.0
+                                else:
+                                    _status(
+                                        f"TURN: {_cp_what} rejected"
+                                        f" (error {_cp_err or 'unknown'}) -"
+                                        f" relay path unusable"
+                                    )
+                                continue
                             # STUN BindingSuccess (0x0101) from camera: ICE complete.
                             # Send AES-128-CBC encrypted SESSION_MODE_REQ (AVIO LIVING).
                             #
@@ -2841,7 +3146,7 @@ class _SdesOpenMixin:
                                     _sz = len(_payload)
                                     _pkt = bytes([0xC8, 0x00, _sz >> 8, _sz & 0xFF]) + _payload
                                     try:
-                                        _bs.sendto(_pkt, _bsrc)
+                                        _br_send_to_cam(_bs, _pkt, _bsrc, _br_cam_peer)
                                         _status(
                                             f"SDES: sent trigger ({_label})"
                                             f" len={_sz}"
@@ -2853,6 +3158,7 @@ class _SdesOpenMixin:
                                 _last_trigger_ts = _time_br.time()
                                 _trigger_bs   = _bs
                                 _trigger_bsrc = _bsrc
+                                _trigger_peer = _br_cam_peer
 
                                 # Camera is SCTP initiator (a=setup:active).
                                 # Be pure SCTP server: wait for camera's INIT,
@@ -2916,7 +3222,7 @@ class _SdesOpenMixin:
                                         _sctp['state'] = 'COOKIE_ECHOED'
                                         try:
                                             _ack_pkt = _sctp_init_ack_pkt()
-                                            _bs.sendto(_ack_pkt, _bsrc)
+                                            _br_send_to_cam(_bs, _ack_pkt, _bsrc, _br_cam_peer)
                                             _status(
                                                 f"SDES DC: camera sent SCTP INIT"
                                                 f" (peer_tag=0x{peer_tag:08x})"
@@ -2929,7 +3235,7 @@ class _SdesOpenMixin:
                                     if cookie:
                                         _sctp['state'] = 'COOKIE_ECHOED'
                                         try:
-                                            _bs.sendto(_sctp_cookie_echo(cookie), _bsrc)
+                                            _br_send_to_cam(_bs, _sctp_cookie_echo(cookie), _bsrc, _br_cam_peer)
                                             _status(
                                                 f"SDES DC: plain INIT-ACK"
                                                 f" (cookie {len(cookie)}B)"
@@ -3111,7 +3417,7 @@ class _SdesOpenMixin:
                                             try:
                                                 _iak_plain = _sctp_init_ack_pkt()
                                                 _iak_bytes = _enc_c8_sctp(_iak_plain)
-                                                _bs.sendto(_iak_bytes, _bsrc)
+                                                _br_send_to_cam(_bs, _iak_bytes, _bsrc, _br_cam_peer)
                                                 _sctp['state'] = 'COOKIE_WAIT'
                                                 _status(
                                                     f"SDES DC: INIT(peer=0x{_sc_p:08x})"
@@ -3126,7 +3432,7 @@ class _SdesOpenMixin:
                                         _sc_ck = _sctp_parse_init_ack(_pd_plain)
                                         if _sc_ck:
                                             try:
-                                                _bs.sendto(_enc_c8_sctp(_sctp_cookie_echo(_sc_ck)), _bsrc)
+                                                _br_send_to_cam(_bs, _enc_c8_sctp(_sctp_cookie_echo(_sc_ck)), _bsrc, _br_cam_peer)
                                                 _sctp['state'] = 'COOKIE_ECHOED'
                                                 _status(
                                                     f"SDES DC: enc INIT-ACK"
@@ -3146,9 +3452,9 @@ class _SdesOpenMixin:
                                         # does exactly this sleep - required.
                                         try:
                                             _cak8 = _sctp_pkt(_sctp['peer_tag'], _sctp_chunk(0x0B, 0, b''))
-                                            _bs.sendto(_enc_c8_sctp(_cak8), _bsrc)
+                                            _br_send_to_cam(_bs, _enc_c8_sctp(_cak8), _bsrc, _br_cam_peer)
                                             _dc8 = _sctp_data(50, _dcep_open_msg())
-                                            _bs.sendto(_enc_c8_sctp(_sctp_pkt(_sctp['peer_tag'], _dc8)), _bsrc)
+                                            _br_send_to_cam(_bs, _enc_c8_sctp(_sctp_pkt(_sctp['peer_tag'], _dc8)), _bsrc, _br_cam_peer)
                                             _sctp['state'] = 'DCEP_WAIT'
                                             _sctp['dcep_sent_ts'] = _time_br.time()
                                             _sctp['dcep_sock'] = _bs
@@ -3164,7 +3470,7 @@ class _SdesOpenMixin:
                                         # Camera COOKIE-ACK -> send encrypted LIVING only
                                         try:
                                             _lv8 = _sctp_data(53, _session_mode_req_msg())
-                                            _bs.sendto(_enc_c8_sctp(_sctp_pkt(_sctp['peer_tag'], _lv8)), _bsrc)
+                                            _br_send_to_cam(_bs, _enc_c8_sctp(_sctp_pkt(_sctp['peer_tag'], _lv8)), _bsrc, _br_cam_peer)
                                             _sctp['state'] = 'DONE'
                                             _sdes_probe_received = True
                                             _last_hb_ts = _time_br.time()
@@ -3223,13 +3529,13 @@ class _SdesOpenMixin:
                                         )
                                         _rr_pol.allow_repeat_tx = True
                                         _rr_sess = _plsrtp_rr.Session(policy=_rr_pol)
-                                        _bs.sendto(_rr_sess.protect_rtcp(_rr_pkt), _bsrc)
+                                        _br_send_to_cam(_bs, _rr_sess.protect_rtcp(_rr_pkt), _bsrc, _br_cam_peer)
                                         _rtcp_sent = True
                                     except Exception:
                                         _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_persistent_sdes_cmd', exc_info=True)
                                     if not _rtcp_sent:
                                         try:
-                                            _bs.sendto(_rr_pkt, _bsrc)
+                                            _br_send_to_cam(_bs, _rr_pkt, _bsrc, _br_cam_peer)
                                         except Exception:
                                             _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_enc_c8_sctp', exc_info=True)
                                     if _bridge_fn._tutk_count == 1:
@@ -3512,6 +3818,35 @@ class _SdesOpenMixin:
                     _uc_cpwd = _cam_ice_pwd or _bridge_uc_info.get("pwd")
                     if _uc_cands and _uc_cufrag and _uc_cpwd and (_br_now - _br_last_uc) >= 2.5:
                         _br_last_uc = _br_now
+                        # Same RFC 5766 s9 door as the setup path, but this is
+                        # the only place it can be opened for a relay-only
+                        # battery cam: its candidates arrive after the STUN
+                        # window, so the setup-time install above never ran and
+                        # nominating without a permission probes a black hole.
+                        # Re-install when the candidate set changes and every
+                        # 120 s thereafter - a TURN permission expires 300 s
+                        # after it is installed (RFC 5766 s8).
+                        _perm_key = tuple(sorted(_uc_cands))
+                        if (_perm_key != _br_perm_cands
+                                or (_br_now - _br_last_perm) >= 120.0):
+                            _br_perm_cands = _perm_key
+                            _br_last_perm = _br_now
+                            _turn_install_permissions(_uc_cands, "bridge")
+                        # Keep the allocation itself alive.  The server grants
+                        # it for a LIFETIME (600 s here) and drops it silently
+                        # when that lapses, so refresh well inside the window.
+                        if (_relay_addrs
+                                and (_br_now - _br_last_alloc_refresh) >= 240.0):
+                            _br_last_alloc_refresh = _br_now
+                            _rf_ok = sum(
+                                1 for _rf_s in (_audio_sock, _video_sock)
+                                if _turn_refresh_allocation(_rf_s)
+                            )
+                            if _rf_ok:
+                                _status(
+                                    f"TURN: refreshed {_rf_ok} relay"
+                                    f" allocation(s)"
+                                )
                         for _c_ip, _c_port in _uc_cands:
                             _send_use_candidate(
                                 _audio_sock, _ufrag_a, _pwd_a,
@@ -3559,6 +3894,60 @@ class _SdesOpenMixin:
             f"bridge thread started - camera sockets audio={audio_port}"
             f" video={video_port} -> ffmpeg loopback {_lo_audio_port}/{_lo_video_port}"
         )
+
+        async def _consume_camera_trickle():
+            """Feed the camera's trickled candidates to TURN and to nomination.
+
+            The answer SDP carries only the camera's host candidate - a private
+            address.  A TURN permission is matched against the peer's source
+            address AS THE RELAY SEES IT, so a permission built from that host
+            candidate authorises an address that can never arrive, and the relay
+            keeps discarding the camera exactly as if no permission existed.
+            Measured on a live A001513: CreatePermission for the host candidate
+            drew a success response and still produced ZERO relay-carried
+            inbound packets.
+
+            The addresses that can actually reach us - the camera's srflx and
+            its own relay allocation - arrive later, by iceCandidateReq trickle.
+            Permission each one as it appears, and add it to the nomination set:
+            when the camera is not directly reachable, USE-CANDIDATE aimed only
+            at its host candidate cannot be delivered either.
+            """
+            _tk_deadline = time.monotonic() + min(max(timeout, 30.0), 90.0)
+            _tk_next = 0
+            _tk_seen: set = set()
+            while time.monotonic() < _tk_deadline:
+                while _tk_next < len(ice_cands_seen):
+                    _tk_line = (ice_cands_seen[_tk_next].get("candidate") or "")
+                    _tk_next += 1
+                    _tk_m = _re_ice.match(
+                        r"(?:a=)?candidate:\S+ \d+ udp \d+ ([\d.]+) (\d+) typ (\w+)",
+                        _tk_line,
+                    )
+                    if not _tk_m:
+                        continue
+                    _tk_ip = _tk_m.group(1)
+                    _tk_port = int(_tk_m.group(2))
+                    _tk_typ = _tk_m.group(3)
+                    if (_tk_ip, _tk_port) in _tk_seen:
+                        continue
+                    _tk_seen.add((_tk_ip, _tk_port))
+                    _turn_install_permissions(
+                        [(_tk_ip, _tk_port)], f"trickle {_tk_typ}")
+                    _tk_cur = _bridge_uc_info["cands"]
+                    if (_tk_ip, _tk_port) not in _tk_cur:
+                        # Rebind to a NEW list rather than appending: the bridge
+                        # thread iterates this and must never see it mutate.
+                        _bridge_uc_info["cands"] = [
+                            *_tk_cur, (_tk_ip, _tk_port)]
+                await asyncio.sleep(0.25)
+
+        if ice_cands_seen is not None:
+            # Hold a strong reference: a task referenced only by a local can be
+            # garbage-collected mid-flight once this coroutine returns.
+            _trickle_task = loop.create_task(_consume_camera_trickle())
+            _SDES_BACKGROUND_TASKS.add(_trickle_task)
+            _trickle_task.add_done_callback(_SDES_BACKGROUND_TASKS.discard)
 
         # --- DTLS fallback: echo-reversal camera did not do ICE or SRTP ----- #
         # LK.IPC.A001064 echoes our webrtcReq offer and webrtcResp answer back

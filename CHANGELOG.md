@@ -4,6 +4,179 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.12.17]
+
+### Fixed
+- **SDES cameras negotiated a session and then delivered nothing.** Every
+  A001513 and A001064 was affected, on released 0.12.16 and across two accounts;
+  DTLS (A000088) was untouched, which is why half the fleet looked healthy and
+  this stayed hidden. The harvest that reads the camera's `webrtcResp` gave the
+  answer a single event-loop cycle and took it only if it had already resolved -
+  but the STUN window ahead of it closes on a fixed schedule about 2.4 s BEFORE
+  the answer lands (`webrtcReq` -> answer = 2.9 s measured on an A001513). The
+  answer SDP was therefore always empty, and everything downstream behaved as
+  though the camera had never replied: no ICE credentials, so no
+  `USE-CANDIDATE`, so a **controlled** ICE agent that sits in "Checking" forever
+  and never sends SRTP, and no camera SRTP keys for the bridge either. The 75 s
+  first-media wait had nothing to wait for. The path now waits for the answer -
+  bounded by `_PRE_LAUNCH_ANSWER_WAIT_S`, and `asyncio.shield`ed so a timeout
+  cannot cancel the future the real answer await and the DTLS-fallback path
+  still consume - and nominates from the answer during the first-media wait as a
+  bounded fallback. Raising `_FIRST_MEDIA_WAIT_S` never helped and never could:
+  that wait was tracking itself, not the camera.
+
+  Measured on an A001513 battery camera: NO_MEDIA / 80 s / 0 bytes before, **PASS
+  on the first attempt, 7.9 s, 2646 packets / 2.9 MB** after, decoding as h264
+  1280x960 with `video_pt=96 audio_pt=8`. A001064 PTZ NO_MEDIA before, **PASS
+  16.7 s / 2.5 MB** after.
+
+- **The TURN relay was allocated and advertised as a candidate, but never
+  used.** Three separate gaps, each of which alone makes the relay unusable as a
+  fallback for a camera that cannot be reached directly. A permission was
+  installed only for the candidate in the answer SDP, which is the camera's
+  private host address; a TURN permission is matched against the peer's source
+  address *as the relay sees it* (RFC 5766 s9), so that authorises an address
+  that can never arrive. Permissions now cover every candidate, including the
+  srflx and relay addresses that only appear via `iceCandidateReq` trickle, and
+  are refreshed inside the permission lifetime - and two of the three allocation
+  paths stored a 7-field tuple where the helper requires 8, so on those paths
+  the permission was silently never sent at all. Nothing was ever *sent* through
+  the allocation either: the Send indication was emitted only while handling
+  data that had already arrived through the relay, which cannot bootstrap, and
+  since ICE validates a candidate *pair*, a camera that only ever saw checks
+  leaving from our host socket never nominated the relay candidate we
+  advertised. Connectivity checks now also go out through the allocation, and
+  the bridge wraps its replies when the peer reached us relayed. Finally the
+  allocation itself was never refreshed, and this TURN server grants 600 s and
+  drops it silently on expiry, so a held session lost its relay mid-stream.
+
+  Measured on an A001513 before the send-side change: CreatePermission confirmed
+  by the server for the camera's host, srflx and relay addresses, and still zero
+  relay-carried inbound packets, because nothing we sent ever left from the
+  relay.
+
+- **L2 / battery cameras that stream from a standalone run but never under Home
+  Assistant.** The same library code took two different paths because the
+  battery-hostile knobs were reachable from a consumer's settings, and a
+  standalone run never sets them. Three of those knobs are now decided by the
+  library instead of by the caller:
+  - **The `liveStreamParam` KVS pre-connect can no longer be turned back on.** It
+    provisions the camera's session toward AWS KVS, so the camera sends its media
+    there instead of to the SDES bridge: the session negotiates, the bridge binds,
+    and no video RTP ever arrives. It is made for **battery cameras only** - i.e.
+    exactly the cameras it breaks - and the `-50019` ("not ready") livePlayResp it
+    was added to cure is benign (mains cameras emit it too and recover via ICE).
+    0.12.15 turned it off by default but left the option/env able to re-enable it,
+    which is a foot-gun aimed at one foot: a consumer that surfaces it as a
+    setting (Home Assistant surfaces these because HA OS cannot set env vars)
+    re-breaks every battery camera on the account, and "negotiates, then shows
+    nothing, forever" looks nothing like a settings problem. The decision now
+    lives in one place and is "no". `AIDOT_LIVESTREAM_PARAM` and
+    `start_keepalive(live_stream_param=...)` are accepted and ignored, logging one
+    warning per camera so a stuck install says why in the log.
+  - **Adaptive fast-connect is refused for battery cameras.** The saving it chases
+    is the TURN relay pre-allocation, which is force-kept for a battery camera
+    (its only return path), and fast-liveplay is already on by default - so a
+    battery "fast" attempt runs the identical handshake and differs only in being
+    given 45 s to open and a 40 s media grace, *inside* the documented 25-70 s
+    battery cold-start window. A slow-but-healthy wake was scored as a fast-path
+    failure: it latched `_fast_path_unavailable`, escalated the backoff, and burnt
+    a camera-side session on a device that frees them slowly.
+  - **Battery cameras are detected from their own cloud data, not just a model
+    list.** `is_battery_camera` now also resolves from a numeric
+    `Battery_remaining` (the signal `lan_control.is_mains_powered` inverts) or
+    `batteryMode == 2`, falling back to the model list when the cloud says
+    nothing. Every battery protection hangs off this one property - the TURN relay
+    pre-allocation, the cloud keep-alive renew, the HTTP wake, the adaptive
+    refusal above, `powerType=2` - so an unlisted battery revision lost all of
+    them at once, and lost them *only* under a consumer that sets the LAN-direct
+    options. Evidence can only add a camera to the battery set, never remove a
+    listed one, so mains cameras keep their optimizations. `powerType` is
+    deliberately not read as evidence (it is a field we send, and its neighbour
+    `p2pCache` reads 2 on every camera).
+- **Model ids are matched consistently by substring.** The plain-RTP (TUTK-framed)
+  set was compared for exact equality, so a revision suffix - `LK.IPC.A001513-1`,
+  the way `A000088-1` already exists on the DTLS side - read as a standard-SRTP
+  camera: ffmpeg then tried to decrypt TUTK frames with the announced fake key and
+  the bridge never stripped the TUTK header, giving a session that negotiates and
+  delivers nothing decodable. The battery-model list and the `powerType` wire value
+  were also re-typed inline in three files; both now derive from one definition, so
+  a guard cannot drift out of step with the payload the camera is sent.
+
+- **A waking battery camera gets a fast retry instead of an escalating backoff**
+  (the follow-up left open in 0.12.16: "a rapid third consecutive session can
+  still hit `-50019` (battery wake-readiness)"). The camera answers `livePlayResp`
+  with `-50019` and then sends no media - it was not refusing, it had not finished
+  waking - and the SDES keepalive loop could not tell that apart from a degraded
+  camera, so the pacer escalated (10 s -> 300 s) on a camera that would have been
+  ready seconds later. Under a consumer that re-opens per view (HA idle-releases
+  after 120 s), that is the difference between a slow first frame and a live view
+  that never fills in.
+
+  The wake signal was also being **discarded**: `sdes_fast_liveplay` is on by
+  default and skips the `livePlayResp` wait, so on the SDES path - the only path
+  battery cameras use - nothing ever read the code. It is now recorded whenever it
+  arrives, whether or not anything is waiting for it.
+
+  The retry reuses the DTLS serve loop's `_retry_policy`, bounded to the peerid
+  reuse window so the whole burst re-offers on **one** peerid (a fresh peerid
+  registers another camera-side session - the 0.12.16 wedge), then hands back to
+  the normal pacer. Scoped to battery cameras: on a mains camera `-50019` is
+  transient noise and a no-media session really is degraded. `-50019` still never
+  aborts an open - it is benign on its own, per 0.12.15; only the retry *delay*
+  keys on it, and only after a session has already failed to deliver media.
+
+  **Validated on hardware** (A001513 under Home Assistant): the camera answers
+  `-50019` and the loop now logs `camera not ready (waking, livePlayResp -50019)
+  and sent no media - fast retry in 3s [1/3]` and re-offers on the same peerid,
+  where before the signal was discarded entirely and the pacer escalated. The
+  retry behaves as designed and is bounded.
+
+  It does **not** by itself make that camera's live view fill in: on the fleet it
+  was measured against, the camera answers `-50019` and sends no media on every
+  attempt of the burst. The remaining cause is upstream of this retry and of
+  every knob in this release - the open profile resolves correctly for that
+  camera (`battery=True (cloud-reported=True) powerType=2 turn-prealloc=kept
+  adaptive=False`), and the identical library and configuration streams the same
+  camera from a different host on the same subnet. See
+  `tests/test_wake_readiness_retry.py`.
+
+### Notes
+- The L2 / battery hardening in this release was measured against a live A001513
+  under Home Assistant. The open profile confirms every decision now resolves
+  correctly for it (`battery=True (cloud-reported=True) powerType=2
+  turn-prealloc=kept adaptive=False`), and a mains SDES camera on the same fleet
+  still reports `battery=False powerType=1 turn-prealloc=skipped` - so the
+  battery detection change does not misclassify mains cameras or alter the
+  `powerType` they are sent. The battery live view that still did not fill in
+  when that work was written was **not** a host or network difference, as was
+  assumed at the time - it was the SDES answer harvest above, which stopped
+  every SDES camera on every host from ever being nominated. With that fixed the
+  same A001513 streams in 7.9 s.
+- **Battery streaming is not universally fixed.** On the reference fleet one
+  A001513 passes in 7.9 s while a second unit of the same model still returns no
+  media, handshaking for ~110 s and absent from `arp-scan` throughout: it is
+  genuinely asleep rather than mis-negotiating, and nothing in this release
+  wakes a camera that will not wake. That is the remaining battery problem, now
+  cleanly isolated from the SDES bug that was masking it.
+
+### Added
+- **A one-line open profile per camera, at INFO.** Names the decisions that
+  determine whether media can arrive at all - model, transport, battery (and
+  whether the cloud reported it), `powerType`, whether the TURN pre-allocation was
+  kept or skipped, adaptive on/off. This whole failure class (a session that
+  negotiates and then delivers nothing) is usually one of these resolving the
+  wrong way, and it was otherwise invisible: the handshake logs look identical
+  either way. At INFO so a bug report carries it without having to re-enable DEBUG
+  and reproduce.
+
+### Changed
+- `tests/test_live_stream_param.py`'s regression lock now calls the **real**
+  resolver. It previously re-implemented the gate as a local helper and asserted
+  against that copy, so the shipped gate was uncovered and the copy was free to
+  drift from it - a flag that must stay off was "locked" by a test that could not
+  see it.
+
 ## [0.12.16]
 
 ### Fixed

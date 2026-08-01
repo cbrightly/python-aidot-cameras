@@ -88,6 +88,14 @@ GETSTREAMCTRL_CMD = 802
 _STREAM_QUALITY: dict = {"hd": 1, "sd": 5}  # AVIOCTRL_QUALITY_MAX / _MIDDLE
 
 
+# livePlayResp code for "not ready": the camera accepted the request but cannot
+# stream yet (a battery camera still waking).  Explicitly NOT a refusal - mains
+# cameras emit it too and recover via ICE - so no path aborts an open on it.  It
+# is only read after the fact, to tell a waking camera apart from a generically
+# failed session when choosing a retry delay (see _live_play_not_ready).
+_LIVE_PLAY_NOT_READY = -50019
+
+
 # Two-way-audio (talk) / SDES timing constants (moved from client.py)
 TALK_PCM_RATE = 8000
 TALK_PCM_FRAME_BYTES = 320  # 160 samples (20 ms @ 8 kHz) x 2 bytes (s16)

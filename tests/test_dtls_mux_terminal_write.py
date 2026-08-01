@@ -18,7 +18,8 @@ import pytest
 
 av = pytest.importorskip("av")
 
-from aidot_cameras.camera.protocol import _dtls_av_mux_run
+# noqa: E402 - must follow the importorskip above (protocol imports av).
+from aidot_cameras.camera.protocol import _dtls_av_mux_run  # noqa: E402
 
 
 def _h264_payloads(n=60):
