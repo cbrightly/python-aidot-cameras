@@ -196,6 +196,38 @@ def test_recording_path_falls_back_when_the_stale_file_is_not_ours(lv, tmp_path,
     assert stale.read_bytes() == b"someone else's", "must not touch their file"
 
 
+def test_cooldown_is_kept_when_a_slot_may_be_held(lv):
+    """PASS/NO_MEDIA/BUSY all mean a session existed - the wait still applies.
+
+    NO_MEDIA matters most here: signaling completed, so the camera opened a
+    session on its side even though nothing arrived. Skipping the wait there
+    would reopen against a camera still holding its own slot.
+    """
+    for verdict in ("PASS", "NO_MEDIA", "BUSY"):
+        assert lv._cooldown_after(verdict, 180.0) == 180.0, verdict
+
+
+def test_cooldown_is_skipped_after_a_camera_that_never_answered(lv):
+    """ERROR means no session was opened, so there is no slot to release."""
+    assert lv._cooldown_after("ERROR", 180.0) == lv.SLOTLESS_COOLDOWN_S
+    assert lv._cooldown_after("ERROR", 180.0) < 180.0
+
+
+def test_short_cooldown_is_not_zero(lv):
+    """Back-to-back cloud signaling on one account is its own contention."""
+    assert lv.SLOTLESS_COOLDOWN_S > 0
+
+
+def test_cooldown_respects_a_shorter_configured_value(lv):
+    """--cooldown below the slotless floor must not be silently lengthened.
+
+    This only shortens waits. A caller who passes --cooldown 5 for a quick local
+    sweep should not get 10 s because a camera errored.
+    """
+    assert lv._cooldown_after("PASS", 5.0) == 5.0
+    assert lv._cooldown_after("ERROR", 5.0) == 5.0, "must never exceed --cooldown"
+
+
 def test_advisory_failure_does_not_block(lv, tmp_path):
     report = {"cameras": [
         _cam(lv, "LK.IPC.A000088", "PASS"),
