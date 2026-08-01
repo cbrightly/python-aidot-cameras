@@ -215,16 +215,6 @@ camera went from 0 bytes to streaming.
   The "late ICE creds parsed" log line tracks the *wait*, not the camera: at a 75 s
   wait it fires at +81 s, at 150 s it fires at +152 s, and nothing else changes.
 
-Two traps this experiment produced, both worth knowing before repeating it:
-
-- A `--name`/`--model` filtered run **always** reports `overall: FAIL`, because the
-  required-model check still runs against the filtered set and reports the others as
-  `missing_required_models`. Read the per-camera verdict, not the overall one, for targeted runs.
-- The run log is full of `Login failed, code: 4354` and `Connection reset by peer` for
-  **non-camera** device ids. Those are LAN logins to lights/plugs and are unrelated to camera
-  streaming - a camera PASSed in the same run that produced dozens of them. Do not read them as
-  an account-credential failure.
-
 Enumeration says nothing about streaming: a shared account can list a camera
 and still lack what it takes to open one. The last three rows need the real
 runs.
