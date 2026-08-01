@@ -2106,6 +2106,42 @@ class _SdesOpenMixin:
             except Exception:
                 _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_use_candidate', exc_info=True)
 
+        def _nominate_from_answer_sdp(sdp_text) -> int:
+            """Nominate every candidate in ``sdp_text``; return how many.
+
+            Same parse as the post-wait path, factored out so the first-media
+            wait can use it.  ``_pre_launch_answer_sdp`` is snapshotted before
+            the camera has answered, so for A001513/A001064 the parse above
+            finds no credentials and nothing is ever nominated - and a camera
+            that never sees USE-CANDIDATE stays in ICE "Checking" and never
+            sends SRTP (see the note above).  Returns 0 while the answer is
+            still absent, so the caller can keep polling.
+            """
+            if not sdp_text:
+                return 0
+            _u = _p = ""
+            _cands: list = []
+            for _ln in sdp_text.splitlines():
+                if _ln.startswith("a=ice-ufrag:") and not _u:
+                    _u = _ln[len("a=ice-ufrag:"):].strip()
+                elif _ln.startswith("a=ice-pwd:") and not _p:
+                    _p = _ln[len("a=ice-pwd:"):].strip()
+                elif _ln.startswith("a=candidate:"):
+                    _m = _re_ice.match(
+                        r"a=candidate:\S+ \d+ udp \d+ ([\d.]+) (\d+) typ (\w+)",
+                        _ln,
+                    )
+                    if _m:
+                        _cands.append((_m.group(1), int(_m.group(2))))
+            if not (_u and _p and _cands):
+                return 0
+            for _c_ip, _c_port in _cands:
+                _send_use_candidate(
+                    _audio_sock, _ufrag_a, _pwd_a, _u, _p, (_c_ip, _c_port))
+                _send_use_candidate(
+                    _video_sock, _ufrag_v, _pwd_v, _u, _p, (_c_ip, _c_port))
+            return len(_cands)
+
         if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:
             for _c_ip, _c_port in _cam_ice_cands:
                 _send_use_candidate(
@@ -3583,8 +3619,33 @@ class _SdesOpenMixin:
         # launched with both payload types unknown.  Waiting for first media costs
         # no picture latency: ffmpeg cannot produce before media exists, and
         # launching earlier only binds the wrong depacketizers.
+        # The camera's answer carries the ICE credentials we need to nominate a
+        # pair, and it lands about a second after webrtcReq - but it is not
+        # awaited until AFTER this wait.  So for a camera whose answer misses the
+        # _pre_launch_answer_sdp snapshot, USE-CANDIDATE was only ever sent once
+        # this window had already expired, the camera sat in ICE "Checking"
+        # forever, and the wait below could not do anything but time out.
+        # Measured on an A001513: answer at +1.3 s, nomination at +81 s.
+        # Nominate as soon as the answer is readable instead.
+        _early_nominated = bool(_cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands)
         _media_deadline = time.monotonic() + _FIRST_MEDIA_WAIT_S
         while _first_video_pt[0] is None and time.monotonic() < _media_deadline:
+            if not _early_nominated and answer_fut is not None and answer_fut.done():
+                # Read-only peek: the real await below still consumes this
+                # future and drives the answer/fallback paths unchanged.
+                _peek_sdp = ""
+                try:
+                    if answer_fut.exception() is None:
+                        _peek_sdp = (answer_fut.result() or {}).get("sdp", "") or ""
+                except Exception:
+                    _peek_sdp = ""
+                _n_nom = _nominate_from_answer_sdp(_peek_sdp)
+                if _n_nom:
+                    _early_nominated = True
+                    _status(
+                        "ICE controlling: nominated %d candidate(s) from the"
+                        " camera's answer during the first-media wait" % _n_nom
+                    )
             await asyncio.sleep(0.1)
         if _serve_audio and _first_audio_pt[0] is None:
             _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
