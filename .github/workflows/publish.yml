@@ -28,19 +28,28 @@ jobs:
         run: pytest tests/ -q
 
   # Releases must be validated against REAL cameras before they reach PyPI.
-  # This job does not run the cameras itself - live-validate.yml does, on the
-  # self-hosted runner, triggered by the same `release: published` event - it
-  # WAITS for that run and requires it to have succeeded for THIS EXACT commit.
   #
-  # Fails closed by construction: no run, a failed run, a cancelled run, or a
-  # run that never finishes within the wait all block the publish. A runner
-  # that is simply switched off blocks it too - that is deliberate, an
-  # unvalidated release is exactly what this exists to prevent.
+  # The cameras run in a PRIVATE repo (python-aidot-cameras-dev), because Actions
+  # logs on a public repository are world-readable and a live run prints the
+  # camera inventory - names, models, device ids. That run reports back here as a
+  # commit status on the sha it validated, and this job just reads it.
+  #
+  # Direction matters: the private repo reports IN, rather than this job reaching
+  # OUT. Polling the private repo would need a token that can read a private repo
+  # stored as a secret in a public one. This way this job needs no credential at
+  # all - GITHUB_TOKEN reads statuses on its own repo - and the only token in
+  # play is scoped to commit statuses on this already-public repo and lives in
+  # the private repo.
+  #
+  # Fails closed: no status, a failure status, a status on a different sha, or a
+  # private run that never reports all block the publish. A runner that is simply
+  # switched off blocks it too - that is deliberate, an unvalidated release is
+  # exactly what this exists to prevent.
   live-gate:
     name: Require green live validation
     runs-on: ubuntu-latest
     permissions:
-      actions: read
+      statuses: read
       contents: read
     steps:
       - name: Emergency override check
@@ -59,7 +68,7 @@ jobs:
             echo "overridden=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Wait for the live-validation run on this commit
+      - name: Wait for the live-validation status on this commit
         if: steps.override.outputs.overridden != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -67,32 +76,30 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # Both workflows fire on the same release event, so poll rather than
-          # assume ordering. 40 min covers a full fleet run incl. the ~3 min
-          # per-camera cooldowns; live-validate.yml itself times out at 45.
+          # Both the release event and the private run start together, so poll
+          # rather than assume ordering. 40 min covers a full fleet run incl. the
+          # ~3 min per-camera cooldowns; the private job times out at 45.
           deadline=$(( SECONDS + 40*60 ))
           while [ $SECONDS -lt $deadline ]; do
-            runs=$(gh api \
-              "repos/${REPO}/actions/workflows/live-validate.yml/runs?head_sha=${SHA}&per_page=20" \
-              --jq '[.workflow_runs[] | {status, conclusion}]' 2>/dev/null || echo '[]')
+            # Exact context only. A filtered/partial run posts a DIFFERENT
+            # context on purpose, so a subset validation can never satisfy this.
+            state=$(gh api "repos/${REPO}/commits/${SHA}/statuses" \
+              --jq 'map(select(.context == "live-validation")) | first | .state // "none"' 2>/dev/null || echo "none")
 
-            if echo "$runs" | jq -e 'any(.[]; .status == "completed" and .conclusion == "success")' >/dev/null; then
-              echo "live validation succeeded for ${SHA}"
-              exit 0
-            fi
-            if echo "$runs" | jq -e 'any(.[]; .status == "completed" and .conclusion != "success")' >/dev/null; then
-              echo "::error::live validation did not succeed for ${SHA}: $(echo "$runs" | jq -c .)"
-              exit 1
-            fi
-            if [ "$(echo "$runs" | jq 'length')" = "0" ]; then
-              echo "no live-validate run for ${SHA} yet - waiting (is the self-hosted runner online?)"
-            else
-              echo "live validation still running - waiting"
-            fi
+            case "$state" in
+              success)
+                echo "live validation succeeded for ${SHA}"
+                exit 0 ;;
+              failure|error)
+                echo "::error::live validation reported ${state} for ${SHA}"
+                exit 1 ;;
+              *)
+                echo "no live-validation status on ${SHA} yet - waiting (is the LAN runner online?)" ;;
+            esac
             sleep 30
           done
           echo "::error::timed out waiting for live validation of ${SHA}. Publish blocked."
-          echo "::error::If the runner is offline, bring it up and re-run this job, or use the documented override in docs/CI-RUNNER.md."
+          echo "::error::If the runner is offline, bring it up and re-run the private live-validate workflow, or use the documented override in docs/CI-RUNNER.md."
           exit 1
 
   publish:

@@ -13,13 +13,46 @@ cameras**. This document is the setup and the operating procedure for that.
 | Trigger | Workflow | Where it runs | Blocks a release? |
 | --- | --- | --- | --- |
 | every push / PR | `ci.yml` (`test`, `e2e`, ...) | GitHub-hosted | via `publish.yml`'s `test` job |
-| release published, manual dispatch | `live-validate.yml` | **self-hosted, on the camera LAN** | yes |
+| release published, manual dispatch | `live-validate.yml` **in the private repo** `python-aidot-cameras-dev` | **self-hosted, on the camera LAN** | yes, via a commit status |
 | release published | `publish.yml` -> `live-gate` -> `publish` | GitHub-hosted | **this is the gate** |
 
-`live-gate` does not touch the cameras. It waits (up to 40 min) for a
-`live-validate` run whose `head_sha` equals the release commit and whose
-conclusion is `success`. Anything else - no run at all, a failure, a
-cancellation, a runner that is switched off - blocks the upload.
+`live-gate` does not touch the cameras. It waits (up to 40 min) for a **commit
+status** named `live-validation` to appear on the release commit with state
+`success`. Anything else - no status at all, a failure, a status on a different
+sha, a runner that is switched off - blocks the upload.
+
+### Why the cameras run in a separate private repo
+
+Actions logs on a **public** repository are world-readable, and a live run prints
+the camera inventory - names, models, device ids - and uploads a report artifact
+containing them. Camera names in this fleet are room names, so they describe the
+layout of a house. Six such runs had to be deleted before this moved.
+
+The library stays public; only the runs moved to `python-aidot-cameras-dev`.
+
+```
+PRIVATE python-aidot-cameras-dev          PUBLIC python-aidot-cameras
+  live-validate.yml
+    checks out the public library at
+    the sha under test, runs its
+    scripts/live_validate.py on the
+    LAN runner, logs stay private
+        │
+        └─ posts commit status ─────────► "live-validation" on that sha
+           (LIB_STATUS_TOKEN lives here)        │
+                                          live-gate reads it with its own
+                                          GITHUB_TOKEN - no secret needed
+```
+
+**The direction is deliberate.** Having the public repo poll the private one
+would need a token that can read a private repo, stored as a secret in a public
+repo. Reporting inward means the public side needs no credential at all, and the
+only token in play is scoped to commit statuses on an already-public repo and
+lives in the private repo. If it leaked, the worst outcome is a spurious status.
+
+A **filtered** run (`models`/`name`) deliberately posts a *different* context -
+`live-validation (partial: ...)` - so validating a subset of the fleet can never
+satisfy the gate.
 
 **It fails closed on purpose.** A runner that is offline means an unvalidated
 release, which is the exact situation this exists to prevent.
@@ -72,14 +105,17 @@ A full-fleet run takes roughly 15-25 minutes, most of it cooldown.
 1. **Pick a host on the camera LAN** that is always on - the HA box, a NAS, a
    Pi. It needs Python 3.11+, `ffmpeg`, and `git`.
 
-2. **Register it** under Settings -> Actions -> Runners -> New self-hosted
-   runner, and give it the labels:
+2. **Register it against the PRIVATE repo** `python-aidot-cameras-dev` -
+   Settings -> Actions -> Runners -> New self-hosted runner - and give it the
+   labels:
 
    ```
    self-hosted, aidot-lan
    ```
 
-   `live-validate.yml` targets exactly those labels.
+   The private repo's `live-validate.yml` targets exactly those labels. A
+   runner belongs to one repository, so it must not also be registered against
+   the public library repo.
 
 3. **Run it as a dedicated unprivileged user**, not as root and not as the
    user that owns your Home Assistant install. Do not attach this runner to
@@ -90,11 +126,12 @@ A full-fleet run takes roughly 15-25 minutes, most of it cooldown.
      approval for all external collaborators*.
    - Confirm self-hosted runners are not usable by fork PRs.
 
-   `live-validate.yml` triggers only on `release: published` and
-   `workflow_dispatch`, neither of which a fork can fire - the settings above
-   are the belt to that braces.
+   The private `live-validate.yml` triggers only on `workflow_dispatch`, which a
+   fork cannot fire, and the repo is private in any case - the settings above are
+   the belt to those braces.
 
-5. **Create the `live-lan` environment** (Settings -> Environments) and put
+5. **Create the `live-lan` environment in the private repo** (Settings ->
+   Environments) and put
    the credentials there, *not* in repo-wide secrets:
    - `AIDOT_USERNAME`, `AIDOT_PASSWORD`
    - optionally the `AIDOT_COUNTRY` variable (defaults to `US`)
@@ -139,7 +176,7 @@ account live in a house whose `isOwner` is false, and `async_get_all_device()`
 skips those - so `--list` reports `found 0 camera(s) of 0 device(s)` on an
 account the cloud is perfectly willing to return every camera for. That reads
 exactly like "sharing does not work" and it is not; set
-`AIDOT_INCLUDE_SHARED_HOUSES=1` (the `live-validate.yml` job does) before
+`AIDOT_INCLUDE_SHARED_HOUSES=1` (the private live-validate job does) before
 concluding anything. The empty *owned* house a new account gets is why
 `get_houses()` returns two homes rather than one.
 
