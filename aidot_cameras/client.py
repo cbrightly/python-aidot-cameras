@@ -25,6 +25,7 @@ camera layer and the CLI depend on and upstream does not provide:
 import asyncio
 import json
 import logging
+import os
 import random
 from typing import Any, Optional
 
@@ -133,6 +134,22 @@ def _upstream_can_build(device: dict[str, Any]) -> bool:
     one precondition upstream relies on is re-checked here for everything else.
     """
     return not _aes_key_is_null(device)
+
+
+def _include_shared_houses() -> bool:
+    """Whether to enumerate houses this account does not own.
+
+    Off by default, matching upstream: a home shared *to* this account is
+    someone else's, and listing its devices would change what every Home
+    Assistant user with a shared home sees.  Read at call time, never cached
+    at import - unset means byte-identical behavior.
+
+    The live-validation harness sets it because the CI account is deliberately
+    a secondary one with the cameras shared to it; without this the cloud
+    returns the shared house and every camera in it, and the filter below
+    throws all of them away.
+    """
+    return os.environ.get("AIDOT_INCLUDE_SHARED_HOUSES", "0") != "0"
 
 
 def _without_mqtt_password(data: Any) -> Any:
@@ -463,9 +480,13 @@ class CameraClient(_UpstreamAidotClient):
             _LOGGER.warning("_async_fetch_user_config: no HTTP session")
             return
 
+        # Imported here, not at module scope: aidot_cameras.camera.__init__
+        # re-exports camera.client, which imports back through device_client -
+        # a top-level import would close that cycle during package init.
+        from .camera.constants import aidot_api_base
+
         region = getattr(self.user_info, "region", "") or ""
-        base = f"https://prod-{region}-api.arnoo.com"
-        url = f"{base}/commons/userConfig"
+        url = f"{aidot_api_base(region)}/commons/userConfig"
         headers = {
             "appid": _CLOUD_APP_ID,
             "owner": user_id,
@@ -541,6 +562,10 @@ class CameraClient(_UpstreamAidotClient):
         and returns a dict keyed by device id rather than the
         ``{CONF_DEVICE_LIST: [...]}`` shape the CLI and integrations consume.
         The HTTP calls themselves are still upstream's ``CloudApi``.
+
+        Houses this account does not own are skipped unless
+        ``AIDOT_INCLUDE_SHARED_HOUSES`` is set - see
+        [[_include_shared_houses]].
         """
         final_device_list: list[dict[str, Any]] = []
         # Devices upstream's client cannot construct (no usable aesKey): Zigbee
@@ -551,8 +576,9 @@ class CameraClient(_UpstreamAidotClient):
         # going to use.
         unbuildable: dict[str, int] = {}
         houses = await self._cloud_api.get_houses() or []
+        include_shared = _include_shared_houses()
         for house in houses:
-            if house.get(CONF_IS_OWNER) is False:
+            if house.get(CONF_IS_OWNER) is False and not include_shared:
                 continue
             device_list = await self._cloud_api.get_devices(house[CONF_ID]) or []
             for device in device_list:

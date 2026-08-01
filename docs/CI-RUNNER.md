@@ -1,0 +1,272 @@
+# Live validation: the self-hosted runner
+
+Releases of this library have repeatedly broken live streaming on some or all
+camera models - 16 releases of 0.12.x in four days, almost all "streaming is
+broken" hotfixes. Unit tests cannot catch that class of failure: the cloud
+accepts the call, signaling looks healthy, and only the media tells the truth.
+
+So a release cannot reach PyPI until the code in it has streamed **real
+cameras**. This document is the setup and the operating procedure for that.
+
+## How the gate fits together
+
+| Trigger | Workflow | Where it runs | Blocks a release? |
+| --- | --- | --- | --- |
+| every push / PR | `ci.yml` (`test`, `e2e`, ...) | GitHub-hosted | via `publish.yml`'s `test` job |
+| release published, manual dispatch | `live-validate.yml` | **self-hosted, on the camera LAN** | yes |
+| release published | `publish.yml` -> `live-gate` -> `publish` | GitHub-hosted | **this is the gate** |
+
+`live-gate` does not touch the cameras. It waits (up to 40 min) for a
+`live-validate` run whose `head_sha` equals the release commit and whose
+conclusion is `success`. Anything else - no run at all, a failure, a
+cancellation, a runner that is switched off - blocks the upload.
+
+**It fails closed on purpose.** A runner that is offline means an unvalidated
+release, which is the exact situation this exists to prevent.
+
+## What gets validated
+
+`scripts/live_validate.py` streams each camera and asks one question: *did
+real media arrive?* The per-transport answer differs and both are handled -
+DTLS decodes in-process (`on_frame`), while SDES hands media to ffmpeg and
+never calls `on_frame`, so its signal is `SdesSession.media_stats()` plus
+recorded bytes.
+
+Policy, all of it learned on hardware (see `docs/CAMERAS.md`):
+
+- **Required models gate the release**: A000088, A001513, A001064. Each needs
+  **at least one camera that streamed** - not every camera of that model. A
+  release breaks a transport/firmware path, and one healthy camera proves that
+  path still works, while individual cameras fail for reasons the code under
+  test cannot cause (flat battery, unit powered off, an L2 too deeply asleep to
+  wake inside the window). Gating on those would train everyone to ignore the
+  gate, which is worse than a slightly narrower one.
+  A model with **zero** passing cameras still FAILS, and a model **absent** from
+  the account still FAILS - validating a subset of the fleet and calling it
+  green is how a model-specific break ships.
+  Failures that did not gate are printed under "did not gate" and recorded in
+  `tolerated_failures`, with per-model counts in `model_coverage`. **Watch
+  them**: they are the early warning that a model is degrading while one healthy
+  camera masks it. Two cameras of a model failing is a gate failure, so the
+  masking only lasts as long as one still works.
+- **Advisory models never gate**: A001108, A001360 (recognized in code, never
+  validated on the reference account), and any unknown `LK.IPC.*`.
+- **DTLS gets 3 attempts, SDES 2.** An A000088's per-attempt connect is
+  probabilistic (~75-87%), so one miss is not a release blocker. The report
+  records how many attempts each camera needed - a drifting attempt count is
+  an early warning even when the run is green.
+- **One camera at a time, ~3 min apart.** A camera holds its viewer slot for
+  ~120 s after a session, and rapid reopens cause camera-side flakiness that
+  has nothing to do with the code under test.
+- **BUSY is not a pass.** A terminal ack (-50002/-50015) means something else
+  is watching - most likely your Home Assistant. It is reported distinctly
+  from a media failure, and it still fails the gate. It is also reported
+  *quickly* (~2 s): the SDES path used to miss the refusal until its
+  first-media wait expired and then spend a pointless DTLS-fallback attempt on
+  top, so a contended camera cost most of a minute per attempt.
+
+A full-fleet run takes roughly 15-25 minutes, most of it cooldown.
+
+## Runner setup
+
+1. **Pick a host on the camera LAN** that is always on - the HA box, a NAS, a
+   Pi. It needs Python 3.11+, `ffmpeg`, and `git`.
+
+2. **Register it** under Settings -> Actions -> Runners -> New self-hosted
+   runner, and give it the labels:
+
+   ```
+   self-hosted, aidot-lan
+   ```
+
+   `live-validate.yml` targets exactly those labels.
+
+3. **Run it as a dedicated unprivileged user**, not as root and not as the
+   user that owns your Home Assistant install. Do not attach this runner to
+   any other repository.
+
+4. **Lock down what can reach it.** In Settings -> Actions -> General:
+   - "Fork pull request workflows from outside collaborators" -> *Require
+     approval for all external collaborators*.
+   - Confirm self-hosted runners are not usable by fork PRs.
+
+   `live-validate.yml` triggers only on `release: published` and
+   `workflow_dispatch`, neither of which a fork can fire - the settings above
+   are the belt to that braces.
+
+5. **Create the `live-lan` environment** (Settings -> Environments) and put
+   the credentials there, *not* in repo-wide secrets:
+   - `AIDOT_USERNAME`, `AIDOT_PASSWORD`
+   - optionally the `AIDOT_COUNTRY` variable (defaults to `US`)
+
+   Environment scoping means only jobs that declare `environment: live-lan`
+   can read them. Add a required reviewer here if you want a human in the loop
+   on every live run.
+
+6. **Smoke-test before wiring the gate**: run the workflow via
+   *Run workflow* (dispatch) and confirm a green run plus a `live-report.json`
+   artifact listing every camera.
+
+## Which account should CI use?
+
+**This needs deciding before the gate goes live, and it needs an experiment -
+it is not safely knowable from the code.**
+
+The problem: logging in **rotates the account's MQTT password**, and the
+broker allows **one connection per account**. A CI login on your main account
+can therefore kick your Home Assistant's camera signaling off the broker (the
+`rc=134` failure mode), and HA reconnecting can kick CI. Camera signaling
+dies; snapshots keep working, so it looks like a streaming bug.
+
+### The experiment (do this first)
+
+1. Create a second AiDot account.
+2. Share the cameras to it from the app.
+3. On the runner host, with the secondary account's credentials in the
+   environment:
+
+   ```bash
+   export AIDOT_INCLUDE_SHARED_HOUSES=1            # see below - without this you get nothing
+   python scripts/live_validate.py --list          # does it see the cameras?
+   python scripts/live_validate.py --model A001513 # can it actually stream one?
+   ```
+
+4. While that runs, **watch Home Assistant**: does its camera signaling stay
+   up, or does it drop and reconnect?
+
+**A shared account sees nothing without the seam.** Cameras shared from another
+account live in a house whose `isOwner` is false, and `async_get_all_device()`
+skips those - so `--list` reports `found 0 camera(s) of 0 device(s)` on an
+account the cloud is perfectly willing to return every camera for. That reads
+exactly like "sharing does not work" and it is not; set
+`AIDOT_INCLUDE_SHARED_HOUSES=1` (the `live-validate.yml` job does) before
+concluding anything. The empty *owned* house a new account gets is why
+`get_houses()` returns two homes rather than one.
+
+### Recording the outcome
+
+| Question | Answer | Date |
+| --- | --- | --- |
+| Secondary account enumerates the cameras? | **Yes** - 7 cameras / 19 devices, with `AIDOT_INCLUDE_SHARED_HOUSES=1`. All three required models present: A000088 x4, A001513 x2, A001064 x1. Returns 0 without the seam | 2026-07-31 |
+| Secondary account streams SDES (A001513)? | **Yes** - L2_181 PASS on the first attempt, handshake 7.9 s, 2646 packets / 2.9 MB, decodes as h264 1280x960 + PCMA. (Failed on 2026-07-31 only because of the answer-harvest bug below, which was not account-related.) | 2026-08-01 |
+| Secondary account streams SDES (A001064, mains)? | **Yes** - Winees PTZ PASS, handshake 16.7 s, 2.5 MB | 2026-08-01 |
+| Secondary account streams DTLS (A000088)? | **Yes** - Bedroom M3 Pro PASS, 139 frames, handshake 2.3 s, `host->relay`. Attempt 1 failed `AidotCameraNotReady` and attempt 2 succeeded, which is the documented per-attempt DTLS probability, not a fault | 2026-07-31 |
+| Main account's HA signaling survived? | **Yes** - the AiDot config entry stayed `loaded` on the main account across ~6 secondary-account logins; one routine `21026 "Please login again"` token refresh, handled | 2026-07-31 |
+
+**Verdict: use the secondary account.** It enumerates every camera (with
+`AIDOT_INCLUDE_SHARED_HOUSES=1`), streams all three required models, and six
+logins on it never disturbed Home Assistant.
+
+The SDES failures recorded here on 2026-07-31 were **not** an account problem.
+They were a shipped defect in <=0.12.16: the harvest of the camera's `webrtcResp`
+gave it one event-loop cycle and took it only `if answer_fut.done()`, but the STUN
+window ahead of it closes ~2.4 s BEFORE the answer lands. So the answer SDP was
+always empty - no ICE credentials, therefore no USE-CANDIDATE, therefore a
+controlled agent stuck in ICE "Checking" that never sends SRTP, and no camera SRTP
+keys for the bridge. Fixed by awaiting the answer before parsing it. Every SDES
+camera went from 0 bytes to streaming.
+
+**Three traps this experiment produced, all convincing and all wrong:**
+
+- A `--name`/`--model` filtered run **always** reports `overall: FAIL`, because the
+  required-model check still runs against the filtered set and reports the rest as
+  `missing_required_models`. Read the per-camera verdict on targeted runs.
+- Runs emit many `Login failed, code: 4354` / `Connection reset by peer` lines for
+  **non-camera** device ids (lights, plugs). Unrelated - a camera PASSes in the
+  same run that produces dozens of them.
+- Raising `_FIRST_MEDIA_WAIT_S` looks like the fix for a slow camera and is not.
+  The "late ICE creds parsed" log line tracks the *wait*, not the camera: at a 75 s
+  wait it fires at +81 s, at 150 s it fires at +152 s, and nothing else changes.
+
+Two traps this experiment produced, both worth knowing before repeating it:
+
+- A `--name`/`--model` filtered run **always** reports `overall: FAIL`, because the
+  required-model check still runs against the filtered set and reports the others as
+  `missing_required_models`. Read the per-camera verdict, not the overall one, for targeted runs.
+- The run log is full of `Login failed, code: 4354` and `Connection reset by peer` for
+  **non-camera** device ids. Those are LAN logins to lights/plugs and are unrelated to camera
+  streaming - a camera PASSed in the same run that produced dozens of them. Do not read them as
+  an account-credential failure.
+
+Enumeration says nothing about streaming: a shared account can list a camera
+and still lack what it takes to open one. The last three rows need the real
+runs.
+
+**If yes** - use the secondary account's credentials as the `live-lan`
+secrets. This is the preferred outcome: CI and HA never contend.
+
+**If no** (sharing does not carry the camera functions) - fall back to the
+main account plus a cached token:
+
+- Log in once on the runner host and set `AIDOT_TOKEN_FILE=/path/token.json`
+  in the environment so live runs reuse the session instead of re-logging-in.
+- Accept the residual risk: a token refresh can still rotate the credential.
+  Schedule releases when nobody is watching cameras, and expect HA to
+  reconnect once around a live run.
+- Either way, expect BUSY verdicts if someone opens a camera in HA or the
+  phone app mid-run. Re-run the workflow; do not "fix" it by loosening the
+  gate.
+
+## Emergency override
+
+There is exactly one way to publish without a green live run, and it is
+deliberately awkward and auditable.
+
+Set the repository **variable** `LIVE_GATE_OVERRIDE_SHA` to the **exact
+commit SHA** of the release you are publishing:
+
+```
+Settings -> Secrets and variables -> Actions -> Variables
+LIVE_GATE_OVERRIDE_SHA = <the release commit sha>
+```
+
+- Setting a repo variable requires admin and shows up in the audit log.
+- It is single-use by construction: the next release has a different SHA, so a
+  stale value can never silently disable the gate.
+- The publish run prints a loud `::warning::` recording that it happened.
+
+Clear the variable afterwards anyway.
+
+Legitimate uses are narrow: the runner is dead and a security fix must ship,
+or the vendor cloud is down and no validation is possible. "The gate is
+annoying today" is not one - if the cameras cannot be validated, the release
+has not been shown to work, which is the entire premise.
+
+## Failure drills
+
+Run these once, when you set the gate up, so you know it actually holds:
+
+1. **Runner offline.** Stop the runner service, publish a throwaway
+   prerelease. `live-gate` must wait and then fail; `publish` must not run.
+2. **Override.** Set `LIVE_GATE_OVERRIDE_SHA` to that prerelease's SHA and
+   re-run. The publish must proceed and must log the warning. Unset it.
+3. **Real failure.** Point the harness at a camera you have powered off
+   (`--name`), and confirm the run goes red with `NO_MEDIA` rather than
+   passing.
+4. **Contention.** Open a camera in HA while a run is in progress; confirm you
+   get a `BUSY` verdict rather than a spurious pass.
+
+## Reading a report
+
+`live-report.json` (uploaded as an artifact on every run, pass or fail):
+
+```jsonc
+{
+  "verdict": "PASS",                    // gate result
+  "ref": "<sha validated>",
+  "cameras": [
+    {
+      "name": "Deck", "model": "LK.IPC.A000088", "tier": "required",
+      "transport": "DTLS", "battery": false,
+      "verdict": "PASS", "attempts_used": 2,   // needed a retry - watch this
+      "attempts": [ /* per-attempt handshake_s, frames, ice_pair, rtp loss */ ]
+    }
+  ],
+  "required_failed": [],
+  "missing_required_models": []
+}
+```
+
+Things worth noticing even in a green run: `attempts_used` creeping up on a
+model, `handshake_s` growing, `rtp[].loss_pct` rising, or an `ice_pair` that
+switched from a host pair to a relay pair.
