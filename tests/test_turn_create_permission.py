@@ -53,22 +53,39 @@ def _impl_source():
     raise AssertionError("_open_sdes_stream_impl not found")
 
 
-def test_create_permission_is_sent_before_connectivity_checks():
+def test_permission_is_installed_before_every_nomination():
+    """Every path that nominates must open the relay's door first.
+
+    A check sent to a peer the relay holds no permission for is discarded, so
+    nominating first probes a black hole on any camera we cannot reach
+    directly. Asserted per call site rather than by position in the whole
+    function: there are three nomination paths - the camera's answer, the
+    setup-time block, and the bridge's periodic tick - and the invariant has
+    to hold in each. (An earlier version of this test compared offsets in the
+    file, which silently stopped testing anything once a second nomination
+    path was added ahead of the first.)
+    """
     src = _impl_source()
-    assert "_turn_create_permission" in src, (
-        "the SDES path must install a TURN permission for the camera")
-    perm_at = src.index("_turn_create_permission(_p_sock")
-    probe_at = src.index("_send_use_candidate(\n")
-    assert perm_at < probe_at, (
-        "the relay permission must be installed BEFORE the connectivity checks, "
-        "otherwise the relay drops the camera's reply")
+    regions = {
+        "answer": _extract_helper(src, "_nominate_from_answer_sdp"),
+        "setup": src[src.index(
+            "if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:"):][:2000],
+        "bridge": src[src.index("Periodic ICE controlling check"):][:4000],
+    }
+    for name, block in regions.items():
+        assert "_send_use_candidate(" in block, f"{name}: expected a nomination"
+        assert "_turn_install_permissions(" in block, (
+            f"{name}: nominates without installing a relay permission")
+        assert block.index("_turn_install_permissions(") < block.index(
+            "_send_use_candidate("), (
+            f"{name}: the relay permission must be installed BEFORE the "
+            "connectivity checks, otherwise the relay drops the camera's reply")
 
 
-def test_permission_is_built_for_every_camera_candidate_on_both_sockets():
-    src = _impl_source()
-    block = src[src.index("_perm_ok = 0"):src.index("_send_use_candidate(\n")]
-    assert "for _c_ip, _c_port in _cam_ice_cands" in block, "must cover every candidate"
-    assert "_audio_sock" in block and "_video_sock" in block, (
+def test_permission_helper_covers_every_candidate_on_both_sockets():
+    body = _extract_helper(_impl_source(), "_turn_install_permissions")
+    assert "for _c_ip, _c_port in _ip_cands" in body, "must cover every candidate"
+    assert "_audio_sock" in body and "_video_sock" in body, (
         "audio and video have separate relay allocations; both need permissions")
 
 

@@ -108,7 +108,7 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   still hit `-50019` (battery wake-readiness)"). The camera answers `livePlayResp`
   with `-50019` and then sends no media - it was not refusing, it had not finished
   waking - and the SDES keepalive loop could not tell that apart from a degraded
-  camera, so the pacer escalated (10 s → 300 s) on a camera that would have been
+  camera, so the pacer escalated (10 s -> 300 s) on a camera that would have been
   ready seconds later. Under a consumer that re-opens per view (HA idle-releases
   after 120 s), that is the difference between a slow first frame and a live view
   that never fills in.
