@@ -76,10 +76,24 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # Both the release event and the private run start together, so poll
-          # rather than assume ordering. 40 min covers a full fleet run incl. the
-          # ~3 min per-camera cooldowns; the private job times out at 45.
-          deadline=$(( SECONDS + 40*60 ))
+          # Two different waits, because "validation is running" and "nobody
+          # started any" deserve very different patience.
+          #
+          # The private run posts a `pending` status the moment it starts, so a
+          # missing status means nothing ever claimed this commit. That is a
+          # mistake, not slowness - fail in minutes rather than stalling.
+          #
+          # Once pending, be generous: a full fleet run measured 45.5 min on
+          # 2026-08-01 (7 cameras, per-camera cooldowns, two flat batteries and a
+          # powered-off unit). The old flat 40 min was SHORTER than that, so a
+          # perfectly good release could have been blocked by the gate giving up
+          # first. This must exceed the private job's own 55 min timeout,
+          # otherwise the gate stops watching before the job can even fail.
+          GRACE=$(( 3*60 ))       # to see any status at all
+          PATIENT=$(( 60*60 ))    # once we know a run is in flight
+          grace_deadline=$(( SECONDS + GRACE ))
+          deadline=$(( SECONDS + PATIENT ))
+          seen_pending=0
           while [ $SECONDS -lt $deadline ]; do
             # Exact context only. A filtered/partial run posts a DIFFERENT
             # context on purpose, so a subset validation can never satisfy this.
@@ -93,8 +107,21 @@ jobs:
               failure|error)
                 echo "::error::live validation reported ${state} for ${SHA}"
                 exit 1 ;;
+              pending)
+                if [ "$seen_pending" -eq 0 ]; then
+                  seen_pending=1
+                  echo "live validation is running for ${SHA} - waiting up to $((PATIENT/60))m"
+                fi ;;
               *)
-                echo "no live-validation status on ${SHA} yet - waiting (is the LAN runner online?)" ;;
+                # Nothing has claimed this commit. Give it a short grace in case
+                # the private run is still spinning up, then stop guessing.
+                if [ $SECONDS -ge $grace_deadline ]; then
+                  echo "::error::no live-validation run ever claimed ${SHA} (no status after $((GRACE/60))m)."
+                  echo "::error::Trigger live-validate.yml in python-aidot-cameras-dev with lib_ref=${SHA}, then re-run this job."
+                  echo "::error::If the LAN runner is offline, bring it up first, or use the documented override in docs/CI-RUNNER.md."
+                  exit 1
+                fi
+                echo "no live-validation status on ${SHA} yet - waiting (grace $((GRACE/60))m)" ;;
             esac
             sleep 30
           done
