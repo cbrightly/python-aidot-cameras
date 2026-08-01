@@ -181,6 +181,46 @@ def _bridge_should_break(rc, teardown_requested: bool) -> bool:
     return rc is not None and not teardown_requested
 
 
+# Cap on peer-reflexive candidates learned from inbound probes.  A camera has
+# one working path; a handful of source addresses is normal churn (NAT rebind,
+# audio vs video socket), anything beyond that is noise and must not be allowed
+# to grow the nomination set without bound.
+_MAX_PRFLX_CANDS = 4
+
+
+def _record_peer_reflexive(known, discovered, observed, is_self=None):
+    """Learn the address a STUN probe actually arrived from.
+
+    ICE calls this a peer-reflexive candidate (RFC 8445 s7.3.1.3): the camera
+    is reachable at the source of its own connectivity check whether or not it
+    ever advertised that address.  We were nominating only what the answer SDP
+    listed, which fails whenever the listed address is not reachable from here
+    - a camera on a foreign subnet advertises a private candidate we have no
+    route to, the nomination goes into a black hole, and the session sits in
+    ICE "Checking" while the camera's probes keep arriving from an address we
+    never nominate.  Observed on the A001064 PTZ while it was on a separate
+    192.168.100.0/24: it advertised 192.168.100.13 as its only candidate.
+
+    Returns the new discovered list, or ``discovered`` unchanged when there is
+    nothing to learn.  Callers must REBIND rather than mutate in place - the
+    bridge thread iterates this list and must never see it change under it.
+
+    Pure function so the policy is unit-testable without a camera.
+    """
+    if not observed:
+        return discovered
+    _ip, _port = observed
+    if not _ip or not _port:
+        return discovered
+    if is_self is not None and is_self(_ip):
+        return discovered
+    if observed in known or observed in discovered:
+        return discovered
+    if len(discovered) >= _MAX_PRFLX_CANDS:
+        return discovered
+    return [*discovered, observed]
+
+
 class _SdesOpenMixin:
     async def _open_sdes_stream(self, **kwargs) -> "SdesSession":
         """Allocate-and-hand-off wrapper around _open_sdes_stream_impl.
@@ -2940,6 +2980,31 @@ class _SdesOpenMixin:
                                     f" {_bsrc[0]}:{_bsrc[1]}"
                                     f" attrs=[{', '.join(_attrs)}]"
                                 )
+                            # Learn where this probe actually came from.  The
+                            # camera reached us from here, so this address is
+                            # known-good in a way an advertised one is not.
+                            # Relay-carried probes carry the camera's real
+                            # address in XOR-PEER-ADDRESS; _bsrc is the TURN
+                            # server and would be useless to nominate.
+                            _br_obs = (
+                                _br_cam_peer if _br_cam_peer
+                                else (None if _bsrc[0] == _hp_host else _bsrc)
+                            )
+                            _br_prflx_was = _bridge_uc_info["prflx"]
+                            _br_prflx_now = _record_peer_reflexive(
+                                _bridge_uc_info["cands"], _br_prflx_was,
+                                _br_obs, _is_self_peer_ip,
+                            )
+                            if _br_prflx_now is not _br_prflx_was:
+                                # Rebind, never append: the nomination tick
+                                # iterates this list.
+                                _bridge_uc_info["prflx"] = _br_prflx_now
+                                _status(
+                                    f"ICE: learned peer-reflexive camera"
+                                    f" candidate {_br_obs[0]}:{_br_obs[1]}"
+                                    f" (not in the {len(_bridge_uc_info['cands'])}"
+                                    f" advertised candidate(s)) - will nominate it"
+                                )
                             try:
                                 if _br_turn_peer_ip is None and _bsrc[0] != _hp_host:
                                     _br_prefer_direct_stun[_bs] = True
@@ -3814,6 +3879,16 @@ class _SdesOpenMixin:
                     # Fall back to the creds parsed late into _bridge_uc_info so this
                     # ungated periodic tick still nominates them.  [SDES-LATECREDS-FIX]
                     _uc_cands = _cam_ice_cands or _bridge_uc_info.get("cands")
+                    # Union in anything learned from the camera's own probes.
+                    # Advertised candidates stay FIRST and are still nominated,
+                    # so a camera we can already reach directly is unaffected;
+                    # this only adds a path where there was none.
+                    _uc_prflx = _bridge_uc_info.get("prflx")
+                    if _uc_prflx:
+                        _uc_cands = [
+                            *(_uc_cands or []),
+                            *(c for c in _uc_prflx if c not in (_uc_cands or [])),
+                        ]
                     _uc_cufrag = _cam_ice_ufrag or _bridge_uc_info.get("ufrag")
                     _uc_cpwd = _cam_ice_pwd or _bridge_uc_info.get("pwd")
                     if _uc_cands and _uc_cufrag and _uc_cpwd and (_br_now - _br_last_uc) >= 2.5:
@@ -3884,6 +3959,10 @@ class _SdesOpenMixin:
             "pwd":     _cam_ice_pwd,
             "cands":   list(_cam_ice_cands),
             "sent":    bool(_cam_ice_cands),  # True if already sent at setup
+            # Addresses the camera's own probes arrived from, which may differ
+            # from anything it advertised.  Written by the bridge thread only;
+            # read there too, so no cross-thread ordering to reason about.
+            "prflx":   [],
         }
 
         _bridge_thread = _threading_br.Thread(
