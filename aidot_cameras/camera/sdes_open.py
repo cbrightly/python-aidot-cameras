@@ -49,6 +49,16 @@ _SDP_AUDIO_PTS = (0, 8)
 # audio line advertising PCMU on a PCMA camera.
 _FIRST_MEDIA_WAIT_S = 75.0
 
+# How long to wait for the camera's webrtcResp before parsing it for the ICE
+# credentials the nomination needs.  The STUN window ahead of it closes on a
+# fixed schedule, and the answer lands about 2.4 s AFTER it does (measured on an
+# A001513: webrtcReq -> answer 2.9 s), so the harvest below used to give the
+# answer a single event-loop cycle and almost always read an empty string.
+# Everything downstream then behaved as if the camera had never answered.
+# Bounded so a camera that truly never answers still falls through to the
+# existing no-answer/DTLS-fallback path on its own schedule.
+_PRE_LAUNCH_ANSWER_WAIT_S = 8.0
+
 # Extra time for the audio payload type once video is known.  Measured on an
 # A001513: audio follows video by 40-70ms, because the camera answers BUNDLE and
 # both share one 5-tuple - so audio is never "late" and this only absorbs jitter.
@@ -1766,11 +1776,36 @@ class _SdesOpenMixin:
                     " - exiting STUN window, handing off to ffmpeg"
                 )
 
-        # --- Harvest camera's webrtcResp answer (may have arrived during STUN window) --- #
+        # --- Harvest camera's webrtcResp answer --- #
         # The asyncio event loop was blocked by the synchronous STUN loop.  Any
         # call_soon_threadsafe(answer_fut.set_result, ...) from the MQTT thread is
         # queued but hasn't fired yet.  One asyncio cycle resolves it.
         await asyncio.sleep(0)
+        # ...but one cycle only helps if the answer had already ARRIVED, and it
+        # has not: the STUN window above runs on a fixed schedule that closes
+        # ~2.4 s before the camera answers.  Wait for it, because the ICE
+        # credentials it carries are what the nomination below needs - without
+        # them the camera is never nominated, stays in ICE "Checking", and never
+        # sends SRTP no matter how long the first-media wait runs.
+        # shield() so a timeout here cannot cancel the future the real answer
+        # await (and the DTLS-fallback path) still consume further down.
+        if not answer_fut.done():
+            _ans_wait_t0 = time.monotonic()
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(answer_fut), timeout=_PRE_LAUNCH_ANSWER_WAIT_S
+                )
+                _status("webrtcResp answer harvested after %.2fs"
+                        % (time.monotonic() - _ans_wait_t0))
+            except TimeoutError:   # asyncio.TimeoutError is an alias since 3.11
+                _status(
+                    "no webrtcResp answer within %.0fs - proceeding without ICE"
+                    " credentials (nomination will retry during the first-media"
+                    " wait)" % _PRE_LAUNCH_ANSWER_WAIT_S
+                )
+            except Exception:
+                _LOGGER.debug("camera %s: swallowed exception awaiting answer",
+                              getattr(self, "device_id", "?"), exc_info=True)
         _pre_launch_answer_sdp: str = ""
         _our_tx_srtp_key_audio = srtp_key_audio  # our TX key; set early in case answer absent
         _cam_key_audio: str = ""   # camera's answer key; set in SDP parse block below
@@ -2105,6 +2140,42 @@ class _SdesOpenMixin:
                 sock.sendto(_req, cam_addr)
             except Exception:
                 _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_use_candidate', exc_info=True)
+
+        def _nominate_from_answer_sdp(sdp_text) -> int:
+            """Nominate every candidate in ``sdp_text``; return how many.
+
+            Same parse as the post-wait path, factored out so the first-media
+            wait can use it.  ``_pre_launch_answer_sdp`` is snapshotted before
+            the camera has answered, so for A001513/A001064 the parse above
+            finds no credentials and nothing is ever nominated - and a camera
+            that never sees USE-CANDIDATE stays in ICE "Checking" and never
+            sends SRTP (see the note above).  Returns 0 while the answer is
+            still absent, so the caller can keep polling.
+            """
+            if not sdp_text:
+                return 0
+            _u = _p = ""
+            _cands: list = []
+            for _ln in sdp_text.splitlines():
+                if _ln.startswith("a=ice-ufrag:") and not _u:
+                    _u = _ln[len("a=ice-ufrag:"):].strip()
+                elif _ln.startswith("a=ice-pwd:") and not _p:
+                    _p = _ln[len("a=ice-pwd:"):].strip()
+                elif _ln.startswith("a=candidate:"):
+                    _m = _re_ice.match(
+                        r"a=candidate:\S+ \d+ udp \d+ ([\d.]+) (\d+) typ (\w+)",
+                        _ln,
+                    )
+                    if _m:
+                        _cands.append((_m.group(1), int(_m.group(2))))
+            if not (_u and _p and _cands):
+                return 0
+            for _c_ip, _c_port in _cands:
+                _send_use_candidate(
+                    _audio_sock, _ufrag_a, _pwd_a, _u, _p, (_c_ip, _c_port))
+                _send_use_candidate(
+                    _video_sock, _ufrag_v, _pwd_v, _u, _p, (_c_ip, _c_port))
+            return len(_cands)
 
         if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:
             for _c_ip, _c_port in _cam_ice_cands:
@@ -3583,8 +3654,33 @@ class _SdesOpenMixin:
         # launched with both payload types unknown.  Waiting for first media costs
         # no picture latency: ffmpeg cannot produce before media exists, and
         # launching earlier only binds the wrong depacketizers.
+        # The camera's answer carries the ICE credentials we need to nominate a
+        # pair, and it lands about a second after webrtcReq - but it is not
+        # awaited until AFTER this wait.  So for a camera whose answer misses the
+        # _pre_launch_answer_sdp snapshot, USE-CANDIDATE was only ever sent once
+        # this window had already expired, the camera sat in ICE "Checking"
+        # forever, and the wait below could not do anything but time out.
+        # Measured on an A001513: answer at +1.3 s, nomination at +81 s.
+        # Nominate as soon as the answer is readable instead.
+        _early_nominated = bool(_cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands)
         _media_deadline = time.monotonic() + _FIRST_MEDIA_WAIT_S
         while _first_video_pt[0] is None and time.monotonic() < _media_deadline:
+            if not _early_nominated and answer_fut is not None and answer_fut.done():
+                # Read-only peek: the real await below still consumes this
+                # future and drives the answer/fallback paths unchanged.
+                _peek_sdp = ""
+                try:
+                    if answer_fut.exception() is None:
+                        _peek_sdp = (answer_fut.result() or {}).get("sdp", "") or ""
+                except Exception:
+                    _peek_sdp = ""
+                _n_nom = _nominate_from_answer_sdp(_peek_sdp)
+                if _n_nom:
+                    _early_nominated = True
+                    _status(
+                        "ICE controlling: nominated %d candidate(s) from the"
+                        " camera's answer during the first-media wait" % _n_nom
+                    )
             await asyncio.sleep(0.1)
         if _serve_audio and _first_audio_pt[0] is None:
             _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
