@@ -49,6 +49,16 @@ _SDP_AUDIO_PTS = (0, 8)
 # audio line advertising PCMU on a PCMA camera.
 _FIRST_MEDIA_WAIT_S = 75.0
 
+# How long to wait for the camera's webrtcResp before parsing it for the ICE
+# credentials the nomination needs.  The STUN window ahead of it closes on a
+# fixed schedule, and the answer lands about 2.4 s AFTER it does (measured on an
+# A001513: webrtcReq -> answer 2.9 s), so the harvest below used to give the
+# answer a single event-loop cycle and almost always read an empty string.
+# Everything downstream then behaved as if the camera had never answered.
+# Bounded so a camera that truly never answers still falls through to the
+# existing no-answer/DTLS-fallback path on its own schedule.
+_PRE_LAUNCH_ANSWER_WAIT_S = 8.0
+
 # Extra time for the audio payload type once video is known.  Measured on an
 # A001513: audio follows video by 40-70ms, because the camera answers BUNDLE and
 # both share one 5-tuple - so audio is never "late" and this only absorbs jitter.
@@ -1766,11 +1776,36 @@ class _SdesOpenMixin:
                     " - exiting STUN window, handing off to ffmpeg"
                 )
 
-        # --- Harvest camera's webrtcResp answer (may have arrived during STUN window) --- #
+        # --- Harvest camera's webrtcResp answer --- #
         # The asyncio event loop was blocked by the synchronous STUN loop.  Any
         # call_soon_threadsafe(answer_fut.set_result, ...) from the MQTT thread is
         # queued but hasn't fired yet.  One asyncio cycle resolves it.
         await asyncio.sleep(0)
+        # ...but one cycle only helps if the answer had already ARRIVED, and it
+        # has not: the STUN window above runs on a fixed schedule that closes
+        # ~2.4 s before the camera answers.  Wait for it, because the ICE
+        # credentials it carries are what the nomination below needs - without
+        # them the camera is never nominated, stays in ICE "Checking", and never
+        # sends SRTP no matter how long the first-media wait runs.
+        # shield() so a timeout here cannot cancel the future the real answer
+        # await (and the DTLS-fallback path) still consume further down.
+        if not answer_fut.done():
+            _ans_wait_t0 = time.monotonic()
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(answer_fut), timeout=_PRE_LAUNCH_ANSWER_WAIT_S
+                )
+                _status("webrtcResp answer harvested after %.2fs"
+                        % (time.monotonic() - _ans_wait_t0))
+            except TimeoutError:   # asyncio.TimeoutError is an alias since 3.11
+                _status(
+                    "no webrtcResp answer within %.0fs - proceeding without ICE"
+                    " credentials (nomination will retry during the first-media"
+                    " wait)" % _PRE_LAUNCH_ANSWER_WAIT_S
+                )
+            except Exception:
+                _LOGGER.debug("camera %s: swallowed exception awaiting answer",
+                              getattr(self, "device_id", "?"), exc_info=True)
         _pre_launch_answer_sdp: str = ""
         _our_tx_srtp_key_audio = srtp_key_audio  # our TX key; set early in case answer absent
         _cam_key_audio: str = ""   # camera's answer key; set in SDP parse block below
