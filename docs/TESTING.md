@@ -74,7 +74,7 @@ and no SDES camera ever streamed.
 ## The live tier
 
 See [`CI-RUNNER.md`](CI-RUNNER.md). `scripts/live_validate.py` is the harness;
-it gates PyPI publishes through `live-validate.yml` + `publish.yml`'s
+it gates PyPI publishes through the private repo's `live-validate.yml` + `publish.yml`'s
 `live-gate`.
 
 Note that the two transports report media differently, and anything asserting
