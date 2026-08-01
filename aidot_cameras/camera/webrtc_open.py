@@ -335,7 +335,7 @@ class _WebRTCOpenMixin:
             # only the higher of the camera's consecutive [P, P+1] ICE ports (its
             # live DTLS socket). aioice's aggressive nomination of BOTH ports made
             # the camera latch the lower one and withhold DTLS - the dominant ~25%
-            # failure. A/B on M3 Pro v2: high-port-only ~87% vs ~25% baseline vs
+            # failure. A/B on an A000088: high-port-only ~87% vs ~25% baseline vs
             # ~12% low-port. Self-gating no-op for non-A000088 peers.
             # See _install_highport_nomination_patch.
             _install_highport_nomination_patch()

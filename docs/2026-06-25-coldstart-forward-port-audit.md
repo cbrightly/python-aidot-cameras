@@ -59,7 +59,7 @@ Full suite: 219 passed, 1 skipped. Ruff clean.
 
 All three A000088 DTLS cameras were cold-opened with the worktree code.
 
-- **Unit 3 - real DC-only cold-decline + burst (hardware).** "Deck" was genuinely
+- **Unit 3 - real DC-only cold-decline + burst (hardware).** "a fourth A000088" was genuinely
   deep-asleep. The full cycle was captured live:
   - attempt 1 `webrtcReq` at 8.2s -> **DC-only answer** at 8.5s (`audio_rejected=True
     video_rejected=True ... encoder not ready - fast-retry`) - the Unit 3 detection
@@ -69,10 +69,10 @@ All three A000088 DTLS cameras were cold-opened with the worktree code.
   - attempt 2 `webrtcReq` at 16.6s (encoder now warm) -> connected 18.1s -> serving
     19.3s -> first video byte **24.6s** end-to-end.
   - Net: the decline retried at +3s instead of +15s, ~12s saved on this cold start.
-- **Unit 2 - PLI prompter (hardware).** On "Bedroom M3 Pro" the prompter found the
+- **Unit 2 - PLI prompter (hardware).** On an A000088 the prompter found the
   video SSRC and sent a real RTCP PLI (`video track: sent RTCP PLI ... ssrc=[...]`),
   then stopped once the keyframe arrived - the intended behaviour.
-- **Happy path (hardware).** "M3 Pro v2" and "Bedroom M3 Pro" (warm) returned full
+- **Happy path (hardware).** a second A000088 and an A000088 (warm) returned full
   media answers and connected ~9.3s / served ~10.3s - no regression from the
   prompter or the Unit 3 wiring.
 - **Burst behaviour (deterministic, committed test).**
@@ -83,7 +83,7 @@ All three A000088 DTLS cameras were cold-opened with the worktree code.
 
 ## Follow-up - Unit 1 host-only ICE A/B (RESOLVED 2026-06-26)
 
-Live A/B on M3 Pro v2 (warm, on-subnet), measuring `setLocalDescription`
+Live A/B on a second A000088 (warm, on-subnet), measuring `setLocalDescription`
 ICE-gather time and total connect time across four local-pc ICE configs.
 The camera-facing webrtcReq `IceServerList` was held constant (STUN) in every
 arm - only the **local** `RTCPeerConnection`'s `iceServers` were narrowed, via a

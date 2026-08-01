@@ -19,7 +19,7 @@ Examples::
     python scripts/smoke_stream.py
 
     # stream specific cameras by (case-insensitive substring) name
-    python scripts/smoke_stream.py --name Deck --name "M3 Pro" --hold 20
+    python scripts/smoke_stream.py --name <substr> --name <substr> --hold 20
 
 Requires the ``[webrtc]`` extra (aiortc/av/...) and, for recording, ffmpeg.
 Exit code is non-zero if any selected camera produced no media.

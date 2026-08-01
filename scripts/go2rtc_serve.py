@@ -18,7 +18,7 @@ Examples::
     python scripts/go2rtc_serve.py --list
 
     # DTLS serve for go2rtc to pull (HTTP-listen mpegts)
-    python scripts/go2rtc_serve.py --name Deck --serve http://127.0.0.1:18000 --hold 60
+    python scripts/go2rtc_serve.py --name <substr> --serve http://127.0.0.1:18000 --hold 60
 
     # SDES push to a go2rtc RTSP server
     python scripts/go2rtc_serve.py --name "Rear of Garage" \
