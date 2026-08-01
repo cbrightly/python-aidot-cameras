@@ -123,13 +123,33 @@ def _media_seen(session, frames: int, out_path: str | None) -> tuple[bool, dict]
     return ok, evidence
 
 
+def _recording_path(out_dir: str, device_id: str, attempt: int) -> str:
+    """Where this attempt records, clearing a stale file we are allowed to clear.
+
+    The default out_dir is /tmp, which is world-writable and sticky: a stale
+    recording left by a *different* user cannot be removed, and os.remove raises
+    PermissionError. That aborted a whole run on the self-hosted runner, because
+    the runner user inherited /tmp files an earlier manual run had left behind.
+
+    A stale file we cannot delete is not a reason to fail - fall back to a path
+    this process definitely owns and carry on.
+    """
+    out = os.path.join(out_dir, f"live_{device_id[:8]}_{attempt}.ts")
+    if os.path.exists(out):
+        try:
+            os.remove(out)
+        except OSError:
+            out = os.path.join(
+                out_dir, f"live_{device_id[:8]}_{attempt}_{os.getpid()}.ts"
+            )
+    return out
+
+
 async def _attempt(dc, hold: float, out_dir: str, attempt: int) -> dict:
     """One streaming attempt. Never raises; classifies the outcome."""
     from aidot_cameras.exceptions import AidotCameraBusy
 
-    out = os.path.join(out_dir, f"live_{dc.device_id[:8]}_{attempt}.ts")
-    if os.path.exists(out):
-        os.remove(out)
+    out = _recording_path(out_dir, dc.device_id, attempt)
 
     frames = {"n": 0}
     t0 = time.time()
