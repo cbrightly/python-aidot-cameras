@@ -59,6 +59,34 @@ ATTEMPTS_SDES = 2
 # A camera holds its viewer slot ~120 s after a session; leave room past that.
 DEFAULT_COOLDOWN_S = 180.0
 
+# Cooldown exists to let a camera release the viewer slot it holds for ~120 s
+# after a session. A camera that never answered never opened one, so waiting on
+# it buys nothing - and it is exactly the camera that burns the most wall clock,
+# because it also spends its full retry budget. A fleet run with two dead
+# cameras spent ~18 minutes of a 45 minute job ceiling asleep on their behalf.
+#
+# Verdicts that DID (or may have) taken a slot, so the wait still applies:
+#   PASS      streamed - definitely held one
+#   NO_MEDIA  signaling completed, so the camera opened a session its side
+#   BUSY      something else holds the slot; backing off is the whole point
+# ERROR is the no-session case: no webrtcResp at all, or the open raised before
+# a session existed. Nothing to release.
+_SLOTLESS_VERDICTS = frozenset({"ERROR"})
+# Not zero: back-to-back cloud signaling on one account is its own contention,
+# and a camera that is merely slow rather than dead deserves a breath.
+SLOTLESS_COOLDOWN_S = 10.0
+
+
+def _cooldown_after(verdict: str, full: float) -> float:
+    """Seconds to wait after an attempt/camera that ended in ``verdict``.
+
+    Never longer than the configured cooldown: this exists to shorten the wait,
+    and `--cooldown 5` must not be lengthened to the slotless floor.
+    """
+    if verdict in _SLOTLESS_VERDICTS:
+        return min(SLOTLESS_COOLDOWN_S, full)
+    return full
+
 
 def _is_camera(device_client) -> bool:
     model = getattr(getattr(device_client, "info", None), "model_id", "") or ""
@@ -223,9 +251,16 @@ async def _validate_camera(client, device, args) -> dict:
 
     for i in range(1, max_attempts + 1):
         if i > 1:
-            print(f"    cooling down {args.cooldown:.0f}s before attempt {i} "
-                  "(a camera holds its viewer slot ~120s)")
-            await asyncio.sleep(args.cooldown)
+            prev = entry["attempts"][-1].get("verdict", "")
+            wait = _cooldown_after(prev, args.cooldown)
+            if wait < args.cooldown:
+                print(f"    {prev} on attempt {i - 1} - no session was opened, "
+                      f"so no slot to release; waiting {wait:.0f}s not "
+                      f"{args.cooldown:.0f}s")
+            else:
+                print(f"    cooling down {wait:.0f}s before attempt {i} "
+                      "(a camera holds its viewer slot ~120s)")
+            await asyncio.sleep(wait)
         print(f"    attempt {i}/{max_attempts}...")
         res = await _attempt(dc, args.hold, args.out_dir, i)
         entry["attempts"].append(res)
@@ -313,8 +348,17 @@ async def _run(args) -> int:
             # cloud signaling channel and for the cameras' own stream slots.
             for idx, cam in enumerate(selected):
                 if idx > 0:
-                    print(f"\n(spacing {args.cooldown:.0f}s between cameras)")
-                    await asyncio.sleep(args.cooldown)
+                    # Space on the PREVIOUS camera's outcome: it is the one that
+                    # may still be holding a slot, not the one about to open.
+                    prev_v = report["cameras"][-1].get("verdict", "")
+                    wait = _cooldown_after(prev_v, args.cooldown)
+                    if wait < args.cooldown:
+                        print(f"\n(previous camera {prev_v} with no session "
+                              f"opened - spacing {wait:.0f}s, not "
+                              f"{args.cooldown:.0f}s)")
+                    else:
+                        print(f"\n(spacing {wait:.0f}s between cameras)")
+                    await asyncio.sleep(wait)
                 report["cameras"].append(await _validate_camera(client, cam, args))
                 # Write after every camera, not only at the end.  A fleet run
                 # where everything fails takes far longer than a green one (each
