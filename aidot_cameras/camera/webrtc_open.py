@@ -578,6 +578,11 @@ class _WebRTCOpenMixin:
         webrtc_req_echo_fut:  asyncio.Future = loop.create_future()  # set when broker echoes our own webrtcReq back (is_echo=True)
         ice_config_fut:    asyncio.Future = loop.create_future()  # TURN credentials from getIceConfigResp
         ice_q:            asyncio.Queue   = asyncio.Queue()
+        # Non-destructive record of every candidate the camera trickles to us.
+        # The SDES path needs these too (for TURN permissions and nomination) but
+        # must not consume ice_q: the DTLS fallback re-reads that queue, and a
+        # candidate taken by SDES would never reach aiortc.
+        ice_cands_seen:   list            = []
         cam_ip_q:         asyncio.Queue   = asyncio.Queue()  # camera IP from setDevAttrNotif
         camera_ready_ev:  asyncio.Event   = asyncio.Event()  # set when camera is on MQTT
         liveplay_echo_ev: asyncio.Event   = asyncio.Event()  # set when livePlayReq echo arrives
@@ -753,6 +758,7 @@ class _WebRTCOpenMixin:
                     return   # candidate for a different camera/session
                 cand = inner.get("candidate") or {}
                 if cand.get("candidate"):
+                    ice_cands_seen.append(cand)
                     loop.call_soon_threadsafe(ice_q.put_nowait, cand)
             elif method == "webrtcReq":
                 # Camera acting as WebRTC offerer (role reversal observed on
@@ -1295,6 +1301,7 @@ class _WebRTCOpenMixin:
                     sdes_answer_timeout=_sdes_answer_timeout,
                     rtsp_push_url=rtsp_push_url,
                     talk=talk,
+                    ice_cands_seen=ice_cands_seen,
                 )
                 # Success: the SdesSession now owns outgoing_q + mqtt_fut and
                 # reaps them on stop(); clear the backstop slot so a concurrent
