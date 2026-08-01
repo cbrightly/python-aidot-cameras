@@ -215,16 +215,6 @@ camera went from 0 bytes to streaming.
   The "late ICE creds parsed" log line tracks the *wait*, not the camera: at a 75 s
   wait it fires at +81 s, at 150 s it fires at +152 s, and nothing else changes.
 
-Two traps this experiment produced, both worth knowing before repeating it:
-
-- A `--name`/`--model` filtered run **always** reports `overall: FAIL`, because the
-  required-model check still runs against the filtered set and reports the others as
-  `missing_required_models`. Read the per-camera verdict, not the overall one, for targeted runs.
-- The run log is full of `Login failed, code: 4354` and `Connection reset by peer` for
-  **non-camera** device ids. Those are LAN logins to lights/plugs and are unrelated to camera
-  streaming - a camera PASSed in the same run that produced dozens of them. Do not read them as
-  an account-credential failure.
-
 Enumeration says nothing about streaming: a shared account can list a camera
 and still lack what it takes to open one. The last three rows need the real
 runs.
@@ -273,15 +263,38 @@ has not been shown to work, which is the entire premise.
 
 Run these once, when you set the gate up, so you know it actually holds:
 
-1. **Runner offline.** Stop the runner service, publish a throwaway
-   prerelease. `live-gate` must wait and then fail; `publish` must not run.
+1. **No validation.** Publish a throwaway prerelease without triggering
+   live-validate. `live-gate` must fail at its 3-minute grace ("no
+   live-validation run ever claimed <sha>") and `publish` must never start.
+   This replaces the older "stop the runner" phrasing: with validation in a
+   separate repo, simply not running it is the same condition and needs no
+   service surgery.
 2. **Override.** Set `LIVE_GATE_OVERRIDE_SHA` to that prerelease's SHA and
    re-run. The publish must proceed and must log the warning. Unset it.
 3. **Real failure.** Point the harness at a camera you have powered off
-   (`--name`), and confirm the run goes red with `NO_MEDIA` rather than
-   passing.
-4. **Contention.** Open a camera in HA while a run is in progress; confirm you
-   get a `BUSY` verdict rather than a spurious pass.
+   (`--name`/`--model`), and confirm it goes red with `ERROR`/`NO_MEDIA` rather
+   than passing.
+4. **Contention** - *see the caveat below; this one does not behave as written.*
+
+### Drill 4 does not produce BUSY on this hardware
+
+Run 2026-08-01: an A001064 was held open by a library session, and a validation
+run was started against the same camera. The run **passed** (13.5 s, 4.6 MB)
+while the *incumbent* session lost its media (`Connection timed out` in its
+ffmpeg log).
+
+So this camera does **last-one-wins**: a new viewer evicts the existing one
+rather than being refused. The `BUSY` path is real - the code handles the
+terminal acks - but a second library session does not provoke one. The refusal
+seems to need a different condition (the phone app, or a hard viewer limit).
+
+Two consequences:
+
+- Do not expect `BUSY` from this drill. Expect a pass, and expect whoever was
+  watching to be dropped.
+- **A live validation run will kick you off a camera you are viewing.** That is
+  the operational cost of validating against a fleet someone lives with -
+  schedule releases accordingly.
 
 ## Reading a report
 
