@@ -480,13 +480,9 @@ class CameraClient(_UpstreamAidotClient):
             _LOGGER.warning("_async_fetch_user_config: no HTTP session")
             return
 
-        # Imported here, not at module scope: aidot_cameras.camera.__init__
-        # re-exports camera.client, which imports back through device_client -
-        # a top-level import would close that cycle during package init.
-        from .camera.constants import aidot_api_base
-
         region = getattr(self.user_info, "region", "") or ""
-        url = f"{aidot_api_base(region)}/commons/userConfig"
+        base = f"https://prod-{region}-api.arnoo.com"
+        url = f"{base}/commons/userConfig"
         headers = {
             "appid": _CLOUD_APP_ID,
             "owner": user_id,
