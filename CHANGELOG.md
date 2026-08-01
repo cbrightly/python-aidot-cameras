@@ -7,6 +7,54 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 ## [0.12.17]
 
 ### Fixed
+- **SDES cameras negotiated a session and then delivered nothing.** Every
+  A001513 and A001064 was affected, on released 0.12.16 and across two accounts;
+  DTLS (A000088) was untouched, which is why half the fleet looked healthy and
+  this stayed hidden. The harvest that reads the camera's `webrtcResp` gave the
+  answer a single event-loop cycle and took it only if it had already resolved -
+  but the STUN window ahead of it closes on a fixed schedule about 2.4 s BEFORE
+  the answer lands (`webrtcReq` -> answer = 2.9 s measured on an A001513). The
+  answer SDP was therefore always empty, and everything downstream behaved as
+  though the camera had never replied: no ICE credentials, so no
+  `USE-CANDIDATE`, so a **controlled** ICE agent that sits in "Checking" forever
+  and never sends SRTP, and no camera SRTP keys for the bridge either. The 75 s
+  first-media wait had nothing to wait for. The path now waits for the answer -
+  bounded by `_PRE_LAUNCH_ANSWER_WAIT_S`, and `asyncio.shield`ed so a timeout
+  cannot cancel the future the real answer await and the DTLS-fallback path
+  still consume - and nominates from the answer during the first-media wait as a
+  bounded fallback. Raising `_FIRST_MEDIA_WAIT_S` never helped and never could:
+  that wait was tracking itself, not the camera.
+
+  Measured: `an A001513 unit` (A001513, battery) NO_MEDIA / 80 s / 0 bytes before, **PASS
+  on the first attempt, 7.9 s, 2646 packets / 2.9 MB** after, decoding as h264
+  1280x960 with `video_pt=96 audio_pt=8`. A001064 PTZ NO_MEDIA before, **PASS
+  16.7 s / 2.5 MB** after.
+
+- **The TURN relay was allocated and advertised as a candidate, but never
+  used.** Three separate gaps, each of which alone makes the relay unusable as a
+  fallback for a camera that cannot be reached directly. A permission was
+  installed only for the candidate in the answer SDP, which is the camera's
+  private host address; a TURN permission is matched against the peer's source
+  address *as the relay sees it* (RFC 5766 s9), so that authorises an address
+  that can never arrive. Permissions now cover every candidate, including the
+  srflx and relay addresses that only appear via `iceCandidateReq` trickle, and
+  are refreshed inside the permission lifetime - and two of the three allocation
+  paths stored a 7-field tuple where the helper requires 8, so on those paths
+  the permission was silently never sent at all. Nothing was ever *sent* through
+  the allocation either: the Send indication was emitted only while handling
+  data that had already arrived through the relay, which cannot bootstrap, and
+  since ICE validates a candidate *pair*, a camera that only ever saw checks
+  leaving from our host socket never nominated the relay candidate we
+  advertised. Connectivity checks now also go out through the allocation, and
+  the bridge wraps its replies when the peer reached us relayed. Finally the
+  allocation itself was never refreshed, and this TURN server grants 600 s and
+  drops it silently on expiry, so a held session lost its relay mid-stream.
+
+  Measured on an A001513 before the send-side change: CreatePermission confirmed
+  by the server for the camera's host, srflx and relay addresses, and still zero
+  relay-carried inbound packets, because nothing we sent ever left from the
+  relay.
+
 - **L2 / battery cameras that stream from a standalone run but never under Home
   Assistant.** The same library code took two different paths because the
   battery-hostile knobs were reachable from a consumer's settings, and a
@@ -100,11 +148,17 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   turn-prealloc=kept adaptive=False`), and a mains SDES camera on the same fleet
   still reports `battery=False powerType=1 turn-prealloc=skipped` - so the
   battery detection change does not misclassify mains cameras or alter the
-  `powerType` they are sent. On that particular fleet the battery camera's live
-  view still does not fill in under Home Assistant, for a cause outside this
-  release: the same library and options stream that camera from a second host on
-  the same subnet, so the difference is in the host/network path rather than in
-  these knobs. That is being investigated separately.
+  `powerType` they are sent. The battery live view that still did not fill in
+  when that work was written was **not** a host or network difference, as was
+  assumed at the time - it was the SDES answer harvest above, which stopped
+  every SDES camera on every host from ever being nominated. With that fixed the
+  same A001513 streams in 7.9 s.
+- **Battery streaming is not universally fixed.** On the reference fleet one
+  A001513 (`an A001513 unit`) passes in 7.9 s while a second (`a second A001513 unit`) still returns no
+  media, handshaking for ~110 s and absent from `arp-scan` throughout: it is
+  genuinely asleep rather than mis-negotiating, and nothing in this release
+  wakes a camera that will not wake. That is the remaining battery problem, now
+  cleanly isolated from the SDES bug that was masking it.
 
 ### Added
 - **A one-line open profile per camera, at INFO.** Names the decisions that
