@@ -21,11 +21,18 @@ import logging
 from typing import Any, Optional
 
 from aidot.device_client import DeviceClient as _UpstreamDeviceClient
-from aidot.device_client import DeviceState as _UpstreamDeviceState
 from aidot.device_client import DeviceInformation as _UpstreamDeviceInformation
 from aidot.device_client import DeviceStatusData as _UpstreamDeviceStatusData
-from aidot.models.auth_model import UserInformation
-from aidot.models.device_model import DeviceModel
+
+# Names upstream spells differently (or dropped) between its two live shapes.
+# _upstream is the ONLY module allowed to know which one is installed.
+from ._upstream import (
+    HAS_READ_DATA_SEAM,
+    DeviceModel,
+    UserInformation,
+    device_client_args,
+)
+from ._upstream import DeviceState as _UpstreamDeviceState
 
 from .const import (
     CONF_ATTR,
@@ -57,6 +64,12 @@ DeviceClient = _UpstreamDeviceClient
 # Same reasoning for the LAN session state enum: a consumer that wants to know
 # whether a device client is authenticated has to compare against it, and
 # reaching into `aidot` for it means depending on a package it never declared.
+#
+# Upstream DELETED this enum in 0.3.56 (the session is two booleans now), so on
+# that shape `_upstream` supplies a value-identical stand-in rather than letting
+# a public name vanish from under the integration.  Nothing upstream produces
+# one there, so a consumer that wants the answer rather than the enum should
+# call `_upstream.device_session_authenticated(client)`, which works on both.
 DeviceState = _UpstreamDeviceState
 
 
@@ -167,40 +180,62 @@ class CameraDeviceClient(CameraMixin, _UpstreamDeviceClient):
     def __init__(
         self,
         device: DeviceModel,
-        user_info: UserInformation,
+        user_info: "UserInformation | dict",
         raw_device: Optional[dict] = None,
         login_info: Optional[dict] = None,
     ) -> None:
         """Build the upstream client, then initialize camera state.
 
         `raw_device` / `login_info` are the unparsed cloud records.  Prefer them:
-        `DeviceModel` and `UserInformation` are closed dataclasses, so round-
-        tripping through `to_dict()` silently drops every camera field (the whole
-        of `properties`: enableSdes, isDTLS, Battery_remaining, Occupancy,
-        SDcardStatus, MotionDetection_*, ...) and detaches `login_info` from the
-        account-shared dict the camera layer mutates in place (access-token
-        refresh, persistent-MQTT cache).  The `to_dict()` fallback keeps the
-        two-argument upstream signature usable for light-only devices.
+        on upstream's typed shape (0.3.55) `DeviceModel` and `UserInformation`
+        are closed dataclasses, so round-tripping through `to_dict()` silently
+        drops every camera field (the whole of `properties`: enableSdes, isDTLS,
+        Battery_remaining, Occupancy, SDcardStatus, MotionDetection_*, ...) and
+        detaches `login_info` from the account-shared dict the camera layer
+        mutates in place (access-token refresh, persistent-MQTT cache).  The
+        `to_dict()` fallback keeps the two-argument upstream signature usable
+        for light-only devices.
+
+        On upstream's dict shape (0.3.56) that whole hazard is gone - its
+        `DeviceClient.__init__` takes the raw dicts natively - so
+        `device_client_args` simply hands the originals through.  The typed
+        `device` is still built and kept as `_device_model` either way, because
+        the camera layer and the dispatch seam read `.id` / `.aesKey` off it.
         """
         # Real cameras report `aesKey: [None]` - a truthy list holding None.
-        # Upstream guards only the list ("if self._device.aesKey:") and then
-        # calls .encode() on the element, so that shape raises AttributeError
-        # for every camera.  Normalize to None so upstream skips the block; the
-        # pre-inversion client guarded the same case ("if key_string is not
-        # None").  Harmless for devices that carry a real key.
+        # The typed shape guards only the list ("if self._device.aesKey:") and
+        # then calls .encode() on the element, so that shape raises
+        # AttributeError for every camera.  Normalize to None so upstream skips
+        # the block; the dict shape's own guard ("if key_string is not None")
+        # already handles it.  Harmless for devices that carry a real key.
         _aes_key = getattr(device, "aesKey", None)
         if _aes_key and _aes_key[0] is None:
             device.aesKey = None
 
-        super().__init__(device, user_info)
+        # Which pair upstream wants depends on its shape; _upstream decides.
+        # raw_device is required for the dict shape - fall back to the typed
+        # model's dict form when a caller omitted it (light-only devices).
+        _raw_device = raw_device if isinstance(raw_device, dict) else device.to_dict()
+        _upstream_device, _upstream_account = device_client_args(
+            device, _raw_device, user_info, login_info
+        )
+        super().__init__(_upstream_device, _upstream_account)
 
         # Upstream's typed models stay reachable; _init_camera_state overwrites
         # self._user_info with the raw dict the camera layer expects.
         self._device_model = device
         self._user_info_model = user_info
 
-        raw_dev = raw_device if isinstance(raw_device, dict) else device.to_dict()
-        raw_user = login_info if isinstance(login_info, dict) else user_info.to_dict()
+        raw_dev = _raw_device
+        # On upstream's dict shape `user_info` IS the raw account dict and has
+        # no `to_dict`, so only fall back to that call when there is a typed
+        # model to call it on.
+        if isinstance(login_info, dict):
+            raw_user = login_info
+        elif isinstance(user_info, dict):
+            raw_user = user_info
+        else:
+            raw_user = user_info.to_dict()
 
         # Pre-inversion attribute names the camera layer reads throughout, and
         # which _init_camera_state itself depends on (self.device_id).
@@ -235,11 +270,26 @@ class CameraDeviceClient(CameraMixin, _UpstreamDeviceClient):
         finally:
             await super().close()
 
-    async def read_data(self) -> dict[str, Any]:
-        """Read one frame, keeping the raw JSON for the camera attribute pass."""
-        data = await super().read_data()
-        self._last_raw_payload = data if isinstance(data, dict) else None
-        return data
+    if HAS_READ_DATA_SEAM:
+        async def read_data(self) -> dict[str, Any]:
+            """Read one frame, keeping the raw JSON for the camera attribute pass.
+
+            Defined conditionally: upstream's dict shape (0.3.56) has no
+            `read_data` - it inlines the decrypt into `receive_data`, so the raw
+            JSON never escapes and there is nothing to hook.  Defining this
+            anyway would add a method that overrides nothing and is never
+            called, and `super().read_data()` would raise AttributeError if
+            anything ever did call it.
+
+            The camera path is unaffected either way: `async_login` returns
+            early for IPC models, so a camera never opens the TCP:10000 session
+            this loop reads from.  On the dict shape the recovery below simply
+            finds no stashed payload and is a no-op.  See
+            docs/UPSTREAM.md ("Known dual-support gaps").
+            """
+            data = await super().read_data()
+            self._last_raw_payload = data if isinstance(data, dict) else None
+            return data
 
     def _notify_status_update(self) -> None:
         """Apply camera-only attribute keys, then notify as upstream does.
@@ -250,6 +300,9 @@ class CameraDeviceClient(CameraMixin, _UpstreamDeviceClient):
         upstream's receive loop.  The stash is consumed (not just read) so a
         notify that is not driven by a frame - reset(), login - cannot re-apply
         a stale attribute set.
+
+        On upstream's dict shape there is no `read_data` seam to stash from, so
+        `_last_raw_payload` stays None and this degrades to a plain notify.
         """
         raw = self._last_raw_payload
         self._last_raw_payload = None

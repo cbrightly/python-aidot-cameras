@@ -22,9 +22,10 @@ import asyncio
 
 from aidot.device_client import DeviceClient as UpstreamDeviceClient
 from aidot.device_client import DeviceStatusData as UpstreamDeviceStatusData
-from aidot.models.auth_model import UserInformation
 from aidot.models.device_client_model import DeviceAttr
-from aidot.models.device_model import DeviceModel
+from upstream_shapes import (
+    make_upstream_device_client,
+)
 
 import aidot_cameras.client as client_mod
 from aidot_cameras.client import CameraClient
@@ -135,10 +136,7 @@ def test_carrying_preserves_state_upstream_already_seeded():
     holds a reference, so the carry must not start from a blank object.
     """
     client = CameraClient(None, country_code="US")
-    dc = UpstreamDeviceClient(
-        DeviceModel.from_json(data=RGBW_BULB),
-        UserInformation.from_json(data={"id": "u1"}),
-    )
+    dc = make_upstream_device_client(RGBW_BULB, {"id": "u1"})
     dc.status.online = True
     dc.status.cct = 4200
     client._carry_active_color_mode(dc)

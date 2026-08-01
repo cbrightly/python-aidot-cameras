@@ -13,6 +13,8 @@ than rewritten against upstream internals.
 """
 
 import asyncio
+
+import pytest
 import os
 import sys
 
@@ -20,10 +22,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 from aidot.device_client import DeviceClient as UpstreamDeviceClient
-from aidot.models.auth_model import UserInformation
 from aidot.models.device_client_model import DeviceAttr
-from aidot.models.device_model import DeviceModel
-from aidot.utils import AsyncTimer
+from aidot_cameras._upstream import HAS_READ_DATA_SEAM
+from upstream_shapes import (
+    account_record,
+    arm_reconnect,
+    device_record,
+    make_upstream_device_client,
+)
 
 from aidot_cameras.camera.client import CameraMixin, CameraStatusData
 from aidot_cameras.client import CameraClient, _is_camera
@@ -47,8 +53,8 @@ def make_dc(device=DEVICE):
     # Upstream's constructor takes typed models; the raw dicts still go through
     # for the camera layer, exactly as CameraClient.get_device_client does.
     return CameraDeviceClient(
-        DeviceModel.from_json(data=dict(device)),
-        UserInformation.from_json(data=dict(USER)),
+        device_record(dict(device)),
+        account_record(dict(USER)),
         raw_device=dict(device),
         login_info=dict(USER),
     )
@@ -81,25 +87,24 @@ def test_camera_filter():
 def test_no_reconnect_after_client_close():
     """Closing the account must silence an already-armed reconnect timer.
 
-    Upstream's DeviceClient.reset() arms a 45s AsyncTimer(callback=async_login)
-    every time a connection drops, and its close() only sets _is_closed - which
-    stops reset() from arming a NEW timer but never cancels the one already
-    ticking.  Left alone, a light re-opens its TCP connection about 45s after
-    the integration was unloaded, leaking a socket, a receive task and a ping
-    timer.  Plain upstream device clients are the exposed case (cameras have
-    their own login gate), so the subject here is an upstream DeviceClient.
+    Upstream's DeviceClient.reset() arms a ~45s delayed re-login every time a
+    connection drops, and its close() only sets its closed flag - which stops
+    reset() from arming a NEW one but never cancels the one already ticking.
+    Left alone, a light re-opens its TCP connection about 45s after the
+    integration was unloaded, leaking a socket, a receive task and a ping timer.
+    Plain upstream device clients are the exposed case (cameras have their own
+    login gate), so the subject here is an upstream DeviceClient.
+
+    The handle is spelled `_reconnect_timer` on the typed shape and
+    `_reconnect_handle` on the dict shape, so it is armed via `arm_reconnect`
+    rather than by name - hardcoding one would arm nothing on the other shape
+    and this assertion would pass without testing anything.
     """
     async def run():
         client = CameraClient(None, country_code="US")
-        dc = UpstreamDeviceClient(
-            DeviceModel.from_json(data=dict(DEVICE)),
-            UserInformation.from_json(data=dict(USER)),
-        )
+        dc = make_upstream_device_client(dict(DEVICE), dict(USER))
         fired = []
-        dc._reconnect_timer = AsyncTimer(
-            callback=lambda: fired.append(1), interval=0.05
-        )
-        dc._reconnect_timer.start()
+        arm_reconnect(dc, lambda: fired.append(1), delay=0.05)
         client._device_clients[dc.info.dev_id] = dc
 
         await client.async_close()
@@ -161,6 +166,14 @@ def test_camera_state_carry_forward():
 # camera-only attributes across the upstream receive loop
 # --------------------------------------------------------------------------- #
 
+@pytest.mark.skipif(
+    not HAS_READ_DATA_SEAM,
+    reason=(
+        "upstream's dict shape inlines the decrypt into receive_data, so there "
+        "is no read_data seam to hook - see docs/UPSTREAM.md, "
+        "'Known dual-support gaps'"
+    ),
+)
 def test_raw_camera_attrs_survive_upstreams_typed_model(monkeypatch):
     """The read_data/_notify_status_update pair recovers camera-only keys.
 
@@ -170,6 +183,10 @@ def test_raw_camera_attrs_survive_upstreams_typed_model(monkeypatch):
     stashes the raw frame and _notify_status_update re-applies payload.attr
     before the callback fires.  Both are called polymorphically by upstream's
     receive_data, which is what makes the pair reachable at all.
+
+    Typed shape only: the dict shape has no read_data, so this pair does not
+    exist there.  Cameras never reach that loop anyway (async_login returns
+    early for IPC models), which is why the gap is acceptable.
     """
     frame = {"payload": {"attr": {"Battery_remaining": "77", "OnOff": 1}}}
 

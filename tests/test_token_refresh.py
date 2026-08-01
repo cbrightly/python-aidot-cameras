@@ -10,8 +10,15 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot.models.auth_model import UserInformation
-from aidot.models.device_model import DeviceModel
+from upstream_shapes import (
+    TYPED,
+    account_record,
+    device_record,
+    patch_refresh_token_call,
+    set_access_token,
+    set_refresh_token,
+)
+from aidot_cameras._upstream import account_record as account_of
 
 from aidot_cameras.client import CameraClient
 from aidot_cameras.device_client import CameraDeviceClient
@@ -35,8 +42,8 @@ def _make_dc():
     dev = {"id": "devX", "modelId": "LK.IPC.A001513", "aesKey": [None]}
     user = {"id": "u1", "accessToken": "stale"}
     return CameraDeviceClient(
-        DeviceModel.from_json(data=dev),
-        UserInformation.from_json(data=user),
+        device_record(dev),
+        account_record(user),
         raw_device=dev,
         login_info=dict(user),
     )
@@ -79,14 +86,20 @@ def test_refresh_auth_token_swallows_cb_failure():
 def test_refreshed_token_reaches_camera_clients():
     """A successful refresh must land in the account-shared login_info dict.
 
-    Upstream's CloudApi.refresh_token writes user_info.accessToken - a dataclass
-    field - and fires the token-refreshed callback.  The camera layer does NOT
-    read that field: every camera HTTP header is built from the login_info dict
-    the client handed each camera client at construction time, and that dict
-    only picks up a rotated token when the login_info property getter runs.  So
-    the getter has to run inside the refresh callback, or a camera that hit a
-    21026, called async_ensure_token() and retried would retry with exactly the
-    token that had just expired.
+    Every camera HTTP header is built from the login_info dict the client handed
+    each camera client at construction time, so a rotated token has to reach
+    THAT dict - or a camera that hit a 21026, called async_ensure_token() and
+    retried would retry with exactly the token that had just expired.
+
+    How the rotation gets there differs by upstream shape, which is the point of
+    testing it on both:
+
+    * typed shape - ``CloudApi.refresh_token`` writes ``user_info.accessToken``,
+      a dataclass field the camera layer never reads, and fires the
+      token-refreshed callback.  The login_info property getter has to run
+      inside that callback for the dict to pick it up.
+    * dict shape - ``async_refresh_token`` writes straight into ``login_info``,
+      which IS the shared dict, so the sync is already done.
 
     _token_fresh_cb is deliberately left UNSET here: the shipped consumers set a
     persist callback that happens to read login_info, which masks the gap.
@@ -94,13 +107,13 @@ def test_refreshed_token_reaches_camera_clients():
     # Built OUTSIDE a running loop on purpose: __init__'s proactive-refresh
     # scheduling and discovery both no-op without one, so this stays offline.
     client = CameraClient(None, country_code="US")
-    client.user_info.accessToken = "stale"
-    client.user_info.refreshToken = "rt"
+    set_access_token(client, "stale")
+    set_refresh_token(client, "rt")
 
     dev = {"id": "camX", "modelId": "LK.IPC.A001513", "aesKey": [None]}
     dc = CameraDeviceClient(
-        DeviceModel.from_json(data=dev),
-        client.user_info,
+        device_record(dev),
+        account_of(client),
         raw_device=dev,
         # The SAME dict object the client mutates in place - what the real
         # dispatch seam passes (CameraClient.get_device_client).
@@ -110,12 +123,13 @@ def test_refreshed_token_reaches_camera_clients():
     assert dc._user_info["accessToken"] == "stale"
 
     async def _fake_refresh():
-        # Exactly what upstream's CloudApi.refresh_token does on success.
-        client.user_info.accessToken = "fresh"
-        client._on_token_refreshed()
+        # Exactly what upstream's refresh call does on success, per shape.
+        set_access_token(client, "fresh")
+        if TYPED:
+            client._on_token_refreshed()
         return {"accessToken": "fresh"}
 
-    client._cloud_api.refresh_token = _fake_refresh
+    patch_refresh_token_call(client, _fake_refresh)
 
     async def _run():
         ok = await client.async_ensure_token()

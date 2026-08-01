@@ -35,18 +35,39 @@ from aiohttp import ClientSession
 from aidot.client import AidotClient as _UpstreamAidotClient
 from aidot.device_client import DeviceClient
 from aidot.device_client import DeviceStatusData as _UpstreamDeviceStatusData
-from aidot.models.device_model import DeviceModel
+
+# Upstream ships two incompatible shapes of this API and both are live; every
+# difference is resolved in _upstream, never inline here.  See that module.
+from ._upstream import (
+    HAS_TYPED_ACCOUNT,
+    DeviceModel,
+    account_record,
+    account_refresh_token,
+    account_region,
+    account_token_ttl,
+    api_get_devices,
+    api_get_houses,
+    api_get_products,
+    api_refresh_token,
+    cancel_pending_reconnect,
+)
 
 from .const import (
     CONF_ACCESS_TOKEN,
+    CONF_COUNTRY,
     CONF_DEVICE_LIST,
     CONF_ID,
     CONF_IPADDRESS,
     CONF_IS_OWNER,
     CONF_LOGIN_INFO,
     CONF_MODEL_ID,
+    CONF_PASSWORD,
     CONF_PRODUCT,
     CONF_PRODUCT_ID,
+    CONF_REGION,
+    CONF_USERNAME,
+    DEFAULT_COUNTRY_NAME,
+    DEFAULT_REGION,
     LOGIN_INFO_PERSISTENT_MQTT_KEY,
     LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
     RUNTIME_ONLY_LOGIN_INFO_KEYS,
@@ -172,6 +193,56 @@ def _without_mqtt_password(data: Any) -> Any:
     return out
 
 
+def _survivable_token(
+    token: "Optional[dict]",
+    username: "Optional[str]",
+    password: "Optional[str]",
+) -> "Optional[dict]":
+    """A stored token upstream's constructor can read without raising.
+
+    Upstream's dict shape indexes four keys directly -
+    ``token[CONF_USERNAME]``, ``[CONF_PASSWORD]``, ``[CONF_REGION]``,
+    ``[CONF_COUNTRY]`` - so a stored entry missing any of them raises KeyError
+    inside ``super().__init__`` and the account never loads at all.  (The typed
+    shape used ``update_from_json``, which tolerates a partial dict, so entries
+    written by it are not guaranteed to carry all four.)
+
+    That is exactly the cross-shape upgrade path: a config entry persisted while
+    the typed upstream was installed, read back after a bump to the dict shape.
+    Fill only what is missing, from the explicit arguments where available, and
+    leave everything else untouched - a KeyError here is unrecoverable for the
+    user, whereas a placeholder region is corrected by the next successful
+    login.
+    """
+    if not isinstance(token, dict):
+        return token
+    stored = token
+    if stored.get(CONF_ID) is None and stored.get(CONF_LOGIN_INFO) is not None:
+        stored = stored.get(CONF_LOGIN_INFO) or {}
+        if not isinstance(stored, dict):
+            return token
+    required = {
+        CONF_USERNAME: username,
+        CONF_PASSWORD: password,
+        CONF_REGION: DEFAULT_REGION,
+        CONF_COUNTRY: DEFAULT_COUNTRY_NAME,
+    }
+    missing = {k: v for k, v in required.items() if k not in stored}
+    if not missing:
+        return token
+    _LOGGER.warning(
+        "stored account entry is missing %s; filling defaults so the entry "
+        "still loads (corrected on next login)",
+        ", ".join(sorted(missing)),
+    )
+    patched = dict(stored)
+    patched.update({k: v for k, v in missing.items() if v is not None})
+    # Any key still absent would raise; a placeholder is survivable.
+    for key in required:
+        patched.setdefault(key, "")
+    return patched
+
+
 async def _prefetch_ice_config(dc: "CameraDeviceClient") -> None:
     """Background task: warm the HTTP ICE config cache for a camera."""
     try:
@@ -213,7 +284,7 @@ class CameraClient(_UpstreamAidotClient):
             country_code=country_code,
             username=username,
             password=password,
-            token=token,
+            token=_survivable_token(token, username, password),
         )
 
         if token is not None:
@@ -253,27 +324,88 @@ class CameraClient(_UpstreamAidotClient):
     def login_info(self) -> dict[str, Any]:
         """The account's login info as ONE dict object, stable for this client.
 
-        Upstream's ``login_info`` is ``user_info.to_dict()``, i.e. a fresh
-        ``asdict()`` copy per access, and ``UserInformation`` silently drops any
-        key it has no dataclass field for.  The camera layer needs the opposite
-        on both counts: it stores camera-only keys here (mqttClientId, and the
+        The camera layer stores camera-only keys here (mqttClientId, and the
         rotating mqttPassword, which never leaves memory - see
-        ``serializable_login_info``) and it shares ONE dict across every device
-        client on the
-        account so a single persistent-MQTT connection can be cached on it (see
-        ``camera/client.py``'s ``_get_persistent_mqtt``).
+        ``serializable_login_info``) and shares ONE dict across every device
+        client on the account so a single persistent-MQTT connection and its
+        guarding lock can be cached on it (see ``camera/client.py``'s
+        ``_get_persistent_mqtt``).  Both upstream shapes break that, differently:
 
-        So keep our own dict and refresh upstream's fields into it in place -
-        the object identity never changes, and rotated tokens still show up.
+        * typed shape (0.3.55): ``login_info`` is ``user_info.to_dict()``, a
+          fresh ``asdict()`` copy per access, and ``UserInformation`` silently
+          drops any key it has no dataclass field for.
+        * dict shape (0.3.56): ``login_info`` is a real dict, but upstream
+          **rebinds** it wholesale - ``self.login_info = token.copy()`` in
+          ``__init__`` and ``self.login_info = response_data`` in
+          ``async_post_login`` - which would swap the shared object out from
+          under every device client mid-session and strand the live MQTT
+          connection on an orphaned dict.
+
+        So keep our own dict and fold upstream's fields into it in place.  The
+        object identity never changes for the life of the client, on either
+        shape, and rotated tokens still show up.
         """
+        login_info = getattr(self, "_login_info", None)
+        if login_info is None:
+            login_info = {}
+            object.__setattr__(self, "_login_info", login_info)
         user_info = getattr(self, "user_info", None)
-        if user_info is not None:
-            self._login_info.update(user_info.to_dict())
-        return self._login_info
+        if user_info is not None and hasattr(user_info, "to_dict"):
+            login_info.update(user_info.to_dict())
+        return login_info
 
     @login_info.setter
     def login_info(self, value: dict[str, Any]) -> None:
-        self._login_info = value if value is not None else {}
+        """Absorb an upstream assignment WITHOUT changing the dict's identity.
+
+        Upstream's dict shape assigns to ``login_info`` twice in the normal
+        lifecycle, and the second one (``async_post_login``) lands mid-session
+        with cameras already holding a reference to the shared dict.  Rebinding
+        ``self._login_info`` there would leave the persistent-MQTT connection,
+        its ``asyncio.Lock`` and ``mqttClientId`` attached to a dict nothing
+        reads any more, and the next camera command would open a SECOND broker
+        connection - which the broker answers by dropping the first (it allows
+        one per account).
+
+        Updating in place instead keeps one object forever.  The live MQTT
+        objects are carried across explicitly because they are, by design,
+        absent from anything upstream assigns.
+
+        The MQTT *password* is deliberately NOT carried across.  It is a cache,
+        not state: the broker issues a new one on every account login, so a copy
+        that survives a re-login is stale by definition, and the one place this
+        setter fires mid-session (``async_post_login``) is exactly a re-login.
+        Keeping it would recreate the confirmed-live failure where a stale
+        credential is preferred over fetching a fresh one and the broker refuses
+        every connection forever (rc=134).  Dropping it means the next camera
+        that needs the broker calls ``async_ensure_mqtt_credential``, which is
+        one HTTP request.
+        """
+        # The backing dict may not exist yet: upstream's constructor assigns to
+        # login_info, and a caller (or a test) may set it on an instance built
+        # without going through __init__.  Establish it rather than raising -
+        # this setter is the first thing to touch it in that case.
+        current = getattr(self, "_login_info", None)
+        if current is None:
+            current = {}
+            object.__setattr__(self, "_login_info", current)
+
+        if value is None:
+            current.clear()
+            return
+        if value is current:
+            return
+        preserved = {
+            k: current[k]
+            for k in (
+                LOGIN_INFO_PERSISTENT_MQTT_KEY,
+                LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
+            )
+            if k in current
+        }
+        current.clear()
+        current.update(value)
+        current.update(preserved)
 
     def serializable_login_info(self) -> dict[str, Any]:
         """A JSON-safe copy of ``login_info`` for persisting to disk/config storage.
@@ -310,30 +442,50 @@ class CameraClient(_UpstreamAidotClient):
     # token lifecycle
     # ---------------------------------------------------------------- #
 
-    def _on_token_refreshed(self) -> None:
-        """Sync the rotated token into login_info, then run upstream's hook.
+    if HAS_TYPED_ACCOUNT:
+        def _on_token_refreshed(self) -> None:
+            """Sync the rotated token into login_info, then run upstream's hook.
 
-        Upstream writes the new token to ``user_info.accessToken``, a dataclass
-        field; the camera layer reads it out of the shared ``login_info`` dict,
-        which only picks it up when the property getter below runs.  Every
-        refresh funnels through this callback - the reactive one behind
-        ``CloudApi.get()``'s 401 retry as well as our ``async_ensure_token()`` -
-        so this is the one place that guarantees a camera never retries with the
-        token that just expired.
+            The typed shape writes the new token to ``user_info.accessToken``, a
+            dataclass field; the camera layer reads it out of the shared
+            ``login_info`` dict, which only picks it up when the property getter
+            runs.  Every refresh funnels through this callback - the reactive
+            one behind ``CloudApi.get()``'s 401 retry as well as our
+            ``async_ensure_token()`` - so this is the one place that guarantees
+            a camera never retries with the token that just expired.
 
-        The sync must happen BEFORE ``super()``, which fires ``_token_fresh_cb``:
-        that callback is what persists the account, and it reads ``login_info``.
+            The sync must happen BEFORE ``super()``, which fires
+            ``_token_fresh_cb``: that callback is what persists the account, and
+            it reads ``login_info``.
+
+            Defined conditionally because upstream's dict shape has no such
+            hook, and there it needs none: ``async_refresh_token`` writes the
+            new token straight into ``self.login_info`` - our shared dict, via
+            the property - and calls ``_token_fresh_cb`` itself, so the sync
+            this method exists to guarantee has already happened by then.  What
+            IS lost on that shape is the proactive-refresh rescheduling below;
+            ``_reschedule_after_refresh`` covers it from the callers instead.
+            """
+            _ = self.login_info  # the getter IS the sync; see the property above
+            super()._on_token_refreshed()
+            self._schedule_proactive_refresh(self._token_ttl())
+
+    def _reschedule_after_refresh(self) -> None:
+        """Re-arm the proactive refresh timer after a token rotation.
+
+        On the typed shape ``_on_token_refreshed`` already does this and this is
+        a no-op second call (``_schedule_proactive_refresh`` cancels any pending
+        task first, so re-arming is idempotent).  On the dict shape there is no
+        refresh hook to hang it on, so this is the only thing that keeps the
+        proactive cycle running past the first rotation - without it a
+        long-running account would refresh once and then only ever discover
+        expiry reactively, as a 21026 mid-stream.
         """
-        _ = self.login_info  # the getter IS the sync; see the property below
-        super()._on_token_refreshed()
         self._schedule_proactive_refresh(self._token_ttl())
 
     def _token_ttl(self) -> int:
         """Access-token lifetime in seconds, defaulting to the server's 7200."""
-        try:
-            return int(getattr(self.user_info, "expiresIn", 0) or 7200)
-        except (TypeError, ValueError):
-            return 7200
+        return account_token_ttl(self, 7200)
 
     def _schedule_proactive_refresh(self, expires_in_secs: int) -> None:
         """Schedule a proactive token refresh at 90% of the token's TTL.
@@ -398,15 +550,18 @@ class CameraClient(_UpstreamAidotClient):
     async def _do_ensure_token(self) -> bool:
         """Refresh the token (refresh-token first, then headless full re-login).
 
-        Both paths update ``user_info``, which is a dataclass, so neither one
-        reaches ``login_info`` - the dict every device client holds - on its
-        own.  ``_on_token_refreshed`` does that sync for the refresh path and
-        ``_async_fetch_user_config`` for the re-login path; this method only
-        picks which one to run and reports whether a token is now in hand.
+        On the typed shape both paths update ``user_info``, which is a
+        dataclass, so neither one reaches ``login_info`` - the dict every device
+        client holds - on its own; ``_on_token_refreshed`` does that sync for
+        the refresh path and ``_async_fetch_user_config`` for the re-login path.
+        On the dict shape upstream writes straight into ``login_info`` and the
+        sync is already done.  Either way this method only picks which path to
+        run and reports whether a token is now in hand.
         """
         try:
-            if getattr(self.user_info, "refreshToken", ""):
-                if await self._cloud_api.refresh_token() is not None:
+            if account_refresh_token(self):
+                if await api_refresh_token(self) is not None:
+                    self._reschedule_after_refresh()
                     return True
         except AidotAuthFailed:
             pass
@@ -480,7 +635,7 @@ class CameraClient(_UpstreamAidotClient):
             _LOGGER.warning("_async_fetch_user_config: no HTTP session")
             return
 
-        region = getattr(self.user_info, "region", "") or ""
+        region = account_region(self)
         base = f"https://prod-{region}-api.arnoo.com"
         url = f"{base}/commons/userConfig"
         headers = {
@@ -571,12 +726,12 @@ class CameraClient(_UpstreamAidotClient):
         # log a dozen WARNINGs on every refresh for devices nothing was ever
         # going to use.
         unbuildable: dict[str, int] = {}
-        houses = await self._cloud_api.get_houses() or []
+        houses = await api_get_houses(self) or []
         include_shared = _include_shared_houses()
         for house in houses:
             if house.get(CONF_IS_OWNER) is False and not include_shared:
                 continue
-            device_list = await self._cloud_api.get_devices(house[CONF_ID]) or []
+            device_list = await api_get_devices(self, house[CONF_ID]) or []
             for device in device_list:
                 if _is_camera_device(device) or _upstream_can_build(device):
                     final_device_list.append(device)
@@ -605,7 +760,7 @@ class CameraClient(_UpstreamAidotClient):
             )
         )
         if product_ids:
-            product_list = await self._cloud_api.get_products(product_ids) or []
+            product_list = await api_get_products(self, product_ids) or []
             product_map = {p[CONF_ID]: p for p in product_list}
             for device in final_device_list:
                 product = product_map.get(device.get(CONF_PRODUCT_ID))
@@ -662,7 +817,7 @@ class CameraClient(_UpstreamAidotClient):
             # mutates in place.  Pass both originals through.
             device_client = CameraDeviceClient(
                 _device,
-                self.user_info,
+                account_record(self),
                 raw_device=device,
                 login_info=self.login_info,
             )
@@ -770,23 +925,24 @@ class CameraClient(_UpstreamAidotClient):
             self._discover.close()
             self._discover = None
         # CARRIED: drop when upstream cancels its reconnect timer on close
-        # Upstream's DeviceClient.reset() arms an AsyncTimer(callback=async_login,
-        # interval=45) whenever a connection drops, and close() only sets
-        # _is_closed - which stops reset() from arming a NEW timer but never
-        # cancels the one already ticking.  So a light re-opens its TCP
-        # connection about 45 seconds after the account was closed, leaking a
-        # socket, a receive task and a ping timer past integration unload.
-        # Cameras are shielded by their own async_login gate; plain upstream
-        # device clients are not.  Cancel before super(), which clears the cache.
+        # Upstream's DeviceClient.reset() arms a delayed re-login whenever a
+        # connection drops, and close() only sets its closed flag - which stops
+        # reset() from arming a NEW one but never cancels the one already
+        # ticking.  So a light re-opens its TCP connection about 45 seconds
+        # after the account was closed, leaking a socket, a receive task and a
+        # ping timer past integration unload.  Cameras are shielded by their own
+        # async_login gate; plain upstream device clients are not.  Cancel
+        # before super(), which clears the cache.
+        #
+        # The handle is spelled `_reconnect_timer` on the typed shape and
+        # `_reconnect_handle` on the dict shape, so this goes through
+        # cancel_pending_reconnect rather than a getattr that would silently
+        # find nothing on one of them and report success.
         for device_client in self._device_clients.values():
-            reconnect_timer = getattr(device_client, "_reconnect_timer", None)
-            if reconnect_timer is not None:
-                try:
-                    reconnect_timer.cancel()
-                except Exception:
-                    _LOGGER.debug(
-                        "reconnect timer cancel failed", exc_info=True
-                    )
+            try:
+                cancel_pending_reconnect(device_client)
+            except Exception:
+                _LOGGER.debug("reconnect timer cancel failed", exc_info=True)
         # Upstream closes and clears the device clients.
         await super().async_close()
         # Close the account-shared persistent MQTT connection, if one was opened.

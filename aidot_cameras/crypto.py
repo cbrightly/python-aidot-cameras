@@ -1,17 +1,23 @@
 """Crypto helpers for the camera layer.
 
-The shared AES/RSA primitives come from upstream (``aidot.utils.crypto``) and
-are re-exported so camera modules have one import site.  Only the string-keyed
-AES-256/ECB pair is defined here: it is a Leedarson camera-SDK convention
-(zero-pad a string key to 32 bytes) that upstream has no use for.
+The shared AES primitives come from upstream and are re-exported so camera
+modules have one import site.  Only the string-keyed AES-256/ECB pair is defined
+here: it is a Leedarson camera-SDK convention (zero-pad a string key to 32
+bytes) that upstream has no use for.
+
+Upstream moved these between shapes - ``aidot.utils.crypto`` on 0.3.55,
+``aidot.aes_utils`` on 0.3.56 - and deleted ``rsa_encrypt`` outright in favour
+of a one-argument ``rsa_password_encrypt``.  ``_upstream`` resolves the AES
+three and supplies ``rsa_encrypt`` itself, keeping the two-argument signature
+this module has always exported.
 """
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-# Shared primitives live upstream; re-exported for camera modules.
-from aidot.utils.crypto import (  # noqa: F401 - deliberate re-export
+# Shared primitives; see _upstream for which upstream module each comes from.
+from ._upstream import (  # noqa: F401 - deliberate re-export
     aes_decrypt,
     aes_decrypt_to_json,
     aes_encrypt,

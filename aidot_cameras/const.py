@@ -6,14 +6,25 @@ import site, and so a constant that upstream renames or drops fails loudly here
 keys are defined locally.
 """
 
-from aidot.const import (  # noqa: F401 - deliberate re-export surface
+# Four of these moved between upstream shapes (API_URL_TEMPLATE, APP_ID,
+# DEFAULT_REGION, PUBLIC_KEY_PEM live in aidot.login_const on 0.3.56 and in
+# aidot.const on 0.3.55).  _upstream resolves that once; the other 31 names
+# below are on aidot.const in both, so they are imported directly and still
+# fail loudly here, by name, if upstream ever moves one.
+from ._upstream import (  # noqa: F401 - deliberate re-export surface
     API_URL_TEMPLATE,
     APP_ID,
+    DEFAULT_REGION,
+    PUBLIC_KEY_PEM,
+)
+
+from aidot.const import (  # noqa: F401 - deliberate re-export surface
     CONF_ACCESS_TOKEN,
     CONF_AES_KEY,
     CONF_APP_ID,
     CONF_ATTR,
     CONF_CCT,
+    CONF_COUNTRY,
     CONF_DEVICE_LIST,
     CONF_DIMMING,
     CONF_HARDWARE_VERSION,
@@ -33,14 +44,16 @@ from aidot.const import (  # noqa: F401 - deliberate re-export surface
     CONF_PRODUCT,
     CONF_PRODUCT_ID,
     CONF_PROPERTIES,
+    CONF_REFRESH_TOKEN,
+    CONF_REGION,
     CONF_RGBW,
     CONF_SERVICE_MODULES,
     CONF_TERMINAL,
     CONF_TOKEN,
+    CONF_USERNAME,
     DEFAULT_COUNTRY_CODE,
-    DEFAULT_REGION,
+    DEFAULT_COUNTRY_NAME,
     Identity,
-    PUBLIC_KEY_PEM,
     SUPPORTED_COUNTRY_CODES,
 )
 
