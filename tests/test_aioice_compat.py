@@ -35,9 +35,9 @@ def test_connection_internals_used_by_highport_patch():
 
 
 def test_candidate_and_pair_shape_used_by_ice_path():
-    cand = ice.Candidate.from_sdp("1 1 udp 2130706431 192.168.1.5 50000 typ host")
+    cand = ice.Candidate.from_sdp("1 1 udp 2130706431 192.0.2.5 50000 typ host")
     assert cand.type == "host"
-    assert cand.host == "192.168.1.5"
+    assert cand.host == "192.0.2.5"
     assert cand.port == 50000
     assert cand.transport == "udp"
     # CandidatePair exposes the candidate accessors _ice_path walks:

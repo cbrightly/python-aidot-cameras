@@ -25,7 +25,7 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   bounded fallback. Raising `_FIRST_MEDIA_WAIT_S` never helped and never could:
   that wait was tracking itself, not the camera.
 
-  Measured: `an A001513 unit` (A001513, battery) NO_MEDIA / 80 s / 0 bytes before, **PASS
+  Measured on an A001513 battery camera: NO_MEDIA / 80 s / 0 bytes before, **PASS
   on the first attempt, 7.9 s, 2646 packets / 2.9 MB** after, decoding as h264
   1280x960 with `video_pt=96 audio_pt=8`. A001064 PTZ NO_MEDIA before, **PASS
   16.7 s / 2.5 MB** after.
@@ -154,7 +154,7 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   every SDES camera on every host from ever being nominated. With that fixed the
   same A001513 streams in 7.9 s.
 - **Battery streaming is not universally fixed.** On the reference fleet one
-  A001513 (`an A001513 unit`) passes in 7.9 s while a second (`a second A001513 unit`) still returns no
+  A001513 passes in 7.9 s while a second unit of the same model still returns no
   media, handshaking for ~110 s and absent from `arp-scan` throughout: it is
   genuinely asleep rather than mis-negotiating, and nothing in this release
   wakes a camera that will not wake. That is the remaining battery problem, now

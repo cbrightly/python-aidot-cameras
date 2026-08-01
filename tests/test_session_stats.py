@@ -51,7 +51,7 @@ def _session(pc):
 
 def test_get_stats_reports_ice_path_and_loss():
     pc = _fake_pc(
-        nominated=(("host", "192.168.1.206", 40410), ("prflx", "192.168.1.245", 58305)),
+        nominated=(("host", "192.0.2.206", 40410), ("prflx", "192.0.2.245", 58305)),
         inbound=[
             {"kind": "video", "packetsReceived": 900, "packetsLost": 100, "jitter": 30},
             {"kind": "audio", "packetsReceived": 500, "packetsLost": 0, "jitter": 12},
@@ -60,8 +60,8 @@ def test_get_stats_reports_ice_path_and_loss():
     out = asyncio.run(_session(pc).get_stats())
     assert out["ice"] == [{
         "component": 1,
-        "local_type": "host", "local": "192.168.1.206:40410",
-        "remote_type": "prflx", "remote": "192.168.1.245:58305",
+        "local_type": "host", "local": "192.0.2.206:40410",
+        "remote_type": "prflx", "remote": "192.0.2.245:58305",
         "transport": "udp",
     }]
     video = next(s for s in out["inbound"] if s["kind"] == "video")

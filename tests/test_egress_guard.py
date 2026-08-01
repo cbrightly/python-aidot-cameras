@@ -11,7 +11,7 @@ from aidot_cameras.camera.protocol import (
 def test_serve_host_extraction():
     assert _serve_host("http://0.0.0.0:8888/cam.ts") == "0.0.0.0"
     assert _serve_host("http://127.0.0.1:1/x") == "127.0.0.1"
-    assert _serve_host("http://192.168.1.5:8554/x.ts") == "192.168.1.5"
+    assert _serve_host("http://192.0.2.5:8554/x.ts") == "192.0.2.5"
     assert _serve_host("rtsp://camhost:554/stream") == "camhost"
     assert _serve_host("http://[::1]:8888/x") == "::1"
     assert _serve_host(None) is None
@@ -25,7 +25,7 @@ def test_is_loopback_serve_host():
     assert _is_loopback_serve_host("localhost")
     assert _is_loopback_serve_host(None)            # unset -> not exposed
     assert not _is_loopback_serve_host("0.0.0.0")   # binds all interfaces
-    assert not _is_loopback_serve_host("192.168.1.5")
+    assert not _is_loopback_serve_host("192.0.2.5")
 
 
 def test_warn_fires_on_non_loopback(caplog, monkeypatch):
@@ -46,5 +46,5 @@ def test_no_warn_on_loopback(caplog, monkeypatch):
 def test_optout_env_silences(caplog, monkeypatch):
     monkeypatch.setenv("AIDOT_ALLOW_LAN_SERVE", "1")
     with caplog.at_level(logging.WARNING, logger="aidot_cameras.camera.protocol"):
-        _warn_lan_serve("192.168.1.5", context="t")
+        _warn_lan_serve("192.0.2.5", context="t")
     assert not caplog.records

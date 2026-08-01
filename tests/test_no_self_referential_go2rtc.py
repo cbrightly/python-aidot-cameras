@@ -24,8 +24,8 @@ def test_push_url_for_a_different_stream_is_fine():
 
 def test_the_http_serve_url_is_a_real_source():
     # PULL mode: go2rtc fetches from the library's own serve. Must still register.
-    assert loops("http://127.0.0.1:18931/ecf4937b640c4c96a102ffdc9b51c2a0.ts",
-                 "aidot_ecf4937b640c") is False
+    assert loops("http://127.0.0.1:18931/00000000000000000000000000000001.ts",
+                 "aidot_000000000000") is False
 
 
 def test_rtsps_is_covered_too():

@@ -77,7 +77,7 @@ def _get_broadcast_candidates() -> List[Tuple[str, str]]:
     results: List[Tuple[str, str]] = []
     try:
         if sys.platform == "darwin":
-            # macOS ifconfig: "inet 192.168.1.175 netmask 0xffffff00 broadcast 192.168.1.255"
+            # macOS ifconfig: "inet 192.0.2.175 netmask 0xffffff00 broadcast 192.0.2.255"
             tool = _resolve_tool("ifconfig", "/sbin/ifconfig")
             if tool is None:
                 _LOGGER.debug("_get_broadcast_candidates: ifconfig not found on PATH")
@@ -95,7 +95,7 @@ def _get_broadcast_candidates() -> List[Tuple[str, str]]:
                 ):
                     results.append((m.group(1), m.group(2)))
         else:
-            # Linux: "inet 192.168.1.x/24 brd 192.168.1.255"
+            # Linux: "inet 192.0.2.x/24 brd 192.0.2.255"
             tool = _resolve_tool("ip", "/sbin/ip")
             if tool is None:
                 _LOGGER.debug("_get_broadcast_candidates: ip not found on PATH")

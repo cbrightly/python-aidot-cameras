@@ -2710,9 +2710,9 @@ class _WebRTCOpenMixin:
             # at the right time so it can initiate STUN checks against us.
             #
             # Key fix: the previous version only sent the first private-LAN host
-            # candidate (e.g. 192.168.1.175), which is unreachable from a remote
+            # candidate (e.g. 192.0.2.175), which is unreachable from a remote
             # camera.  We now send ALL gathered candidates including server-reflexive
-            # ones (e.g. 72.84.199.230 public IP) so a remote camera can reach us
+            # ones (e.g. 198.51.100.30 public IP) so a remote camera can reach us
             # even when NAT traversal without TURN is possible.
             _rr_local_sdp  = pc.localDescription.sdp
             _rr_ice_topic  = f"iot/v1/s/{user_id}/IPC/iceCandidateReq"

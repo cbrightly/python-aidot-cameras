@@ -257,12 +257,12 @@ def test_trickle_regex_parses_real_camera_candidates():
     lines = {
         "host":  "candidate:0 1 udp 2130706431 203.0.113.9 48776 typ host raddr 0.0.0.0 rport 0 generation 0 network-cost 999",
         "srflx": "candidate:1 1 udp 1694498815 198.51.100.7 34686 typ srflx raddr 0.0.0.0 rport 0 generation 0 network-cost 999",
-        "relay": "candidate:2 1 udp 16777215 3.230.182.123 21449 typ relay raddr 0.0.0.0 rport 0 generation 0 network-cost 999",
+        "relay": "candidate:2 1 udp 16777215 198.51.100.20 21449 typ relay raddr 0.0.0.0 rport 0 generation 0 network-cost 999",
     }
     expected = {
         "host":  ("203.0.113.9", 48776),
         "srflx": ("198.51.100.7", 34686),
-        "relay": ("3.230.182.123", 21449),
+        "relay": ("198.51.100.20", 21449),
     }
     for kind, line in lines.items():
         m = re.match(pat, line)

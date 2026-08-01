@@ -39,7 +39,7 @@ def _record_base_login(monkeypatch):
 def _client(model_id):
     c = CameraDeviceClient.__new__(CameraDeviceClient)
     c.info = SimpleNamespace(model_id=model_id)
-    c._ip_address = "192.168.1.50"
+    c._ip_address = "192.0.2.50"
     return c
 
 
@@ -58,14 +58,14 @@ def test_ptz_camera_excluded(_record_base_login):
 def test_light_still_logs_in(_record_base_login):
     light = _client("lk.WIFI-RGBWLight-D0006")
     asyncio.run(light.async_login())
-    assert _record_base_login == ["192.168.1.50"]   # lights keep the base login
+    assert _record_base_login == ["192.0.2.50"]   # lights keep the base login
 
 
 def test_unknown_model_logs_in(_record_base_login):
     # No "IPC" in model -> treated as a (light) device that uses the base channel.
     dev = _client("")
     asyncio.run(dev.async_login())
-    assert _record_base_login == ["192.168.1.50"]
+    assert _record_base_login == ["192.0.2.50"]
 
 
 # NOTE: the pre-inversion fork also carried a 30-second re-login throttle inside
