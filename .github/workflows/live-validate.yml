@@ -49,21 +49,49 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
 
-      # A self-hosted runner keeps its filesystem between jobs, so build the
-      # venv fresh each run: a stale dependency tree would validate code that
-      # is not what this release ships.
-      - name: Create a clean venv
+      # Reuse the dependency tree between runs, rebuild it when the spec moves.
+      #
+      # aiortc / av / cryptography / pylibsrtp have no ARM64 wheels and compile
+      # from source, which measured ~4 minutes on this runner - about 60% of a
+      # single-camera run, paid before a single camera is touched, on every
+      # release. What must NOT be stale is the library under test, so the
+      # editable install is re-pointed at this checkout on every run below.
+      #
+      # It lives outside the workspace deliberately: actions/checkout runs
+      # `git clean -ffdx`, which would delete a venv inside it every time.
+      - name: Create or reuse the venv
+        id: venv
         run: |
-          rm -rf .venv-live
-          python3 -m venv .venv-live
-          .venv-live/bin/pip install --upgrade pip
-          .venv-live/bin/pip install -e ".[webrtc]"
+          set -eu
+          VENV="$HOME/.cache/aidot-live-venv"
+          STAMP="$VENV/.dep-stamp"
+          WANT="$(sha256sum pyproject.toml | cut -d' ' -f1)"
+
+          if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$WANT" ] \
+             && "$VENV/bin/python" -c "import aiortc, av, pylibsrtp" 2>/dev/null; then
+            echo "reusing cached venv (dependency spec unchanged)"
+          else
+            echo "building venv (no usable cache, or pyproject.toml changed)"
+            rm -rf "$VENV"
+            python3 -m venv "$VENV"
+            "$VENV/bin/pip" install --quiet --upgrade pip
+            "$VENV/bin/pip" install --quiet -e ".[webrtc]"
+            echo "$WANT" > "$STAMP"
+          fi
+
+          # Always re-point the editable install at THIS checkout. The cache may
+          # have been built from an older ref, and validating anything other
+          # than the code in this ref would defeat the entire gate.
+          "$VENV/bin/pip" install --quiet -e . --no-deps
+          echo "python=$VENV/bin/python" >> "$GITHUB_OUTPUT"
 
       - name: Report what we are validating
         run: |
           echo "ref:    ${{ inputs.ref || github.sha }}"
           echo "sha:    ${{ github.sha }}"
-          .venv-live/bin/python -c "import aidot_cameras, sys; print('library:', aidot_cameras.__file__); print('python: ', sys.version)"
+          # Prints the resolved library path, which is the check that the cached
+          # venv is pointing at THIS checkout rather than a stale one.
+          ${{ steps.venv.outputs.python }} -c "import aidot_cameras, sys; print('library:', aidot_cameras.__file__); print('python: ', sys.version)"
           ffmpeg -version | head -1
 
       - name: List cameras
@@ -76,7 +104,7 @@ jobs:
           # sees zero cameras.  Set the repo variable to '0' if CI ever moves
           # back to the owning account.
           AIDOT_INCLUDE_SHARED_HOUSES: ${{ vars.AIDOT_INCLUDE_SHARED_HOUSES || '1' }}
-        run: .venv-live/bin/python scripts/live_validate.py --list --json-out ''
+        run: ${{ steps.venv.outputs.python }} scripts/live_validate.py --list --json-out ''
 
       - name: Validate every camera
         env:
@@ -92,7 +120,7 @@ jobs:
               MODEL_ARGS="$MODEL_ARGS --model $m"
             done
           fi
-          .venv-live/bin/python scripts/live_validate.py \
+          ${{ steps.venv.outputs.python }} scripts/live_validate.py \
             --hold "${{ inputs.hold || '16' }}" \
             --json-out live-report.json \
             $MODEL_ARGS
@@ -113,7 +141,7 @@ jobs:
             {
               echo "### Live validation"
               echo ""
-              .venv-live/bin/python - <<'PY'
+              ${{ steps.venv.outputs.python }} - <<'PY'
           import json
           r = json.load(open("live-report.json"))
           print(f"**Overall: {r.get('verdict', '?')}**\n")
