@@ -27,9 +27,77 @@ jobs:
       - name: Run tests
         run: pytest tests/ -q
 
+  # Releases must be validated against REAL cameras before they reach PyPI.
+  # This job does not run the cameras itself - live-validate.yml does, on the
+  # self-hosted runner, triggered by the same `release: published` event - it
+  # WAITS for that run and requires it to have succeeded for THIS EXACT commit.
+  #
+  # Fails closed by construction: no run, a failed run, a cancelled run, or a
+  # run that never finishes within the wait all block the publish. A runner
+  # that is simply switched off blocks it too - that is deliberate, an
+  # unvalidated release is exactly what this exists to prevent.
+  live-gate:
+    name: Require green live validation
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Emergency override check
+        id: override
+        env:
+          OVERRIDE_SHA: ${{ vars.LIVE_GATE_OVERRIDE_SHA }}
+        run: |
+          # The override is a repo VARIABLE that must equal this exact commit.
+          # Admin-only to set, visible in the audit log, and single-use by
+          # construction (the next release has a different SHA). See
+          # docs/CI-RUNNER.md for when this is legitimate.
+          if [ -n "${OVERRIDE_SHA}" ] && [ "${OVERRIDE_SHA}" = "${GITHUB_SHA}" ]; then
+            echo "::warning::LIVE GATE OVERRIDDEN for ${GITHUB_SHA} - publishing WITHOUT live camera validation"
+            echo "overridden=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "overridden=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Wait for the live-validation run on this commit
+        if: steps.override.outputs.overridden != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # Both workflows fire on the same release event, so poll rather than
+          # assume ordering. 40 min covers a full fleet run incl. the ~3 min
+          # per-camera cooldowns; live-validate.yml itself times out at 45.
+          deadline=$(( SECONDS + 40*60 ))
+          while [ $SECONDS -lt $deadline ]; do
+            runs=$(gh api \
+              "repos/${REPO}/actions/workflows/live-validate.yml/runs?head_sha=${SHA}&per_page=20" \
+              --jq '[.workflow_runs[] | {status, conclusion}]' 2>/dev/null || echo '[]')
+
+            if echo "$runs" | jq -e 'any(.[]; .status == "completed" and .conclusion == "success")' >/dev/null; then
+              echo "live validation succeeded for ${SHA}"
+              exit 0
+            fi
+            if echo "$runs" | jq -e 'any(.[]; .status == "completed" and .conclusion != "success")' >/dev/null; then
+              echo "::error::live validation did not succeed for ${SHA}: $(echo "$runs" | jq -c .)"
+              exit 1
+            fi
+            if [ "$(echo "$runs" | jq 'length')" = "0" ]; then
+              echo "no live-validate run for ${SHA} yet - waiting (is the self-hosted runner online?)"
+            else
+              echo "live validation still running - waiting"
+            fi
+            sleep 30
+          done
+          echo "::error::timed out waiting for live validation of ${SHA}. Publish blocked."
+          echo "::error::If the runner is offline, bring it up and re-run this job, or use the documented override in docs/CI-RUNNER.md."
+          exit 1
+
   publish:
     name: Build and publish
-    needs: test
+    needs: [test, live-gate]
     runs-on: ubuntu-latest
     # Trusted Publishing: register this repo + workflow (publish.yml) +
     # environment (pypi) under the python-aidot-cameras project on pypi.org.
