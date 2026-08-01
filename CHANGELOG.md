@@ -4,6 +4,58 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.13.0]
+
+### Changed
+- **Both live shapes of upstream `python-aidot` are now supported, and the pin
+  became a range (`>=0.3.55,<0.4`).** Upstream refactored its account/device API
+  to typed dataclasses in 0.3.54/0.3.55 and then **reverted** that refactor in
+  0.3.56, five days later - so "newer" does not mean "further along", and the
+  shape this package was written against is the one upstream abandoned. Home
+  Assistant core pins `python-aidot==0.3.56` in its own `aidot` integration, so
+  an exact pin here on any other version is unsatisfiable alongside it.
+
+  Every difference is resolved in a single new module, `aidot_cameras/_upstream.py`,
+  which detects the shape **by capability** (does the name import?) rather than
+  by version string - upstream shipped the dict shape under both 0.3.53 and
+  0.3.56, so a version comparison would encode the five-day excursion instead of
+  the shape. No other module branches on the upstream version.
+
+  What moved, renamed or vanished between the two: `DeviceModel` ->
+  `DeviceInformation`; `aidot.utils.crypto` -> `aidot.aes_utils`;
+  `API_URL_TEMPLATE`/`APP_ID`/`DEFAULT_REGION`/`PUBLIC_KEY_PEM` -> `aidot.login_const`;
+  `CloudApi` folded into `AidotClient` as `async_get_*`; `UserInformation`,
+  `DeviceState`, `AsyncTimer`, `_on_token_refreshed` and `DeviceClient.read_data`
+  deleted outright; `DeviceClient.__init__` switched from typed models to raw
+  dicts; `Discover` from a static class to an instance one.
+
+### Fixed
+- **The account-shared `login_info` dict could be swapped out mid-session.**
+  Upstream's dict shape assigns `self.login_info = response_data` inside
+  `async_post_login`, which lands while cameras already hold a reference to the
+  shared dict. Rebinding there would have left the persistent-MQTT connection,
+  its `asyncio.Lock` and `mqttClientId` attached to a dict nothing reads any
+  more, and the next camera command would have opened a SECOND broker connection
+  - which the broker answers by dropping the first, since it allows one per
+  account. The `login_info` setter now updates in place, so the object identity
+  is stable for the life of the client on either shape. The MQTT password is
+  deliberately *not* carried across such an assignment: it rotates on every
+  login, and preferring a stale copy is the confirmed-live rc=134 failure.
+- **The close-time reconnect-leak fix would have gone silent on 0.3.56.** It
+  cancelled `device_client._reconnect_timer` via an unguarded `getattr`, and
+  upstream renamed that handle to `_reconnect_handle`; the `getattr` would have
+  found nothing, cancelled nothing, and reported success. It now goes through
+  `_upstream.cancel_pending_reconnect`, which returns False when it finds no
+  handle, and the regression test arms the handle under whichever name the
+  installed shape uses instead of hardcoding one.
+- **A stored config entry could fail to load outright after an upstream bump.**
+  The dict shape indexes four keys off a stored token directly
+  (`token[CONF_USERNAME]` and friends) where the typed shape tolerated a partial
+  dict via `update_from_json`, so an entry written under one and read back under
+  the other raised `KeyError` inside upstream's constructor and the account never
+  loaded. Missing keys are now filled with survivable defaults and corrected on
+  the next successful login.
+
 ## [0.12.17]
 
 ### Fixed

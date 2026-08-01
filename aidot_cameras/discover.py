@@ -39,6 +39,7 @@ from aidot.discover import BroadcastProtocol as _UpstreamBroadcastProtocol
 from aidot.discover import Discover as _UpstreamDiscover
 from aidot.models.discover_model import DiscoverRequest, DiscoverResponse
 
+from ._upstream import HAS_SHARED_DISCOVERY_MAP, broadcast_protocol_args
 from .const import CONF_ID, CONF_IPADDRESS
 from .crypto import aes_decrypt, aes_encrypt
 from .exceptions import AidotOSError
@@ -139,7 +140,11 @@ class InterfaceBroadcastProtocol(_UpstreamBroadcastProtocol):
         user_id: str,
         broadcast_addr: str = "255.255.255.255",
     ) -> None:
-        super().__init__(callback)
+        # Upstream's own signature differs between shapes - `(callback)` on
+        # 0.3.55, `(callback, user_id)` on 0.3.56 - so the positional args come
+        # from _upstream rather than being hardcoded.  `self.user_id` is set
+        # unconditionally afterwards because our overrides read it on both.
+        super().__init__(*broadcast_protocol_args(callback, user_id))
         self.user_id = user_id
         self._broadcast_addr = broadcast_addr
 
@@ -196,14 +201,16 @@ class InterfaceBroadcastProtocol(_UpstreamBroadcastProtocol):
 class CameraDiscover(_UpstreamDiscover):
     """Instance-scoped, multi-interface discovery sweep.
 
-    Subclasses upstream's ``Discover`` for one reason that matters: the
+    Upstream ships two shapes of ``Discover`` and this class sits on top of
+    both; see ``discovered_device`` for how the discovered-address map differs.
+
+    On the class-scoped shape (0.3.55) subclassing matters for one reason: the
     inherited ``DISCOVERED_DEVICE`` class attribute.  ``_discover_callback``
     writes into that dict by item assignment, so it mutates the *base class's*
     object rather than shadowing it - which is what lets a pure-upstream
     ``DeviceClient`` (created by ``AidotClient.get_device_client``, which reads
     ``Discover.DISCOVERED_DEVICE``) still receive a LAN IP from this sweep.
-
-    The rest of upstream's ``Discover`` is a static class whose broadcast state
+    The rest of that shape is a static class whose broadcast state
     (``_BROADCAST_PROTOCOL``, ``BROADCAST_TIMER``) is single-valued and whose
     timer is started as a side effect of ``set_user_info``, with no way to stop
     it.  Per-interface fan-out plus a stoppable lifecycle cannot be expressed by
@@ -211,6 +218,11 @@ class CameraDiscover(_UpstreamDiscover):
     is provided in full.  Upstream's classmethod API is left intact and unused
     by us: ``CameraClient.setup_discover`` never calls ``set_user_info``, so
     upstream's own timer is never started and the two do not double-broadcast.
+
+    On the instance-scoped shape (0.3.56) upstream converged on very nearly this
+    design of its own accord - ``Discover(login_info, callback)`` with
+    ``start_repeat_broadcast()`` / ``close()`` / ``discovered_device`` - so what
+    remains ours is only the per-interface fan-out and the cancellable timer.
     """
 
     _timer_handle: "Optional[asyncio.TimerHandle]" = None
@@ -218,10 +230,11 @@ class CameraDiscover(_UpstreamDiscover):
     def __init__(self, login_info: dict[str, Any], callback) -> None:
         """Create a sweep for one account.
 
-        Deliberately does NOT call ``super().__init__``: upstream's raises
-        ``TypeError("Discover is a static class and cannot be instantiated")``.
-        Re-enabling instance construction is the intended contract change - the
-        sweep needs per-instance sockets and a close hook.
+        Deliberately does NOT call ``super().__init__`` on either shape.  On the
+        class-scoped shape it raises outright (``TypeError("Discover is a static
+        class and cannot be instantiated")``); on the instance-scoped shape it
+        would succeed but assign ``self.discovered_device = {}``, which collides
+        with the property below.  Every attribute it would set is set here.
         """
         self._login_info = login_info
         self._callback = callback
@@ -229,16 +242,27 @@ class CameraDiscover(_UpstreamDiscover):
         self._is_close = False
         self._broadcast_task: "Optional[asyncio.Task]" = None
         self._fast_discover_count = 0
+        # Only needed on the instance-scoped shape; see `discovered_device`.
+        self._discovered_device: dict[str, str] = {}
 
     @property
     def discovered_device(self) -> dict[str, str]:
         """The device-id -> LAN IP map.
 
-        Intentionally the same object as
-        ``aidot.discover.Discover.DISCOVERED_DEVICE`` (see the class docstring):
-        one map, read by both our dispatch and upstream's.
+        On upstream's class-scoped shape (0.3.55) this is intentionally the very
+        same object as ``aidot.discover.Discover.DISCOVERED_DEVICE`` (see the
+        class docstring): one map, read by both our dispatch and upstream's
+        ``get_device_client``.
+
+        On the instance-scoped shape (0.3.56) upstream reads
+        ``self._discover.discovered_device`` - i.e. straight off this object -
+        so the sharing trick is unnecessary and there is no class dict to write
+        into.  A per-instance map is then strictly better: two accounts no
+        longer pool their discovered addresses in process-wide state.
         """
-        return _UpstreamDiscover.DISCOVERED_DEVICE
+        if HAS_SHARED_DISCOVERY_MAP:
+            return _UpstreamDiscover.DISCOVERED_DEVICE
+        return self._discovered_device
 
     async def _ensure_sockets(self) -> None:
         """Create one datagram endpoint per active interface (idempotent)."""

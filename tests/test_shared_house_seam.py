@@ -15,13 +15,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aidot_cameras.client import CameraClient, _include_shared_houses
 from aidot_cameras.const import CONF_DEVICE_LIST
+from upstream_shapes import stub_account_http
 
 _OWNED_EMPTY = 2082907      # the CI account's own house: real, and empty
 _SHARED_WITH_CAMERAS = 51744
 
 
 class _FakeCloudApi:
-    """The shape a shared CI account actually sees (verified against the cloud)."""
+    """The shape a shared CI account actually sees (verified against the cloud).
+
+    Method names follow the typed shape's ``CloudApi``; ``stub_account_http``
+    rebinds them onto the client's own ``async_get_*`` methods when the dict
+    shape is installed, where upstream folded ``CloudApi`` into the client.
+    """
 
     def __init__(self):
         self.queried: list[int] = []
@@ -47,7 +53,10 @@ class _FakeCloudApi:
 
 def _client_with(cloud):
     client = object.__new__(CameraClient)
-    client._cloud_api = cloud
+    # Which surface async_get_all_device drives depends on the installed
+    # upstream shape; stubbing _cloud_api alone leaves the dict shape reaching
+    # into a half-built client for _base_url.
+    stub_account_http(client, cloud)
     client._device_clients = {}
     return client
 

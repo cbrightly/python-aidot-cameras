@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "python-aidot-cameras"
-version = "0.12.17"
+version = "0.13.0"
 description = "Control AiDot/Leedarson WiFi lights and cameras (WebRTC streaming, two-way audio, PTZ, controls)"
 readme = "README.md"
 license = "MIT"
@@ -22,9 +22,20 @@ classifiers = [
 # after re-validating against it.
 dependencies = [
     # Upstream lights library: this package EXTENDS it (subclass/override) and
-    # never edits its files, so taking a new upstream release is a version bump
-    # here plus the seam-contract test - not a merge.  See docs/UPSTREAM.md.
-    "python-aidot==0.3.55",
+    # never edits its files.  See docs/UPSTREAM.md.
+    #
+    # A RANGE, not a pin, and deliberately so.  Upstream ships two incompatible
+    # shapes of the private API this package attaches to, and both are live:
+    # 0.3.54-0.3.55 refactored to typed dataclasses and 0.3.56 REVERTED that.
+    # Home Assistant core pins `python-aidot==0.3.56` in its own aidot
+    # integration, so an exact pin here on any other version is unsatisfiable
+    # alongside it.  Both shapes are supported (aidot_cameras/_upstream.py) and
+    # both are exercised by tests/test_upstream_compat.py.
+    #
+    # The <0.4 cap is real: upstream has already broken this API twice inside
+    # 0.3.x, so a major/minor bump gets validated before it is allowed, rather
+    # than being picked up silently by a resolver.
+    "python-aidot>=0.3.55,<0.4",
     "aiohttp>=3.9",
     "paho-mqtt>=1.6.1",
     "cryptography>=42.0",
