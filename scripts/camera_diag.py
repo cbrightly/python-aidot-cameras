@@ -29,10 +29,10 @@ independent).
 Examples::
 
     # diagnose one camera for 45 s
-    python scripts/camera_diag.py --name Deck --hold 45
+    python scripts/camera_diag.py --name <substr> --hold 45
 
     # compare two cameras (run sequentially)
-    python scripts/camera_diag.py --name Deck --name "Bedroom M3 Pro"
+    python scripts/camera_diag.py --name <substr> --name <substr>
 
     # list cameras and exit
     python scripts/camera_diag.py --list

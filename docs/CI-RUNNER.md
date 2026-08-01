@@ -148,9 +148,9 @@ concluding anything. The empty *owned* house a new account gets is why
 | Question | Answer | Date |
 | --- | --- | --- |
 | Secondary account enumerates the cameras? | **Yes** - 7 cameras / 19 devices, with `AIDOT_INCLUDE_SHARED_HOUSES=1`. All three required models present: A000088 x4, A001513 x2, A001064 x1. Returns 0 without the seam | 2026-07-31 |
-| Secondary account streams SDES (A001513)? | **Yes** - L2_181 PASS on the first attempt, handshake 7.9 s, 2646 packets / 2.9 MB, decodes as h264 1280x960 + PCMA. (Failed on 2026-07-31 only because of the answer-harvest bug below, which was not account-related.) | 2026-08-01 |
-| Secondary account streams SDES (A001064, mains)? | **Yes** - Winees PTZ PASS, handshake 16.7 s, 2.5 MB | 2026-08-01 |
-| Secondary account streams DTLS (A000088)? | **Yes** - Bedroom M3 Pro PASS, 139 frames, handshake 2.3 s, `host->relay`. Attempt 1 failed `AidotCameraNotReady` and attempt 2 succeeded, which is the documented per-attempt DTLS probability, not a fault | 2026-07-31 |
+| Secondary account streams SDES (A001513)? | **Yes** - an A001513 PASS on the first attempt, handshake 7.9 s, 2646 packets / 2.9 MB, decodes as h264 1280x960 + PCMA. (Failed on 2026-07-31 only because of the answer-harvest bug below, which was not account-related.) | 2026-08-01 |
+| Secondary account streams SDES (A001064, mains)? | **Yes** - the A001064 PTZ PASS, handshake 16.7 s, 2.5 MB | 2026-08-01 |
+| Secondary account streams DTLS (A000088)? | **Yes** - an A000088 PASS, 139 frames, handshake 2.3 s, `host->relay`. Attempt 1 failed `AidotCameraNotReady` and attempt 2 succeeded, which is the documented per-attempt DTLS probability, not a fault | 2026-07-31 |
 | Main account's HA signaling survived? | **Yes** - the AiDot config entry stayed `loaded` on the main account across ~6 secondary-account logins; one routine `21026 "Please login again"` token refresh, handled | 2026-07-31 |
 
 **Verdict: use the secondary account.** It enumerates every camera (with
@@ -256,7 +256,7 @@ Run these once, when you set the gate up, so you know it actually holds:
   "ref": "<sha validated>",
   "cameras": [
     {
-      "name": "Deck", "model": "LK.IPC.A000088", "tier": "required",
+      "name": "a fourth A000088", "model": "LK.IPC.A000088", "tier": "required",
       "transport": "DTLS", "battery": false,
       "verdict": "PASS", "attempts_used": 2,   // needed a retry - watch this
       "attempts": [ /* per-attempt handshake_s, frames, ice_pair, rtp loss */ ]
