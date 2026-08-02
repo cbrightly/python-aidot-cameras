@@ -854,6 +854,10 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         self._last_frame_time: float = 0.0
         self._keepalive_rtsp_url: Optional[str] = None  # local serve URL (go2rtc pulls)
         self._go2rtc_url: Optional[str] = None           # go2rtc API base (prefer-go2rtc)
+        # Whether WE own this camera's go2rtc stream registration.  False when the
+        # consumer registers the stream itself and passes the URL for viewer
+        # queries only - in which case we must neither add nor REMOVE it.
+        self._go2rtc_manages_stream: bool = True
         self._go2rtc_pull_url: Optional[str] = None      # go2rtc pull URL once registered
         self._go2rtc_task: "Optional[asyncio.Task[None]]" = None
         # Set by the DTLS serve loop once ffmpeg is bound + serving, so
@@ -2877,6 +2881,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             return
         self._keepalive_rtsp_url = rtsp_push_url
         self._go2rtc_url = go2rtc_url
+        self._go2rtc_manages_stream = bool(go2rtc_register)
         self._streaming_active = True
         # App parity: keep a battery camera awake for the whole view (mains cams
         # never sleep, so this is a no-op there). Single-instance; cancelled in
@@ -2962,9 +2967,17 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_register_with_go2rtc', exc_info=True)
 
     async def _deregister_go2rtc(self) -> None:
-        """Remove this camera's stream from go2rtc (best-effort)."""
+        """Remove this camera's stream from go2rtc (best-effort).
+
+        Only ever removes a registration this client created.  With
+        ``go2rtc_register=False`` the consumer owns the stream and merely lent us
+        the URL to ask who is watching; deleting its stream on stop or
+        idle-release would tear down the very thing it is serving from.
+        """
         base = self._go2rtc_url
         self._go2rtc_pull_url = None
+        if not self._go2rtc_manages_stream:
+            return
         # Deliberately NOT gated on `pull`: go2rtc answers the register call with
         # 400 when it cannot immediately validate the source (a camera that has
         # not started producing yet), yet it still keeps the stream registered.

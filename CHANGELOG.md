@@ -32,6 +32,12 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   fail fell straight through to the socket check that push mode cannot use. It
   is now gated on push mode itself and answers "unknown" in that case too.
 
+  And `_deregister_go2rtc` now only removes a registration this client created.
+  It gated on `go2rtc_url` alone, which was unreachable for a consumer that
+  withheld the URL - so simply passing the URL for queries would have made it
+  reachable and started deleting the consumer's own stream on every stop and
+  idle-release, tearing down the thing it serves from.
+
 ## [0.13.0]
 
 ### Changed

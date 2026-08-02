@@ -171,6 +171,59 @@ def test_only_a_definite_no_releases(answer, expected_release):
 # the registration seam
 # --------------------------------------------------------------------------- #
 
+def test_deregister_never_removes_a_stream_we_did_not_register():
+    """The dangerous half of the seam.
+
+    ``_deregister_go2rtc`` gates on ``_go2rtc_url`` alone. Before this seam
+    existed a query-only consumer withheld that URL, so deregistration was
+    unreachable by accident. Passing the URL for queries makes it reachable - and
+    it would then DELETE the stream the consumer registered itself, on every stop
+    and every idle-release, tearing down the thing it serves from.
+    """
+    from aidot_cameras.camera.client import CameraMixin
+
+    removed = []
+
+    class _Client:
+        def __init__(self, session, base):
+            pass
+
+        async def remove_stream(self, name):
+            removed.append(name)
+
+    class _Sess:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    import aidot_cameras.camera.go2rtc as g2
+    import aiohttp
+    _orig_client, _orig_sess = g2.Go2rtcClient, aiohttp.ClientSession
+    g2.Go2rtcClient = _Client
+    aiohttp.ClientSession = lambda *a, **k: _Sess()
+    try:
+        for manages, expected in ((False, []), (True, ["aidot_cam1"])):
+            removed.clear()
+            obj = types.SimpleNamespace(
+                _go2rtc_url="http://go2rtc:1984",
+                _go2rtc_pull_url="x",
+                _go2rtc_manages_stream=manages,
+                _go2rtc_stream_name=lambda: "aidot_cam1",
+                device_id="cam1",
+            )
+            obj._deregister_go2rtc = CameraMixin._deregister_go2rtc.__get__(obj)
+            asyncio.run(obj._deregister_go2rtc())
+            assert removed == expected, (
+                f"manages={manages}: expected {expected}, got {removed}"
+            )
+            # The pull URL is cleared either way - it is ours regardless.
+            assert obj._go2rtc_pull_url is None
+    finally:
+        g2.Go2rtcClient, aiohttp.ClientSession = _orig_client, _orig_sess
+
+
 def test_start_keepalive_exposes_go2rtc_register():
     import inspect
 
