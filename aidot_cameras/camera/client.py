@@ -960,15 +960,27 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         for _key in ("Battery_remaining", "batteryRemaining", "batteryLevel"):
             if _as_int(_props.get(_key)) is not None:
                 return True
-        # The low-power flag: batteryMode=2 is what a camera that sleeps between
-        # sessions reports (see _async_send_camera_command).  Deliberately NOT
-        # keyed on ``powerType``: that name is also the value we SEND in
-        # livePlayReq, we have never observed the cloud returning it as a device
-        # property, and p2pCache - the field right next to it - reads 2 on every
-        # camera including mains ones.  Reading it here would risk classifying a
-        # mains camera as battery, which would put powerType=2 on ITS wire payload
-        # and can leave an A000088 un-armed.  Evidence has to be unambiguous.
-        if _as_int(_props.get("batteryMode")) == 2:
+        # The low-power flag, but ONLY when corroborated.  ``batteryMode=2`` on
+        # its own is not evidence: measured against the live cloud payload, every
+        # MAINS A000088 on this fleet reports ``batteryMode: '2'`` and nothing
+        # else battery-related, while a real battery model reports it alongside
+        # actual telemetry (``Battery_remaining``, ``lowPowerStatus``,
+        # ``charging``).  Trusting it alone classified four mains cameras as
+        # battery, which put powerType=2 on their wire payload and gave them the
+        # battery idle window instead of the mains warm-hold.
+        #
+        # This is the same trap the paragraph below describes for ``powerType`` /
+        # ``p2pCache`` - a field that reads 2 on every camera - so it gets the
+        # same treatment rather than being taken at face value.  Corroboration is
+        # kept (instead of dropping the flag) so a future battery model that
+        # names its level differently is still caught by the flag plus any one
+        # battery-only field.
+        _BATTERY_TELEMETRY = (
+            "Battery_remaining", "batteryRemaining", "batteryLevel",
+            "lowPowerStatus", "charging",
+        )
+        if (_as_int(_props.get("batteryMode")) == 2
+                and any(_props.get(k) is not None for k in _BATTERY_TELEMETRY)):
             return True
         # Already-parsed status, for a camera refreshed from an attribute push
         # rather than from a device-list dict.
