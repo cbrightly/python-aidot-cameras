@@ -195,6 +195,36 @@ If a camera is already serving its maximum number of viewers it returns a
 terminal ack (`-50002` / `-50015`); the library raises `AidotCameraBusy` and
 stops retrying rather than burning the retry budget.
 
+### The SDP handed to ffmpeg carries ONE codec (0.14.0)
+
+The ffmpeg-input SDP advertises both video codecs (`m=video ... 96 97`) and both
+audio ones (`m=audio ... 0 8`), because which pair a camera uses varies per
+session. It **must** be narrowed to the ones actually in use before ffmpeg
+launches, and getting it wrong is expensive in two different ways:
+
+- ffmpeg binds each depacketizer to the **first** payload type on the m-line and
+  silently discards packets carrying any other, so the wrong video type means no
+  picture and the wrong audio type means the mpegts mux never writes its PAT/PMT
+  - which loses the video too;
+- an un-narrowed video line makes the RTSP-push ANNOUNCE carry a parameterless
+  H.265 stream, which **go2rtc rejects outright**: no publisher attaches and
+  every viewer gets a 404.
+
+Narrowing normally uses the payload type observed on the session's first RTP
+packet. When no video packet arrives before the serve launches, the codec is
+taken from the camera's **answer SDP** instead - a negotiated fact rather than a
+guess - via `video_pt_from_answer_sdp()`. That returns the payload type *this
+package's* template writes for the codec (96 H.264 / 97 H.265); a camera may
+number the same codec differently, and narrowing to a number our SDP does not
+contain would drop the video line entirely. An answer naming no codec we write
+leaves the SDP unchanged.
+
+Before 0.14.0 there was no fallback, so a session whose media started late served
+nothing at all - and the serve-restart path rebuilt the same un-narrowed SDP on
+every watchdog cycle, so it stayed broken until the process restarted. The
+`SDES: narrowed ffmpeg SDP to ...` status line is the signal that narrowing ran;
+its absence is the fault.
+
 ### Connection reliability (SDES / battery)
 
 SDES cameras - including battery models (A001513) - stream end-to-end once the
