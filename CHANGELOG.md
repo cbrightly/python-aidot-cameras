@@ -4,6 +4,37 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [Unreleased]
+
+### Added
+- **BLE-mesh devices behind an AiDot mesh hub can now be controlled.** A mesh
+  bulb has no address of its own; it is reached by talking to its hub
+  (`type == "BleMesh_Hub"`) on the hub's local TCP:10000 channel and naming the
+  child in the payload. That is the wire format `camera/lan_control.py` already
+  speaks, so `ble_gateway.py` reuses its framing and changes only what the relay
+  requires: the hub's socket/`aesKey`/`password`, `payload.parentId` set to the
+  hub, and `payload.channel` `"ble"` instead of `"tcp"`.
+
+  Session handling differs from the direct-to-device channel deliberately. That
+  channel evicts an existing login whenever a second one arrives, so it is used
+  one short session at a time; a hub instead multiplexes every bulb behind it,
+  where connect-and-login per command is visible as slider lag. Hub sessions are
+  therefore per-hub, lock-serialised, and closed after 5s idle - a brightness
+  drag reuses one login, and an idle hub is released rather than held against
+  the phone app.
+
+  Mesh children never report state back, so an accepted command advances the
+  status optimistically - but only after a `setDevAttrResp`, so a command the
+  hub dropped cannot leave a state the device never reached.
+
+  `is_ble_mesh_child()` requires mesh addressing (`bleMeshDeviceKey` /
+  `bleMeshAddr`) in addition to a known hub id: a hub id alone also appears on
+  Zigbee children and on records that merely share a house, and a mesh client
+  built for one of those accepts commands and controls nothing.
+
+  Not yet exercised against hardware - the reference account has a mesh hub but
+  no mesh children paired to it.
+
 ## [0.13.2]
 
 ### Fixed
