@@ -44,6 +44,12 @@ _SDES_BACKGROUND_TASKS: set = set()
 _SDP_VIDEO_PTS = (96, 97, 98)
 _SDP_AUDIO_PTS = (0, 8)
 
+# Which payload type OUR ffmpeg SDP carries for each video codec.  The template
+# writes 96=H.264 and 97=H.265, so an answer that negotiates H.265 narrows to 97
+# even when the camera numbers that codec differently on the wire - it is our own
+# SDP being rewritten, not the camera's.
+_SDP_VIDEO_PT_BY_CODEC = {"H264": 96, "H265": 97}
+
 # How long to wait for the FIRST media of a session before launching the serve.
 # Nothing useful can happen before then: the payload types are unknown, so the SDP
 # cannot be narrowed, and ffmpeg would bind the wrong depacketizers.  Sized to the
@@ -68,6 +74,50 @@ _PRE_LAUNCH_ANSWER_WAIT_S = 8.0
 # both share one 5-tuple - so audio is never "late" and this only absorbs jitter.
 # Kept tight so a camera that genuinely sends no audio barely delays the picture.
 _AUDIO_PT_GRACE_S = 1.0
+
+
+def video_pt_from_answer_sdp(sdp_text: str) -> Optional[int]:
+    """Which video payload type to narrow to, taken from the camera's answer SDP.
+
+    This is the fallback for the case where no video RTP packet arrives before
+    the serve launches.  Without it the ffmpeg SDP keeps advertising both codecs,
+    and :func:`narrow_sdp_payload_types` documents what that costs: ffmpeg binds
+    its depacketizer to the FIRST payload type and silently discards the rest,
+    and the RTSP-push ANNOUNCE carries a parameterless H.265 stream that go2rtc
+    rejects - so the publisher never attaches and every viewer gets a 404.
+
+    The answer already states which codec the camera agreed to send, so this is a
+    negotiated fact rather than a guess.  Only the *first* video m-line is read,
+    and only ``a=rtpmap`` lines inside that section, so a payload number reused in
+    the audio section cannot leak into the answer.
+
+    Returns the payload type **our** template uses for that codec (96/97) - the
+    camera's own numbering need not agree - or None when the answer names no video
+    codec we write, which leaves the existing behaviour untouched.
+    """
+    pts: list = []
+    rtpmap: dict = {}
+    section = None
+    for raw in (sdp_text or "").splitlines():
+        line = raw.strip()
+        if line.startswith("m="):
+            if section == "video":
+                break  # the first video section has been read in full
+            section = "video" if line.startswith("m=video") else "other"
+            if section == "video":
+                # "m=video <port> <proto> <pt> [<pt> ...]"
+                pts = line.split()[3:]
+            continue
+        if section == "video" and line.startswith("a=rtpmap:"):
+            body = line[len("a=rtpmap:"):]
+            pt, _, enc = body.partition(" ")
+            if pt and enc:
+                rtpmap[pt.strip()] = enc.strip().split("/", 1)[0].upper()
+    for pt in pts:
+        codec = rtpmap.get(pt)
+        if codec in _SDP_VIDEO_PT_BY_CODEC:
+            return _SDP_VIDEO_PT_BY_CODEC[codec]
+    return None
 
 
 def narrow_sdp_payload_types(sdp_text: str, keep_video=None, keep_audio=None) -> str:
@@ -2549,6 +2599,11 @@ class _SdesOpenMixin:
         # bridge on the first video RTP packet so the ffmpeg SDP can be narrowed
         # to the matching single codec before ffmpeg is launched.
         _first_video_pt: list = [None]
+        # Fallback for the above, filled from the camera's negotiated answer SDP
+        # when the wait below expires without a single video packet. Kept in a
+        # list for the same reason as _first_video_pt: the serve-restart path
+        # reads it from a nested scope.
+        _answer_video_pt: list = [None]
         # Same for audio: the ffmpeg SDP advertises BOTH PCMU (0) and PCMA (8),
         # and ffmpeg binds the depacketizer to the first one listed - so the line
         # has to be narrowed to the payload type the camera actually sends, the
@@ -4159,7 +4214,29 @@ class _SdesOpenMixin:
         # Which single payload type (if any) each line can be narrowed to. Audio
         # is usable only when its type was actually observed; otherwise the "0 8"
         # line cannot be narrowed.
-        _keep_v = int(_vpt) if _vpt in _SDP_VIDEO_PTS else None
+        if _vpt not in _SDP_VIDEO_PTS and answer_fut is not None and answer_fut.done():
+            # No video packet arrived inside the window, but the camera's answer
+            # still names the codec it agreed to send. Narrowing on that beats
+            # leaving both codecs advertised: an unnarrowed video line makes
+            # ffmpeg bind the wrong depacketizer, and makes the RTSP-push
+            # ANNOUNCE carry a parameterless H.265 stream that go2rtc rejects
+            # outright - no publisher, and every viewer sees a 404.
+            try:
+                if answer_fut.exception() is None:
+                    _answer_video_pt[0] = video_pt_from_answer_sdp(
+                        (answer_fut.result() or {}).get("sdp", "") or "")
+            except Exception:
+                _LOGGER.debug("camera %s: swallowed exception in %s",
+                              getattr(self, "device_id", "?"),
+                              'video_pt_from_answer_sdp', exc_info=True)
+            if _answer_video_pt[0] is not None:
+                _LOGGER.info(
+                    "camera %s: no video observed before the serve launched; "
+                    "narrowing the SDP to payload type %d from the camera's "
+                    "negotiated answer instead of advertising both codecs.",
+                    getattr(self, "device_id", "?"), _answer_video_pt[0],
+                )
+        _keep_v = int(_vpt) if _vpt in _SDP_VIDEO_PTS else _answer_video_pt[0]
         _keep_a = int(_apt) if _apt in _SDP_AUDIO_PTS else None
         if _serve_audio and _keep_a is None:
             # No audio observed in the window, so the line cannot be narrowed and
@@ -4490,8 +4567,13 @@ class _SdesOpenMixin:
                         )
                         _new_sdp = narrow_sdp_payload_types(
                             _new_sdp,
+                            # Same answer-SDP fallback as the pre-launch narrowing:
+                            # this restart rebuilds the dual-codec template, so
+                            # without it a session that never saw a video packet
+                            # reproduces the unnarrowed SDP on every watchdog cycle.
                             keep_video=(_first_video_pt[0]
-                                        if _first_video_pt[0] in _SDP_VIDEO_PTS else None),
+                                        if _first_video_pt[0] in _SDP_VIDEO_PTS
+                                        else _answer_video_pt[0]),
                             keep_audio=(_first_audio_pt[0]
                                         if _first_audio_pt[0] in (0, 8) else None),
                         )

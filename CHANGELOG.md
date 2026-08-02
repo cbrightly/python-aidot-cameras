@@ -4,7 +4,29 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
-## [Unreleased]
+## [0.14.0]
+
+### Fixed
+- **SDES cameras could serve nothing at all, indefinitely.** The ffmpeg SDP
+  advertises both video codecs (`m=video ... 96 97`) because which one a camera
+  sends varies per session, and it is narrowed to the observed payload type just
+  before the serve launches. When no video packet arrived inside that window
+  there was nothing to narrow on, so the dual-codec SDP went to ffmpeg unchanged
+  - and that costs the picture twice over: ffmpeg binds its depacketizer to the
+  first payload type and silently discards packets carrying the other, while the
+  RTSP-push ANNOUNCE carries a parameterless H.265 stream that go2rtc rejects
+  outright. No publisher attaches, so every viewer gets a 404, and the
+  serve-restart path rebuilt the same unnarrowed SDP on each watchdog cycle - so
+  a session that started badly stayed broken until the process restarted.
+
+  The camera's answer SDP already names the codec it agreed to send, so that is
+  now used when no packet has been observed - a negotiated fact rather than a
+  guess. The payload type is translated to the one this package's own template
+  writes for that codec (96 H.264 / 97 H.265), since the camera's numbering need
+  not agree. An answer naming no codec we write leaves the SDP exactly as before.
+
+  Measured against the reference fleet: the "narrowed ffmpeg SDP" status line was
+  absent from every logged session, i.e. narrowing was never running.
 
 ### Added
 - **BLE-mesh devices behind an AiDot mesh hub can now be controlled.** A mesh
