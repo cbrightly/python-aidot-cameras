@@ -76,6 +76,20 @@ _SLOTLESS_VERDICTS = frozenset({"ERROR"})
 # and a camera that is merely slow rather than dead deserves a breath.
 SLOTLESS_COOLDOWN_S = 10.0
 
+# Attempts to allow a camera that has produced NOTHING but slotless ERRORs.
+#
+# The retry budget exists because a DTLS connect is probabilistic - ICE and the
+# media path can fail and then succeed. But a slotless ERROR is a different
+# animal: no webrtcResp at all, i.e. the camera never answered cloud signaling,
+# so there was nothing probabilistic to lose. Retrying that is a 45 s timeout
+# spent re-asking a camera that is not on the network.
+#
+# One retry is kept, because a single missed webrtcResp is possible on a busy
+# account. A third is not: a camera silent twice running is off, unplugged or
+# out of range, and every further attempt is pure wall clock. Observed: a fleet
+# camera absent all day burned 3 x 45 s on every run to reach the same verdict.
+SLOTLESS_MAX_ATTEMPTS = 2
+
 
 def _cooldown_after(verdict: str, full: float) -> float:
     """Seconds to wait after an attempt/camera that ended in ``verdict``.
@@ -270,6 +284,17 @@ async def _validate_camera(client, device, args) -> dict:
               + (f"  bytes={res['recorded_bytes']}" if "recorded_bytes" in res else "")
               + (f"  {res['error']}" if "error" in res else ""))
         if res["verdict"] == "PASS":
+            break
+        # A camera that has only ever failed WITHOUT opening a session is not
+        # being flaky, it is absent. Stop re-asking it; the verdict cannot change
+        # and each further attempt costs a full signaling timeout.
+        if (len(entry["attempts"]) >= SLOTLESS_MAX_ATTEMPTS
+                and all(a["verdict"] in _SLOTLESS_VERDICTS
+                        for a in entry["attempts"])
+                and i < max_attempts):
+            print(f"    no session opened on {len(entry['attempts'])} attempts - "
+                  f"treating as absent, skipping the remaining "
+                  f"{max_attempts - i} attempt(s)")
             break
 
     verdicts = [a["verdict"] for a in entry["attempts"]]

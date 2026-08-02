@@ -279,3 +279,58 @@ def test_media_seen_accepts_dtls_frames(lv):
     ok, evidence = lv._media_seen(object(), frames=42, out_path=None)
     assert ok
     assert evidence["frames"] == 42
+
+
+# --------------------------------------------------------------------------- #
+# absent-camera early exit
+# --------------------------------------------------------------------------- #
+
+def test_slotless_budget_is_smaller_than_the_dtls_budget(lv):
+    """The early exit must actually save attempts, or it is decoration."""
+    assert lv.SLOTLESS_MAX_ATTEMPTS < lv.ATTEMPTS_DTLS
+
+
+def test_one_retry_is_still_allowed_for_a_single_missed_response(lv):
+    """A camera silent ONCE may just have missed a webrtcResp on a busy account.
+
+    Dropping to a single attempt would turn one unlucky timeout into a failed
+    release, so the budget must be >1.
+    """
+    assert lv.SLOTLESS_MAX_ATTEMPTS > 1
+
+
+def test_only_the_no_session_verdict_is_treated_as_absent(lv):
+    """ERROR alone means no session was opened, so nothing was probabilistic.
+
+    NO_MEDIA and BUSY DID reach the camera - those are exactly the flaky cases
+    the retry budget exists for, and they must keep their full allowance.
+    """
+    assert lv._SLOTLESS_VERDICTS == frozenset({"ERROR"})
+    for reached_the_camera in ("PASS", "NO_MEDIA", "BUSY"):
+        assert reached_the_camera not in lv._SLOTLESS_VERDICTS
+
+
+def test_a_camera_that_reached_us_once_keeps_its_full_budget(lv):
+    """The early exit requires EVERY attempt to be slotless.
+
+    A camera that returns NO_MEDIA then ERROR is flaky, not absent, and must not
+    be cut short - which is why the loop checks all() rather than the last one.
+    """
+    mixed = [{"verdict": "NO_MEDIA"}, {"verdict": "ERROR"}]
+    assert not all(a["verdict"] in lv._SLOTLESS_VERDICTS for a in mixed)
+
+    absent = [{"verdict": "ERROR"}, {"verdict": "ERROR"}]
+    assert all(a["verdict"] in lv._SLOTLESS_VERDICTS for a in absent)
+
+
+def test_an_absent_camera_still_reaches_a_failing_verdict(lv, tmp_path):
+    """Skipping attempts must not soften the verdict - absent is still ERROR.
+
+    The saving is wall clock, not leniency: a required model with no working
+    camera must still fail the release.
+    """
+    report = {"cameras": [_cam(lv, "LK.IPC.A000088", "ERROR", name="Deck")]}
+    report["cameras"][0]["attempts_used"] = lv.SLOTLESS_MAX_ATTEMPTS
+    assert lv._summarize(report, _args(tmp_path)) == 1
+    assert report["verdict"] == "FAIL"
+    assert report["required_failed"] == ["Deck"]
