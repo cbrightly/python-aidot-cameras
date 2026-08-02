@@ -854,6 +854,10 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         self._last_frame_time: float = 0.0
         self._keepalive_rtsp_url: Optional[str] = None  # local serve URL (go2rtc pulls)
         self._go2rtc_url: Optional[str] = None           # go2rtc API base (prefer-go2rtc)
+        # Whether WE own this camera's go2rtc stream registration.  False when the
+        # consumer registers the stream itself and passes the URL for viewer
+        # queries only - in which case we must neither add nor REMOVE it.
+        self._go2rtc_manages_stream: bool = True
         self._go2rtc_pull_url: Optional[str] = None      # go2rtc pull URL once registered
         self._go2rtc_task: "Optional[asyncio.Task[None]]" = None
         # Set by the DTLS serve loop once ffmpeg is bound + serving, so
@@ -2789,6 +2793,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         fast_connect: Optional[bool] = None,
         sdes_audio: Optional[bool] = None,
         go2rtc_url: Optional[str] = None,
+        go2rtc_register: bool = True,
         live_stream_param: Optional[bool] = None,
         serve_relay: Optional[bool] = None,
         stream_idle_s: Optional[float] = None,
@@ -2828,6 +2833,22 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         ``AIDOT_SERVE_RELAY`` env var (default on); set False to serve ffmpeg
         directly on the public port (the pre-0.7.18 behaviour).
 
+        ``go2rtc_url`` points at a go2rtc API base.  It does two things: register
+        the local serve with go2rtc (exposing its low-latency pull URL), and let
+        the idle-release logic ask go2rtc **who is watching**.
+
+        ``go2rtc_register=False`` keeps the second and drops the first, for a
+        consumer that registers the stream itself - registering it twice
+        re-points the source mid-stream and was observed leaving DTLS cameras
+        producing nothing at all.  Such a consumer must still pass ``go2rtc_url``:
+        withholding it does not merely lose a nicety, it silently disables viewer
+        detection, and in SDES **push** mode that is the only viewer signal there
+        is (the serve port is go2rtc's shared RTSP port, where every camera's own
+        publisher is connected, so a socket check would report a viewer for every
+        camera forever).  With no signal ``_viewer_present`` answers "unknown",
+        ``_idle_release_due`` correctly never releases on unknown, and a battery
+        camera's keepalive renews forever against a camera nobody is watching.
+
         ``stream_idle_s`` sets the no-viewer idle-release window in seconds,
         overriding the ``AIDOT_STREAM_IDLE_S`` env default (120).  ``0`` (or
         negative) keeps the warm WebRTC session forever so re-views are instant
@@ -2860,6 +2881,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             return
         self._keepalive_rtsp_url = rtsp_push_url
         self._go2rtc_url = go2rtc_url
+        self._go2rtc_manages_stream = bool(go2rtc_register)
         self._streaming_active = True
         # App parity: keep a battery camera awake for the whole view (mains cams
         # never sleep, so this is a no-op there). Single-instance; cancelled in
@@ -2874,7 +2896,18 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         # Prefer-go2rtc: if a go2rtc server is configured, register the local
         # serve with it once ready and expose its pull URL (ffmpeg fallback
         # otherwise). Opt-in: with no go2rtc_url, behaviour is unchanged.
-        if go2rtc_url:
+        #
+        # ``go2rtc_register=False`` stores the URL for QUERIES ONLY and skips
+        # registration.  That exists for a consumer that registers the stream
+        # itself: registering it twice re-points the source while a stream is
+        # mid-flight, which was observed leaving DTLS cameras producing nothing
+        # at all.  Such a consumer previously had to withhold go2rtc_url
+        # entirely, which silently disabled viewer detection - and in SDES push
+        # mode that means a battery camera can never idle-release, because
+        # ``_viewer_present`` answers "unknown" and ``_idle_release_due``
+        # (correctly) never releases on unknown.  The keepalive then renews
+        # forever against a camera nobody is watching.
+        if go2rtc_url and go2rtc_register:
             self._go2rtc_task = asyncio.ensure_future(self._register_with_go2rtc())
 
     @property
@@ -2934,9 +2967,17 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_register_with_go2rtc', exc_info=True)
 
     async def _deregister_go2rtc(self) -> None:
-        """Remove this camera's stream from go2rtc (best-effort)."""
+        """Remove this camera's stream from go2rtc (best-effort).
+
+        Only ever removes a registration this client created.  With
+        ``go2rtc_register=False`` the consumer owns the stream and merely lent us
+        the URL to ask who is watching; deleting its stream on stop or
+        idle-release would tear down the very thing it is serving from.
+        """
         base = self._go2rtc_url
         self._go2rtc_pull_url = None
+        if not self._go2rtc_manages_stream:
+            return
         # Deliberately NOT gated on `pull`: go2rtc answers the register call with
         # 400 when it cannot immediately validate the source (a camera that has
         # not started producing yet), yet it still keeps the stream registered.
@@ -3099,22 +3140,21 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
 
         name = self._go2rtc_stream_name()
         base = self._go2rtc_url
-        if not base:
-            # No go2rtc to ask.  In PUSH mode the fallback below is not merely
-            # unavailable, it is WRONG: the "serve port" is go2rtc's shared RTSP
-            # port (8554), where every camera's own publisher is connected, so the
-            # check reports a viewer for every camera forever and nothing ever
-            # releases.  Answer "unknown" instead of a confident lie - the caller
-            # then holds the stream rather than tearing down a live view, and the
-            # honest way out is for the consumer to pass go2rtc_url.
-            if self._keepalive_rtsp_url and not str(
-                    self._keepalive_rtsp_url).startswith("http"):
-                _LOGGER.debug(
-                    "no go2rtc url and the serve is an RTSP push to a shared "
-                    "port; cannot tell whether anyone is watching",
-                )
-                self._viewer_cache = (_now_mono, None)
-                return None
+
+        # In PUSH mode the "serve port" is go2rtc's SHARED RTSP port (8554),
+        # where every camera's own publisher is connected - so the socket
+        # fallback below is not merely unavailable, it is WRONG: it would report
+        # a viewer for every camera forever and nothing would ever release.
+        # Tracked separately from `base` because it must gate the fallback even
+        # when go2rtc IS configured but the query fails.
+        push_mode = bool(self._keepalive_rtsp_url) and not str(
+            self._keepalive_rtsp_url).startswith("http")
+
+        # Ask go2rtc when we can. This is the only viewer signal that works in
+        # push mode, which is why a consumer that registers its own stream
+        # should still pass go2rtc_url with go2rtc_register=False rather than
+        # withholding it (withholding it silently pins push-mode cameras to
+        # "unknown", and unknown never releases).
         if base and name:
             try:
                 import aiohttp
@@ -3128,6 +3168,18 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     return _answer
             except Exception as exc:
                 _LOGGER.debug("go2rtc viewer check failed: %s", exc)
+
+        if push_mode:
+            # Answer "unknown" instead of a confident lie - the caller then holds
+            # the stream rather than tearing down a live view.
+            _LOGGER.debug(
+                "cannot tell whether anyone is watching: the serve is an RTSP "
+                "push to a shared port and go2rtc %s",
+                "did not answer" if base else "was not configured",
+            )
+            self._viewer_cache = (_now_mono, None)
+            return None
+
         _answer = self._sdes_serve_consumer_present(port)
         self._viewer_cache = (_now_mono, _answer)
         return _answer
