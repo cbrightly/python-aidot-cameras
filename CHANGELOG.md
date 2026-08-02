@@ -4,6 +4,29 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.13.2]
+
+### Fixed
+- **Mains cameras were classified as battery cameras.** Measured against the
+  live cloud device list, every A000088 on the reference fleet reports
+  `batteryMode: '2'` and no other battery field, while genuine battery models
+  report it alongside real telemetry (`Battery_remaining`, `lowPowerStatus`,
+  `charging`). `_battery_evidence` trusted the flag on its own, so four mains
+  cameras were treated as battery: `powerType=2` went out on their wire payload,
+  and a consumer keying its idle window on `is_battery_camera` handed them the
+  battery window instead of the mains warm-hold.
+
+  This is the same trap the code already guarded for `powerType` - whose
+  neighbour `p2pCache` "reads 2 on every camera including mains ones" - so
+  `batteryMode` now gets the same treatment: it counts as evidence only when at
+  least one genuine battery field corroborates it. The flag is kept rather than
+  dropped so a future battery model whose level field we have not seen is still
+  caught, provided it reports any battery-only field.
+
+  Detection remains one-directional: evidence can only ever ADD a camera to the
+  battery set, never remove a known model from it, so no battery camera can lose
+  its TURN pre-allocation, keep-alive renew or HTTP wake through this change.
+
 ## [0.13.1]
 
 ### Fixed

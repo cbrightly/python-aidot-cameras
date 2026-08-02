@@ -91,9 +91,36 @@ def test_numeric_string_battery_level_counts():
     assert _cam("LK.IPC.A009999", props={"Battery_remaining": "38"}).is_battery_camera
 
 
-def test_battery_mode_two_counts():
-    assert _cam("LK.IPC.A009999", props={"batteryMode": 2}).is_battery_camera is True
-    assert _cam("LK.IPC.A009999", props={"batteryMode": "2"}).is_battery_camera is True
+def test_battery_mode_two_alone_is_not_evidence():
+    """REVISED 2026-08-02 against the live cloud payload.
+
+    This test used to assert that ``batteryMode=2`` alone proves a battery, on
+    the reasonable reading of the field's name. The account's actual device list
+    disproves it: every MAINS A000088 reports ``batteryMode: '2'`` and no other
+    battery field, while real battery models report it alongside real telemetry
+    (``Battery_remaining``, ``lowPowerStatus``, ``charging``).
+
+    Trusting it alone classified four mains cameras as battery, which put
+    powerType=2 on their wire payload and gave them the battery idle window
+    instead of the mains warm-hold - the same trap
+    ``test_power_type_property_is_deliberately_not_evidence`` guards for
+    ``powerType``/``p2pCache``, which also read 2 on every camera.
+    """
+    for value in (2, "2"):
+        assert _cam("LK.IPC.A009999",
+                    props={"batteryMode": value}).is_battery_camera is False
+
+
+def test_battery_mode_two_counts_when_corroborated():
+    """The flag is still a signal - it just needs one real battery field.
+
+    Kept (rather than dropping the flag) so a battery model whose level field we
+    have not seen is still caught, provided it reports any battery-only field.
+    """
+    for extra in ({"charging": "0"}, {"lowPowerStatus": "0"},
+                  {"Battery_remaining": "100"}):
+        assert _cam("LK.IPC.A009999",
+                    props={"batteryMode": "2", **extra}).is_battery_camera is True
 
 
 def test_battery_mode_one_is_not_evidence():
