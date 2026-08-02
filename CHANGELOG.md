@@ -4,6 +4,34 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.13.1]
+
+### Fixed
+- **A battery camera in SDES push mode could never idle-release**, so its
+  keepalive renewed forever against a camera nobody was watching. Observed live:
+  a sleeping L2 still being renewed every ~100 s, each stream attempt dying at
+  ~10 s, indefinitely.
+
+  Neither half of the mechanism was wrong on its own. In push mode the "serve
+  port" is go2rtc's *shared* RTSP port, where every camera's own publisher is
+  connected, so a socket check there would report a viewer for every camera
+  forever - `_viewer_present` rightly refuses it and answers "unknown", and
+  `_idle_release_due` rightly never releases on unknown. The defect was what
+  they composed into: a consumer that withholds `go2rtc_url` (to avoid a
+  duplicate registration that re-points the stream mid-flight) removes the only
+  viewer signal push mode has, making "unknown" the *only reachable* answer -
+  at which point "never release on unknown" becomes unconditional.
+
+  `start_keepalive(..., go2rtc_register=False)` is the way out: it keeps the
+  go2rtc viewer query and skips the registration, so such a consumer can pass
+  `go2rtc_url` without the duplicate-registration breakage. Default is `True`,
+  so existing callers are unaffected.
+
+  Also hardened the fallback while restructuring: the shared-port guard used to
+  sit behind `if not go2rtc_url`, so configuring go2rtc and having the *query*
+  fail fell straight through to the socket check that push mode cannot use. It
+  is now gated on push mode itself and answers "unknown" in that case too.
+
 ## [0.13.0]
 
 ### Changed
