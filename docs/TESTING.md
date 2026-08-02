@@ -1,5 +1,19 @@
 # Testing tiers
 
+> **Status: this describes the `ci/release-validation` branch, not `main`.**
+> On `main` the suite is a single flat tier — 657 passed / 5 skipped, run with
+> `PYTHONPATH=. python -m pytest tests/ -q`. The `e2e` and `live` markers, the
+> `[tool.pytest.ini_options]` block with `addopts`, `tests/e2e/`, `tests/fakes/`,
+> `tests/test_env_seams.py`, `tests/test_media_wait_floor.py` and
+> `.github/workflows/live-validate.yml` **do not exist on `main`** — they land
+> with that branch. `scripts/live_validate.py` and
+> [`CI-RUNNER.md`](CI-RUNNER.md) are the exceptions: both are already on `main`.
+>
+> The practical consequence: the "a bare `pytest` can never reach hardware"
+> guarantee below is a property of that branch's `addopts`. On `main` no bare
+> `pytest` reaches hardware either, but only because no live-marked test is
+> there to run — nothing is enforcing it.
+
 Streaming breaks in ways unit tests structurally cannot see: the cloud accepts
 the call, signaling looks healthy, and only the media tells the truth. So the
 suite is in three tiers, each catching a class the one below it cannot.
