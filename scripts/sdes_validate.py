@@ -29,9 +29,9 @@ import time
 
 import aiohttp
 
-from aidot.client import AidotClient
-from aidot.const import CONF_DEVICE_LIST, CONF_NAME
-from aidot.credentials import load_credentials
+from aidot_cameras.client import AidotClient
+from aidot_cameras.const import CONF_DEVICE_LIST, CONF_NAME
+from aidot_cameras.credentials import load_credentials
 
 
 class _Collector(logging.Handler):
