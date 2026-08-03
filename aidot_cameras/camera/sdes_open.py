@@ -15,6 +15,7 @@ import random
 import time
 from typing import Callable, Optional  # noqa: F401 - method annotations
 
+from ..exceptions import AidotCameraBusy
 from .constants import (
     _LIVE_PLAY_NOT_READY,
     SDES_SPEAKERSTART_DELAY,
@@ -177,6 +178,42 @@ def narrow_sdp_payload_types(sdp_text: str, keep_video=None, keep_audio=None) ->
     return "".join(kept)
 
 
+async def _sdes_await_answer_or_terminal(
+    answer_fut, terminal_error_fut, timeout: float, _status=None
+):
+    """Await the camera's SDES answer, but give up at once on a terminal ack.
+
+    A terminal webrtcResp ack (-50002 max-streams / -50015 SD-cap) means the
+    camera REFUSED this stream; the whole point of classifying it as terminal
+    is that neither waiting nor retrying can help.  The SDES path used to watch
+    only ``answer_fut``, so a refusal cost the full answer budget and then a
+    pointless DTLS-fallback offer on top.
+
+    Raises ``AidotCameraBusy`` the moment the refusal lands, ``TimeoutError``
+    if neither arrives in ``timeout`` (the caller's existing no-answer path).
+    """
+    if terminal_error_fut is None:
+        return await asyncio.wait_for(answer_fut, timeout=timeout)
+
+    _waits = {answer_fut, terminal_error_fut}
+    _done, _pending = await asyncio.wait(
+        _waits, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+    )
+    # Never cancel the futures themselves: they are owned by the MQTT handler
+    # and the caller inspects them afterwards (incl. on the fallback path).
+    if terminal_error_fut in _done:
+        code, desc = terminal_error_fut.result()
+        if _status is not None:
+            _status(f"camera refused: ack {code} {desc} - terminal, not retrying")
+        raise AidotCameraBusy(code, desc)
+    if answer_fut in _done:
+        return answer_fut.result()
+    # Builtin TimeoutError (asyncio.TimeoutError is an alias since 3.11); this
+    # is what the caller's `except TimeoutError` no-answer path already catches,
+    # which is what triggers the DTLS fallback.
+    raise TimeoutError()
+
+
 def _sdes_echo_wait_timeout(skip_liveplay: bool) -> float:
     """Seconds to block on the camera's webrtcReq echo before proceeding.
 
@@ -332,6 +369,10 @@ class _SdesOpenMixin:
         rtsp_push_url: Optional[str] = None,
         talk: bool = False,
         ice_cands_seen=None,
+        # So the SDES answer-wait can abandon at once when the camera says
+        # -50002/-50015 instead of waiting out its budget and then paying for a
+        # DTLS-fallback offer that cannot succeed.
+        terminal_error_fut=None,
     ) -> "SdesSession":
         """SDES-SRTP streaming path using a hand-crafted SDP offer and ffmpeg.
 
@@ -1897,20 +1938,42 @@ class _SdesOpenMixin:
         # sends SRTP no matter how long the first-media wait runs.
         # shield() so a timeout here cannot cancel the future the real answer
         # await (and the DTLS-fallback path) still consume further down.
+        # A TERMINAL refusal races the harvest.  A camera at its viewer cap acks
+        # -50002/-50015 about a second after webrtcReq and then, by definition,
+        # never answers - so without this the refusal sat unread for the whole
+        # _PRE_LAUNCH_ANSWER_WAIT_S before the later checks could see it, and we
+        # launched a bridge for a stream the camera had already declined.
         if not answer_fut.done():
             _ans_wait_t0 = time.monotonic()
             try:
-                await asyncio.wait_for(
-                    asyncio.shield(answer_fut), timeout=_PRE_LAUNCH_ANSWER_WAIT_S
+                _harvest_waits = [asyncio.shield(answer_fut)]
+                if terminal_error_fut is not None:
+                    _harvest_waits.append(asyncio.shield(terminal_error_fut))
+                _h_done, _h_pending = await asyncio.wait(
+                    _harvest_waits,
+                    timeout=_PRE_LAUNCH_ANSWER_WAIT_S,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-                _status("webrtcResp answer harvested after %.2fs"
-                        % (time.monotonic() - _ans_wait_t0))
-            except TimeoutError:   # asyncio.TimeoutError is an alias since 3.11
-                _status(
-                    "no webrtcResp answer within %.0fs - proceeding without ICE"
-                    " credentials (nomination will retry during the first-media"
-                    " wait)" % _PRE_LAUNCH_ANSWER_WAIT_S
-                )
+                # Cancel the shield WRAPPERS only; the futures they guard are
+                # owned by the MQTT handler and are still consumed below.
+                for _h in _h_pending:
+                    _h.cancel()
+                if terminal_error_fut is not None and terminal_error_fut.done():
+                    _code, _desc = terminal_error_fut.result()
+                    _status(f"camera refused: ack {_code} {_desc}"
+                            " - terminal, not launching the bridge")
+                    raise AidotCameraBusy(_code, _desc)
+                if answer_fut.done():
+                    _status("webrtcResp answer harvested after %.2fs"
+                            % (time.monotonic() - _ans_wait_t0))
+                else:
+                    _status(
+                        "no webrtcResp answer within %.0fs - proceeding without ICE"
+                        " credentials (nomination will retry during the first-media"
+                        " wait)" % _PRE_LAUNCH_ANSWER_WAIT_S
+                    )
+            except AidotCameraBusy:
+                raise
             except Exception:
                 _LOGGER.debug("camera %s: swallowed exception awaiting answer",
                               getattr(self, "device_id", "?"), exc_info=True)
@@ -4199,6 +4262,11 @@ class _SdesOpenMixin:
         _early_nominated = bool(_cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands)
         _media_deadline = time.monotonic() + _FIRST_MEDIA_WAIT_S
         while _first_video_pt[0] is None and time.monotonic() < _media_deadline:
+            if terminal_error_fut is not None and terminal_error_fut.done():
+                _code, _desc = terminal_error_fut.result()
+                _status(f"camera refused: ack {_code} {_desc}"
+                        " - terminal, abandoning the first-media wait")
+                raise AidotCameraBusy(_code, _desc)
             if not _early_nominated and answer_fut is not None and answer_fut.done():
                 # Read-only peek: the real await below still consumes this
                 # future and drives the answer/fallback paths unchanged.
@@ -4415,7 +4483,16 @@ class _SdesOpenMixin:
             else min(timeout, 8.0 if dtls_fallback_ok else 20.0)
         )
         try:
-            answer = await asyncio.wait_for(answer_fut, timeout=_sdes_answer_timeout)
+            # Race the answer against a TERMINAL refusal (-50002 max-streams /
+            # -50015 SD-cap).  Without this the SDES path is blind to a camera
+            # that explicitly said no: it waited out its whole answer budget and
+            # then handed a "no answer" to the DTLS fallback, which sent a second
+            # offer and only THEN surfaced AidotCameraBusy.  Measured ~48s to
+            # report a refusal that arrived in about one second - and two of the
+            # three validated models (A001513, A001064) take this path.
+            answer = await _sdes_await_answer_or_terminal(
+                answer_fut, terminal_error_fut, _sdes_answer_timeout, _status,
+            )
             _ans_sdp = answer.get("sdp", "")
             _ans_mlines = [ln for ln in _ans_sdp.splitlines() if ln.startswith("m=")]
             _status(

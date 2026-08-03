@@ -1302,6 +1302,7 @@ class _WebRTCOpenMixin:
                     rtsp_push_url=rtsp_push_url,
                     talk=talk,
                     ice_cands_seen=ice_cands_seen,
+                    terminal_error_fut=terminal_error_fut,
                 )
                 # Success: the SdesSession now owns outgoing_q + mqtt_fut and
                 # reaps them on stop(); clear the backstop slot so a concurrent
