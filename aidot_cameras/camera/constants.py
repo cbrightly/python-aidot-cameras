@@ -4,6 +4,7 @@ Extracted verbatim from client.py (behavior-preserving). client.py
 re-imports these names, so the public/runtime surface is unchanged.
 """
 
+import os
 import struct
 
 # AppKey from LDSAppOpenSDK CocoaPods docs (kLDSAppOpenSDKKey = "appa070")
@@ -16,6 +17,57 @@ _LEEDARSON_APP_ID = "1392315867093508098"
 # Camera-specific backend; region prefix mirrors AidotClient._base_url pattern.
 # e.g. "us" -> "https://us-smarthome.arnoo.com:443"
 _SMARTHOME_URL_TEMPLATE = "https://{region}-smarthome.arnoo.com:443"
+
+# AiDot platform API base (the prod-{region}-api.arnoo.com family).
+_AIDOT_API_BASE_TEMPLATE = "https://prod-{region}-api.arnoo.com"
+
+# --------------------------------------------------------------------------- #
+# Test-environment seams.
+#
+# Every cloud endpoint the camera layer contacts routes through one of these
+# helpers, so an end-to-end test can point the WHOLE client at a local fake
+# environment via env vars (the same opt-in pattern as
+# AIDOT_SDES_HOLEPUNCH_HOST).  Read at call time, never cached at import, and
+# defaulting to today's production URLs - unset means byte-identical behavior.
+#
+# These exist so the e2e tier CANNOT reach the real cloud: without them the
+# fake-lab tests fall through to prod-{region}-api.arnoo.com and the live MQTT
+# broker, which is real egress with test credentials from CI.
+
+
+def smarthome_base(region: str) -> str:
+    """Smarthome API base for ``region`` (AIDOT_SMARTHOME_URL_TEMPLATE override)."""
+    tmpl = os.environ.get("AIDOT_SMARTHOME_URL_TEMPLATE") or _SMARTHOME_URL_TEMPLATE
+    return tmpl.format(region=region)
+
+
+def aidot_api_base(region: str) -> str:
+    """Platform API base for ``region`` (AIDOT_API_BASE_TEMPLATE override)."""
+    tmpl = os.environ.get("AIDOT_API_BASE_TEMPLATE") or _AIDOT_API_BASE_TEMPLATE
+    return tmpl.format(region=region)
+
+
+def _ice_uris_from_env(var: str, default: list) -> list:
+    """Comma-separated ICE URI list from ``var``; unset -> default, "" -> []."""
+    env = os.environ.get(var)
+    if env is None:
+        return list(default)
+    return [u.strip() for u in env.split(",") if u.strip()]
+
+
+def stun_server_uris() -> list:
+    """Default STUN server URIs (AIDOT_STUN_SERVERS override; "" disables)."""
+    return _ice_uris_from_env("AIDOT_STUN_SERVERS", ["stun:stun.l.google.com:19302"])
+
+
+def fallback_turn_uris() -> list:
+    """TURN relay URIs appended when the cloud ICE config carries none
+    (AIDOT_TURN_SERVERS override; "" disables the hardcoded Arnoo fallback)."""
+    return _ice_uris_from_env(
+        "AIDOT_TURN_SERVERS",
+        ["stun:3.230.182.123:3478", "turn:3.230.182.123:5349"],
+    )
+
 
 # --------------------------------------------------------------------------- #
 # Playback TCP binary framing constants

@@ -94,6 +94,10 @@ markers = [
     "mux: exercises the real ffmpeg/libavformat mux path",
 ]
 addopts = "-m 'not live'"
+# The e2e tier uses async fixtures (fake broker / cloud servers); auto mode
+# keeps them working without decorating every test.
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.coverage.run]
 # Vendored third-party code (aiortc) is exercised via streaming, not our tests;

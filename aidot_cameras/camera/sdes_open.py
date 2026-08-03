@@ -15,7 +15,11 @@ import random
 import time
 from typing import Callable, Optional  # noqa: F401 - method annotations
 
-from .constants import _LIVE_PLAY_NOT_READY, SDES_SPEAKERSTART_DELAY
+from .constants import (
+    _LIVE_PLAY_NOT_READY,
+    SDES_SPEAKERSTART_DELAY,
+    stun_server_uris,
+)
 from .models import VideoFrame  # noqa: F401 - forward-ref annotation
 from .sdes import SdesSession
 from .protocol import (
@@ -1052,7 +1056,7 @@ class _SdesOpenMixin:
         # agent can gather its own srflx candidate.  Append any TURN entries from
         # ice_config so the camera can allocate a relay and probe our srflx/host
         # candidates when direct connectivity fails (e.g. symmetric NAT).
-        _sdes_ice_server_list = [{"Uris": ["stun:stun.l.google.com:19302"]}]
+        _sdes_ice_server_list = [{"Uris": stun_server_uris()}]
         _sdes_ice_server_list.extend(_sdes_turn_entries)
         # _psk_value_req was generated before the SDP offer (see above).
         # Reused here in webrtcReq and webrtcResp for consistency.
@@ -2613,6 +2617,11 @@ class _SdesOpenMixin:
         # media packet; the keepalive watchdog reads it via SdesSession to
         # restart a session the camera silently stopped feeding.
         _media_progress: list = [0.0]
+        # Shared with the bridge thread: [packets, bytes] actually forwarded to
+        # ffmpeg.  The SDES path decodes nothing in-process, so on_frame never
+        # fires and these counters are the only in-process proof media flowed -
+        # see SdesSession.media_stats(), which the live-validation gate reads.
+        _media_counts: list = [0, 0]
 
         def _bridge_fn():
             nonlocal _br_first_di_logged, _br_first_srtp_logged, _br_first_req_dumped
@@ -3921,6 +3930,8 @@ class _SdesOpenMixin:
                                     _fwd_pkt, ('127.0.0.1', _btgt)
                                 )
                                 _media_progress[0] = _time_br.monotonic()
+                                _media_counts[0] += 1
+                                _media_counts[1] += len(_fwd_pkt)
                             except Exception:
                                 _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                     # Periodic ICE controlling check: re-send USE-CANDIDATE every 2.5 s.
@@ -4709,5 +4720,8 @@ class _SdesOpenMixin:
             cmd_chan=_cmd_chan,
             talk_state=_talk_state,
             media_progress=_media_progress,
+            media_counts=_media_counts,
             teardown_requested=_teardown_holder,
+            first_video_pt=_first_video_pt,
+            first_audio_pt=_first_audio_pt,
         )
