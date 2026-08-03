@@ -4,7 +4,13 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
-## [Unreleased]
+## [0.15.0b1] - pre-release
+
+This is a PRE-RELEASE. Live validation on real cameras passed for all three
+gated models, but the terminal-ack fast-fail below only triggers when a camera
+is at its viewer cap, and no camera refused during that run - so the headline
+change is unproven against real firmware. `pip install` does not select
+pre-releases, so this cannot reach an installation that did not ask for it.
 
 ### Added
 - **The e2e "fake lab" test tier.** `tests/e2e/` drives the real client stack -
@@ -17,13 +23,19 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   (`AIDOT_API_BASE_TEMPLATE`, `AIDOT_SMARTHOME_URL_TEMPLATE`, `AIDOT_MQTT_URL`,
   `AIDOT_STUN_SERVERS`, `AIDOT_TURN_SERVERS`). Read at call time and defaulting
   to today's production URLs, so unset means byte-identical behaviour. These are
-  what let the e2e tier run with no egress at all.
+  what let the e2e tier run with no egress at all. Setting one to the empty
+  string disables that category outright: with `AIDOT_STUN_SERVERS=""` no ICE
+  server entry is advertised at all, rather than an entry naming no server, so
+  only host candidates are gathered and a camera off the local network segment
+  will not connect.
 - **`SdesSession.media_stats()`** - `{packets, bytes, last_media_monotonic,
   video_pt, audio_pt}` counted by the bridge thread. The SDES path decodes
   nothing in-process, so `on_frame` never fires and there was previously no
   in-process proof media flowed. `scripts/live_validate.py` already looked for
   this method and silently never found it, leaving the release gate's SDES check
-  resting on recorded bytes alone.
+  resting on recorded bytes alone. Counted at every point the bridge forwards to
+  ffmpeg, including the decrypted-PCMA audio path, so a camera whose audio
+  arrives that way is not reported as carrying no media.
 
 ### Fixed
 - **A camera at its viewer cap took ~26s to report it, instead of ~2s.** A
