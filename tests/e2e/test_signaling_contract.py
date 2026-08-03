@@ -30,12 +30,6 @@ async def _open_expecting_failure(dc, **kwargs):
         return exc
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="SDES does not yet abandon on a terminal ack; the refusal is waited "
-           "out (~26s here). The fix is held back on its own branch until a "
-           "real camera can be observed refusing - remove this marker with it.",
-)
 async def test_busy_ack_raises_promptly_without_retry_storm(
     e2e_device_client, fake_broker
 ):

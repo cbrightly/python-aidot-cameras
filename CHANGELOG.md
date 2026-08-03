@@ -26,6 +26,16 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   resting on recorded bytes alone.
 
 ### Fixed
+- **A camera at its viewer cap took ~26s to report it, instead of ~2s.** A
+  terminal `webrtcResp` ack (-50002 max-streams / -50015 SD-cap) was recorded for
+  both transports but only ever read by the DTLS path and by a single check
+  *before* the SDES open began. The refusal lands about a second after
+  `webrtcReq`, so the SDES path then waited out its pre-launch answer harvest and
+  its answer budget, launched a bridge for a stream the camera had already
+  declined, and only afterwards surfaced `AidotCameraBusy` - having also sent a
+  pointless DTLS-fallback offer. The answer harvest, the answer wait and the
+  first-media wait now all abandon the moment the refusal lands. Two of the three
+  validated models take this path.
 - **`tests/conftest.py` could not build a camera device client on the upstream
   shape Home Assistant pins.** The `make_camera_device_client` fixture imported
   `aidot.models.auth_model` directly - a module that exists only on the typed
