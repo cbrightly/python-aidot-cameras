@@ -199,8 +199,6 @@ async def _sdes_await_answer_or_terminal(
     _done, _pending = await asyncio.wait(
         _waits, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
     )
-    # Never cancel the futures themselves: they are owned by the MQTT handler
-    # and the caller inspects them afterwards (incl. on the fallback path).
     if terminal_error_fut in _done:
         code, desc = terminal_error_fut.result()
         if _status is not None:
@@ -208,6 +206,18 @@ async def _sdes_await_answer_or_terminal(
         raise AidotCameraBusy(code, desc)
     if answer_fut in _done:
         return answer_fut.result()
+    # Timed out.  ``answer_fut`` MUST be cancelled here, exactly as the
+    # ``asyncio.wait_for(answer_fut, ...)`` this replaced did.  The MQTT handler
+    # routes a late webrtcResp to ``second_answer_fut`` only ``if
+    # answer_fut.done()`` (webrtc_open.py), and the late-ICE-credential recovery
+    # reads ``second_answer_fut``.  Leaving it pending swallows the late answer,
+    # so USE-CANDIDATE is never sent, the camera stays in ICE "Checking" and the
+    # view shows a black frame with no media - the 0.12.16 failure mode.
+    #
+    # ``terminal_error_fut`` is deliberately NOT cancelled: it is checked again
+    # after the open returns (webrtc_open.py) to surface a refusal that landed
+    # during the fallback.
+    answer_fut.cancel()
     # Builtin TimeoutError (asyncio.TimeoutError is an alias since 3.11); this
     # is what the caller's `except TimeoutError` no-answer path already catches,
     # which is what triggers the DTLS fallback.
@@ -385,6 +395,27 @@ class _SdesOpenMixin:
         from .client import CameraMixin, _build_sdes_serve_cmd, _ffmpeg_path, _spawn_bg  # lazy: break client<->sdes_open cycle
         import base64
         import subprocess
+
+        # Stop the MQTT signaling thread on ANY abnormal exit from this impl.
+        # The explicit `outgoing_q.put_nowait(None)` calls further down cover the
+        # paths that existed when they were written, but an exception raised
+        # before one of them is reached (AidotCameraBusy on a terminal ack, or a
+        # CancelledError mid-handshake) skipped the sentinel entirely and left
+        # `_mqtt_session_sync` running in an executor thread for its full 3600s.
+        # Those orphans all reconnect with the same stable account clientId, so
+        # they take the session away from later opens and signaling for other
+        # cameras on the account stops being delivered until HA restarts.
+        # The wrapper only closes this stack when the impl did NOT return a
+        # session, so a live session is unaffected.  A duplicate sentinel on the
+        # paths that already send one is harmless - the reader exits on the first.
+        if outgoing_q is not None:
+            def _stop_mqtt_thread() -> None:
+                try:
+                    outgoing_q.put_nowait(None)
+                except Exception:
+                    _LOGGER.debug("camera %s: could not signal MQTT thread to exit",
+                                  getattr(self, "device_id", "?"), exc_info=True)
+            _cleanup.callback(_stop_mqtt_thread)
 
         # SDES path: fast_connect's wait-skips / TURN-strip destabilise the SCTP
         # handshake (session churns ~every 60-90s -> live view drops to snapshot),
@@ -1097,7 +1128,12 @@ class _SdesOpenMixin:
         # agent can gather its own srflx candidate.  Append any TURN entries from
         # ice_config so the camera can allocate a relay and probe our srflx/host
         # candidates when direct connectivity fails (e.g. symmetric NAT).
-        _sdes_ice_server_list = [{"Uris": stun_server_uris()}]
+        # Advertise an ICE server to the camera only when we actually have a
+        # URI for it.  With AIDOT_STUN_SERVERS="" this used to put
+        # {"Uris": []} into webrtcReq - an entry the camera must parse and
+        # that names no server.
+        _sdes_stun_uris = stun_server_uris()
+        _sdes_ice_server_list = [{"Uris": _sdes_stun_uris}] if _sdes_stun_uris else []
         _sdes_ice_server_list.extend(_sdes_turn_entries)
         # _psk_value_req was generated before the SDP offer (see above).
         # Reused here in webrtcReq and webrtcResp for consistency.
@@ -3753,6 +3789,18 @@ class _SdesOpenMixin:
                                                 _rtp_hdr + _pd_plain,
                                                 ('127.0.0.1', _lo_audio_port),
                                             )
+                                            # Count it: media_stats() documents
+                                            # itself as "media actually forwarded
+                                            # to ffmpeg by the bridge", and
+                                            # scripts/live_validate.py uses it as
+                                            # the SDES release gate.  This is a
+                                            # real forward, so omitting it made a
+                                            # camera whose audio arrives on the
+                                            # TUTK path under-report - far enough
+                                            # to fail an otherwise healthy release.
+                                            _media_progress[0] = _time_br.monotonic()
+                                            _media_counts[0] += 1
+                                            _media_counts[1] += len(_rtp_hdr) + len(_pd_plain)
                                             if not _br_first_audio_logged:
                                                 _br_first_audio_logged = True
                                                 # Record the payload type this path
@@ -4267,9 +4315,14 @@ class _SdesOpenMixin:
                 _status(f"camera refused: ack {_code} {_desc}"
                         " - terminal, abandoning the first-media wait")
                 raise AidotCameraBusy(_code, _desc)
-            if not _early_nominated and answer_fut is not None and answer_fut.done():
+            if (not _early_nominated and answer_fut is not None
+                    and answer_fut.done() and not answer_fut.cancelled()):
                 # Read-only peek: the real await below still consumes this
                 # future and drives the answer/fallback paths unchanged.
+                # ``cancelled()`` is checked explicitly because the answer-wait
+                # cancels this future on timeout, and ``.exception()`` on a
+                # cancelled future raises CancelledError - a BaseException that
+                # the ``except Exception`` below would NOT catch.
                 _peek_sdp = ""
                 try:
                     if answer_fut.exception() is None:
@@ -4293,7 +4346,8 @@ class _SdesOpenMixin:
         # Which single payload type (if any) each line can be narrowed to. Audio
         # is usable only when its type was actually observed; otherwise the "0 8"
         # line cannot be narrowed.
-        if _vpt not in _SDP_VIDEO_PTS and answer_fut is not None and answer_fut.done():
+        if (_vpt not in _SDP_VIDEO_PTS and answer_fut is not None
+                and answer_fut.done() and not answer_fut.cancelled()):
             # No video packet arrived inside the window, but the camera's answer
             # still names the codec it agreed to send. Narrowing on that beats
             # leaving both codecs advertised: an unnarrowed video line makes

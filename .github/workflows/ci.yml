@@ -98,7 +98,7 @@ jobs:
       # only guard - it keeps the job from importing the tier at all.
       # The e2e job below is what actually runs it.
       - name: Run unit tests
-        run: pytest tests/ -q -m "not e2e" --ignore=tests/e2e --cov=aidot_cameras --cov-report=term-missing
+        run: pytest tests/ -q -m "not e2e and not live" --ignore=tests/e2e --cov=aidot_cameras --cov-report=term-missing
 
   # End-to-end against a FAKE environment: the real client stack (real paho over
   # websockets, real aiohttp, real ffmpeg) driven against a fake cloud, a fake

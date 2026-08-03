@@ -96,16 +96,35 @@ async def test_neither_arriving_times_out_as_before():
         await _sdes_await_answer_or_terminal(answer_fut, terminal_fut, 0.2)
 
 
-async def test_futures_are_left_usable_for_the_caller():
-    """The caller inspects these afterwards - the wait must not cancel them."""
+async def test_timeout_cancels_answer_fut_but_not_the_terminal_future():
+    """On timeout the answer future must be CANCELLED, and the terminal one must not.
+
+    Cancelling ``answer_fut`` is load-bearing, not incidental tidy-up.  The MQTT
+    handler routes a late webrtcResp to ``second_answer_fut`` only ``if
+    answer_fut.done()``, and the late-ICE-credential recovery reads
+    ``second_answer_fut`` to learn the camera's ufrag/pwd/candidates and send
+    USE-CANDIDATE.  Leave ``answer_fut`` pending and the late answer lands there
+    instead, where nothing reads it: no USE-CANDIDATE, the camera sits in ICE
+    "Checking" and the view is a black frame with no media.
+
+    ``terminal_error_fut`` is the opposite case - it is inspected again after the
+    open returns, so it must stay untouched.
+
+    The ``terminal_error_fut=None`` branch of this helper delegates to
+    ``asyncio.wait_for``, which cancels on timeout, so anything else here would
+    also make the two branches disagree with each other.
+    """
     answer_fut, terminal_fut = _futs()
     with pytest.raises((asyncio.TimeoutError, TimeoutError)):
         await _sdes_await_answer_or_terminal(answer_fut, terminal_fut, 0.2)
-    assert not answer_fut.cancelled(), "answer_fut must survive the timeout"
+    assert answer_fut.cancelled(), (
+        "answer_fut must be cancelled so a late webrtcResp is routed to "
+        "second_answer_fut and the late-ICE-credential recovery can run"
+    )
     assert not terminal_fut.cancelled(), "terminal_error_fut must survive"
-    # And still be resolvable by the MQTT handler afterwards.
-    answer_fut.set_result({"sdp": "late"})
-    assert answer_fut.result()["sdp"] == "late"
+    # The terminal future is still resolvable by the MQTT handler afterwards.
+    terminal_fut.set_result((-50002, "late refusal"))
+    assert terminal_fut.result()[0] == -50002
 
 
 async def test_no_terminal_future_falls_back_to_the_old_behaviour():

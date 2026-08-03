@@ -85,8 +85,12 @@ def fakelab_env(monkeypatch, fake_broker, fake_cloud, fake_api):
     monkeypatch.setenv("AIDOT_TURN_SERVERS", "")
     monkeypatch.setenv("AIDOT_SDES_HOLEPUNCH_HOST", "")
     # One account-level MQTT connection is the production default; per-open
-    # connections make the fake broker's session bookkeeping noisier.
-    monkeypatch.setenv("AIDOT_PERSISTENT_MQTT", "0")
+    # connections make the fake broker's session bookkeeping noisier.  The knob
+    # is DISABLE-on-falsey (client.py: persistent unless the value is one of
+    # 0/false/no/off), so "0" would have selected the per-open topology this
+    # comment is trying to avoid - and left the account-level path production
+    # actually uses untested by the whole tier.
+    monkeypatch.setenv("AIDOT_PERSISTENT_MQTT", "1")
     # Keep the tier fast: these are the production waits sized for real
     # firmware on a real network, and nothing here is more than a few ms away.
     # Shrunk through the SAME knobs production uses - no internals patched.

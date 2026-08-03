@@ -705,6 +705,26 @@ class _WebRTCOpenMixin:
                 # AidotCameraBusy instead of timing out into a generic retry.
                 _term = _terminal_webrtc_ack(msg)
                 if _term is not None:
+                    # Isolate per camera/stream BEFORE accepting the refusal.  We
+                    # subscribe to the account-wide topic (iot/v1/c/{user_id}/#),
+                    # so without this a -50002 for a DIFFERENT camera aborts this
+                    # camera's healthy open with AidotCameraBusy.  That matters
+                    # now that the SDES path polls terminal_error_fut across the
+                    # whole first-media wait rather than reading it once.
+                    # Same accept rule the answer branch below uses: an exact
+                    # peerid match, or BOTH devId and dstAddr (dstAddr alone is
+                    # the shared account id and matches every camera).
+                    _t_pid = inner.get("peerid")
+                    if not (_t_pid == peer_id
+                            or (inner.get("devId") == device_id
+                                and inner.get("dstAddr") == user_id)):
+                        loop.call_soon_threadsafe(
+                            lambda rp=_t_pid, c=_term[0]: _status(
+                                f"terminal ack {c} IGNORED - belongs to another"
+                                f" camera/stream: peerid {rp!r}"
+                            )
+                        )
+                        return
                     if not terminal_error_fut.done():
                         loop.call_soon_threadsafe(terminal_error_fut.set_result, _term)
                     return
@@ -1373,7 +1393,11 @@ class _WebRTCOpenMixin:
                 result.append(u)
             return result
 
-        _ice_servers = [RTCIceServer(urls=stun_server_uris())]
+        # Omit the entry entirely when the URI list is empty (STUN disabled
+        # via AIDOT_STUN_SERVERS=""): RTCIceServer(urls=[]) is not the same as
+        # "no server" - it is an ICE server that advertises nothing.
+        _stun_uris = stun_server_uris()
+        _ice_servers = [RTCIceServer(urls=_stun_uris)] if _stun_uris else []
         if ice_config_fut.done():
             try:
                 _ice_data = ice_config_fut.result()
@@ -1513,7 +1537,10 @@ class _WebRTCOpenMixin:
                         RTCIceServer(urls=_su, username=_srv.username,
                                      credential=_srv.credential)
                     )
-            _ice_servers = _stun_only or [RTCIceServer(urls=stun_server_uris())]
+            _fallback_stun = stun_server_uris()
+            _ice_servers = _stun_only or (
+                [RTCIceServer(urls=_fallback_stun)] if _fallback_stun else []
+            )
             _status(
                 "AIDOT_FAST_CONNECT: stripped TURN (STUN-only, LAN-direct) -"
                 f" {len(_ice_servers)} ICE server(s), no relay gather stall"
