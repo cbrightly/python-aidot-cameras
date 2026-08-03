@@ -34,7 +34,10 @@ class SdesSession:
         cmd_chan=None,
         talk_state=None,
         media_progress=None,
+        media_counts=None,
         teardown_requested=None,
+        first_video_pt=None,
+        first_audio_pt=None,
     ) -> None:
         self._proc       = proc
         self._sdp_path   = sdp_path
@@ -48,6 +51,14 @@ class SdesSession:
         # that stopped sending (battery teardown ~49-72s) and reconnect - ffmpeg
         # itself never exits on a dead UDP input, so wait_done() alone would hang.
         self._media_progress = media_progress if media_progress is not None else [0.0]
+        # Shared with the bridge thread: [packets, bytes] forwarded to ffmpeg.
+        # See media_stats() - the SDES path never calls on_frame, so this is the
+        # in-process signal that media is actually flowing.
+        self._media_counts = media_counts if media_counts is not None else [0, 0]
+        # Shared with the bridge thread: the payload types the camera actually
+        # sent (video 96/97/98, audio 0/8), or None before first media.
+        self._first_video_pt = first_video_pt if first_video_pt is not None else [None]
+        self._first_audio_pt = first_audio_pt if first_audio_pt is not None else [None]
         # Mutable one-element list shared with the bridge thread: [0] flips True
         # the moment ANY locally-initiated ffmpeg-kill path fires (this stop(),
         # the cold-open _reap(), the key-restart proc replace, or the DTLS-
@@ -145,6 +156,26 @@ class SdesSession:
     def last_media_monotonic(self) -> float:
         """time.monotonic() of the last media packet forwarded, 0.0 if none yet."""
         return self._media_progress[0]
+
+    def media_stats(self) -> dict:
+        """Snapshot of media actually forwarded to ffmpeg by the bridge.
+
+        The SDES path decodes nothing in-process (ffmpeg owns the media), so
+        ``on_frame`` is never invoked and callers cannot count frames the way
+        the DTLS path allows.  These counters are the supported substitute:
+        non-zero ``packets``/``bytes`` means real media reached the consumer.
+
+        Returns ``{packets, bytes, last_media_monotonic, video_pt, audio_pt}``;
+        the payload types are ``None`` until the camera's first packet of that
+        kind arrives.
+        """
+        return {
+            "packets": self._media_counts[0],
+            "bytes": self._media_counts[1],
+            "last_media_monotonic": self._media_progress[0],
+            "video_pt": self._first_video_pt[0],
+            "audio_pt": self._first_audio_pt[0],
+        }
 
     def _log_ffmpeg_stderr(self, stderr_bytes: bytes) -> None:
         """Log ffmpeg's captured stderr at a level that matches what happened.

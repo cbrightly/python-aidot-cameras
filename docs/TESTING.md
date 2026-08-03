@@ -1,18 +1,14 @@
 # Testing tiers
 
-> **Status: this describes the `ci/release-validation` branch, not `main`.**
-> On `main` the suite is a single flat tier — 657 passed / 5 skipped, run with
-> `PYTHONPATH=. python -m pytest tests/ -q`. The `e2e` and `live` markers, the
-> `[tool.pytest.ini_options]` block with `addopts`, `tests/e2e/`, `tests/fakes/`,
-> `tests/test_env_seams.py`, `tests/test_media_wait_floor.py` and
-> `.github/workflows/live-validate.yml` **do not exist on `main`** — they land
-> with that branch. `scripts/live_validate.py` and
-> [`CI-RUNNER.md`](CI-RUNNER.md) are the exceptions: both are already on `main`.
+> **Status: all three tiers are on `main`.** The unit tier is 708 passed /
+> 5 skipped and the fake lab is 20 passed; the `e2e` and `live` markers, the
+> `[tool.pytest.ini_options]` block with `addopts`, `tests/e2e/` and the env
+> seams are all in place. The live tier's workflow lives in a private repo and
+> gates publishing on a commit status - see [`CI-RUNNER.md`](CI-RUNNER.md).
 >
-> The practical consequence: the "a bare `pytest` can never reach hardware"
-> guarantee below is a property of that branch's `addopts`. On `main` no bare
-> `pytest` reaches hardware either, but only because no live-marked test is
-> there to run — nothing is enforcing it.
+> The fake lab needs `amqtt`, `pytest-asyncio` and `pytest-timeout`, which the
+> unit tier does not install; `tests/e2e/conftest.py` skips the whole tier when
+> `amqtt` is missing rather than erroring at collection.
 
 Streaming breaks in ways unit tests structurally cannot see: the cloud accepts
 the call, signaling looks healthy, and only the media tells the truth. So the
@@ -98,7 +94,7 @@ the media). For SDES, use `SdesSession.media_stats()` or recorded bytes.
 
 ## Adding a test: which tier?
 
-- Can you express it as inputs → outputs on a function? **Unit.** Prefer
+- Can you express it as inputs -> outputs on a function? **Unit.** Prefer
   extracting a pure helper over reaching into a 4000-line coroutine - that is
   how `_sdes_await_answer_or_terminal` and `_is_self_referential_source` became
   testable.

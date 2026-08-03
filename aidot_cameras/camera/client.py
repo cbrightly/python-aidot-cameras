@@ -22,9 +22,11 @@ from ..const import (
 from .constants import (
     _LEEDARSON_APP_ID,
     _LIVE_PLAY_NOT_READY,
-    _SMARTHOME_URL_TEMPLATE,
+    _SMARTHOME_URL_TEMPLATE,  # noqa: F401 - re-exported for back-compat; reads go through smarthome_base()
     GETSTREAMCTRL_CMD,  # noqa: F401 - re-exported for back-compat (public pair; unused in-module)
     SDES_SPEAKERSTART_DELAY,  # noqa: F401 - used by the sdes_open mixin; kept re-exported
+    aidot_api_base,
+    smarthome_base,
 )
 from .constants import (  # noqa: F401 - re-exported for device_client / back-compat
     TALK_PCM_FRAME_BYTES,
@@ -1156,7 +1158,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
 
     @property
     def _smarthome_base(self) -> str:
-        return _SMARTHOME_URL_TEMPLATE.format(region=self._region)
+        return smarthome_base(self._region)
 
     def set_token_refresh_cb(self, cb: "Callable") -> None:
         """Register the AidotClient coroutine that refreshes the access token."""
@@ -1369,6 +1371,15 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         # getServerUrlConfig.  The full response is stored in self._smarthome_auth
         # so mqttUser / mqttPassword are captured in the same call.
         if self._mqtt_url:
+            return self._mqtt_url
+
+        # Test seam: point the whole client at a local broker without any cloud
+        # call (paho derives ws-vs-wss and the port from the scheme, so a plain
+        # "ws://127.0.0.1:PORT/mqtt" needs nothing else).  Unset in production.
+        _env_mqtt = os.environ.get("AIDOT_MQTT_URL")
+        if _env_mqtt:
+            _LOGGER.debug("AIDOT_MQTT_URL override in effect: %s", _env_mqtt)
+            self._mqtt_url = _env_mqtt
             return self._mqtt_url
 
         import aiohttp
@@ -1603,11 +1614,11 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
 
     @property
     def _aidot_v21_base(self) -> str:
-        return f"https://prod-{self._region}-api.arnoo.com/v21"
+        return f"{aidot_api_base(self._region)}/v21"
 
     @property
     def _aidot_v32_base(self) -> str:
-        return f"https://prod-{self._region}-api.arnoo.com/v32/api/ipc"
+        return f"{aidot_api_base(self._region)}/v32/api/ipc"
 
     def _aidot_headers(self) -> dict:
         # Auth headers for the AiDot platform API (prod-{region}-api.arnoo.com).
@@ -4847,7 +4858,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             return None
 
         url = (
-            f"https://prod-{self._region}-api.arnoo.com"
+            f"{aidot_api_base(self._region)}"
             f"/v29/api/webrtc/iceConfig?forceRefresh=0"
         )
 

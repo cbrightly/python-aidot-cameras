@@ -89,18 +89,28 @@ def make_camera_device_client(raw_device, login_info):
     Constructs through the public constructor (typed models + raw records),
     exactly as CameraClient does, so tests exercise real initialization
     instead of `Cls.__new__` stubs.
-    """
-    from aidot.models.auth_model import UserInformation
-    from aidot.models.device_model import DeviceModel
 
+    Both upstream shapes are live, so the account argument is resolved through
+    ``_upstream`` rather than imported directly: the typed shape (0.3.54-0.3.55)
+    wants a ``UserInformation``, while the dict shape (<=0.3.53, >=0.3.56) has
+    no such class at all and takes the raw login dict natively.  Importing
+    ``aidot.models.auth_model`` here raises ModuleNotFoundError on every
+    dict-shape install - including the one Home Assistant pins.
+    """
+    from aidot_cameras._upstream import (
+        HAS_TYPED_ACCOUNT,
+        DeviceModel,
+        UserInformation,
+    )
     from aidot_cameras.device_client import CameraDeviceClient
 
     def _make(profile: str = "A001513", *, login: dict | None = None, **dev_overrides):
         dev = raw_device(profile, **dev_overrides)
         user = login if login is not None else login_info()
+        account = UserInformation.from_json(data=user) if HAS_TYPED_ACCOUNT else user
         return CameraDeviceClient(
             DeviceModel.from_json(data=dev),
-            UserInformation.from_json(data=user),
+            account,
             raw_device=dev,
             login_info=user,
         )

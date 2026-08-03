@@ -17,7 +17,7 @@ import logging
 from typing import Callable, Optional
 
 from ..exceptions import AidotCameraBusy, AidotCameraNotReady
-from .constants import _LIVE_PLAY_NOT_READY
+from .constants import _LIVE_PLAY_NOT_READY, fallback_turn_uris, stun_server_uris
 from .models import VideoFrame
 from .webrtc import WebRTCSession
 from .protocol import (
@@ -1372,7 +1372,7 @@ class _WebRTCOpenMixin:
                 result.append(u)
             return result
 
-        _ice_servers = [RTCIceServer(urls=["stun:stun.l.google.com:19302"])]
+        _ice_servers = [RTCIceServer(urls=stun_server_uris())]
         if ice_config_fut.done():
             try:
                 _ice_data = ice_config_fut.result()
@@ -1478,10 +1478,10 @@ class _WebRTCOpenMixin:
         # that are on a different network segment or behind strict NAT.  The Arnoo
         # TURN server (confirmed from browser webrtc_internals - ALL candidates are
         # relay type) accepts connections without explicit per-session credentials.
-        _arnoo_stun = "stun:3.230.182.123:3478"
-        _arnoo_turn = "turn:3.230.182.123:5349"
-        if not _has_turn_in_resp:
-            _ice_servers.append(RTCIceServer(urls=[_arnoo_stun, _arnoo_turn]))
+        # AIDOT_TURN_SERVERS overrides the hardcoded pair (empty disables it).
+        _arnoo_fallback = fallback_turn_uris()
+        if not _has_turn_in_resp and _arnoo_fallback:
+            _ice_servers.append(RTCIceServer(urls=_arnoo_fallback))
         # Log the final ICE server configuration.
         _stun_url = (_ice_servers[0].urls[0]
                      if _ice_servers and _ice_servers[0].urls
@@ -1512,9 +1512,7 @@ class _WebRTCOpenMixin:
                         RTCIceServer(urls=_su, username=_srv.username,
                                      credential=_srv.credential)
                     )
-            _ice_servers = _stun_only or [
-                RTCIceServer(urls=["stun:stun.l.google.com:19302"])
-            ]
+            _ice_servers = _stun_only or [RTCIceServer(urls=stun_server_uris())]
             _status(
                 "AIDOT_FAST_CONNECT: stripped TURN (STUN-only, LAN-direct) -"
                 f" {len(_ice_servers)} ICE server(s), no relay gather stall"

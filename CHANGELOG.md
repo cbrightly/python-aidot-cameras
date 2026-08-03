@@ -4,6 +4,35 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [Unreleased]
+
+### Added
+- **The e2e "fake lab" test tier.** `tests/e2e/` drives the real client stack -
+  real paho over websockets, real aiohttp, real ffmpeg - against a fake cloud, a
+  fake MQTT broker, fake cameras and a go2rtc stub on 127.0.0.1. It covers what
+  unit tests structurally cannot: signaling *order*, cross-component behaviour,
+  terminal acks and multi-camera fleets. Run with `pytest tests/e2e -m e2e`;
+  needs `amqtt`, `pytest-asyncio` and `pytest-timeout`.
+- **Env seams for every cloud endpoint the camera layer contacts**
+  (`AIDOT_API_BASE_TEMPLATE`, `AIDOT_SMARTHOME_URL_TEMPLATE`, `AIDOT_MQTT_URL`,
+  `AIDOT_STUN_SERVERS`, `AIDOT_TURN_SERVERS`). Read at call time and defaulting
+  to today's production URLs, so unset means byte-identical behaviour. These are
+  what let the e2e tier run with no egress at all.
+- **`SdesSession.media_stats()`** - `{packets, bytes, last_media_monotonic,
+  video_pt, audio_pt}` counted by the bridge thread. The SDES path decodes
+  nothing in-process, so `on_frame` never fires and there was previously no
+  in-process proof media flowed. `scripts/live_validate.py` already looked for
+  this method and silently never found it, leaving the release gate's SDES check
+  resting on recorded bytes alone.
+
+### Fixed
+- **`tests/conftest.py` could not build a camera device client on the upstream
+  shape Home Assistant pins.** The `make_camera_device_client` fixture imported
+  `aidot.models.auth_model` directly - a module that exists only on the typed
+  0.3.54-0.3.55 shape - so it raised `ModuleNotFoundError` on 0.3.56. It now
+  resolves the account through `aidot_cameras._upstream` like the rest of the
+  package.
+
 ## [0.14.0]
 
 ### Fixed

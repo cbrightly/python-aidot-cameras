@@ -79,12 +79,159 @@ jobs:
       - name: System deps
         run: apk add --no-cache git ffmpeg gcc musl-dev libffi-dev
       - name: Install package + test deps
+        # pytest-asyncio is needed even though this job skips the e2e tier: the
+        # asyncio_mode / asyncio_default_fixture_loop_scope settings live in
+        # pyproject, and without the plugin pytest warns they are unknown AND
+        # would silently not run any async test added outside tests/e2e.
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[webrtc]" pytest pytest-cov
+          pip install -e ".[webrtc]" pytest pytest-cov pytest-asyncio
       # Coverage is informational (term-missing report); it does not gate the build.
       # The suite includes tests/test_scripts_importable.py, which fails if any
       # scripts/ harness rots against the installed package (they all silently
       # broke at the 0.12.0 rename and CI never noticed).
+      #
+      # --ignore, not just -m: marker filtering happens AFTER collection, so
+      # -m alone still imports tests/e2e/conftest.py and its e2e-only deps
+      # (amqtt), which this job does not install. That conftest also skips
+      # itself when amqtt is missing, so this is the fast path rather than the
+      # only guard - it keeps the job from importing the tier at all.
+      # The e2e job below is what actually runs it.
       - name: Run unit tests
-        run: pytest tests/ -q --cov=aidot_cameras --cov-report=term-missing
+        run: pytest tests/ -q -m "not e2e" --ignore=tests/e2e --cov=aidot_cameras --cov-report=term-missing
+
+  # End-to-end against a FAKE environment: the real client stack (real paho over
+  # websockets, real aiohttp, real ffmpeg) driven against a fake cloud, a fake
+  # MQTT broker and fake cameras on 127.0.0.1.  No secrets and no egress, so it
+  # is safe on fork PRs with the plain `pull_request` trigger.
+  #
+  # The no-egress property is enforced by the env seams in camera/constants.py
+  # (AIDOT_API_BASE_TEMPLATE / AIDOT_SMARTHOME_URL_TEMPLATE / AIDOT_MQTT_URL /
+  # AIDOT_STUN_SERVERS / AIDOT_TURN_SERVERS), which tests/e2e/conftest.py sets.
+  # Without them the client falls through to prod-{region}-api.arnoo.com and the
+  # live broker - test_seams_redirect_the_real_client is the guard on that.
+  #
+  # This is the tier that covers what unit tests structurally cannot: signaling
+  # ORDER (battery wake before the offer), cross-component behaviour (go2rtc),
+  # and terminal-ack handling.
+  e2e:
+    name: E2E (fake cloud / fake cameras)
+    runs-on: ubuntu-latest
+    container: python:3.13-alpine
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24, mandatory in a musl container)
+      - name: System deps
+        run: apk add --no-cache git ffmpeg gcc musl-dev libffi-dev
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[webrtc]" pytest pytest-asyncio pytest-timeout pytest-xdist amqtt
+      # -n 4: these tests are dominated by real protocol timeouts, not CPU, so
+      # running them concurrently cuts the tier from ~4 min to ~1.5 min.
+      # --timeout: a hung handshake must fail the job, never stall it.
+      - name: Run e2e tier
+        run: pytest tests/e2e -q -m e2e -n 4 --timeout=180
+
+  # The Home Assistant integration is this library's only consumer, and the
+  # coupling has broken in BOTH directions before: a library change that
+  # violated the integration's expectations (a go2rtc stream registered as its
+  # own source), and an integration version floor that pinned a broken library
+  # forward so rolling the integration back did not restore video.
+  #
+  # The integration's own CI can only test RELEASED library versions, so it
+  # finds these after the fact. This job runs the integration's suite against
+  # the library IN THIS PR - before the release exists.
+  #
+  # Public repo, read-only, no secrets: safe on fork PRs.
+  downstream-integration:
+    name: Downstream integration tests (hass-aidot-cameras)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the library (this PR)
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24)
+        with:
+          path: library
+      # Pinned to a RELEASE TAG, not a moving branch: this job is a required
+      # check, and tracking the integration's main would let an unrelated
+      # breakage there turn every library PR red for reasons the author cannot
+      # act on. Bump this deliberately when the integration ships something the
+      # library must keep working with (and note that a contract test added on
+      # the integration's main only starts running here once it is tagged).
+      - name: Check out the integration
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24)
+        with:
+          repository: cbrightly/hass-aidot-cameras
+          ref: v2.10.2
+          path: integration
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6 (node24)
+        with:
+          python-version: "3.13"
+      - name: Install the integration's test deps + THIS library
+        run: |
+          set -euo pipefail
+          pip install -r integration/requirements_test.txt
+          # Installed last and from source, so it wins over whatever released
+          # version the test deps dragged in - that substitution is the point.
+          pip install -e "./library[webrtc]"
+          python -c "import aidot_cameras; print('library under test:', aidot_cameras.__file__)"
+      - name: Run the integration's test suite
+        working-directory: integration
+        run: pytest tests/ -q --timeout=60
+
+  # Home Assistant pins its whole dependency tree in package_constraints.txt.
+  # A library pin that cannot satisfy those constraints makes the [webrtc]
+  # extra unresolvable, and the integration fails to load with "Requirements
+  # for aidot not found" - which is a shipped regression (HA 2026.7 pinned
+  # av==17 while stock aiortc capped av<17, the reason aiortc is vendored).
+  # No amount of unit testing sees that; only a real resolve against the real
+  # constraints does.
+  ha-constraints:
+    name: Install under HA constraints (${{ matrix.ha }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Current stable and the previous release. Bump deliberately.
+        ha: ["2026.7.0", "2026.6.0"]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24)
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6 (node24)
+        with:
+          python-version: "3.13"
+      - name: Resolve and install against HA's constraints
+        run: |
+          set -euo pipefail
+          curl -fsSL -o ha-constraints.txt \
+            "https://raw.githubusercontent.com/home-assistant/core/${{ matrix.ha }}/homeassistant/package_constraints.txt"
+          echo "--- constraints that matter to us ---"
+          grep -Ei '^(av|numpy|pillow|cryptography|aiohttp)==' ha-constraints.txt || true
+          pip install -e ".[webrtc]" -c ha-constraints.txt
+      # Resolving is necessary but not sufficient: the pinned versions have to
+      # actually work together at runtime.
+      - name: Import the camera stack
+        run: |
+          python -c "import aidot_cameras.camera.client, aidot_cameras.camera.protocol, aidot_cameras.camera.sdes_open, aidot_cameras.camera.webrtc_open; print('imports ok')"
+      - name: H.264 encode/decode roundtrip with HA's av
+        run: |
+          python - <<'PY'
+          import av, numpy as np
+          print("av:", av.__version__)
+          enc = av.CodecContext.create("libx264", "w")
+          enc.width, enc.height, enc.pix_fmt = 160, 120, "yuv420p"
+          enc.options = {"tune": "zerolatency"}
+          pkts = []
+          for i in range(10):
+              img = np.full((120, 160, 3), i * 20, dtype=np.uint8)
+              fr = av.VideoFrame.from_ndarray(img, format="rgb24").reformat(format="yuv420p")
+              fr.pts = i
+              pkts += [bytes(p) for p in enc.encode(fr)]
+          pkts += [bytes(p) for p in enc.encode(None)]
+          assert pkts, "libx264 produced no packets under HA's pins"
+          dec = av.CodecContext.create("h264", "r")
+          frames = 0
+          for raw in pkts:
+              for _f in dec.decode(av.Packet(raw)):
+                  frames += 1
+          assert frames > 0, "no frames decoded under HA's pins"
+          print(f"roundtrip ok: {len(pkts)} packets -> {frames} frames")
+          PY
