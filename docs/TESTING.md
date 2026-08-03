@@ -22,13 +22,18 @@ suite is in three tiers, each catching a class the one below it cannot.
 
 ```bash
 pytest tests/                      # unit + e2e; NEVER touches hardware
-pytest tests/ -m "not e2e"         # unit only (fast)
+pytest tests/ -m "not e2e and not live"    # unit only (fast)
 pytest tests/e2e -m e2e -n 4       # the fake lab, parallel (~2 min)
 pytest tests/ -m live              # live tier - requires cameras, opt-in
 ```
 
 `addopts = -m 'not live'` in `pyproject.toml` means a bare `pytest` can never
 reach for hardware by accident. The live tier has to be asked for by name.
+
+Note the `and not live` above: pytest's `-m` takes a single expression and the
+command line REPLACES `addopts`, it does not merge with it. So any command that
+passes its own `-m` drops the default live guard and has to restate it - plain
+`-m "not e2e"` would happily collect the live tier and drive real cameras.
 
 ## The fake lab (`tests/e2e/`)
 
