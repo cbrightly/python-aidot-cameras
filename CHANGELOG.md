@@ -4,6 +4,30 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.15.0b5] - pre-release
+
+### Changed
+- **Working out which decoder to use no longer costs a small machine much of a
+  minute.** On a Raspberry Pi 4 it took 54 seconds of wall clock and 26 seconds
+  of processor time; it now takes about 6 and 5. Measured back to back on the
+  same loaded machine.
+
+  Three things were being paid for and not used. Hardware was being tried that
+  the machine plainly does not have - a check for the device first costs a
+  filesystem lookup, where trying it costs a process and a couple of seconds.
+  H.265 was being worked out although only H.264 is ingested, which was nearly
+  half the total. And software decoding was being measured even when nothing
+  had beaten it, though in that case it wins whatever the measurement says.
+
+  On a machine with no video hardware at all - most cloud and container
+  installations - the question is now answered in about three milliseconds
+  without starting anything, where before it encoded and decoded a video clip
+  to reach the same conclusion.
+
+  This is one-time work per machine that already ran in the background, so
+  nothing was ever delayed by it. The point is that it no longer takes
+  processor time away from streaming on machines that have little to spare.
+
 ## [0.15.0b4] - pre-release
 
 ### Fixed

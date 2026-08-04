@@ -33,7 +33,9 @@ import hashlib
 import json
 import logging
 import os
+import glob
 import subprocess
+import sys
 import threading
 import time
 from typing import List, Optional
@@ -182,6 +184,34 @@ def _list_names(flag: str) -> set:
     return names
 
 
+def _plausible(cand: List[str]) -> bool:
+    """Could this candidate possibly work, judged without spawning anything?
+
+    A build advertises support compiled in, not hardware present. Trying a
+    candidate costs an ffmpeg process and a couple of seconds on a small board,
+    and on a machine with no video hardware at all EVERY trial is wasted - as is
+    encoding the sample they would have decoded. Checking for the device first
+    costs a stat.
+
+    Deliberately permissive: it rules out only what is impossible, never what is
+    merely unlikely. Anything that survives still has to prove itself.
+    """
+    if not cand:
+        return True                                  # software
+    name = cand[1]
+    if name == "videotoolbox":
+        return sys.platform == "darwin"
+    if name == "vaapi" or name.endswith("_vaapi") or name.endswith("_qsv"):
+        return bool(glob.glob("/dev/dri/render*"))
+    if name.endswith("_cuvid") or name.endswith("_nvdec"):
+        return bool(glob.glob("/dev/nvidia*"))
+    if name.endswith("_v4l2m2m"):
+        return bool(glob.glob("/dev/video*"))
+    if name.endswith("_rkmpp"):
+        return bool(glob.glob("/dev/mpp_service") or glob.glob("/dev/rga"))
+    return True
+
+
 def _available(cand: List[str]) -> bool:
     """Cheap pre-filter. Never sufficient on its own - a Pi advertises
     h264_cuvid with no Nvidia hardware present, which is why everything that
@@ -285,6 +315,19 @@ def probe_decoder(codec: str, force: bool = False) -> List[str]:
         _cache_mem[key] = list(cache[key])
         return list(cache[key])
 
+    # Everything below spawns processes, so decide first whether it is worth
+    # spawning any. A machine with no video hardware - a VPS, a container, most
+    # cloud installs - can be answered here for free, and encoding a sample it
+    # would never decode is the single largest cost in this module.
+    hw = [c for c in _CANDIDATES[codec] if c and _plausible(c) and _available(c)]
+    if not hw:
+        _LOGGER.debug("decoder probe: no hardware candidate is possible for %s "
+                      "on this machine; software, nothing probed", codec)
+        cache[key] = []
+        _cache_mem[key] = []
+        _save_cache(cache)
+        return []
+
     import tempfile
     winner: List[str] = []
     best = None
@@ -293,16 +336,23 @@ def probe_decoder(codec: str, force: bool = False) -> List[str]:
         if not _make_sample(codec, sample):
             _LOGGER.debug("decoder probe: could not build a %s sample", codec)
             return []
-        for cand in _CANDIDATES[codec]:
-            if not _available(cand):
-                continue
+        for cand in hw:
             took = _try_decoder(cand, sample)
             if took is None:
                 _LOGGER.debug("decoder probe: %s cannot decode %s here",
-                              " ".join(cand) or "software", codec)
+                              " ".join(cand), codec)
                 continue
             if best is None or took < best:
                 winner, best = list(cand), took
+        # Software is only worth timing if something beat it to the line. When
+        # every hardware candidate failed - the common case on small boards -
+        # software wins by default and the measurement would change nothing.
+        if winner:
+            sw = _try_decoder([], sample)
+            if sw is not None and sw <= (best or 0.0):
+                _LOGGER.debug("decoder probe: software (%.2fs) beats %s (%.2fs) "
+                              "for %s", sw, " ".join(winner), best or 0.0, codec)
+                winner, best = [], sw
 
     if winner:
         _LOGGER.info("decoder probe: using %s for %s (%.2fs on the probe clip)",
@@ -315,7 +365,7 @@ def probe_decoder(codec: str, force: bool = False) -> List[str]:
     return list(winner)
 
 
-def warm_decoder_cache(codecs: tuple = ("h264", "hevc")) -> "threading.Thread":
+def warm_decoder_cache(codecs: tuple = ("h264",)) -> "threading.Thread":
     """Probe in the background so the first real use is already cached.
 
     Probing costs about ten seconds per codec the first time on a small ARM
@@ -324,6 +374,12 @@ def warm_decoder_cache(codecs: tuple = ("h264", "hevc")) -> "threading.Thread":
     first stream rather than during it. So run it on a daemon thread and let the
     caller carry on: anything asking for a decoder meanwhile simply computes it
     inline, and the result is shared through the same cache either way.
+
+    Only H.264 is warmed by default, because only H.264 is ingested: probing
+    H.265 as well doubled the cost of this module on a Pi 4 (22s of 47s wall,
+    15s of 26s CPU) to answer a question nothing asks. If H.265 ingest lands,
+    add it here - and until then a stray H.265 stream still works, it just lets
+    ffmpeg choose on the first session while the answer is worked out.
 
     Idempotent: a second call while the first is still running is a no-op, so
     every config entry can call it at setup without spawning a probe each.
