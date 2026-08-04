@@ -1,6 +1,8 @@
 # Design: surviving a camera that ends its own streaming session
 
-Status: proposed, not built. Phase 0 must run before any code is written.
+Status: proposed, not built, and **demoted to a fallback**. See the Phase 0
+result below - the premise this was written on turns out to be wrong in the way
+that matters most.
 
 ## The problem, stated precisely
 
@@ -45,8 +47,49 @@ and record whether it recovers on its own. This sizes the problem: if viewers
 somehow survive already, the remaining cost is only the ~20s window for *new*
 views and this design is not worth building.
 
-**0b. Does the official application blip?** Open the camera in the AiDot app and
-watch for a break every minute or two. This is the decisive one:
+**0b. RESULT: the official application does NOT blip.** Reported from real use:
+the camera "has been behaving just fine in the app" across ordinary viewing, with
+no break every minute or two. Treat this as strong evidence rather than a
+controlled measurement - it was not instrumented, and a very brief reconnect
+could pass unnoticed - but it is the observation this whole design was waiting
+on, and it points the opposite way to what was assumed.
+
+**This means the recycle is NOT an unavoidable property of the camera.** The
+hardware can clearly sustain a continuous session; something about how the app
+asks for it differs from how we do. Masking the gap is therefore the wrong
+primary goal. The continuity work below remains worth having as a safety net -
+terminating ffmpeg and taking every viewer down with it is bad behaviour
+regardless of why the session ended - but it is no longer the fix.
+
+**The leading candidate is bitrate, and the numbers are not close.** Measured on
+the same camera on the same night:
+
+| source | bitrate |
+|---|---|
+| the app, "auto" quality | **225 - 500 Kbps** |
+| our validation run | 1,886 Kbps |
+| our earlier hold | 1,600 Kbps |
+
+We take four to eight times what the app takes, and we are the one that gets
+recycled. The camera was confirmed set to `hd`.
+
+(!) **The project guide lists "low-quality stream profile" as a dead hypothesis.
+It is not dead - it was closed on faulty reasoning.** The check that killed it
+established only that the camera was set to `hd`, i.e. it confirmed its own
+premise. It never tested whether the camera behaves differently on `sd`. That
+test is still owed: set `sd`, measure session lifetime at least three times, and
+compare the distribution against the `hd` baseline of 62, 76, 80, 82, 83, ~100,
+~120 and 243 seconds.
+
+Also worth noting: neither side negotiates any RTCP feedback (our offer carries
+no `a=rtcp-fb`, and neither does the camera's answer), so there is no mechanism
+by which the camera could adapt its rate downward for us mid-session. If the app
+runs at a quarter of our bitrate, it is far more likely asking for something
+different up front than adapting on the fly. That is a signalling difference to
+capture off the wire, not to guess at - eight guesses have already died here.
+
+**Superseded framing, kept because the reasoning still applies if the above
+fails:**
 
 - If the app **also** blips, the recycle is firmware, cannot be prevented, and
   masking it (below) is the whole of the available fix.
