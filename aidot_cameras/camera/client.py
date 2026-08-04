@@ -867,6 +867,8 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         self.latest_jpeg: Optional[bytes] = None
         self._streaming_active: bool = False
         self._stream_session: Optional[Any] = None
+        # Last resolution asked for, re-sent when a session starts.
+        self._desired_quality: Optional[str] = None
         self._stream_task: Optional["asyncio.Task[None]"] = None
         self._stream_mqtt_drain: Optional["asyncio.Future"] = None
         self._last_frame_time: float = 0.0
@@ -3354,6 +3356,8 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
 
             self._fast_attempt_override = None
             self._stream_session = session
+            # A remembered resolution is only deliverable once a session exists.
+            self._apply_pending_resolution()
             # Don't block solely on wait_done(): the SDES ffmpeg reads RTP over a
             # UDP socket with no input timeout, so when a battery camera tears the
             # session down (~49-72s) ffmpeg keeps waiting on dead sockets forever
@@ -3564,6 +3568,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 continue
 
             self._stream_session = session
+            self._apply_pending_resolution()
             try:
                 while self._streaming_active:
                     await asyncio.sleep(5.0)

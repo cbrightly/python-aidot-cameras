@@ -144,6 +144,13 @@ class _CameraControlsMixin:
         mirroring the official app's HD/SD toggle.  Rides the active stream
         session (SETSTREAMCTRL=800), so the camera must be streaming.
 
+        The choice is REMEMBERED and re-sent whenever a session next starts.
+        Without that it was simply dropped when nothing was streaming - and
+        since a camera is idle far more often than not, the usual outcome of
+        changing this was nothing at all, while the caller was told the setting
+        had been applied. Nothing else re-sent it, so "it will apply on the next
+        session" was not true of any code path.
+
         Source: f0.java g3() -> X2(800, SetStreamCtrlReq.parseContent(0, quality)).
         Payload <IB3x> = channel(0) + quality byte + 3 reserved.
         """
@@ -151,14 +158,37 @@ class _CameraControlsMixin:
         if q is None:
             _LOGGER.error("async_set_resolution: unknown quality %r", quality)
             return False
+        self._desired_quality = quality.lower()
         payload = struct.pack("<IB3x", 0, q)
         session = self._stream_session
         if session is None:
-            _LOGGER.warning("async_set_resolution: no active stream session")
-            return False
+            _LOGGER.info(
+                "resolution %s remembered; the camera is not streaming, so it "
+                "will be applied when a session next starts", quality)
+            return True
         ok = session._avio_cmd(SETSTREAMCTRL_CMD, payload)
         _LOGGER.debug(
             "set resolution %s (quality=%d) -> %s",
             quality, q, "sent" if ok else "no channel yet",
         )
         return ok
+
+    def _apply_pending_resolution(self) -> None:
+        """Re-send the remembered resolution now that a session exists.
+
+        Called when a stream session becomes active. Best-effort and silent on
+        failure: a stream that is up matters more than a quality preference, so
+        this must never be able to disturb it.
+        """
+        quality = getattr(self, "_desired_quality", None)
+        if not quality:
+            return
+        q = _STREAM_QUALITY.get(quality)
+        session = self._stream_session
+        if q is None or session is None:
+            return
+        try:
+            if session._avio_cmd(SETSTREAMCTRL_CMD, struct.pack("<IB3x", 0, q)):
+                _LOGGER.debug("re-applied remembered resolution %s", quality)
+        except Exception:
+            _LOGGER.debug("could not re-apply resolution %s", quality, exc_info=True)

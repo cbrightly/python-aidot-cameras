@@ -4,6 +4,21 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.15.2]
+
+### Fixed
+- **Changing a camera's resolution usually did nothing.** The setting is
+  delivered over the live streaming session, so it could only ever arrive while
+  the camera happened to be streaming. At any other time it was discarded, and
+  nothing re-sent it. Since a camera is idle far more often than it is being
+  watched, the ordinary result of changing this setting was no change at all -
+  while the caller was told it had been applied.
+
+  The choice is now remembered and applied when a session next starts. Changing
+  it while the camera is streaming behaves as before, taking effect at once.
+  Re-applying is best-effort and cannot disturb a stream that is already
+  running: a picture matters more than a quality preference.
+
 ## [0.15.1]
 
 ### Fixed
