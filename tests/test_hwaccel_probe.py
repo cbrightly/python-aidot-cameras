@@ -266,7 +266,7 @@ def test_software_is_not_timed_when_no_hardware_qualifies(monkeypatch):
 
     def _try(cand, sample):
         tried.append(tuple(cand))
-        return None                      # nothing decodes
+        return                           # nothing decodes here
 
     monkeypatch.setattr(hwaccel, "_try_decoder", _try)
     assert hwaccel.probe_decoder("h264") == []
