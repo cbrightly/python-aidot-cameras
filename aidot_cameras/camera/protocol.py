@@ -583,6 +583,26 @@ def _sprop_cache_path(devid: str) -> str:
     return os.path.join(_SPROP_DIR, f"{safe}.sprop")
 
 
+def _sprop_unstable_path(devid: str) -> str:
+    """Marker file: this camera does NOT keep its parameter sets stable."""
+    return _sprop_cache_path(devid) + ".unstable"
+
+
+def _sprop_is_unstable(devid: str) -> bool:
+    """True once this camera has been seen to change its parameter sets.
+
+    Injecting a cached ``sprop-parameter-sets`` is only safe while the camera
+    keeps sending the SAME sets.  An A001064 was measured changing its
+    ``seq_parameter_set_id`` between sessions (cache held id 0, the stream then
+    referenced id 3), and out-of-band parameter sets that name the wrong id are
+    far worse than none: ffmpeg initialises its decoder from them, every slice
+    then references an id the decoder does not have, and the whole session
+    decodes nothing - "sps_id 3 out of range", "non-existing PPS 0 referenced",
+    "no frame!".  A MISSING set only costs the wait for the next in-band IDR.
+    """
+    return os.path.exists(_sprop_unstable_path(devid))
+
+
 def _load_sprop(devid: str) -> "Optional[str]":
     """Cached ``sprop-parameter-sets`` for ``devid`` (captured from a prior
     stream), or None.  Fail-safe: any error -> None (SDP omits sprop = today's
@@ -596,8 +616,33 @@ def _load_sprop(devid: str) -> "Optional[str]":
 
 
 def _save_sprop(devid: str, sprop: str) -> None:
-    """Persist the ``sprop-parameter-sets`` string for ``devid`` (best-effort)."""
+    """Persist the ``sprop-parameter-sets`` string for ``devid`` (best-effort).
+
+    If a DIFFERENT value was already cached, this camera does not keep its
+    parameter sets stable: mark it and drop the cache, so nothing is injected
+    for it again (see _sprop_is_unstable).  The caller only reaches here from
+    in-band capture, so such a camera demonstrably sends its sets in-band and
+    loses nothing by the injection being skipped.
+    """
+    if _sprop_is_unstable(devid):
+        return          # already known unstable; nothing to cache for this camera
     try:
+        prev = _load_sprop(devid)
+        if prev is not None and prev != sprop:
+            _LOGGER.warning(
+                "camera %s: in-band parameter sets differ from the cached ones - "
+                "this camera changes them between sessions, so out-of-band "
+                "injection is now disabled for it (a stale set decodes nothing)",
+                devid,
+            )
+            try:
+                os.makedirs(_SPROP_DIR, exist_ok=True)
+                with open(_sprop_unstable_path(devid), "w") as fh:
+                    fh.write("parameter sets changed between sessions\n")
+                os.remove(_sprop_cache_path(devid))
+            except OSError:
+                pass
+            return
         os.makedirs(_SPROP_DIR, exist_ok=True)
         tmp = _sprop_cache_path(devid) + ".tmp"
         with open(tmp, "w") as fh:
@@ -616,6 +661,8 @@ def _inject_sprop(sdp: str, devid: str) -> str:
     in-band SPS loss).  No-op if nothing is cached yet or sprop is already
     present.  Applied at every ffmpeg-input SDP write so both the serve path and
     the snapshot/file path benefit."""
+    if _sprop_is_unstable(devid):
+        return sdp
     sprop = _load_sprop(devid)
     if not sprop or "sprop-parameter-sets=" in sdp:
         return sdp
