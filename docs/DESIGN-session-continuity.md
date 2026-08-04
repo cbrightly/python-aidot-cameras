@@ -1,8 +1,18 @@
 # Design: surviving a camera that ends its own streaming session
 
-Status: proposed, not built, and **demoted to a fallback**. See the Phase 0
-result below - the premise this was written on turns out to be wrong in the way
-that matters most.
+Status: proposed, not built, and **largely superseded**. Both Phase 0
+measurements came back against it:
+
+- the vendor app does not show the interruption at all, so the recycle is not
+  firmware-inevitable and preventing it beats masking it;
+- an already-open view already survives a recycle unaided, so the specific harm
+  this document set out to prevent does not occur.
+
+What remains real is the *duration* of the stalls - about 56% of a five minute
+viewing had no picture. Keep this document for its architectural notes, which
+are still accurate, but do not build the stitching described below on the
+strength of the original argument. It was aimed at a failure that does not
+happen.
 
 ## The problem, stated precisely
 
@@ -41,11 +51,29 @@ exits because we terminate it. Nothing about the transport requires the teardown
 Both are cheap. Neither justifies writing code until it is done, and the second
 could change the design entirely.
 
-**0a. Does an open view actually die today?** Predicted yes, from the reasoning
-above, but predicted is not measured. Attach a viewer, hold it across a recycle,
-and record whether it recovers on its own. This sizes the problem: if viewers
-somehow survive already, the remaining cost is only the ~20s window for *new*
-views and this design is not worth building.
+**0a. RESULT: an open view does NOT die. It stalls and recovers by itself.**
+Measured over a 300 second hold on the affected camera: 2634 frames delivered,
+eleven stalls, ten of which recovered unaided - including gaps of 17, 28 and 49
+seconds. Only the last was still stalled when the window ended.
+
+**This refutes the premise this document was written on.** The reasoning above -
+that terminating ffmpeg drops the publish, drops go2rtc's publisher, and takes
+every attached viewer with it - is wrong about the outcome. Something downstream
+re-establishes: the viewer's session survives the camera's session ending. The
+code path reads as though it should be fatal and empirically is not, which is
+exactly why this had to be measured rather than reasoned about.
+
+**So the problem is not survival, it is duration.** Roughly 167 of those 300
+seconds had no picture - about 56% of the window - in stalls ranging from 1 to 57
+seconds. A viewer is not losing the stream; they are watching a frozen picture
+for long stretches. That is a different fix: shorten the gap, not preserve the
+session.
+
+(!) The publisher sampling in that run is not evidence of anything: it polled
+go2rtc on port 1984 (the AlexxIT instance) while Home Assistant's WebRTC path
+serves from the bundled instance, so it reported `pub=NO` throughout a viewing
+that was plainly delivering frames. Point it at the instance actually serving
+before using it to attribute a stall.
 
 **0b. RESULT: the official application does NOT blip.** Reported from real use:
 the camera "has been behaving just fine in the app" across ordinary viewing, with
