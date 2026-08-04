@@ -4,6 +4,27 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.15.0b2] - pre-release
+
+### Fixed
+- **A camera could show a permanent black picture while its stream was
+  perfectly healthy.** The decoder is initialised from parameter sets cached
+  from an earlier session, which is only safe while the camera keeps sending the
+  same ones. One model does not: the cache described one set while the live
+  stream had moved to another, so the decoder was initialised from a description
+  that no longer matched and could not decode a single frame for the entire
+  session.
+
+  This was hard to recognise because nothing else looked wrong. The camera was
+  connected, the stream was flowing at around 2 Mbps, and eleven megabytes
+  arrived during a viewing that produced no picture at all.
+
+  A camera whose parameter sets are seen to change is now remembered, and the
+  cached copy is neither kept nor used for it again. Cameras that keep their
+  parameter sets steady are unaffected. Nothing is lost by the change: the cache
+  is only ever filled in from what the camera itself sends, so a camera it stops
+  applying to is one that demonstrably sends what the decoder needs anyway.
+
 ## [0.15.0b1] - pre-release
 
 This is a PRE-RELEASE. Live validation on real cameras passed for all three
