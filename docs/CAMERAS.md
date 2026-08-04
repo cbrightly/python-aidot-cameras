@@ -330,6 +330,51 @@ the bandwidth-heavy media therefore stays on the LAN.
 - **Connect is per-attempt probabilistic** for DTLS cameras; rely on retries (the
   high-port nomination fix substantially raises the per-attempt rate).
 
+## Choosing a video decoder
+
+Only one place in this library decodes video: the drain that keeps ffmpeg
+consuming SRTP while proving the stream is usable. Serving, publishing and
+recording are all `-c copy` and decode nothing, so a decoder choice cannot help
+them and is not applied there.
+
+The drain decodes deliberately, and that must not be "optimised" away. Decoding
+is what distinguishes media arriving from media that can be turned into
+pictures. A copy-only check demuxes perfectly happily while every frame is
+undecodable, which is exactly how one camera looked healthy for two days while
+showing a black picture.
+
+`camera/hwaccel.py` picks the decoder by proving candidates rather than reading
+a list. `ffmpeg -decoders` reports what the binary was compiled with, not what
+the machine can run: a Raspberry Pi 4 advertises `h264_cuvid` with no Nvidia
+hardware present, and advertises `h264_v4l2m2m` while failing to open it even
+with `/dev/video10` present. Two forms are tried, and they are not
+interchangeable:
+
+    ["-c:v", "<name>"]        a named decoder, e.g. h264_v4l2m2m
+    ["-hwaccel", "<method>"]  an acceleration method, e.g. videotoolbox
+
+VideoToolbox and VAAPI expose no decoder at all - ffmpeg lists both as
+*encoders* - so naming them with `-c:v` can never work. Each form is looked up
+in the list that describes it. Both are input options and must precede `-i`;
+after `-i`, ffmpeg reads `-c:v` as an encoder.
+
+A candidate must produce frames, not merely exit cleanly, or a decoder that
+consumes the stream and emits nothing would qualify - the black-picture failure
+again.
+
+Hardware is not assumed faster. On an Apple M1, VideoToolbox decodes H.264 about
+three times slower than software, measured through the same `-f null` pipeline
+used in production. Candidates are ranked by measured time, so software wins
+where it deserves to.
+
+Cost is kept off the hot paths. `warm_decoder_cache()` probes on a daemon thread
+and is idempotent; `cached_decoder()` is the event-loop-safe reader and returns
+None for "not measured yet", which simply means ffmpeg chooses as it always did.
+Candidates the machine plainly cannot host are ruled out by a device check
+before anything is spawned, and if none survive, no sample is even encoded -
+that case answers in about three milliseconds. Only H.264 is measured, because
+only H.264 is ingested.
+
 ## Advanced tuning environment variables
 
 These finer-grained knobs are read by the camera client but rarely need changing
