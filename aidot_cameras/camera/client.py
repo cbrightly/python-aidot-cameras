@@ -374,7 +374,7 @@ def _build_sdes_serve_cmd(
     sdes_audio: bool = False,
     audio_gain_db: float = -8.0,
     push_video_only: bool = False,
-    video_decoder: Optional[str] = None,
+    video_decoder: Optional[list] = None,
 ) -> list:
     """Build the ffmpeg argv for the SDES bridge serve.
 
@@ -450,14 +450,15 @@ def _build_sdes_serve_cmd(
         dest_args = [*time_args, "-f", "null", "/dev/null"]
 
     # Decoder selection applies to the ``-f null`` drain alone - it is the only
-    # destination that decodes; every other one is ``-c copy``.  It must sit
-    # BEFORE ``-i`` (after ``-i``, ``-c:v`` names an encoder instead) and is
-    # omitted unless the caller resolved one, in which case ffmpeg chooses as
-    # it always did.  Keep the decode: it is what proves frames are not merely
+    # destination that decodes; every other one is ``-c copy``.  The caller
+    # passes ready-made input arguments, either ``["-hwaccel", m]`` or
+    # ``["-c:v", name]``, and they must sit BEFORE ``-i``: after ``-i`` ffmpeg
+    # reads ``-c:v`` as an ENCODER, and ``-hwaccel`` is an input option that has
+    # no meaning there at all.  Empty or None means ffmpeg chooses, as always.  Keep the decode: it is what proves frames are not merely
     # arriving but decodable, which is what catches a parameter-set mismatch
     # that otherwise presents as a permanently black picture.
     decode_args = (
-        ["-c:v", video_decoder]
+        list(video_decoder)
         if video_decoder and not rtsp_push_url and not output_path
         else []
     )

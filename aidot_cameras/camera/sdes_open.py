@@ -4391,8 +4391,9 @@ class _SdesOpenMixin:
         _push_video_only = _is_push and _keep_a is None
         # Only the -f null drain decodes; the rest are -c copy, so this is the
         # one place a decoder choice can pay.  Read the cache only - probing
-        # shells out for ~10s on a cold host and would stall the event loop for
-        # every camera; None just means "let ffmpeg choose", as before.
+        # shells out for several seconds on a cold host and would stall the
+        # event loop for every camera; None just means "let ffmpeg choose", as
+        # before, and an empty list is a real "software decoding" answer.
         from .hwaccel import cached_decoder  # lazy: keep import cost off setup
         _video_decoder = (
             cached_decoder("h264" if _keep_v == 96 else "hevc")

@@ -8,10 +8,15 @@ directory") even with the kernel device present and the user in the ``video``
 group. Selecting a decoder from that list would not accelerate decoding, it would
 stop decoding working at all.
 
-So every candidate is PROVEN before it is offered: a tiny clip is generated and
-decoded with that decoder, and only a clean exit qualifies it. The winner is the
-fastest qualifying candidate, which is a hardware decoder when one genuinely
-works and the software decoder otherwise.
+So every candidate is PROVEN before it is offered: a clip at the resolution the
+cameras actually send is generated and decoded with it, and only a clean run
+that produces frames qualifies. The winner is the fastest qualifying candidate,
+which is a hardware path when one genuinely works and software otherwise.
+
+Nor is hardware automatically faster. Measured on an Apple M1, VideoToolbox
+decodes H.264 about three times SLOWER than software, in the same pipeline
+production runs. Ranking by measured time rather than by preference is what
+keeps that from becoming a regression sold as an optimisation.
 
 Probing costs a second or two per codec, so the verdict is cached on disk. The
 cache key includes the ffmpeg build identity, so upgrading ffmpeg re-probes
@@ -37,32 +42,55 @@ from .protocol import _SPROP_DIR  # reuse the same per-user cache root
 
 _LOGGER = logging.getLogger(__name__)
 
-# Candidates per codec, best-effort first. Software last so it always qualifies.
+# Ways to decode, best first; the empty list is plain software and always works.
+#
+# There are TWO forms and they are not interchangeable:
+#
+#   ["-c:v", "<name>"]      a named decoder, e.g. h264_v4l2m2m on a Pi
+#   ["-hwaccel", "<method>"] an acceleration method, e.g. videotoolbox on macOS
+#
+# Getting this wrong silently costs the whole feature. VideoToolbox and VAAPI
+# expose no decoder at all - ffmpeg lists h264_videotoolbox and h264_vaapi as
+# ENCODERS - so naming them with -c:v can never work, and every macOS and VAAPI
+# machine would fall back to software while genuinely having hardware decoding
+# available through -hwaccel. Verified on an Apple M1 (videotoolbox appears in
+# -hwaccels, nowhere in -decoders) and on a Pi 4 (same for vaapi).
+#
+# Both forms go before -i. Ordering is only a starting preference; whichever
+# proves fastest wins, and anything that cannot decode is dropped.
 _CANDIDATES = {
     "h264": [
-        "h264_v4l2m2m",     # Raspberry Pi 4 / many ARM SoCs
-        "h264_rkmpp",       # Rockchip
-        "h264_qsv",         # Intel QuickSync
-        "h264_cuvid",       # Nvidia
-        "h264_vaapi",       # generic Linux VA-API
-        "h264_videotoolbox",  # macOS
-        "h264",             # software (always works)
+        ["-hwaccel", "videotoolbox"],   # macOS / Apple silicon
+        ["-hwaccel", "vaapi"],          # generic Linux (Intel/AMD)
+        ["-c:v", "h264_v4l2m2m"],       # Raspberry Pi 4 / many ARM SoCs
+        ["-c:v", "h264_rkmpp"],         # Rockchip
+        ["-c:v", "h264_qsv"],           # Intel QuickSync
+        ["-c:v", "h264_cuvid"],         # Nvidia
+        [],                             # software
     ],
     "hevc": [
-        "hevc_v4l2m2m",
-        "hevc_rkmpp",
-        "hevc_qsv",
-        "hevc_cuvid",
-        "hevc_vaapi",
-        "hevc_videotoolbox",
-        "hevc",
+        ["-hwaccel", "videotoolbox"],
+        ["-hwaccel", "vaapi"],
+        ["-c:v", "hevc_v4l2m2m"],
+        ["-c:v", "hevc_rkmpp"],
+        ["-c:v", "hevc_qsv"],
+        ["-c:v", "hevc_cuvid"],
+        [],
     ],
 }
 
-_ENV_OVERRIDE = "AIDOT_VIDEO_DECODER"     # force one decoder, skip probing
-_ENV_DISABLE = "AIDOT_DISABLE_HWACCEL"    # stay on software decoders
+# Bumped when the shape of a cached verdict changes, so an older entry is
+# re-probed instead of being read as something it is not.
+_CACHE_SCHEMA = 2
 
-_PROBE_TIMEOUT_S = 15.0
+# Force a choice and skip probing. Takes either form: a bare name is a decoder
+# ("h264_v4l2m2m"), a "hwaccel:" prefix an acceleration method
+# ("hwaccel:videotoolbox"). The prefix is needed because the two are not
+# interchangeable - VideoToolbox and VAAPI have no decoder to name.
+_ENV_OVERRIDE = "AIDOT_VIDEO_DECODER"
+_ENV_DISABLE = "AIDOT_DISABLE_HWACCEL"    # stay on software decoding
+
+_PROBE_TIMEOUT_S = 40.0
 _cache_mem: dict = {}
 _warm_thread: Optional["threading.Thread"] = None
 _warm_lock = threading.Lock()
@@ -132,36 +160,68 @@ def _save_cache(data: dict) -> None:
 
 
 _decoders_memo: Optional[set] = None
+_hwaccels_memo: Optional[set] = None
+
+
+def _list_names(flag: str) -> set:
+    try:
+        out = subprocess.run(
+            [_ffmpeg(), "-hide_banner", flag],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+    except Exception:
+        return set()
+    names = set()
+    for ln in out.splitlines():
+        parts = ln.split()
+        if not parts or ln.startswith(" -") or ln.rstrip().endswith(":"):
+            continue
+        # -decoders lines are " V....D name  description"; -hwaccels is one
+        # bare name per line under a heading.
+        names.add(parts[1] if flag == "-decoders" and len(parts) > 1 else parts[0])
+    return names
+
+
+def _available(cand: List[str]) -> bool:
+    """Cheap pre-filter. Never sufficient on its own - a Pi advertises
+    h264_cuvid with no Nvidia hardware present, which is why everything that
+    passes here still has to prove it can decode."""
+    global _decoders_memo, _hwaccels_memo
+    if not cand:
+        return True                      # software
+    if cand[0] == "-c:v":
+        if _decoders_memo is None:
+            _decoders_memo = _list_names("-decoders")
+        return cand[1] in _decoders_memo
+    if _hwaccels_memo is None:
+        _hwaccels_memo = _list_names("-hwaccels")
+    return cand[1] in _hwaccels_memo
 
 
 def _compiled_in(name: str) -> bool:
-    """Cheap pre-filter: is the decoder even in this build? Never sufficient -
-    a Pi advertises h264_cuvid with no Nvidia hardware present."""
-    global _decoders_memo
-    if _decoders_memo is None:
-        try:
-            out = subprocess.run(
-                [_ffmpeg(), "-hide_banner", "-decoders"],
-                capture_output=True, text=True, timeout=10,
-            ).stdout
-        except Exception:
-            out = ""
-        _decoders_memo = {
-            ln.split()[1] for ln in out.splitlines()
-            if len(ln.split()) > 1 and not ln.startswith(" -")
-        }
-    return name in _decoders_memo
+    """Back-compat shim: is this named decoder in the build?"""
+    return _available(["-c:v", name])
+
+
+# The cameras send 1280x720, and the probe clip matches that deliberately.
+# A smaller clip is cheaper but ranks candidates badly: hardware decoding pays a
+# fixed session-setup cost that dominates a tiny job, so a 320x240 clip can make
+# a decoder that wins comfortably on real frames look like a loser. Measured on
+# a Pi 4: 2.75s per candidate at 720p against 1.73s at 320x240 - a fair price
+# for a measurement that reflects the actual workload, and it is paid once per
+# host in the background.
+_SAMPLE = "testsrc=size=1280x720:rate=15:duration=1"
 
 
 def _make_sample(codec: str, path: str) -> bool:
-    """Generate a tiny clip to decode. Encoding is software and that is fine -
+    """Generate a clip to decode. Encoding is software and that is fine -
     it happens once per probe, not per stream."""
     enc = "libx264" if codec == "h264" else "libx265"
     try:
         r = subprocess.run(
             [_ffmpeg(), "-hide_banner", "-loglevel", "error",
-             "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=1",
-             "-c:v", enc, "-preset", "ultrafast", "-g", "5",
+             "-f", "lavfi", "-i", _SAMPLE,
+             "-c:v", enc, "-preset", "ultrafast", "-g", "15",
              "-f", codec, "-y", path],
             capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
         )
@@ -170,75 +230,89 @@ def _make_sample(codec: str, path: str) -> bool:
         return False
 
 
-def _try_decoder(name: str, sample: str) -> Optional[float]:
-    """Decode the sample with ``name``; return seconds taken, or None if it
-    cannot decode. A non-zero exit OR anything on stderr disqualifies it -
-    a decoder that warns its way through is not one to rely on."""
+def _try_decoder(cand: List[str], sample: str) -> Optional[float]:
+    """Decode the sample with ``cand``; seconds taken, or None if it cannot.
+
+    Decodes to rawvideo and requires bytes to come out, not merely a zero exit.
+    A decoder that opens, consumes the input and emits nothing would otherwise
+    look like a pass - and that is precisely the failure that matters here,
+    since it presents downstream as a permanently black picture rather than as
+    an error. A non-zero exit or anything on stderr also disqualifies it: a
+    decoder that warns its way through is not one to rely on.
+    """
     t0 = time.monotonic()
     try:
         r = subprocess.run(
             [_ffmpeg(), "-hide_banner", "-loglevel", "error",
-             "-c:v", name, "-i", sample, "-f", "null", "-"],
-            capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
+             *cand, "-i", sample,
+             "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"],
+            capture_output=True, timeout=_PROBE_TIMEOUT_S,
         )
     except Exception:
         return None
-    if r.returncode != 0 or r.stderr.strip():
+    if r.returncode != 0 or r.stderr.strip() or not r.stdout:
         return None
     return time.monotonic() - t0
 
 
-def probe_decoder(codec: str, force: bool = False) -> str:
-    """Fastest decoder for ``codec`` ("h264" or "hevc") proven to work here.
+def probe_decoder(codec: str, force: bool = False) -> List[str]:
+    """ffmpeg input arguments for the fastest way to decode ``codec`` here.
 
-    Falls back to the software decoder, which is also the answer whenever
-    hardware acceleration is disabled or nothing else qualifies.
+    Returns ``["-hwaccel", m]`` or ``["-c:v", name]`` for a hardware path that
+    was proven to work on this machine, or ``[]`` for plain software decoding -
+    which is also the answer when acceleration is disabled or nothing else
+    qualifies. The result always belongs BEFORE ``-i``.
     """
     codec = codec.lower()
     if codec not in _CANDIDATES:
-        return codec
+        return []
 
     forced = os.environ.get(_ENV_OVERRIDE, "").strip()
     if forced:
-        return forced
+        # Accept either form: a bare name is a decoder, "hwaccel:x" a method.
+        if forced.startswith("hwaccel:"):
+            return ["-hwaccel", forced.split(":", 1)[1]]
+        return ["-c:v", forced]
     if os.environ.get(_ENV_DISABLE, "").strip().lower() in ("1", "true", "yes", "on"):
-        return codec
+        return []
 
-    ident = _ffmpeg_identity()
-    key = f"{codec}:{ident}"
+    key = f"v{_CACHE_SCHEMA}:{codec}:{_ffmpeg_identity()}"
     if not force and key in _cache_mem:
-        return _cache_mem[key]
+        return list(_cache_mem[key])
 
     cache = _load_cache()
-    if not force and isinstance(cache.get(key), str):
-        _cache_mem[key] = cache[key]
-        return cache[key]
+    if not force and isinstance(cache.get(key), list):
+        _cache_mem[key] = list(cache[key])
+        return list(cache[key])
 
     import tempfile
-    winner, best = codec, None
+    winner: List[str] = []
+    best = None
     with tempfile.TemporaryDirectory() as td:
         sample = os.path.join(td, f"probe.{codec}")
         if not _make_sample(codec, sample):
             _LOGGER.debug("decoder probe: could not build a %s sample", codec)
-            return codec
-        for name in _CANDIDATES[codec]:
-            if name != codec and not _compiled_in(name):
+            return []
+        for cand in _CANDIDATES[codec]:
+            if not _available(cand):
                 continue
-            took = _try_decoder(name, sample)
+            took = _try_decoder(cand, sample)
             if took is None:
-                _LOGGER.debug("decoder probe: %s cannot decode here", name)
+                _LOGGER.debug("decoder probe: %s cannot decode %s here",
+                              " ".join(cand) or "software", codec)
                 continue
             if best is None or took < best:
-                winner, best = name, took
+                winner, best = list(cand), took
 
-    if winner != codec:
-        _LOGGER.info(
-            "decoder probe: using %s for %s (%.2fs on the probe clip)",
-            winner, codec, best or 0.0)
+    if winner:
+        _LOGGER.info("decoder probe: using %s for %s (%.2fs on the probe clip)",
+                     " ".join(winner), codec, best or 0.0)
+    else:
+        _LOGGER.debug("decoder probe: software decoding for %s", codec)
     cache[key] = winner
-    _cache_mem[key] = winner
+    _cache_mem[key] = list(winner)
     _save_cache(cache)
-    return winner
+    return list(winner)
 
 
 def warm_decoder_cache(codecs: tuple = ("h264", "hevc")) -> "threading.Thread":
@@ -278,14 +352,17 @@ def warm_decoder_cache(codecs: tuple = ("h264", "hevc")) -> "threading.Thread":
         return _warm_thread
 
 
-def cached_decoder(codec: str) -> Optional[str]:
+def cached_decoder(codec: str) -> Optional[List[str]]:
     """The cached verdict for ``codec``, or None if it has not been probed yet.
 
     Never probes, so it is safe to call from an event loop - probing shells out
-    for about ten seconds on a first run and would stall every other camera.
-    A caller that gets None should simply let ffmpeg choose, which is the
+    for several seconds on a first run and would stall every other camera. A
+    caller that gets None should simply let ffmpeg choose, which is the
     behaviour that existed before any of this; ``warm_decoder_cache()`` fills
     the cache in the background so the answer is normally already there.
+
+    An empty list is a real answer meaning "software decoding", and is
+    deliberately distinct from None.
     """
     codec = codec.lower()
     if codec not in _CANDIDATES:
@@ -293,21 +370,22 @@ def cached_decoder(codec: str) -> Optional[str]:
 
     forced = os.environ.get(_ENV_OVERRIDE, "").strip()
     if forced:
-        return forced
+        if forced.startswith("hwaccel:"):
+            return ["-hwaccel", forced.split(":", 1)[1]]
+        return ["-c:v", forced]
     if os.environ.get(_ENV_DISABLE, "").strip().lower() in ("1", "true", "yes", "on"):
-        return codec
+        return []
 
-    key = f"{codec}:{_ffmpeg_identity()}"
+    key = f"v{_CACHE_SCHEMA}:{codec}:{_ffmpeg_identity()}"
     if key in _cache_mem:
-        return _cache_mem[key]
+        return list(_cache_mem[key])
     val = _load_cache().get(key)
-    if isinstance(val, str):
-        _cache_mem[key] = val
-        return val
+    if isinstance(val, list):
+        _cache_mem[key] = list(val)
+        return list(val)
     return None
 
 
 def decoder_args(codec: str) -> List[str]:
-    """``-c:v <decoder>`` for ``codec``, or [] to let ffmpeg choose."""
-    dec = probe_decoder(codec)
-    return ["-c:v", dec] if dec else []
+    """Input arguments for decoding ``codec``, probing if necessary."""
+    return probe_decoder(codec)

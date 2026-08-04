@@ -4,6 +4,42 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.15.0b4] - pre-release
+
+### Fixed
+- **Hardware decoding was unreachable on Apple machines and on Linux machines
+  using VAAPI**, which between them are most of the desktop installations. The
+  detection added in 0.15.0b3 looked for decoders by name, and on those two
+  platforms there is no decoder to name: ffmpeg lists `h264_videotoolbox` and
+  `h264_vaapi` as *encoders*, and offers the decoding side only as an
+  acceleration method. So those machines quietly fell back to software while
+  having working hardware decoding available. Both forms are now tried, each
+  looked up in the list that actually describes it.
+
+  Found by running the detection on an Apple M1, where the whole candidate list
+  came back empty. It could not have been found on the Raspberry Pi this was
+  first written against, which uses the naming form.
+
+### Changed
+- **The sample used for detection is now the size the cameras actually send.**
+  It was much smaller, which measured the wrong thing: hardware decoding pays a
+  fixed setup cost that dominates a very short job, so a decoder that wins
+  comfortably on real frames could look like a loser. Correcting this changed a
+  real verdict on the M1 tested, where H.265 moved from software to hardware.
+- A candidate must now produce frames to qualify, not merely exit cleanly. A
+  decoder that opens, consumes the stream and emits nothing would otherwise pass
+  the check, and that failure shows up as a permanently black picture rather
+  than as an error, which is the hardest kind to attribute.
+
+### Notes
+- Hardware decoding is not always faster, and is no longer assumed to be. On the
+  Apple M1 tested, VideoToolbox decodes H.264 about three times slower than
+  software, measured in the same pipeline this uses in practice; software is
+  therefore selected there. Candidates are ranked by measured time on the
+  machine itself, so the faster path wins whichever it turns out to be.
+- `AIDOT_VIDEO_DECODER` accepts either form: a bare name for a decoder, or a
+  `hwaccel:` prefix for an acceleration method (`hwaccel:videotoolbox`).
+
 ## [0.15.0b3] - pre-release
 
 ### Added
