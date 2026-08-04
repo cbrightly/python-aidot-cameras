@@ -393,6 +393,14 @@ def warm_decoder_cache(codecs: tuple = ("h264",)) -> "threading.Thread":
             return _warm_thread
 
     def _run() -> None:
+        # Prime the in-memory cache from disk HERE, on this thread, so
+        # cached_decoder() never has to read a file on the event loop.
+        try:
+            for k, v in _load_cache().items():
+                if isinstance(v, list):
+                    _cache_mem.setdefault(k, list(v))
+        except Exception:
+            _LOGGER.debug("decoder cache preload failed", exc_info=True)
         for codec in codecs:
             try:
                 probe_decoder(codec)
@@ -432,13 +440,15 @@ def cached_decoder(codec: str) -> Optional[List[str]]:
     if os.environ.get(_ENV_DISABLE, "").strip().lower() in ("1", "true", "yes", "on"):
         return []
 
+    # MEMORY ONLY. This runs on the event loop, so it must not touch the disk:
+    # Home Assistant detects a blocking open() here and reports it as a
+    # stability problem, correctly. The disk cache is read by
+    # warm_decoder_cache() on its own thread, which populates _cache_mem; a miss
+    # here simply means "not known yet", and the caller lets ffmpeg choose,
+    # which is the behaviour that existed before any of this.
     key = f"v{_CACHE_SCHEMA}:{codec}:{_ffmpeg_identity()}"
     if key in _cache_mem:
         return list(_cache_mem[key])
-    val = _load_cache().get(key)
-    if isinstance(val, list):
-        _cache_mem[key] = list(val)
-        return list(val)
     return None
 
 

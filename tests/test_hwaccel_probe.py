@@ -158,6 +158,18 @@ def test_no_sample_falls_back_to_software(monkeypatch):
     assert hwaccel.probe_decoder("h264", force=True) == []
 
 
+def test_warm_cache_primes_memory_from_disk(monkeypatch):
+    """Since cached_decoder() is memory-only, something has to load the disk
+    cache - and it must be the background thread, not the event loop."""
+    monkeypatch.setattr(hwaccel, "_ffmpeg_identity", lambda: "b")
+    key = f"v{hwaccel._CACHE_SCHEMA}:h264:b"
+    hwaccel._save_cache({key: ["-c:v", "h264_v4l2m2m"]})
+    assert hwaccel.cached_decoder("h264") is None      # not yet in memory
+    monkeypatch.setattr(hwaccel, "probe_decoder", lambda c: [])
+    hwaccel.warm_decoder_cache(("h264",)).join(timeout=30)
+    assert hwaccel.cached_decoder("h264") == ["-c:v", "h264_v4l2m2m"]
+
+
 def test_software_verdict_is_not_confused_with_unprobed(monkeypatch):
     """[] means "software, proven"; None means "not probed yet". Collapsing the
     two would re-probe forever on any host with no hardware decoding."""
@@ -168,7 +180,7 @@ def test_software_verdict_is_not_confused_with_unprobed(monkeypatch):
                         lambda cand, sample: 1.0 if not cand else None)
     assert hwaccel.cached_decoder("h264") is None      # nothing probed yet
     assert hwaccel.probe_decoder("h264") == []         # proven software
-    assert hwaccel.cached_decoder("h264") == []        # remembered, not None
+    assert hwaccel.cached_decoder("h264") == []        # memoised, not None
 
 
 def test_a_stale_schema_entry_is_ignored(monkeypatch):
@@ -176,6 +188,8 @@ def test_a_stale_schema_entry_is_ignored(monkeypatch):
     Reading that back as a verdict would put a string into the ffmpeg argv."""
     monkeypatch.setattr(hwaccel, "_ffmpeg_identity", lambda: "b")
     hwaccel._save_cache({"h264:b": "h264_v4l2m2m"})    # v1-shaped entry
+    monkeypatch.setattr(hwaccel, "probe_decoder", lambda c: [])
+    hwaccel.warm_decoder_cache(("h264",)).join(timeout=30)
     assert hwaccel.cached_decoder("h264") is None
 
 
@@ -231,13 +245,18 @@ def test_no_verdict_leaves_ffmpeg_to_choose():
         sdp_path="/tmp/x.sdp", video_decoder=None)
 
 
-def test_cached_decoder_never_probes(monkeypatch):
-    """It runs on the event loop, so it must not shell out."""
+def test_cached_decoder_touches_neither_disk_nor_subprocess(monkeypatch):
+    """It runs on the event loop, so it must not shell out AND must not read a
+    file. Home Assistant detects a blocking open() on the loop and reports it as
+    a stability problem - it did, on a shipped release. The disk cache is read
+    by warm_decoder_cache() on its own thread instead."""
+    monkeypatch.setattr(hwaccel, "_load_cache",
+                        lambda: pytest.fail("must not read the cache file"))
     monkeypatch.setattr(hwaccel, "_try_decoder",
                         lambda cand, sample: pytest.fail("must not probe"))
     monkeypatch.setattr(hwaccel, "_make_sample",
                         lambda codec, path: pytest.fail("must not probe"))
-    assert hwaccel.cached_decoder("h264") is None  # empty cache, no probing
+    assert hwaccel.cached_decoder("h264") is None  # nothing memoised, no I/O
 
 
 # --------------------------------------------------------------------------- #

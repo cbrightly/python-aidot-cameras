@@ -4,6 +4,23 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.15.1]
+
+### Fixed
+- **Reading the remembered decoder could block the event loop.** Home Assistant
+  detected it and reported it as a stability problem, which it was: the reader
+  is consulted while a camera stream is being set up, and it fell back to
+  reading a file from disk whenever the answer was not already in memory.
+
+  The reader now only ever consults memory. The file is read once, in the
+  background, by the same startup work that measures the decoder in the first
+  place. If an answer is not yet in memory the caller is simply told so and lets
+  ffmpeg choose, which is what happened before any of this existed.
+
+  Affects 0.15.0 only. The effect was a few milliseconds of delay per stream
+  setup rather than anything visible, but it is not something to leave in a
+  release.
+
 ## [0.15.0]
 
 Verified on real cameras before release: every reachable camera on the test
