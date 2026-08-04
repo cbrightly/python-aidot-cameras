@@ -4389,6 +4389,15 @@ class _SdesOpenMixin:
         # gates audio via sdes_audio in _build_sdes_serve_cmd.)
         _is_push = bool(rtsp_push_url) and not rtsp_push_url.startswith("http")
         _push_video_only = _is_push and _keep_a is None
+        # Only the -f null drain decodes; the rest are -c copy, so this is the
+        # one place a decoder choice can pay.  Read the cache only - probing
+        # shells out for ~10s on a cold host and would stall the event loop for
+        # every camera; None just means "let ffmpeg choose", as before.
+        from .hwaccel import cached_decoder  # lazy: keep import cost off setup
+        _video_decoder = (
+            cached_decoder("h264" if _keep_v == 96 else "hevc")
+            if _keep_v is not None else None
+        )
         cmd = _build_sdes_serve_cmd(
             sdp_path=sdp_path,
             rtsp_push_url=rtsp_push_url,
@@ -4397,6 +4406,7 @@ class _SdesOpenMixin:
             sdes_audio=_serve_audio,
             audio_gain_db=self._resolve_sdes_audio_gain_db(),
             push_video_only=_push_video_only,
+            video_decoder=_video_decoder,
         )
         # Audio matters even more than video here.  A multi-PT m-line makes ffmpeg
         # bind the depacketizer to the FIRST payload type and silently discard the

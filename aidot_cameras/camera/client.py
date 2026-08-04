@@ -374,6 +374,7 @@ def _build_sdes_serve_cmd(
     sdes_audio: bool = False,
     audio_gain_db: float = -8.0,
     push_video_only: bool = False,
+    video_decoder: Optional[str] = None,
 ) -> list:
     """Build the ffmpeg argv for the SDES bridge serve.
 
@@ -447,10 +448,24 @@ def _build_sdes_serve_cmd(
         dest_args = ["-c", "copy", *time_args, output_path]
     else:
         dest_args = [*time_args, "-f", "null", "/dev/null"]
+
+    # Decoder selection applies to the ``-f null`` drain alone - it is the only
+    # destination that decodes; every other one is ``-c copy``.  It must sit
+    # BEFORE ``-i`` (after ``-i``, ``-c:v`` names an encoder instead) and is
+    # omitted unless the caller resolved one, in which case ffmpeg chooses as
+    # it always did.  Keep the decode: it is what proves frames are not merely
+    # arriving but decodable, which is what catches a parameter-set mismatch
+    # that otherwise presents as a permanently black picture.
+    decode_args = (
+        ["-c:v", video_decoder]
+        if video_decoder and not rtsp_push_url and not output_path
+        else []
+    )
     return [
         "ffmpeg", "-y",
         "-loglevel", "warning",
         "-protocol_whitelist", "file,rtp,udp,srtp",
+        *decode_args,
         # 2 s analyzeduration: the camera sends SPS+PPS+IDR in the first burst;
         # 15 s consumed nearly all packets during analysis.  PLI re-arms an IDR
         # every 5 s so parameters always re-arrive.

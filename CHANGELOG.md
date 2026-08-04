@@ -4,6 +4,40 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.15.0b3] - pre-release
+
+### Added
+- **The fastest working video decoder is now detected per machine, rather than
+  assumed.** Where a machine has video decoding hardware that genuinely works,
+  it is used; where it does not, nothing changes.
+
+  Detection cannot simply read the list of decoders ffmpeg reports, because that
+  list describes what the program was built with rather than what the machine
+  can do. A Raspberry Pi 4 lists decoders for Nvidia graphics hardware it does
+  not have, and lists one for its own video hardware that fails to start even
+  with the hardware present. Choosing from that list would not speed decoding
+  up, it would stop decoding working.
+
+  So each candidate is required to prove itself: a short clip is produced and
+  decoded with it, and only a clean run qualifies it. The fastest that qualifies
+  is used. On the Raspberry Pi 4 this was tested on, the two decoders that
+  cannot work were correctly rejected.
+
+  Proving a decoder takes around ten seconds per video format the first time, so
+  the result is remembered and reused, and is tied to the ffmpeg program it was
+  measured against - installing a different ffmpeg re-measures rather than
+  trusting an answer about a different program. Reading a remembered result
+  costs about two milliseconds. The measurement runs in the background so it
+  never delays startup, and anything that needs an answer before it finishes
+  simply proceeds as before.
+
+  This affects the checking path, which decodes deliberately in order to prove
+  that frames are not merely arriving but usable. Live viewing and recording
+  pass video through without decoding it and are unchanged by design.
+
+  `AIDOT_VIDEO_DECODER` forces a specific decoder and `AIDOT_DISABLE_HWACCEL`
+  keeps to software decoding, for anyone who needs to override the choice.
+
 ## [0.15.0b2] - pre-release
 
 ### Fixed
