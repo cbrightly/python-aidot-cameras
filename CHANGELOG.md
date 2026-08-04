@@ -4,6 +4,54 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.15.0]
+
+Verified on real cameras before release: every reachable camera on the test
+fleet streamed through Home Assistant's own live view, including the one that
+had been showing a black picture.
+
+### Fixed
+- **A camera could show a permanent black picture while its stream was
+  perfectly healthy.** The decoder is set up from parameter sets remembered
+  from an earlier session, which is only safe while the camera keeps sending
+  the same ones. One model does not, so the decoder was described a stream that
+  no longer matched and decoded nothing for the whole session, while the
+  picture stayed blank and everything else looked fine - the camera connected,
+  the stream flowing at around 2 Mbps, eleven megabytes arriving during a
+  viewing that showed nothing. A camera whose parameter sets are seen to change
+  is now remembered, and the remembered copy is neither kept nor used for it
+  again.
+
+### Added
+- **The fastest working video decoder is now found per machine, rather than
+  assumed**, and used where it genuinely helps.
+
+  It cannot be read off the list of decoders ffmpeg reports: that list says what
+  the program was built with, not what the machine can do. A Raspberry Pi 4
+  lists decoders for graphics hardware it does not have, and one for its own
+  video hardware that fails to start. On Apple machines, and on Linux machines
+  using VAAPI, there is no decoder to name at all - those are listed as encoders
+  and the decoding side is offered only as an acceleration method. Both forms
+  are tried, each looked up in the list that describes it, and every candidate
+  has to decode a sample before it is used.
+
+  Hardware is not assumed to be faster, because it is not always: on an Apple
+  M1, VideoToolbox decodes H.264 about three times slower than software, so
+  software is chosen there. Candidates are ranked by measured time on the
+  machine itself.
+
+  The work runs in the background and never delays startup. It costs a
+  Raspberry Pi 4 about six seconds once, and a machine with no video hardware
+  is answered in about three milliseconds without starting anything.
+
+  `AIDOT_VIDEO_DECODER` forces a choice - a decoder name, or `hwaccel:` and a
+  method. `AIDOT_DISABLE_HWACCEL` keeps to software decoding.
+
+### Notes
+- H.265 ingest is not part of this release. It needs the H.265 parameter sets
+  handled first, and shipping it before that would invite the same blank-picture
+  fault on a less-tested path.
+
 ## [0.15.0b5] - pre-release
 
 ### Changed
