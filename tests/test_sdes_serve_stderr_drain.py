@@ -59,6 +59,35 @@ def test_stderr_none_is_safe() -> None:
     assert _tail(proc) == []
 
 
+def test_every_piped_spawn_installs_the_drain() -> None:
+    """A serve spawned with an un-drained ``stderr=PIPE`` is the outage itself.
+
+    There are two serve-spawn sites (cold open and key-restart), and the bug
+    shipped because a pipe was opened at one of them with nothing reading it.
+    A third site, or a drain call deleted from an existing one, reintroduces it
+    exactly - and no behavioural test can see the difference until ffmpeg has
+    written ~64KB, which is far past where a unit test looks. Pin the source.
+    """
+    import inspect
+
+    from aidot_cameras.camera import sdes_open
+
+    src = inspect.getsource(sdes_open).splitlines()
+    spawns = [i for i, line in enumerate(src) if "stderr=subprocess.PIPE" in line]
+    assert spawns, (
+        "no piped spawn found in sdes_open - if the serve stopped using a pipe "
+        "this guard is obsolete, but do not delete it without checking why"
+    )
+    for line_no in spawns:
+        window = "\n".join(src[line_no:line_no + 12])
+        assert "_start_serve_stderr_drain(" in window, (
+            f"{sdes_open.__name__}:{line_no + 1} spawns with stderr=PIPE and "
+            "nothing drains it within the next few lines. An un-drained pipe "
+            "fills at ~64KB and blocks ffmpeg on its next write, which kills "
+            "the RTSP publisher and 404s every viewer"
+        )
+
+
 class _TornDownProc:
     """A serve proc whose stderr pipe the drainer already emptied.
 
