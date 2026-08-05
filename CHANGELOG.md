@@ -19,6 +19,12 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   alive and go2rtc keeps a live producer; if ffmpeg ever does exit non-zero the
   reason is now logged instead of discarded. Confirmed live: the publisher stays
   connected and streams H.264 + PCMA into go2rtc.
+- **Teardown no longer loses ffmpeg's stderr.** Draining the pipe leaves it at
+  EOF, so the read in `SdesSession.stop()` returns nothing and the teardown
+  diagnostic - which is where a genuine mid-stream ffmpeg error surfaces - would
+  have gone silent. It now falls back to the drained tail, and still demotes the
+  expected "camera sent no media" shape to debug rather than warning on every
+  retry.
 
 ## [0.15.2]
 
