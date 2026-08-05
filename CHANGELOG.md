@@ -4,6 +4,28 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.15.3]
+
+### Fixed
+- **SDES push live view recovered (e.g. the A001064 PTZ): every viewer got a
+  `DESCRIBE ... 404`.** The SDES serve ffmpeg was spawned with `stderr=PIPE` that
+  nothing ever read; ffmpeg logs H.264 warnings continuously on some streams, so it
+  filled the ~64KB pipe buffer and then blocked on its next stderr write, which
+  killed the RTSP-push publisher (exit 255). go2rtc was left holding only the inert
+  placeholder source, so every consumer got `DESCRIBE ... 404` and the go2rtc
+  provider surfaced a hard stream error. The serve's stderr is now drained
+  continuously into a bounded tail on a daemon thread (ending at EOF when ffmpeg
+  exits) and logged on a non-teardown exit. With the pipe drained the publisher stays
+  alive and go2rtc keeps a live producer; if ffmpeg ever does exit non-zero the
+  reason is now logged instead of discarded. Confirmed live: the publisher stays
+  connected and streams H.264 + PCMA into go2rtc.
+- **Teardown no longer loses ffmpeg's stderr.** Draining the pipe leaves it at
+  EOF, so the read in `SdesSession.stop()` returns nothing and the teardown
+  diagnostic - which is where a genuine mid-stream ffmpeg error surfaces - would
+  have gone silent. It now falls back to the drained tail, and still demotes the
+  expected "camera sent no media" shape to debug rather than warning on every
+  retry.
+
 ## [0.15.2]
 
 ### Fixed

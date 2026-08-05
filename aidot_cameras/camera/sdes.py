@@ -177,6 +177,24 @@ class SdesSession:
             "audio_pt": self._first_audio_pt[0],
         }
 
+    def _drained_stderr_tail(self) -> bytes:
+        """The stderr the drain thread already consumed, for the teardown log.
+
+        The serve's stderr is drained continuously on a daemon thread (see
+        ``_start_serve_stderr_drain`` in sdes_open) so an un-drained pipe cannot
+        fill and stall ffmpeg.  A consequence is that by teardown the pipe is at
+        EOF and stop()'s ``stderr.read()`` returns nothing, which would leave
+        ``_log_ffmpeg_stderr`` with an empty buffer and silently drop the
+        teardown diagnostic - the mid-stream ffmpeg error it exists to surface
+        included.  Fall back to the bounded tail the drainer kept.  Returns
+        ``b""`` when there is no drainer or it captured nothing, which
+        ``_log_ffmpeg_stderr`` already treats as "nothing to say".
+        """
+        tail = getattr(self._proc, "_aidot_stderr_tail", None)
+        if not tail:
+            return b""
+        return "\n".join(tail).encode("utf-8", "replace")
+
     def _log_ffmpeg_stderr(self, stderr_bytes: bytes) -> None:
         """Log ffmpeg's captured stderr at a level that matches what happened.
 
@@ -285,7 +303,7 @@ class SdesSession:
                 self._proc.stderr.close()
             except Exception:
                 _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
-        self._log_ffmpeg_stderr(stderr_bytes)
+        self._log_ffmpeg_stderr(stderr_bytes or self._drained_stderr_tail())
         import os
         try:
             os.unlink(self._sdp_path)
