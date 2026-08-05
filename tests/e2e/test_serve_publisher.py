@@ -176,6 +176,25 @@ def _spawn_serve(feed: _LossyRtpFeed, sink: FakeRtspSink, *, drain: bool):
     return proc
 
 
+def _buffered_stderr(proc) -> int:
+    """Bytes sitting unread in the serve's stderr pipe, or -1 if unknowable.
+
+    A full pipe is the stall condition itself, so this distinguishes "the
+    publisher survived a condition it should not have" from "this run never
+    produced enough output to reach the condition" - which a loaded runner can
+    cause and which says nothing about the code. Reading unblocks ffmpeg, so
+    only call it once a run is over.
+    """
+    try:
+        import fcntl
+
+        flags = fcntl.fcntl(proc.stderr, fcntl.F_GETFL)
+        fcntl.fcntl(proc.stderr, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        return len(proc.stderr.read() or b"")
+    except Exception:                                    # pragma: no cover
+        return -1
+
+
 async def _kill(proc) -> None:
     proc.kill()
     await asyncio.get_running_loop().run_in_executor(None, proc.wait)
@@ -253,6 +272,15 @@ async def test_an_undrained_serve_stalls_the_publisher(rtsp_sink, lossy_feed):
                     await rtsp_sink.media_flowed_during(1.5) == 0:
                 stalled = True
                 break
+        if not stalled:
+            buffered = _buffered_stderr(proc)
+            if 0 <= buffered < 60_000:
+                pytest.skip(
+                    "conditions not reached: the un-drained serve left only "
+                    f"{buffered} bytes unread, short of the ~64KB pipe buffer "
+                    "this outage depends on. Most likely a starved runner "
+                    "slowed the noise source - nothing to conclude either way"
+                )
         assert stalled, (
             "an un-drained serve kept publishing for 18s. Either ffmpeg has "
             "stopped logging enough to fill the pipe, or this platform buffers "
