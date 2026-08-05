@@ -38,6 +38,38 @@ from .protocol import (
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _start_serve_stderr_drain(proc, *, maxlines: int = 40) -> None:
+    """Drain a serve ffmpeg's stderr continuously into a bounded tail on the proc.
+
+    The serve is spawned with ``stderr=PIPE`` but the bridge loop only polls the
+    process and reads its RTP sockets - it never reads stderr.  An un-drained
+    ``PIPE`` fills its ~64KB kernel buffer and then blocks ffmpeg on its next
+    stderr write, stalling the serve; and when ffmpeg exits non-zero the reason is
+    otherwise lost (the RTSP-push ANNOUNCE error in particular).  Read it on a
+    daemon thread that ends at EOF when the process exits, keeping the last
+    ``maxlines`` lines on ``proc._aidot_stderr_tail`` for the exit logger.
+    """
+    import collections
+    import threading
+
+    tail = collections.deque(maxlen=maxlines)
+    proc._aidot_stderr_tail = tail
+    if proc.stderr is None:
+        return
+
+    def _drain() -> None:
+        try:
+            for _line in iter(proc.stderr.readline, b""):
+                tail.append(_line.decode("utf-8", "replace").rstrip())
+        except Exception:
+            pass
+
+    threading.Thread(
+        target=_drain, daemon=True, name="aidot-sdes-serve-stderr"
+    ).start()
+
+
 # Strong references to detached per-session helper tasks, so the event loop
 # cannot garbage-collect one mid-flight.  Entries remove themselves on done.
 _SDES_BACKGROUND_TASKS: set = set()
@@ -2803,6 +2835,15 @@ class _SdesOpenMixin:
                                 _log_br.getLogger(__name__).log(
                                     _br_level, _br_msg, _br_rc
                                 )
+                                if _br_level >= _log_br.WARNING:
+                                    _serr_tail = getattr(
+                                        _br_proc, "_aidot_stderr_tail", None)
+                                    if _serr_tail:
+                                        _log_br.getLogger(__name__).warning(
+                                            "SDES serve ffmpeg stderr (last %d"
+                                            " lines):\n%s", len(_serr_tail),
+                                            "\n".join(_serr_tail),
+                                        )
                             if _bridge_should_break(
                                 _br_rc, _br_teardown_requested
                             ):
@@ -4462,6 +4503,7 @@ class _SdesOpenMixin:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
             )
+            _start_serve_stderr_drain(proc)
             _proc_holder[0] = proc
             _cl(_reap, proc)   # kill ffmpeg if the open is cancelled before hand-off
         except FileNotFoundError:
@@ -4745,6 +4787,7 @@ class _SdesOpenMixin:
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.PIPE,
                         )
+                        _start_serve_stderr_drain(proc)
                         # Point the shared holder at the live proc immediately.
                         # The bridge thread polls _proc_holder[0]; if it still
                         # sees the terminated old proc it logs "stream ended",
