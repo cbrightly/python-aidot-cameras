@@ -4552,16 +4552,36 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             # AIDOT_DTLS_RETRY_GATE_S and added dead latency after healthy drops.)
 
     async def _spawn_dtls_serve_ffmpeg(self, serve_url: Optional[str], stdin_fd: int):
-        """Launch ffmpeg to serve the mux thread's MPEG-TS (read from ``stdin_fd``)
-        on an HTTP-listen socket go2rtc pulls.  The stream is already cleanly
-        timestamped + AAC-muxed (with the gain/limiter applied) by PyAV, so
-        ffmpeg just copies and serves - re-encoding here dropped the live audio
-        (mpegts PMT-timing on the real-time pipe).  Returns the process, or None."""
+        """Launch ffmpeg to serve the mux thread's MPEG-TS (read from ``stdin_fd``).
+
+        The stream is already cleanly timestamped + AAC-muxed (with the
+        gain/limiter applied) by PyAV, so ffmpeg just copies and serves -
+        re-encoding here dropped the live audio (mpegts PMT-timing on the
+        real-time pipe).  Returns the process, or None.
+
+        Two destinations:
+
+        - ``serve_url == "-"`` -> STDOUT model: write MPEG-TS to this process's
+          own stdout (``pipe:1``), so a parent that spawned us - go2rtc's
+          ``exec:`` source - consumes the camera directly and owns the process
+          lifecycle (spawn on first viewer, kill on idle).  No listen port and
+          no cold-start relay, which is the DTLS analogue of the SDES
+          ``{output}`` RTSP push.  Logging already goes to stderr, so stdout
+          carries nothing but media.
+        - anything else -> HTTP-listen model, unchanged: serve on a ``-listen``
+          socket that go2rtc pulls.
+        """
         if not serve_url:
             return None
         if _ffmpeg_path() is None:
             _LOGGER.error("DTLS serve: %s", _FFMPEG_MISSING_MSG)
             return None
+        if serve_url == "-":
+            out_args = ["-f", "mpegts", "pipe:1"]
+            out_target = 1               # this process's real stdout
+        else:
+            out_args = ["-f", "mpegts", "-listen", "1", serve_url]
+            out_target = asyncio.subprocess.DEVNULL
         cmd = [
             "ffmpeg", "-y", "-loglevel", "warning",
             # Suppress input-side buffering: the PyAV mux already writes
@@ -4572,13 +4592,13 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             # bursty/choppy audio pattern.  Matches the SDES serve's approach.
             "-fflags", "+nobuffer",
             "-i", "pipe:0",
-            "-c", "copy", "-f", "mpegts", "-listen", "1", serve_url,
+            "-c", "copy", *out_args,
         ]
         try:
             return await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=stdin_fd,
-                stdout=asyncio.subprocess.DEVNULL,
+                stdout=out_target,
                 stderr=asyncio.subprocess.DEVNULL,
             )
         except FileNotFoundError:

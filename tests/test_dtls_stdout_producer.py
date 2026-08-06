@@ -1,0 +1,77 @@
+"""The DTLS serve can write MPEG-TS to stdout for a go2rtc ``exec:`` source.
+
+SDES cameras get a lazily-managed producer for free: go2rtc spawns the process
+per ``{output}``, the library RTSP-pushes into it, and go2rtc kills it when the
+last viewer leaves. DTLS had no equivalent - it could only serve on an
+``-listen`` socket, which has to be bound before anyone asks for it and stays
+bound afterwards.
+
+``-`` closes that gap: ffmpeg writes to this process's own stdout, so whoever
+spawned us is the consumer and owns the lifecycle. Everything else about the
+serve is untouched, which is what these tests pin - a regression here would
+either break every existing HTTP-listen serve or silently send media to
+/dev/null.
+"""
+import asyncio
+import types
+
+import aidot_cameras.camera.client as client_mod
+from aidot_cameras.camera.client import CameraMixin
+
+
+def _spawn(monkeypatch, serve_url):
+    """Run the real _spawn_dtls_serve_ffmpeg, capturing what it would exec."""
+    seen = {}
+
+    async def _fake_exec(*cmd, stdin=None, stdout=None, stderr=None):
+        seen["cmd"] = list(cmd)
+        seen["stdout"] = stdout
+        seen["stdin"] = stdin
+        return object()
+
+    monkeypatch.setattr(client_mod, "_ffmpeg_path", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+    obj = types.SimpleNamespace()
+    fn = CameraMixin._spawn_dtls_serve_ffmpeg.__get__(obj)
+    proc = asyncio.run(fn(serve_url, 7))
+    return proc, seen
+
+
+def test_stdout_mode_writes_mpegts_to_this_process_stdout(monkeypatch):
+    proc, seen = _spawn(monkeypatch, "-")
+    assert proc is not None
+    assert seen["cmd"][-3:] == ["-f", "mpegts", "pipe:1"], seen["cmd"]
+    # fd 1, not DEVNULL: the media has to reach the parent that spawned us.
+    assert seen["stdout"] == 1, (
+        "stdout mode must hand ffmpeg this process's real stdout - anything "
+        "else sends the camera to nowhere while looking healthy"
+    )
+    assert "-listen" not in seen["cmd"]
+
+
+def test_http_listen_mode_is_unchanged(monkeypatch):
+    url = "http://127.0.0.1:18981/cam.ts"
+    proc, seen = _spawn(monkeypatch, url)
+    assert proc is not None
+    assert seen["cmd"][-4:] == ["-f", "mpegts", "-listen", "1", url][-4:]
+    assert seen["cmd"][-1] == url
+    assert "-listen" in seen["cmd"]
+    assert seen["stdout"] == asyncio.subprocess.DEVNULL, (
+        "the listen serve must keep stdout discarded; writing media to our own "
+        "stdout there would corrupt whatever the parent reads"
+    )
+
+
+def test_both_modes_still_copy_from_the_mux_pipe(monkeypatch):
+    for url in ("-", "http://127.0.0.1:1/x.ts"):
+        _proc, seen = _spawn(monkeypatch, url)
+        cmd = seen["cmd"]
+        assert cmd[:2] == ["ffmpeg", "-y"]
+        assert "-i" in cmd and cmd[cmd.index("-i") + 1] == "pipe:0"
+        assert "-c" in cmd and cmd[cmd.index("-c") + 1] == "copy"
+        assert seen["stdin"] == 7
+
+
+def test_no_serve_url_still_returns_none(monkeypatch):
+    proc, seen = _spawn(monkeypatch, "")
+    assert proc is None and "cmd" not in seen

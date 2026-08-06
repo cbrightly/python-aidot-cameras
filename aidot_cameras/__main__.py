@@ -45,9 +45,18 @@ go2rtc.yaml example (SDES camera - native RTSP push, video + audio):
     streams:
       frontdoor: exec:aidot-go2rtc 8d2521ea... {output}
 
-For a DTLS camera (A000088) there is no RTSP-push path; pass an http serve URL
-(http://127.0.0.1:PORT/name.ts) and add it to go2rtc as an http-mpegts source -
-but this process must stay running to keep that serve bound.
+A DTLS camera (A000088) has no RTSP-push path, but a stdout producer works the
+same lazy way. Pass ``-`` as the output and this process writes MPEG-TS (video
+plus AAC audio) to stdout, which go2rtc's exec: source reads directly:
+
+    streams:
+      driveway: exec:aidot-go2rtc 7c89a5c1... -
+
+go2rtc then owns the lifecycle - spawn on the first viewer, kill when idle -
+exactly as it does with ``{output}`` for an SDES camera. An
+``http://host:port/name.ts`` output still works too: the older HTTP-listen
+serve, useful for a persistent consumer that is not go2rtc, but that process
+must stay running to keep the serve bound.
 """
 
 from __future__ import annotations
@@ -225,7 +234,21 @@ async def cmd_stream(dev_id: str, output_url: str) -> int:
 
         dc = client.get_device_client(device)
 
-        if not output_url.startswith("rtsp") and dc.is_sdes_camera:
+        if output_url == "-":
+            # Stdout producer: MPEG-TS on this process's stdout, for a go2rtc
+            # exec: source.  SDES cameras already have {output} (RTSP push) and
+            # do not take this path, so say which one to use rather than
+            # producing an empty stream.
+            if dc.is_sdes_camera:
+                sys.exit(
+                    f"{dev_id} is an SDES camera - '-' (stdout) is the DTLS "
+                    "producer path. Use {output} (RTSP push) instead."
+                )
+            _LOGGER.info(
+                "DTLS stdout mode: writing MPEG-TS (video + AAC audio) to "
+                "stdout for a go2rtc exec: consumer."
+            )
+        elif not output_url.startswith("rtsp") and dc.is_sdes_camera:
             _LOGGER.warning(
                 "SDES camera but output %r is not rtsp:// - the library will "
                 "HTTP-serve (video only by default) instead of pushing audio+video. "
@@ -235,7 +258,8 @@ async def cmd_stream(dev_id: str, output_url: str) -> int:
         if output_url.startswith("rtsp") and not dc.is_sdes_camera:
             sys.exit(
                 f"{dev_id} is a DTLS camera - the library has no RTSP-push path "
-                "for it. Use an http://host:port/name.ts serve URL instead."
+                "for it. Use '-' (stdout, for a go2rtc exec: source) or an "
+                "http://host:port/name.ts serve URL instead."
             )
 
         await dc.async_login()
