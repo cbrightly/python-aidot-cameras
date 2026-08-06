@@ -4,6 +4,30 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.15.7]
+
+### Fixed
+- **Every synthesized RTP packet carried sequence number 1.** The TUTK-to-RTP
+  bridge (the `_PLAIN_RTP_MODELS` path - A001064 PTZ, A001513) keeps its
+  sequence counters on the bridge function and initialised them behind
+  `if not hasattr(_bridge_fn, '_tutk_seq')`. Nothing ever assigned `_tutk_seq`;
+  the counters are `_tutk_seq_a` and `_tutk_seq_v`. So the guard was true on
+  every packet, both counters reset to 0 each time, and every packet went out
+  with sequence 1. ffmpeg reads a constant sequence as a stream of
+  discontinuities and logs `RTP: missed N packets` for loss that never happened,
+  then backs its input queue up behind the reordering it thinks it sees.
+
+  Found by elimination: kernel counters showed **zero drops on every socket in
+  the path** - our media sockets, and ffmpeg's own loopback receive sockets at
+  5% queue depth - during a window where ffmpeg reported 21 new missed-packet
+  lines. Nothing was being lost, so the gaps had to be in the numbering we
+  write.
+
+  Tests pin the guard against the counters it initialises, that both counters
+  advance from their own previous value, and - generally - that no
+  `hasattr(_bridge_fn, ...)` guard names an attribute nothing assigns, since
+  that idiom fails silently for the whole class of state kept this way.
+
 ## [0.15.6]
 
 ### Fixed
