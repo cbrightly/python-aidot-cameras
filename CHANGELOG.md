@@ -4,6 +4,18 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.15.5]
+
+### Added
+- **`aidot-go2rtc <id> -` streams a DTLS camera to stdout**, so go2rtc's
+  `exec:` source can own the process the way it already does for SDES cameras
+  (`{output}`): spawn on the first viewer, kill when idle. Previously a DTLS
+  camera could only be served on an `-listen` socket, which has to be bound
+  before anyone asks for it and stays bound afterwards. The HTTP-listen serve
+  is unchanged and still available. This removes the need for the private
+  go2rtc add-on to carry a source patch against the library, which had drifted
+  against a package path that no longer exists.
+
 ## [0.15.4]
 
 ### Fixed
