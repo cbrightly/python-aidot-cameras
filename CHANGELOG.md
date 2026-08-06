@@ -4,6 +4,31 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.15.6]
+
+### Fixed
+- **Camera media sockets ran on the OS default receive buffer.** Nothing in the
+  package ever set `SO_RCVBUF`, so the sockets that receive a camera's RTP used
+  the kernel default - 208 KB on Home Assistant OS. An A001064 keyframe is
+  146-190 KB and arrives as one burst of about 130 packets, so a single keyframe
+  nearly fills that buffer; any delay in the reader (the GIL while another
+  camera's bridge runs, an ffmpeg write blocking) lets the kernel drop the tail
+  of the burst. ffmpeg reports that as `RTP: missed N packets` and backs its
+  input queue up behind it. Both media sockets now ask for 4 MB before they
+  bind, and log what the kernel granted.
+
+  Evidence: the reference Home Assistant box carried **44.3 million
+  `RcvbufErrors` against 161 million datagrams received** over four days, and
+  `InErrors` equalled `RcvbufErrors` exactly - every UDP receive error on it was
+  a buffer overflow, not a checksum or port error. Measured against load: a
+  settled single camera dropped **0 packets in 90 s**, while the 120 s after an
+  integration reload - every camera opening at once - dropped **176**. That is
+  the same window in which sessions were dying after ~75 s, and it is why the
+  same camera can run for over an hour untouched and then recycle every minute
+  after a restart. Host-wide counters cannot attribute those drops to one
+  socket, so this is not proof for any single stall; the mechanism, the timing
+  and the `RTP: missed N packets` in the serve's own stderr all agree.
+
 ## [0.15.5]
 
 ### Added
