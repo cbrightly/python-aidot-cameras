@@ -38,7 +38,12 @@ class SdesSession:
         teardown_requested=None,
         first_video_pt=None,
         first_audio_pt=None,
+        device_id=None,
     ) -> None:
+        # Which camera this session belongs to, for logging only.  Optional so
+        # an existing caller that does not pass it still works; the logs then
+        # read "?" exactly as they did before.
+        self._device_id  = device_id or "?"
         self._proc       = proc
         self._sdp_path   = sdp_path
         self._outgoing_q = outgoing_q
@@ -215,7 +220,8 @@ class SdesSession:
             or "Could not find codec parameters" in text
         )
         (_LOGGER.debug if expected_no_media else _LOGGER.warning)(
-            "ffmpeg SDES stderr:\n%s", text
+            "camera %s: ffmpeg SDES stderr:\n%s",
+            getattr(self, "_device_id", "?"), text
         )
 
     @staticmethod

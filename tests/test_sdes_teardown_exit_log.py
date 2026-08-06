@@ -61,6 +61,27 @@ def test_reap_sets_teardown_flag_before_kill():
     )
 
 
+def test_the_bridge_exit_log_names_the_camera():
+    """The exit line is emitted from a closure the tests cannot call directly.
+
+    It is still worth pinning: this account streams several SDES cameras at
+    once, and while these lines carried no device id a burst of exits could not
+    be attributed to a camera at all. Assert the format string takes one, and
+    that the session is handed the id it needs for its own stderr log.
+    """
+    src = inspect.getsource(sdes_open)
+    assert "camera %s: SDES bridge: ffmpeg exited" in src, (
+        "the bridge exit log lost its device id - a burst of these is "
+        "unattributable without it"
+    )
+    assert "camera %s: SDES serve ffmpeg stderr" in src
+    start = src.index("return SdesSession(")
+    assert "device_id=" in src[start:start + 800], (
+        "SdesSession is constructed without a device_id, so its own stderr "
+        "log cannot name the camera"
+    )
+
+
 class _FakeProc:
     def __init__(self):
         self._alive = True
