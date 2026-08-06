@@ -32,7 +32,7 @@ jobs:
 
   # Releases must be validated against REAL cameras before they reach PyPI.
   #
-  # The cameras run in a PRIVATE repo (python-aidot-cameras-dev), because Actions
+  # The cameras run in a PRIVATE repo (python-aidot-cameras-ci), because Actions
   # logs on a public repository are world-readable and a live run prints the
   # camera inventory - names, models, device ids. That run reports back here as a
   # commit status on the sha it validated, and this job just reads it.
@@ -120,7 +120,7 @@ jobs:
                 # the private run is still spinning up, then stop guessing.
                 if [ $SECONDS -ge $grace_deadline ]; then
                   echo "::error::no live-validation run ever claimed ${SHA} (no status after $((GRACE/60))m)."
-                  echo "::error::Trigger live-validate.yml in python-aidot-cameras-dev with lib_ref=${SHA}, then re-run this job."
+                  echo "::error::Trigger live-validate.yml in python-aidot-cameras-ci with lib_ref=${SHA}, then re-run this job."
                   echo "::error::If the LAN runner is offline, bring it up first, or use the documented override in docs/CI-RUNNER.md."
                   exit 1
                 fi

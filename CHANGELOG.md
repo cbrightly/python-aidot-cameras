@@ -4,6 +4,23 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.15.4]
+
+### Fixed
+- **SDES serve and bridge log lines now name the camera.** They carried no
+  device id, so on an account running several SDES cameras at once a burst of
+  `ffmpeg exited with code 255` lines could not be attributed to any one of
+  them - during a live investigation that ambiguity produced a wrong reading of
+  which camera was failing. `SdesSession` now takes the id (optional, so an
+  existing caller keeps working) and both the bridge exit line and the serve
+  stderr tail carry it.
+
+### Changed
+- Docs and the publish workflow's error text named `python-aidot-cameras-dev`
+  as the home of the live-validation runner. It lives in
+  `python-aidot-cameras-ci`; a release blocked by the gate pointed at a repo
+  with no such workflow.
+
 ## [0.15.3]
 
 ### Fixed

@@ -13,7 +13,7 @@ cameras**. This document is the setup and the operating procedure for that.
 | Trigger | Workflow | Where it runs | Blocks a release? |
 | --- | --- | --- | --- |
 | every push / PR | `ci.yml` (`test`, `e2e`, ...) | GitHub-hosted | via `publish.yml`'s `test` job |
-| release published, manual dispatch | `live-validate.yml` **in the private repo** `python-aidot-cameras-dev` | **self-hosted, on the camera LAN** | yes, via a commit status |
+| release published, manual dispatch | `live-validate.yml` **in the private repo** `python-aidot-cameras-ci` | **self-hosted, on the camera LAN** | yes, via a commit status |
 | release published | `publish.yml` -> `live-gate` -> `publish` | GitHub-hosted | **this is the gate** |
 
 `live-gate` does not touch the cameras. It waits (up to 40 min) for a **commit
@@ -28,10 +28,10 @@ the camera inventory - names, models, device ids - and uploads a report artifact
 containing them. Camera names in this fleet are room names, so they describe the
 layout of a house. Six such runs had to be deleted before this moved.
 
-The library stays public; only the runs moved to `python-aidot-cameras-dev`.
+The library stays public; only the runs moved to `python-aidot-cameras-ci`.
 
 ```
-PRIVATE python-aidot-cameras-dev          PUBLIC python-aidot-cameras
+PRIVATE python-aidot-cameras-ci          PUBLIC python-aidot-cameras
   live-validate.yml
     checks out the public library at
     the sha under test, runs its
@@ -105,7 +105,7 @@ A full-fleet run takes roughly 15-25 minutes, most of it cooldown.
 1. **Pick a host on the camera LAN** that is always on - the HA box, a NAS, a
    Pi. It needs Python 3.11+, `ffmpeg`, and `git`.
 
-2. **Register it against the PRIVATE repo** `python-aidot-cameras-dev` -
+2. **Register it against the PRIVATE repo** `python-aidot-cameras-ci` -
    Settings -> Actions -> Runners -> New self-hosted runner - and give it the
    labels:
 

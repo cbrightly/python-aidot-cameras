@@ -2825,23 +2825,31 @@ class _SdesOpenMixin:
                                 _br_level = _classify_ffmpeg_exit(
                                     _br_rc, _br_teardown_requested
                                 )
+                                # Name the camera.  These lines used to carry no
+                                # device id at all, and this account runs several
+                                # SDES cameras at once, so a burst of exits could
+                                # not be attributed to one of them without extra
+                                # tooling - which sent a live investigation down
+                                # the wrong path once already.
+                                _br_dev = getattr(self, "device_id", "?")
                                 _br_msg = (
-                                    "SDES bridge: ffmpeg exited with code %d"
-                                    " - stopped by teardown"
+                                    "camera %s: SDES bridge: ffmpeg exited with"
+                                    " code %d - stopped by teardown"
                                     if _br_level < _log_br.WARNING else
-                                    "SDES bridge: ffmpeg exited with code %d"
-                                    " - stream ended"
+                                    "camera %s: SDES bridge: ffmpeg exited with"
+                                    " code %d - stream ended"
                                 )
                                 _log_br.getLogger(__name__).log(
-                                    _br_level, _br_msg, _br_rc
+                                    _br_level, _br_msg, _br_dev, _br_rc
                                 )
                                 if _br_level >= _log_br.WARNING:
                                     _serr_tail = getattr(
                                         _br_proc, "_aidot_stderr_tail", None)
                                     if _serr_tail:
                                         _log_br.getLogger(__name__).warning(
-                                            "SDES serve ffmpeg stderr (last %d"
-                                            " lines):\n%s", len(_serr_tail),
+                                            "camera %s: SDES serve ffmpeg stderr"
+                                            " (last %d lines):\n%s", _br_dev,
+                                            len(_serr_tail),
                                             "\n".join(_serr_tail),
                                         )
                             if _bridge_should_break(
@@ -4909,4 +4917,5 @@ class _SdesOpenMixin:
             teardown_requested=_teardown_holder,
             first_video_pt=_first_video_pt,
             first_audio_pt=_first_audio_pt,
+            device_id=getattr(self, "device_id", None),
         )

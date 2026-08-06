@@ -12,8 +12,10 @@ import types
 from aidot_cameras.camera.sdes import SdesSession
 
 
-def _log_fn(last_media):
-    obj = types.SimpleNamespace(last_media_monotonic=last_media)
+def _log_fn(last_media, device_id="dev-abc"):
+    obj = types.SimpleNamespace(
+        last_media_monotonic=last_media, _device_id=device_id
+    )
     return SdesSession._log_ffmpeg_stderr.__get__(obj)
 
 
@@ -29,6 +31,18 @@ def test_no_media_expected_shape_logs_debug(caplog):
             _log_fn(0.0)(msg)
         recs = _stderr_records(caplog)
         assert recs and recs[0].levelno == logging.DEBUG, msg
+
+
+def test_the_log_names_the_camera(caplog):
+    """Several SDES cameras stream at once; an unattributed line is near-useless.
+
+    A burst of these lines with no device id could not be pinned to a camera
+    during a live investigation, which cost real time and one wrong conclusion.
+    """
+    with caplog.at_level(logging.DEBUG, logger="aidot_cameras.camera.sdes"):
+        _log_fn(1.0, device_id="12b144cb12da")(b"Error writing trailer")
+    recs = _stderr_records(caplog)
+    assert recs and "12b144cb12da" in recs[0].getMessage()
 
 
 def test_no_media_unexpected_error_still_warns(caplog):
