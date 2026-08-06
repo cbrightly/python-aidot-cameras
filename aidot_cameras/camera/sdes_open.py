@@ -39,6 +39,41 @@ from .protocol import (
 _LOGGER = logging.getLogger(__name__)
 
 
+#: What we ask the kernel for on a media receive socket.  The kernel clamps to
+#: ``net.core.rmem_max`` (4 MB on Home Assistant OS), and doubles what it grants
+#: for bookkeeping, so asking for more than the cap is harmless.
+_MEDIA_RCVBUF_BYTES = 4 * 1024 * 1024
+
+
+def _widen_media_rcvbuf(sock, kind: str, device_id: str = "?") -> int:
+    """Ask for a large receive buffer on a camera media socket.
+
+    These sockets ran on the OS default, which is 208 KB on Home Assistant OS.
+    A keyframe from an A001064 is 146-190 KB and arrives as one burst of ~130
+    packets, so a single keyframe nearly fills that buffer: any delay in the
+    reader - the GIL while another camera's bridge runs, an ffmpeg write
+    blocking - and the kernel drops the tail of the burst.  ffmpeg then reports
+    ``RTP: missed N packets`` and backs up its input queue.
+
+    Returns the buffer the kernel actually granted (it reports double what it
+    reserves), or 0 if the option could not be set.  Best-effort by design: a
+    platform that refuses the option must not stop a camera from streaming.
+    """
+    try:
+        import socket as _sock_rb
+
+        sock.setsockopt(_sock_rb.SOL_SOCKET, _sock_rb.SO_RCVBUF,
+                        _MEDIA_RCVBUF_BYTES)
+        got = sock.getsockopt(_sock_rb.SOL_SOCKET, _sock_rb.SO_RCVBUF)
+    except Exception:
+        _LOGGER.debug("camera %s: could not widen the %s receive buffer",
+                      device_id, kind, exc_info=True)
+        return 0
+    _LOGGER.debug("camera %s: %s receive buffer %d bytes (asked %d)",
+                  device_id, kind, got, _MEDIA_RCVBUF_BYTES)
+    return got
+
+
 def _start_serve_stderr_drain(proc, *, maxlines: int = 40) -> None:
     """Drain a serve ffmpeg's stderr continuously into a bounded tail on the proc.
 
@@ -529,11 +564,13 @@ class _SdesOpenMixin:
         import socket as _socket
 
         _audio_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        _widen_media_rcvbuf(_audio_sock, "audio", getattr(self, "device_id", "?"))
         _audio_sock.bind(("0.0.0.0", 0))
         audio_port = _audio_sock.getsockname()[1]
         _cl(_audio_sock.close)   # also unblocks the bridge thread's recv on cleanup
 
         _video_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        _widen_media_rcvbuf(_video_sock, "video", getattr(self, "device_id", "?"))
         _video_sock.bind(("0.0.0.0", 0))
         video_port = _video_sock.getsockname()[1]
         _cl(_video_sock.close)
