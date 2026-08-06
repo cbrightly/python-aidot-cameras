@@ -3637,7 +3637,16 @@ class _SdesOpenMixin:
                                 if not _sdes_probe_received:
                                     _sdes_probe_received = True
                                     _last_hb_ts = _time_br.time()  # HB fires in 10s
-                                if not hasattr(_bridge_fn, '_tutk_seq'):
+                                # Guard on a counter that is actually assigned.
+                                # This used to test `_tutk_seq`, a name nothing
+                                # ever set, so hasattr was False on EVERY packet
+                                # and both counters were reset to 0 each time -
+                                # every synthesized packet went out with
+                                # sequence number 1.  ffmpeg reads a constant
+                                # sequence as a stream of discontinuities and
+                                # reports `RTP: missed N packets` for loss that
+                                # never happened.
+                                if not hasattr(_bridge_fn, '_tutk_seq_v'):
                                     _bridge_fn._tutk_seq_a = 0
                                     _bridge_fn._tutk_seq_v = 0
                                 if _tk_audio:
