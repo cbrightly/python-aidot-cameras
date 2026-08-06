@@ -365,6 +365,18 @@ def _is_self_referential_source(source: str, stream_name: str) -> bool:
     return path == stream_name
 
 
+#: Packets the serve's demuxer may hold while it waits for a gap to fill.  A
+#: keyframe on an A001064 is 146-190 KB - roughly 130 packets - so anything
+#: smaller than a few hundred cannot ride out a burst that arrives out of order.
+#: Env-overridable because the right value depends on the link, not on us.
+_SERVE_REORDER_QUEUE = int(os.environ.get("AIDOT_SERVE_REORDER_QUEUE", "500"))
+
+#: How long (microseconds) the demuxer waits for a missing packet before moving
+#: on.  Bounded on purpose: waiting forever turns loss into a stall, which is the
+#: failure this is meant to prevent.
+_SERVE_MAX_DELAY_US = int(os.environ.get("AIDOT_SERVE_MAX_DELAY_US", "500000"))
+
+
 def _build_sdes_serve_cmd(
     *,
     sdp_path: str,
@@ -470,9 +482,26 @@ def _build_sdes_serve_cmd(
         # 2 s analyzeduration: the camera sends SPS+PPS+IDR in the first burst;
         # 15 s consumed nearly all packets during analysis.  PLI re-arms an IDR
         # every 5 s so parameters always re-arrive.
-        "-fflags", "+nobuffer+genpts",
+        #
+        # ``discardcorrupt`` is the loss half of this: both ends of this path are
+        # wireless (the camera, and typically the host), so RTP arrives with real
+        # gaps.  Measured on the reference install: `RTP: missed N packets` with
+        # ZERO drops on every socket in the path, which means the packets were
+        # lost before they ever reached the box.  Without this ffmpeg passes the
+        # damaged frame downstream and then backs its input queue up behind the
+        # reordering it thinks it needs - "max delay reached. need to consume
+        # packet" - and the serve eventually dies, taking every viewer with it.
+        # A brief artefact is a far better outcome than a dropped stream.
+        "-fflags", "+nobuffer+genpts+discardcorrupt",
         "-analyzeduration", "2000000",
         "-probesize", "500000",
+        # Reordering headroom.  The default (-1) leaves the demuxer with almost
+        # none, so a burst that arrives out of order reads as loss.  A keyframe
+        # here is 146-190 KB - about 130 packets - so the queue has to be able to
+        # hold more than one of them, and max_delay bounds how long it will wait
+        # before giving up on a gap rather than stalling the pipeline.
+        "-reorder_queue_size", str(_SERVE_REORDER_QUEUE),
+        "-max_delay", str(_SERVE_MAX_DELAY_US),
         "-i", sdp_path,
         *dest_args,
     ]

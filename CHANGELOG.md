@@ -4,6 +4,31 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.15.8]
+
+### Fixed
+- **A lossy link no longer kills the stream.** Both ends of this path are
+  usually wireless - the camera, and the Home Assistant host - so RTP genuinely
+  arrives with gaps. Measured on the reference install: ffmpeg logged
+  `RTP: missed N packets` while every socket in the path showed **zero** kernel
+  drops, so those packets were lost before they ever reached the box and no
+  amount of buffering here can recover them. What the serve controls is what
+  happens next, and it was handling loss badly: with no reordering headroom a
+  burst that arrived out of order read as loss, and with no bounded `max_delay`
+  the demuxer stalled waiting for it ("max delay reached. need to consume
+  packet") until its input queue backed up and the serve died - dropping every
+  attached viewer over packets that were never coming.
+
+  The serve now runs with `+discardcorrupt`, a 500-packet reorder queue (a
+  keyframe here is 146-190 KB, about 130 packets, so the queue has to clear more
+  than one) and a 500 ms `max_delay` so a gap is given up on rather than stalling
+  the pipeline. Both are env-overridable - `AIDOT_SERVE_REORDER_QUEUE`,
+  `AIDOT_SERVE_MAX_DELAY_US` - because the right values depend on the link. The
+  low-latency flags are unchanged, and the e2e tier exercises the real serve
+  command against a feed with every second packet dropped.
+
+  This does not stop the loss. It stops the loss from ending the session.
+
 ## [0.15.7]
 
 ### Fixed
