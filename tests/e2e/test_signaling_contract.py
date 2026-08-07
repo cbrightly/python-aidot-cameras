@@ -188,6 +188,48 @@ async def test_client_publishes_the_expected_topic_sequence(
         cam.stop()
 
 
+async def test_sdes_webrtc_req_carries_power_type_and_p2p_cache(
+    e2e_device_client, fake_broker
+):
+    """The SDES offer must carry powerType / p2pCache, as the app's does.
+
+    The reference client puts both on the webrtcReq payload - the same object it
+    puts encOffer and liveMqtt on - reading them from the IPC device info
+    (`LDSMQTTClient.sendSdpOffer`, smali :2967-2969, put at :3017/:3022).  Its
+    no-device-info fallback puts the literal strings "1" / "0", so the wire type
+    is a STRING, not an int.
+
+    Our DTLS webrtcReq has carried both for a long time (webrtc_open.py, citing
+    docs/official_camera_network_calls.md section 5.2); the SDES offer was simply
+    never brought in line.  A001513 is a battery camera, so powerType is 2.
+
+    This does NOT claim to fix the no-media failures - our offer bytes are
+    identical between cycles that stream and cycles that do not, so a field
+    missing from every cycle cannot explain the difference.  It closes a parity
+    gap, nothing more.
+    """
+    dc = e2e_device_client("A001513")
+    cam = FakeCameraSignaling(
+        fake_broker.url, device_id=dc.device_id, user_id=dc.user_id
+    )
+    await cam.start()
+    try:
+        await _open_expecting_failure(dc, timeout=20.0)
+        offers = [b for _t, b in cam.received if b.get("method") == "webrtcReq"]
+        assert offers, f"no webrtcReq seen; saw {cam.methods_received()}"
+        inner = offers[0].get("payload") or {}
+        assert inner.get("powerType") == "2", (
+            f"battery camera must offer powerType '2' as a string; "
+            f"got {inner.get('powerType')!r}"
+        )
+        assert inner.get("p2pCache") == "2", (
+            f"webrtcReq must carry p2pCache as a string; "
+            f"got {inner.get('p2pCache')!r}"
+        )
+    finally:
+        cam.stop()
+
+
 async def test_concurrent_opens_do_not_deadlock(e2e_device_client, fake_broker):
     """Two concurrent opens of the same camera must both settle, not hang.
 
