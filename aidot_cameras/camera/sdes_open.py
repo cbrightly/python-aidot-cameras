@@ -24,6 +24,8 @@ from .constants import (
 from .models import VideoFrame  # noqa: F401 - forward-ref annotation
 from .sdes import SdesSession
 from .protocol import (
+    AvioResponseRouter,
+    _avio_cmd_id,
     _build_sprop,
     _build_stun_binding_success_response,
     _extract_param_sets_from_rtp,
@@ -2756,6 +2758,12 @@ class _SdesOpenMixin:
         # once the SCTP DataChannel is established.  SdesSession reads it via
         # _cmd_chan[0] to dispatch PTZ / IOCtrl commands from the main thread.
         _cmd_chan: list = [None]
+        # The other direction: matches the camera's AVIO replies to the commands
+        # that asked for them.  Created here, not in SdesSession, because the
+        # bridge thread starts dispatching into it before the session object
+        # exists; the session is handed the same instance so both sides share
+        # one registry.
+        _avio_responses = AvioResponseRouter()
         # Proc holder: set to the ffmpeg Popen object after launch so the
         # bridge thread can poll for exit without a NameError race.
         _proc_holder: list = [None]
@@ -3878,7 +3886,32 @@ class _SdesOpenMixin:
                                     # f0.java:3224): the camera can send it unsolicited, and
                                     # without it here an 804 frame is misrouted as PCMA noise.
                                     _avio_cmds = {5376, 5377, 5156, 5157, 768, 769, 511, 804}
-                                    if _fwd_cmd not in _avio_cmds:
+                                    _is_ctrl = _fwd_cmd in _avio_cmds
+                                    if _is_ctrl:
+                                        _avio_responses.dispatch(_pd_plain)
+                                        _LOGGER.debug(
+                                            "camera %s: AVIO inbound cmd=%d len=%d",
+                                            getattr(self, "device_id", "?"),
+                                            _fwd_cmd, len(_pd_plain),
+                                        )
+                                    elif _avio_responses.dispatch(_pd_plain):
+                                        # It answered a question we had
+                                        # outstanding, so it is control traffic
+                                        # whatever the list above says - the
+                                        # list was built from frames we happened
+                                        # to observe, not from a spec.  Logged
+                                        # at INFO because finding an id that is
+                                        # missing from that set is exactly the
+                                        # thing we cannot learn any other way.
+                                        _is_ctrl = True
+                                        _LOGGER.info(
+                                            "camera %s: AVIO inbound cmd=%d answered a"
+                                            " pending request and is NOT in the known"
+                                            " control-frame set",
+                                            getattr(self, "device_id", "?"),
+                                            _avio_cmd_id(_pd_plain),
+                                        )
+                                    if not _is_ctrl:
                                         try:
                                             _lo_a.sendto(
                                                 _rtp_hdr + _pd_plain,
@@ -4964,4 +4997,5 @@ class _SdesOpenMixin:
             first_video_pt=_first_video_pt,
             first_audio_pt=_first_audio_pt,
             device_id=getattr(self, "device_id", None),
+            responses=_avio_responses,
         )

@@ -10,11 +10,12 @@ import logging
 from typing import Callable, Optional
 
 from .constants import SDES_TALK_PUMP_IDLE_TICK
+from .protocol import AvioRequestMixin, AvioResponseRouter
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class SdesSession:
+class SdesSession(AvioRequestMixin):
     """Active SDES-SRTP stream session managed by an ffmpeg subprocess.
 
     Obtain via ``await DeviceClient.async_open_webrtc_stream(...)`` when the
@@ -39,6 +40,7 @@ class SdesSession:
         first_video_pt=None,
         first_audio_pt=None,
         device_id=None,
+        responses=None,
     ) -> None:
         # Which camera this session belongs to, for logging only.  Optional so
         # an existing caller that does not pass it still works; the logs then
@@ -80,6 +82,11 @@ class SdesSession:
         # Mutable one-element list shared with the bridge thread.  Bridge sets
         # [0] to a callable(cmd, payload) once the SCTP channel is up.
         self._cmd_chan   = cmd_chan if cmd_chan is not None else [None]
+        # Matches inbound AVIO replies to the commands that asked for them.
+        # Created here, not lazily: the bridge thread dispatches into it.
+        self._avio_responses = (
+            responses if responses is not None else AvioResponseRouter()
+        )
         # Shared talk state (dict) for outbound two-way audio, or None when the
         # session was not opened talk-capable (offer stayed recvonly).  Populated
         # by the bridge (camera audio addr) and by async_start_talk (provider).

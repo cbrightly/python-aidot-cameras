@@ -22,7 +22,7 @@ import struct
 
 import pytest
 
-from aidot_cameras.camera.protocol import parse_avio_response
+from aidot_cameras.camera.protocol import _avio_cmd_id, parse_avio_response
 
 _HDR = "<IIqII4x"
 
@@ -73,3 +73,19 @@ def test_trailing_bytes_beyond_the_declared_length_are_not_returned():
 @pytest.mark.parametrize("blob", [b"", b"\x00" * 4, b"not an avio frame at all"])
 def test_junk_is_rejected_rather_than_guessed_at(blob):
     assert parse_avio_response(blob) is None
+
+
+def test_the_command_id_can_be_read_for_a_log_line():
+    """The transports log what the camera sent them.
+
+    Which command ids this firmware actually emits is not documented anywhere we
+    trust - the one list we have was built from frames observed on the wire - so
+    the receive-path log has to name them or the next question costs another
+    live session to answer.
+    """
+    assert _avio_cmd_id(_frame(801, b"\x00\x05")) == 801
+
+
+def test_a_frame_that_is_not_avio_has_no_command_id():
+    """PCMA audio shares the channel; it must read as "not a control frame"."""
+    assert _avio_cmd_id(b"not an avio frame at all") is None

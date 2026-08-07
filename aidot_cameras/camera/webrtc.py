@@ -12,10 +12,12 @@ import struct
 import time
 from typing import Any, Callable, Optional
 
+from .protocol import AvioRequestMixin, AvioResponseRouter
+
 _LOGGER = logging.getLogger(__name__)
 
 
-class WebRTCSession:
+class WebRTCSession(AvioRequestMixin):
     """Active WebRTC live-stream session for a liveType=2 AiDot camera.
 
     Obtain via ``await DeviceClient.async_open_webrtc_stream(...)``.
@@ -34,6 +36,7 @@ class WebRTCSession:
         audio_sender: Any = None,
         talk_track: Any = None,
         talk_holder: Any = None,
+        responses: Any = None,
     ) -> None:
         self._pc          = pc
         self._outgoing_q  = outgoing_q
@@ -41,6 +44,12 @@ class WebRTCSession:
         self._recorder    = recorder
         self._track_tasks = track_tasks
         self._dc          = dc  # RTCDataChannel for AVIO IOCtrl commands
+        # Matches inbound AVIO replies to the commands that asked for them.
+        # Created here, not lazily: the DataChannel message handler can
+        # dispatch from outside this constructor's thread.
+        self._avio_responses = (
+            responses if responses is not None else AvioResponseRouter()
+        )
         # Two-way audio (talk): the sendrecv audio RTCRtpSender, an idle PCMA talk
         # track, and a mutable {"provider": callable|None} holder the track reads from.
         self._audio_sender = audio_sender

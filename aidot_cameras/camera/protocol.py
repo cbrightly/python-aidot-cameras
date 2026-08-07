@@ -2225,6 +2225,10 @@ class _AvioWaiter:
         self._command = command
         self._future  = _cfutures.Future()
 
+    def cancel(self) -> None:
+        """Withdraw the question - used when the command could not be sent."""
+        self._router._forget(self)
+
     async def result(self, timeout: float) -> "Optional[AvioResponse]":
         """The camera's reply, or None if it did not answer within ``timeout``.
 
@@ -2327,3 +2331,75 @@ class AvioResponseRouter:
                 return
             if not queue:
                 self._waiting.pop(waiter._command, None)
+
+
+def _avio_cmd_id(frame: bytes) -> "Optional[int]":
+    """The command id of an AVIO frame, or None if it does not look like one.
+
+    For the receive-path logs.  Which ids this firmware actually sends is not
+    documented anywhere we trust - the list we work from was assembled from
+    frames seen on the wire - so naming them as they arrive is what turns the
+    next question into a log grep instead of another live session.
+    """
+    resp = parse_avio_response(bytes(frame))
+    return None if resp is None else resp.command
+
+
+#: How long a control call waits for the camera before reporting "no reply".
+#: Short on purpose: these run behind Home Assistant service calls, and a
+#: firmware that implements the request but not the response must not be able to
+#: hold up a view while we find that out.
+AVIO_RESPONSE_TIMEOUT_S = 2.0
+
+
+class AvioRequestMixin:
+    """Ask an AVIO command and wait for the camera's reply.
+
+    Mixed into both session types.  ``_avio_cmd`` itself is left exactly as it
+    was - fire-and-forget, synchronous, returns a bool - because every camera on
+    both transports goes through it, for the speaker, the keepalive heartbeat
+    and resolution alike.  Wanting an answer is opt-in and additive.
+
+    A session that mixes this in must create its router in ``__init__``:
+    dispatch arrives from the bridge thread and creating one lazily could race
+    with the event loop and lose the reply to a second router.
+    """
+
+    _avio_responses: "AvioResponseRouter"
+
+    def dispatch_avio_frame(self, frame: bytes) -> bool:
+        """Offer an inbound control frame to whoever is waiting for it.
+
+        Called from the transports' receive paths (the DTLS DataChannel message
+        handler, the SDES bridge thread).  False - not an error - when nothing
+        was waiting for it, which is the common case: the camera sends session
+        notifications and track switches nobody asked for.
+        """
+        return self._avio_responses.dispatch(frame)
+
+    async def async_avio_request(
+        self,
+        cmd: int,
+        payload: bytes = b"",
+        *,
+        response_cmd: int,
+        timeout: float = AVIO_RESPONSE_TIMEOUT_S,
+    ) -> "Optional[AvioResponse]":
+        """Send ``cmd`` and return the camera's ``response_cmd`` reply, or None.
+
+        None means the camera did not answer in time.  That is a real result,
+        not a failure: this firmware may implement a request without a response,
+        and no reply at all points at the channel rather than the firmware.
+        """
+        waiter = self._avio_responses.expect(response_cmd)
+        # Registered BEFORE the send: a camera on the LAN can answer before the
+        # sending call returns, and a reply that arrives with nobody listening
+        # would be reported as silence.
+        try:
+            sent = self._avio_cmd(cmd, payload)
+        except Exception:
+            sent = False
+        if not sent:
+            waiter.cancel()
+            return None
+        return await waiter.result(timeout)
