@@ -11,7 +11,8 @@ no code path did.
 
 import os
 import sys
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -28,8 +29,17 @@ class _Cam(_CameraControlsMixin):
 
 
 def _session():
+    """A session that answers the way an A000088 does.
+
+    `_apply_pending_resolution` still uses the synchronous `_avio_cmd` - it runs
+    off the session-start path where there is nothing to await into - while
+    `async_set_resolution` now asks and reads the camera's ack. Both are stubbed
+    so each test can assert against whichever it exercises.
+    """
     s = MagicMock()
     s._avio_cmd = MagicMock(return_value=True)
+    s.async_avio_request = AsyncMock(
+        return_value=SimpleNamespace(command=801, payload=b"\x00" * 8))
     return s
 
 
@@ -70,7 +80,10 @@ async def test_a_live_session_still_gets_it_immediately():
     cam = _Cam(session=_session())
 
     assert await cam.async_set_resolution("sd") is True
-    cam._stream_session._avio_cmd.assert_called_once()
+    cam._stream_session.async_avio_request.assert_awaited_once()
+    cmd, payload = cam._stream_session.async_avio_request.await_args[0]
+    assert cmd == SETSTREAMCTRL_CMD
+    assert payload[4] == _STREAM_QUALITY["sd"]
 
 
 def test_nothing_is_sent_when_no_choice_was_ever_made():

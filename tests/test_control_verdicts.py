@@ -154,3 +154,73 @@ async def test_an_unreadable_ack_is_treated_as_acceptance(payload):
     """
     session = _session()
     assert await _start_talk(session, _reply(SPEAKERSTART_RESP, payload)) is True
+
+
+async def test_resolution_asks_for_the_verdict_and_records_it():
+    """800 is acked with 801 in 0.01-0.03s. Read it, so a refusal is visible.
+
+    The RETURN value deliberately does not change. A001064 firmware answers 848
+    but does not implement 802 at all, so "this camera never answers" is
+    model-dependent - turning silence into a reported failure would break the
+    call on exactly the cameras whose firmware is quieter. What we can do
+    safely, and could not do before, is see the answer.
+    """
+    from aidot_cameras.camera.controls import _CameraControlsMixin
+
+    class _Cam(_CameraControlsMixin):
+        pass
+
+    cam = _Cam()
+    session = _session()
+    seen = []
+    session.async_avio_request = _record(seen)
+
+    assert await cam_set(cam, session, "hd") is True
+    assert seen and seen[0]["response_cmd"] == SETSTREAMCTRL_RESP
+
+
+async def test_resolution_still_succeeds_when_the_camera_says_nothing():
+    """The safety property: a quiet firmware must not lose the command."""
+    from aidot_cameras.camera.controls import _CameraControlsMixin
+
+    class _Cam(_CameraControlsMixin):
+        pass
+
+    cam = _Cam()
+    session = _session()
+    session.async_avio_request = _record([], reply=None)
+    assert await cam_set(cam, session, "hd") is True
+
+
+async def test_resolution_with_no_session_is_unchanged():
+    """Remembering it for the next session is not a claim that it was applied."""
+    from aidot_cameras.camera.controls import _CameraControlsMixin
+
+    class _Cam(_CameraControlsMixin):
+        pass
+
+    cam = _Cam()
+    cam._stream_session = None
+    assert await cam.async_set_resolution("hd") is True
+    assert cam._desired_quality == "hd"
+
+
+async def test_an_unknown_quality_is_still_rejected():
+    from aidot_cameras.camera.controls import _CameraControlsMixin
+
+    class _Cam(_CameraControlsMixin):
+        pass
+
+    assert await _Cam().async_set_resolution("ultra") is False
+
+
+def _record(seen, reply=SimpleNamespace(command=801, payload=b"\x00" * 8)):
+    async def _req(cmd, payload=b"", **kwargs):
+        seen.append(dict(kwargs, cmd=cmd, payload=payload))
+        return reply
+    return _req
+
+
+async def cam_set(cam, session, quality):
+    cam._stream_session = session
+    return await cam.async_set_resolution(quality)
