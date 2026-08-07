@@ -7,6 +7,31 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 ## [0.17.1]
 
 ### Added
+- **RTCP feedback survives SDP compression, so the camera can be told to slow
+  down.** The compressor that produces the compact offer these cameras parse was
+  dropping every `a=rtcp-fb` line. Payload types that survive narrowing now keep
+  their feedback lines, and the camera's own answer comes back advertising
+  `nack` and `goog-remb` on audio PT 8 and video PT 96 - so its compact parser
+  does read them. Measured cost on a real browser offer: 263 bytes, taking the
+  compressed offer to about 1300, well inside the 2048 the smallest model
+  reports.
+
+- **REMB can be sent, but is off by default.** `build_remb` /
+  `decode_remb_bitrate` and the sender are included and tested;
+  `AIDOT_REMB_TARGET_BPS` set to a bitrate turns it on.
+
+  It ships disabled because it was measured and did not work. An A001064 was
+  A/B'd with REMB transmitting at 500 Kbps and correctly naming the video SSRC -
+  per-session receipts, interleaved arms, a control - and its bitrate did not
+  fall. The one clean like-for-like pair had the REMB arm higher than its
+  control, 3859 against 3355 Kbps.
+
+  Enabling it by default would also have capped, at 500 Kbps, any model that
+  *does* honour REMB - on the strength of a measurement taken on a model that
+  ignores it. The other models on this fleet have not been tested. A bitrate cap
+  is not something to switch on fleet-wide without evidence it helps the cameras
+  it would affect.
+
 - **The negotiated video profile is now recorded on every session.** An A001064
   was measured serving two different profiles for identical requests - H264
   1280x720 at 2.5-4.0 Mbps, and H265 2560x1440 at roughly 1.1 Mbps - varying

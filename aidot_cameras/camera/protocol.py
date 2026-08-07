@@ -235,6 +235,14 @@ def _parse_alarm_event(msg: dict):
     return {"device_id": dev, "type": kind, "alarm_type": code}
 
 
+def _section_of(lines: list) -> str:
+    """The m-section the given emitted lines currently end inside, or ""."""
+    for ln in reversed(lines):
+        if ln.startswith("m="):
+            return ln.split(" ")[0]
+    return ""
+
+
 def _compress_sdp_for_camera(sdp: str) -> str:
     """Selective SDP filter matching official Java client's g.b() behaviour.
 
@@ -258,6 +266,14 @@ def _compress_sdp_for_camera(sdp: str) -> str:
     seen: dict = {}
     media_type = ""
     before_m = True
+    # Payload types that survived narrowing. rtcp-fb is kept for these and only
+    # these: feedback describing a codec we dropped is bytes spent on something
+    # that will never be sent, in an offer whose size is why this function
+    # exists.
+    _kept_pts: set = set()
+    # rtcp-fb lines are buffered because they can appear before the rtpmap that
+    # decides whether their payload type survives.
+    _fb_lines: list = []
 
     def keep(ln: str, key: str = "") -> None:
         out.append(ln + "\r\n")
@@ -283,6 +299,11 @@ def _compress_sdp_for_camera(sdp: str) -> str:
         if ln.startswith("a=mid:"):
             keep(ln)
             continue
+        if ln.startswith("a=rtcp-fb:"):
+            # Buffered, not decided here: an rtcp-fb line can precede the
+            # rtpmap that determines whether its payload type survives.
+            _fb_lines.append((media_type, ln))
+            continue
         if ln.startswith("a=ssrc") and "cname" in ln:
             if seen.get(f"ssrc-cname-{media_type}") is None:
                 keep(ln, f"ssrc-cname-{media_type}")
@@ -303,17 +324,26 @@ def _compress_sdp_for_camera(sdp: str) -> str:
             if media_type == "m=audio":
                 if any(c in ln for c in ("opus", "PCMU", "PCMA", "AAC")):
                     keep(ln)
+                    # Remember the payload type so its rtcp-fb can be kept too.
+                    if ln.startswith("a=rtpmap:"):
+                        try:
+                            _kept_pts.add(ln.split(":")[1].split(" ")[0])
+                        except Exception:
+                            _LOGGER.debug("swallowed exception in %s", 'keep',
+                                          exc_info=True)
             elif media_type == "m=video":
                 if "H264/90000" in ln and seen.get("H264/90000") is None:
                     keep(ln, "H264/90000")
                     try:
                         seen["H264/90000_pt"] = ln.split(":")[1].split(" ")[0]
+                        _kept_pts.add(seen["H264/90000_pt"])
                     except Exception:
                         _LOGGER.debug("swallowed exception in %s", 'keep', exc_info=True)
                 elif "H265/90000" in ln and seen.get("H265/90000") is None:
                     keep(ln, "H265/90000")
                     try:
                         seen["H265/90000_pt"] = ln.split(":")[1].split(" ")[0]
+                        _kept_pts.add(seen["H265/90000_pt"])
                     except Exception:
                         _LOGGER.debug("swallowed exception in %s", 'keep', exc_info=True)
                 elif "apt=" in ln:
@@ -332,6 +362,22 @@ def _compress_sdp_for_camera(sdp: str) -> str:
             elif media_type == "m=application":
                 if "sctp-port" in ln:
                     keep(ln)
+    # Re-insert the surviving feedback at the end of its own media section, so
+    # the offer stays well-formed. Kept only for payload types that survived
+    # narrowing - see _kept_pts.
+    if _fb_lines:
+        kept_fb = [(mt, ln) for mt, ln in _fb_lines
+                   if ln.split(":", 1)[1].split(" ")[0] in _kept_pts]
+        if kept_fb:
+            rebuilt: list = []
+            for line in out:
+                if line.startswith("m=") and rebuilt:
+                    prev = _section_of(rebuilt)
+                    rebuilt.extend(l + "\r\n" for mt, l in kept_fb if mt == prev)
+                rebuilt.append(line)
+            prev = _section_of(rebuilt)
+            rebuilt.extend(l + "\r\n" for mt, l in kept_fb if mt == prev)
+            out = rebuilt
     return "".join(out)
 
 
@@ -2335,6 +2381,87 @@ class AvioResponseRouter:
                 return
             if not queue:
                 self._waiting.pop(waiter._command, None)
+
+
+#: What we ask the camera to send, in bits per second. Zero disables sending
+#: REMB at all, which is the default.
+#:
+#: OFF by default because it was measured and did not work. An A001064 was A/B'd
+#: with REMB transmitting at 500 Kbps and correctly naming the video SSRC -
+#: receipts per session, interleaved arms against a control - and its bitrate
+#: did not fall. The one clean like-for-like pair had the REMB arm HIGHER than
+#: its control (3859 vs 3355 Kbps). No effect was demonstrated on the only model
+#: tested.
+#:
+#: That alone would argue for opt-in. The stronger argument is the models NOT
+#: tested: an A000088 or A001513 that does honour REMB would have had its
+#: picture capped at 500 Kbps fleet-wide, by default, on the strength of a
+#: measurement taken elsewhere that showed no benefit. Shipping a bitrate cap
+#: enabled by default, validated on one camera that ignores it, risks degrading
+#: precisely the cameras nobody measured.
+#:
+#: The negotiation, the encoder and the decoder are all kept and tested: the
+#: camera does advertise goog-remb in its answer, so this is a working
+#: instrument for anyone who wants to measure their own hardware. Set
+#: AIDOT_REMB_TARGET_BPS to a bitrate to turn it on.
+REMB_TARGET_BPS = int(os.environ.get("AIDOT_REMB_TARGET_BPS", "0"))
+
+
+def build_remb(sender_ssrc: int, media_ssrcs: "list", bitrate_bps: int) -> bytes:
+    """An RTCP REMB packet asking the sender for at most ``bitrate_bps``.
+
+    Format is the Google draft (draft-alvestrand-rmcat-remb) carried as a
+    Payload-Specific Feedback message: FMT 15, PT 206, the ASCII identifier
+    ``REMB``, then a count of SSRCs and the bitrate as a 6-bit exponent with an
+    18-bit mantissa, then the SSRCs themselves.
+
+    The camera negotiates ``goog-remb`` in its answer (confirmed live on an
+    A001064 over SDES), which means it will accept this. It has no effect until
+    one is actually sent - negotiation alone changes nothing, which is why this
+    is a separate step from keeping the attribute in the offer.
+    """
+    if bitrate_bps <= 0:
+        raise ValueError("REMB bitrate must be positive - zero would ask the "
+                         "camera to stop sending entirely")
+    if not media_ssrcs:
+        raise ValueError("REMB must name at least one stream")
+
+    # 18-bit mantissa, 6-bit exponent: shift right until the value fits.
+    exp = 0
+    mantissa = int(bitrate_bps)
+    while mantissa > 0x3FFFF:
+        mantissa >>= 1
+        exp += 1
+        if exp > 63:
+            raise ValueError("REMB bitrate too large to encode")
+
+    header = struct.pack(
+        "!BBH",
+        0x80 | 15,          # V=2, P=0, FMT=15
+        206,                # PT: payload-specific feedback
+        0,                  # length, filled in below
+    )
+    body = (struct.pack("!II", sender_ssrc & 0xFFFFFFFF, 0)
+            + b"REMB"
+            + struct.pack("!BBBB",
+                          len(media_ssrcs) & 0xFF,
+                          ((exp << 2) | (mantissa >> 16)) & 0xFF,
+                          (mantissa >> 8) & 0xFF,
+                          mantissa & 0xFF)
+            + b"".join(struct.pack("!I", s & 0xFFFFFFFF) for s in media_ssrcs))
+    pkt = header + body
+    # RTCP length is in 32-bit words, minus one.
+    return pkt[:2] + struct.pack("!H", len(pkt) // 4 - 1) + pkt[4:]
+
+
+def decode_remb_bitrate(pkt: bytes) -> int:
+    """The bitrate a REMB packet asks for. For tests and diagnostics."""
+    # Layout: 0-3 header, 4-7 sender SSRC, 8-11 media SSRC, 12-15 "REMB",
+    # 16 num-SSRC, 17-19 exponent+mantissa, 20+ the SSRCs.
+    b = pkt[17]
+    exp = b >> 2
+    mantissa = ((b & 0x03) << 16) | (pkt[18] << 8) | pkt[19]
+    return mantissa << exp
 
 
 def _avio_cmd_id(frame: bytes) -> "Optional[int]":
