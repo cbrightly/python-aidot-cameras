@@ -3150,6 +3150,43 @@ class _SdesOpenMixin:
                         except ValueError:
                             _pli_gaps = (0.0, 1.5, 2.0, 3.0)
                         _bridge_fn._pli_gaps = _pli_gaps
+                    # REMB names the VIDEO stream, which is the one to
+                    # limit. An earlier version rode the audio Receiver Report
+                    # and so named the audio SSRC - it asked the camera to keep
+                    # PCMA under the target, which it already was, and left the
+                    # video untouched. Measured no change, correctly.
+                    #
+                    # Own cadence: the PLI timer backs off to 30s once the
+                    # stream is up, which is too slow to hold a rate.
+                    if (REMB_TARGET_BPS > 0
+                            and hasattr(_bridge_fn, '_cam_video_ssrc')
+                            and hasattr(_bridge_fn, '_cam_srtp_sock')
+                            and _time_br.time() - getattr(
+                                _bridge_fn, '_last_remb_ts', 0.0) >= 1.0):
+                        _bridge_fn._last_remb_ts = _time_br.time()
+                        try:
+                            _remb_raw = build_remb(
+                                0xAB12CD34,
+                                [_bridge_fn._cam_video_ssrc],
+                                REMB_TARGET_BPS)
+                            _remb_sess = getattr(_bridge_fn, '_pli_tx_sess', None)
+                            _bridge_fn._cam_srtp_sock.sendto(
+                                _remb_sess.protect_rtcp(_remb_raw)
+                                if _remb_sess is not None else _remb_raw,
+                                _bridge_fn._cam_srtp_src,
+                            )
+                            if not getattr(_bridge_fn, '_remb_logged', False):
+                                _bridge_fn._remb_logged = True
+                                _status(
+                                    f"SDES: sent REMB {REMB_TARGET_BPS // 1000} kbps"
+                                    f" for video SSRC"
+                                    f" 0x{_bridge_fn._cam_video_ssrc:08x}")
+                        except Exception:
+                            _LOGGER.debug(
+                                "camera %s: swallowed exception in %s",
+                                getattr(self, "device_id", "?"), '_remb',
+                                exc_info=True)
+
                     _pli_done       = getattr(_bridge_fn, '_pli_count', 0)
                     _pli_interval   = (_pli_gaps[_pli_done]
                                        if _pli_done < len(_pli_gaps) else 30.0)
@@ -4020,25 +4057,6 @@ class _SdesOpenMixin:
                                         _bridge_fn._tutk_count,
                                         0, 0, 0,
                                     )
-                                    # Append REMB, telling the camera what rate
-                                    # we actually want. It negotiates goog-remb
-                                    # in its answer (confirmed live on an
-                                    # A001064), but negotiation alone changes
-                                    # nothing - without a REMB it has no target
-                                    # and sends at its unconstrained rate, which
-                                    # is how we ended up taking 1900-3700 Kbps
-                                    # where the vendor clients take 225-500.
-                                    # Compound RTCP: RR first, then the feedback.
-                                    if REMB_TARGET_BPS > 0:
-                                        try:
-                                            _rr_pkt = _rr_pkt + build_remb(
-                                                _rr_our_ssrc, [_tk_ssrc],
-                                                REMB_TARGET_BPS)
-                                        except Exception:
-                                            _LOGGER.debug(
-                                                "camera %s: swallowed exception in %s",
-                                                getattr(self, "device_id", "?"),
-                                                'build_remb', exc_info=True)
                                     _rtcp_sent = False
                                     try:
                                         import pylibsrtp as _plsrtp_rr
