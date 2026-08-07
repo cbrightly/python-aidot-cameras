@@ -66,6 +66,7 @@ _PAYLOADS = {
     848: b"\x00" * 8,                       # SPEAKERSTART, channel 0
     849: b"\x00" * 8,                       # SPEAKERSTOP, channel 0
     800: struct.pack("<IB3x", 0, 5),        # SETSTREAMCTRL, channel 0, quality sd
+    802: struct.pack("<I", 0),              # GETSTREAMCTRL, channel 0
 }
 _QUALITY = {"hd": 1, "sd": 5}
 
