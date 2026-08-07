@@ -56,16 +56,47 @@ fresh peerid into a camera that just refused one.
   `addIceCandidate` verbatim: no filtering, no prioritisation, no port selection,
   no re-nomination. Pairing is entirely native libwebrtc.
 
+## The stream-quality control: settled
+
+`SETSTREAMCTRL` (cmd 800) is **not** ignored by the camera, and saying so was
+wrong. Measured 2026-08-07 with the response path (`scripts/avio_probe.py`),
+which is what made the difference readable at all:
+
+- the camera **acks** it - 801 comes back in 0.01-0.03 s on an A000088;
+- and it **records** it - `GETSTREAMCTRL` (802) reads back 5 (MIDDLE) at session
+  start, 5 after setting `sd`, and **1 after setting `hd`**.
+
+What does not change is the video. With the quality verified by read-back first,
+then recorded and read per frame:
+
+| verified quality | frames | dimensions | bytes/frame |
+|------------------|--------|------------|-------------|
+| 1 (MAX / `hd`)   | 728    | 1280x720   | 2592 |
+| 5 (MIDDLE / `sd`)| 651    | 1280x720   | 2682 |
+
+Every earlier check had been made in the `sd` direction - and `sd` sends 5, the
+value the camera is already on, so those checks only ever showed that setting a
+camera to its current value changes nothing. The setting also does not survive a
+session: each one opens at the camera's own default of 5.
+
+So the camera accepts the command, acknowledges it, reports it back, and encodes
+exactly the same video. The integration's resolution select was removed in 2.11.9
+for this reason; the command stays in the library because it is correct and a
+future firmware may act on it.
+
 ## The one real difference still unexplained
 
-Bitrate. The app takes 225-500 Kbps on auto quality; we take 1000-1800 Kbps from
-the same camera. This is **not** reachable through the HD/SD control: on
-2026-08-06 the A001064 was set to `sd` both mid-session and at session start, and
-the encode stayed 1280x720 both times with the bitrate unchanged. The camera
-ignores `SETSTREAMCTRL` (cmd 800) for resolution, which is also why the
-integration's resolution select currently reports a value the camera never
-applied.
+Bitrate, and it is model-specific rather than something the app asks for. Direct
+library recordings, same method on both, 2026-08-07:
+
+- **A000088 (DTLS)**: ~350 Kbps - inside the app's own 225-500 range.
+- **A001064 (SDES)**: 1900-3700 Kbps across two runs.
+
+So "we take 1000-1800 Kbps" is about the A001064 specifically, it is not an
+artefact of the Home Assistant or go2rtc path (these numbers are off the library
+alone), and it is not the HD/SD control - see above, MAX and MIDDLE produce the
+same bytes per frame.
 
 Whatever the app asks for that we do not, it is not that command. Answering it
-needs a capture of the app's own session setup, not another guess - eight
-hypotheses have already died here.
+needs a capture of the app's own session setup against **an A001064**, not
+another guess - nine hypotheses have died here now.
