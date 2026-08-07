@@ -40,6 +40,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   That branch had been decoding each frame and logging its command id for some
   time, then dropping it, so the acks were sitting in the log unread.
 
+  A chunk there can also carry more than one frame - the session-mode notify
+  declares a 12-byte payload and has been seen arriving in a 140-byte chunk - so
+  every frame in a chunk is now read rather than just the leading one. A reply
+  batched behind a notify would otherwise be dropped, and that presents as a
+  camera intermittently failing to answer, which is the hardest symptom on this
+  path to attribute correctly.
+
 ### Notes
 - **`async_set_resolution` is confirmed to have no observable effect, and it is
   not because the camera ignores the command.** The camera accepts it, acks it,
