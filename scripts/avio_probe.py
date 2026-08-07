@@ -50,6 +50,7 @@ Requires the ``[webrtc]`` extra.
 import argparse
 import asyncio
 import inspect
+import logging
 import os
 import struct
 import sys
@@ -73,6 +74,31 @@ _QUALITY = {"hd": 1, "sd": 5}
 
 #: Default probe: the pair the library's own notes record as observed.
 _DEFAULT_PROBES = [(848, 851, None)]
+
+
+class _AvioOnly(logging.Filter):
+    """Pass only the receive-path AVIO lines.
+
+    The library at DEBUG is far too loud to read, and the one thing this harness
+    needs from it is whether ANY inbound control frame reached the dispatch
+    point. That distinction is the whole diagnosis: a camera that answers
+    nothing looks identical to a receive path wired to the wrong place, and only
+    the presence of unrelated inbound frames (the heartbeat ack, say) tells them
+    apart.
+    """
+
+    def filter(self, record) -> bool:
+        return "AVIO" in record.getMessage()
+
+
+def _enable_avio_logging() -> None:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("    [log] %(message)s"))
+    handler.addFilter(_AvioOnly())
+    for name in ("aidot_cameras.camera.sdes_open", "aidot_cameras.camera.webrtc_open"):
+        log = logging.getLogger(name)
+        log.setLevel(logging.DEBUG)
+        log.addHandler(handler)
 
 
 def _is_camera(device_client) -> bool:
@@ -107,7 +133,8 @@ async def _stop(session) -> None:
 
 
 async def _probe_one(client, device, probes, settle: float, timeout: float,
-                     record: float = 0.0, out_path: str = "") -> bool:
+                     record: float = 0.0, out_path: str = "",
+                     verbose: bool = False) -> bool:
     """Open a session, run each probe, report every reply.  True if any answered.
 
     With ``record``, the session is written to ``out_path`` and held that long
@@ -125,7 +152,11 @@ async def _probe_one(client, device, probes, settle: float, timeout: float,
     # Echo the receive-path status lines - on DTLS these carry the inbound frame
     # hex, which is the whole point of running this against a DTLS camera.
     def _on_status(msg: str) -> None:
-        if " RX " in msg or "AVIO" in msg:
+        # Under --debug print everything: on SDES the inbound control frames are
+        # reported as "SDES DC: enc DATA ...", which no receive-shaped filter
+        # would have matched. Guessing at which lines matter is how a wired
+        # receive path can look like a silent camera.
+        if verbose or " RX " in msg or "AVIO" in msg:
             print(f"    [rx] {msg}")
 
     print(f"\n>>> {name!r} ({model}) opening stream...")
@@ -224,7 +255,7 @@ async def _run(args) -> int:
             results = [
                 (c.get(CONF_NAME),
                  await _probe_one(client, c, probes, args.settle, args.timeout,
-                                  args.record, args.out))
+                                  args.record, args.out, args.debug))
                 for c in selected
             ]
 
@@ -256,7 +287,11 @@ def main() -> int:
                    help="hold and record the session this long after the probes")
     p.add_argument("--out", default="",
                    help="where to write the recording (with --record)")
+    p.add_argument("--debug", action="store_true",
+                   help="show every inbound AVIO frame the receive path sees")
     args = p.parse_args()
+    if args.debug:
+        _enable_avio_logging()
     return asyncio.run(_run(args))
 
 

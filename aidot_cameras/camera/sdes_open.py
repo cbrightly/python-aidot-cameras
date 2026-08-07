@@ -25,7 +25,6 @@ from .models import VideoFrame  # noqa: F401 - forward-ref annotation
 from .sdes import SdesSession
 from .protocol import (
     AvioResponseRouter,
-    _avio_cmd_id,
     _build_sprop,
     _build_stun_binding_success_response,
     _extract_param_sets_from_rtp,
@@ -45,6 +44,27 @@ _LOGGER = logging.getLogger(__name__)
 #: ``net.core.rmem_max`` (4 MB on Home Assistant OS), and doubles what it grants
 #: for bookkeeping, so asking for more than the cap is harmless.
 _MEDIA_RCVBUF_BYTES = 4 * 1024 * 1024
+
+
+def _dispatch_sctp_avio(responses, payload) -> bool:
+    """Offer an inbound SCTP DATA payload to the AVIO response router.
+
+    This is where the camera's replies actually arrive on SDES: an encrypted
+    SCTP DATA chunk (PPID 53) on the same channel we send LIVING, the heartbeat
+    and SPEAKERSTART on - not the TUTK-audio framing the audio forward path
+    watches. Wiring only the latter is why a camera that answered SPEAKERSTART
+    in moments looked silent.
+
+    True if it answered something we were waiting for. Never raises and never
+    blocks: it runs inline on the bridge receive loop, where a bad frame must
+    not be able to take the media path down with it.
+    """
+    if responses is None or not payload:
+        return False
+    try:
+        return responses.dispatch(payload)
+    except Exception:
+        return False
 
 
 def _widen_media_rcvbuf(sock, kind: str, device_id: str = "?") -> int:
@@ -3815,9 +3835,17 @@ class _SdesOpenMixin:
                                                     if len(_pd_plain) >= 28 else 0)
                                         _sc_cmd = (int.from_bytes(_sc_pay[4:8], 'little')
                                                    if len(_sc_pay) >= 8 else 0)
+                                        # This is where the camera's answers
+                                        # come back on SDES.  They were parsed
+                                        # and logged here long before anything
+                                        # could receive them; hand them to
+                                        # whoever asked.
+                                        _sc_answered = _dispatch_sctp_avio(
+                                            _avio_responses, _sc_pay)
                                         _status(
                                             f"SDES DC: enc DATA ppid={_sc_ppid}"
                                             f" cmd={_sc_cmd} {len(_sc_pay)}B"
+                                            f"{' (answered a request)' if _sc_answered else ''}"
                                             f" {_sc_pay[:32].hex()}"
                                         )
                                     else:
@@ -3886,32 +3914,15 @@ class _SdesOpenMixin:
                                     # f0.java:3224): the camera can send it unsolicited, and
                                     # without it here an 804 frame is misrouted as PCMA noise.
                                     _avio_cmds = {5376, 5377, 5156, 5157, 768, 769, 511, 804}
-                                    _is_ctrl = _fwd_cmd in _avio_cmds
-                                    if _is_ctrl:
-                                        _avio_responses.dispatch(_pd_plain)
-                                        _LOGGER.debug(
-                                            "camera %s: AVIO inbound cmd=%d len=%d",
-                                            getattr(self, "device_id", "?"),
-                                            _fwd_cmd, len(_pd_plain),
-                                        )
-                                    elif _avio_responses.dispatch(_pd_plain):
-                                        # It answered a question we had
-                                        # outstanding, so it is control traffic
-                                        # whatever the list above says - the
-                                        # list was built from frames we happened
-                                        # to observe, not from a spec.  Logged
-                                        # at INFO because finding an id that is
-                                        # missing from that set is exactly the
-                                        # thing we cannot learn any other way.
-                                        _is_ctrl = True
-                                        _LOGGER.info(
-                                            "camera %s: AVIO inbound cmd=%d answered a"
-                                            " pending request and is NOT in the known"
-                                            " control-frame set",
-                                            getattr(self, "device_id", "?"),
-                                            _avio_cmd_id(_pd_plain),
-                                        )
-                                    if not _is_ctrl:
+                                    # No response dispatch here.  Measured
+                                    # 2026-08-07: the camera's replies come back
+                                    # as encrypted SCTP DATA (see
+                                    # _dispatch_sctp_avio), never in this
+                                    # framing.  Offering every audio packet to
+                                    # the router would be per-packet work on the
+                                    # media path for something that has never
+                                    # arrived on it.
+                                    if _fwd_cmd not in _avio_cmds:
                                         try:
                                             _lo_a.sendto(
                                                 _rtp_hdr + _pd_plain,
