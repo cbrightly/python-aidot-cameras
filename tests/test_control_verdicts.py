@@ -74,18 +74,50 @@ async def test_talk_still_succeeds_when_the_camera_says_nothing(monkeypatch):
     assert await session.async_start_talk(lambda: b"") is True
 
 
-async def test_talk_reports_failure_when_the_camera_refuses():
-    """The case we were blind to: an answer that is not an acceptance."""
-    session = _session()
-    assert await _start_talk(session, _reply(SPEAKERSTART_RESP, b"\x00\x01")) is False
+async def test_a_refused_speaker_would_not_leave_the_pump_running(monkeypatch):
+    """No refusal payload is currently identifiable, so this drives the verdict
+    directly rather than inventing one.
 
+    The property is still worth holding: if a refusal is ever recognised, the
+    caller stops and the microphone must stop with it. Reporting failure while
+    still streaming viewer audio at a closed speaker would be worse than the
+    original bug.
+    """
+    from aidot_cameras.camera import protocol as proto
 
-async def test_a_refused_speaker_does_not_leave_the_pump_running():
-    """Reporting failure while still streaming viewer audio would be worse than
-    the bug: the caller stops, the microphone does not."""
+    async def _refuse(session, cmd, resp_cmd, timeout):
+        return False
+
+    monkeypatch.setattr(proto, "_speaker_opened", _refuse)
+    monkeypatch.setattr("aidot_cameras.camera.webrtc._speaker_opened", _refuse)
     session = _session()
-    await _start_talk(session, _reply(SPEAKERSTART_RESP, b"\x00\x01"))
+
+    assert await session.async_start_talk(lambda: b"") is False
     assert session._talk_holder["provider"] is None
+    enabled = [c for c in session._audio_sender.replaceTrack.call_args_list
+               if c.args and c.args[0] is session._talk_track]
+    assert not enabled
+
+
+async def test_the_microphone_is_not_opened_before_the_speaker_answers():
+    """Order matters: nothing may go out before the camera has answered.
+
+    replaceTrack used to happen first, so the microphone was live and encoding
+    for the whole round trip. Checked at the moment the ack lands rather than
+    via a refusal, because there is no refusal payload to use.
+    """
+    session = _session()
+    task = asyncio.create_task(session.async_start_talk(lambda: b""))
+    await asyncio.sleep(0.01)
+
+    def _mic_calls():
+        return [c for c in session._audio_sender.replaceTrack.call_args_list
+                if c.args and c.args[0] is session._talk_track]
+
+    assert not _mic_calls(), "the microphone was enabled before the camera answered"
+    session.dispatch_avio_frame(_reply(SPEAKERSTART_RESP))
+    assert await task is True
+    assert _mic_calls(), "an accepted speaker must still enable the microphone"
 
 
 async def test_talk_without_a_channel_is_unchanged():
@@ -128,29 +160,13 @@ async def test_sdes_talk_waits_for_the_ack_without_sending_it_itself(monkeypatch
     assert session._talk_state["want_speaker"] is True
 
 
-async def test_sdes_talk_reports_a_refusal(monkeypatch):
-    import aidot_cameras.camera.sdes as sdes_mod
+@pytest.mark.parametrize("payload", [b"", b"\x00", b"\x00\x64\x00\x00", b"\xff\xff"])
+async def test_an_unfamiliar_ack_is_treated_as_acceptance(payload):
+    """An ack is an ack. No payload has ever meant refusal.
 
-    monkeypatch.setattr(sdes_mod, "_run_sdes_talk_pump", lambda state: None)
-    session = _sdes_session()
-
-    task = asyncio.create_task(session.async_start_talk(lambda: b""))
-    await asyncio.sleep(0.01)
-    session.dispatch_avio_frame(_reply(SPEAKERSTART_RESP, b"\x00\x01"))
-
-    assert await task is False
-    # ...and the microphone is not left running against a closed speaker.
-    assert session._talk_state["provider"] is None
-    assert session._talk_state["want_speaker"] is False
-
-
-@pytest.mark.parametrize("payload", [b"", b"\x00", b"\x00\x64\x00\x00"])
-async def test_an_unreadable_ack_is_treated_as_acceptance(payload):
-    """Do not invent a refusal out of a payload shape we have not seen.
-
-    The one ack measured is 0x0064 on both transports. Anything else is unknown,
-    and unknown must fall the same way as silence, or a firmware variation
-    silently disables talk.
+    Every value observed - 0x0064 and 0x00c8, including both from one camera on
+    consecutive sessions - came back from a speaker that opened. Reading an
+    unfamiliar payload as refusal is what would have disabled talk on the L2.
     """
     session = _session()
     assert await _start_talk(session, _reply(SPEAKERSTART_RESP, payload)) is True
@@ -226,31 +242,6 @@ async def cam_set(cam, session, quality):
     return await cam.async_set_resolution(quality)
 
 
-async def test_the_microphone_is_not_opened_before_the_speaker_answers():
-    """Order matters: a refusal must not have already sent viewer audio.
-
-    replaceTrack used to happen first, so on a refused speaker the microphone
-    had been live and encoding for the whole round trip before being detached.
-    The verdict is cheap on this transport - 0.01-0.38s measured - so it can
-    simply come first.
-    """
-    session = _session()
-    await _start_talk(session, _reply(SPEAKERSTART_RESP, b"\x00\x01"))
-
-    enabled = [c for c in session._audio_sender.replaceTrack.call_args_list
-               if c.args and c.args[0] is session._talk_track]
-    assert not enabled, "the microphone was enabled before the camera answered"
-
-
-async def test_an_accepted_speaker_does_open_the_microphone():
-    session = _session()
-    assert await _start_talk(session, _reply(SPEAKERSTART_RESP)) is True
-
-    enabled = [c for c in session._audio_sender.replaceTrack.call_args_list
-               if c.args and c.args[0] is session._talk_track]
-    assert enabled, "an accepted speaker must still enable the microphone"
-
-
 async def test_the_sdes_budget_covers_the_bridge_delay():
     """The bridge waits SDES_SPEAKERSTART_DELAY before it sends 848 at all.
 
@@ -263,3 +254,24 @@ async def test_the_sdes_budget_covers_the_bridge_delay():
     from aidot_cameras.camera.protocol import SPEAKER_ACK_TIMEOUT_S
 
     assert SDES_SPEAKER_ACK_TIMEOUT_S >= SDES_SPEAKERSTART_DELAY + SPEAKER_ACK_TIMEOUT_S
+
+
+@pytest.mark.parametrize("payload,camera", [
+    (b"\x00\x64", "A000088 DTLS and A001064 SDES"),
+    (b"\x00\xc8", "A001513 SDES"),
+])
+async def test_every_observed_speaker_ack_is_an_acceptance(payload, camera):
+    """The ack payload differs per model, and both observed values are successes.
+
+    Measured 2026-08-07 on live cameras: an M3 Pro and the PTZ answer 0x0064,
+    an L2 answers 0x00c8. Both opened their speakers.
+
+    The first cut of this check treated 0x0064 as "the" success value and any
+    other two-byte payload as a refusal - a discriminator invented from one
+    sample, which would have disabled two-way audio on the L2 entirely. No
+    refusal payload has ever been observed, so there is nothing to discriminate
+    against yet; an ack is an ack, and the payload is logged so that a real
+    refusal can be recognised when one turns up.
+    """
+    session = _session()
+    assert await _start_talk(session, _reply(SPEAKERSTART_RESP, payload)) is True, camera
