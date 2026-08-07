@@ -174,6 +174,33 @@ _SDP_AUDIO_PTS = (0, 8)
 # even when the camera numbers that codec differently on the wire - it is our own
 # SDP being rewritten, not the camera's.
 _SDP_VIDEO_PT_BY_CODEC = {"H264": 96, "H265": 97}
+_SDP_CODEC_BY_VIDEO_PT = {pt: codec for codec, pt in _SDP_VIDEO_PT_BY_CODEC.items()}
+
+
+def describe_video_profile(pt) -> str:
+    """Name the video profile a session negotiated, for the log.
+
+    An A001064 was measured serving two profiles for identical requests - H264
+    1280x720 at 2.5-4.0 Mbps and H265 2560x1440 at ~1.1 Mbps - varying per
+    session with nothing on our side asking for either.  What selects it is
+    unknown, and it is unknown because nothing recorded it: bitrate figures
+    gathered before 2026-08-07 cannot be compared, since the codec that produced
+    each one was never written down.
+
+    Instrumentation, not a fix.  It asserts no cause.
+
+    Deliberately limited to the payload type and its codec name, which is what
+    the bridge knows when the first video packet lands.  Frame dimensions would
+    mean parsing H264/H265 parameter sets out of the stream - far more than the
+    question needs, and on the camera measured codec and resolution moved
+    together in 11 of 11 sessions, so the codec stratifies it today.
+
+    Never raises: this runs on the media path, and nothing here may be able to
+    break an otherwise healthy stream.  An unmapped payload type is reported as
+    ``unknown``, which is a finding worth having rather than a reason to skip
+    the record.
+    """
+    return f"pt={pt} codec={_SDP_CODEC_BY_VIDEO_PT.get(pt) or 'unknown'}"
 
 # How long to wait for the FIRST media of a session before launching the serve.
 # Nothing useful can happen before then: the payload types are unknown, so the SDP
@@ -243,6 +270,49 @@ def video_pt_from_answer_sdp(sdp_text: str) -> Optional[int]:
         if codec in _SDP_VIDEO_PT_BY_CODEC:
             return _SDP_VIDEO_PT_BY_CODEC[codec]
     return None
+
+
+#: Video payload types the SDES answer template advertises (H264, H265).
+_SDES_ANSWER_VIDEO_PTS = (96, 97)
+
+
+def _resolve_sdes_video_pt() -> Optional[int]:
+    """EXPERIMENTAL (opt-in, default off): pin the OFFER to one video codec.
+
+    The offer sent in webrtcReq advertises BOTH 96 (H264) and 97 (H265) and
+    expresses no preference, so the camera chooses which to send in its answer.
+    Measured on an A001064 across eleven sessions in one afternoon it chose H264
+    nine times and H265 twice for an otherwise identical request, and the codec
+    it chose determined the resolution (H264 -> 1280x720, H265 -> 2560x1440, 11
+    of 11).  A consumer that cannot decode a sudden 2560x1440 H265 stream, or
+    cannot absorb the bitrate change either way, has no means today of
+    preventing the flip.  Pinning removes the choice: measured 2026-08-07, an
+    offer pinned to 96 produced h264 1280x720 in 4 of 4 sessions.
+
+    It is the OFFER that matters, not the answer.  Traced live with every status
+    line printed: this path sends webrtcReq carrying our offer and then reports
+    "Using camera's video SRTP key from answer" - the camera answers, we do not.
+    An earlier version of this pinned the answer builder instead and changed
+    nothing at all, while the arms still came out looking like it had worked.
+
+    **Do not set this to 97.**  An H265-only offer returned NO VIDEO - audio
+    only, no video stream in the recording - in 3 of 3 interleaved rounds
+    against 3 of 3 successes for 96 in the same run.  The efficient H265 profile
+    is real and reproducible, but only when BOTH codecs are offered; narrowing
+    to it removes the option rather than selecting it.
+
+    Left unset this returns None and the offer is byte-identical to today.  The
+    SDES offer path is shared by every SDES camera, and this project's CHANGELOG
+    records fleet-wide blackouts caused by changes to shared paths, so the
+    default has to be inert.  Anything unparseable, or a payload type the
+    template does not advertise, also returns None: narrowing to a payload type
+    the camera was never offered would leave it nothing to send.
+    """
+    raw = (os.environ.get("AIDOT_SDES_VIDEO_PT", "") or "").strip()
+    if not raw.isdigit():
+        return None
+    pt = int(raw)
+    return pt if pt in _SDES_ANSWER_VIDEO_PTS else None
 
 
 def narrow_sdp_payload_types(sdp_text: str, keep_video=None, keep_audio=None) -> str:
@@ -1085,6 +1155,23 @@ class _SdesOpenMixin:
                 if _dc_probe_fp else ""
             )
         )
+
+        # Opt-in: express a video-codec preference in the OFFER rather than
+        # advertising both 96/97 and letting the camera decide in its answer.
+        #
+        # The offer is the SDP that matters here.  Traced live 2026-08-07 with
+        # every status line printed: this path sends webrtcReq carrying OUR
+        # offer and then reports "Using camera's video SRTP key from answer" -
+        # the camera answers, we do not.  The answer builder further down runs
+        # only on the branch where the camera offers first, which this camera
+        # did not take, so pinning there changed nothing at all while the
+        # arms still came out looking like the pin had worked.  Inert unless set.
+        _pin_video_pt = _resolve_sdes_video_pt()
+        if _pin_video_pt is not None:
+            sdes_offer_sdp = narrow_sdp_payload_types(
+                sdes_offer_sdp, keep_video=_pin_video_pt)
+            if _status:
+                _status(f"SDES: offer pinned to video pt={_pin_video_pt}")
 
         _relay_str = (
             f"  relay-audio={_relay_addrs[_audio_sock][0]}:{_relay_addrs[_audio_sock][1]}"
@@ -4123,6 +4210,14 @@ class _SdesOpenMixin:
                                 _br_first_video_logged = True
                                 _first_video_pt[0] = _pt
                                 _status(f"bridge: first video RTP pt={_pt}")
+                                # At INFO, not DEBUG: this is the one line that
+                                # makes a bitrate figure comparable to another
+                                # one, and it is emitted once per session.
+                                _LOGGER.info(
+                                    "camera %s: video profile %s",
+                                    getattr(self, "device_id", "?"),
+                                    describe_video_profile(_pt),
+                                )
                                 # Camera answers BUNDLE (all media on one 5-tuple),
                                 # so the talk destination is the same address as
                                 # video.  Capture it here too - the camera may send
