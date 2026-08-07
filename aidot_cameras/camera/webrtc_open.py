@@ -21,6 +21,8 @@ from .constants import _LIVE_PLAY_NOT_READY, fallback_turn_uris, stun_server_uri
 from .models import VideoFrame
 from .webrtc import WebRTCSession
 from .protocol import (
+    AvioResponseRouter,
+    _avio_cmd_id,
     _compress_sdp_for_camera,
     _dedup_bundle_candidates,
     _filter_sdp_candidates,
@@ -1729,6 +1731,12 @@ class _WebRTCOpenMixin:
                 _status(f"talk: SPEAKER{'START' if start else 'STOP'} failed:"
                         f" {_spk_exc}")
 
+        # Matches the camera's AVIO replies to the commands that asked for
+        # them.  Created here rather than in the session because the message
+        # handlers below are registered while the session does not exist yet;
+        # it is handed to the session at the end so both sides share one.
+        _avio_responses = AvioResponseRouter()
+
         # Camera-initiated DCEP path: KVS firmware on A000088 doesn't include
         # m=application in its answer SDP, suggesting the data channel may
         # actually be opened by the camera (master), not the viewer.  Hook
@@ -1748,8 +1756,10 @@ class _WebRTCOpenMixin:
             def _on_remote_dc_message(message) -> None:
                 try:
                     if isinstance(message, (bytes, bytearray)):
+                        _avio_responses.dispatch(bytes(message))
                         _status(
                             f"DC[remote:{channel.label}] RX {len(message)}B"
+                            f" cmd={_avio_cmd_id(message)}"
                             f" hex={bytes(message)[:32].hex()}"
                         )
                     else:
@@ -1874,8 +1884,10 @@ class _WebRTCOpenMixin:
             def _on_kvs_dc_message(message) -> None:
                 try:
                     if isinstance(message, (bytes, bytearray)):
+                        _avio_responses.dispatch(bytes(message))
                         _status(
                             f"DC[{_dc_label}] RX {len(message)}B"
+                            f" cmd={_avio_cmd_id(message)}"
                             f" hex={bytes(message)[:32].hex()}"
                         )
                     else:
@@ -3716,4 +3728,5 @@ class _WebRTCOpenMixin:
             audio_sender=_audio_sender,
             talk_track=_talk_track,
             talk_holder=_talk_holder,
+            responses=_avio_responses,
         )

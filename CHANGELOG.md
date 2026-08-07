@@ -4,6 +4,66 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.16.0]
+
+### Added
+- **The library reads the camera's replies.** Every AVIO control command was
+  fire-and-forget: the camera answered and the reply was discarded, so three
+  outcomes were indistinguishable from outside - the camera applied the command,
+  accepted and ignored it, or refused it. That ambiguity has cost whole evenings
+  of investigation more than once.
+
+  `session.async_avio_request(cmd, payload, response_cmd=..., timeout=...)`
+  sends a command and returns what the camera said, or `None` if it said nothing
+  within the budget. Registration happens before the send, because a camera on
+  the LAN can answer before the sending call returns. The wait is short by
+  design: these sit behind Home Assistant service calls and a firmware that
+  implements a request without a response must not be able to hold up a view.
+
+  `_avio_cmd` is deliberately untouched - still synchronous, still
+  fire-and-forget, still returning a bool. Every camera on both transports goes
+  through it, so wanting an answer is a separate, opt-in call and no existing
+  caller changes behaviour.
+
+  Confirmed live on both transports. An A000088 over DTLS answers SPEAKERSTART
+  (848) with 851 in 0.38 s, SETSTREAMCTRL (800) with 801 in 0.01 s, and
+  GETSTREAMCTRL (802) with 803. An A001064 over SDES answers 848 with 851 in
+  0.17 s and does not implement 802 at all - a per-model firmware difference
+  that was simply invisible before, because "no reply" and "no listener" looked
+  the same.
+
+### Fixed
+- **Inbound AVIO on SDES was read from the wrong channel.** Replies were being
+  looked for in the TUTK-audio forward path, which handles control frames framed
+  as 0xC8 audio. The camera answers on the encrypted SCTP DATA channel (PPID 53)
+  instead - the same one that carries LIVING, the heartbeat and SPEAKERSTART.
+  That branch had been decoding each frame and logging its command id for some
+  time, then dropping it, so the acks were sitting in the log unread.
+
+  A chunk there can also carry more than one frame - the session-mode notify
+  declares a 12-byte payload and has been seen arriving in a 140-byte chunk - so
+  every frame in a chunk is now read rather than just the leading one. A reply
+  batched behind a notify would otherwise be dropped, and that presents as a
+  camera intermittently failing to answer, which is the hardest symptom on this
+  path to attribute correctly.
+
+### Notes
+- **`async_set_resolution` is confirmed to have no observable effect, and it is
+  not because the camera ignores the command.** The camera accepts it, acks it,
+  and reports the new value back through `GETSTREAMCTRL`: read 5 (MIDDLE) at
+  session start, 5 after setting `sd`, and 1 after setting `hd`. What does not
+  change is the video. Measured per frame on an A000088 with the quality
+  verified by read-back first: 728 frames at quality 1, all 1280x720, 2592 bytes
+  per frame; 651 frames at quality 5, all 1280x720, 2682 bytes per frame.
+
+  Earlier checks had all been made in the `sd` direction, which sends the value
+  the camera is already on - they only ever showed that setting a camera to its
+  current value changes nothing. The setting also does not survive a session:
+  every session opens at the camera's own default of 5.
+
+  The command stays in the library. It is correct, the camera acknowledges it,
+  and a future firmware may act on it.
+
 ## [0.15.8]
 
 ### Fixed

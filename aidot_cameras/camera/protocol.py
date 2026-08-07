@@ -8,6 +8,7 @@ imports client.py -- the import edge is one-way (client -> protocol).
 """
 
 import asyncio
+import concurrent.futures as _cfutures
 import hashlib
 import ipaddress
 import json
@@ -22,7 +23,7 @@ import tempfile
 import threading
 import time
 import zlib
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, NamedTuple
 
 from .constants import TALK_PCM_FRAME_BYTES, TALK_PCM_RATE
 
@@ -2176,3 +2177,233 @@ def _dedup_bundle_candidates(sdp: str) -> str:
         else:
             result.extend(ln for ln in sec if not ln.startswith('a=candidate:'))
     return '\r\n'.join(result)
+
+
+#: Header of an AVIO control frame: seq, command, timestamp(ms), payload length,
+#: reserved, then 4 bytes of padding.  Same layout we already build when sending.
+_AVIO_RESP_HDR = struct.Struct("<IIqII4x")
+
+#: Bytes of header before an AVIO payload begins.  Exported because the SDES
+#: receive path has to walk past one frame to reach the next in the same chunk.
+AVIO_HDR_LEN = _AVIO_RESP_HDR.size
+
+
+class AvioResponse(NamedTuple):
+    """A decoded AVIO control response."""
+
+    seq: int
+    command: int
+    payload: bytes
+
+
+def parse_avio_response(frame: bytes) -> "Optional[AvioResponse]":
+    """Decode an AVIO control response, or None if this is not a valid one.
+
+    Returns None rather than raising: this runs on the bridge's receive path,
+    where anything can arrive, and a malformed frame must be ignored rather than
+    kill the loop. A declared length that overruns the buffer is rejected too -
+    trusting it would hand the caller a truncated payload and, for example, read
+    a stream profile out of bytes the camera never sent.
+    """
+    if not frame or len(frame) < _AVIO_RESP_HDR.size:
+        return None
+    seq, command, _ts, length, _reserved = _AVIO_RESP_HDR.unpack_from(frame, 0)
+    body = frame[_AVIO_RESP_HDR.size:]
+    if len(body) < length:
+        return None
+    return AvioResponse(seq=seq, command=command, payload=body[:length])
+
+
+class _AvioWaiter:
+    """A single outstanding question, handed back by ``AvioResponseRouter.expect``.
+
+    Built on a ``concurrent.futures.Future`` rather than an ``asyncio`` one on
+    purpose: the reply is dispatched from the SDES bridge thread while the
+    caller awaits on the event loop, and setting an asyncio future's result from
+    a foreign thread does not wake the awaiting coroutine - the camera would
+    look silent.
+    """
+
+    def __init__(self, router: "AvioResponseRouter", command: int) -> None:
+        self._router  = router
+        self._command = command
+        self._future  = _cfutures.Future()
+
+    def cancel(self) -> None:
+        """Withdraw the question - used when the command could not be sent."""
+        self._router._forget(self)
+
+    async def result(self, timeout: float) -> "Optional[AvioResponse]":
+        """The camera's reply, or None if it did not answer within ``timeout``.
+
+        None is a real answer, not an error: this firmware may not implement a
+        response for every command we send, and a control call must never block
+        a view while we find out.
+        """
+        if self._future.done():
+            # A wait that timed out cancels its own wrapper, and that
+            # cancellation can propagate down to this future - asking again
+            # would then raise where the first call returned None.
+            if self._future.cancelled():
+                return None
+            try:
+                return self._future.result()
+            except Exception:
+                return None
+        try:
+            return await asyncio.wait_for(
+                asyncio.wrap_future(self._future), timeout
+            )
+        except TimeoutError:
+            # Stop listening.  _avio_cmd runs on the keepalive path, so a
+            # registration left behind on every unanswered command would grow
+            # for as long as the session lives.
+            self._router._forget(self)
+            return None
+        except asyncio.CancelledError:
+            # Cancellation is the caller's task being stopped (entity teardown,
+            # config-entry unload), NOT the camera declining to answer.  Drop
+            # the registration, then let it through: swallowing it would leave
+            # the caller running inside a task the loop has already given up on.
+            self._router._forget(self)
+            raise
+
+
+class AvioResponseRouter:
+    """Match inbound AVIO responses to the commands that asked for them.
+
+    The control channel also carries traffic nobody asked for (session-mode
+    notifications, track switches), so "the next frame in" is not the answer to
+    the last question out.  Register interest with ``expect()`` *before* sending,
+    then await the waiter; ``dispatch()`` is safe to call from the bridge thread
+    and never raises or blocks it.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._waiting: "dict[int, list[_AvioWaiter]]" = {}
+
+    def expect(self, command: int) -> _AvioWaiter:
+        """Register interest in the next response carrying ``command``.
+
+        Call this before sending the request: the camera can answer before the
+        sender returns, and a registration made afterwards would miss the reply.
+        """
+        waiter = _AvioWaiter(self, command)
+        with self._lock:
+            self._waiting.setdefault(command, []).append(waiter)
+        return waiter
+
+    def dispatch(self, frame: bytes) -> bool:
+        """Hand ``frame`` to whoever is waiting for it.
+
+        True if it answered an outstanding question.  False - not an error - for
+        junk, for a command nobody asked about, and for a retransmitted copy of
+        a reply already delivered.
+        """
+        try:
+            resp = parse_avio_response(frame)
+            if resp is None:
+                return False
+            with self._lock:
+                queue = self._waiting.get(resp.command)
+                waiter = None
+                while queue:
+                    candidate = queue.pop(0)
+                    if not candidate._future.done():
+                        waiter = candidate
+                        break
+                if queue is not None and not queue:
+                    self._waiting.pop(resp.command, None)
+            if waiter is None:
+                return False
+            waiter._future.set_result(resp)
+            return True
+        except Exception:
+            # Runs inline on the bridge's receive path; a bad frame must never
+            # take the media loop down with it.
+            return False
+
+    def _forget(self, waiter: "_AvioWaiter") -> None:
+        with self._lock:
+            queue = self._waiting.get(waiter._command)
+            if not queue:
+                return
+            try:
+                queue.remove(waiter)
+            except ValueError:
+                return
+            if not queue:
+                self._waiting.pop(waiter._command, None)
+
+
+def _avio_cmd_id(frame: bytes) -> "Optional[int]":
+    """The command id of an AVIO frame, or None if it does not look like one.
+
+    For the receive-path logs.  Which ids this firmware actually sends is not
+    documented anywhere we trust - the list we work from was assembled from
+    frames seen on the wire - so naming them as they arrive is what turns the
+    next question into a log grep instead of another live session.
+    """
+    resp = parse_avio_response(bytes(frame))
+    return None if resp is None else resp.command
+
+
+#: How long a control call waits for the camera before reporting "no reply".
+#: Short on purpose: these run behind Home Assistant service calls, and a
+#: firmware that implements the request but not the response must not be able to
+#: hold up a view while we find that out.
+AVIO_RESPONSE_TIMEOUT_S = 2.0
+
+
+class AvioRequestMixin:
+    """Ask an AVIO command and wait for the camera's reply.
+
+    Mixed into both session types.  ``_avio_cmd`` itself is left exactly as it
+    was - fire-and-forget, synchronous, returns a bool - because every camera on
+    both transports goes through it, for the speaker, the keepalive heartbeat
+    and resolution alike.  Wanting an answer is opt-in and additive.
+
+    A session that mixes this in must create its router in ``__init__``:
+    dispatch arrives from the bridge thread and creating one lazily could race
+    with the event loop and lose the reply to a second router.
+    """
+
+    _avio_responses: "AvioResponseRouter"
+
+    def dispatch_avio_frame(self, frame: bytes) -> bool:
+        """Offer an inbound control frame to whoever is waiting for it.
+
+        Called from the transports' receive paths (the DTLS DataChannel message
+        handler, the SDES bridge thread).  False - not an error - when nothing
+        was waiting for it, which is the common case: the camera sends session
+        notifications and track switches nobody asked for.
+        """
+        return self._avio_responses.dispatch(frame)
+
+    async def async_avio_request(
+        self,
+        cmd: int,
+        payload: bytes = b"",
+        *,
+        response_cmd: int,
+        timeout: float = AVIO_RESPONSE_TIMEOUT_S,
+    ) -> "Optional[AvioResponse]":
+        """Send ``cmd`` and return the camera's ``response_cmd`` reply, or None.
+
+        None means the camera did not answer in time.  That is a real result,
+        not a failure: this firmware may implement a request without a response,
+        and no reply at all points at the channel rather than the firmware.
+        """
+        waiter = self._avio_responses.expect(response_cmd)
+        # Registered BEFORE the send: a camera on the LAN can answer before the
+        # sending call returns, and a reply that arrives with nobody listening
+        # would be reported as silence.
+        try:
+            sent = self._avio_cmd(cmd, payload)
+        except Exception:
+            sent = False
+        if not sent:
+            waiter.cancel()
+            return None
+        return await waiter.result(timeout)

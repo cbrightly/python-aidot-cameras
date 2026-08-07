@@ -24,7 +24,10 @@ from .constants import (
 from .models import VideoFrame  # noqa: F401 - forward-ref annotation
 from .sdes import SdesSession
 from .protocol import (
+    AVIO_HDR_LEN,
+    AvioResponseRouter,
     _build_sprop,
+    parse_avio_response,
     _build_stun_binding_success_response,
     _extract_param_sets_from_rtp,
     _grab_free_port,
@@ -43,6 +46,40 @@ _LOGGER = logging.getLogger(__name__)
 #: ``net.core.rmem_max`` (4 MB on Home Assistant OS), and doubles what it grants
 #: for bookkeeping, so asking for more than the cap is harmless.
 _MEDIA_RCVBUF_BYTES = 4 * 1024 * 1024
+
+
+def _dispatch_sctp_avio(responses, payload) -> bool:
+    """Offer an inbound SCTP DATA payload to the AVIO response router.
+
+    This is where the camera's replies actually arrive on SDES: an encrypted
+    SCTP DATA chunk (PPID 53) on the same channel we send LIVING, the heartbeat
+    and SPEAKERSTART on - not the TUTK-audio framing the audio forward path
+    watches. Wiring only the latter is why a camera that answered SPEAKERSTART
+    in moments looked silent.
+
+    True if it answered something we were waiting for. Never raises and never
+    blocks: it runs inline on the bridge receive loop, where a bad frame must
+    not be able to take the media path down with it.
+    """
+    if responses is None or not payload:
+        return False
+    answered = False
+    try:
+        view = memoryview(payload)
+        while len(view) >= AVIO_HDR_LEN:
+            frame = parse_avio_response(bytes(view))
+            if frame is None:
+                break
+            if responses.dispatch(bytes(view)):
+                answered = True
+            # One chunk can carry more than one frame: 5377 declares a 12-byte
+            # payload and has been seen arriving in a 140-byte chunk.  Reading
+            # only the first would lose a reply batched behind a notify, which
+            # presents as the camera intermittently not answering.
+            view = view[AVIO_HDR_LEN + len(frame.payload):]
+    except Exception:
+        return answered
+    return answered
 
 
 def _widen_media_rcvbuf(sock, kind: str, device_id: str = "?") -> int:
@@ -2756,6 +2793,12 @@ class _SdesOpenMixin:
         # once the SCTP DataChannel is established.  SdesSession reads it via
         # _cmd_chan[0] to dispatch PTZ / IOCtrl commands from the main thread.
         _cmd_chan: list = [None]
+        # The other direction: matches the camera's AVIO replies to the commands
+        # that asked for them.  Created here, not in SdesSession, because the
+        # bridge thread starts dispatching into it before the session object
+        # exists; the session is handed the same instance so both sides share
+        # one registry.
+        _avio_responses = AvioResponseRouter()
         # Proc holder: set to the ffmpeg Popen object after launch so the
         # bridge thread can poll for exit without a NameError race.
         _proc_holder: list = [None]
@@ -3807,9 +3850,17 @@ class _SdesOpenMixin:
                                                     if len(_pd_plain) >= 28 else 0)
                                         _sc_cmd = (int.from_bytes(_sc_pay[4:8], 'little')
                                                    if len(_sc_pay) >= 8 else 0)
+                                        # This is where the camera's answers
+                                        # come back on SDES.  They were parsed
+                                        # and logged here long before anything
+                                        # could receive them; hand them to
+                                        # whoever asked.
+                                        _sc_answered = _dispatch_sctp_avio(
+                                            _avio_responses, _sc_pay)
                                         _status(
                                             f"SDES DC: enc DATA ppid={_sc_ppid}"
                                             f" cmd={_sc_cmd} {len(_sc_pay)}B"
+                                            f"{' (answered a request)' if _sc_answered else ''}"
                                             f" {_sc_pay[:32].hex()}"
                                         )
                                     else:
@@ -3878,6 +3929,14 @@ class _SdesOpenMixin:
                                     # f0.java:3224): the camera can send it unsolicited, and
                                     # without it here an 804 frame is misrouted as PCMA noise.
                                     _avio_cmds = {5376, 5377, 5156, 5157, 768, 769, 511, 804}
+                                    # No response dispatch here.  Measured
+                                    # 2026-08-07: the camera's replies come back
+                                    # as encrypted SCTP DATA (see
+                                    # _dispatch_sctp_avio), never in this
+                                    # framing.  Offering every audio packet to
+                                    # the router would be per-packet work on the
+                                    # media path for something that has never
+                                    # arrived on it.
                                     if _fwd_cmd not in _avio_cmds:
                                         try:
                                             _lo_a.sendto(
@@ -4964,4 +5023,5 @@ class _SdesOpenMixin:
             first_video_pt=_first_video_pt,
             first_audio_pt=_first_audio_pt,
             device_id=getattr(self, "device_id", None),
+            responses=_avio_responses,
         )
