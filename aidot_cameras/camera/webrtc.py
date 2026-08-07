@@ -12,7 +12,12 @@ import struct
 import time
 from typing import Any, Callable, Optional
 
-from .protocol import AvioRequestMixin, AvioResponseRouter
+from .protocol import (
+    SPEAKER_ACK_TIMEOUT_S,
+    AvioRequestMixin,
+    AvioResponseRouter,
+    _speaker_opened,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -99,7 +104,15 @@ class WebRTCSession(AvioRequestMixin):
             self._talk_holder["provider"] = None
             return False
         # IOTYPE_USER_IPCAM_SPEAKERSTART = 848 (AVIOCTRLDEFs.java), 8-byte channel=0 payload.
-        self._avio_cmd(848, b"\x00" * 8)
+        # The camera answers 851; this used to be sent fire-and-forget and talk
+        # reported success whether or not the speaker ever opened.
+        if not await _speaker_opened(self, 848, SPEAKER_ACK_TIMEOUT_S):
+            self._talk_holder["provider"] = None
+            try:
+                self._audio_sender.replaceTrack(None)
+            except Exception:
+                _LOGGER.debug("swallowed exception in %s", 'async_start_talk', exc_info=True)
+            return False
         self._talk_holder["was_active"] = True  # ensure stop() releases the speaker
         return True
 

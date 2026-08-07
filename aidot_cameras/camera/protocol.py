@@ -2356,6 +2356,54 @@ def _avio_cmd_id(frame: bytes) -> "Optional[int]":
 AVIO_RESPONSE_TIMEOUT_S = 2.0
 
 
+#: How long to wait for the camera's SPEAKERSTART ack before opening the mic
+#: anyway.  Measured 0.01-0.86s across both transports; this is generous enough
+#: to cover a slow SDES open without making a press-to-talk feel stuck.
+SPEAKER_ACK_TIMEOUT_S = 2.0
+
+#: The one SPEAKERSTART ack payload observed, on both transports.
+_SPEAKER_ACK_OK = b"\x00\x64"
+
+
+async def _speaker_opened(session, cmd: int, timeout: float) -> bool:
+    """Send SPEAKERSTART and decide whether the camera opened its speaker.
+
+    Silence counts as success on purpose. An A001064 answers 848 but does not
+    implement 802 at all, so "this firmware has no response for this command" is
+    a real and common state; failing on it would remove two-way audio from every
+    camera quieter than the one we measured. So does an ack whose payload we do
+    not recognise - inventing a refusal out of an unfamiliar shape would
+    silently disable talk on a firmware variation.
+
+    What this does catch is an answer that is not an acceptance, which is the
+    case we were previously blind to.
+    """
+    waiter = session._avio_responses.expect(cmd + 3)
+    try:
+        sent = session._avio_cmd(cmd, b"\x00" * 8)
+    except Exception:
+        sent = False
+    if not sent:
+        waiter.cancel()
+        return True  # no channel to refuse on; unchanged from before
+    return await _speaker_ack_accepted(waiter, timeout)
+
+
+async def _speaker_ack_accepted(waiter, timeout: float) -> bool:
+    """Read a SPEAKERSTART ack, defaulting to acceptance on anything unfamiliar.
+
+    Shared by both transports because the decision is the same, even though the
+    send is not: on SDES the command leaves from the bridge thread and this only
+    ever waits.
+    """
+    reply = await waiter.result(timeout)
+    if reply is None:
+        return True
+    if len(reply.payload) != len(_SPEAKER_ACK_OK):
+        return True
+    return reply.payload == _SPEAKER_ACK_OK
+
+
 class AvioRequestMixin:
     """Ask an AVIO command and wait for the camera's reply.
 

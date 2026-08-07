@@ -10,7 +10,12 @@ import logging
 from typing import Callable, Optional
 
 from .constants import SDES_TALK_PUMP_IDLE_TICK
-from .protocol import AvioRequestMixin, AvioResponseRouter
+from .protocol import (
+    SPEAKER_ACK_TIMEOUT_S,
+    AvioRequestMixin,
+    AvioResponseRouter,
+    _speaker_ack_accepted,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -138,13 +143,24 @@ class SdesSession(AvioRequestMixin):
         # SPEAKERSTART(848) is sent by the BRIDGE thread (not here) once the SCTP
         # command channel is up - all SCTP DATA must stay on one thread or the
         # command races the heartbeat's TSN and the camera drops it.
+        # Register interest BEFORE the pump starts, so the ack cannot arrive
+        # while nothing is listening.  Note this does NOT send 848 - the bridge
+        # thread does, once want_speaker is set.  Moving the send here would put
+        # SCTP DATA on a second thread, racing the heartbeat's TSN.
+        waiter = self._avio_responses.expect(851)
         if self._talk_thread is None or not self._talk_thread.is_alive():
             import threading
             self._talk_thread = threading.Thread(
                 target=_run_sdes_talk_pump, args=(self._talk_state,), daemon=True
             )
             self._talk_thread.start()
-        return True
+        if await _speaker_ack_accepted(waiter, SPEAKER_ACK_TIMEOUT_S):
+            return True
+        # The camera refused. Stop the microphone rather than stream viewer
+        # audio at a speaker that never opened.
+        self._talk_state["want_speaker"] = False
+        self._talk_state["provider"] = None
+        return False
 
     async def async_stop_talk(self) -> bool:
         """End two-way audio: close the camera speaker and stop sending audio."""
