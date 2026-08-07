@@ -50,6 +50,7 @@ Requires the ``[webrtc]`` extra.
 import argparse
 import asyncio
 import inspect
+import os
 import struct
 import sys
 import time
@@ -105,8 +106,18 @@ async def _stop(session) -> None:
         await result
 
 
-async def _probe_one(client, device, probes, settle: float, timeout: float) -> bool:
-    """Open a session, run each probe, report every reply.  True if any answered."""
+async def _probe_one(client, device, probes, settle: float, timeout: float,
+                     record: float = 0.0, out_path: str = "") -> bool:
+    """Open a session, run each probe, report every reply.  True if any answered.
+
+    With ``record``, the session is written to ``out_path`` and held that long
+    after the probes. The recording necessarily starts before the probes do -
+    the camera's stream setting does not survive a session, so every session
+    begins at the camera's own default and there is no way to open one already
+    switched. Read the result per frame (``ffprobe -show_entries frame=width,
+    height``) rather than from the container header: what matters is whether the
+    dimensions change partway through, after the command lands.
+    """
     name = device.get(CONF_NAME)
     dc = client.get_device_client(device)
     model = getattr(getattr(dc, "info", None), "model_id", "") or ""
@@ -122,9 +133,13 @@ async def _probe_one(client, device, probes, settle: float, timeout: float) -> b
     answered = False
     try:
         t0 = time.time()
-        session = await dc.async_open_webrtc_stream(
-            timeout=45.0, status_callback=_on_status
-        )
+        open_kwargs = {"timeout": 45.0, "status_callback": _on_status}
+        if record > 0.0 and out_path:
+            if os.path.exists(out_path):
+                os.remove(out_path)
+            open_kwargs["output_path"] = out_path
+            open_kwargs["max_seconds"] = int(settle + record + 5)
+        session = await dc.async_open_webrtc_stream(**open_kwargs)
         transport = type(session).__name__
         print(f"    established in {time.time() - t0:.1f}s via {transport}")
 
@@ -152,6 +167,13 @@ async def _probe_one(client, device, probes, settle: float, timeout: float) -> b
                 answered = True
                 print(f"    <- cmd={cmd}: REPLY {expect} in {waited:.2f}s"
                       f" seq={reply.seq} payload={reply.payload.hex() or '<empty>'}")
+
+        if record > 0.0 and out_path:
+            print(f"    recording {record:.0f}s to {out_path} ...")
+            await asyncio.sleep(record)
+            size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+            print(f"    recorded {size}B"
+                  f" (~{size * 8 / 1000.0 / max(record, 1):.0f} kbps average)")
 
         # Leave the camera as we found it: if we opened the speaker, close it.
         if any(cmd == 848 for cmd, _, _ in probes):
@@ -201,7 +223,8 @@ async def _run(args) -> int:
             probes = args.probe or _DEFAULT_PROBES
             results = [
                 (c.get(CONF_NAME),
-                 await _probe_one(client, c, probes, args.settle, args.timeout))
+                 await _probe_one(client, c, probes, args.settle, args.timeout,
+                                  args.record, args.out))
                 for c in selected
             ]
 
@@ -229,6 +252,10 @@ def main() -> int:
                    help="seconds to wait for the control channel (default 5)")
     p.add_argument("--timeout", type=float, default=5.0,
                    help="seconds to wait for each reply (default 5)")
+    p.add_argument("--record", type=float, default=0.0,
+                   help="hold and record the session this long after the probes")
+    p.add_argument("--out", default="",
+                   help="where to write the recording (with --record)")
     args = p.parse_args()
     return asyncio.run(_run(args))
 
