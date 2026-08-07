@@ -773,6 +773,39 @@ _KEEPALIVE_WINDOW_S = 25
 _KEEPALIVE_RENEW_S = 20
 
 
+def _ack_matches_seq(msg, seq):
+    """Is ``msg`` the device's answer to the command we sent as ``seq``?
+
+    ``True`` for our own 200, the integer response code for our own non-200,
+    and ``False`` for anything that is not attributable to us - another
+    command's ack, the battery wake response, a message with no seq at all.
+
+    Correlating matters because several messages are in flight on the same four
+    wildcard subscriptions: battery cameras get a ``lowPowerActiveStateReq``
+    published alongside the write, and Home Assistant writes attributes in
+    bursts. Accepting a stranger's 200 reports that one control landed on the
+    evidence of a different one landing.
+    """
+    if not isinstance(msg, dict) or seq is None:
+        return False
+    got = msg.get("seq")
+    if got is None:
+        return False
+    # We send a string; nothing obliges the camera to echo the same type.
+    if str(got) != str(seq):
+        return False
+    code = (msg.get("ack") or {}).get("code")
+    if code is None:
+        code = msg.get("code")
+    if code is None:
+        inner = msg.get("payload") or {}
+        if isinstance(inner, dict):
+            code = inner.get("code")
+    if code == 200:
+        return True
+    return code if isinstance(code, int) else False
+
+
 class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
     """All camera/streaming methods, mixed into DeviceClient via inheritance."""
 
@@ -1902,6 +1935,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         *,
         timeout: float = 8.0,
         ack_keyword: str = "setDevAttr",
+        seq: "Optional[str]" = None,
     ) -> bool:
         """Connect MQTT, optionally wake battery camera, publish command, wait for ack.
 
@@ -1980,6 +2014,11 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 duration=timeout,
             )
 
+        # Two passes, because being sure is worth more than being quick. A
+        # response carrying OUR seq is proof; anything else on these topics is
+        # only evidence that SOMETHING was acked - and several things are in
+        # flight here (the battery wake goes out alongside the write, and Home
+        # Assistant writes attributes in bursts).
         for topic, raw in messages:
             if ack_keyword and ack_keyword not in topic:
                 continue
@@ -1987,14 +2026,42 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 msg = _json.loads(raw)
             except Exception:
                 continue
+            mine = _ack_matches_seq(msg, seq)
+            if mine is True:
+                _LOGGER.debug("device cmd ack 200 for seq=%s: topic=%s", seq, topic)
+                return True
+            if mine is not False:
+                # The camera answered OUR command with a non-200. Logged, not
+                # acted on: whether this firmware ever sends one is unknown, and
+                # turning it into a failure on a guess would report every
+                # working write as broken the moment the guess is wrong. If
+                # these show up in the wild, that is the evidence needed to make
+                # it a real error.
+                _LOGGER.warning(
+                    "device cmd for %s answered with code %s (seq=%s, topic=%s) "
+                    "- reporting the command as sent anyway; please report this "
+                    "log line, it is the evidence needed to handle it properly",
+                    device_id, mine, seq, topic,
+                )
+
+        for topic, raw in messages:
+            if ack_keyword and ack_keyword not in topic:
+                continue
+            try:
+                msg = _json.loads(raw)
+            except Exception:
+                continue
+            if _ack_matches_seq(msg, seq) is not False:
+                continue  # already considered above
             code = (msg.get("ack") or {}).get("code") or msg.get("code")
             if code == 200:
-                _LOGGER.debug("device cmd ack 200: topic=%s", topic)
+                _LOGGER.debug("device cmd ack 200 (unattributed): topic=%s", topic)
                 return True
             # Some firmware ACKs with code in payload.payload
             inner = msg.get("payload") or {}
             if isinstance(inner, dict) and inner.get("code") == 200:
-                _LOGGER.debug("device cmd ack 200 (inner): topic=%s", topic)
+                _LOGGER.debug(
+                    "device cmd ack 200 (inner, unattributed): topic=%s", topic)
                 return True
 
         # Fire-and-forget fallback: the official app uses a delivery callback,
@@ -2070,7 +2137,8 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         pub_topic = f"iot/v1/c/{device_id}/device/setDevAttrReq"
         _LOGGER.info("setDevAttrReq: %s=%s -> %s  seq=%s", attr, value, device_id, seq)
         ok = await self._mqtt_device_cmd(
-            pub_topic, payload, timeout=timeout, ack_keyword="setDevAttr")
+            pub_topic, payload, timeout=timeout, ack_keyword="setDevAttr",
+            seq=seq)
         if ok:
             # Reflect the change in local status right away (optimistic), so HA
             # control entities show the new value immediately instead of waiting
