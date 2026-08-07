@@ -2183,6 +2183,10 @@ def _dedup_bundle_candidates(sdp: str) -> str:
 #: reserved, then 4 bytes of padding.  Same layout we already build when sending.
 _AVIO_RESP_HDR = struct.Struct("<IIqII4x")
 
+#: Bytes of header before an AVIO payload begins.  Exported because the SDES
+#: receive path has to walk past one frame to reach the next in the same chunk.
+AVIO_HDR_LEN = _AVIO_RESP_HDR.size
+
 
 class AvioResponse(NamedTuple):
     """A decoded AVIO control response."""

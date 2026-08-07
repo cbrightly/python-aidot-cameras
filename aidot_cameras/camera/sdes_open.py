@@ -24,8 +24,10 @@ from .constants import (
 from .models import VideoFrame  # noqa: F401 - forward-ref annotation
 from .sdes import SdesSession
 from .protocol import (
+    AVIO_HDR_LEN,
     AvioResponseRouter,
     _build_sprop,
+    parse_avio_response,
     _build_stun_binding_success_response,
     _extract_param_sets_from_rtp,
     _grab_free_port,
@@ -61,10 +63,23 @@ def _dispatch_sctp_avio(responses, payload) -> bool:
     """
     if responses is None or not payload:
         return False
+    answered = False
     try:
-        return responses.dispatch(payload)
+        view = memoryview(payload)
+        while len(view) >= AVIO_HDR_LEN:
+            frame = parse_avio_response(bytes(view))
+            if frame is None:
+                break
+            if responses.dispatch(bytes(view)):
+                answered = True
+            # One chunk can carry more than one frame: 5377 declares a 12-byte
+            # payload and has been seen arriving in a 140-byte chunk.  Reading
+            # only the first would lose a reply batched behind a notify, which
+            # presents as the camera intermittently not answering.
+            view = view[AVIO_HDR_LEN + len(frame.payload):]
     except Exception:
-        return False
+        return answered
+    return answered
 
 
 def _widen_media_rcvbuf(sock, kind: str, device_id: str = "?") -> int:

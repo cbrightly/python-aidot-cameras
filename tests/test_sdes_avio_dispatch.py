@@ -70,6 +70,39 @@ def test_junk_is_ignored_rather_than_raised(blob):
     assert _dispatch_sctp_avio(router, blob) is False
 
 
+def test_a_chunk_carrying_two_frames_delivers_both():
+    """One SCTP DATA payload is not necessarily one AVIO frame.
+
+    The session-mode notify (5377) declares a 12-byte payload but has been seen
+    arriving in a 140-byte chunk, which is far more than one frame's worth. If a
+    reply is ever batched behind a notify, reading only the first frame loses it
+    - and it would present as the camera intermittently not answering, which is
+    the single hardest symptom to attribute correctly here.
+    """
+    router = AvioResponseRouter()
+    waiter = router.expect(851)
+
+    assert _dispatch_sctp_avio(router, REAL_5157 + REAL_851) is True
+    assert waiter._future.result(timeout=1).payload == b"\x00\x64"
+
+
+def test_padding_after_the_last_frame_is_not_mistaken_for_another():
+    """Stop at the first thing that is not a whole frame, rather than guessing."""
+    router = AvioResponseRouter()
+    waiter = router.expect(851)
+
+    assert _dispatch_sctp_avio(router, REAL_851 + b"\x00\x00\x00\x00") is True
+    assert waiter._future.result(timeout=1).payload == b"\x00\x64"
+
+
+def test_a_frame_hidden_behind_an_unparseable_one_does_not_hang_the_walk():
+    """A junk prefix must not cost the whole chunk, nor loop forever on it."""
+    router = AvioResponseRouter()
+    router.expect(851)
+
+    assert _dispatch_sctp_avio(router, b"\xff" * 3 + REAL_851) is False
+
+
 def test_a_missing_router_is_survivable():
     """Belt and braces: the bridge must not care whether one was handed over."""
     assert _dispatch_sctp_avio(None, REAL_851) is False
