@@ -235,6 +235,14 @@ def _parse_alarm_event(msg: dict):
     return {"device_id": dev, "type": kind, "alarm_type": code}
 
 
+def _section_of(lines: list) -> str:
+    """The m-section the given emitted lines currently end inside, or ""."""
+    for ln in reversed(lines):
+        if ln.startswith("m="):
+            return ln.split(" ")[0]
+    return ""
+
+
 def _compress_sdp_for_camera(sdp: str) -> str:
     """Selective SDP filter matching official Java client's g.b() behaviour.
 
@@ -258,6 +266,14 @@ def _compress_sdp_for_camera(sdp: str) -> str:
     seen: dict = {}
     media_type = ""
     before_m = True
+    # Payload types that survived narrowing. rtcp-fb is kept for these and only
+    # these: feedback describing a codec we dropped is bytes spent on something
+    # that will never be sent, in an offer whose size is why this function
+    # exists.
+    _kept_pts: set = set()
+    # rtcp-fb lines are buffered because they can appear before the rtpmap that
+    # decides whether their payload type survives.
+    _fb_lines: list = []
 
     def keep(ln: str, key: str = "") -> None:
         out.append(ln + "\r\n")
@@ -283,6 +299,11 @@ def _compress_sdp_for_camera(sdp: str) -> str:
         if ln.startswith("a=mid:"):
             keep(ln)
             continue
+        if ln.startswith("a=rtcp-fb:"):
+            # Buffered, not decided here: an rtcp-fb line can precede the
+            # rtpmap that determines whether its payload type survives.
+            _fb_lines.append((media_type, ln))
+            continue
         if ln.startswith("a=ssrc") and "cname" in ln:
             if seen.get(f"ssrc-cname-{media_type}") is None:
                 keep(ln, f"ssrc-cname-{media_type}")
@@ -303,17 +324,26 @@ def _compress_sdp_for_camera(sdp: str) -> str:
             if media_type == "m=audio":
                 if any(c in ln for c in ("opus", "PCMU", "PCMA", "AAC")):
                     keep(ln)
+                    # Remember the payload type so its rtcp-fb can be kept too.
+                    if ln.startswith("a=rtpmap:"):
+                        try:
+                            _kept_pts.add(ln.split(":")[1].split(" ")[0])
+                        except Exception:
+                            _LOGGER.debug("swallowed exception in %s", 'keep',
+                                          exc_info=True)
             elif media_type == "m=video":
                 if "H264/90000" in ln and seen.get("H264/90000") is None:
                     keep(ln, "H264/90000")
                     try:
                         seen["H264/90000_pt"] = ln.split(":")[1].split(" ")[0]
+                        _kept_pts.add(seen["H264/90000_pt"])
                     except Exception:
                         _LOGGER.debug("swallowed exception in %s", 'keep', exc_info=True)
                 elif "H265/90000" in ln and seen.get("H265/90000") is None:
                     keep(ln, "H265/90000")
                     try:
                         seen["H265/90000_pt"] = ln.split(":")[1].split(" ")[0]
+                        _kept_pts.add(seen["H265/90000_pt"])
                     except Exception:
                         _LOGGER.debug("swallowed exception in %s", 'keep', exc_info=True)
                 elif "apt=" in ln:
@@ -332,6 +362,22 @@ def _compress_sdp_for_camera(sdp: str) -> str:
             elif media_type == "m=application":
                 if "sctp-port" in ln:
                     keep(ln)
+    # Re-insert the surviving feedback at the end of its own media section, so
+    # the offer stays well-formed. Kept only for payload types that survived
+    # narrowing - see _kept_pts.
+    if _fb_lines:
+        kept_fb = [(mt, ln) for mt, ln in _fb_lines
+                   if ln.split(":", 1)[1].split(" ")[0] in _kept_pts]
+        if kept_fb:
+            rebuilt: list = []
+            for line in out:
+                if line.startswith("m=") and rebuilt:
+                    prev = _section_of(rebuilt)
+                    rebuilt.extend(l + "\r\n" for mt, l in kept_fb if mt == prev)
+                rebuilt.append(line)
+            prev = _section_of(rebuilt)
+            rebuilt.extend(l + "\r\n" for mt, l in kept_fb if mt == prev)
+            out = rebuilt
     return "".join(out)
 
 
