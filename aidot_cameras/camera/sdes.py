@@ -28,6 +28,7 @@ _LOGGER = logging.getLogger(__name__)
 SDES_SPEAKER_ACK_TIMEOUT_S = SDES_SPEAKERSTART_DELAY + SPEAKER_ACK_TIMEOUT_S
 
 
+
 class SdesSession(AvioRequestMixin):
     """Active SDES-SRTP stream session managed by an ffmpeg subprocess.
 
@@ -54,6 +55,7 @@ class SdesSession(AvioRequestMixin):
         first_audio_pt=None,
         device_id=None,
         responses=None,
+        abort_chan=None,
     ) -> None:
         # Which camera this session belongs to, for logging only.  Optional so
         # an existing caller that does not pass it still works; the logs then
@@ -100,6 +102,12 @@ class SdesSession(AvioRequestMixin):
         self._avio_responses = (
             responses if responses is not None else AvioResponseRouter()
         )
+        # Mutable one-element list the bridge fills with a callable that sends
+        # an SCTP ABORT.  Unlike SPEAKERSTART this is safe to call from here:
+        # ABORT carries no TSN, so there is nothing for it to race, and it is
+        # the last thing the association ever sees.  None when the caller
+        # supplied no holder - teardown then behaves exactly as it did before.
+        self._abort_chan = abort_chan if abort_chan is not None else [None]
         # Shared talk state (dict) for outbound two-way audio, or None when the
         # session was not opened talk-capable (offer stayed recvonly).  Populated
         # by the bridge (camera audio addr) and by async_start_talk (provider).
@@ -303,6 +311,23 @@ class SdesSession(AvioRequestMixin):
                 await asyncio.sleep(0.3)
             self._talk_state["stop"] = True
             self._talk_state["provider"] = None
+        # Close the SCTP association BEFORE anything else, while the bridge
+        # loop that sends it is still running - it dies with ffmpeg.  Measured
+        # 2026-08-07: reopening 2s after a close is refused with -50002 while 8s
+        # is fine, because the camera holds the session until it works out we
+        # have gone.  We were the only one of the three implementations that
+        # never said so; the official app disposes its data channel and our own
+        # DTLS path sends this same chunk.
+        _abort = self._abort_chan[0]
+        if _abort is not None:
+            try:
+                if _abort():
+                    _LOGGER.debug("camera %s: sent SCTP ABORT at teardown",
+                                  self._device_id)
+            except Exception:
+                # Never let closing politely stop us closing at all.
+                _LOGGER.debug("camera %s: swallowed exception in %s",
+                              self._device_id, 'stop', exc_info=True)
         # Flag this as a locally-initiated teardown BEFORE signalling ffmpeg, so
         # the bridge thread's observe loop never races a look at a stale False
         # if it polls the exit code immediately after terminate()/kill().

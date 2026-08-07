@@ -376,6 +376,18 @@ _SERVE_REORDER_QUEUE = int(os.environ.get("AIDOT_SERVE_REORDER_QUEUE", "500"))
 #: failure this is meant to prevent.
 _SERVE_MAX_DELAY_US = int(os.environ.get("AIDOT_SERVE_MAX_DELAY_US", "500000"))
 
+#: How long to wait after a camera answers -50002 / -50015 ("no free session").
+#: Both loops used to wait _MAX_DELAY (300s) on the belief that the camera
+#: "releases slowly". Measured 2026-08-07 on an A001064: reopening 2s after a
+#: close is refused, 8s reopens cleanly, every time - and that was minting a
+#: fresh peerid each attempt, the case the old comment warned about. A camera
+#: that clears in seconds paired with a five-minute refusal to retry is
+#: indistinguishable from one that needs a long rest, which is the likeliest
+#: origin of this project's "battery cameras need 30-45 minutes" rule.
+#: Still a real wait: retrying instantly would hammer a camera that genuinely
+#: has none free, and on a battery model risks a wake-then-sleep loop.
+_BUSY_BACKOFF_S = float(os.environ.get("AIDOT_BUSY_BACKOFF_S", "20"))
+
 
 def _build_sdes_serve_cmd(
     *,
@@ -3420,14 +3432,17 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 # wake-then-sleep loop that serves nothing. Wait out the release
                 # window instead. (The DTLS loops have always done this; the SDES
                 # loop silently did not.)
+                #
+                # That release window is now measured rather than assumed: 8s is
+                # enough, 2s is not. See _BUSY_BACKOFF_S.
                 self._fast_attempt_override = None
                 _LOGGER.warning(
                     "SDES keepalive: camera %s refused the stream (%s) - "
                     "backing off %.0fs so its sessions can be released",
-                    self.device_id, busy, _MAX_DELAY,
+                    self.device_id, busy, _BUSY_BACKOFF_S,
                 )
                 try:
-                    await asyncio.sleep(_MAX_DELAY)
+                    await asyncio.sleep(_BUSY_BACKOFF_S)
                 except asyncio.CancelledError:
                     return
                 continue
@@ -3645,10 +3660,10 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 # before trying again rather than hammering it.
                 _LOGGER.warning(
                     "Stream refused for %s (%s) - backing off %.0fs before retry",
-                    self.device_id, busy, _MAX_DELAY,
+                    self.device_id, busy, _BUSY_BACKOFF_S,
                 )
                 try:
-                    await asyncio.sleep(_MAX_DELAY)
+                    await asyncio.sleep(_BUSY_BACKOFF_S)
                 except asyncio.CancelledError:
                     return
                 continue
