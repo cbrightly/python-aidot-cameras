@@ -9,7 +9,7 @@ import asyncio
 import logging
 from typing import Callable, Optional
 
-from .constants import SDES_TALK_PUMP_IDLE_TICK
+from .constants import SDES_SPEAKERSTART_DELAY, SDES_TALK_PUMP_IDLE_TICK
 from .protocol import (
     SPEAKER_ACK_TIMEOUT_S,
     AvioRequestMixin,
@@ -18,6 +18,14 @@ from .protocol import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+#: The bridge does not send SPEAKERSTART the moment talk starts - it waits
+#: SDES_SPEAKERSTART_DELAY after the command channel is up, because a
+#: SPEAKERSTART sent too early is ignored and never acked.  The ack budget
+#: has to cover that delay as well as the round trip, or the wait expires
+#: before the command has even left and every press-to-talk pays the full
+#: timeout for no verdict.
+SDES_SPEAKER_ACK_TIMEOUT_S = SDES_SPEAKERSTART_DELAY + SPEAKER_ACK_TIMEOUT_S
 
 
 class SdesSession(AvioRequestMixin):
@@ -154,7 +162,7 @@ class SdesSession(AvioRequestMixin):
                 target=_run_sdes_talk_pump, args=(self._talk_state,), daemon=True
             )
             self._talk_thread.start()
-        if await _speaker_ack_accepted(waiter, SPEAKER_ACK_TIMEOUT_S):
+        if await _speaker_ack_accepted(waiter, SDES_SPEAKER_ACK_TIMEOUT_S):
             return True
         # The camera refused. Stop the microphone rather than stream viewer
         # audio at a speaker that never opened.

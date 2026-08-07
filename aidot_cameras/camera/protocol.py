@@ -2365,7 +2365,7 @@ SPEAKER_ACK_TIMEOUT_S = 2.0
 _SPEAKER_ACK_OK = b"\x00\x64"
 
 
-async def _speaker_opened(session, cmd: int, timeout: float) -> bool:
+async def _speaker_opened(session, cmd: int, resp_cmd: int, timeout: float) -> bool:
     """Send SPEAKERSTART and decide whether the camera opened its speaker.
 
     Silence counts as success on purpose. An A001064 answers 848 but does not
@@ -2378,7 +2378,7 @@ async def _speaker_opened(session, cmd: int, timeout: float) -> bool:
     What this does catch is an answer that is not an acceptance, which is the
     case we were previously blind to.
     """
-    waiter = session._avio_responses.expect(cmd + 3)
+    waiter = session._avio_responses.expect(resp_cmd)
     try:
         sent = session._avio_cmd(cmd, b"\x00" * 8)
     except Exception:

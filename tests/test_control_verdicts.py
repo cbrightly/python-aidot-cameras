@@ -224,3 +224,42 @@ def _record(seen, reply=SimpleNamespace(command=801, payload=b"\x00" * 8)):
 async def cam_set(cam, session, quality):
     cam._stream_session = session
     return await cam.async_set_resolution(quality)
+
+
+async def test_the_microphone_is_not_opened_before_the_speaker_answers():
+    """Order matters: a refusal must not have already sent viewer audio.
+
+    replaceTrack used to happen first, so on a refused speaker the microphone
+    had been live and encoding for the whole round trip before being detached.
+    The verdict is cheap on this transport - 0.01-0.38s measured - so it can
+    simply come first.
+    """
+    session = _session()
+    await _start_talk(session, _reply(SPEAKERSTART_RESP, b"\x00\x01"))
+
+    enabled = [c for c in session._audio_sender.replaceTrack.call_args_list
+               if c.args and c.args[0] is session._talk_track]
+    assert not enabled, "the microphone was enabled before the camera answered"
+
+
+async def test_an_accepted_speaker_does_open_the_microphone():
+    session = _session()
+    assert await _start_talk(session, _reply(SPEAKERSTART_RESP)) is True
+
+    enabled = [c for c in session._audio_sender.replaceTrack.call_args_list
+               if c.args and c.args[0] is session._talk_track]
+    assert enabled, "an accepted speaker must still enable the microphone"
+
+
+async def test_the_sdes_budget_covers_the_bridge_delay():
+    """The bridge waits SDES_SPEAKERSTART_DELAY before it sends 848 at all.
+
+    If the ack budget did not account for that, the wait would expire before the
+    command had even left, and the whole check would silently degrade to "the
+    camera said nothing" while costing every press-to-talk the full timeout.
+    """
+    from aidot_cameras.camera.constants import SDES_SPEAKERSTART_DELAY
+    from aidot_cameras.camera.sdes import SDES_SPEAKER_ACK_TIMEOUT_S
+    from aidot_cameras.camera.protocol import SPEAKER_ACK_TIMEOUT_S
+
+    assert SDES_SPEAKER_ACK_TIMEOUT_S >= SDES_SPEAKERSTART_DELAY + SPEAKER_ACK_TIMEOUT_S
