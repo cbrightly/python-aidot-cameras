@@ -2361,22 +2361,30 @@ AVIO_RESPONSE_TIMEOUT_S = 2.0
 #: to cover a slow SDES open without making a press-to-talk feel stuck.
 SPEAKER_ACK_TIMEOUT_S = 2.0
 
-#: The one SPEAKERSTART ack payload observed, on both transports.
-_SPEAKER_ACK_OK = b"\x00\x64"
+#: Ack payloads observed for SPEAKERSTART, all of them on speakers that opened:
+#: 0x0064 (M3 Pro / DTLS, PTZ / SDES, and an L2) and 0x00c8 (the same L2, on the
+#: very next session). One camera returning both across consecutive successful
+#: opens is what settles it - the payload is not a verdict, so there is nothing
+#: here to read as a refusal.
+_SPEAKER_ACKS_SEEN = (b"\x00\x64", b"\x00\xc8")
 
 
 async def _speaker_opened(session, cmd: int, resp_cmd: int, timeout: float) -> bool:
     """Send SPEAKERSTART and decide whether the camera opened its speaker.
 
-    Silence counts as success on purpose. An A001064 answers 848 but does not
-    implement 802 at all, so "this firmware has no response for this command" is
-    a real and common state; failing on it would remove two-way audio from every
-    camera quieter than the one we measured. So does an ack whose payload we do
-    not recognise - inventing a refusal out of an unfamiliar shape would
-    silently disable talk on a firmware variation.
+    Everything currently counts as success, and that is the honest position
+    rather than a placeholder. Silence does, because an A001064 answers 848 but
+    does not implement 802 at all - a firmware with no response for a command is
+    a real and common state, and failing on it would remove two-way audio from
+    every camera quieter than the one measured. And any ack does, because no
+    refusal has ever been observed: the payload varies across models AND across
+    consecutive sessions on one camera, so it carries no verdict to read.
 
-    What this does catch is an answer that is not an acceptance, which is the
-    case we were previously blind to.
+    An earlier version treated 0x0064 as "the" success value and any other
+    two-byte payload as a refusal. That was a discriminator invented from a
+    single sample, and it would have disabled talk outright on an L2, which
+    answers 0x00c8 about half the time. The payload is logged instead, so a
+    genuine refusal can be recognised from evidence when one appears.
     """
     waiter = session._avio_responses.expect(resp_cmd)
     try:
@@ -2398,10 +2406,17 @@ async def _speaker_ack_accepted(waiter, timeout: float) -> bool:
     """
     reply = await waiter.result(timeout)
     if reply is None:
+        _LOGGER.debug("SPEAKERSTART: no ack within %.1fs - treating as opened", timeout)
         return True
-    if len(reply.payload) != len(_SPEAKER_ACK_OK):
-        return True
-    return reply.payload == _SPEAKER_ACK_OK
+    if reply.payload not in _SPEAKER_ACKS_SEEN:
+        _LOGGER.info(
+            "SPEAKERSTART acked with an unrecorded payload %s - treating the "
+            "speaker as open. Please report this: the payloads seen so far all "
+            "belong to speakers that opened, so a genuine refusal has never "
+            "been identified and this may be the first",
+            reply.payload.hex() or "<empty>",
+        )
+    return True
 
 
 class AvioRequestMixin:
