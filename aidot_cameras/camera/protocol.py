@@ -2383,11 +2383,28 @@ class AvioResponseRouter:
                 self._waiting.pop(waiter._command, None)
 
 
-#: What we ask the camera to send, in bits per second. The vendor clients sit at
-#: 225-500 Kbps on this hardware while we were taking 1900-3700, so this starts
-#: in their region rather than at some invented number. Overridable per install
-#: because the right value depends on the link and the viewer.
-REMB_TARGET_BPS = int(os.environ.get("AIDOT_REMB_TARGET_BPS", "500000"))
+#: What we ask the camera to send, in bits per second. Zero disables sending
+#: REMB at all, which is the default.
+#:
+#: OFF by default because it was measured and did not work. An A001064 was A/B'd
+#: with REMB transmitting at 500 Kbps and correctly naming the video SSRC -
+#: receipts per session, interleaved arms against a control - and its bitrate
+#: did not fall. The one clean like-for-like pair had the REMB arm HIGHER than
+#: its control (3859 vs 3355 Kbps). No effect was demonstrated on the only model
+#: tested.
+#:
+#: That alone would argue for opt-in. The stronger argument is the models NOT
+#: tested: an A000088 or A001513 that does honour REMB would have had its
+#: picture capped at 500 Kbps fleet-wide, by default, on the strength of a
+#: measurement taken elsewhere that showed no benefit. Shipping a bitrate cap
+#: enabled by default, validated on one camera that ignores it, risks degrading
+#: precisely the cameras nobody measured.
+#:
+#: The negotiation, the encoder and the decoder are all kept and tested: the
+#: camera does advertise goog-remb in its answer, so this is a working
+#: instrument for anyone who wants to measure their own hardware. Set
+#: AIDOT_REMB_TARGET_BPS to a bitrate to turn it on.
+REMB_TARGET_BPS = int(os.environ.get("AIDOT_REMB_TARGET_BPS", "0"))
 
 
 def build_remb(sender_ssrc: int, media_ssrcs: "list", bitrate_bps: int) -> bytes:
