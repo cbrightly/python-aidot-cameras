@@ -13,6 +13,11 @@ from .constants import _PTZ_DIR_CODES, _STREAM_QUALITY, SETSTREAMCTRL_CMD
 
 _LOGGER = logging.getLogger(__name__)
 
+#: The camera's ack for SETSTREAMCTRL (800).
+SETSTREAMCTRL_RESP_CMD = 801
+#: Measured 0.01-0.03s; short so a control call never holds up a view.
+_SETSTREAMCTRL_ACK_S = 1.5
+
 
 class _CameraControlsMixin:
     """Device-control setters mixed into CameraMixin."""
@@ -166,12 +171,32 @@ class _CameraControlsMixin:
                 "resolution %s remembered; the camera is not streaming, so it "
                 "will be applied when a session next starts", quality)
             return True
-        ok = session._avio_cmd(SETSTREAMCTRL_CMD, payload)
-        _LOGGER.debug(
-            "set resolution %s (quality=%d) -> %s",
-            quality, q, "sent" if ok else "no channel yet",
+        # Ask, and read what comes back.  The camera acks with 801 in
+        # 0.01-0.03s (measured 2026-08-07 on an A000088) and reports the new
+        # value through GETSTREAMCTRL afterwards, so the command is genuinely
+        # accepted - it simply does not change the encode.
+        #
+        # The RETURN value deliberately still means "the command went out". An
+        # A001064 answers SPEAKERSTART but does not implement GETSTREAMCTRL at
+        # all, so how much a given firmware answers is model-dependent, and
+        # turning silence into a failure would break this call on exactly the
+        # quieter cameras. Reading the reply is what we could not do before; it
+        # makes a refusal visible instead of indistinguishable from success.
+        reply = await session.async_avio_request(
+            SETSTREAMCTRL_CMD, payload,
+            response_cmd=SETSTREAMCTRL_RESP_CMD, timeout=_SETSTREAMCTRL_ACK_S,
         )
-        return ok
+        if reply is None:
+            _LOGGER.debug(
+                "set resolution %s (quality=%d): sent, no ack within %.1fs",
+                quality, q, _SETSTREAMCTRL_ACK_S,
+            )
+        else:
+            _LOGGER.debug(
+                "set resolution %s (quality=%d): camera acked %d payload=%s",
+                quality, q, reply.command, reply.payload.hex() or "<empty>",
+            )
+        return True
 
     def _apply_pending_resolution(self) -> None:
         """Re-send the remembered resolution now that a session exists.

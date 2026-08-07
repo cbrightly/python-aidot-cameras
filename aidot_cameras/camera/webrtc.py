@@ -12,7 +12,12 @@ import struct
 import time
 from typing import Any, Callable, Optional
 
-from .protocol import AvioRequestMixin, AvioResponseRouter
+from .protocol import (
+    SPEAKER_ACK_TIMEOUT_S,
+    AvioRequestMixin,
+    AvioResponseRouter,
+    _speaker_opened,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,14 +97,23 @@ class WebRTCSession(AvioRequestMixin):
         """
         if not self.talk_supported:
             return False
+        # Ask the camera to open its speaker FIRST, and only enable the
+        # microphone once it has.  The other order left the mic live and
+        # encoding for the whole round trip, so a refused speaker had already
+        # been sent viewer audio by the time we detached it.  The verdict is
+        # cheap here - 0.01-0.38s measured on an A000088.
+        #
+        # IOTYPE_USER_IPCAM_SPEAKERSTART = 848 (AVIOCTRLDEFs.java), 8-byte
+        # channel=0 payload; the camera answers 851.
         self._talk_holder["provider"] = pcm_provider
+        if not await _speaker_opened(self, 848, 851, SPEAKER_ACK_TIMEOUT_S):
+            self._talk_holder["provider"] = None
+            return False
         try:
             self._audio_sender.replaceTrack(self._talk_track)
         except Exception:
             self._talk_holder["provider"] = None
             return False
-        # IOTYPE_USER_IPCAM_SPEAKERSTART = 848 (AVIOCTRLDEFs.java), 8-byte channel=0 payload.
-        self._avio_cmd(848, b"\x00" * 8)
         self._talk_holder["was_active"] = True  # ensure stop() releases the speaker
         return True
 
