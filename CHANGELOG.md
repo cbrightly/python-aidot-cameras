@@ -4,6 +4,60 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.17.1]
+
+### Added
+- **The negotiated video profile is now recorded on every session.** An A001064
+  was measured serving two different profiles for identical requests - H264
+  1280x720 at 2.5-4.0 Mbps, and H265 2560x1440 at roughly 1.1 Mbps - varying
+  per session, with nothing in the request asking for either. Codec and
+  resolution moved together in all eleven sessions measured.
+
+  Nothing recorded which one a session got, so no two bitrate figures from this
+  camera were ever comparable: the codec that produced each one was never
+  written down. One INFO line now names the payload type and codec when the
+  first video packet lands.
+
+- **`AIDOT_SDES_VIDEO_PT` pins the SDES offer to a single video codec.** The
+  offer advertises both 96 (H264) and 97 (H265) and expresses no preference, so
+  the camera decides in its answer. A consumer that cannot decode a sudden
+  2560x1440 H265 stream, or cannot absorb a threefold bitrate change, has had no
+  way to prevent the flip.
+
+  Set it to `96` and the offer carries H264 only: measured h264 1280x720 in 4 of
+  4 sessions, against an unpinned baseline that varies. Unset - the default -
+  the offer is byte-identical to 0.17.0, which matters because this path is
+  shared by every SDES camera.
+
+  **Do not set it to `97`.** An H265-only offer returned no video at all - audio
+  only, with no video stream in the recording - in 3 of 3 interleaved rounds,
+  against 3 of 3 successes for `96` in the same run. The H265 profile is real
+  and reproducible, but only when both codecs are offered; narrowing to it
+  removes the option rather than selecting it. What does select it is not yet
+  known, which is what the logging above exists to answer.
+
+### Fixed
+- **A battery camera was being woken for sessions that could never stream.** The
+  keepalive loop had no give-up condition: when a camera opened a session but no
+  media ever arrived, it reconnected indefinitely, waking the camera each time
+  and spending its battery on sessions that produced nothing. Observed running
+  for eight hours.
+
+  After five consecutive no-media background sessions a battery camera's
+  keepalive now stops and says so; `AIDOT_FUTILE_KEEPALIVE_LIMIT=0` disables the
+  ceiling. Mains cameras are unchanged - they have no charge to protect, and
+  that persistence is what recovers a stream after a router reboot or a
+  power-cycle.
+
+  Scoped to the background loop on purpose. A live view still opens a session on
+  demand: a user asking to see the camera is new information, and a retry
+  ceiling should not decide on their behalf that it cannot work.
+
+  This does not address why such a camera delivers no media through a given
+  host - the same unit streams fine from other machines on the same LAN. What is
+  fixed is a background task repeating a failed operation forever at the
+  camera's expense.
+
 ## [0.17.0]
 
 ### Fixed
