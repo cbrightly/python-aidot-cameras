@@ -4,6 +4,73 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.17.0]
+
+### Fixed
+- **A camera that clears in eight seconds was being rested for five minutes.**
+  When a camera answers `-50002` / `-50015` ("no free session") both keepalive
+  loops slept 300 s, on the reasoning that the camera "releases slowly". It does
+  not. Measured on an A001064, reopening after a close:
+
+  | gap | result |
+  |-----|--------|
+  | 2 s | refused `-50002` |
+  | 8 s | reopened cleanly |
+  | 20 s | reopened cleanly |
+
+  That was minting a fresh peerid on every attempt - the case the old comment
+  warned about - and it still recovered inside eight seconds. A camera that
+  clears in seconds paired with a five-minute refusal to retry is
+  indistinguishable from one that needs a long rest, and it made a brief,
+  ordinary refusal look like a camera that had to be left alone.
+
+  The wait is now 20 s, overridable with `AIDOT_BUSY_BACKOFF_S`. It is still a
+  real wait: retrying instantly would hammer a camera that genuinely has none
+  free, and on a battery model risks the wake-then-sleep loop the original
+  backoff was guarding against.
+
+- **Two-way audio reports whether the camera opened its speaker.**
+  `async_start_talk` returned `True` unconditionally - it sent SPEAKERSTART and
+  declared success whether or not the speaker ever opened. It now waits for the
+  camera's 851, measured at 0.01-0.86 s across both transports, and the
+  microphone is enabled only once the camera has answered. Previously
+  `replaceTrack` came first, so viewer audio was already going out during the
+  round trip.
+
+  Silence still counts as success: an A001064 answers SPEAKERSTART but does not
+  implement GETSTREAMCTRL at all, so a firmware with no response for a command
+  is an ordinary state, and failing on it would remove two-way audio from every
+  quieter camera. So does any ack - the payloads observed (`0x0064`, `0x00c8`,
+  including both from one camera on consecutive sessions) all came back from
+  speakers that opened, so the payload carries no verdict to read.
+
+- **A device-attribute ack is matched to the command that sent it.**
+  `async_set_device_attribute` generates a `seq` and the camera echoes it in
+  `setDevAttrResp`, but nothing checked it coming back: the first message on a
+  topic containing `setDevAttr` carrying code 200 was accepted, whichever
+  command it belonged to. Battery cameras get a wake published in the same
+  breath and Home Assistant writes attributes in bursts, so that could report
+  one control landing on the evidence of another. A reply carrying our own seq
+  is now proof; everything else is considered exactly as before.
+
+  A command that draws no matching ack still succeeds - the official app is
+  fire-and-forget and no-ack is normal - and a non-200 ack for our own seq is
+  logged rather than acted on, because no camera has been seen sending one.
+
+- **The SCTP association is closed at teardown.** The library built only INIT,
+  INIT-ACK and DATA and never sent SHUTDOWN or ABORT, so a camera was never told
+  the association was over, while the official app disposes its data channel and
+  the DTLS path already sent ABORT. Measured before and after: this does **not**
+  change the refusal window above - the camera releases the session on an
+  application-level timeout, not on association state - so it is here as
+  correctness rather than as a fix.
+
+### Added
+- `async_set_resolution` reads the camera's 801 ack and logs it, so a refusal is
+  visible instead of indistinguishable from success. The return value still
+  means "the command went out": how much a firmware answers is model-dependent,
+  and failing on silence would break the call on the quieter cameras.
+
 ## [0.16.0]
 
 ### Added
