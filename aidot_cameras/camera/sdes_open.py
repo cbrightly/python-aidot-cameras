@@ -48,6 +48,22 @@ _LOGGER = logging.getLogger(__name__)
 _MEDIA_RCVBUF_BYTES = 4 * 1024 * 1024
 
 
+def _sctp_abort_chunk() -> bytes:
+    """An SCTP ABORT chunk (RFC 4960 s3.3.7): type 6, T=0, no parameters.
+
+    Sent at teardown so the camera learns the association is over rather than
+    timing it out. Measured 2026-08-07: reopening 2s after a close is refused
+    with -50002 (session-exceed) while 8s is fine, and we were the only one of
+    the three implementations saying nothing - the official app disposes its
+    data channel and our own DTLS path (aiortc) sends this same chunk.
+
+    T=0 because we hold the peer's verification tag and send it in the common
+    header; the T bit is for an endpoint reflecting a tag it does not have.
+    """
+    import struct as _st_ab
+    return _st_ab.pack("!BBH", 6, 0, 4)
+
+
 def _dispatch_sctp_avio(responses, payload) -> bool:
     """Offer an inbound SCTP DATA payload to the AVIO response router.
 
@@ -2793,6 +2809,9 @@ class _SdesOpenMixin:
         # once the SCTP DataChannel is established.  SdesSession reads it via
         # _cmd_chan[0] to dispatch PTZ / IOCtrl commands from the main thread.
         _cmd_chan: list = [None]
+        # Bridge installs the SCTP ABORT sender here once the command
+        # channel is up; teardown calls it to close the association.
+        _abort_chan: list = [None]
         # The other direction: matches the camera's AVIO replies to the commands
         # that asked for them.  Created here, not in SdesSession, because the
         # bridge thread starts dispatching into it before the session object
@@ -3153,7 +3172,30 @@ class _SdesOpenMixin:
                                     except Exception:
                                         _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_persistent_sdes_cmd', exc_info=True)
 
+                                def _persistent_sdes_abort():
+                                    """ABORT the association from the same socket the commands use.
+
+                                    Lives here rather than in the bridge's main
+                                    loop because this is where the encrypted
+                                    SCTP context actually is - the dcep socket,
+                                    the peer tag and the encrypt helper. An
+                                    earlier attempt to send it from the media
+                                    loop referenced none of them and would not
+                                    have compiled.
+                                    """
+                                    _csock = _sctp.get('dcep_sock')
+                                    _csrc  = _sctp.get('dcep_src')
+                                    if _csock is None or _csrc is None:
+                                        return False
+                                    _csock.sendto(
+                                        _enc_c8_sctp(_sctp_pkt(_sctp['peer_tag'],
+                                                               _sctp_abort_chunk())),
+                                        _csrc,
+                                    )
+                                    return True
+
                                 _cmd_chan[0] = _persistent_sdes_cmd
+                                _abort_chan[0] = _persistent_sdes_abort
                             except Exception as _dw_e:
                                 _status(f"SDES DC: DCEP_WAIT LIVING err: {_dw_e}")
 
@@ -5024,4 +5066,5 @@ class _SdesOpenMixin:
             first_audio_pt=_first_audio_pt,
             device_id=getattr(self, "device_id", None),
             responses=_avio_responses,
+            abort_chan=_abort_chan,
         )

@@ -69,5 +69,11 @@ def test_sdes_keepalive_loop_backs_off_on_camera_busy():
         "the SDES keepalive loop must honour a camera refusal instead of "
         "retrying on the short backoff")
     busy_at = loop_src.index("except AidotCameraBusy")
-    assert "_MAX_DELAY" in loop_src[busy_at:busy_at + 1600], (
-        "a camera refusal must wait out the long release window")
+    assert "_BUSY_BACKOFF_S" in loop_src[busy_at:busy_at + 1600], (
+        "a camera refusal must wait out the release window rather than "
+        "retrying on the short backoff")
+    assert "_MAX_DELAY" not in loop_src[busy_at:busy_at + 1600], (
+        "the refusal wait used to be _MAX_DELAY (300s) on the belief that the "
+        "camera releases slowly. Measured 2026-08-07: 2s is refused, 8s "
+        "reopens cleanly. A camera that clears in seconds must not cost "
+        "minutes - see _BUSY_BACKOFF_S")
