@@ -388,6 +388,32 @@ _SERVE_MAX_DELAY_US = int(os.environ.get("AIDOT_SERVE_MAX_DELAY_US", "500000"))
 #: has none free, and on a battery model risks a wake-then-sleep loop.
 _BUSY_BACKOFF_S = float(os.environ.get("AIDOT_BUSY_BACKOFF_S", "20"))
 
+#: Consecutive background sessions that deliver NO media before the keepalive
+#: stops reopening a battery camera. Observed 2026-08-07 on an A001513: 22 opens
+#: across ~8 hours, none of them delivering media, because the loop escalated
+#: its backoff but had no condition under which it ever stopped. On a mains
+#: camera that is wasteful; on a battery one it spends charge, and a unit has
+#: already been drained to 5% that way.
+#: 0 disables the ceiling entirely.
+_FUTILE_KEEPALIVE_LIMIT = int(os.environ.get("AIDOT_FUTILE_KEEPALIVE_LIMIT", "5"))
+
+
+def _should_abandon_keepalive(no_media_streak: int, *, is_battery: bool,
+                              limit: int = _FUTILE_KEEPALIVE_LIMIT) -> bool:
+    """Should the background keepalive stop reopening this camera?
+
+    Only for battery cameras. A mains camera has no charge to protect, and the
+    same persistence is what recovers a stream after a router reboot or a
+    power-cycle - there the loop is the feature.
+
+    Scoped to the BACKGROUND loop. A view still opens a session on demand: the
+    user asking to see the camera is new information, and a retry ceiling should
+    not decide on their behalf that it cannot work.
+    """
+    if not is_battery or limit <= 0:
+        return False
+    return no_media_streak >= limit
+
 
 def _build_sdes_serve_cmd(
     *,
@@ -3357,6 +3383,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         # camera (or a fleet reconnecting at once) isn't hammered into further
         # degradation / cloud rate-limiting; resets after a session that delivered
         # media (see end of loop).
+        _no_media_streak = 0
         _pacer = ReconnectPacer(_MIN_DELAY, _MAX_DELAY)
 
         # Adaptive fast-with-fallback (default on): the first open tries the fast
@@ -3579,6 +3606,23 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 _loop_peer_id = self.generate_webrtc_peer_id(
                     live_type=2, stream_id=0, sdes=True)
                 _peer_reuses = 0
+                _no_media_streak = 0
+            else:
+                _no_media_streak += 1
+                if _should_abandon_keepalive(
+                        _no_media_streak, is_battery=self.is_battery_camera):
+                    # Every open so far has cost the camera a wake and returned
+                    # nothing. Continuing spends charge to learn the same thing
+                    # again; a view will still open a session on demand.
+                    _LOGGER.warning(
+                        "camera %s: %d consecutive keepalive sessions delivered no "
+                        "media - stopping the background keepalive to stop waking "
+                        "it. A live view will still open a session; set "
+                        "AIDOT_FUTILE_KEEPALIVE_LIMIT=0 to keep retrying.",
+                        self.device_id, _no_media_streak,
+                    )
+                    self._streaming_active = False
+                    return
             if _use_fast and not _healthy and not _fast_failed:
                 _LOGGER.info(
                     "SDES adaptive[%s]: fast attempt delivered no media - "
