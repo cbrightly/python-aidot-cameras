@@ -120,11 +120,18 @@ def test_the_size_cost_is_small():
     """Measured, not asserted from intuition.
 
     The whole argument for this change is that feedback is cheap and the bulk is
-    not. If keeping it ever costs more than a couple of hundred bytes on a
-    narrowed offer, that argument is wrong and this test should fail loudly.
+    not. The bound is set from a REAL browser offer, not this fixture: a genuine
+    7638-byte Chrome offer compresses to 1300 bytes and carries 11 feedback
+    lines costing 263 - it lists both H264 and H265, each with the full
+    goog-remb / transport-cc / ccm fir / nack / nack pli set.
+
+    An earlier version of this test asserted 200 bytes, drawn from the synthetic
+    fixture below. Reality was larger. The number here is what was measured,
+    with headroom for a third codec; if it is ever exceeded the argument that
+    feedback is cheap has stopped holding and that deserves to fail loudly.
     """
     with_fb = len(_compress_sdp_for_camera(OFFER))
     without = len("".join(
         l + "\r\n" for l in _compress_sdp_for_camera(OFFER).splitlines()
         if not l.startswith("a=rtcp-fb:")))
-    assert with_fb - without <= 200, f"rtcp-fb cost {with_fb - without} bytes"
+    assert with_fb - without <= 400, f"rtcp-fb cost {with_fb - without} bytes"

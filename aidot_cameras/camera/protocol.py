@@ -2383,6 +2383,70 @@ class AvioResponseRouter:
                 self._waiting.pop(waiter._command, None)
 
 
+#: What we ask the camera to send, in bits per second. The vendor clients sit at
+#: 225-500 Kbps on this hardware while we were taking 1900-3700, so this starts
+#: in their region rather than at some invented number. Overridable per install
+#: because the right value depends on the link and the viewer.
+REMB_TARGET_BPS = int(os.environ.get("AIDOT_REMB_TARGET_BPS", "500000"))
+
+
+def build_remb(sender_ssrc: int, media_ssrcs: "list", bitrate_bps: int) -> bytes:
+    """An RTCP REMB packet asking the sender for at most ``bitrate_bps``.
+
+    Format is the Google draft (draft-alvestrand-rmcat-remb) carried as a
+    Payload-Specific Feedback message: FMT 15, PT 206, the ASCII identifier
+    ``REMB``, then a count of SSRCs and the bitrate as a 6-bit exponent with an
+    18-bit mantissa, then the SSRCs themselves.
+
+    The camera negotiates ``goog-remb`` in its answer (confirmed live on an
+    A001064 over SDES), which means it will accept this. It has no effect until
+    one is actually sent - negotiation alone changes nothing, which is why this
+    is a separate step from keeping the attribute in the offer.
+    """
+    if bitrate_bps <= 0:
+        raise ValueError("REMB bitrate must be positive - zero would ask the "
+                         "camera to stop sending entirely")
+    if not media_ssrcs:
+        raise ValueError("REMB must name at least one stream")
+
+    # 18-bit mantissa, 6-bit exponent: shift right until the value fits.
+    exp = 0
+    mantissa = int(bitrate_bps)
+    while mantissa > 0x3FFFF:
+        mantissa >>= 1
+        exp += 1
+        if exp > 63:
+            raise ValueError("REMB bitrate too large to encode")
+
+    header = struct.pack(
+        "!BBH",
+        0x80 | 15,          # V=2, P=0, FMT=15
+        206,                # PT: payload-specific feedback
+        0,                  # length, filled in below
+    )
+    body = (struct.pack("!II", sender_ssrc & 0xFFFFFFFF, 0)
+            + b"REMB"
+            + struct.pack("!BBBB",
+                          len(media_ssrcs) & 0xFF,
+                          ((exp << 2) | (mantissa >> 16)) & 0xFF,
+                          (mantissa >> 8) & 0xFF,
+                          mantissa & 0xFF)
+            + b"".join(struct.pack("!I", s & 0xFFFFFFFF) for s in media_ssrcs))
+    pkt = header + body
+    # RTCP length is in 32-bit words, minus one.
+    return pkt[:2] + struct.pack("!H", len(pkt) // 4 - 1) + pkt[4:]
+
+
+def decode_remb_bitrate(pkt: bytes) -> int:
+    """The bitrate a REMB packet asks for. For tests and diagnostics."""
+    # Layout: 0-3 header, 4-7 sender SSRC, 8-11 media SSRC, 12-15 "REMB",
+    # 16 num-SSRC, 17-19 exponent+mantissa, 20+ the SSRCs.
+    b = pkt[17]
+    exp = b >> 2
+    mantissa = ((b & 0x03) << 16) | (pkt[18] << 8) | pkt[19]
+    return mantissa << exp
+
+
 def _avio_cmd_id(frame: bytes) -> "Optional[int]":
     """The command id of an AVIO frame, or None if it does not look like one.
 

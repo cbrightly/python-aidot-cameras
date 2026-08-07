@@ -25,7 +25,9 @@ from .models import VideoFrame  # noqa: F401 - forward-ref annotation
 from .sdes import SdesSession
 from .protocol import (
     AVIO_HDR_LEN,
+    REMB_TARGET_BPS,
     AvioResponseRouter,
+    build_remb,
     _build_sprop,
     parse_avio_response,
     _build_stun_binding_success_response,
@@ -4018,6 +4020,25 @@ class _SdesOpenMixin:
                                         _bridge_fn._tutk_count,
                                         0, 0, 0,
                                     )
+                                    # Append REMB, telling the camera what rate
+                                    # we actually want. It negotiates goog-remb
+                                    # in its answer (confirmed live on an
+                                    # A001064), but negotiation alone changes
+                                    # nothing - without a REMB it has no target
+                                    # and sends at its unconstrained rate, which
+                                    # is how we ended up taking 1900-3700 Kbps
+                                    # where the vendor clients take 225-500.
+                                    # Compound RTCP: RR first, then the feedback.
+                                    if REMB_TARGET_BPS > 0:
+                                        try:
+                                            _rr_pkt = _rr_pkt + build_remb(
+                                                _rr_our_ssrc, [_tk_ssrc],
+                                                REMB_TARGET_BPS)
+                                        except Exception:
+                                            _LOGGER.debug(
+                                                "camera %s: swallowed exception in %s",
+                                                getattr(self, "device_id", "?"),
+                                                'build_remb', exc_info=True)
                                     _rtcp_sent = False
                                     try:
                                         import pylibsrtp as _plsrtp_rr
