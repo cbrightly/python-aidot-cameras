@@ -2233,6 +2233,11 @@ class _AvioWaiter:
         a view while we find out.
         """
         if self._future.done():
+            # A wait that timed out cancels its own wrapper, and that
+            # cancellation can propagate down to this future - asking again
+            # would then raise where the first call returned None.
+            if self._future.cancelled():
+                return None
             try:
                 return self._future.result()
             except Exception:
@@ -2241,12 +2246,19 @@ class _AvioWaiter:
             return await asyncio.wait_for(
                 asyncio.wrap_future(self._future), timeout
             )
-        except (asyncio.CancelledError, TimeoutError):
+        except TimeoutError:
             # Stop listening.  _avio_cmd runs on the keepalive path, so a
             # registration left behind on every unanswered command would grow
             # for as long as the session lives.
             self._router._forget(self)
             return None
+        except asyncio.CancelledError:
+            # Cancellation is the caller's task being stopped (entity teardown,
+            # config-entry unload), NOT the camera declining to answer.  Drop
+            # the registration, then let it through: swallowing it would leave
+            # the caller running inside a task the loop has already given up on.
+            self._router._forget(self)
+            raise
 
 
 class AvioResponseRouter:

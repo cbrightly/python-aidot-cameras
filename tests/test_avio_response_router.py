@@ -141,6 +141,40 @@ async def test_the_result_can_be_read_twice():
     assert first == second
 
 
+async def test_cancelling_the_caller_is_not_swallowed():
+    """Cancellation is not the same as "the camera did not answer".
+
+    Home Assistant cancels these tasks on entity teardown and config-entry
+    unload. Turning that into a quiet None would let the caller carry on inside
+    a task the loop believes it has stopped - and the waiting-for-a-camera case
+    is exactly where a slow teardown gets cancelled.
+    """
+    router = AvioResponseRouter()
+    waiter = router.expect(SETSTREAMCTRL_RESP)
+
+    task = asyncio.create_task(waiter.result(timeout=5.0))
+    await asyncio.sleep(0.01)  # let it reach the wait
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # ...and it still stopped listening on the way out.
+    assert router.dispatch(_frame(SETSTREAMCTRL_RESP, b"\xaa")) is False
+
+
+async def test_an_unanswered_wait_can_be_asked_again():
+    """Reading the result twice must be safe whether or not a reply arrived.
+
+    The success path already allows it; the timeout path must not raise the
+    cancellation used internally to end the wait.
+    """
+    router = AvioResponseRouter()
+    waiter = router.expect(SETSTREAMCTRL_RESP)
+
+    assert await waiter.result(timeout=0.05) is None
+    assert await waiter.result(timeout=0.05) is None
+
+
 async def test_a_reply_dispatched_from_the_bridge_thread_reaches_the_waiter():
     """The real shape of the SDES path: decrypt on the bridge, await on the loop.
 
