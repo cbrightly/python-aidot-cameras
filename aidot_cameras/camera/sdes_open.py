@@ -66,6 +66,114 @@ def _sctp_abort_chunk() -> bytes:
     return _st_ab.pack("!BBH", 6, 0, 4)
 
 
+def _srtp_tx_key_note(sender: str, used_key: str, offer_key: str,
+                      answer_key: str) -> str:
+    """Record which SRTP key an outbound RTCP sender encrypted with.
+
+    Diagnostic only -- nothing branches on this.
+
+    Three RTCP senders share the we-to-camera direction on the SDES bridge --
+    PLI, REMB and RR, all with sender SSRC 0xAB12CD34 -- but only two key
+    selections: REMB reuses the PLI's cached SRTP session rather than choosing
+    for itself, so instrumenting the PLI covers it.  The two selections do not
+    agree.  The PLI encrypts with our own offer key; the RR prefers the camera's
+    answer key and falls back to ours.  SRTP keys are per-direction, so at most
+    one of those can be the key the camera authenticates our RTCP against.  No
+    symptom has ever been reported for any of the three, and until now no log
+    line said which key went out, so a live capture could not settle it.
+
+    ``differ=no`` means the camera echoed our key and the two senders were
+    identical anyway -- the question does not arise in that session.  A run with
+    ``differ=yes`` is the one that answers it, and the PLI is the sender that
+    answers it: a PLI the camera authenticates is followed by a keyframe, so a
+    ``differ=yes`` session whose PLIs produce keyframes says the offer key is
+    the one the camera accepts on this direction.  The RR has no comparably
+    sharp outcome -- a camera keeps sending audio whether or not it accepted our
+    report -- so the RR line is there to record which key it used, not to prove
+    that key right.
+
+    A caller emitting this must emit it again if the key it selects can change:
+    ``_cam_key_audio`` is parsed late on the wake path, after the bridge is
+    running, so a first-send-only note on a sender that re-selects per packet
+    would record ``answer=none differ=no`` for precisely the session in which
+    the two senders diverged.
+
+    Keys are recorded as truncated SHA-256 fingerprints, never as prefixes of
+    the key itself: this line is logged, so it reaches home-assistant.log and
+    the public issue reports users paste it into.  See _key_fingerprint.
+    """
+    def _origin(key: str) -> str:
+        if not key:
+            return "none"
+        if key == offer_key:
+            return "offer"
+        if key == answer_key:
+            return "answer"
+        return "other"
+
+    def _key_fingerprint(key: str) -> str:
+        """A truncated SHA-256 of the key -- deliberately NOT a prefix of it.
+
+        This line goes through _status, which logs, so it lands in
+        home-assistant.log on real installs, and users paste that file into
+        public issue reports as a matter of course.  An SDES inline key is
+        base64 of a 30-byte master key + salt, so printing its first 8
+        characters would put roughly 48 bits of real key material in those
+        reports -- a reduction of the brute-force space, not a nickname.
+
+        A hash costs the note nothing.  ``_origin`` decides offer/answer/other
+        by comparing the keys directly, so the only job this field has is
+        telling two keys apart across log lines, and a fingerprint does that
+        exactly as well.  Do not "simplify" this back to ``key[:8]``.
+        """
+        if not key:
+            return "none"
+        import hashlib as _hl_kf
+        return _hl_kf.sha256(key.encode()).hexdigest()[:8]
+
+    differ = bool(offer_key) and bool(answer_key) and offer_key != answer_key
+    return (
+        f"SRTP-TX-KEY sender={sender} used={_origin(used_key)}"
+        f"({_key_fingerprint(used_key)}) offer={_key_fingerprint(offer_key)}"
+        f" answer={_key_fingerprint(answer_key)}"
+        f" differ={'yes' if differ else 'no'}"
+    )
+
+
+def _sctp_parse_init_ack(pkt: bytes, state: dict) -> Optional[bytes]:
+    """Read the camera's INIT-ACK into ``state`` and return its State Cookie.
+
+    RFC 4960 s3.3.3: the INIT-ACK carries the *peer's* Initiate Tag and the
+    *peer's* Initial TSN -- both describe the sequence the camera will send on,
+    so both belong in the peer half of the association state.  Our own TSN is
+    the one we picked for our INIT and keep counting from in ``_sctp_data``;
+    nothing in the answer may move it.
+
+    Returns None when the packet holds no INIT-ACK chunk or that chunk carries
+    no State Cookie parameter, which is the caller's signal to keep waiting.
+    """
+    import struct as _st_sc
+    pos = 12
+    while pos + 4 <= len(pkt):
+        ctype, _, clen = _st_sc.unpack_from('!BBH', pkt, pos)
+        if clen < 4:
+            break
+        cdata = pkt[pos + 4:pos + clen]
+        if ctype == 0x02 and len(cdata) >= 16:
+            state['peer_tag'] = _st_sc.unpack_from('!I', cdata)[0]
+            state['peer_tsn'] = _st_sc.unpack_from('!I', cdata, 12)[0]
+            pp = 16
+            while pp + 4 <= len(cdata):
+                ptype, plen = _st_sc.unpack_from('!HH', cdata, pp)
+                if plen < 4:
+                    break
+                if ptype == 7:  # State Cookie
+                    return cdata[pp + 4:pp + plen]
+                pp += max(4, (plen + 3) & ~3)
+        pos += max(4, (clen + 3) & ~3)
+    return None
+
+
 def _dispatch_sctp_avio(responses, payload) -> bool:
     """Offer an inbound SCTP DATA payload to the AVIO response router.
 
@@ -2387,7 +2495,7 @@ class _SdesOpenMixin:
         _dc_answer_has_app: bool = False  # set True if camera echoes m=application; init here so bridge closure never sees NameError on late-wake path
         _sctp: dict = {              # initialized here for the same reason - bridge closure
             'state': 'CLOSED', 'local_tag': 0, 'peer_tag': 0,
-            'local_tsn': 0, 'stream_seq': 0,
+            'local_tsn': 0, 'peer_tsn': 0, 'stream_seq': 0,
         }
         if answer_fut.done():
             try:
@@ -2449,6 +2557,7 @@ class _SdesOpenMixin:
                 'local_tag': 0,       # our verification tag (sent in INIT)
                 'peer_tag': 0,        # camera's verification tag (from INIT-ACK)
                 'local_tsn': 0,       # our TSN counter
+                'peer_tsn': 0,        # camera's Initial TSN (from its INIT/INIT-ACK)
                 'stream_seq': 0,      # stream sequence number
             }
 
@@ -2549,30 +2658,6 @@ class _SdesOpenMixin:
             body = _st_sc.pack('!IIHHI', _sctp['local_tag'],
                                131072, 1024, 2048, _sctp['local_tsn'])
             return _sctp_pkt(0, _sctp_chunk(0x01, 0, body))
-
-        def _sctp_parse_init_ack(pkt):
-            import struct as _st_sc
-            pos = 12
-            while pos + 4 <= len(pkt):
-                ctype, _, clen = _st_sc.unpack_from('!BBH', pkt, pos)
-                if clen < 4:
-                    break
-                cdata = pkt[pos + 4:pos + clen]
-                if ctype == 0x02 and len(cdata) >= 16:
-                    peer_tag = _st_sc.unpack_from('!I', cdata)[0]
-                    peer_tsn = _st_sc.unpack_from('!I', cdata, 12)[0]
-                    _sctp['peer_tag'] = peer_tag
-                    _sctp['local_tsn'] = peer_tsn
-                    pp = 16
-                    while pp + 4 <= len(cdata):
-                        ptype, plen = _st_sc.unpack_from('!HH', cdata, pp)
-                        if plen < 4:
-                            break
-                        if ptype == 7:  # State Cookie
-                            return cdata[pp + 4:pp + plen]
-                        pp += max(4, (plen + 3) & ~3)
-                pos += max(4, (clen + 3) & ~3)
-            return None
 
         def _sctp_parse_init(pkt):
             import struct as _st_sc
@@ -3360,13 +3445,17 @@ class _SdesOpenMixin:
                             _pli_media_ssrc,
                         )
                         _pli_sent = False
+                        # Hoisted out of the session-build below only so the
+                        # SRTP-TX-KEY note can report the key that actually went
+                        # out rather than re-deriving it.  Same expression, same
+                        # result - no behavior change.
+                        _pli_key_b64 = (
+                            _our_tx_srtp_key_audio
+                            or srtp_key_audio
+                        )
                         try:
                             import pylibsrtp as _plsrtp_pli
                             if not hasattr(_bridge_fn, '_pli_tx_sess'):
-                                _pli_key_b64 = (
-                                    _our_tx_srtp_key_audio
-                                    or srtp_key_audio
-                                )
                                 _pli_pol = _plsrtp_pli.Policy(
                                     key=_b64_pli.b64decode(_pli_key_b64),
                                     ssrc_type=_plsrtp_pli.Policy.SSRC_SPECIFIC,
@@ -3400,6 +3489,14 @@ class _SdesOpenMixin:
                                 f" -> SSRC=0x{_pli_media_ssrc:08x}"
                                 f" ({'SRTCP' if _pli_sent else 'plain'})"
                             )
+                        # First send only, unlike the RR note below: the PLI
+                        # SRTP session is built once and cached on _bridge_fn,
+                        # so the key the first PLI went out with is the key
+                        # every later PLI goes out with.
+                        if _pli_n == 1 and _pli_sent:
+                            _status(_srtp_tx_key_note(
+                                "PLI", _pli_key_b64,
+                                _our_tx_srtp_key_audio, _cam_key_audio))
 
                     # DCEP_WAIT -> send LIVING 300ms after DCEP_OPEN.
                     # Camera needs time to register stream 0 before LIVING arrives.
@@ -3912,7 +4009,7 @@ class _SdesOpenMixin:
                                         except Exception as _iae:
                                             _status(f"SCTP INIT-ACK failed: {_iae}")
                                 elif st in ('INIT_SENT', 'COOKIE_WAIT'):
-                                    cookie = _sctp_parse_init_ack(_bpkt)
+                                    cookie = _sctp_parse_init_ack(_bpkt, _sctp)
                                     if cookie:
                                         _sctp['state'] = 'COOKIE_ECHOED'
                                         try:
@@ -4119,7 +4216,7 @@ class _SdesOpenMixin:
                                                 _status(f"SDES DC: enc INIT-ACK err: {_sce8}")
                                     elif _pd_ct8 == 0x02 and _sct in ('INIT_SENT', 'COOKIE_WAIT'):
                                         # Camera SCTP INIT-ACK -> send encrypted COOKIE-ECHO
-                                        _sc_ck = _sctp_parse_init_ack(_pd_plain)
+                                        _sc_ck = _sctp_parse_init_ack(_pd_plain, _sctp)
                                         if _sc_ck:
                                             try:
                                                 _br_send_to_cam(_bs, _enc_c8_sctp(_sctp_cookie_echo(_sc_ck)), _bsrc, _br_cam_peer)
@@ -4214,11 +4311,15 @@ class _SdesOpenMixin:
                                         0, 0, 0,
                                     )
                                     _rtcp_sent = False
+                                    # Hoisted purely so the SRTP-TX-KEY note can
+                                    # report the key that actually went out.
+                                    # Same expression - no behavior change.
+                                    _rr_key_b64 = (
+                                        _cam_key_audio or _our_tx_srtp_key_audio)
                                     try:
                                         import pylibsrtp as _plsrtp_rr
                                         import base64 as _b64_rr
-                                        _rr_key = _b64_rr.b64decode(
-                                            _cam_key_audio or _our_tx_srtp_key_audio)
+                                        _rr_key = _b64_rr.b64decode(_rr_key_b64)
                                         _rr_pol = _plsrtp_rr.Policy(
                                             key=_rr_key,
                                             ssrc_type=_plsrtp_rr.Policy.SSRC_SPECIFIC,
@@ -4241,6 +4342,25 @@ class _SdesOpenMixin:
                                             f"SDES: sent RTCP RR to camera"
                                             f" (SSRC=0x{_tk_ssrc:08x})"
                                         )
+                                    # Re-noted whenever the selected key changes,
+                                    # not just on the first RR: this branch
+                                    # rebuilds its SRTP session from the current
+                                    # expression on every packet, and
+                                    # _cam_key_audio can be set after the bridge
+                                    # is already running (late-wake answer
+                                    # parse), so the RR key does flip mid-session
+                                    # on battery cameras.  A first-send-only note
+                                    # would have recorded "answer=none differ=no"
+                                    # for exactly that session.  Bounded: the
+                                    # answer key is only ever set once.
+                                    if (_rtcp_sent and getattr(
+                                            _bridge_fn, '_rr_key_noted', None)
+                                            != _rr_key_b64):
+                                        _bridge_fn._rr_key_noted = _rr_key_b64
+                                        _status(_srtp_tx_key_note(
+                                            "RR", _rr_key_b64,
+                                            _our_tx_srtp_key_audio,
+                                            _cam_key_audio))
                                 # Forward decrypted PCMA audio to ffmpeg loopback.
                                 # AVIO control frames (SESSION_MODE_RESP=5377, etc.) are
                                 # identified by cmd field and skipped; raw PCMA bytes are sent.
