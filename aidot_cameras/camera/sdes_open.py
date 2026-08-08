@@ -398,6 +398,82 @@ def narrow_sdp_payload_types(sdp_text: str, keep_video=None, keep_audio=None) ->
     return "".join(kept)
 
 
+def _build_restart_sdp(
+    *,
+    ts: int,
+    lo_audio_port: int,
+    lo_video_port: int,
+    use_plain_rtp: bool,
+    srtp_key_audio: str,
+    srtp_key_video: str,
+    first_video_pt=None,
+    answer_video_pt=None,
+    first_audio_pt=None,
+) -> str:
+    """Build the SDP the SRTP key-restart hands to the relaunched ffmpeg.
+
+    The restart rebuilds the bridge SDP from scratch, and it has to match the
+    PRIMARY SDP on two counts or it undoes two shipped fixes at once.
+
+    Transport: for ``_use_plain_rtp`` models - which is every SDES camera this
+    library supports - the bridge decrypts and forwards PLAIN RTP, so the
+    primary SDP is RTP/AVP with no a=crypto.  Writing RTP/SAVP here makes
+    ffmpeg try to authenticate already-decrypted packets: every one fails its
+    HMAC check and a working stream drops to zero bytes mid-session.
+
+    Payload types: hard-coding "0 8" and "96 97" throws away the narrowing, and
+    ffmpeg binds the FIRST type on each line - so an H.265 camera silently
+    loses all video (and with it the PAT/PMT, hence the whole output), and a
+    PCMA camera loses its audio.  Both types are known by now, so the selection
+    lives here rather than at the call site: a caller free to pass a payload
+    type of its own is a caller free to reintroduce the hard-coding.
+
+    Pure: no I/O, no clock, no ``self``.  ``ts`` is passed in and the
+    sprop-parameter-sets injection and the on-disk rewrite stay with the
+    caller.
+    """
+    _proto = "RTP/AVP" if use_plain_rtp else "RTP/SAVP"
+
+    def _crypto(key: str) -> str:
+        if use_plain_rtp:
+            return ""
+        return (f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 "
+                f"inline:{key}\r\n")
+
+    sdp = (
+        "v=0\r\n"
+        f"o=- {ts} {ts} IN IP4 0.0.0.0\r\n"
+        "s=aidot-sdes-rx\r\n"
+        "t=0 0\r\n"
+        f"m=audio {lo_audio_port} {_proto} 0 8\r\n"
+        "c=IN IP4 127.0.0.1\r\n"
+        f"{_crypto(srtp_key_audio)}"
+        "a=rtpmap:0 PCMU/8000\r\n"
+        "a=rtpmap:8 PCMA/8000\r\n"
+        "a=rtcp-mux\r\n"
+        f"m=video {lo_video_port} {_proto} 96 97\r\n"
+        "c=IN IP4 127.0.0.1\r\n"
+        f"{_crypto(srtp_key_video)}"
+        "a=rtpmap:96 H264/90000\r\n"
+        "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
+        "profile-level-id=42e01f\r\n"
+        "a=rtpmap:97 H265/90000\r\n"
+        "a=fmtp:97 level-id=93\r\n"
+        "a=rtcp-mux\r\n"
+    )
+    return narrow_sdp_payload_types(
+        sdp,
+        # Same answer-SDP fallback as the pre-launch narrowing: this restart
+        # rebuilds the dual-codec template, so without it a session that never
+        # saw a video packet reproduces the unnarrowed SDP on every watchdog
+        # cycle.
+        keep_video=(first_video_pt
+                    if first_video_pt in _SDP_VIDEO_PTS
+                    else answer_video_pt),
+        keep_audio=(first_audio_pt if first_audio_pt in (0, 8) else None),
+    )
+
+
 async def _sdes_await_answer_or_terminal(
     answer_fut, terminal_error_fut, timeout: float, _status=None
 ):
@@ -5052,62 +5128,19 @@ class _SdesOpenMixin:
                         except Exception:
                             proc.kill()
                         _ts2 = int(time.time())
-                        # Match the PRIMARY SDP on both counts, or this restart
-                        # undoes two fixes at once.
-                        #
-                        # Transport: for _use_plain_rtp models - which is every
-                        # SDES camera this library supports - the bridge decrypts
-                        # and forwards PLAIN RTP, so the primary SDP is RTP/AVP
-                        # with no a=crypto.  Writing RTP/SAVP here makes ffmpeg
-                        # try to authenticate already-decrypted packets: every one
-                        # fails its HMAC check and a working stream drops to zero
-                        # bytes mid-session.
-                        #
-                        # Payload types: hard-coding "0 8" and "96 97" throws away
-                        # the narrowing, and ffmpeg binds the FIRST type on each
-                        # line - so an H.265 camera silently loses all video (and
-                        # with it the PAT/PMT, hence the whole output), and a PCMA
-                        # camera loses its audio.  Both types are known by now.
-                        _proto = "RTP/AVP" if _use_plain_rtp else "RTP/SAVP"
-
-                        def _crypto(key: str) -> str:
-                            if _use_plain_rtp:
-                                return ""
-                            return (f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 "
-                                    f"inline:{key}\r\n")
-
-                        _new_sdp = (
-                            "v=0\r\n"
-                            f"o=- {_ts2} {_ts2} IN IP4 0.0.0.0\r\n"
-                            "s=aidot-sdes-rx\r\n"
-                            "t=0 0\r\n"
-                            f"m=audio {_lo_audio_port} {_proto} 0 8\r\n"
-                            "c=IN IP4 127.0.0.1\r\n"
-                            f"{_crypto(srtp_key_audio)}"
-                            "a=rtpmap:0 PCMU/8000\r\n"
-                            "a=rtpmap:8 PCMA/8000\r\n"
-                            "a=rtcp-mux\r\n"
-                            f"m=video {_lo_video_port} {_proto} 96 97\r\n"
-                            "c=IN IP4 127.0.0.1\r\n"
-                            f"{_crypto(srtp_key_video)}"
-                            "a=rtpmap:96 H264/90000\r\n"
-                            "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
-                            "profile-level-id=42e01f\r\n"
-                            "a=rtpmap:97 H265/90000\r\n"
-                            "a=fmtp:97 level-id=93\r\n"
-                            "a=rtcp-mux\r\n"
-                        )
-                        _new_sdp = narrow_sdp_payload_types(
-                            _new_sdp,
-                            # Same answer-SDP fallback as the pre-launch narrowing:
-                            # this restart rebuilds the dual-codec template, so
-                            # without it a session that never saw a video packet
-                            # reproduces the unnarrowed SDP on every watchdog cycle.
-                            keep_video=(_first_video_pt[0]
-                                        if _first_video_pt[0] in _SDP_VIDEO_PTS
-                                        else _answer_video_pt[0]),
-                            keep_audio=(_first_audio_pt[0]
-                                        if _first_audio_pt[0] in (0, 8) else None),
+                        # Transport and payload-type selection both live in
+                        # _build_restart_sdp, where they are unit-tested against
+                        # the SDP it actually emits.
+                        _new_sdp = _build_restart_sdp(
+                            ts=_ts2,
+                            lo_audio_port=_lo_audio_port,
+                            lo_video_port=_lo_video_port,
+                            use_plain_rtp=_use_plain_rtp,
+                            srtp_key_audio=srtp_key_audio,
+                            srtp_key_video=srtp_key_video,
+                            first_video_pt=_first_video_pt[0],
+                            answer_video_pt=_answer_video_pt[0],
+                            first_audio_pt=_first_audio_pt[0],
                         )
                         try:
                             # Re-apply the cached sprop-parameter-sets here too:

@@ -23,6 +23,7 @@ retry ceiling should not decide on their behalf that it cannot work.
 """
 import pytest
 
+from aidot_cameras.camera.client import _next_no_media_streak as next_streak
 from aidot_cameras.camera.client import _should_abandon_keepalive as abandon
 
 LIMIT = 5
@@ -48,10 +49,40 @@ def test_a_mains_camera_keeps_trying():
     assert abandon(999, is_battery=False, limit=LIMIT) is False
 
 
-def test_the_streak_is_consecutive_failures_only():
-    """A session that delivered media resets it - that is the caller's job, and
-    this exists so the intent is written down where the limit is."""
-    assert abandon(0, is_battery=True, limit=LIMIT) is False
+@pytest.mark.parametrize("streak", [0, 1, 4, LIMIT, LIMIT + 9, 999])
+def test_a_session_that_delivered_media_resets_the_streak(streak):
+    """Consecutive, not cumulative.
+
+    Without the reset the count only ever rises, so a camera that works most of
+    the time but fails now and then - five scattered no-media sessions over a
+    day, each separated by sessions that delivered - trips a ceiling meant for
+    a camera that never delivers anything, and loses its keepalive for good.
+    """
+    assert next_streak(streak, True) == 0
+
+
+@pytest.mark.parametrize("streak", [0, 1, 4, 50])
+def test_a_session_without_media_advances_the_streak_by_one(streak):
+    assert next_streak(streak, False) == streak + 1
+
+
+def test_the_streak_reaches_the_limit_only_on_consecutive_failures():
+    """Walk the counter the way the keepalive loop does.
+
+    Four failures then a success then four more must NOT abandon, while five
+    unbroken failures must - which is the whole distinction the reset carries.
+    """
+    streak = 0
+    for healthy in (False, False, False, False, True, False, False, False, False):
+        streak = next_streak(streak, healthy)
+        assert abandon(streak, is_battery=True, limit=LIMIT) is False
+
+    streak = 0
+    outcomes = []
+    for _ in range(LIMIT):
+        streak = next_streak(streak, False)
+        outcomes.append(abandon(streak, is_battery=True, limit=LIMIT))
+    assert outcomes == [False, False, False, False, True]
 
 
 def test_a_limit_of_zero_never_abandons():
