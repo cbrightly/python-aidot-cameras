@@ -42,6 +42,52 @@ from .protocol import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def _resolve_future_threadsafe(loop, fut, value) -> None:
+    """Resolve ``fut`` with ``value`` from the MQTT (non-loop) thread.
+
+    The ``done()`` test and the ``set_result`` run in the SAME loop callback.
+    Testing off-loop and setting on-loop is not atomic, and the window is wide
+    here: the loop blocks for seconds on the synchronous STUN ``select()``
+    while MQTT keeps draining, so two messages can both see an unresolved
+    future and both schedule a ``set_result`` - the second one raising
+    ``InvalidStateError`` inside an asyncio callback, with no camera or peerid
+    context to attribute it to.
+    """
+    def _resolve() -> None:
+        if not fut.done():
+            fut.set_result(value)
+
+    loop.call_soon_threadsafe(_resolve)
+
+
+def _deliver_webrtc_answer(loop, answer_fut, second_answer_fut, answer) -> None:
+    """Route a webrtcResp answer to the first-answer or second-answer future.
+
+    Called from the MQTT (non-loop) thread.  The first accepted answer resolves
+    ``answer_fut``; a later one is the camera's real answer (the first was the
+    broker echo of our own webrtcResp) and resolves ``second_answer_fut``.
+
+    One hop, for the reason in ``_resolve_future_threadsafe``: two answers
+    drained inside one loop stall would otherwise both take the first branch,
+    so the second would be dropped without even the debug line below to say it
+    arrived.  The log is emitted from the loop thread, where what it asserts
+    about ``answer_fut`` is true.
+    """
+    def _deliver() -> None:
+        if not answer_fut.done():
+            answer_fut.set_result(answer)
+            return
+        _LOGGER.debug(
+            "SDES: second webrtcResp received (answer_fut already set)"
+            " - camera real answer SDP (len=%d)",
+            len(answer.get("sdp", "")),
+        )
+        if not second_answer_fut.done():
+            second_answer_fut.set_result(answer)
+
+    loop.call_soon_threadsafe(_deliver)
+
+
 def _normalize_fingerprint(value: str) -> str:
     """Normalize a sha-256 fingerprint for comparison.
 
@@ -724,8 +770,7 @@ class _WebRTCOpenMixin:
                 # loop thread rather than assigned here - this runs on the MQTT
                 # thread.
                 loop.call_soon_threadsafe(self._note_live_play_resp, inner)
-                if not liveplay_resp_fut.done():
-                    loop.call_soon_threadsafe(liveplay_resp_fut.set_result, inner)
+                _resolve_future_threadsafe(loop, liveplay_resp_fut, inner)
             # livePlayReq echo: broker/camera confirmed delivery of our livePlayReq.
             # Signal _open_sdes_stream to proceed with webrtcReq.
             if method == "livePlayReq" and inner.get("devId") == device_id:
@@ -757,8 +802,7 @@ class _WebRTCOpenMixin:
                             )
                         )
                         return
-                    if not terminal_error_fut.done():
-                        loop.call_soon_threadsafe(terminal_error_fut.set_result, _term)
+                    _resolve_future_threadsafe(loop, terminal_error_fut, _term)
                     return
                 resp_pid = inner.get("peerid")
                 answer   = inner.get("offer") or inner.get("answer") or {}
@@ -786,18 +830,9 @@ class _WebRTCOpenMixin:
                         )
                     )
                     return
-                if not answer_fut.done():
-                    loop.call_soon_threadsafe(answer_fut.set_result, answer)
-                else:
-                    # Second webrtcResp - likely the camera's real answer (the first
-                    # was the broker echo of our own webrtcResp).  Capture and log it.
-                    _LOGGER.debug(
-                        "SDES: second webrtcResp received (answer_fut already set)"
-                        " - camera real answer SDP (len=%d)",
-                        len(answer.get("sdp", "")),
-                    )
-                    if not second_answer_fut.done():
-                        loop.call_soon_threadsafe(second_answer_fut.set_result, answer)
+                _deliver_webrtc_answer(
+                    loop, answer_fut, second_answer_fut, answer
+                )
             elif method == "iceCandidateReq":
                 resp_pid = inner.get("peerid")
                 # Isolate per camera/stream.  NOTE: dstAddr is the shared account
