@@ -64,6 +64,53 @@ _LOGIN_RETRY_LIMIT = int(os.environ.get("AIDOT_LOGIN_RETRY_LIMIT", "6"))
 _LOGIN_RETRY_CAP_S = float(os.environ.get("AIDOT_LOGIN_RETRY_CAP_S", "60"))
 _LOGIN_RETRY_BASE_S = 1.0
 
+#: Ceiling on one LAN connect+login attempt.  Upstream has no read timeout at
+#: all - `grep -cE "wait_for|timeout"` over its device_client returns 0 - so a
+#: device that accepts the TCP connection and then stops answering parks
+#: `readexactly(8)` forever, inside `connect()`.
+_LOGIN_CONNECT_TIMEOUT_S = float(
+    os.environ.get("AIDOT_LOGIN_CONNECT_TIMEOUT_S", "20"))
+
+
+async def _await_connect_with_deadline(
+    connect_coro, timeout: float, device_id: str, on_timeout
+) -> bool:
+    """Await a connect attempt, bounded.  True if it finished in time.
+
+    A parked attempt is worse than a failed one.  `connect()`'s
+    `finally: self._connecting = False` never runs, so the client still believes
+    an attempt is in flight - which wedges both re-entry doors, because the
+    retry never spawns and a timer that did fire would hit the in-flight guard
+    and return.  The device stops being managed, silently, and its socket stays
+    open.  Observed: four of six devices ended that way, and all six emitted
+    their single teardown error within 3 ms of each other, one socket having
+    been held for 21 minutes.
+
+    ``on_timeout`` closes the connection.  Its failure is logged and swallowed:
+    this runs on the failure path already, and letting a close error replace the
+    timeout would turn a handled outcome into an unhandled one.  Cancellation of
+    the caller is never swallowed - shutdown has to be able to stop this.
+    """
+    try:
+        await asyncio.wait_for(connect_coro, timeout)
+        return True
+    except asyncio.CancelledError:
+        raise
+    except TimeoutError:  # asyncio.TimeoutError is an alias since 3.11
+        _LOGGER.warning(
+            "%s: LAN connect/login did not answer within %.0fs - abandoning "
+            "this attempt and closing the socket. Override with "
+            "AIDOT_LOGIN_CONNECT_TIMEOUT_S.", device_id, timeout,
+        )
+        try:
+            await on_timeout()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.debug("%s: cleanup after connect timeout failed",
+                          device_id, exc_info=True)
+        return False
+
 
 def _next_login_retry_delay(attempt: int) -> Optional[float]:
     """Seconds to wait before login attempt ``attempt``, or None to give up.
@@ -311,6 +358,28 @@ class CameraDeviceClient(CameraMixin, _UpstreamDeviceClient):
         # Upstream sets _connect_and_login only on the success path.
         if getattr(self, "_connect_and_login", False):
             self._login_attempt = 0
+
+    async def connect(self, ip_address) -> None:
+        """Bound the attempt, so a silent device cannot park it forever.
+
+        Upstream reads the login response with no timeout, so a device that
+        completes the TCP handshake and then says nothing leaves this coroutine
+        parked inside `readexactly`, with `_connecting` still True and the
+        socket still open.  See _await_connect_with_deadline.
+
+        On timeout we close through `reset()`, which is also what puts the
+        device back on the retry path - now a bounded one.
+        """
+        ok = await _await_connect_with_deadline(
+            super().connect(ip_address),
+            _LOGIN_CONNECT_TIMEOUT_S,
+            getattr(self, "device_id", "?"),
+            self.reset,
+        )
+        if not ok:
+            # reset() cleared it, but the parked attempt never ran connect()'s
+            # own finally, so make the in-flight flag honest either way.
+            self._connecting = False
 
     def _schedule_reconnect(self) -> None:
         """Back off between failed logins, and eventually stop.

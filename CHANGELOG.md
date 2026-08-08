@@ -32,6 +32,23 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
   Cameras were never affected: `async_login` returns early for IPC models.
 
+- **A device that went silent mid-login was abandoned with its socket still
+  open.** Upstream has no read timeout anywhere in its device client, so a
+  device that completes the TCP handshake and then stops answering leaves the
+  login parked in `readexactly` forever - inside `connect()`, which means
+  `connect()`'s own cleanup never runs and the client goes on believing an
+  attempt is still in flight. That wedges the retry path too: nothing new can be
+  scheduled while an attempt is notionally live, so the device silently stops
+  being managed.
+
+  Observed on the same run: four of six devices ended that way rather than
+  stopping cleanly, and all six emitted their single teardown error within 3 ms
+  of each other - six sockets held open, one of them for 21 minutes.
+
+  A connect/login attempt is now bounded at 20 s, after which the socket is
+  closed and the device returns to the (now bounded) retry path.
+  `AIDOT_LOGIN_CONNECT_TIMEOUT_S` overrides it.
+
 ## [0.17.1]
 
 ### Added
