@@ -62,6 +62,22 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   known, which is what the logging above exists to answer.
 
 ### Fixed
+- **Two kinds of "the camera is awake" evidence could never release the wake
+  gate.** The gate that ends the pre-offer wait checked for MQTT topics under
+  `iot/v1/c/{device_id}/` - but the client subscribes to
+  `iot/v1/cb/{device_id}/#`, with a "b", so no device-channel topic ever
+  matched. Separately, `wakeupStatus` - the camera announcing it is awake -
+  carries no `devId` at top level or in its payload, identifying itself only
+  through `srcAddr`, which nothing read. Both now count. The change is strictly
+  additive: everything that released the gate before still does.
+
+- **The SDES offer was missing `powerType` and `p2pCache`.** The DTLS
+  `webrtcReq` has carried both for a long time; the SDES offer never did, so
+  half the fleet sent an offer the reference client would not recognise as
+  complete. Sent as strings on the SDES path, matching the reference client,
+  which stringifies the values it reads. The DTLS path sends ints, is
+  fleet-proven, and is left alone.
+
 - **A battery camera was being woken for sessions that could never stream.** The
   keepalive loop had no give-up condition: when a camera opened a session but no
   media ever arrived, it reconnected indefinitely, waking the camera each time
