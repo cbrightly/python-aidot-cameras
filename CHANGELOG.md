@@ -4,6 +4,31 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [Unreleased]
+
+### Fixed
+- **A camera that changed its SRTP key mid-open was decrypted with the old key
+  for the rest of the session, so it delivered nothing.** On the SDES path the
+  bridge is the only decryptor - the ffmpeg SDP is plain RTP with no key in it -
+  so the receive session's key decides whether there is any picture at all.
+
+  That session was built once and never revisited. The guard around it was "have
+  we been here before", and the first thing inside the guard answered yes, so
+  every later packet skipped the block whether or not a session had actually
+  been built. A build that failed - no SRTP support installed, or an unusable
+  key - was therefore disabled for the life of the stream rather than retried.
+
+  It also preferred the key parsed from the camera's *first* answer. Cameras
+  that answer twice (the second answer being the real one) already trigger an
+  ffmpeg restart with the new key, but the bridge kept the first key, so the
+  restart could not help: the camera encrypted with one key and the only
+  component able to decrypt held another.
+
+  The session now records the key it was built from and is rebuilt when that key
+  changes, nothing is stored unless construction succeeds, and the key it
+  follows is the one the rest of the open negotiates. A key learned only from a
+  late answer is now adopted the same way a prompt answer's key already was.
+
 ## [0.17.3b1]
 
 Same code as 0.17.2. Re-cut as a pre-release, because 0.17.2 should not have
