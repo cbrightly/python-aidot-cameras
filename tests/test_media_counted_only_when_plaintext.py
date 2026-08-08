@@ -110,12 +110,27 @@ def test_the_srtp_forward_site_is_gated_on_the_helper():
     )
 
 
-def test_no_ungated_counter_update_survives_at_the_forward_site():
-    """Catch a second, ungated copy of the same three lines creeping back."""
-    sites = re.findall(r"_media_counts\[1\] \+= len\(_fwd_pkt\)", _SRC)
-    assert len(sites) == 1, (
-        f"expected exactly one _fwd_pkt counter site, found {len(sites)} - "
-        "re-point this test and check each one is gated"
+def test_only_the_two_known_counter_sites_exist():
+    """Every place that stamps media-liveness must be one we have reasoned about.
+
+    ``_media_progress[0] = _time_br.monotonic()`` is the stamp ``is_stalled``
+    and ``_healthy`` read, so a third one appearing anywhere in the bridge is a
+    third claim that media flowed - and this whole defect was one such claim
+    being made for packets ffmpeg discards.  There are exactly two: the TUTK
+    audio forward (plaintext it decrypted itself, ungated by design) and the
+    SRTP forward the test above pins to the gate.  A new one fails here rather
+    than silently re-opening the hole.
+    """
+    stamps = re.findall(r"_media_progress\[0\] = _time_br\.monotonic\(\)", _SRC)
+    assert len(stamps) == 2, (
+        f"expected exactly 2 media-liveness stamps in the bridge, found "
+        f"{len(stamps)} - a new one must be shown to fire only for media the "
+        "consumer can actually use, then this count updated"
+    )
+    fwd_sites = re.findall(r"_media_counts\[1\] \+= len\(_fwd_pkt\)", _SRC)
+    assert len(fwd_sites) == 1, (
+        f"expected exactly one _fwd_pkt counter site, found {len(fwd_sites)} - "
+        "re-point the gate test above and check each one is gated"
     )
 
 
