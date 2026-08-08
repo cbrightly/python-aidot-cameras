@@ -2622,7 +2622,14 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                         _session.wait_done(),
                         timeout=_sdes_snap_seconds + 80,
                     )
-                except (TimeoutError, _asyncio.CancelledError):
+                except _asyncio.CancelledError:
+                    # Not the same event as a timeout.  A timeout means the
+                    # camera was slow and whatever landed in the temp file is
+                    # worth salvaging; a cancellation means the caller is gone,
+                    # so salvaging it (another ffmpeg, up to 15s) is work nobody
+                    # is waiting for and it stops shutdown from completing.
+                    raise
+                except TimeoutError:
                     pass
                 finally:
                     await _session.stop()
