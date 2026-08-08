@@ -4,6 +4,26 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.17.3b1]
+
+Same code as 0.17.2. Re-cut as a pre-release, because 0.17.2 should not have
+been a final version.
+
+Nothing in 0.17.2 is known to be broken, and it measurably improves on 0.17.1 -
+the LAN login storm went from 26,229 failed logins in a 25-minute fleet run to
+157. But "this specific fix is validated" is not "this release is good", and
+several known problems are still open at the time of writing: the six devices
+that reject LAN login still reject it (the ceiling stops the hammering, it does
+not make them log in), and the audit backlog is unfinished.
+
+Releases stay on this beta line until that is no longer true. `pip` and Home
+Assistant skip pre-release versions unless asked for them, which is the point:
+the version number itself now says what state the code is in, rather than a flag
+on a release page that no installer reads.
+
+0.17.2 is left on PyPI rather than yanked - yanking it would move installs back
+to 0.17.1, which has the storm.
+
 ## [0.17.2]
 
 ### Fixed
