@@ -278,6 +278,34 @@ def video_pt_from_answer_sdp(sdp_text: str) -> Optional[int]:
 _SDES_ANSWER_VIDEO_PTS = (96, 97)
 
 
+def _should_capture_sprop(kind, decrypted: bool, sprop_done: bool) -> bool:
+    """May this packet's payload be mined for SPS/PPS and cached to disk?
+
+    ``decrypted`` is the load-bearing term and it used to be missing.  The
+    bridge's ``_fwd_pkt`` starts as the raw inbound packet and is rebound only
+    when ``unprotect`` succeeds, so it stays ciphertext whenever there is no
+    SRTP receive session - pylibsrtp is in the optional ``webrtc`` extra, so a
+    base install never has one - or when ``unprotect`` raised, since that
+    handler logs a few lines and falls through.
+
+    SRTP leaves the RTP header in clear, so the payload offset comes out right
+    and random ciphertext reaches the NAL demux; ``payload[0] & 0x1F`` draws 7
+    and 8 at about 1/32 each, and on a 30 fps stream both appear within seconds.
+
+    The result is written to ``~/.config/aidot/sprop/<devid>.sprop`` and injected
+    as ``sprop-parameter-sets=`` by every later session, so a poisoned cache
+    outlives the session that created it: installing pylibsrtp afterwards does
+    not clear the file, and the first correct capture then differs from it and
+    trips the ``.unstable`` marker, disabling injection for that camera for good.
+    A bad frame is cheap; a bad file is not.
+
+    Returning False for a packet nobody decrypted is right even where ffmpeg
+    does its own decryption: what we hold is still ciphertext, so anything mined
+    from it would be noise either way.
+    """
+    return bool(kind == "video" and decrypted and not sprop_done)
+
+
 def _resolve_sdes_video_pt() -> Optional[int]:
     """EXPERIMENTAL (opt-in, default off): pin the OFFER to one video codec.
 
@@ -4295,6 +4323,12 @@ class _SdesOpenMixin:
                             # from TUTK SFrames to standard SRTP, so we decrypt here
                             # before forwarding plain RTP to ffmpeg.
                             _fwd_pkt = _bpkt
+                            # Whether _fwd_pkt is plaintext by the time anything
+                            # below reads its PAYLOAD. False until something has
+                            # actually decrypted it: forwarding ciphertext is
+                            # inert (ffmpeg discards it), but MINING it is not -
+                            # see _should_capture_sprop.
+                            _decrypted = False
                             if _use_plain_rtp:
                                 if not hasattr(_bridge_fn, '_srtp_rx_sess'):
                                     _bridge_fn._srtp_rx_sess = None
@@ -4319,6 +4353,7 @@ class _SdesOpenMixin:
                                 if _bridge_fn._srtp_rx_sess is not None:
                                     try:
                                         _fwd_pkt = _bridge_fn._srtp_rx_sess.unprotect(_bpkt)
+                                        _decrypted = True
                                     except Exception as _srx_dec_e:
                                         _ec = getattr(
                                             _bridge_fn, '_decrypt_err_n', 0)
@@ -4341,8 +4376,9 @@ class _SdesOpenMixin:
                             # can inject sprop-parameter-sets (out-of-band decoder
                             # init, robust to in-band SPS loss).  Parses only until
                             # both are seen; then _sprop_done short-circuits.
-                            if (_kind == "video"
-                                    and not getattr(_bridge_fn, "_sprop_done", False)):
+                            if _should_capture_sprop(
+                                    _kind, _decrypted,
+                                    getattr(_bridge_fn, "_sprop_done", False)):
                                 _ps = _extract_param_sets_from_rtp(_fwd_pkt)
                                 if _ps:
                                     _psc = getattr(_bridge_fn, "_ps_cache", None)
