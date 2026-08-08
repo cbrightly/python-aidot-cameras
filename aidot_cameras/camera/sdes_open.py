@@ -72,13 +72,15 @@ def _srtp_tx_key_note(sender: str, used_key: str, offer_key: str,
 
     Diagnostic only -- nothing branches on this.
 
-    Two senders share the we-to-camera direction on the SDES bridge and they do
-    not agree on the key: the PLI encrypts with our own offer key, the RR
-    prefers the camera's answer key and falls back to ours.  SRTP keys are
-    per-direction, so at most one of those can be the key the camera
-    authenticates our RTCP against.  No symptom has ever been reported for
-    either, and until now no log line said which key went out, so a live
-    capture could not settle it.
+    Three RTCP senders share the we-to-camera direction on the SDES bridge --
+    PLI, REMB and RR, all with sender SSRC 0xAB12CD34 -- but only two key
+    selections: REMB reuses the PLI's cached SRTP session rather than choosing
+    for itself, so instrumenting the PLI covers it.  The two selections do not
+    agree.  The PLI encrypts with our own offer key; the RR prefers the camera's
+    answer key and falls back to ours.  SRTP keys are per-direction, so at most
+    one of those can be the key the camera authenticates our RTCP against.  No
+    symptom has ever been reported for any of the three, and until now no log
+    line said which key went out, so a live capture could not settle it.
 
     ``differ=no`` means the camera echoed our key and the two senders were
     identical anyway -- the question does not arise in that session.  A run with

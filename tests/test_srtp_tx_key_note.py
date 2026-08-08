@@ -1,12 +1,13 @@
 """Instrumentation for a disagreement nobody has been able to see.
 
-Two RTCP senders run on the same we-to-camera direction on the SDES bridge, and
-they do not encrypt with the same key.  The PLI takes our own offer key; the RR
-prefers the camera's answer key and only falls back to ours.  SRTP keys are
-per-direction, so at most one of those can be the key the camera is actually
-authenticating our RTCP against -- but there is no reported symptom either way,
-and no log line today records which key either sender used, so a live capture
-cannot currently tell you which one is right.
+Three RTCP senders run on the same we-to-camera direction on the SDES bridge --
+PLI, REMB and RR -- but only two of them choose a key: REMB reuses the PLI's
+cached SRTP session.  The two choices do not agree.  The PLI takes our own offer
+key; the RR prefers the camera's answer key and only falls back to ours.  SRTP
+keys are per-direction, so at most one of those can be the key the camera is
+actually authenticating our RTCP against -- but there is no reported symptom
+either way, and no log line today records which key any sender used, so a live
+capture cannot currently tell you which one is right.
 
 This note is what makes that answerable.  It reports, per sender, the key that
 went out and where it came from, plus whether the two candidates differ at all
