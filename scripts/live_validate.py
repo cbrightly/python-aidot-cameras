@@ -167,6 +167,70 @@ def _media_seen(session, frames: int, out_path: str | None) -> tuple[bool, dict]
     return ok, evidence
 
 
+async def _decode_probe(path: str, timeout: float = 60.0) -> dict:
+    """Decode the recording and report what actually came out of the decoder.
+
+    The gate's other media signals do not require a packet to have been
+    decodable. ``media_stats.packets`` counts what the bridge forwarded, and
+    ``recorded_bytes`` measures a file written by a ``-c copy`` pipeline that
+    never looks inside a packet. Both are satisfied by bytes of the right shape.
+    A camera streaming ciphertext, or a stream whose depacketizer is bound to
+    the wrong payload type, can produce a healthy-looking number for either.
+
+    This runs the file through a decoder and asks how many frames came out. It
+    is the only signal in this harness that distinguishes "media arrived" from
+    "media a viewer could watch".
+
+    Returns ``{"decoded_frames": int, "decode_errors": int}``, plus ``error``
+    when the probe itself could not run - a probe that cannot run must not be
+    reported as zero frames, because those mean opposite things.
+    """
+    if not path or not os.path.exists(path):
+        return {"decode_error": "no recording"}
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-v", "error", "-i", path, "-an", "-f", "null", "-",
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        return {"decode_error": "ffmpeg not found"}
+    try:
+        _out, err = await asyncio.wait_for(proc.communicate(), timeout)
+    except TimeoutError:
+        proc.kill()
+        return {"decode_error": f"probe exceeded {timeout:.0f}s"}
+
+    stderr = (err or b"").decode("utf-8", "replace")
+    # -v error keeps this to real decode failures rather than the ordinary
+    # "missed N packets" chatter a lossy live stream always produces.
+    errors = [ln for ln in stderr.splitlines() if ln.strip()]
+
+    frames = 0
+    try:
+        probe = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
+            "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(probe.communicate(), timeout)
+        # ffprobe emits one line per matching stream, and an mpegts recording
+        # routinely reports the same video stream twice, so this is "50\n\n50"
+        # rather than "50". Parse the numeric lines and take the largest instead
+        # of int()-ing the blob - which raised, and reported a perfectly good
+        # stream as unprobed.
+        counts = [int(ln) for ln in (out or b"").decode().split()
+                  if ln.strip().isdigit()]
+        frames = max(counts) if counts else 0
+    except FileNotFoundError:
+        return {"decode_error": "ffprobe not found", "decode_errors": len(errors)}
+    except (TimeoutError, ValueError):
+        probe_err = "ffprobe gave no frame count"
+        return {"decode_error": probe_err, "decode_errors": len(errors)}
+
+    return {"decoded_frames": frames, "decode_errors": len(errors),
+            "decode_first_error": errors[0][:200] if errors else None}
+
+
 def _recording_path(out_dir: str, device_id: str, attempt: int) -> str:
     """Where this attempt records, clearing a stale file we are allowed to clear.
 
@@ -228,6 +292,12 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int) -> dict:
 
         ok, evidence = _media_seen(session, frames["n"], out)
         result.update(evidence)
+        # Advisory for now, deliberately: it is reported but does not gate. The
+        # measurement has never run on this fleet, and a gate that has never
+        # produced a number is not one to start blocking releases with. Promote
+        # it to a PASS condition once one run shows what the cameras actually
+        # give - that is a one-line change to the verdict below.
+        result.update(await _decode_probe(out))
         result["verdict"] = "PASS" if ok else "NO_MEDIA"
     except AidotCameraBusy as exc:
         # Someone else is watching. Distinct from a media failure - but still
@@ -284,6 +354,10 @@ async def _validate_camera(client, device, args) -> dict:
               + (f"  handshake={res['handshake_s']}s" if "handshake_s" in res else "")
               + (f"  frames={res['frames']}" if "frames" in res else "")
               + (f"  bytes={res['recorded_bytes']}" if "recorded_bytes" in res else "")
+              + (f"  decoded={res['decoded_frames']}" if "decoded_frames" in res else "")
+              + (f"  decode_err={res['decode_errors']}"
+                 if res.get("decode_errors") else "")
+              + (f"  decode_probe={res['decode_error']}" if "decode_error" in res else "")
               + (f"  {res['error']}" if "error" in res else ""))
         if res["verdict"] == "PASS":
             break
