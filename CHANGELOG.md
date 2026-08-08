@@ -62,6 +62,25 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   known, which is what the logging above exists to answer.
 
 ### Fixed
+- **A camera's cached decoder parameters could be filled with random bytes, and
+  the damage outlived the session.** The bridge mined SPS/PPS out of whatever
+  packet it was holding without checking that anything had decrypted it. Two
+  ordinary situations leave it holding ciphertext: no SRTP receive session at
+  all - `pylibsrtp` ships in the optional `webrtc` extra, so a base install has
+  none - or a decrypt that failed.
+
+  SRTP leaves the RTP header in clear, so the payload offset is computed
+  correctly and random ciphertext reaches the parameter-set parser, where the
+  two values it looks for turn up by chance within seconds of a 30 fps stream.
+  The result was written to `~/.config/aidot/sprop/<devid>.sprop` and injected
+  into every later session as `sprop-parameter-sets=`, so a decoder was
+  initialised from noise. Installing `pylibsrtp` afterwards did not clear the
+  file, and the first genuine capture then disagreed with it and tripped the
+  instability marker, which disables injection for that camera permanently.
+
+  The capture is now gated on the packet having actually been decrypted. On a
+  healthy session nothing changes.
+
 - **Two kinds of "the camera is awake" evidence could never release the wake
   gate.** The gate that ends the pre-offer wait checked for MQTT topics under
   `iot/v1/c/{device_id}/` - but the client subscribes to
