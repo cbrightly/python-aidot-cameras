@@ -306,6 +306,46 @@ def _should_capture_sprop(kind, decrypted: bool, sprop_done: bool) -> bool:
     return bool(kind == "video" and decrypted and not sprop_done)
 
 
+def _should_count_media(decrypted: bool, plain_rtp: bool) -> bool:
+    """Did this forward deliver media the consumer can actually use?
+
+    ``_media_progress`` and ``_media_counts`` are the only in-process evidence
+    that media flowed on the SDES path - nothing is decoded in this process, so
+    ``on_frame`` never fires and these counters are what every health check
+    reads: ``SdesSession.last_media_monotonic`` feeds ``SdesSession.is_stalled``,
+    the keepalive's ``_healthy`` is ``last_media_monotonic > 0.0``, and
+    ``_healthy`` is what resets the streak ``_should_abandon_keepalive`` counts.
+    Counting a packet the consumer throws away therefore does not just skew a
+    statistic: it makes a session report healthy forever while the viewer sees
+    black, because every one of those checks is satisfied by a counter that
+    keeps moving.
+
+    The question is not "did we decrypt it" but "is the forwarded packet
+    plaintext by the time ffmpeg reads it", and who owes the decryption depends
+    on the camera:
+
+    * ``plain_rtp`` (``_use_plain_rtp``, the ``_PLAIN_RTP_MODELS`` substring
+      allowlist): the ffmpeg SDP is ``RTP/AVP`` with no ``a=crypto``, so the
+      BRIDGE owes the decryption.  ``_fwd_pkt`` is rebound only when
+      ``unprotect`` succeeds, and two paths leave it as ciphertext - no SRTP
+      receive session (pylibsrtp is in the optional ``webrtc`` extra) and an
+      ``unprotect`` that raised.  ffmpeg discards those, so they are not
+      delivered media.  Non-TUTK packets on this path are SRTP by then: the
+      camera switches from TUTK SFrames to standard SRTP after LIVING, and the
+      SFrames are handled and ``continue``-d well before this point.
+    * Otherwise the SDP is ``RTP/SAVP`` with ``a=crypto`` and FFMPEG owes the
+      decryption.  Forwarding ciphertext is exactly right there, ``decrypted``
+      is always False, and the packet IS delivered media - so the ``plain_rtp``
+      term is load-bearing.  ``is_sdes_camera`` is a cloud property
+      (``enableSdes == '1'``), a different and wider set than the model
+      allowlist, so this path is reachable by any SDES camera not named in it.
+      Without the second term such a camera would report ``last_media`` 0.0
+      forever, trip ``is_stalled`` at the grace deadline while streaming fine,
+      and eventually have its keepalive abandoned.
+    """
+    return bool(decrypted or not plain_rtp)
+
+
 def _resolve_sdes_video_pt() -> Optional[int]:
     """EXPERIMENTAL (opt-in, default off): pin the OFFER to one video codec.
 
@@ -4494,9 +4534,20 @@ class _SdesOpenMixin:
                                 _lo_target.sendto(
                                     _fwd_pkt, ('127.0.0.1', _btgt)
                                 )
-                                _media_progress[0] = _time_br.monotonic()
-                                _media_counts[0] += 1
-                                _media_counts[1] += len(_fwd_pkt)
+                                # Forward unconditionally - ciphertext ffmpeg
+                                # discards is inert, and a `continue` here would
+                                # change loop control flow for the whole SDES
+                                # fleet.  But only COUNT what the consumer can
+                                # use: these three are the only in-process proof
+                                # media flowed, so counting a discarded packet
+                                # keeps is_stalled from ever tripping and the
+                                # session reports healthy while the viewer sees
+                                # black.  See _should_count_media.
+                                if _should_count_media(
+                                        _decrypted, _use_plain_rtp):
+                                    _media_progress[0] = _time_br.monotonic()
+                                    _media_counts[0] += 1
+                                    _media_counts[1] += len(_fwd_pkt)
                             except Exception:
                                 _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                     # Periodic ICE controlling check: re-send USE-CANDIDATE every 2.5 s.
