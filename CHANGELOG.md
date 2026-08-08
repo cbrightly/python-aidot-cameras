@@ -30,7 +30,16 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   momentary drop still recovers on the first prompt retry.
   `AIDOT_LOGIN_RETRY_LIMIT` and `AIDOT_LOGIN_RETRY_CAP_S` override both.
 
-  Cameras were never affected: `async_login` returns early for IPC models.
+  The policy applies to every device client this package hands out, camera or
+  not. That is the whole point: the LAN login is the light protocol, and the six
+  devices in the run above were lights. Non-camera devices now get
+  `LightDeviceClient` - upstream's client plus the retry policy and nothing
+  else. The policy itself lives in `aidot_cameras/lan_retry.py`, which imports
+  nothing from the camera package and is tested for it, so bounding a light's
+  retries does not put camera code in a light's path.
+
+  Cameras never reached this path anyway: `async_login` returns early for IPC
+  models.
 
 - **A device that went silent mid-login was abandoned with its socket still
   open.** Upstream has no read timeout anywhere in its device client, so a

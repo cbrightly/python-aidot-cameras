@@ -72,7 +72,7 @@ from .const import (
     LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
     RUNTIME_ONLY_LOGIN_INFO_KEYS,
 )
-from .device_client import CameraDeviceClient
+from .device_client import CameraDeviceClient, LightDeviceClient
 # CARRIED: drop when python-aidot#6 merges - this is upstream's DeviceStatusData
 # plus the active_color_mode tracker (see aidot_cameras/device_client.py).
 from .device_client import DeviceStatusData as _CarriedStatusData
@@ -791,13 +791,33 @@ class CameraClient(_UpstreamAidotClient):
 
         This is the only place device clients are constructed, upstream or
         here, and therefore the only place that decides which class to use.
-        Non-cameras take the ``super()`` path and get a plain upstream
-        ``DeviceClient``: no camera code RUNS in their path and no camera
-        behavior is attached to them.  (Importing this module still pulls the
-        camera package in - the guarantee is about execution, not imports.)
+        Non-cameras get a ``LightDeviceClient``: upstream's client plus the
+        camera-free ``LanRetryMixin``, and nothing else.  No camera code RUNS in
+        their path and no camera behavior is attached to them.  (Importing this
+        module still pulls the camera package in - the guarantee is about
+        execution, not imports.)
+
+        The light branch is the one place an upstream method body is
+        reproduced.  Upstream's ``get_device_client`` names ``DeviceClient``
+        directly at construction, so there is no seam that lets a subclass be
+        substituted; the alternative is patching upstream's module global, which
+        would reach every consumer in the process rather than only ours.  The
+        one behaviour that copy owes upstream - pushing the discovered LAN IP
+        into the client, without which a light never logs in - is covered by
+        ``test_a_discovered_address_still_reaches_a_light``.  It reads the map
+        through ``CameraDiscover.discovered_device``, which resolves correctly
+        on both upstream shapes (upstream's own line does not).
         """
         if not _is_camera_device(device):
-            device_client = super().get_device_client(device)
+            device_id = device.get(CONF_ID)
+            device_client = self._device_clients.get(device_id)
+            if device_client is None:
+                device_client = LightDeviceClient(device, self.login_info)
+                self._device_clients[device_id] = device_client
+            if self._discover is not None:
+                device_client.update_ip_address(
+                    self._discover.discovered_device.get(device_id)
+                )
             # CARRIED: drop when python-aidot#6 merges
             self._carry_active_color_mode(device_client)
             return device_client

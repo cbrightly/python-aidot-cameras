@@ -29,7 +29,11 @@ from upstream_shapes import (
 
 import aidot_cameras.client as client_mod
 from aidot_cameras.client import CameraClient
-from aidot_cameras.device_client import CameraDeviceClient, DeviceStatusData
+from aidot_cameras.device_client import (
+    CameraDeviceClient,
+    DeviceStatusData,
+    LightDeviceClient,
+)
 
 
 def test_cct_only_delta_sets_cct_mode():
@@ -118,11 +122,16 @@ def _dispatch(device):
     return asyncio.run(_run())
 
 
-def test_rgbw_bulb_gets_the_carried_status_on_a_pure_upstream_client():
+def test_rgbw_bulb_gets_the_carried_status_on_a_camera_free_client():
     _client, dc = _dispatch(RGBW_BULB)
-    # The device itself must stay 100% upstream - no camera code in a bulb's path.
-    assert type(dc) is UpstreamDeviceClient
+    # No camera code in a bulb's path.  The class is upstream's plus the
+    # camera-free LAN retry policy - which a bulb needs, because a bulb is what
+    # produced the login storm - and nothing else.
+    assert type(dc) is LightDeviceClient
+    assert isinstance(dc, UpstreamDeviceClient)
     assert not isinstance(dc, CameraDeviceClient)
+    assert [c for c in type(dc).__mro__
+            if c.__module__.startswith("aidot_cameras.camera")] == []
     # ...but its status carries the fix.
     assert isinstance(dc.status, DeviceStatusData)
     dc.status.update(DeviceAttr(OnOff=1, Dimming=100, CCT=3000))
@@ -159,9 +168,9 @@ def test_carrying_is_idempotent_across_repeat_dispatch():
     assert dc.status is carried
 
 
-def test_cct_only_bulb_stays_exactly_upstream():
+def test_cct_only_bulb_keeps_upstreams_own_status():
     _client, dc = _dispatch(CCT_BULB)
-    assert type(dc) is UpstreamDeviceClient
+    assert type(dc) is LightDeviceClient
     # enable_rgbw is False here, so nothing is carried: the status object is
     # upstream's own class, not our subclass.
     assert type(dc.status) is UpstreamDeviceStatusData
