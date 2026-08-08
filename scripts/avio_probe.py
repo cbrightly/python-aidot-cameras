@@ -139,7 +139,9 @@ async def _probe_one(client, device, probes, settle: float, timeout: float,
 
     With ``record``, the session is written to ``out_path`` and held that long
     after the probes. The recording necessarily starts before the probes do -
-    the camera's stream setting does not survive a session, so every session
+    the camera's stream setting does not survive a session (measured 2026-08-07:
+    a session that sent nothing, run immediately after each of the six quality
+    values, opened on the same profile every time), so every session
     begins at the camera's own default and there is no way to open one already
     switched. Read the result per frame (``ffprobe -show_entries frame=width,
     height``) rather than from the container header: what matters is whether the

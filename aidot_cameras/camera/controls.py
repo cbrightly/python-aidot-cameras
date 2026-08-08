@@ -172,9 +172,17 @@ class _CameraControlsMixin:
                 "will be applied when a session next starts", quality)
             return True
         # Ask, and read what comes back.  The camera acks with 801 in
-        # 0.01-0.03s (measured 2026-08-07 on an A000088) and reports the new
-        # value through GETSTREAMCTRL afterwards, so the command is genuinely
-        # accepted - it simply does not change the encode.
+        # 0.01-0.19s and reports the new value through GETSTREAMCTRL afterwards
+        # (where it implements 802), so the command is genuinely accepted - it
+        # simply does not change the encode.
+        #
+        # Settled 2026-08-07 across both transports and every value the enum
+        # defines, not just hd/sd: an A001064 was swept over all six
+        # AVIOCTRL_QUALITY values, each followed by a session that sent nothing
+        # to catch a setting that applies only to the NEXT session. Twelve
+        # sessions, twelve times h264 1280x720, no dimension change in any of
+        # them. Four of those values had never been sent to any camera here.
+        # See docs/APP-PARITY-STATUS.md for the table.
         #
         # The RETURN value deliberately still means "the command went out". An
         # A001064 answers SPEAKERSTART but does not implement GETSTREAMCTRL at

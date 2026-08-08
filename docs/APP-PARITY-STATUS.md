@@ -84,6 +84,48 @@ exactly the same video. The integration's resolution select was removed in 2.11.
 for this reason; the command stays in the library because it is correct and a
 future firmware may act on it.
 
+### Extended to every value, and to the other transport, 2026-08-07
+
+The table above covers two values on one model, which left room for the control
+working on a value or a camera nobody had tried. It does not.
+
+An A001064 (SDES) was swept across **all six** `AVIOCTRL_QUALITY` values. The
+enum was read out of the vendor APK (`AVIOCTRLDEFs.smali`) rather than assumed,
+because it is **not** the stock TUTK ordering and anyone reasoning from the
+public enum will get it wrong:
+
+    UNKNOWN = 0    MAX = 1    HIGH = 2    MIN = 3    LOW = 4    MIDDLE = 5
+
+Each value was sent, then followed by a second session that sent nothing at all -
+because a setting that applies to the *next* session would look identical to one
+that does nothing, and every earlier check had only ever looked within the
+session that sent the command.
+
+| value | ack | this session | next session |
+|-------|-----|--------------|--------------|
+| 0 UNKNOWN | 801 in 0.05 s | h264 1280x720 | h264 1280x720 |
+| 1 MAX     | 801 in 0.17 s | h264 1280x720 | h264 1280x720 |
+| 2 HIGH    | 801 in 0.02 s | h264 1280x720 | h264 1280x720 |
+| 3 MIN     | 801 in 0.19 s | h264 1280x720 | h264 1280x720 |
+| 4 LOW     | 801 in 0.01 s | h264 1280x720 | h264 1280x720 |
+| 5 MIDDLE  | 801 in 0.11 s | h264 1280x720 | h264 1280x720 |
+
+Twelve sessions, twelve identical results, no dimension change in any of them -
+read per frame, not from the container header, so a switch partway through would
+have shown. The "does not survive a session" line above is now measured rather
+than inferred: the follow-up sessions confirm it.
+
+**The control is settled as inert on this firmware**, on both transports and on
+every value it accepts. Four of those six values had never been sent to any
+camera on this fleet before.
+
+Note this leaves the vendor app's own Auto/HD/SD switch unexplained - the owner
+reports it does have a visible effect. Since our 800 demonstrably does not, the
+app is likely achieving it some other way, most plausibly by renegotiating the
+stream rather than by sending this command. That points at the offer, which is
+where a real control surface was found: see the video-codec pinning note in the
+0.17.1 changelog.
+
 ## The one real difference still unexplained
 
 Bitrate, and it is model-specific rather than something the app asks for. Direct
