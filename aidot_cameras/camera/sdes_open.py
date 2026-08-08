@@ -542,6 +542,54 @@ def _record_peer_reflexive(known, discovered, observed, is_self=None):
     return [*discovered, observed]
 
 
+def _ensure_srtp_rx_session(holder, key, build, *, on_built=None, on_error=None):
+    """Return the bridge's SRTP receive session, rebuilt when ``key`` changes.
+
+    For every model in ``_PLAIN_RTP_MODELS`` -- which is every SDES camera this
+    library supports -- the bridge is the only decryptor: the ffmpeg SDP is
+    RTP/AVP with no ``a=crypto``, so a receive session holding the wrong key
+    means no media at all, not a degraded stream.  The camera can hand us a
+    different key partway through the open (the second webrtcResp on
+    echo-reversal cameras), so "built once" is not good enough; the session has
+    to follow the key it was built from.
+
+    ``build(key)`` constructs the session; the caller keeps ``pylibsrtp`` out of
+    this module so a base install without the ``webrtc`` extra still imports.
+    Nothing is stored unless ``build`` returns, so a construction error is
+    retried on the next packet rather than latched off for the stream.  A
+    missing SRTP module is the exception: an ``ImportError`` cannot start
+    succeeding later in the process, and this runs per packet, so it is
+    remembered and not retried.
+
+    ``on_built`` is called with True for the first successful build and False
+    for a rebuild; ``on_error`` receives the exception ``build`` raised.
+    """
+    if not key or getattr(holder, "_srtp_rx_unavailable", False):
+        return None
+    sess = getattr(holder, "_srtp_rx_sess", None)
+    if sess is not None and getattr(holder, "_srtp_rx_key", None) == key:
+        return sess
+    try:
+        new_sess = build(key)
+    except Exception as exc:
+        # Drop the old session too: it was built from a different key, so
+        # everything it "decrypts" from here on is noise.
+        holder._srtp_rx_sess = None
+        holder._srtp_rx_key = None
+        if isinstance(exc, ImportError):
+            holder._srtp_rx_unavailable = True
+        if on_error is not None:
+            on_error(exc)
+        return None
+    first = not getattr(holder, "_srtp_rx_built_once", False)
+    holder._srtp_rx_sess = new_sess
+    holder._srtp_rx_key = key
+    holder._srtp_rx_built_once = True
+    if on_built is not None:
+        on_built(first)
+    return new_sess
+
+
 class _SdesOpenMixin:
     async def _open_sdes_stream(self, **kwargs) -> "SdesSession":
         """Allocate-and-hand-off wrapper around _open_sdes_stream_impl.
@@ -2982,6 +3030,37 @@ class _SdesOpenMixin:
         # see SdesSession.media_stats(), which the live-validation gate reads.
         _media_counts: list = [0, 0]
 
+        # SRTP receive side for _use_plain_rtp cameras.  Defined once per open
+        # rather than per packet; the bridge calls _ensure_srtp_rx_session with
+        # these deep inside its receive loop.  pylibsrtp is imported here, not at
+        # module scope, because it lives in the optional "webrtc" extra.
+        def _build_srtp_rx(_rx_key):
+            import base64 as _b64_srx
+
+            import pylibsrtp as _plsrtp_rx
+            _rx_pol = _plsrtp_rx.Policy(
+                key=_b64_srx.b64decode(_rx_key),
+                ssrc_type=_plsrtp_rx.Policy.SSRC_ANY_INBOUND,
+                srtp_profile=_plsrtp_rx.Policy.SRTP_PROFILE_AES128_CM_SHA1_80,
+            )
+            _rx_pol.allow_repeat_tx = True
+            return _plsrtp_rx.Session(policy=_rx_pol)
+
+        def _on_srtp_rx_built(_first):
+            # first-media marks the cold-start timeline; a re-key mid-open is a
+            # rebuild, not a second first packet.
+            if _first:
+                self._cold_phase("first-media")
+            _status("bridge: SRTP RX session ready (cam->us)")
+
+        def _on_srtp_rx_error(_exc):
+            # Capped: a build that keeps failing is retried per packet by
+            # design, and the log must not follow it at frame rate.
+            _n = getattr(_bridge_fn, '_srtp_rx_err_n', 0)
+            if _n < 8:
+                _bridge_fn._srtp_rx_err_n = _n + 1
+                _status(f"bridge: SRTP RX init failed: {_exc}")
+
         def _bridge_fn():
             nonlocal _br_first_di_logged, _br_first_srtp_logged, _br_first_req_dumped
             nonlocal _br_first_audio_logged, _br_first_video_logged, _avio_living_sent
@@ -4330,29 +4409,22 @@ class _SdesOpenMixin:
                             # see _should_capture_sprop.
                             _decrypted = False
                             if _use_plain_rtp:
-                                if not hasattr(_bridge_fn, '_srtp_rx_sess'):
-                                    _bridge_fn._srtp_rx_sess = None
-                                    _rx_inline = _cam_key_audio or srtp_key_audio
-                                    if _rx_inline:
-                                        try:
-                                            import pylibsrtp as _plsrtp_rx
-                                            import base64 as _b64_srx
-                                            _rx_pol = _plsrtp_rx.Policy(
-                                                key=_b64_srx.b64decode(_rx_inline),
-                                                ssrc_type=_plsrtp_rx.Policy.SSRC_ANY_INBOUND,
-                                                srtp_profile=_plsrtp_rx.Policy.SRTP_PROFILE_AES128_CM_SHA1_80,
-                                            )
-                                            _rx_pol.allow_repeat_tx = True
-                                            _bridge_fn._srtp_rx_sess = _plsrtp_rx.Session(
-                                                policy=_rx_pol
-                                            )
-                                            self._cold_phase("first-media")
-                                            _status("bridge: SRTP RX session ready (cam->us)")
-                                        except Exception as _srx_e:
-                                            _status(f"bridge: SRTP RX init failed: {_srx_e}")
-                                if _bridge_fn._srtp_rx_sess is not None:
+                                # srtp_key_audio, not _cam_key_audio: the
+                                # second-webrtcResp handler adopts the camera's
+                                # real key into srtp_key_audio (this is a live
+                                # closure cell, so the rebind is visible here)
+                                # and leaves _cam_key_audio at the first answer's
+                                # value.  Preferring _cam_key_audio pinned the
+                                # bridge - the only decryptor on this path - to a
+                                # key the camera had stopped using.
+                                _rx_sess = _ensure_srtp_rx_session(
+                                    _bridge_fn, srtp_key_audio, _build_srtp_rx,
+                                    on_built=_on_srtp_rx_built,
+                                    on_error=_on_srtp_rx_error,
+                                )
+                                if _rx_sess is not None:
                                     try:
-                                        _fwd_pkt = _bridge_fn._srtp_rx_sess.unprotect(_bpkt)
+                                        _fwd_pkt = _rx_sess.unprotect(_bpkt)
                                         _decrypted = True
                                     except Exception as _srx_dec_e:
                                         _ec = getattr(
@@ -4983,6 +5055,23 @@ class _SdesOpenMixin:
                                 _lk_m = _re_lk.search(r"inline:([A-Za-z0-9+/=]+)", _lk_ln)
                                 if _lk_m:
                                     _cam_key_audio = _lk_m.group(1)
+                                    # Adopt it the same way the pre-launch answer
+                                    # is adopted above.  srtp_key_audio is the one
+                                    # key the bridge decrypts with, so a key
+                                    # learned only here has to land in it or this
+                                    # camera keeps being decrypted with our offer
+                                    # key -- which it never used.
+                                    #
+                                    # Only where the bridge is the decryptor.
+                                    # Adopting it on the other branch would make
+                                    # the second-answer comparison below see the
+                                    # key as already taken and skip the ffmpeg
+                                    # restart - but there it is ffmpeg that holds
+                                    # the key, and its SDP was written before this
+                                    # answer arrived, so the restart is the only
+                                    # thing that would deliver the new key.
+                                    if _use_plain_rtp:
+                                        srtp_key_audio = _cam_key_audio
                                     break
                     _status(
                         f"late ICE creds parsed - bridge will send USE-CANDIDATE"
