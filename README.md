@@ -35,40 +35,39 @@ Other battery models (A001108, A001360) are recognized in code with the same
 battery handling. See [`docs/CAMERAS.md`](docs/CAMERAS.md#supported-cameras) for
 the authoritative table and per-model notes.
 
-## Known limitations
+## Local (LAN) control and account ownership
 
-**LAN device login does not work on the reference hardware.** The local control
-channel (upstream's TCP:10000 light protocol, and this package's
-`CameraLanClient` built on the same protocol) is rejected by every device on the
-account this library is validated against. Measured 2026-08-08:
+Local control over the devices' TCP:10000 channel - both the light/plug protocol
+and this package's `CameraLanClient` - is accepted **only for the account that
+owns the devices**. A member of a shared home is rejected at the device, even
+though the cloud happily hands that member a full device list, complete with the
+per-device `password` and `aesKey`.
 
-| Model | Devices | Ack |
-| --- | --- | --- |
-| `LK.IPC.A000088` | 3 | 4352 `fail` |
-| `LK.light.A001497`, `LK.plug.A001535` | 6 | 4354 `fail` |
-| `LK.light.A001493` | 1 | 400 `not equal abort user id or password` |
+The rejection is easy to misread, because the device answers with a code that
+varies by firmware family and a message that blames the wrong thing:
 
-The devices are not unreachable and the request is not malformed: they accept
-the connection, decrypt the body with their own `aesKey`, parse the JSON, and
-answer a well-formed `loginResp`. They also advertise the feature - unicast
-discovery returns `lanMode=1` (and `localCtrFlag=1` on the cameras). A correct
-password and a deliberately wrong one produce the identical rejection, and the
-request is field-identical to the vendor app's own, which sends nothing before
-it. So there is no known client-side change that fixes this.
+| Model | Ack |
+| --- | --- |
+| `LK.light.A001493` | 400 `not equal abort user id or password` |
+| `LK.light.A001497`, `LK.plug.A001535` | 4354 `fail` |
+| `LK.IPC.A000088` | 4352 `fail` |
 
-Consequences:
+The A001493's message is the honest one: it is the **user id** that does not
+match, not the password. Every credential in the request can be correct and the
+login will still be refused if the `userId` is not the owner's.
 
-- Devices fall back to cloud control. Nothing is broken by it, but local control
-  is unavailable and the latency and offline benefits it would bring are not
-  there.
-- `CameraLanClient` will raise `CameraLanLoginRejected` rather than attaching.
+Verified 2026-08-08 against ten devices across four model families: every one
+returns 200 for the owning account and one of the codes above for a shared-home
+member.
 
-This appears to be model-family-specific rather than universal: third-party
-reports show upstream's LAN login working on other families. If your devices
-work locally, this section does not apply to you.
+**If local control never engages, check which account the integration is signed
+in as before looking anywhere else.** A dedicated or secondary login - the sort
+of thing you might use to avoid contending with a phone app over a rotating
+refresh token - will control everything fine through the cloud and never once
+log in locally.
 
-**Camera streaming is unaffected.** Video is WebRTC over cloud MQTT signaling
-and does not use this path at all; `async_login` returns early for IPC models.
+Cameras' live video is unaffected either way: it is WebRTC signaled over cloud
+MQTT and does not use this path.
 
 ## Library install
 
