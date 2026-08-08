@@ -89,12 +89,24 @@ future firmware may act on it.
 The table above covers two values on one model, which left room for the control
 working on a value or a camera nobody had tried. It does not.
 
-An A001064 (SDES) was swept across **all six** `AVIOCTRL_QUALITY` values. The
-enum was read out of the vendor APK (`AVIOCTRLDEFs.smali`) rather than assumed,
-because it is **not** the stock TUTK ordering and anyone reasoning from the
-public enum will get it wrong:
+An A001064 (SDES) was swept across all six `AVIOCTRL_QUALITY` values **and the
+one value the app sends that the enum does not name**. The enum was read out of
+the vendor APK (`AVIOCTRLDEFs.smali`) rather than assumed, because it is **not**
+the stock TUTK ordering and anyone reasoning from the public enum will get it
+wrong:
 
     UNKNOWN = 0    MAX = 1    HIGH = 2    MIN = 3    LOW = 4    MIDDLE = 5
+
+The enum is not the whole story. `HorLiveController.smali:629-631` shows the
+app's resolution picker has THREE arms, not two: `0x1`, `0x5`, and `0x10` -
+whose label is `_auto_resulution`. `KVSWebRTCChannel.smali:15314` ships that
+value on `0x320` (= 800), through the same `SMsgAVIoctrlSetStreamCtrlReq` struct
+we use. So the app's "Auto" is quality byte **16**, and it sits outside
+`AVIOCTRL_QUALITY`, which stops at `MIDDLE = 5`.
+
+An enum sweep alone would have missed it, and did: the first version of this
+section claimed the control was settled "on every value it accepts" while
+having tested only 0-5.
 
 Each value was sent, then followed by a second session that sent nothing at all -
 because a setting that applies to the *next* session would look identical to one
@@ -109,21 +121,119 @@ session that sent the command.
 | 3 MIN     | 801 in 0.19 s | h264 1280x720 | h264 1280x720 |
 | 4 LOW     | 801 in 0.01 s | h264 1280x720 | h264 1280x720 |
 | 5 MIDDLE  | 801 in 0.11 s | h264 1280x720 | h264 1280x720 |
+| 16 (app's Auto) | 801 in 0.54 s | h264 1280x720 | h264 1280x720 |
 
-Twelve sessions, twelve identical results, no dimension change in any of them -
+Fourteen sessions, fourteen identical results, no dimension change in any of them -
 read per frame, not from the container header, so a switch partway through would
 have shown. The "does not survive a session" line above is now measured rather
 than inferred: the follow-up sessions confirm it.
 
-**The control is settled as inert on this firmware**, on both transports and on
-every value it accepts. Four of those six values had never been sent to any
-camera on this fleet before.
+**The control is settled as inert on this firmware** - on both transports, on
+every value the enum defines, and on the extra value the app itself sends for
+Auto. Five of those seven had never been sent to any camera on this fleet.
 
-Note this leaves the vendor app's own Auto/HD/SD switch unexplained - the owner
-reports it does have a visible effect. Since our 800 demonstrably does not, the
-app is likely achieving it some other way, most plausibly by renegotiating the
-stream rather than by sending this command. That points at the offer, which is
-where a real control surface was found: see the video-codec pinning note in the
+One loose thread, recorded rather than interpreted: value 16 acked in 0.54 s
+against 0.01-0.19 s for the enum values. That is 3-50x slower and might mean the
+firmware does real work for it. It is n=1 against noisy latencies, and the video
+was unchanged either way, so nothing is built on it.
+
+### Why the app's switch still works
+
+The owner reports the app's Auto/HD/SD switch has a visible effect. It sends the
+same command we do, with values we have now all tried, so the command is not how
+it does it. The obvious next guess was that the app restarts the stream around
+the switch and the renegotiation changes the encode.
+
+**It does not.** Traced through the decompiled app rather than assumed:
+
+    HorLiveController.lambda$showResolutionChoiceBox$1   picker -> 0x10 / 0x1 / 0x5
+      -> NewLiveFragment$21 -> NewLivePresenter.setResolution(int, boolean)
+         the boolean is needLoading - a UI spinner, nothing more
+      -> KVSWebRTCChannel.setResolution(int, SetResolutionRespListener)
+         -> SMsgAVIoctrlSetStreamCtrlReq.parseContent(0, (byte) value)
+         -> sendCtrl(0x320)                    the same cmd 800 we send
+
+    NewLivePresenter$6.onSuccess()   the ack handler, in full:
+         store the value in a field
+         log "setResolution, onSuccess"
+         hideLoading() and cancel the loading timeout
+         getQualitySuc(value)  ->  HorLiveController.setResolution(value)
+                                   which is the LABEL setter - the same
+                                   sparse-switch that maps 0x1/0x5/0x10 to
+                                   the displayed HD / SD / Auto strings
+         kvsSetResolutionSuccess(...)          analytics
+
+There is no restart, no re-offer and no renegotiation on that path. The app
+sends the command, receives the ack, and **changes the text on screen**.
+
+Which resolves the apparent contradiction without needing the camera to behave
+differently for the app than it does for us: the visible effect is the label.
+The vendor app has precisely the defect this integration removed its own
+resolution select for - a control that reports success while changing nothing.
+
+Stated with its limit: what is proven is that the success path does not restart
+the stream. No claim is made that no code path anywhere does.
+
+### The whole command surface, enumerated
+
+Rather than keep asking "is there another command", every control id the app
+actually sends was pulled out of `KVSWebRTCChannel` and named against
+`AVIOCTRLDEFs.smali`:
+
+| id | name | do we send it |
+|----|------|---------------|
+| 0x318 / 792 | `USER_IPCAM_LISTEVENT_REQ` | no - event list |
+| 0x31a / 794 | `USER_IPCAM_RECORD_PLAYCONTROL` | no - SD playback |
+| 0x320 / 800 | `USER_IPCAM_SETSTREAMCTRL_REQ` | yes |
+| 0x322 / 802 | `USER_IPCAM_GETSTREAMCTRL_REQ` | yes |
+| 0x350 / 848 | SPEAKERSTART | yes |
+| 0x351 / 849 | SPEAKERSTOP | yes |
+| 0x4b5 / 1205 | `USER_IPCAM_HASLISTEVENT_REQ` | no - event list |
+| 0x4b7 / 1207 | `DELLISTEVENT_REQ` | no - event list |
+| 0x4b9 / 1209 | `USER_IPCAM_CUSTOM_COMMAND_REQ` | no - see below |
+| 0x528/0x52a/0x52e | radar start / stop / SD-card start | no |
+| 0x1001 / 4097 | PTZ | yes |
+| 0x1424 / 5156 | heartbeat | yes |
+| 0x1500 / 5376 | LIVING | yes |
+
+**None of them touch the encoder.** The generic escape hatch, `CUSTOM_COMMAND`,
+was the last candidate and it is not one either: in `KVSWebRTCChannel` its only
+caller is `getThumbnais(List, GetThumbnaiRespListener)`, which packs a list of
+event timestamps little-endian and asks for thumbnails.
+
+So there is no command in the vendor app's repertoire that selects the video
+profile. Whatever chooses it is internal to the firmware.
+
+### And why the app's kb/s number appears to respond
+
+`TrafficStatsTextView` renders a live throughput figure from
+`android.net.TrafficStats.getTotalRxBytes` / `getUidRxBytes`, re-posted every
+1000 ms. That is device and process network traffic, not the encoder's bitrate,
+and it moves continuously on its own.
+
+This camera's bitrate genuinely varies more than fourfold session to session -
+839 to 3698 Kbps measured in one afternoon with nothing changed. A per-second
+counter watched across any UI action will move, and would have moved had nothing
+been pressed. It is the same trap the A/B arms were interleaved to avoid.
+
+Two device properties were checked before concluding that, because both looked
+like better explanations:
+
+- **`StreamType`** is the app's stored selection ("0" -> MAX, "1" -> MIDDLE,
+  "2" -> Auto). The A001064 that varies its profile reads **`StreamType=0`**, so
+  it is not sitting in Auto - which kills the obvious "it is in adaptive mode"
+  reading before it costs a session.
+- **`dynamicStream`** looked stronger still: it is `1` on the A001064 that
+  varies and `0` on both A001513s that do not, a perfect correlation across the
+  fleet. But `PropsBean.isSupportDynamicStream()` is just
+  `"1".equals(dynamicStream)`, and its only callers gate app UI - it decides
+  whether the picker shows three arms or two. It is a read-only capability flag,
+  never written back to the cloud. It reports that a camera can adapt; it does
+  not control whether it does.
+
+So the profile choice is internal to the firmware and is not exposed through any
+property or command the vendor app uses. The only lever found that does move
+this camera is the offer's video codec list - see the codec-pinning note in the
 0.17.1 changelog.
 
 ## The one real difference still unexplained
