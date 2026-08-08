@@ -17,7 +17,9 @@ Import order matters: the two data classes must be defined BEFORE
 back from this module at import time.
 """
 
+import asyncio
 import logging
+import os
 from typing import Any, Optional
 
 from aidot.device_client import DeviceClient as _UpstreamDeviceClient
@@ -54,6 +56,39 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+#: How many consecutive failed LAN logins before this device is left alone, and
+#: the ceiling on the delay between them.  Both overridable per install.
+_LOGIN_RETRY_LIMIT = int(os.environ.get("AIDOT_LOGIN_RETRY_LIMIT", "6"))
+_LOGIN_RETRY_CAP_S = float(os.environ.get("AIDOT_LOGIN_RETRY_CAP_S", "60"))
+_LOGIN_RETRY_BASE_S = 1.0
+
+
+def _next_login_retry_delay(attempt: int) -> Optional[float]:
+    """Seconds to wait before login attempt ``attempt``, or None to give up.
+
+    Upstream retries a failed login with no delay and no ceiling: ``login()``
+    logs the error, calls ``reset()``, and ``reset()`` ends in
+    ``_schedule_reconnect()``, whose last line is
+    ``asyncio.create_task(self.async_login())`` - straight back into
+    ``connect()``.  The ``loop.call_later(60, ...)`` on the line above never
+    fires, because the next ``reset()`` cancels ``_reconnect_handle`` at its own
+    top.  So the period is the device's login round-trip, not a minute.
+
+    Measured on a live run: 8,434 of 8,434 failures were followed by that
+    device's next connect within a median of 0.295 ms - about 7.6 attempts per
+    second for one light, 15,376 across six devices, sustained until the process
+    ended.  The loop never stops on its own.
+
+    Exponential from 1 s, capped, and then it stops.  The first retry stays
+    prompt because a single dropped connection is ordinary and recovering from
+    it quickly is the behaviour worth keeping; what is not worth keeping is the
+    twelve-thousandth attempt.
+    """
+    if attempt < 0 or attempt >= _LOGIN_RETRY_LIMIT:
+        return None
+    return min(_LOGIN_RETRY_BASE_S * (2 ** attempt), _LOGIN_RETRY_CAP_S)
 
 # Upstream's base client, re-exported under its plain name.  `get_device_client`
 # hands one of these back for every non-camera device, so consumers (the Home
@@ -271,6 +306,52 @@ class CameraDeviceClient(CameraMixin, _UpstreamDeviceClient):
         if "IPC" in model:
             return
         await super().async_login()
+        # A login that got through resets the failure count, so a device that
+        # drops occasionally never accumulates its way to the give-up ceiling.
+        # Upstream sets _connect_and_login only on the success path.
+        if getattr(self, "_connect_and_login", False):
+            self._login_attempt = 0
+
+    def _schedule_reconnect(self) -> None:
+        """Back off between failed logins, and eventually stop.
+
+        Upstream's version re-arms a 60 s timer that never fires and then
+        immediately spawns the next login, so a device that cannot log in is
+        retried at its own round-trip rate forever - measured at ~7.6/s per
+        device, 15,376 attempts in one 25-minute run across six lights.
+
+        This replaces the immediate respawn with an exponential delay and a
+        ceiling.  It deliberately does NOT call super(): the whole of upstream's
+        body is the defect - the timer that never fires and the task that fires
+        at once.
+        """
+        if getattr(self, "_is_close", False):
+            return
+        attempt = getattr(self, "_login_attempt", 0)
+        delay = _next_login_retry_delay(attempt)
+        if delay is None:
+            _LOGGER.warning(
+                "%s: giving up LAN login after %d consecutive failures; it will "
+                "be retried when something asks for this device again. Set "
+                "AIDOT_LOGIN_RETRY_LIMIT to change the ceiling.",
+                getattr(self, "device_id", "?"), attempt,
+            )
+            return
+        self._login_attempt = attempt + 1
+
+        async def _retry() -> None:
+            try:
+                await asyncio.sleep(delay)
+                await self.async_login()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOGGER.debug(
+                    "%s: delayed LAN login retry failed",
+                    getattr(self, "device_id", "?"), exc_info=True,
+                )
+
+        self._login_task = asyncio.create_task(_retry())
 
     async def close(self) -> None:
         """Stop any streaming, then close the connection permanently."""
