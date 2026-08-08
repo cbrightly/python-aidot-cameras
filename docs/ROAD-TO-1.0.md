@@ -31,8 +31,35 @@ evidence.
 ### 2. An unexplained 5x bitrate difference
 
 An A001064 takes 1900-3700 Kbps where the vendor app takes 225-500 from the same
-camera. Nine hypotheses have died here; the remaining path is a capture of the
-app's own session setup against that model specifically.
+camera.
+
+**Twelve hypotheses have died here.** The three most recent, all 2026-08-07 and
+all with the measurements recorded:
+
+- **RTCP feedback / REMB.** The camera really does negotiate `goog-remb` - its
+  answer advertises it on audio PT 8 and video PT 96 - but sending REMB at 500
+  Kbps, verified transmitting and naming the video SSRC, moved nothing. The one
+  clean interleaved pair had the REMB arm *higher* than its control, 3859 against
+  3355 Kbps. Shipped disabled (`AIDOT_REMB_TARGET_BPS=0`).
+- **The stream-quality byte.** `SETSTREAMCTRL` was swept across all six
+  `AVIOCTRL_QUALITY` values, twelve sessions, each followed by a session that
+  sent nothing to catch a next-session effect. All six acked in 0.01-0.19 s; all
+  twelve sessions came back h264 1280x720, single dimension cluster. See "The
+  stream-quality control" in [APP-PARITY-STATUS.md](APP-PARITY-STATUS.md).
+- **Narrowing the offer to H265.** An H265-only offer returns no video at all,
+  3 of 3 rounds.
+
+**What was found instead, and it is the first real lever:** this camera serves
+*two* profiles for an identical request - h264 1280x720 at 2.5-4.0 Mbps, and hevc
+2560x1440 at ~1.1 Mbps - choosing per session, because our offer advertises both
+video codecs and expresses no preference. `AIDOT_SDES_VIDEO_PT` pins the offer
+and makes the choice deterministic (96 gave h264 720p in 4 of 4). The efficient
+hevc profile appears only when both codecs are offered; what selects it is still
+unknown, which is why the negotiated profile is now logged at INFO on every
+session.
+
+Note the profile also differs by model: an A001513's h264 is 1280x960, not
+1280x720, so codec does not imply resolution across a mixed fleet.
 
 The bar: **explained, or documented as accepted** with the measurements. Shipping
 1.0 with an unexplained 5x resource difference on a supported model is a stretch.
@@ -55,12 +82,22 @@ The bar: **root cause found and fixed.** The serve is being launched before
 ffmpeg can establish the video dimensions; why that never resolves on this one
 unit is the open question.
 
+**This is one defect wearing three names.** It is also the `camera.kitchen`
+no-media case, and the subject of the relay-only investigation: the same unit
+streams fine from other hosts on the same LAN, and the one difference found is
+that it sits on a different SSID from the Home Assistant host while we advertise
+a host candidate it cannot reach. The loop was stopped in 0.17.1 - a battery
+camera's keepalive now gives up after five futile sessions - but stopping the
+loop is not fixing the cause, and the give-up explicitly does not claim to.
+
 ### 4. Coverage holes
 
 - The `liveType=0` / TUTK path is researched but deferred and untested - see
   [DEFERRED_FEATURES.md](DEFERRED_FEATURES.md).
-- `async_set_resolution`'s acknowledgement read has unit tests but has never been
-  exercised against a live camera.
+- `async_set_resolution`'s acknowledgement read is now exercised live: a
+  2026-08-07 sweep sent all six `AVIOCTRL_QUALITY` values to an A001064 over
+  twelve sessions and read every reply, acks landing in 0.01-0.19 s. The
+  remaining gap is the DTLS models, where the read has unit tests only.
 
 The bar: **tested, or explicitly out of scope for 1.0** and said so here.
 
