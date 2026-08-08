@@ -63,3 +63,55 @@ def test_real_failures_still_warn():
     assert _classify_ffmpeg_exit(-9, teardown_requested=False) == logging.WARNING
     # ...but an expected teardown is quiet.
     assert _classify_ffmpeg_exit(-9, teardown_requested=True) == logging.DEBUG
+
+
+def test_every_exit_that_stops_streaming_also_deregisters():
+    """Enumerate the exits instead of slicing to one of them.
+
+    The tests above slice from `if _idle_release:` to the end of the source, so
+    they can only ever see that one exit. A second exit was added later - the
+    futile-keepalive abandon - and it returned without deregistering, leaving a
+    dormant camera's stream pointed at a dead serve port. No test could see it,
+    because no test looked anywhere else.
+
+    This walks the function instead: every `return` that follows
+    `self._streaming_active = False` must have a `_deregister_go2rtc` call
+    between the two. It fails on the next exit added carelessly, which the
+    slicing form cannot.
+    """
+    import ast
+    import textwrap
+
+    for name in ("_sdes_keepalive_loop_inner", "_dtls_serve_loop_inner"):
+        tree = ast.parse(textwrap.dedent(_src(name)))
+        fn = tree.body[0]
+
+        stops = []          # (lineno of `_streaming_active = False`)
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Assign):
+                continue
+            for t in node.targets:
+                if (isinstance(t, ast.Attribute) and t.attr == "_streaming_active"
+                        and isinstance(node.value, ast.Constant)
+                        and node.value.value is False):
+                    stops.append(node.lineno)
+
+        assert stops, f"{name}: no `_streaming_active = False` found at all"
+
+        deregs = [n.lineno for n in ast.walk(fn)
+                  if isinstance(n, ast.Attribute) and n.attr == "_deregister_go2rtc"]
+        returns = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Return)]
+
+        for stop in stops:
+            # The return that this stop falls through to.
+            after = [r for r in returns if r > stop]
+            if not after:
+                continue        # falls through to the loop, not an exit
+            exit_line = min(after)
+            between = [d for d in deregs if stop < d < exit_line]
+            assert between, (
+                f"{name}: the exit at line {exit_line} sets _streaming_active="
+                f"False (line {stop}) and returns without calling "
+                f"_deregister_go2rtc. A dormant camera's go2rtc stream is left "
+                f"pointing at a serve port with nothing listening."
+            )
