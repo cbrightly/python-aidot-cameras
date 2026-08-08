@@ -398,6 +398,21 @@ _BUSY_BACKOFF_S = float(os.environ.get("AIDOT_BUSY_BACKOFF_S", "20"))
 _FUTILE_KEEPALIVE_LIMIT = int(os.environ.get("AIDOT_FUTILE_KEEPALIVE_LIMIT", "5"))
 
 
+def _next_no_media_streak(no_media_streak: int, healthy: bool) -> int:
+    """The streak after a keepalive session that was (or was not) healthy.
+
+    The ceiling counts CONSECUTIVE failures, so a session that delivered media
+    resets it to zero. Without that reset the count is cumulative and a camera
+    that merely fails occasionally - five scattered no-media sessions spread
+    across a day, each one separated by sessions that worked - eventually trips
+    a limit meant for cameras that never deliver anything at all, and has its
+    background keepalive stopped for good.
+    """
+    if healthy:
+        return 0
+    return no_media_streak + 1
+
+
 def _should_abandon_keepalive(no_media_streak: int, *, is_battery: bool,
                               limit: int = _FUTILE_KEEPALIVE_LIMIT) -> bool:
     """Should the background keepalive stop reopening this camera?
@@ -2622,7 +2637,14 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                         _session.wait_done(),
                         timeout=_sdes_snap_seconds + 80,
                     )
-                except (TimeoutError, _asyncio.CancelledError):
+                except _asyncio.CancelledError:
+                    # Not the same event as a timeout.  A timeout means the
+                    # camera was slow and whatever landed in the temp file is
+                    # worth salvaging; a cancellation means the caller is gone,
+                    # so salvaging it (another ffmpeg, up to 15s) is work nobody
+                    # is waiting for and it stops shutdown from completing.
+                    raise
+                except TimeoutError:
                     pass
                 finally:
                     await _session.stop()
@@ -3599,6 +3621,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             # Adaptive bookkeeping: a fast attempt that never delivered media
             # latches the loop onto the full relay path for its remaining opens.
             _healthy = session.last_media_monotonic > 0.0
+            _no_media_streak = _next_no_media_streak(_no_media_streak, _healthy)
             if _healthy:
                 # A session that delivered media is a real, cleanly-used session;
                 # the next open should be a fresh one rather than re-offering on a
@@ -3606,9 +3629,7 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 _loop_peer_id = self.generate_webrtc_peer_id(
                     live_type=2, stream_id=0, sdes=True)
                 _peer_reuses = 0
-                _no_media_streak = 0
             else:
-                _no_media_streak += 1
                 if _should_abandon_keepalive(
                         _no_media_streak, is_battery=self.is_battery_camera):
                     # Every open so far has cost the camera a wake and returned

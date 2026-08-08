@@ -14,6 +14,7 @@ from aidot_cameras.camera.lan_control import (
     ATTR_KEYS,
     CameraLanClient,
     CameraLanError,
+    CameraLanLoginRejected,
     _local_ipv4,
     _pack,
     discover_subnet,
@@ -100,3 +101,63 @@ def test_get_attributes_empty_replies_raises_lanerror():
             await c.async_get_attributes()
 
     asyncio.run(_go())
+
+
+# --------------------------------------------------------------------------- #
+# A device that ADVERTISES local control and then refuses the login
+# --------------------------------------------------------------------------- #
+# Measured on the reference LAN 2026-08-08: every device answers unicast
+# discovery with lanMode=1/localCtrFlag=1 - so async_resolve() says yes and the
+# login is attempted - and then rejects loginReq. Cameras answer ack 4352,
+# lights 400 or 4354. The consumer caught one flat CameraLanError for every
+# failure mode and logged it at DEBUG, so a feature that has never once worked
+# looked exactly like a device that simply does not offer local control.
+#
+# The distinction the caller needs is "this device declined to offer local
+# control" (ordinary, quiet) versus "this device offered it and then refused
+# us" (a defect, and it should be able to say so).
+
+def test_a_refused_login_is_distinguishable_from_an_unavailable_one():
+    """The caller cannot log the interesting case differently without this."""
+    assert issubclass(CameraLanLoginRejected, CameraLanError)
+
+
+def test_a_refused_login_carries_the_ack_the_device_sent():
+    """4352, 400 and 4354 are different refusals; a bare exception loses that."""
+    exc = CameraLanLoginRejected("dev1: login rejected ack=4352", ack=4352)
+    assert exc.ack == 4352
+
+
+def test_the_login_raises_the_specific_error_on_a_refusal():
+    """The real login path must produce the new type, not a bare CameraLanError."""
+    import asyncio
+
+    c = CameraLanClient(DEVICE, USER, ip="192.0.2.10")
+    reply = {"service": "device", "method": "loginResp", "deviceId": "dev1",
+             "payload": {"ascNumber": 1}, "ack": {"code": 4352, "desc": "fail"}}
+    body = aes_encrypt(json.dumps(reply).encode(), c._key)
+
+    class _Reader:
+        def __init__(self):
+            self._buf = _pack(1, body)
+
+        async def readexactly(self, n):
+            out, self._buf = self._buf[:n], self._buf[n:]
+            return out
+
+    class _Writer:
+        def write(self, _data):
+            return None
+
+        async def drain(self):
+            return None
+
+    async def _go():
+        with pytest.raises(CameraLanLoginRejected) as caught:
+            await c._login(_Reader(), _Writer())
+        return caught.value
+
+    exc = asyncio.run(_go())
+    assert exc.ack == 4352
+    # The client still de-eligibles itself, so cloud fallback is unchanged.
+    assert c._eligible is False

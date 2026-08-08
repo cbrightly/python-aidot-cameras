@@ -18,6 +18,7 @@ _bridge_should_break to make the decision - the same function the production
 loop calls - plus a source-inspection check that the production loop really
 does call it, so the mirror cannot silently drift from the real code.
 """
+import ast
 import inspect
 import select
 import socket
@@ -56,16 +57,79 @@ def test_no_break_while_still_running():
 # reimplement (or bypass) the decision inline.
 # --------------------------------------------------------------------- #
 
-def test_production_loop_calls_the_shared_helper():
-    src = inspect.getsource(sdes_open)
-    start = src.index("def _bridge_fn():")
-    end = src.index("def _bridge_fn():", start + 1) if src.count(
-        "def _bridge_fn():"
-    ) > 1 else len(src)
-    block = src[start:end]
-    assert "_bridge_should_break(" in block, (
-        "the bridge observe loop must delegate the break decision to "
-        "_bridge_should_break so the policy stays unit-testable and in sync"
+def _bridge_fn_node() -> ast.FunctionDef:
+    """The one _bridge_fn definition in sdes_open.py, as an AST node.
+
+    Parsed rather than sliced out of the text.  The previous version of this
+    check took src.index("def _bridge_fn():") and, because that string occurs
+    exactly once, fell back to len(src) for the end - so the "block" it
+    searched ran to the end of the file.  Two lines in sdes_open.py mention
+    _bridge_should_break(: the real call and a COMMENT about it.  Deleting the
+    real call left the comment, and the check stayed green.
+
+    An AST node has none of those failure modes: it is bounded at the function
+    body exactly, and comments do not survive parsing at all.
+    """
+    tree = ast.parse(inspect.getsource(sdes_open))
+    nodes = [n for n in ast.walk(tree)
+             if isinstance(n, ast.FunctionDef) and n.name == "_bridge_fn"]
+    assert len(nodes) == 1, (
+        f"expected exactly one _bridge_fn definition, found {len(nodes)} - "
+        "this guard inspects a single, specific loop"
+    )
+    return nodes[0]
+
+
+def test_production_loop_gates_its_break_on_the_shared_helper():
+    # Not "the name appears somewhere": the loop must contain an `if` whose
+    # CONDITION calls _bridge_should_break and whose BODY breaks.  A bare
+    # `break` on a non-None exit code is the pre-fix bug itself - it tore the
+    # bridge down during the key-restart window and starved the freshly
+    # restarted ffmpeg.
+    gated = []
+    for node in ast.walk(_bridge_fn_node()):
+        if not isinstance(node, ast.If):
+            continue
+        calls_helper = any(
+            isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            and c.func.id == "_bridge_should_break"
+            for c in ast.walk(node.test)
+        )
+        breaks = any(isinstance(b, ast.Break) for b in node.body)
+        if calls_helper and breaks:
+            gated.append(node)
+    assert gated, (
+        "the bridge observe loop must gate its break on _bridge_should_break "
+        "so the policy stays unit-testable and in sync"
+    )
+
+
+def test_the_loop_has_no_break_that_bypasses_the_helper():
+    # The gate is only worth anything if it is the ONLY way out of the proc
+    # poll.  A second, ungated `break` next to it restores the original bug
+    # while the test above keeps passing.
+    node = _bridge_fn_node()
+    ungated = []
+    for parent in ast.walk(node):
+        if not isinstance(parent, ast.If):
+            continue
+        calls_helper = any(
+            isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            and c.func.id == "_bridge_should_break"
+            for c in ast.walk(parent.test)
+        )
+        if calls_helper:
+            continue
+        for stmt in parent.body + parent.orelse:
+            if isinstance(stmt, ast.Break):
+                ungated.append(parent.lineno)
+    # The select() except-clause break is the documented escape hatch for a
+    # genuine teardown closing the loopback sockets; it is a Try handler, not
+    # an If, so it is not counted here.
+    assert not ungated, (
+        "an `if ...: break` in the bridge loop that does not consult "
+        f"_bridge_should_break (near line {ungated}) can tear the bridge down "
+        "during the key-restart window, which is the bug this gate fixed"
     )
 
 
