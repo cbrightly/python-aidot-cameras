@@ -3622,6 +3622,18 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                         self.device_id, _no_media_streak,
                     )
                     self._streaming_active = False
+                    # Same teardown the idle-release exit does. Leaving the
+                    # go2rtc stream registered points it at a serve port with
+                    # nothing listening, so a viewer attaching to a dormant
+                    # camera gets "connection refused" instead of a clean miss -
+                    # exactly what the idle-release path exists to avoid.
+                    self._cancel_keepalive_renew()
+                    try:
+                        await self._deregister_go2rtc()
+                    except Exception:
+                        _LOGGER.debug("camera %s: go2rtc deregister after "
+                                      "abandon failed", self.device_id,
+                                      exc_info=True)
                     return
             if _use_fast and not _healthy and not _fast_failed:
                 _LOGGER.info(
