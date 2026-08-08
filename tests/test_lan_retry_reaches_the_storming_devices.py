@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aidot.device_client import DeviceClient as _UpstreamDeviceClient  # noqa: E402
 
+from aidot_cameras import client as client_module  # noqa: E402
 from aidot_cameras import lan_retry  # noqa: E402
 from aidot_cameras.client import CameraClient  # noqa: E402
 from aidot_cameras.device_client import (  # noqa: E402
@@ -92,6 +93,38 @@ def test_a_light_that_cannot_log_in_is_eventually_left_alone():
         f"a light spawned {spawned} login retries; the ceiling is "
         f"{_LOGIN_RETRY_LIMIT}. An unbounded count here is the storm."
     )
+
+
+def test_every_client_the_dispatch_seam_builds_carries_the_policy():
+    """Enumerate the construction sites rather than trusting the two we know.
+
+    0.17.2 was correct code on a class that one of the two branches never
+    builds.  Naming both classes in an assertion would repeat that mistake at
+    one remove - it would still be a list someone has to remember to extend.
+    So read the seam's own body: whatever it constructs, that class must have
+    the policy in its MRO.
+    """
+    import ast
+
+    source = pathlib.Path(client_module.__file__).read_text()
+    seam = next(
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == "get_device_client"
+    )
+    built = sorted({
+        node.func.id for node in ast.walk(seam)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id.endswith("DeviceClient")
+    })
+    assert built, "found no device-client construction in the dispatch seam"
+
+    for name in built:
+        cls = getattr(client_module, name)
+        assert issubclass(cls, lan_retry.LanRetryMixin), (
+            f"{name} is constructed by get_device_client but does not carry "
+            f"LanRetryMixin, so the devices it serves retry LAN login "
+            f"unbounded. MRO: {[c.__name__ for c in cls.__mro__]}"
+        )
 
 
 def test_the_retry_policy_module_never_imports_the_camera_package():
