@@ -66,6 +66,27 @@ def _sctp_abort_chunk() -> bytes:
     return _st_ab.pack("!BBH", 6, 0, 4)
 
 
+def _key_fingerprint(key: str) -> str:
+    """A truncated SHA-256 of the key -- deliberately NOT a prefix of it.
+
+    This line goes through _status, which logs, so it lands in
+    home-assistant.log on real installs, and users paste that file into
+    public issue reports as a matter of course.  An SDES inline key is
+    base64 of a 30-byte master key + salt, so printing its first 8
+    characters would put roughly 48 bits of real key material in those
+    reports -- a reduction of the brute-force space, not a nickname.
+
+    A hash costs the note nothing.  ``_origin`` decides offer/answer/other
+    by comparing the keys directly, so the only job this field has is
+    telling two keys apart across log lines, and a fingerprint does that
+    exactly as well.  Do not "simplify" this back to ``key[:8]``.
+    """
+    if not key:
+        return "none"
+    import hashlib as _hl_kf
+    return _hl_kf.sha256(key.encode()).hexdigest()[:8]
+
+
 def _srtp_tx_key_note(sender: str, used_key: str, offer_key: str,
                       answer_key: str) -> str:
     """Record which SRTP key an outbound RTCP sender encrypted with.
@@ -110,26 +131,6 @@ def _srtp_tx_key_note(sender: str, used_key: str, offer_key: str,
         if key == answer_key:
             return "answer"
         return "other"
-
-    def _key_fingerprint(key: str) -> str:
-        """A truncated SHA-256 of the key -- deliberately NOT a prefix of it.
-
-        This line goes through _status, which logs, so it lands in
-        home-assistant.log on real installs, and users paste that file into
-        public issue reports as a matter of course.  An SDES inline key is
-        base64 of a 30-byte master key + salt, so printing its first 8
-        characters would put roughly 48 bits of real key material in those
-        reports -- a reduction of the brute-force space, not a nickname.
-
-        A hash costs the note nothing.  ``_origin`` decides offer/answer/other
-        by comparing the keys directly, so the only job this field has is
-        telling two keys apart across log lines, and a fingerprint does that
-        exactly as well.  Do not "simplify" this back to ``key[:8]``.
-        """
-        if not key:
-            return "none"
-        import hashlib as _hl_kf
-        return _hl_kf.sha256(key.encode()).hexdigest()[:8]
 
     differ = bool(offer_key) and bool(answer_key) and offer_key != answer_key
     return (
@@ -1267,13 +1268,14 @@ class _SdesOpenMixin:
         # AES_CM_128_HMAC_SHA1_80: 16-byte key + 14-byte salt = 30 bytes.
         srtp_key_audio = base64.b64encode(os.urandom(30)).decode()
         srtp_key_video = base64.b64encode(os.urandom(30)).decode()
-        # Log SDES key material at DEBUG only - this is SRTP keying material and
-        # should not appear in production-level logs.  Re-enable at debug when
-        # verifying the AES counter derivation formula after Frida observation.
+        # DEBUG is not low enough for real key material.  This used to log the
+        # decoded master key AND salt in full hex - the whole secret, not a
+        # prefix - on the reasoning that DEBUG is not "production-level".  But
+        # Home Assistant users turn this integration's logger to debug precisely
+        # when something is wrong, and then paste the log into a public issue.
         _LOGGER.debug(
-            "sdes: offer key=%s salt=%s psk=%s",
-            base64.b64decode(srtp_key_audio)[:16].hex(),
-            base64.b64decode(srtp_key_audio)[16:].hex(),
+            "sdes: offer key=%s psk=%s",
+            _key_fingerprint(srtp_key_audio),
             _psk_value_req,
         )
         ts = int(time.time())
@@ -3945,8 +3947,8 @@ class _SdesOpenMixin:
                                     _status(
                                         "SDES DC: m=application present"
                                         " - waiting for camera SCTP INIT"
-                                        f" key={_our_tx_srtp_key_audio[:8]}"
-                                        f" iv={_cam_key_audio[:8] if _cam_key_audio else '(none)'}"
+                                        f" our_key={_key_fingerprint(_our_tx_srtp_key_audio)}"
+                                        f" cam_key={_key_fingerprint(_cam_key_audio)}"
                                     )
                         else:
                             # Non-STUN packet - demux by first byte.
@@ -4068,14 +4070,15 @@ class _SdesOpenMixin:
                                     _bridge_fn._c8_raw_count = 0
                                 _bridge_fn._c8_raw_count += 1
                                 if _bridge_fn._c8_raw_count <= 10:
-                                    _sdes_k = _our_tx_srtp_key_audio[:16]
-                                    _sdes_v = (_cam_key_audio or _our_tx_srtp_key_audio)[:16]
+                                    _sdes_k_fp = _key_fingerprint(_our_tx_srtp_key_audio)
+                                    _sdes_v_fp = _key_fingerprint(
+                                        _cam_key_audio or _our_tx_srtp_key_audio)
                                     _status(
                                         f"bridge: RAW 0x{_bpkt[0]:02x} {len(_bpkt)}B"
                                         f" #{_bridge_fn._c8_raw_count}"
-                                        f" sdes_key={_sdes_k}"
-                                        f" sdes_iv={_sdes_v}"
-                                        f" [{_bpkt.hex()}]"
+                                        f" our_key={_sdes_k_fp}"
+                                        f" cam_key={_sdes_v_fp}"
+                                        f" [{_bpkt[:24].hex()}]"
                                     )
                             # TUTK SFrame detection (A001064 / _use_plain_rtp):
                             # The camera sends TUTK-framed data instead of SRTP.
@@ -5235,7 +5238,7 @@ class _SdesOpenMixin:
                         f"late ICE creds parsed - bridge will send USE-CANDIDATE"
                         f" to {len(_late_cands)} candidate(s)"
                         + (" [m=application present]" if _dc_answer_has_app else "")
-                        + (f" [cam_key set: {_cam_key_audio[:8]}...]" if _cam_key_audio else "")
+                        + (f" [cam_key set: {_key_fingerprint(_cam_key_audio)}]" if _cam_key_audio else "")
                     )
             # For echo-reversal cameras (A001064) the first answer_fut was set by
             # the broker echo of our own webrtcResp.  Wait briefly for the camera's
