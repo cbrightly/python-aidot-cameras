@@ -66,6 +66,40 @@ def _sctp_abort_chunk() -> bytes:
     return _st_ab.pack("!BBH", 6, 0, 4)
 
 
+def _sctp_parse_init_ack(pkt: bytes, state: dict) -> Optional[bytes]:
+    """Read the camera's INIT-ACK into ``state`` and return its State Cookie.
+
+    RFC 4960 s3.3.3: the INIT-ACK carries the *peer's* Initiate Tag and the
+    *peer's* Initial TSN -- both describe the sequence the camera will send on,
+    so both belong in the peer half of the association state.  Our own TSN is
+    the one we picked for our INIT and keep counting from in ``_sctp_data``;
+    nothing in the answer may move it.
+
+    Returns None when the packet holds no INIT-ACK chunk or that chunk carries
+    no State Cookie parameter, which is the caller's signal to keep waiting.
+    """
+    import struct as _st_sc
+    pos = 12
+    while pos + 4 <= len(pkt):
+        ctype, _, clen = _st_sc.unpack_from('!BBH', pkt, pos)
+        if clen < 4:
+            break
+        cdata = pkt[pos + 4:pos + clen]
+        if ctype == 0x02 and len(cdata) >= 16:
+            state['peer_tag'] = _st_sc.unpack_from('!I', cdata)[0]
+            state['peer_tsn'] = _st_sc.unpack_from('!I', cdata, 12)[0]
+            pp = 16
+            while pp + 4 <= len(cdata):
+                ptype, plen = _st_sc.unpack_from('!HH', cdata, pp)
+                if plen < 4:
+                    break
+                if ptype == 7:  # State Cookie
+                    return cdata[pp + 4:pp + plen]
+                pp += max(4, (plen + 3) & ~3)
+        pos += max(4, (clen + 3) & ~3)
+    return None
+
+
 def _dispatch_sctp_avio(responses, payload) -> bool:
     """Offer an inbound SCTP DATA payload to the AVIO response router.
 
@@ -2271,7 +2305,7 @@ class _SdesOpenMixin:
         _dc_answer_has_app: bool = False  # set True if camera echoes m=application; init here so bridge closure never sees NameError on late-wake path
         _sctp: dict = {              # initialized here for the same reason - bridge closure
             'state': 'CLOSED', 'local_tag': 0, 'peer_tag': 0,
-            'local_tsn': 0, 'stream_seq': 0,
+            'local_tsn': 0, 'peer_tsn': 0, 'stream_seq': 0,
         }
         if answer_fut.done():
             try:
@@ -2333,6 +2367,7 @@ class _SdesOpenMixin:
                 'local_tag': 0,       # our verification tag (sent in INIT)
                 'peer_tag': 0,        # camera's verification tag (from INIT-ACK)
                 'local_tsn': 0,       # our TSN counter
+                'peer_tsn': 0,        # camera's Initial TSN (from its INIT/INIT-ACK)
                 'stream_seq': 0,      # stream sequence number
             }
 
@@ -2433,30 +2468,6 @@ class _SdesOpenMixin:
             body = _st_sc.pack('!IIHHI', _sctp['local_tag'],
                                131072, 1024, 2048, _sctp['local_tsn'])
             return _sctp_pkt(0, _sctp_chunk(0x01, 0, body))
-
-        def _sctp_parse_init_ack(pkt):
-            import struct as _st_sc
-            pos = 12
-            while pos + 4 <= len(pkt):
-                ctype, _, clen = _st_sc.unpack_from('!BBH', pkt, pos)
-                if clen < 4:
-                    break
-                cdata = pkt[pos + 4:pos + clen]
-                if ctype == 0x02 and len(cdata) >= 16:
-                    peer_tag = _st_sc.unpack_from('!I', cdata)[0]
-                    peer_tsn = _st_sc.unpack_from('!I', cdata, 12)[0]
-                    _sctp['peer_tag'] = peer_tag
-                    _sctp['local_tsn'] = peer_tsn
-                    pp = 16
-                    while pp + 4 <= len(cdata):
-                        ptype, plen = _st_sc.unpack_from('!HH', cdata, pp)
-                        if plen < 4:
-                            break
-                        if ptype == 7:  # State Cookie
-                            return cdata[pp + 4:pp + plen]
-                        pp += max(4, (plen + 3) & ~3)
-                pos += max(4, (clen + 3) & ~3)
-            return None
 
         def _sctp_parse_init(pkt):
             import struct as _st_sc
@@ -3796,7 +3807,7 @@ class _SdesOpenMixin:
                                         except Exception as _iae:
                                             _status(f"SCTP INIT-ACK failed: {_iae}")
                                 elif st in ('INIT_SENT', 'COOKIE_WAIT'):
-                                    cookie = _sctp_parse_init_ack(_bpkt)
+                                    cookie = _sctp_parse_init_ack(_bpkt, _sctp)
                                     if cookie:
                                         _sctp['state'] = 'COOKIE_ECHOED'
                                         try:
@@ -4003,7 +4014,7 @@ class _SdesOpenMixin:
                                                 _status(f"SDES DC: enc INIT-ACK err: {_sce8}")
                                     elif _pd_ct8 == 0x02 and _sct in ('INIT_SENT', 'COOKIE_WAIT'):
                                         # Camera SCTP INIT-ACK -> send encrypted COOKIE-ECHO
-                                        _sc_ck = _sctp_parse_init_ack(_pd_plain)
+                                        _sc_ck = _sctp_parse_init_ack(_pd_plain, _sctp)
                                         if _sc_ck:
                                             try:
                                                 _br_send_to_cam(_bs, _enc_c8_sctp(_sctp_cookie_echo(_sc_ck)), _bsrc, _br_cam_peer)
