@@ -66,6 +66,59 @@ def _sctp_abort_chunk() -> bytes:
     return _st_ab.pack("!BBH", 6, 0, 4)
 
 
+def _srtp_tx_key_note(sender: str, used_key: str, offer_key: str,
+                      answer_key: str) -> str:
+    """Record which SRTP key an outbound RTCP sender encrypted with.
+
+    Diagnostic only -- nothing branches on this.
+
+    Two senders share the we-to-camera direction on the SDES bridge and they do
+    not agree on the key: the PLI encrypts with our own offer key, the RR
+    prefers the camera's answer key and falls back to ours.  SRTP keys are
+    per-direction, so at most one of those can be the key the camera
+    authenticates our RTCP against.  No symptom has ever been reported for
+    either, and until now no log line said which key went out, so a live
+    capture could not settle it.
+
+    ``differ=no`` means the camera echoed our key and the two senders were
+    identical anyway -- the question does not arise in that session.  A run with
+    ``differ=yes`` is the one that answers it, and the PLI is the sender that
+    answers it: a PLI the camera authenticates is followed by a keyframe, so a
+    ``differ=yes`` session whose PLIs produce keyframes says the offer key is
+    the one the camera accepts on this direction.  The RR has no comparably
+    sharp outcome -- a camera keeps sending audio whether or not it accepted our
+    report -- so the RR line is there to record which key it used, not to prove
+    that key right.
+
+    A caller emitting this must emit it again if the key it selects can change:
+    ``_cam_key_audio`` is parsed late on the wake path, after the bridge is
+    running, so a first-send-only note on a sender that re-selects per packet
+    would record ``answer=none differ=no`` for precisely the session in which
+    the two senders diverged.
+
+    Only the first 8 characters of each key are recorded: enough to tell two
+    keys apart in a log, not enough to be a key.
+    """
+    def _origin(key: str) -> str:
+        if not key:
+            return "none"
+        if key == offer_key:
+            return "offer"
+        if key == answer_key:
+            return "answer"
+        return "other"
+
+    def _prefix(key: str) -> str:
+        return key[:8] if key else "none"
+
+    differ = bool(offer_key) and bool(answer_key) and offer_key != answer_key
+    return (
+        f"SRTP-TX-KEY sender={sender} used={_origin(used_key)}"
+        f"({_prefix(used_key)}) offer={_prefix(offer_key)}"
+        f" answer={_prefix(answer_key)} differ={'yes' if differ else 'no'}"
+    )
+
+
 def _sctp_parse_init_ack(pkt: bytes, state: dict) -> Optional[bytes]:
     """Read the camera's INIT-ACK into ``state`` and return its State Cookie.
 
@@ -3255,13 +3308,17 @@ class _SdesOpenMixin:
                             _pli_media_ssrc,
                         )
                         _pli_sent = False
+                        # Hoisted out of the session-build below only so the
+                        # SRTP-TX-KEY note can report the key that actually went
+                        # out rather than re-deriving it.  Same expression, same
+                        # result - no behavior change.
+                        _pli_key_b64 = (
+                            _our_tx_srtp_key_audio
+                            or srtp_key_audio
+                        )
                         try:
                             import pylibsrtp as _plsrtp_pli
                             if not hasattr(_bridge_fn, '_pli_tx_sess'):
-                                _pli_key_b64 = (
-                                    _our_tx_srtp_key_audio
-                                    or srtp_key_audio
-                                )
                                 _pli_pol = _plsrtp_pli.Policy(
                                     key=_b64_pli.b64decode(_pli_key_b64),
                                     ssrc_type=_plsrtp_pli.Policy.SSRC_SPECIFIC,
@@ -3295,6 +3352,14 @@ class _SdesOpenMixin:
                                 f" -> SSRC=0x{_pli_media_ssrc:08x}"
                                 f" ({'SRTCP' if _pli_sent else 'plain'})"
                             )
+                        # First send only, unlike the RR note below: the PLI
+                        # SRTP session is built once and cached on _bridge_fn,
+                        # so the key the first PLI went out with is the key
+                        # every later PLI goes out with.
+                        if _pli_n == 1 and _pli_sent:
+                            _status(_srtp_tx_key_note(
+                                "PLI", _pli_key_b64,
+                                _our_tx_srtp_key_audio, _cam_key_audio))
 
                     # DCEP_WAIT -> send LIVING 300ms after DCEP_OPEN.
                     # Camera needs time to register stream 0 before LIVING arrives.
@@ -4109,11 +4174,15 @@ class _SdesOpenMixin:
                                         0, 0, 0,
                                     )
                                     _rtcp_sent = False
+                                    # Hoisted purely so the SRTP-TX-KEY note can
+                                    # report the key that actually went out.
+                                    # Same expression - no behavior change.
+                                    _rr_key_b64 = (
+                                        _cam_key_audio or _our_tx_srtp_key_audio)
                                     try:
                                         import pylibsrtp as _plsrtp_rr
                                         import base64 as _b64_rr
-                                        _rr_key = _b64_rr.b64decode(
-                                            _cam_key_audio or _our_tx_srtp_key_audio)
+                                        _rr_key = _b64_rr.b64decode(_rr_key_b64)
                                         _rr_pol = _plsrtp_rr.Policy(
                                             key=_rr_key,
                                             ssrc_type=_plsrtp_rr.Policy.SSRC_SPECIFIC,
@@ -4136,6 +4205,25 @@ class _SdesOpenMixin:
                                             f"SDES: sent RTCP RR to camera"
                                             f" (SSRC=0x{_tk_ssrc:08x})"
                                         )
+                                    # Re-noted whenever the selected key changes,
+                                    # not just on the first RR: this branch
+                                    # rebuilds its SRTP session from the current
+                                    # expression on every packet, and
+                                    # _cam_key_audio can be set after the bridge
+                                    # is already running (late-wake answer
+                                    # parse), so the RR key does flip mid-session
+                                    # on battery cameras.  A first-send-only note
+                                    # would have recorded "answer=none differ=no"
+                                    # for exactly that session.  Bounded: the
+                                    # answer key is only ever set once.
+                                    if (_rtcp_sent and getattr(
+                                            _bridge_fn, '_rr_key_noted', None)
+                                            != _rr_key_b64):
+                                        _bridge_fn._rr_key_noted = _rr_key_b64
+                                        _status(_srtp_tx_key_note(
+                                            "RR", _rr_key_b64,
+                                            _our_tx_srtp_key_audio,
+                                            _cam_key_audio))
                                 # Forward decrypted PCMA audio to ffmpeg loopback.
                                 # AVIO control frames (SESSION_MODE_RESP=5377, etc.) are
                                 # identified by cmd field and skipped; raw PCMA bytes are sent.
