@@ -1440,6 +1440,18 @@ class _SdesOpenMixin:
                 "dstAddr": device_id,
                 "encOffer": 1,
                 "liveMqtt": 1,
+                # powerType / p2pCache ride on the webrtcReq payload, alongside
+                # encOffer and liveMqtt - the same object the reference client
+                # puts them on (LDSMQTTClient.sendSdpOffer, smali :2967-2969,
+                # put at :3017/:3022).  They are STRINGS on the wire there: the
+                # app stringifies the ints it reads from the IPC device info,
+                # and its no-device-info fallback puts the literals "1" / "0".
+                # The DTLS webrtcReq has carried both for a long time
+                # (webrtc_open.py, per docs/official_camera_network_calls.md
+                # section 5.2) and sends them as ints; that path is fleet-proven,
+                # so it is deliberately left alone rather than churned to match.
+                "powerType": str(_live_power_type),
+                "p2pCache": str(_live_p2p_cache),
                 # wPayload: newer firmware parses wPayload for ICE credentials
                 # and PSK.  Fields match reference app o.java (signaling/tyrus).
                 "wPayload": {
