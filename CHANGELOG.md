@@ -41,6 +41,18 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   Cameras never reached this path anyway: `async_login` returns early for IPC
   models.
 
+- **A camera the keepalive gave up on left a dead stream registered in
+  go2rtc.** The keepalive has several exits; the idle-release one tears down its
+  go2rtc registration, but the exit taken when a camera delivers no media for
+  long enough returned without doing so. The stream stayed registered against a
+  serve port with nothing listening, so a viewer attaching to a camera that had
+  gone dormant that way got "connection refused" instead of the clean miss the
+  release path exists to produce.
+
+  That exit now performs the same teardown as the idle-release one. The test is
+  an AST guard that enumerates every keepalive exit rather than checking the one
+  that was wrong, so an exit added later without teardown fails too.
+
 - **A device that went silent mid-login was abandoned with its socket still
   open.** Upstream has no read timeout anywhere in its device client, so a
   device that completes the TCP handshake and then stops answering leaves the
