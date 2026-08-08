@@ -38,7 +38,9 @@ import argparse
 import asyncio
 import inspect
 import json
+import logging
 import os
+import sys
 import time
 
 import aiohttp
@@ -505,6 +507,36 @@ def _write_report(report: dict, args, quiet: bool = False) -> None:
         print(f"\nwrote {args.json_out}")
 
 
+def _configure_logging(level_name: str) -> None:
+    """Let the library's own log lines out of the process.
+
+    Nothing here ever configured logging, so the root logger fell back to
+    Python's lastResort handler: WARNING and above, to stderr, unformatted.
+    Every INFO and DEBUG line the library emits was discarded - including the
+    per-session video-profile lines that 0.17.1 shipped specifically so the
+    bitrate question could be reopened from a record, and the SRTP
+    decrypt-failure reports that are the only direct evidence for whether the
+    bridge is forwarding ciphertext. Four runs after that instrumentation
+    landed produced zero of those lines, and no corpus was ever going to
+    accumulate from CI.
+
+    The aidot loggers are raised, not the root: aiortc, asyncio and aiohttp at
+    INFO bury the signal in a run that already prints tens of thousands of
+    lines. Timestamps are included because most questions asked of these logs
+    are about ordering and latency.
+    """
+    level = getattr(logging, level_name.upper(), None)
+    if not isinstance(level, int):
+        raise SystemExit(f"unknown --log-level {level_name!r}")
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,  # stdout carries the human-readable report
+    )
+    for name in ("aidot", "aidot_cameras"):
+        logging.getLogger(name).setLevel(level)
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -522,7 +554,12 @@ def main() -> int:
     p.add_argument("--out-dir", default="/tmp", help="where to write recordings")
     p.add_argument("--json-out", default="live-report.json",
                    help="machine-readable report path ('' to skip)")
-    return asyncio.run(_run(p.parse_args()))
+    p.add_argument("--log-level", default="INFO",
+                   help="level for the aidot loggers (default INFO; DEBUG for"
+                        " protocol detail, WARNING for the old behaviour)")
+    args = p.parse_args()
+    _configure_logging(args.log_level)
+    return asyncio.run(_run(args))
 
 
 if __name__ == "__main__":
