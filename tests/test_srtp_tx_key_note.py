@@ -59,11 +59,43 @@ def test_an_absent_answer_key_is_not_a_disagreement():
     assert "answer=none" in note
 
 
-def test_it_records_key_prefixes_not_whole_keys():
-    """Enough to tell two keys apart in a log, not enough to be one."""
+def test_it_leaks_no_fragment_of_any_key():
+    """The note reaches home-assistant.log, and users paste that into issues.
+
+    An SDES inline key is base64 of a 30-byte master key + salt. A leading
+    fragment of it is not a nickname, it is key material with the search space
+    reduced by however many characters were printed - so the note must carry no
+    run of any key long enough to be worth having.
+    """
+    note = _srtp_tx_key_note("RR", ANSWER, OFFER, ANSWER)
+
+    for name, key in (("offer", OFFER), ("answer", ANSWER)):
+        for start in range(len(key) - 5):
+            run = key[start:start + 6]
+            assert run not in note, f"{name} key fragment {run!r} leaked: {note}"
+
+
+def test_it_does_not_print_the_key_prefix():
+    """The specific regression: an 8-char prefix is ~48 bits of key material."""
     note = _srtp_tx_key_note("PLI", OFFER, OFFER, ANSWER)
 
-    assert OFFER not in note
-    assert ANSWER not in note
-    assert OFFER[:8] in note
-    assert ANSWER[:8] in note
+    assert OFFER[:8] not in note
+    assert ANSWER[:8] not in note
+
+
+def test_it_still_tells_two_different_keys_apart():
+    """Distinguishing keys across log lines is the whole job of the field."""
+    note = _srtp_tx_key_note("RR", ANSWER, OFFER, ANSWER)
+
+    offer_field = note.split("offer=")[1].split(" ")[0]
+    answer_field = note.split("answer=")[1].split(" ")[0]
+    assert offer_field != answer_field
+
+
+def test_the_same_key_gets_the_same_fingerprint_every_time():
+    """Two log lines from one session have to be correlatable."""
+    first = _srtp_tx_key_note("PLI", OFFER, OFFER, ANSWER)
+    second = _srtp_tx_key_note("RR", OFFER, OFFER, ANSWER)
+
+    assert first.split("used=offer(")[1].split(")")[0] == (
+        second.split("used=offer(")[1].split(")")[0])

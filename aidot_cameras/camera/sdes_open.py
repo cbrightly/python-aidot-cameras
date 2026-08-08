@@ -98,8 +98,9 @@ def _srtp_tx_key_note(sender: str, used_key: str, offer_key: str,
     would record ``answer=none differ=no`` for precisely the session in which
     the two senders diverged.
 
-    Only the first 8 characters of each key are recorded: enough to tell two
-    keys apart in a log, not enough to be a key.
+    Keys are recorded as truncated SHA-256 fingerprints, never as prefixes of
+    the key itself: this line is logged, so it reaches home-assistant.log and
+    the public issue reports users paste it into.  See _key_fingerprint.
     """
     def _origin(key: str) -> str:
         if not key:
@@ -110,14 +111,32 @@ def _srtp_tx_key_note(sender: str, used_key: str, offer_key: str,
             return "answer"
         return "other"
 
-    def _prefix(key: str) -> str:
-        return key[:8] if key else "none"
+    def _key_fingerprint(key: str) -> str:
+        """A truncated SHA-256 of the key -- deliberately NOT a prefix of it.
+
+        This line goes through _status, which logs, so it lands in
+        home-assistant.log on real installs, and users paste that file into
+        public issue reports as a matter of course.  An SDES inline key is
+        base64 of a 30-byte master key + salt, so printing its first 8
+        characters would put roughly 48 bits of real key material in those
+        reports -- a reduction of the brute-force space, not a nickname.
+
+        A hash costs the note nothing.  ``_origin`` decides offer/answer/other
+        by comparing the keys directly, so the only job this field has is
+        telling two keys apart across log lines, and a fingerprint does that
+        exactly as well.  Do not "simplify" this back to ``key[:8]``.
+        """
+        if not key:
+            return "none"
+        import hashlib as _hl_kf
+        return _hl_kf.sha256(key.encode()).hexdigest()[:8]
 
     differ = bool(offer_key) and bool(answer_key) and offer_key != answer_key
     return (
         f"SRTP-TX-KEY sender={sender} used={_origin(used_key)}"
-        f"({_prefix(used_key)}) offer={_prefix(offer_key)}"
-        f" answer={_prefix(answer_key)} differ={'yes' if differ else 'no'}"
+        f"({_key_fingerprint(used_key)}) offer={_key_fingerprint(offer_key)}"
+        f" answer={_key_fingerprint(answer_key)}"
+        f" differ={'yes' if differ else 'no'}"
     )
 
 
