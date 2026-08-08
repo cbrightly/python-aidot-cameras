@@ -145,6 +145,43 @@ async def _wait_or_event(ev: "asyncio.Event", timeout: float) -> bool:
         return False
 
 
+def _is_camera_present_signal(topic, msg, device_id):
+    """Whether this inbound MQTT message releases the pre-offer wake wait.
+
+    Two of these clauses recognise the camera's own device-channel traffic and
+    were missing.  The client subscribes to iot/v1/cb/{device_id}/# but only
+    ever checked iot/v1/c/{device_id}/ ("c", no "b"), so no device-channel
+    topic matched; and wakeupStatus - the camera announcing it is awake -
+    carries no devId at top level or in payload, identifying itself only via
+    srcAddr ("2.{device_id}"), which nothing read.  Both additions are strictly
+    additive: they can only recognise more real camera traffic.
+
+    lowPowerActiveStateResp stays sufficient on its own, deliberately.  It is a
+    cloud ack, not the camera: published by the server (clientId "server-..."),
+    addressed to the user channel, carrying no devId, and arriving in ~60 ms
+    whatever the camera is doing.  Waiting for the camera instead was tried and
+    rejected - the official app does not do it.  In the decompiled client,
+    DeviceWakeUpRepos.wakeUpOrSleep fires the MQTT wake fire-and-forget (its
+    handler has no emitter at all) and completes the wake step from the HTTP
+    lowPowerActiveState response: DeviceWakeUpRepos$1.onSuccess calls
+    onNext + onComplete on BOTH the valid and invalid branches.  The string
+    "wakeupStatus" does not appear anywhere in the app.  So publishing the
+    offer on a cloud ack is app behaviour, and holding a battery camera back
+    for device evidence would be a new, unvalidated divergence on the shared
+    open path.
+    """
+    inner = msg.get("payload") or {}
+    return bool(
+        topic.startswith(f"iot/v1/cb/{device_id}/")
+        or topic.startswith(f"iot/v1/c/{device_id}/")
+        or topic.startswith(f"lds/v1/cb/{device_id}/")
+        or inner.get("devId") == device_id
+        or msg.get("devId") == device_id
+        or str(msg.get("srcAddr") or "").endswith(device_id)
+        or (msg.get("method") or "") == "lowPowerActiveStateResp"
+    )
+
+
 class _WebRTCOpenMixin:
     async def _async_open_webrtc_stream_impl(
         self,
@@ -668,17 +705,10 @@ class _WebRTCOpenMixin:
                 return
             method = msg.get("method") or ""
             inner  = msg.get("payload") or {}
-            # Fire camera_ready_ev the moment the camera appears on MQTT - either via its
-            # explicit wake-ACK (lowPowerActiveStateResp), any message on the device channel,
-            # OR any message on the user channel whose payload identifies our device.
-            # LK.IPC.A001064 (and similar) responds on the user channel (iot/v1/c/{userId}/...)
-            # rather than the device channel, so the old topic-prefix check never fired -
-            # causing the 17-second getIceConfigReq timeout overhead every session.
-            if (method == "lowPowerActiveStateResp"
-                    or topic.startswith(f"iot/v1/c/{device_id}/")
-                    or topic.startswith(f"lds/v1/cb/{device_id}/")
-                    or inner.get("devId") == device_id
-                    or msg.get("devId") == device_id):
+            # Fire camera_ready_ev the moment the camera appears on MQTT.  See
+            # _is_camera_present_signal for what counts as evidence and why the
+            # server's wake-ACK is not enough for a battery camera.
+            if _is_camera_present_signal(topic, msg, device_id):
                 loop.call_soon_threadsafe(camera_ready_ev.set)
             # livePlayResp: explicit camera ack/nack for start-play command.
             # The camera echoes our peer_id (verified live); its payload has NO
