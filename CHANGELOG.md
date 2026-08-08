@@ -4,6 +4,51 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [0.17.2]
+
+### Fixed
+- **A device that could not log in over the LAN was retried several times a
+  second, forever.** Upstream's client retries a failed login with no delay and
+  no ceiling: `login()` logs the error, calls `reset()`, and `reset()` ends in
+  `_schedule_reconnect()`, whose last line spawns the next login immediately.
+  The `call_later(60, ...)` on the line above never fires, because the next
+  `reset()` cancels it first. So the period is the device's login round-trip,
+  not a minute.
+
+  Measured on one 25-minute run: 8,434 of 8,434 failures were followed by that
+  device's next connection attempt within a median of 0.295 ms - about 7.6
+  attempts per second for a single light, 15,376 across six devices, and it
+  stopped only because the process ended.
+
+  This was reachable from Home Assistant, not just from test harnesses. Any
+  device that cannot LAN-login - wrong credentials, or another client already
+  holding the session - was hammered for as long as the integration stayed
+  loaded, and the only visible symptom was a very large log.
+
+  Retries are now exponential from 1 s, capped at 60 s, and stop after six
+  consecutive failures; a successful login resets the count, so an ordinary
+  momentary drop still recovers on the first prompt retry.
+  `AIDOT_LOGIN_RETRY_LIMIT` and `AIDOT_LOGIN_RETRY_CAP_S` override both.
+
+  Cameras were never affected: `async_login` returns early for IPC models.
+
+- **A device that went silent mid-login was abandoned with its socket still
+  open.** Upstream has no read timeout anywhere in its device client, so a
+  device that completes the TCP handshake and then stops answering leaves the
+  login parked in `readexactly` forever - inside `connect()`, which means
+  `connect()`'s own cleanup never runs and the client goes on believing an
+  attempt is still in flight. That wedges the retry path too: nothing new can be
+  scheduled while an attempt is notionally live, so the device silently stops
+  being managed.
+
+  Observed on the same run: four of six devices ended that way rather than
+  stopping cleanly, and all six emitted their single teardown error within 3 ms
+  of each other - six sockets held open, one of them for 21 minutes.
+
+  A connect/login attempt is now bounded at 20 s, after which the socket is
+  closed and the device returns to the (now bounded) retry path.
+  `AIDOT_LOGIN_CONNECT_TIMEOUT_S` overrides it.
+
 ## [0.17.1]
 
 ### Added
