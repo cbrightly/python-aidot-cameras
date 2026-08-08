@@ -4,9 +4,23 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
-## [Unreleased]
+## [0.17.3b2]
+
+Pre-release. Closes the audit backlog opened on 2026-08-07, and corrects two
+things that were wrong about how this project measures itself.
 
 ### Fixed
+
+- **A stream that could not be decrypted still reported itself healthy.** The
+  SDES bridge stamped its media counters after forwarding every packet,
+  including ones that failed SRTP decryption and that ffmpeg then discarded.
+  Those counters are the only in-process evidence media flowed, so
+  `is_stalled` never tripped, the keepalive stayed `_healthy`, and the abandon
+  ceiling could never fire: a session showed black and claimed to be fine,
+  indefinitely. Counting is now gated on the packet being plaintext by the time
+  the consumer reads it - which depends on the camera, because on models where
+  ffmpeg owns the decryption, forwarding ciphertext IS correct delivery.
+
 - **A camera that changed its SRTP key mid-open was decrypted with the old key
   for the rest of the session, so it delivered nothing.** On the SDES path the
   bridge is the only decryptor - the ffmpeg SDP is plain RTP with no key in it -
@@ -28,6 +42,64 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   changes, nothing is stored unless construction succeeds, and the key it
   follows is the one the rest of the open negotiates. A key learned only from a
   late answer is now adopted the same way a prompt answer's key already was.
+
+- **Two answers to one signaling request could both be lost.** The MQTT handler
+  runs on an executor thread and tested a future's `done()` there while
+  deferring the mutation to the loop, so the test and the set were not atomic -
+  and the loop is documented as blocking for seconds inside a synchronous STUN
+  select. Both now happen inside one callback. The harm was a missing log line
+  and unprocessed second-answer ICE candidates, not lost video.
+
+- **Cancelling a snapshot did not cancel it.** `async_snapshot` caught
+  `CancelledError` in the same handler as `TimeoutError` and then spawned
+  another ffmpeg for up to 15 s, returning normally. Cancellation now
+  propagates.
+
+- **SRTP key material was printed into logs users share.** Four sites on the
+  SDES path logged real key bytes - one of them the decoded master key and salt
+  in full hex, another 16 characters of two keys plus the whole packet, on the
+  first ten packets of every session. These reach `home-assistant.log`, which
+  people paste into public issue reports. All four now print a truncated
+  SHA-256 fingerprint, which tells two keys apart without disclosing either, and
+  a test walks the module to keep it that way.
+
+- **A latent SCTP parse wrote the peer's initial TSN into our own counter.** The
+  path is not currently reachable; the mapping is correct now regardless.
+
+- **A device that offered local control and then refused it looked like a device
+  that never offered it.** `CameraLanLoginRejected` now carries the ack the
+  device sent, so the two can be told apart.
+
+### Changed
+
+- Local control is accepted only by the account that OWNS the devices. A member
+  of a shared home receives a full device list from the cloud - including every
+  per-device password and aesKey - and is then refused by the device itself,
+  with a code that varies by model and a message that blames the password. Both
+  READMEs now say so, and say to check the account first. No code changed: this
+  was a documentation defect, not a protocol one.
+
+- The RTCP transmit path records which SRTP key each sender used. Instrumentation
+  only - the PLI and RR select differently and at most one can be right, but
+  nothing has ever been observed to go wrong, so nothing branches on it yet.
+
+### Internal
+
+- The release harness now configures logging. It never did, so the root logger
+  fell back to WARNING-and-above and every INFO and DEBUG line the library
+  emitted was discarded in every fleet run - including the per-session video
+  profile lines shipped in 0.17.1 for no other purpose than to accumulate a
+  record. Four runs produced zero of them.
+
+- The harness also decodes each recording and reports the frame count. Its other
+  media signals - a packet counter and a byte count from a `-c copy` pipeline -
+  are both satisfied by bytes of the right shape, which is precisely the failure
+  the first entry above describes.
+
+- Three tests that passed on prose were replaced with tests that fail when the
+  code they guard is deleted. Each replacement was demonstrated failing against
+  the injected fault; one of the originals passed while two independent
+  stream-killing regressions were present.
 
 ## [0.17.3b1]
 
