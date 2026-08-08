@@ -66,6 +66,115 @@ def _sctp_abort_chunk() -> bytes:
     return _st_ab.pack("!BBH", 6, 0, 4)
 
 
+def _key_fingerprint(key: str) -> str:
+    """A truncated SHA-256 of the key -- deliberately NOT a prefix of it.
+
+    This line goes through _status, which logs, so it lands in
+    home-assistant.log on real installs, and users paste that file into
+    public issue reports as a matter of course.  An SDES inline key is
+    base64 of a 30-byte master key + salt, so printing its first 8
+    characters would put roughly 48 bits of real key material in those
+    reports -- a reduction of the brute-force space, not a nickname.
+
+    A hash costs the note nothing.  ``_origin`` decides offer/answer/other
+    by comparing the keys directly, so the only job this field has is
+    telling two keys apart across log lines, and a fingerprint does that
+    exactly as well.  Do not "simplify" this back to ``key[:8]``.
+    """
+    if not key:
+        return "none"
+    import hashlib as _hl_kf
+    return _hl_kf.sha256(key.encode()).hexdigest()[:8]
+
+
+def _srtp_tx_key_note(sender: str, used_key: str, offer_key: str,
+                      answer_key: str) -> str:
+    """Record which SRTP key an outbound RTCP sender encrypted with.
+
+    Diagnostic only -- nothing branches on this.
+
+    Three RTCP senders share the we-to-camera direction on the SDES bridge --
+    PLI, REMB and RR, all with sender SSRC 0xAB12CD34 -- but only two key
+    selections: REMB reuses the PLI's cached SRTP session rather than choosing
+    for itself, so instrumenting the PLI covers it.  The two selections do not
+    agree.  The PLI encrypts with our own offer key; the RR prefers the camera's
+    answer key and falls back to ours.  SRTP keys are per-direction, so at most
+    one of those can be the key the camera authenticates our RTCP against.  No
+    symptom has ever been reported for any of the three, and until now no log
+    line said which key went out, so a live capture could not settle it.
+
+    ``differ=no`` means the camera echoed our key and the two senders were
+    identical anyway -- the question does not arise in that session.  A run with
+    ``differ=yes`` is the one that answers it, and the PLI is the sender that
+    answers it: a PLI the camera authenticates is followed by a keyframe, so a
+    ``differ=yes`` session whose PLIs produce keyframes says the offer key is
+    the one the camera accepts on this direction.  The RR has no comparably
+    sharp outcome -- a camera keeps sending audio whether or not it accepted our
+    report -- so the RR line is there to record which key it used, not to prove
+    that key right.
+
+    A caller emitting this must emit it again if the key it selects can change:
+    ``_cam_key_audio`` is parsed late on the wake path, after the bridge is
+    running, so a first-send-only note on a sender that re-selects per packet
+    would record ``answer=none differ=no`` for precisely the session in which
+    the two senders diverged.
+
+    Keys are recorded as truncated SHA-256 fingerprints, never as prefixes of
+    the key itself: this line is logged, so it reaches home-assistant.log and
+    the public issue reports users paste it into.  See _key_fingerprint.
+    """
+    def _origin(key: str) -> str:
+        if not key:
+            return "none"
+        if key == offer_key:
+            return "offer"
+        if key == answer_key:
+            return "answer"
+        return "other"
+
+    differ = bool(offer_key) and bool(answer_key) and offer_key != answer_key
+    return (
+        f"SRTP-TX-KEY sender={sender} used={_origin(used_key)}"
+        f"({_key_fingerprint(used_key)}) offer={_key_fingerprint(offer_key)}"
+        f" answer={_key_fingerprint(answer_key)}"
+        f" differ={'yes' if differ else 'no'}"
+    )
+
+
+def _sctp_parse_init_ack(pkt: bytes, state: dict) -> Optional[bytes]:
+    """Read the camera's INIT-ACK into ``state`` and return its State Cookie.
+
+    RFC 4960 s3.3.3: the INIT-ACK carries the *peer's* Initiate Tag and the
+    *peer's* Initial TSN -- both describe the sequence the camera will send on,
+    so both belong in the peer half of the association state.  Our own TSN is
+    the one we picked for our INIT and keep counting from in ``_sctp_data``;
+    nothing in the answer may move it.
+
+    Returns None when the packet holds no INIT-ACK chunk or that chunk carries
+    no State Cookie parameter, which is the caller's signal to keep waiting.
+    """
+    import struct as _st_sc
+    pos = 12
+    while pos + 4 <= len(pkt):
+        ctype, _, clen = _st_sc.unpack_from('!BBH', pkt, pos)
+        if clen < 4:
+            break
+        cdata = pkt[pos + 4:pos + clen]
+        if ctype == 0x02 and len(cdata) >= 16:
+            state['peer_tag'] = _st_sc.unpack_from('!I', cdata)[0]
+            state['peer_tsn'] = _st_sc.unpack_from('!I', cdata, 12)[0]
+            pp = 16
+            while pp + 4 <= len(cdata):
+                ptype, plen = _st_sc.unpack_from('!HH', cdata, pp)
+                if plen < 4:
+                    break
+                if ptype == 7:  # State Cookie
+                    return cdata[pp + 4:pp + plen]
+                pp += max(4, (plen + 3) & ~3)
+        pos += max(4, (clen + 3) & ~3)
+    return None
+
+
 def _dispatch_sctp_avio(responses, payload) -> bool:
     """Offer an inbound SCTP DATA payload to the AVIO response router.
 
@@ -306,6 +415,46 @@ def _should_capture_sprop(kind, decrypted: bool, sprop_done: bool) -> bool:
     return bool(kind == "video" and decrypted and not sprop_done)
 
 
+def _should_count_media(decrypted: bool, plain_rtp: bool) -> bool:
+    """Did this forward deliver media the consumer can actually use?
+
+    ``_media_progress`` and ``_media_counts`` are the only in-process evidence
+    that media flowed on the SDES path - nothing is decoded in this process, so
+    ``on_frame`` never fires and these counters are what every health check
+    reads: ``SdesSession.last_media_monotonic`` feeds ``SdesSession.is_stalled``,
+    the keepalive's ``_healthy`` is ``last_media_monotonic > 0.0``, and
+    ``_healthy`` is what resets the streak ``_should_abandon_keepalive`` counts.
+    Counting a packet the consumer throws away therefore does not just skew a
+    statistic: it makes a session report healthy forever while the viewer sees
+    black, because every one of those checks is satisfied by a counter that
+    keeps moving.
+
+    The question is not "did we decrypt it" but "is the forwarded packet
+    plaintext by the time ffmpeg reads it", and who owes the decryption depends
+    on the camera:
+
+    * ``plain_rtp`` (``_use_plain_rtp``, the ``_PLAIN_RTP_MODELS`` substring
+      allowlist): the ffmpeg SDP is ``RTP/AVP`` with no ``a=crypto``, so the
+      BRIDGE owes the decryption.  ``_fwd_pkt`` is rebound only when
+      ``unprotect`` succeeds, and two paths leave it as ciphertext - no SRTP
+      receive session (pylibsrtp is in the optional ``webrtc`` extra) and an
+      ``unprotect`` that raised.  ffmpeg discards those, so they are not
+      delivered media.  Non-TUTK packets on this path are SRTP by then: the
+      camera switches from TUTK SFrames to standard SRTP after LIVING, and the
+      SFrames are handled and ``continue``-d well before this point.
+    * Otherwise the SDP is ``RTP/SAVP`` with ``a=crypto`` and FFMPEG owes the
+      decryption.  Forwarding ciphertext is exactly right there, ``decrypted``
+      is always False, and the packet IS delivered media - so the ``plain_rtp``
+      term is load-bearing.  ``is_sdes_camera`` is a cloud property
+      (``enableSdes == '1'``), a different and wider set than the model
+      allowlist, so this path is reachable by any SDES camera not named in it.
+      Without the second term such a camera would report ``last_media`` 0.0
+      forever, trip ``is_stalled`` at the grace deadline while streaming fine,
+      and eventually have its keepalive abandoned.
+    """
+    return bool(decrypted or not plain_rtp)
+
+
 def _resolve_sdes_video_pt() -> Optional[int]:
     """EXPERIMENTAL (opt-in, default off): pin the OFFER to one video codec.
 
@@ -396,6 +545,82 @@ def narrow_sdp_payload_types(sdp_text: str, keep_video=None, keep_audio=None) ->
             continue
         kept.append(line)
     return "".join(kept)
+
+
+def _build_restart_sdp(
+    *,
+    ts: int,
+    lo_audio_port: int,
+    lo_video_port: int,
+    use_plain_rtp: bool,
+    srtp_key_audio: str,
+    srtp_key_video: str,
+    first_video_pt=None,
+    answer_video_pt=None,
+    first_audio_pt=None,
+) -> str:
+    """Build the SDP the SRTP key-restart hands to the relaunched ffmpeg.
+
+    The restart rebuilds the bridge SDP from scratch, and it has to match the
+    PRIMARY SDP on two counts or it undoes two shipped fixes at once.
+
+    Transport: for ``_use_plain_rtp`` models - which is every SDES camera this
+    library supports - the bridge decrypts and forwards PLAIN RTP, so the
+    primary SDP is RTP/AVP with no a=crypto.  Writing RTP/SAVP here makes
+    ffmpeg try to authenticate already-decrypted packets: every one fails its
+    HMAC check and a working stream drops to zero bytes mid-session.
+
+    Payload types: hard-coding "0 8" and "96 97" throws away the narrowing, and
+    ffmpeg binds the FIRST type on each line - so an H.265 camera silently
+    loses all video (and with it the PAT/PMT, hence the whole output), and a
+    PCMA camera loses its audio.  Both types are known by now, so the selection
+    lives here rather than at the call site: a caller free to pass a payload
+    type of its own is a caller free to reintroduce the hard-coding.
+
+    Pure: no I/O, no clock, no ``self``.  ``ts`` is passed in and the
+    sprop-parameter-sets injection and the on-disk rewrite stay with the
+    caller.
+    """
+    _proto = "RTP/AVP" if use_plain_rtp else "RTP/SAVP"
+
+    def _crypto(key: str) -> str:
+        if use_plain_rtp:
+            return ""
+        return (f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 "
+                f"inline:{key}\r\n")
+
+    sdp = (
+        "v=0\r\n"
+        f"o=- {ts} {ts} IN IP4 0.0.0.0\r\n"
+        "s=aidot-sdes-rx\r\n"
+        "t=0 0\r\n"
+        f"m=audio {lo_audio_port} {_proto} 0 8\r\n"
+        "c=IN IP4 127.0.0.1\r\n"
+        f"{_crypto(srtp_key_audio)}"
+        "a=rtpmap:0 PCMU/8000\r\n"
+        "a=rtpmap:8 PCMA/8000\r\n"
+        "a=rtcp-mux\r\n"
+        f"m=video {lo_video_port} {_proto} 96 97\r\n"
+        "c=IN IP4 127.0.0.1\r\n"
+        f"{_crypto(srtp_key_video)}"
+        "a=rtpmap:96 H264/90000\r\n"
+        "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
+        "profile-level-id=42e01f\r\n"
+        "a=rtpmap:97 H265/90000\r\n"
+        "a=fmtp:97 level-id=93\r\n"
+        "a=rtcp-mux\r\n"
+    )
+    return narrow_sdp_payload_types(
+        sdp,
+        # Same answer-SDP fallback as the pre-launch narrowing: this restart
+        # rebuilds the dual-codec template, so without it a session that never
+        # saw a video packet reproduces the unnarrowed SDP on every watchdog
+        # cycle.
+        keep_video=(first_video_pt
+                    if first_video_pt in _SDP_VIDEO_PTS
+                    else answer_video_pt),
+        keep_audio=(first_audio_pt if first_audio_pt in (0, 8) else None),
+    )
 
 
 async def _sdes_await_answer_or_terminal(
@@ -1091,13 +1316,14 @@ class _SdesOpenMixin:
         # AES_CM_128_HMAC_SHA1_80: 16-byte key + 14-byte salt = 30 bytes.
         srtp_key_audio = base64.b64encode(os.urandom(30)).decode()
         srtp_key_video = base64.b64encode(os.urandom(30)).decode()
-        # Log SDES key material at DEBUG only - this is SRTP keying material and
-        # should not appear in production-level logs.  Re-enable at debug when
-        # verifying the AES counter derivation formula after Frida observation.
+        # DEBUG is not low enough for real key material.  This used to log the
+        # decoded master key AND salt in full hex - the whole secret, not a
+        # prefix - on the reasoning that DEBUG is not "production-level".  But
+        # Home Assistant users turn this integration's logger to debug precisely
+        # when something is wrong, and then paste the log into a public issue.
         _LOGGER.debug(
-            "sdes: offer key=%s salt=%s psk=%s",
-            base64.b64decode(srtp_key_audio)[:16].hex(),
-            base64.b64decode(srtp_key_audio)[16:].hex(),
+            "sdes: offer key=%s psk=%s",
+            _key_fingerprint(srtp_key_audio),
             _psk_value_req,
         )
         ts = int(time.time())
@@ -2319,7 +2545,7 @@ class _SdesOpenMixin:
         _dc_answer_has_app: bool = False  # set True if camera echoes m=application; init here so bridge closure never sees NameError on late-wake path
         _sctp: dict = {              # initialized here for the same reason - bridge closure
             'state': 'CLOSED', 'local_tag': 0, 'peer_tag': 0,
-            'local_tsn': 0, 'stream_seq': 0,
+            'local_tsn': 0, 'peer_tsn': 0, 'stream_seq': 0,
         }
         if answer_fut.done():
             try:
@@ -2381,6 +2607,7 @@ class _SdesOpenMixin:
                 'local_tag': 0,       # our verification tag (sent in INIT)
                 'peer_tag': 0,        # camera's verification tag (from INIT-ACK)
                 'local_tsn': 0,       # our TSN counter
+                'peer_tsn': 0,        # camera's Initial TSN (from its INIT/INIT-ACK)
                 'stream_seq': 0,      # stream sequence number
             }
 
@@ -2481,30 +2708,6 @@ class _SdesOpenMixin:
             body = _st_sc.pack('!IIHHI', _sctp['local_tag'],
                                131072, 1024, 2048, _sctp['local_tsn'])
             return _sctp_pkt(0, _sctp_chunk(0x01, 0, body))
-
-        def _sctp_parse_init_ack(pkt):
-            import struct as _st_sc
-            pos = 12
-            while pos + 4 <= len(pkt):
-                ctype, _, clen = _st_sc.unpack_from('!BBH', pkt, pos)
-                if clen < 4:
-                    break
-                cdata = pkt[pos + 4:pos + clen]
-                if ctype == 0x02 and len(cdata) >= 16:
-                    peer_tag = _st_sc.unpack_from('!I', cdata)[0]
-                    peer_tsn = _st_sc.unpack_from('!I', cdata, 12)[0]
-                    _sctp['peer_tag'] = peer_tag
-                    _sctp['local_tsn'] = peer_tsn
-                    pp = 16
-                    while pp + 4 <= len(cdata):
-                        ptype, plen = _st_sc.unpack_from('!HH', cdata, pp)
-                        if plen < 4:
-                            break
-                        if ptype == 7:  # State Cookie
-                            return cdata[pp + 4:pp + plen]
-                        pp += max(4, (plen + 3) & ~3)
-                pos += max(4, (clen + 3) & ~3)
-            return None
 
         def _sctp_parse_init(pkt):
             import struct as _st_sc
@@ -3323,13 +3526,17 @@ class _SdesOpenMixin:
                             _pli_media_ssrc,
                         )
                         _pli_sent = False
+                        # Hoisted out of the session-build below only so the
+                        # SRTP-TX-KEY note can report the key that actually went
+                        # out rather than re-deriving it.  Same expression, same
+                        # result - no behavior change.
+                        _pli_key_b64 = (
+                            _our_tx_srtp_key_audio
+                            or srtp_key_audio
+                        )
                         try:
                             import pylibsrtp as _plsrtp_pli
                             if not hasattr(_bridge_fn, '_pli_tx_sess'):
-                                _pli_key_b64 = (
-                                    _our_tx_srtp_key_audio
-                                    or srtp_key_audio
-                                )
                                 _pli_pol = _plsrtp_pli.Policy(
                                     key=_b64_pli.b64decode(_pli_key_b64),
                                     ssrc_type=_plsrtp_pli.Policy.SSRC_SPECIFIC,
@@ -3363,6 +3570,14 @@ class _SdesOpenMixin:
                                 f" -> SSRC=0x{_pli_media_ssrc:08x}"
                                 f" ({'SRTCP' if _pli_sent else 'plain'})"
                             )
+                        # First send only, unlike the RR note below: the PLI
+                        # SRTP session is built once and cached on _bridge_fn,
+                        # so the key the first PLI went out with is the key
+                        # every later PLI goes out with.
+                        if _pli_n == 1 and _pli_sent:
+                            _status(_srtp_tx_key_note(
+                                "PLI", _pli_key_b64,
+                                _our_tx_srtp_key_audio, _cam_key_audio))
 
                     # DCEP_WAIT -> send LIVING 300ms after DCEP_OPEN.
                     # Camera needs time to register stream 0 before LIVING arrives.
@@ -3811,8 +4026,8 @@ class _SdesOpenMixin:
                                     _status(
                                         "SDES DC: m=application present"
                                         " - waiting for camera SCTP INIT"
-                                        f" key={_our_tx_srtp_key_audio[:8]}"
-                                        f" iv={_cam_key_audio[:8] if _cam_key_audio else '(none)'}"
+                                        f" our_key={_key_fingerprint(_our_tx_srtp_key_audio)}"
+                                        f" cam_key={_key_fingerprint(_cam_key_audio)}"
                                     )
                         else:
                             # Non-STUN packet - demux by first byte.
@@ -3875,7 +4090,7 @@ class _SdesOpenMixin:
                                         except Exception as _iae:
                                             _status(f"SCTP INIT-ACK failed: {_iae}")
                                 elif st in ('INIT_SENT', 'COOKIE_WAIT'):
-                                    cookie = _sctp_parse_init_ack(_bpkt)
+                                    cookie = _sctp_parse_init_ack(_bpkt, _sctp)
                                     if cookie:
                                         _sctp['state'] = 'COOKIE_ECHOED'
                                         try:
@@ -3934,14 +4149,15 @@ class _SdesOpenMixin:
                                     _bridge_fn._c8_raw_count = 0
                                 _bridge_fn._c8_raw_count += 1
                                 if _bridge_fn._c8_raw_count <= 10:
-                                    _sdes_k = _our_tx_srtp_key_audio[:16]
-                                    _sdes_v = (_cam_key_audio or _our_tx_srtp_key_audio)[:16]
+                                    _sdes_k_fp = _key_fingerprint(_our_tx_srtp_key_audio)
+                                    _sdes_v_fp = _key_fingerprint(
+                                        _cam_key_audio or _our_tx_srtp_key_audio)
                                     _status(
                                         f"bridge: RAW 0x{_bpkt[0]:02x} {len(_bpkt)}B"
                                         f" #{_bridge_fn._c8_raw_count}"
-                                        f" sdes_key={_sdes_k}"
-                                        f" sdes_iv={_sdes_v}"
-                                        f" [{_bpkt.hex()}]"
+                                        f" our_key={_sdes_k_fp}"
+                                        f" cam_key={_sdes_v_fp}"
+                                        f" [{_bpkt[:24].hex()}]"
                                     )
                             # TUTK SFrame detection (A001064 / _use_plain_rtp):
                             # The camera sends TUTK-framed data instead of SRTP.
@@ -4082,7 +4298,7 @@ class _SdesOpenMixin:
                                                 _status(f"SDES DC: enc INIT-ACK err: {_sce8}")
                                     elif _pd_ct8 == 0x02 and _sct in ('INIT_SENT', 'COOKIE_WAIT'):
                                         # Camera SCTP INIT-ACK -> send encrypted COOKIE-ECHO
-                                        _sc_ck = _sctp_parse_init_ack(_pd_plain)
+                                        _sc_ck = _sctp_parse_init_ack(_pd_plain, _sctp)
                                         if _sc_ck:
                                             try:
                                                 _br_send_to_cam(_bs, _enc_c8_sctp(_sctp_cookie_echo(_sc_ck)), _bsrc, _br_cam_peer)
@@ -4177,11 +4393,15 @@ class _SdesOpenMixin:
                                         0, 0, 0,
                                     )
                                     _rtcp_sent = False
+                                    # Hoisted purely so the SRTP-TX-KEY note can
+                                    # report the key that actually went out.
+                                    # Same expression - no behavior change.
+                                    _rr_key_b64 = (
+                                        _cam_key_audio or _our_tx_srtp_key_audio)
                                     try:
                                         import pylibsrtp as _plsrtp_rr
                                         import base64 as _b64_rr
-                                        _rr_key = _b64_rr.b64decode(
-                                            _cam_key_audio or _our_tx_srtp_key_audio)
+                                        _rr_key = _b64_rr.b64decode(_rr_key_b64)
                                         _rr_pol = _plsrtp_rr.Policy(
                                             key=_rr_key,
                                             ssrc_type=_plsrtp_rr.Policy.SSRC_SPECIFIC,
@@ -4204,6 +4424,25 @@ class _SdesOpenMixin:
                                             f"SDES: sent RTCP RR to camera"
                                             f" (SSRC=0x{_tk_ssrc:08x})"
                                         )
+                                    # Re-noted whenever the selected key changes,
+                                    # not just on the first RR: this branch
+                                    # rebuilds its SRTP session from the current
+                                    # expression on every packet, and
+                                    # _cam_key_audio can be set after the bridge
+                                    # is already running (late-wake answer
+                                    # parse), so the RR key does flip mid-session
+                                    # on battery cameras.  A first-send-only note
+                                    # would have recorded "answer=none differ=no"
+                                    # for exactly that session.  Bounded: the
+                                    # answer key is only ever set once.
+                                    if (_rtcp_sent and getattr(
+                                            _bridge_fn, '_rr_key_noted', None)
+                                            != _rr_key_b64):
+                                        _bridge_fn._rr_key_noted = _rr_key_b64
+                                        _status(_srtp_tx_key_note(
+                                            "RR", _rr_key_b64,
+                                            _our_tx_srtp_key_audio,
+                                            _cam_key_audio))
                                 # Forward decrypted PCMA audio to ffmpeg loopback.
                                 # AVIO control frames (SESSION_MODE_RESP=5377, etc.) are
                                 # identified by cmd field and skipped; raw PCMA bytes are sent.
@@ -4490,9 +4729,20 @@ class _SdesOpenMixin:
                                 _lo_target.sendto(
                                     _fwd_pkt, ('127.0.0.1', _btgt)
                                 )
-                                _media_progress[0] = _time_br.monotonic()
-                                _media_counts[0] += 1
-                                _media_counts[1] += len(_fwd_pkt)
+                                # Forward unconditionally - ciphertext ffmpeg
+                                # discards is inert, and a `continue` here would
+                                # change loop control flow for the whole SDES
+                                # fleet.  But only COUNT what the consumer can
+                                # use: these three are the only in-process proof
+                                # media flowed, so counting a discarded packet
+                                # keeps is_stalled from ever tripping and the
+                                # session reports healthy while the viewer sees
+                                # black.  See _should_count_media.
+                                if _should_count_media(
+                                        _decrypted, _use_plain_rtp):
+                                    _media_progress[0] = _time_br.monotonic()
+                                    _media_counts[0] += 1
+                                    _media_counts[1] += len(_fwd_pkt)
                             except Exception:
                                 _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                     # Periodic ICE controlling check: re-send USE-CANDIDATE every 2.5 s.
@@ -5077,7 +5327,7 @@ class _SdesOpenMixin:
                         f"late ICE creds parsed - bridge will send USE-CANDIDATE"
                         f" to {len(_late_cands)} candidate(s)"
                         + (" [m=application present]" if _dc_answer_has_app else "")
-                        + (f" [cam_key set: {_cam_key_audio[:8]}...]" if _cam_key_audio else "")
+                        + (f" [cam_key set: {_key_fingerprint(_cam_key_audio)}]" if _cam_key_audio else "")
                     )
             # For echo-reversal cameras (A001064) the first answer_fut was set by
             # the broker echo of our own webrtcResp.  Wait briefly for the camera's
@@ -5141,62 +5391,19 @@ class _SdesOpenMixin:
                         except Exception:
                             proc.kill()
                         _ts2 = int(time.time())
-                        # Match the PRIMARY SDP on both counts, or this restart
-                        # undoes two fixes at once.
-                        #
-                        # Transport: for _use_plain_rtp models - which is every
-                        # SDES camera this library supports - the bridge decrypts
-                        # and forwards PLAIN RTP, so the primary SDP is RTP/AVP
-                        # with no a=crypto.  Writing RTP/SAVP here makes ffmpeg
-                        # try to authenticate already-decrypted packets: every one
-                        # fails its HMAC check and a working stream drops to zero
-                        # bytes mid-session.
-                        #
-                        # Payload types: hard-coding "0 8" and "96 97" throws away
-                        # the narrowing, and ffmpeg binds the FIRST type on each
-                        # line - so an H.265 camera silently loses all video (and
-                        # with it the PAT/PMT, hence the whole output), and a PCMA
-                        # camera loses its audio.  Both types are known by now.
-                        _proto = "RTP/AVP" if _use_plain_rtp else "RTP/SAVP"
-
-                        def _crypto(key: str) -> str:
-                            if _use_plain_rtp:
-                                return ""
-                            return (f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 "
-                                    f"inline:{key}\r\n")
-
-                        _new_sdp = (
-                            "v=0\r\n"
-                            f"o=- {_ts2} {_ts2} IN IP4 0.0.0.0\r\n"
-                            "s=aidot-sdes-rx\r\n"
-                            "t=0 0\r\n"
-                            f"m=audio {_lo_audio_port} {_proto} 0 8\r\n"
-                            "c=IN IP4 127.0.0.1\r\n"
-                            f"{_crypto(srtp_key_audio)}"
-                            "a=rtpmap:0 PCMU/8000\r\n"
-                            "a=rtpmap:8 PCMA/8000\r\n"
-                            "a=rtcp-mux\r\n"
-                            f"m=video {_lo_video_port} {_proto} 96 97\r\n"
-                            "c=IN IP4 127.0.0.1\r\n"
-                            f"{_crypto(srtp_key_video)}"
-                            "a=rtpmap:96 H264/90000\r\n"
-                            "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
-                            "profile-level-id=42e01f\r\n"
-                            "a=rtpmap:97 H265/90000\r\n"
-                            "a=fmtp:97 level-id=93\r\n"
-                            "a=rtcp-mux\r\n"
-                        )
-                        _new_sdp = narrow_sdp_payload_types(
-                            _new_sdp,
-                            # Same answer-SDP fallback as the pre-launch narrowing:
-                            # this restart rebuilds the dual-codec template, so
-                            # without it a session that never saw a video packet
-                            # reproduces the unnarrowed SDP on every watchdog cycle.
-                            keep_video=(_first_video_pt[0]
-                                        if _first_video_pt[0] in _SDP_VIDEO_PTS
-                                        else _answer_video_pt[0]),
-                            keep_audio=(_first_audio_pt[0]
-                                        if _first_audio_pt[0] in (0, 8) else None),
+                        # Transport and payload-type selection both live in
+                        # _build_restart_sdp, where they are unit-tested against
+                        # the SDP it actually emits.
+                        _new_sdp = _build_restart_sdp(
+                            ts=_ts2,
+                            lo_audio_port=_lo_audio_port,
+                            lo_video_port=_lo_video_port,
+                            use_plain_rtp=_use_plain_rtp,
+                            srtp_key_audio=srtp_key_audio,
+                            srtp_key_video=srtp_key_video,
+                            first_video_pt=_first_video_pt[0],
+                            answer_video_pt=_answer_video_pt[0],
+                            first_audio_pt=_first_audio_pt[0],
                         )
                         try:
                             # Re-apply the cached sprop-parameter-sets here too:

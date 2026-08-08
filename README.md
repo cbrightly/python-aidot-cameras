@@ -35,6 +35,41 @@ Other battery models (A001108, A001360) are recognized in code with the same
 battery handling. See [`docs/CAMERAS.md`](docs/CAMERAS.md#supported-cameras) for
 the authoritative table and per-model notes.
 
+## Known limitations
+
+**LAN device login does not work on the reference hardware.** The local control
+channel (upstream's TCP:10000 light protocol, and this package's
+`CameraLanClient` built on the same protocol) is rejected by every device on the
+account this library is validated against. Measured 2026-08-08:
+
+| Model | Devices | Ack |
+| --- | --- | --- |
+| `LK.IPC.A000088` | 3 | 4352 `fail` |
+| `LK.light.A001497`, `LK.plug.A001535` | 6 | 4354 `fail` |
+| `LK.light.A001493` | 1 | 400 `not equal abort user id or password` |
+
+The devices are not unreachable and the request is not malformed: they accept
+the connection, decrypt the body with their own `aesKey`, parse the JSON, and
+answer a well-formed `loginResp`. They also advertise the feature - unicast
+discovery returns `lanMode=1` (and `localCtrFlag=1` on the cameras). A correct
+password and a deliberately wrong one produce the identical rejection, and the
+request is field-identical to the vendor app's own, which sends nothing before
+it. So there is no known client-side change that fixes this.
+
+Consequences:
+
+- Devices fall back to cloud control. Nothing is broken by it, but local control
+  is unavailable and the latency and offline benefits it would bring are not
+  there.
+- `CameraLanClient` will raise `CameraLanLoginRejected` rather than attaching.
+
+This appears to be model-family-specific rather than universal: third-party
+reports show upstream's LAN login working on other families. If your devices
+work locally, this section does not apply to you.
+
+**Camera streaming is unaffected.** Video is WebRTC over cloud MQTT signaling
+and does not use this path at all; `async_login` returns early for IPC models.
+
 ## Library install
 
 Install from PyPI (the simplest, recommended method):
