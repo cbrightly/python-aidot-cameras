@@ -42,10 +42,14 @@ all with the measurements recorded:
   clean interleaved pair had the REMB arm *higher* than its control, 3859 against
   3355 Kbps. Shipped disabled (`AIDOT_REMB_TARGET_BPS=0`).
 - **The stream-quality byte.** `SETSTREAMCTRL` was swept across all six
-  `AVIOCTRL_QUALITY` values, twelve sessions, each followed by a session that
-  sent nothing to catch a next-session effect. All six acked in 0.01-0.19 s; all
-  twelve sessions came back h264 1280x720, single dimension cluster. See "The
-  stream-quality control" in [APP-PARITY-STATUS.md](APP-PARITY-STATUS.md).
+  `AVIOCTRL_QUALITY` values AND the value 16 the app sends for "Auto" (which the
+  enum does not name) - fourteen sessions, each followed by a session that sent
+  nothing to catch a next-session effect. All seven acked; all fourteen sessions
+  came back h264 1280x720, single dimension cluster. The device properties that
+  looked like better explanations were checked too: the camera reads
+  `StreamType=0`, so it is not in Auto, and `dynamicStream` is a read-only
+  capability flag gating app UI, not a mode. See "The stream-quality control" in
+  [APP-PARITY-STATUS.md](APP-PARITY-STATUS.md).
 - **Narrowing the offer to H265.** An H265-only offer returns no video at all,
   3 of 3 rounds.
 

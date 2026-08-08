@@ -131,9 +131,13 @@ _PTZ_DIR_CODES: dict = {
     "zoom_in": 23, "zoom_out": 24,
 }
 
-# Live-stream resolution (AVIOCTRL_QUALITY_*).  The official app's HD/SD toggle
-# switches between MAX(1) and MIDDLE(5) (f0.java g3() / LiveFragment d6); we
-# mirror those two.  Sent as SETSTREAMCTRL (cmd 800) over the active session,
+# Live-stream resolution (AVIOCTRL_QUALITY_*).  The official app's picker has
+# THREE arms, not two: MAX(1), MIDDLE(5), and 0x10 = 16, whose label is
+# _auto_resulution (HorLiveController.smali:629-631).  16 is deliberately absent
+# here: it is outside AVIOCTRL_QUALITY, and measured 2026-08-07 it behaves like
+# every other value - acked, and the encode unchanged in that session and the
+# next.  Adding it would offer a control that does nothing.  The two arms below
+# are the ones with enum names, kept for parity with the command the app sends.  Sent as SETSTREAMCTRL (cmd 800) over the active session,
 # payload <IB3x> = channel(0) + quality byte (SMsgAVIoctrlSetStreamCtrlReq).
 SETSTREAMCTRL_CMD = 800
 GETSTREAMCTRL_CMD = 802
