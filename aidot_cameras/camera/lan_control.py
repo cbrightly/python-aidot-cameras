@@ -164,6 +164,26 @@ class CameraLanError(Exception):
     """A local control operation failed (connect, login, or protocol error)."""
 
 
+class CameraLanLoginRejected(CameraLanError):
+    """The device advertised local control and then refused our login.
+
+    Separate from its parent because the two mean opposite things to a caller.
+    A device that does not offer local control is ordinary and should be quiet;
+    a device that offers it, accepts the connection, decrypts our request with
+    its own key, and STILL answers with a non-200 ack is a defect - either in
+    what we send or in the device - and the caller should be able to say so out
+    loud rather than logging it at the same level as "not supported here".
+
+    ``ack`` is the device's own code, because the refusals differ by family and
+    the number is the only handle on which one happened: A000088 cameras answer
+    4352, A001497 lights and A001535 plugs 4354, A001493 lights 400.
+    """
+
+    def __init__(self, message: str, ack: Any = None) -> None:
+        super().__init__(message)
+        self.ack = ack
+
+
 class CameraLanClient:
     """Short-lived local device-control client for one camera.
 
@@ -291,9 +311,13 @@ class CameraLanClient:
             ) from exc
         if ack != 200:
             # The real device rejected our key-authenticated login; stop using
-            # the LAN path and revert to cloud.
+            # the LAN path and revert to cloud.  Raised as the specific type so
+            # a caller can tell this apart from a device that never offered
+            # local control - see CameraLanLoginRejected.
             self._eligible = False
-            raise CameraLanError(f"{self.device_id}: login rejected ack={ack}")
+            raise CameraLanLoginRejected(
+                f"{self.device_id}: login rejected ack={ack}", ack=ack
+            )
         return (resp.get("payload") or {}).get("ascNumber", 1)
 
     # -- public control ---------------------------------------------------- #
