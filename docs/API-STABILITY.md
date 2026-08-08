@@ -40,6 +40,11 @@ interchangeable beyond that.
 - The internal protocol helpers in `camera.protocol` other than those named
   above, including the AVIO request and response machinery.
 - Log message text and log levels. Useful for humans, not for parsing.
+- The **concrete class** `get_device_client` returns. Annotate against
+  `DeviceClient` and use `isinstance`, never `type(x) is`. Non-cameras get a
+  `LightDeviceClient` (0.17.2; before that, upstream's `DeviceClient` itself) and
+  cameras get a `CameraDeviceClient`; both are subclasses of `DeviceClient`, so
+  every `isinstance` check and every method in the table above is unaffected.
 
 ## How this is kept honest
 
