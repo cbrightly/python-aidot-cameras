@@ -1,7 +1,8 @@
 # What 1.0.0 is waiting on
 
-Written 2026-08-07. The point of this file is to make the bar checkable, so that
-"are we ready" stops being a matter of opinion.
+Written 2026-08-07, updated 2026-08-08 after an audit-closing day. The point of
+this file is to make the bar checkable, so that "are we ready" stops being a
+matter of opinion.
 
 What 1.0.0 asserts is **not** that there are no known issues. It asserts that we
 understand the system and its shape has settled.
@@ -16,6 +17,27 @@ understand the system and its shape has settled.
   a downstream integration run, and validation against real cameras on a LAN
   runner before anything reaches PyPI.
 
+  Qualified on 2026-08-08, because the gate was partly scoring its own homework:
+  its SDES PASS signal is `media_stats.packets`, the very counter that was
+  counting undecryptable packets as delivered media, with `recorded_bytes` from
+  a `-c copy` pipeline as the fallback - neither requires a packet to have
+  decrypted or decoded. And the harness never configured logging, so every INFO
+  and DEBUG line the library emitted was discarded in every run. Both are fixed:
+  the harness now decodes the recording and reports real frame counts, and the
+  aidot loggers are raised. The gate is meaningfully stronger than the sentence
+  above claimed when it was written.
+
+- **The audit backlog is closed.** Every item in the 2026-08-08 findings list
+  landed: media counted only when the consumer can use it, the SDES receive
+  session rebuilt on rekey, the `webrtcResp` future resolved in one loop hop,
+  three decorative tests replaced with real ones, snapshot cancellation
+  propagated, and a latent SCTP TSN mapping corrected.
+
+- **Local (LAN) control is demonstrably working.** Ten devices across four model
+  families return 200 for the owning account. It had appeared broken; the
+  devices were rejecting the shared-home account the CI runner deliberately
+  uses. No library defect existed. See the READMEs.
+
 ## Open
 
 ### 1. The discovery rate is still high
@@ -24,6 +46,15 @@ Fourteen releases in the four days to 2026-08-07, and the finds were structural
 rather than cosmetic: inbound AVIO on SDES was being decoded, logged and dropped
 so the whole response path was dead on that transport; a `-50002` backoff waited
 300 s for a camera measured to clear in 8.
+
+**2026-08-08 set this back rather than advancing it.** Roughly ten changes
+landed in a day, and three were structural: undecryptable packets counted as
+delivered media, so a black stream could report healthy indefinitely and the
+abandon ceiling could never fire; the SDES receive session latched behind a
+`hasattr` so a camera that rekeyed reached nothing; and four logging sites
+printing SRTP key material into logs users paste into public issues.
+
+That is not a settling cadence. The clock has not started.
 
 The bar: **two weeks with no streaming-breaking release.** The cadence is the
 evidence.
@@ -62,6 +93,14 @@ hevc profile appears only when both codecs are offered; what selects it is still
 unknown, which is why the negotiated profile is now logged at INFO on every
 session.
 
+**2026-08-08: that logging was never reaching anyone.** The validation harness
+did not configure logging, so the root logger fell back to WARNING-and-above and
+every one of those INFO lines was discarded - four runs after the instrumentation
+shipped produced zero of them. The standing advice not to open a fourteenth
+hypothesis until a corpus accumulated was waiting on data that could never
+arrive. Fixed; the first run after that fix is the first that can produce the
+record this item asks for.
+
 Note the profile also differs by model: an A001513's h264 is 1280x960, not
 1280x720, so codec does not imply resolution across a mixed fleet.
 
@@ -86,6 +125,11 @@ The bar: **root cause found and fixed.** The serve is being launched before
 ffmpeg can establish the video dimensions; why that never resolves on this one
 unit is the open question.
 
+**2026-08-08 added a sharp clue.** Across 15 sessions the first-media outcome is
+bimodal with a 63-second empty band: the slowest SDES pass was 16.8 s and the
+fastest no-media was 80.1 s, with nothing in between. Media arrives fast or it
+never arrives - so whatever fails here fails at setup, not by degrading.
+
 **This is one defect wearing three names.** It is also the `camera.kitchen`
 no-media case, and the subject of the relay-only investigation: the same unit
 streams fine from other hosts on the same LAN, and the one difference found is
@@ -104,6 +148,22 @@ loop is not fixing the cause, and the give-up explicitly does not claim to.
   remaining gap is the DTLS models, where the read has unit tests only.
 
 The bar: **tested, or explicitly out of scope for 1.0** and said so here.
+
+### 5. No standard for keeping secrets out of logs
+
+Added 2026-08-08. Four logging sites on the SDES path were printing real SRTP
+key material - one of them the decoded master key AND salt in full hex, another
+16 characters of two keys plus the full packet hex, unconditionally, on the
+first ten packets of every session. These lines reach `home-assistant.log`,
+which users paste into public issue reports.
+
+All four now print a truncated SHA-256 fingerprint, and an AST guard over the
+module fails if any logging call carries key material again. But nothing was
+watching before, and "we looked once" is not a standard.
+
+The bar: **the guard extended beyond `sdes_open`, or a stated reason it does not
+need to be.** The same classes of secret (device passwords, aesKeys, tokens)
+exist elsewhere in the package.
 
 ## Out of scope for 1.0.0
 
