@@ -133,12 +133,19 @@ class SdesSession(AvioRequestMixin):
     def talk_supported(self) -> bool:
         """True if two-way audio can be used on this SDES session.
 
-        Requires a talk-capable open (offer advertised sendrecv + a=ssrc).  The
-        camera audio address is filled in by the bridge on first inbound audio;
-        async_start_talk tolerates being called before that - the pump waits for
-        the address before emitting.
+        Requires a talk-capable open (offer advertised sendrecv + a=ssrc) AND a
+        session that is still running.  The camera audio address is filled in by
+        the bridge on first inbound audio; async_start_talk tolerates being
+        called before that - the pump waits for the address before emitting.
+
+        Liveness is part of the answer because the talk state is a plain dict
+        that outlives ffmpeg, while everything that acts on it - the bridge
+        thread that sends SPEAKERSTART, the socket the pump writes to - dies
+        with ffmpeg.  ``async_speak`` reuses the warm session whenever this is
+        true, so answering from the dict alone routed talk into a session that
+        could no longer carry it instead of opening a fresh one.
         """
-        return bool(self._talk_state)
+        return bool(self._talk_state) and self.is_alive
 
     async def async_start_talk(
         self, pcm_provider: "Callable[[], Optional[bytes]]"
@@ -170,10 +177,23 @@ class SdesSession(AvioRequestMixin):
                 target=_run_sdes_talk_pump, args=(self._talk_state,), daemon=True
             )
             self._talk_thread.start()
-        if await _speaker_ack_accepted(waiter, SDES_SPEAKER_ACK_TIMEOUT_S):
+        accepted = await _speaker_ack_accepted(waiter, SDES_SPEAKER_ACK_TIMEOUT_S)
+        # _speaker_ack_accepted is generous by design: it treats an unfamiliar or
+        # absent ack as acceptance, because no genuine refusal has ever been
+        # identified and guessing at one would break working cameras.  That
+        # generosity is about INTERPRETING the camera's answer, and it has
+        # nothing to say about the case where the question was never asked.
+        # `speaker_on` is set on exactly one line - immediately after the bridge
+        # thread dispatches SPEAKERSTART(848) - so a falsy flag here means our
+        # own bridge never sent the command, which happens whenever ffmpeg (and
+        # with it that thread) has already exited.  The ack budget above already
+        # covers SDES_SPEAKERSTART_DELAY, so a live bridge has always set it by
+        # now and this cannot race a working session.
+        if accepted and self._talk_state.get("speaker_on"):
             return True
-        # The camera refused. Stop the microphone rather than stream viewer
-        # audio at a speaker that never opened.
+        # Either the camera refused, or the speaker command never left this
+        # process.  Stop the microphone rather than stream viewer audio at a
+        # speaker that never opened.
         self._talk_state["want_speaker"] = False
         self._talk_state["provider"] = None
         return False
