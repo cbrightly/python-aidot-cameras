@@ -381,6 +381,16 @@ Two residuals, stated rather than fixed:
   "sent".** `_avio_cmd` returned False and nothing left the host. It is a log
   wording issue on a path whose return value is unaffected, and changing it was
   out of scope here; recorded so it is a decision rather than an oversight.
+- **PTZ still reports success for bytes that left the socket, not for a camera
+  that moved.** Added 2026-08-09. On SDES the command goes out through a closure
+  that holds the datagram socket, so `sendto` can succeed after the session it
+  belongs to has been torn down - the send is fire-and-forget by design and
+  there is no acknowledgement to read on the A001064, whose firmware answers 848
+  but not 802. The related two-way audio defect, where the same shape of
+  reasoning produced a False success, is fixed in 1.0.0b2; this one is stated
+  rather than fixed because there is no signal to condition it on. What changed
+  is that the harness no longer asks a closed session, so a PASS at least means
+  a live one.
 
 ### 5. No standard for keeping secrets out of logs
 
