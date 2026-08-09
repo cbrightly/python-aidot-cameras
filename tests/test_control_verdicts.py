@@ -129,8 +129,13 @@ async def test_talk_without_a_channel_is_unchanged():
 def _sdes_session():
     from aidot_cameras.camera.sdes import SdesSession
 
+    # poll() -> None is "ffmpeg still running". A bare MagicMock returns a
+    # truthy mock, which now reads as an exited process and makes the session
+    # correctly refuse talk - so the mock has to say which it is.
+    proc = MagicMock()
+    proc.poll.return_value = None
     return SdesSession(
-        proc=MagicMock(), sdp_path="/tmp/nonexistent.sdp",
+        proc=proc, sdp_path="/tmp/nonexistent.sdp",
         outgoing_q=MagicMock(), mqtt_fut=MagicMock(),
         cmd_chan=[lambda cmd, payload: None],
         talk_state={"provider": None},
@@ -151,9 +156,14 @@ async def test_sdes_talk_waits_for_the_ack_without_sending_it_itself(monkeypatch
     session = _sdes_session()
     session._avio_cmd = MagicMock(side_effect=AssertionError("must not send here"))
 
-    # The bridge sends; here we only stand in for the camera's answer.
+    # Stand in for the bridge thread: it dispatches SPEAKERSTART and sets
+    # speaker_on, and the camera answers. Both halves are needed - a True answer
+    # now requires that our own bridge actually sent the command, not just that
+    # something acked, so that a session whose bridge has died reports False
+    # instead of a speaker it never opened.
     task = asyncio.create_task(session.async_start_talk(lambda: b""))
     await asyncio.sleep(0.01)
+    session._talk_state["speaker_on"] = True
     session.dispatch_avio_frame(_reply(SPEAKERSTART_RESP))
 
     assert await task is True

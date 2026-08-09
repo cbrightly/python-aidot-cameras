@@ -52,6 +52,9 @@ from aidot_cameras.client import AidotClient
 from aidot_cameras.const import CONF_DEVICE_LIST, CONF_ID, CONF_NAME
 from aidot_cameras.credentials import load_credentials
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from feature_probe import probe_features
+
 # Models validated end-to-end on the reference account: these GATE the release.
 REQUIRED_MODELS = ("A000088", "A001513", "A001064")
 # Recognized in code but never validated on hardware: reported, never gating.
@@ -60,6 +63,21 @@ ADVISORY_MODELS = ("A001108", "A001360")
 # Per-attempt connect is probabilistic for DTLS; give those cameras more tries.
 ATTEMPTS_DTLS = 3
 ATTEMPTS_SDES = 2
+
+# Seconds of session life to leave beyond the recording window, so the probes
+# that ride the OPEN session - talk and PTZ - still have one to ride.
+#
+# `max_seconds` is ffmpeg's -t, and on the SDES path the bridge thread that
+# dispatches SPEAKERSTART and PTZ lives and dies with that process. It was set
+# to hold-2, which put the session's death BEFORE `await asyncio.sleep(hold)`
+# even returned, so every probe ran against a corpse. Run 31332008184 read that
+# as three SDES cameras failing two-way audio; the run log has no SPEAKERSTART
+# line in it at all, because there was nothing left to send one.
+#
+# 14 s covers the talk probe's worst case (2.6 s ack budget + a 6 s hold + stop)
+# and the PTZ nudge, with margin. It buys a longer recording, which costs disk
+# and nothing else.
+LIVE_PROBE_BUDGET_S = 14
 
 # A camera holds its viewer slot ~120 s after a session; leave room past that.
 DEFAULT_COOLDOWN_S = 180.0
@@ -322,7 +340,8 @@ def _recording_path(out_dir: str, device_id: str, attempt: int) -> str:
     return out
 
 
-async def _attempt(dc, hold: float, out_dir: str, attempt: int) -> dict:
+async def _attempt(dc, hold: float, out_dir: str, attempt: int,
+                   device: dict | None = None) -> dict:
     """One streaming attempt. Never raises; classifies the outcome."""
     from aidot_cameras.exceptions import AidotCameraBusy
 
@@ -333,11 +352,17 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int) -> dict:
     session = None
     result: dict = {"attempt": attempt}
     try:
+        # talk=True so the offer advertises sendrecv audio. Without it an SDES
+        # session never negotiates a return track, `talk_supported` is False,
+        # and a two-way audio probe reports UNSUPPORTED for a camera that
+        # supports it perfectly well - the harness not asking, misread as the
+        # camera not offering.
         session = await dc.async_open_webrtc_stream(
             on_frame=lambda _f: frames.__setitem__("n", frames["n"] + 1),
             timeout=45.0,
             output_path=out,
-            max_seconds=max(1, int(hold - 2)),
+            max_seconds=max(1, int(hold - 2) + LIVE_PROBE_BUDGET_S),
+            talk=True,
         )
         result["handshake_s"] = round(time.time() - t0, 1)
         result["transport"] = type(session).__name__
@@ -358,6 +383,30 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int) -> dict:
                 ]
             except Exception as exc:
                 result["stats_error"] = str(exc)
+
+        # Advisory: reported, never gating. The same reasoning the decode probe
+        # shipped under - a measurement that has never run against this fleet is
+        # not one to start blocking releases with. Runs while the session is
+        # still open, because snapshot and talk need one.
+        #
+        # PTZ and the resolution setter reach their session through
+        # `dc._stream_session`, which the library sets from its keepalive,
+        # streaming and serve loops - the paths Home Assistant goes through -
+        # and NOT from a bare async_open_webrtc_stream, which is what this
+        # harness calls. Left unset, every PTZ command returned False with "no
+        # active stream session" and sent nothing; the probe used to score that
+        # as a pass, so PTZ had never once been exercised on hardware. Standing
+        # in for the loop that would own it is the only way to measure the real
+        # call path, and it is restored immediately afterwards so nothing else
+        # inherits a session this function is about to close.
+        _prev_session = getattr(dc, "_stream_session", None)
+        try:
+            dc._stream_session = session
+            result["features"] = await probe_features(dc, device or {}, session)
+        except Exception as exc:
+            result["features_error"] = f"{type(exc).__name__}: {exc}"[:120]
+        finally:
+            dc._stream_session = _prev_session
 
         ok, evidence = _media_seen(session, frames["n"], out)
         result.update(evidence)
@@ -423,7 +472,7 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
                       "(a camera holds its viewer slot ~120s)")
             await asyncio.sleep(wait)
         print(f"    attempt {i}/{max_attempts}...")
-        res = await _attempt(dc, args.hold, args.out_dir, i)
+        res = await _attempt(dc, args.hold, args.out_dir, i, device)
         entry["attempts"].append(res)
         # This device may now be holding a viewer slot, so record when it may
         # next be opened. Every exit from this loop passes through here,

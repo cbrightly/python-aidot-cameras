@@ -60,7 +60,7 @@ def _patch_attempts(lv, monkeypatch, verdicts):
     """Feed ``_validate_camera`` canned per-device verdicts, no cameras needed."""
     queues = {dev: list(vs) for dev, vs in verdicts.items()}
 
-    async def _fake_attempt(dc, hold, out_dir, attempt):
+    async def _fake_attempt(dc, hold, out_dir, attempt, device=None):
         queue = queues[dc.device_id]
         return {"attempt": attempt, "verdict": queue.pop(0)}
 

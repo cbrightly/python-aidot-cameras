@@ -102,9 +102,25 @@ def test_talk_supported_reflects_talk_state():
 
 
 def test_start_talk_sets_want_speaker_and_provider():
+    # A bridge stand-in is required: this used to assert True with nothing on the
+    # other end, which is how the SDES talk path came to report success for a
+    # SPEAKERSTART it had never sent.  What the state machine owes the caller is
+    # want_speaker + provider armed for the bridge to act on; whether the answer
+    # is True is decided by the bridge actually opening the speaker, and that
+    # contract lives in test_talk_reports_a_speaker_that_never_opened.py.
     ts = _fresh_talk_state()
     s = _make_sdes(ts)
     prov = lambda: None
+
+    def _bridge():
+        for _ in range(400):
+            if ts.get("want_speaker"):
+                time.sleep(0.05)
+                ts["speaker_on"] = True
+                return
+            time.sleep(0.005)
+
+    threading.Thread(target=_bridge, daemon=True).start()
     assert asyncio.run(s.async_start_talk(prov)) is True
     assert ts["want_speaker"] is True
     assert ts["provider"] is prov

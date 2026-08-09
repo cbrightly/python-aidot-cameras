@@ -381,6 +381,16 @@ Two residuals, stated rather than fixed:
   "sent".** `_avio_cmd` returned False and nothing left the host. It is a log
   wording issue on a path whose return value is unaffected, and changing it was
   out of scope here; recorded so it is a decision rather than an oversight.
+- **PTZ still reports success for bytes that left the socket, not for a camera
+  that moved.** Added 2026-08-09. On SDES the command goes out through a closure
+  that holds the datagram socket, so `sendto` can succeed after the session it
+  belongs to has been torn down - the send is fire-and-forget by design and
+  there is no acknowledgement to read on the A001064, whose firmware answers 848
+  but not 802. The related two-way audio defect, where the same shape of
+  reasoning produced a False success, is fixed in 1.0.0b2; this one is stated
+  rather than fixed because there is no signal to condition it on. What changed
+  is that the harness no longer asks a closed session, so a PASS at least means
+  a live one.
 
 ### 5. No standard for keeping secrets out of logs
 
@@ -397,6 +407,30 @@ watching before, and "we looked once" is not a standard.
 The bar: **the guard extended beyond `sdes_open`, or a stated reason it does not
 need to be.** The same classes of secret (device passwords, aesKeys, tokens)
 exist elsewhere in the package.
+
+
+### 6. SD-card recordings cannot be retrieved
+
+Added 2026-08-09, found while verifying the features the gate never touched.
+
+`IsSupportPlayback` is not a model capability - it says where a camera's
+recordings live. Measured across the reference fleet:
+
+    A001064, A001513 x2    IsSupportPlayback=1, no SD card   -> cloud
+    A000088 x4             IsSupportPlayback=0, SDcardStatus=1 -> SD card
+
+The library has exactly one retrieval path, `async_open_cloud_playback`, and
+`async_get_cloud_recordings` to list for it. There is no SD-card equivalent. So
+four of the seven cameras on the reference account record continuously to a card
+and **nothing in this package can play any of it back**.
+
+That is a feature gap rather than a defect - nothing regressed, it was never
+built - but the product describes playback without qualifying it by storage, so
+either the capability or the description has to change.
+
+The bar: **implemented, or the docs say which cameras it applies to.** The
+second is cheap and honest; the first needs the vendor's SD retrieval protocol,
+which has not been looked at.
 
 ## Out of scope for 1.0.0
 
