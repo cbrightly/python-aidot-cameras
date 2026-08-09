@@ -4700,9 +4700,23 @@ class _SdesOpenMixin:
                                     if 7 in _psc and 8 in _psc:
                                         _sprop_new = _build_sprop(_psc[7], _psc[8])
                                         if _sprop_new != _load_sprop(self.device_id):
-                                            _save_sprop(self.device_id, _sprop_new)
-                                            _status("bridge: cached sprop-parameter"
+                                            # Gated on the result: two of
+                                            # _save_sprop's three outcomes write
+                                            # nothing, and this is the only line
+                                            # the sprop path ever emits.
+                                            if _save_sprop(self.device_id,
+                                                           _sprop_new):
+                                                _status(
+                                                    "bridge: cached sprop-parameter"
                                                     f"-sets for {self.device_id}")
+                                            else:
+                                                _status(
+                                                    "bridge: parameter sets NOT "
+                                                    f"cached for {self.device_id} "
+                                                    "(camera marked unstable, or "
+                                                    "the cache is unwritable) - "
+                                                    "out-of-band injection stays "
+                                                    "off for it")
                                         _bridge_fn._sprop_done = True
                             # Rebase RTP timestamps to start near 0.  Camera picks a
                             # random starting timestamp (RFC 3550 section 5.1); the 90 kHz
