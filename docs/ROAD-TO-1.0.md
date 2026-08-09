@@ -38,6 +38,11 @@ understand the system and its shape has settled.
   devices were rejecting the shared-home account the CI runner deliberately
   uses. No library defect existed. See the READMEs.
 
+- **The coverage holes are decided.** The `liveType=0` / TUTK path is out of
+  scope for 1.0.0 with a stated reason, and the `async_set_resolution` ack read
+  has coverage that joins the setter to a real session on DTLS. Item 4 below
+  keeps its number and records both decisions; it no longer gates anything.
+
 ## Open
 
 ### 1. The discovery rate is still high
@@ -138,16 +143,93 @@ a host candidate it cannot reach. The loop was stopped in 0.17.1 - a battery
 camera's keepalive now gives up after five futile sessions - but stopping the
 loop is not fixing the cause, and the give-up explicitly does not claim to.
 
-### 4. Coverage holes
+### 4. Coverage holes - closed 2026-08-08
 
-- The `liveType=0` / TUTK path is researched but deferred and untested - see
-  [DEFERRED_FEATURES.md](DEFERRED_FEATURES.md).
-- `async_set_resolution`'s acknowledgement read is now exercised live: a
-  2026-08-07 sweep sent all six `AVIOCTRL_QUALITY` values to an A001064 over
-  twelve sessions and read every reply, acks landing in 0.01-0.19 s. The
-  remaining gap is the DTLS models, where the read has unit tests only.
+The bar was: **tested, or explicitly out of scope for 1.0** and said so here.
+Both holes are decided below, so this item is closed. It keeps its number
+because the working notes refer to it by number.
 
-The bar: **tested, or explicitly out of scope for 1.0** and said so here.
+#### The `liveType=0` / TUTK path: out of scope for 1.0.0
+
+Not "we ran out of time". The path cannot be entered, and the part of it that
+could be tested is not the part that is uncertain:
+
+- **No device can reach it.** `async_open_live_stream` needs a TUTK UID. Every
+  camera queried reports `liveType=2` with no `p2pId` field, and none of the
+  three sources `async_get_p2p_uid` tries has ever returned one (the smarthome
+  `getP2pId` endpoint answers 200 with a null body). So the call refuses at its
+  first guard. See [DEFERRED_FEATURES.md](DEFERRED_FEATURES.md) for the fleet
+  query.
+- **What is past the guard is a foreign SDK.** `TutkStreamSession._start_sync`
+  is ctypes against `libIOTCAPIs.so` and `libAVAPIs.so`, which this package does
+  not ship, has never loaded, and cannot obtain. A test would have to mock every
+  one of those C entry points, which asserts our reading of the SDK rather than
+  the SDK - and the whole reason this is deferred is that the reading is
+  unvalidated. Passing tests there would make the path look supported.
+- **The interesting code is not even in the tree.** The four improvements the
+  deferral is about (license key, session-alive timeout, `CONNECTION_CHECK_REQ`,
+  the 24-byte `IPCAM_START`) were reverted; only the base scaffolding remains.
+- **Nothing calls it.** The Home Assistant integration opens streams through
+  `async_open_webrtc_stream`; `async_open_live_stream` is reachable only by a
+  consumer who goes looking for it.
+
+What *is* reachable is the refusal, and that now has a test:
+`tests/test_tutk_path_is_out_of_reach.py` asserts that a WebRTC camera - DTLS
+and SDES alike - never constructs a `TutkStreamSession`, and that the error
+names `async_open_webrtc_stream` as the call to use. It asserts non-construction
+rather than the `None` return on purpose: with the guard deleted the call still
+returns `None`, because loading the absent native libraries fails and the
+failure is swallowed, so a test on the return value alone passes against the
+broken code.
+
+Re-activating this needs a `liveType=0` camera in hand. At that point the tests
+to write are integration tests against a device, not mocks written in advance.
+
+#### The `async_set_resolution` ack read: DTLS was misdescribed here
+
+The line this section used to carry - "the remaining gap is the DTLS models,
+where the read has unit tests only" - was wrong, and two places in this repo
+already said so. DTLS was the **first** transport the read was confirmed on:
+
+- `CHANGELOG.md` 0.16.0: "An A000088 over DTLS answers SPEAKERSTART (848) with
+  851 in 0.38 s, **SETSTREAMCTRL (800) with 801 in 0.01 s**, and GETSTREAMCTRL
+  (802) with 803."
+- [APP-PARITY-STATUS.md](APP-PARITY-STATUS.md), measured 2026-08-07 with
+  `scripts/avio_probe.py`: 801 comes back in 0.01-0.03 s on an A000088, and 802
+  reads the value back - 5 at session start, 5 after `sd`, **1 after `hd`**.
+
+A read-back that changes with what was set is stronger evidence than an ack
+alone, and it is on the DTLS model. The A001064 sweep extended the result to
+SDES and to every value; it did not fill a DTLS hole, because there was not one.
+
+**The real gap was in the tests, and it was a different gap.** Every existing
+test of this call stubs `async_avio_request` (`test_resolution_persists.py`,
+`test_control_verdicts.py`), and every existing test of the transport calls
+`async_avio_request` directly with a payload of its own
+(`test_avio_request.py`). Nothing joined the two: no test asserted that the
+bytes the setter builds are the bytes a real `WebRTCSession` puts on the
+DataChannel, or that a reply arriving at that session's receive entry point is
+the one the setter reads. `tests/test_dtls_resolution_ack.py` closes that with
+a real session, the real router and frames in the camera's header layout,
+reached through `async_set_resolution`: the frame on the wire decodes as 800
+with the quality byte where the camera looks for it; a 801 is read and reported;
+an answer that arrives inside `dc.send` is still heard; silence is not dressed
+up as an ack and leaves no registration behind; an unprompted 804 is not
+mistaken for the reply; and a session whose DataChannel is not open returns
+promptly instead of holding a service call for the ack budget.
+
+Two residuals, stated rather than fixed:
+
+- **The DataChannel message handlers themselves are not unit-tested.** They are
+  closures inside the WebRTC open sequence, and extracting them to a testable
+  helper is a change to a shipped path that this work is not the occasion for.
+  They are not unexercised, though: the same router and the same handlers carry
+  talk's SPEAKERSTART/851 ack, measured 0.01-0.38 s on an A000088, on every
+  session where anyone presses to talk.
+- **When the DataChannel is not open, the "no ack" log line still says
+  "sent".** `_avio_cmd` returned False and nothing left the host. It is a log
+  wording issue on a path whose return value is unaffected, and changing it was
+  out of scope here; recorded so it is a decision rather than an oversight.
 
 ### 5. No standard for keeping secrets out of logs
 
