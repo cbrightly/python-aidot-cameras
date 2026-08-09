@@ -156,6 +156,119 @@ a host candidate it cannot reach. The loop was stopped in 0.17.1 - a battery
 camera's keepalive now gives up after five futile sessions - but stopping the
 loop is not fixing the cause, and the give-up explicitly does not claim to.
 
+#### 2026-08-08 (later): the per-session gate is found
+
+Half the bar is met. **Why any one of these sessions delivers nothing is now
+confirmed. Why it repeated 22 times in a row is not.** Both halves are stated
+below; do not read the first as covering the second.
+
+Evidence: the raw logs of five fleet validation runs (31275220411, 31279366049,
+31281147686, 31282396141, 31283603368), 17 SDES opens, all of them after the
+harness started configuring logging, so the library's INFO breadcrumbs are
+present for the first time. A sixth run, 31273232752, was read as well and
+contributes no rows: it predates that harness fix, carries zero `webrtc:` lines,
+and every camera passed, L2_F8A3 included.
+
+**The gate.** Media only ever follows the AVIO LIVING trigger
+(`sdes_open.py:3969-4015`, the `SDES: sent trigger` line), and that trigger is
+armed by exactly one thing: an inbound STUN Binding Success Response
+(`_bpkt[:2] == b'\x01\x01'`) from the camera. Its only other term,
+`_use_plain_rtp`, is a model-id constant (`_PLAIN_RTP_MODELS`, true for every
+A001513 and A001064) and is identical on both sides of the split.
+
+    open   camera            nominated candidate      trigger  first media
+    ----   ---------------   ----------------------   -------  -----------
+    x5     A001064 12b144cb  192.168.0.171:<port>     yes      12.2-12.9 s
+    x5     A001513 338603b5  54.144.38.43:<port>      yes      4.7-6.3 s
+    x3     A001513 b5284fc7  54.144.38.43:<port>      yes      5.6-6.4 s
+    x3     A001513 b5284fc7  192.168.100.3:<port>     NO       none
+    x1     A001513 b5284fc7  (no ICE creds in answer) NO       none
+
+13 opens sent the trigger and every one delivered first media. 4 did not and not
+one delivered a byte. 17 of 17, no exception in either direction.
+
+**Why it never arms on this unit.** USE-CANDIDATE goes only to the candidates
+carried in the camera's answer, plus peer-reflexive candidates learned from the
+camera's own probes (`sdes_open.py:3083-3099`, `:3788-3800`). On the three
+host-only opens the answer carried exactly one candidate, `192.168.100.3`, on a
+subnet this host has no route to; the fourth carried no ICE credentials at all.
+Nothing we nominated could answer, so no Binding Success came back, so the
+trigger never fired, so the camera never started sending.
+
+The camera's own probes did arrive - as TURN Data Indications through our
+allocation, 0.5 s after the answer, in both instrumented failures - and were not
+learned. A relay-carried probe reaches `_br_obs` (`:3784`) only through
+`_br_cam_peer`, which is dropped when `_is_self_peer_ip` matches the
+XOR-PEER-ADDRESS; the `_bsrc` fallback is refused because `_bsrc` is the TURN
+server and that equals `_hp_host`. VERIFIED: no `learned peer-reflexive` line in
+any failing open, and the candidate count stays at 1 across all five permission
+installs (`[setup]`, `[trickle host]`, `[trickle srflx]`, `[trickle relay]`,
+`[bridge]`), so the camera sent no later candidates and none were dropped.
+INFERRED, not verified: which of the two vetoes did it. Both are silent.
+
+**Why one unit.** The cloud device records in these runs carry `ssidName`:
+L2_F8A3 is the only camera on the IoT SSID; every other working camera is on the
+main one. This is the mirror image of the disproven relay-only story, not a
+revival of it. That story said *we* advertise a host candidate the camera cannot
+reach. What is measured here is that *the camera* advertises a host candidate
+*we* cannot reach, and nothing else. The relay finding still stands: when this
+camera's answer does carry its own relay candidate it streams over the relay,
+3 of 3 here, first media 5.6-6.4 s. So the remedy is not "move it to the main
+SSID" - it is to make the relay path usable when the answer is host-only.
+
+**Why a mains camera hit it once and recovered.** Same mechanism, already on
+record in this codebase: `_record_peer_reflexive`'s own docstring
+(`sdes_open.py:737-756`) notes the A001064 PTZ advertising `192.168.100.13` as
+its only candidate while it sat on that same subnet. That is what peer-reflexive
+learning was added for. The PTZ now reports `192.168.0.171` and passes 5 of 5
+here, and the learning covers the direct-probe case - just not the relay-carried
+one, which is the only path this battery unit has.
+
+**Why the 63-second empty band.** The trigger arms within about a second of the
+answer or never. The mechanism has no slow-success state to land in.
+
+**What is NOT established, and it is the rest of the question.** This explains a
+failing session; it does not explain 22 consecutive ones. The same unit streamed
+on 3 of its 7 opens in this corpus (4 of 8 counting the uninstrumented run) and
+on 11 of 26 in the 2026-08-07 sweep. At that rate 22 in a row is on the order of
+one in a hundred thousand, so the eight-hour loop needs either a
+persistent camera-side state (no relay allocation at all for that window) or a
+loop that sustains its own failure. Nothing here decides between them. Note also
+that the eight-hour signature above (`[rtsp] dimensions not set`, exit 234) comes
+from a Home Assistant log that is not in hand; this corpus shows the same
+upstream cause through the file muxer (`[mpegts] frame size not set`, exit 255).
+Consistent with, not verified identical to.
+
+**Open sub-question that gates any fix.** A Data Indication reached us while the
+only permission installed was for `192.168.100.3`. Either the cloud TURN server
+does not enforce inbound permissions - in which case a Send-Indication return
+path to the camera's observed address is viable - or the model of the failing
+case is incomplete.
+
+**No fix shipped, deliberately.** The change the mechanism points at - learn the
+relay-observed peer address, install a permission for it, nominate it through a
+Send Indication - sits on the ICE nomination path that all 13 working opens use,
+and its safety turns on telling "the camera behind our own NAT" apart from "our
+own mapped address", which is precisely what `_is_self_peer_ip` exists to
+prevent. Nominating our own address would have us answer our own check and fire
+the trigger at ourselves. That cannot be validated without a camera.
+
+**The smallest experiment, and it settles both open points in one run.** Make
+the stall self-reporting: at the first-media wait expiry (`sdes_open.py:4689`)
+log at WARNING how many candidates were nominated and their addresses, whether
+any Binding Success was ever received, whether the trigger was sent, and the
+source of every inbound probe. Two of those facts are computed today and thrown
+away - `bridge: drop TURN self-loop STUN peer` (`:3858`) is DEBUG and the
+`_bsrc == _hp_host` refusal (`:3785`) logs nothing at all. `_tutk_trigger_sent`
+and `_br_stun_resp_count` are bridge-thread locals; publish them on `_bridge_fn`
+the way `_sprop_done` already is. One validation run then answers which veto is
+the blocker and whether a host-only answer is a transient or a state the camera
+holds for hours.
+
+**The kill, stated before the sweep and not triggered by any of the 17 opens:**
+an open that logs `SDES: sent trigger` and delivers no media, or one that
+delivers media without it.
+
 ### 4. Coverage holes - closed 2026-08-08
 
 The bar was: **tested, or explicitly out of scope for 1.0** and said so here.
