@@ -6,6 +6,36 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b2]
+
+Pre-release. `1.0.0b1` was tagged but never published to PyPI; this supersedes
+it and is the first 1.0.0 pre-release to ship.
+
+### Fixed
+
+- **Two-way audio reported success for a speaker that never opened.** On the
+  SDES path `async_start_talk` returned True whenever the acknowledgement wait
+  expired, because the shared ack reader treats an absent or unfamiliar ack as
+  acceptance. That generosity exists to interpret the camera's ANSWER - no
+  genuine refusal has ever been identified, and guessing at one would break
+  working cameras - and it has nothing to say about the command never being sent
+  at all. The speaker flag is set on exactly one line, immediately after the
+  bridge thread dispatches SPEAKERSTART, so its absence after the wait means our
+  own bridge never sent it, which is what happens once ffmpeg has exited: a
+  stall, a camera drop, the abandon ceiling. Both the ack and the flag are now
+  required.
+
+  `talk_supported` had the same shape of error and is fixed with it. It answered
+  from the talk-state dictionary, which outlives ffmpeg, while the bridge thread
+  and the pump's socket do not - so `async_speak` reused a session that could no
+  longer carry talk instead of opening a fresh one, and the integration's talk
+  service returned success on silence. It now requires the session to still be
+  running.
+
+  Measured on the fleet: three SDES cameras returned True and never pulled a
+  single audio frame, and the run log contains no SPEAKERSTART line at all. The
+  DTLS path shares the ack reader and its behaviour does not change.
+
 ### Added
 
 - **`AIDOT_SDES_VIDEO_PT_ORDER` sets the video codec preference order in the
@@ -48,6 +78,23 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   Untested on hardware. Whether the camera acts on m-line order is exactly the
   open question, and the default is deliberately left alone until a run answers
   it.
+
+### Internal
+
+- The release harness exercises snapshot, PTZ, two-way audio, thumbnails and
+  cloud recordings against real hardware. Nothing had ever verified any of them;
+  the gate only ever answered whether video arrives and decodes. Four outcomes
+  are kept apart on purpose - unsupported, not run, passed, failed - because
+  collapsing any two of them is the defect this project has now corrected
+  repeatedly. `IsSupportPlayback` is the live example: it says where a camera's
+  recordings live rather than whether it can record, so cloud playback is
+  UNSUPPORTED on the models that store to SD, not broken.
+
+- The probes that ride an open session now run while one is open. The recording
+  window ended before the probes began, so all of them ran against a closed
+  session - which is how a working two-way audio path came to be reported as
+  three cameras failing. A closed session now reports NOT_RUN and names itself,
+  rather than being scored against the camera.
 
 ## [1.0.0b1]
 
