@@ -159,20 +159,28 @@ async def _probe_snapshot(dc, timeout: float, out_dir: str = "/tmp"
 
 
 async def _probe_ptz(dc, timeout: float) -> tuple[bool, bool, Optional[str]]:
-    """Nudge and stop. A move with no stop would leave the head travelling."""
+    """Nudge and stop, and require every command to be accepted.
+
+    A move with no stop would leave the head travelling, so each nudge is
+    followed by one. The return values are what decides: ``async_ptz_move``
+    does NOT raise when it cannot send - with no active stream session it logs a
+    warning, returns False and nothing leaves the host. Catching only exceptions
+    therefore scored four refused commands as a pass, which is how PTZ came to
+    be reported working on hardware it had never reached.
+    """
     move = getattr(dc, "async_ptz_move", None)
     stop = getattr(dc, "async_ptz_stop", None)
     if move is None or stop is None:
         return False, False, "no ptz methods"
+    refused = []
     try:
-        await asyncio.wait_for(move("right"), timeout)
-        await asyncio.sleep(0.4)
-        await asyncio.wait_for(stop(), timeout)
-        await asyncio.sleep(0.4)
-        await asyncio.wait_for(move("left"), timeout)
-        await asyncio.sleep(0.4)
-        await asyncio.wait_for(stop(), timeout)
-        return True, True, None
+        for label, call in (("move right", lambda: move("right")),
+                            ("stop", lambda: stop()),
+                            ("move left", lambda: move("left")),
+                            ("stop", lambda: stop())):
+            if await asyncio.wait_for(call(), timeout) is False:
+                refused.append(label)
+            await asyncio.sleep(0.4)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -181,6 +189,11 @@ async def _probe_ptz(dc, timeout: float) -> tuple[bool, bool, Optional[str]]:
         except Exception:
             pass
         return True, False, f"{type(exc).__name__}: {exc}"[:120]
+    if refused:
+        return True, False, (
+            f"camera refused {len(refused)}/4 commands ({', '.join(refused)}) "
+            f"- the call returned False and sent nothing")
+    return True, True, None
 
 
 async def _probe_talk(session, timeout: float, hold: float = 6.0

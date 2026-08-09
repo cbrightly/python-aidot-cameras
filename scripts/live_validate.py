@@ -388,10 +388,25 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int,
         # shipped under - a measurement that has never run against this fleet is
         # not one to start blocking releases with. Runs while the session is
         # still open, because snapshot and talk need one.
+        #
+        # PTZ and the resolution setter reach their session through
+        # `dc._stream_session`, which the library sets from its keepalive,
+        # streaming and serve loops - the paths Home Assistant goes through -
+        # and NOT from a bare async_open_webrtc_stream, which is what this
+        # harness calls. Left unset, every PTZ command returned False with "no
+        # active stream session" and sent nothing; the probe used to score that
+        # as a pass, so PTZ had never once been exercised on hardware. Standing
+        # in for the loop that would own it is the only way to measure the real
+        # call path, and it is restored immediately afterwards so nothing else
+        # inherits a session this function is about to close.
+        _prev_session = getattr(dc, "_stream_session", None)
         try:
+            dc._stream_session = session
             result["features"] = await probe_features(dc, device or {}, session)
         except Exception as exc:
             result["features_error"] = f"{type(exc).__name__}: {exc}"[:120]
+        finally:
+            dc._stream_session = _prev_session
 
         ok, evidence = _media_seen(session, frames["n"], out)
         result.update(evidence)
