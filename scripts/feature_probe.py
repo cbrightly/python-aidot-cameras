@@ -85,6 +85,20 @@ def _pcm_provider(frames: int = 25):
     return provider, sent
 
 
+def _snapshot_budget(device: dict, base: float) -> float:
+    """SDES snapshot needs far longer than DTLS, and the paths differ by design.
+
+    Per the library's own docstring: a DTLS camera waits for the first keyframe
+    via on_frame, while an SDES camera streams ~5 s to a temp file and then
+    shells out to ffmpeg to extract a JPEG. A single budget cannot serve both -
+    the first fleet run at 10 s passed all three DTLS cameras and timed out both
+    SDES ones, which was the budget being wrong rather than the feature.
+    """
+    if _model(device) and not any(m in _model(device) for m in ("A000088",)):
+        return max(base, 25.0)
+    return base
+
+
 async def _probe_snapshot(dc, timeout: float, out_dir: str = "/tmp"
                           ) -> tuple[bool, bool, Optional[str]]:
     """Capture a still and require a non-trivial file on disk.
@@ -228,7 +242,8 @@ async def probe_features(device_client, device: dict, session=None,
 
     sup = getattr(device_client, "async_snapshot", None) is not None
     if sup and session is not None:
-        a, ok, err = await _probe_snapshot(device_client, timeout, out_dir)
+        a, ok, err = await _probe_snapshot(
+                device_client, _snapshot_budget(device, timeout), out_dir)
     else:
         a, ok, err = False, False, None if sup else "unsupported"
     out["snapshot"] = _verdict(sup, a, ok, err)
