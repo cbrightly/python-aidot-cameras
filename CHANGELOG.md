@@ -96,6 +96,14 @@ it and is the first 1.0.0 pre-release to ship.
   three cameras failing. A closed session now reports NOT_RUN and names itself,
   rather than being scored against the camera.
 
+- PTZ is scored on what the call returns. `async_ptz_move` does not raise when
+  it cannot send - it logs, returns False and nothing leaves the host - and the
+  probe caught only exceptions, so a run reported PTZ passing while its own log
+  carried a refusal for every command. The harness also now registers the open
+  session where the library's control paths look for it, which the loops Home
+  Assistant goes through do and a bare stream open does not. Between them these
+  mean the first real PTZ measurement on hardware is the one after this.
+
 ## [1.0.0b1]
 
 The first pre-release of 1.0.0. **It does not assert that the 1.0.0 bar is met** -
