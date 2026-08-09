@@ -98,6 +98,19 @@ hevc profile appears only when both codecs are offered; what selects it is still
 unknown, which is why the negotiated profile is now logged at INFO on every
 session.
 
+**2026-08-08, later: the corpus exists now, and the first sample is in.** Run
+`31285146195` produced three profile lines - one per SDES camera - where every
+previous run produced zero:
+
+    12b144cb12da (A001064)   video profile pt=96 codec=H264
+    338603b50fce (A001513)   video profile pt=96 codec=H264
+    b5284fc70d1e (A001513)   video profile pt=96 codec=H264
+
+Three of three chose H264. No hevc instance appeared, so this run cannot answer
+what selects it - the question needs a corpus large enough to contain both
+outcomes for the same camera. Collection is proven to work; the campaign has not
+been run. That is the honest state, and it is a different state from "blocked".
+
 **2026-08-08: that logging was never reaching anyone.** The validation harness
 did not configure logging, so the root logger fell back to WARNING-and-above and
 every one of those INFO lines was discarded - four runs after the instrumentation

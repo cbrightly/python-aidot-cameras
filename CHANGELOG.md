@@ -4,6 +4,53 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [1.0.0b1]
+
+The first pre-release of 1.0.0. **It does not assert that the 1.0.0 bar is met** -
+see `docs/ROAD-TO-1.0.md`, which names what is still open. It asserts that this
+is the shape 1.0.0 is intended to have.
+
+### Fixed
+
+- **A cloud response that can carry per-device credentials was logged whole.**
+  `batchGetDeviceUserInfo` was printed in full, at WARNING on one of its two
+  sites, so it reached every install's log rather than only debug ones. That
+  response can carry `tutkAccount` and `tutkPassword`. It now logs the response's
+  KEYS and a count, matching the adjacent branch, which had been doing it
+  correctly all along.
+
+- **A camera the cloud reports offline is no longer opened.** The integration
+  guarded three doors against this and not the fourth - `stream_source`, which is
+  the go2rtc lazy-pull path. A camera that has been off for weeks was still
+  taking 45 seconds of the library's global open gate on every attempt, delaying
+  every other camera's cold start. The check fails open, and sits where a wrongly
+  stale flag can cost a cold open but can never take away a working live view.
+
+- **The parameter-set cache no longer reports writes it did not make.** Two of
+  the three outcomes in that path write nothing, and the announcement did not
+  distinguish them - so a camera whose injection is permanently disabled logged a
+  successful cache write on every session. It is the only observable that path
+  has, and it sent an investigation looking for a cache that could not exist.
+
+### Changed
+
+- The secrets-in-logs guard now covers the whole package rather than one module,
+  with device passwords, aesKeys, tokens and MQTT credentials added to what it
+  refuses to see printed. It reports honestly on what it still cannot catch: a
+  secret inside a container that is not itself named like a secret, subprocess
+  output, and a rename into a local.
+
+### Internal
+
+- The `liveType=0` / TUTK path is **declared out of scope for 1.0.0**, with
+  reasons, rather than left silent: no device can enter it, and everything past
+  its guard is ctypes into libraries this package does not ship. The one
+  reachable behaviour - the refusal - is now tested.
+- The resolution acknowledgement read is covered end to end on DTLS over a real
+  session and router. The bar had described this hole as "unit tests only on
+  DTLS"; that was wrong, and the repo's own changelog and parity notes said so.
+  The real gap was that nothing joined the setter to a session.
+
 ## [0.17.3b2]
 
 Pre-release. Closes the audit backlog opened on 2026-08-07, and corrects two
