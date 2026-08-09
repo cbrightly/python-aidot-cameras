@@ -172,19 +172,37 @@ async def _probe_ptz(dc, timeout: float) -> tuple[bool, bool, Optional[str]]:
         return True, False, f"{type(exc).__name__}: {exc}"[:120]
 
 
-async def _probe_talk(session, timeout: float) -> tuple[bool, bool, Optional[str]]:
+async def _probe_talk(session, timeout: float, hold: float = 6.0
+                     ) -> tuple[bool, bool, Optional[str]]:
+    """Speak silence and require that our provider was actually polled.
+
+    The hold is 6 s, not 1 s. On the SDES path `async_start_talk` returns as
+    soon as the camera ACKs SPEAKERSTART (848 -> 851), but the pump that polls
+    the provider runs on its own thread and, per its docstring, "waits until the
+    camera audio address" is filled in by the bridge on first INBOUND audio. A
+    one-second hold stopped it before that address existed, so every SDES camera
+    reported "no PCM frames pulled" for a talk path that was working - the probe
+    hanging up before the callee picked up.
+
+    Passing on the ack alone would hide the opposite failure, so the pull is
+    still what decides: the ack is the camera's, the pull is ours.
+    """
     start = getattr(session, "async_start_talk", None)
     stop = getattr(session, "async_stop_talk", None)
     if start is None or stop is None:
         return False, False, "no talk methods"
-    provider, sent = _pcm_provider()
+    provider, sent = _pcm_provider(frames=400)
     try:
         await asyncio.wait_for(start(provider), timeout)
-        await asyncio.sleep(1.0)
+        for _ in range(int(hold / 0.25)):
+            await asyncio.sleep(0.25)
+            if sent["n"]:
+                break   # proven; no reason to keep the speaker open
         await asyncio.wait_for(stop(), timeout)
         # A talk path that accepted the call but never pulled a frame has not
         # been shown to work - the ack is the camera's, the pull is ours.
-        return True, sent["n"] > 0, None if sent["n"] else "no PCM frames pulled"
+        return True, sent["n"] > 0, (
+            None if sent["n"] else f"no PCM frames pulled in {hold:.0f}s")
     except asyncio.CancelledError:
         raise
     except Exception as exc:
