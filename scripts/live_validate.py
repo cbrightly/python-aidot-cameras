@@ -52,6 +52,9 @@ from aidot_cameras.client import AidotClient
 from aidot_cameras.const import CONF_DEVICE_LIST, CONF_ID, CONF_NAME
 from aidot_cameras.credentials import load_credentials
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from feature_probe import probe_features
+
 # Models validated end-to-end on the reference account: these GATE the release.
 REQUIRED_MODELS = ("A000088", "A001513", "A001064")
 # Recognized in code but never validated on hardware: reported, never gating.
@@ -322,7 +325,8 @@ def _recording_path(out_dir: str, device_id: str, attempt: int) -> str:
     return out
 
 
-async def _attempt(dc, hold: float, out_dir: str, attempt: int) -> dict:
+async def _attempt(dc, hold: float, out_dir: str, attempt: int,
+                   device: dict | None = None) -> dict:
     """One streaming attempt. Never raises; classifies the outcome."""
     from aidot_cameras.exceptions import AidotCameraBusy
 
@@ -358,6 +362,15 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int) -> dict:
                 ]
             except Exception as exc:
                 result["stats_error"] = str(exc)
+
+        # Advisory: reported, never gating. The same reasoning the decode probe
+        # shipped under - a measurement that has never run against this fleet is
+        # not one to start blocking releases with. Runs while the session is
+        # still open, because snapshot and talk need one.
+        try:
+            result["features"] = await probe_features(dc, device or {}, session)
+        except Exception as exc:
+            result["features_error"] = f"{type(exc).__name__}: {exc}"[:120]
 
         ok, evidence = _media_seen(session, frames["n"], out)
         result.update(evidence)
@@ -423,7 +436,7 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
                       "(a camera holds its viewer slot ~120s)")
             await asyncio.sleep(wait)
         print(f"    attempt {i}/{max_attempts}...")
-        res = await _attempt(dc, args.hold, args.out_dir, i)
+        res = await _attempt(dc, args.hold, args.out_dir, i, device)
         entry["attempts"].append(res)
         # This device may now be holding a viewer slot, so record when it may
         # next be opened. Every exit from this loop passes through here,
