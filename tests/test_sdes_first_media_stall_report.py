@@ -245,14 +245,56 @@ def test_the_stall_path_calls_the_report_helper_at_warning():
 
 
 def test_the_report_is_gated_on_the_wait_actually_having_failed():
-    """A working open must emit nothing new above DEBUG."""
+    """A working open must emit nothing new above DEBUG.
+
+    Anchored on the dedented ``if``, not the bare substring: the ``while``
+    condition above contains the same text, so a substring search would pass
+    with the guard deleted.
+    """
     block = _first_media_wait_block()
     call = block.index("_first_media_stall_report(")
-    guard = block.rindex("_first_video_pt[0] is None", 0, call)
+    guard = block.rindex("\n        if _first_video_pt[0] is None:", 0, call)
     assert guard < call, (
         "the stall report must be gated on the first-media wait's own unmet "
         "exit condition, or every healthy open emits a WARNING"
     )
+
+
+def test_the_report_sees_the_candidates_the_answer_peek_path_nominated():
+    """The failing shape's own nomination path does not touch _bridge_uc_info.
+
+    On a late answer -- item 3's measured shape, answer at +1.3s, missing the
+    pre-launch snapshot -- it is `_nominate_from_answer_sdp` inside the wait
+    that nominates, and it neither appends to `_bridge_uc_info["cands"]` nor
+    flips `["sent"]`. Sourcing the report from that dict alone would print
+    `nominated=none; use-candidate=not-sent` on an open that DID nominate, and
+    collapse the "answer carried no ICE credentials" row into the "answer
+    carried one unroutable candidate" row -- two different diagnoses.
+    """
+    src = inspect.getsource(sdes_open)
+    start = src.index("def _nominate_from_answer_sdp(")
+    end = src.index("return len(_cands)", start)
+    assert "_nominated_seen" in src[start:end], (
+        "_nominate_from_answer_sdp nominates without recording what it "
+        "nominated, so the stall report cannot see it"
+    )
+    assert "_nominated_seen" in _first_media_wait_block(), (
+        "the stall report does not read the answer-peek path's nominations"
+    )
+
+
+def test_the_dropped_probe_count_is_distinct_sources_not_packets():
+    """One unrecorded source probing 50 times is one source, not 50.
+
+    A per-packet counter renders as '(+50 more source(s))' and someone will
+    reason from that number.
+    """
+    src = inspect.getsource(sdes_open)
+    assert "_br_probe_overflow.add(" in src, (
+        "the overflow tracker must collect distinct probe-source labels; a "
+        "bare += counts packets and reports a wrong number"
+    )
+    assert "_br_probe_overflow += 1" not in src
 
 
 def test_the_bridge_publishes_the_trigger_flag_and_the_binding_success_count():

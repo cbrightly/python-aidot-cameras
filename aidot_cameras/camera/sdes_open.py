@@ -2966,6 +2966,17 @@ class _SdesOpenMixin:
             if not _is_self_peer_ip(cam_addr[0]):
                 _turn_send_indication(sock, cam_addr[0], cam_addr[1], _req)
 
+        # Every candidate this session actually sent USE-CANDIDATE to, in the
+        # order it was nominated.  Instrumentation only, and it exists because
+        # _bridge_uc_info cannot answer the question on the shape that stalls:
+        # on a late answer - measured at +1.3 s, missing the pre-launch snapshot
+        # - it is _nominate_from_answer_sdp below that nominates, and it neither
+        # appends to _bridge_uc_info["cands"] nor flips ["sent"].  Reporting the
+        # stall from that dict alone would print "nominated=none" on an open
+        # that did nominate, and make "the answer carried no ICE credentials"
+        # indistinguishable from "the answer carried one unroutable candidate".
+        _nominated_seen: list = []
+
         def _nominate_from_answer_sdp(sdp_text) -> int:
             """Nominate every candidate in ``sdp_text``; return how many.
 
@@ -3005,6 +3016,8 @@ class _SdesOpenMixin:
                     _audio_sock, _ufrag_a, _pwd_a, _u, _p, (_c_ip, _c_port))
                 _send_use_candidate(
                     _video_sock, _ufrag_v, _pwd_v, _u, _p, (_c_ip, _c_port))
+                if (_c_ip, _c_port) not in _nominated_seen:
+                    _nominated_seen.append((_c_ip, _c_port))
             return len(_cands)
 
         # Open the TURN relay's door for the camera BEFORE probing it.
@@ -3402,7 +3415,10 @@ class _SdesOpenMixin:
             # here is read by the bridge itself; they only ever describe.
             _br_binding_success_count = 0   # inbound STUN Binding Success (0x0101)
             _br_probe_verdicts: dict = {}   # probe source -> why it was/wasn't learned
-            _br_probe_overflow = 0          # sources past _MAX_PROBE_SOURCES
+            # A SET, not a counter: one unrecorded source probing fifty times
+            # is one source, and a per-packet count would put a wrong number in
+            # the report for someone to reason from.
+            _br_probe_overflow: set = set()  # sources past _MAX_PROBE_SOURCES
             _bridge_fn._tutk_trigger_sent = False
             _bridge_fn._br_stun_resp_count = 0
             _bridge_fn._br_binding_success_count = 0
@@ -3929,8 +3945,8 @@ class _SdesOpenMixin:
                                 if _br_pv_where in _br_probe_verdicts:
                                     pass
                                 elif len(_br_probe_verdicts) >= _MAX_PROBE_SOURCES:
-                                    _br_probe_overflow += 1
-                                    _bridge_fn._br_probe_overflow = (
+                                    _br_probe_overflow.add(_br_pv_where)
+                                    _bridge_fn._br_probe_overflow = len(
                                         _br_probe_overflow)
                                 else:
                                     _br_probe_verdicts[_br_pv_where] = (
@@ -5236,14 +5252,22 @@ class _SdesOpenMixin:
                 _stall_probes = list(
                     (getattr(_bridge_fn, "_br_probe_verdicts", None) or {}).items()
                 )
+                # Union of every nomination source, deduped and order-preserving:
+                # the answer-peek path records into _nominated_seen, the setup /
+                # trickle / late-answer paths into _bridge_uc_info, and the
+                # bridge's peer-reflexive learning into ["prflx"].  Any one of
+                # them alone under-reports on some shape.
+                _stall_nominated: list = []
+                for _sn in (*_nominated_seen, *_bridge_uc_info["cands"],
+                            *_bridge_uc_info["prflx"]):
+                    if _sn not in _stall_nominated:
+                        _stall_nominated.append(_sn)
                 _LOGGER.warning("%s", _first_media_stall_report(
                     device_id=getattr(self, "device_id", "?"),
                     waited_s=_FIRST_MEDIA_WAIT_S,
-                    nominated=[
-                        *_bridge_uc_info["cands"],
-                        *_bridge_uc_info["prflx"],
-                    ],
-                    use_candidate_sent=bool(_bridge_uc_info["sent"]),
+                    nominated=_stall_nominated,
+                    use_candidate_sent=bool(
+                        _bridge_uc_info["sent"] or _nominated_seen),
                     binding_success=int(
                         getattr(_bridge_fn, "_br_binding_success_count", 0)),
                     trigger_sent=bool(
