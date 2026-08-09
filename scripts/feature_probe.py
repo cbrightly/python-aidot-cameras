@@ -16,6 +16,7 @@ truth.
 """
 
 import asyncio
+import os
 import time
 from typing import Any, Optional
 
@@ -84,17 +85,39 @@ def _pcm_provider(frames: int = 25):
     return provider, sent
 
 
-async def _probe_snapshot(dc, timeout: float) -> tuple[bool, bool, Optional[str]]:
+async def _probe_snapshot(dc, timeout: float, out_dir: str = "/tmp"
+                          ) -> tuple[bool, bool, Optional[str]]:
+    """Capture a still and require a non-trivial file on disk.
+
+    ``async_snapshot(output_path, timeout=...)`` takes a destination - the first
+    version of this probe called it with no arguments and every camera reported
+    FAIL with a TypeError. The bool it returns is the library's own claim; the
+    file size is the independent check, and this asserts both. An empty or
+    tiny file with a True return would be the same "bytes of the right shape"
+    hole the decode gate exists to close.
+    """
     fn = getattr(dc, "async_snapshot", None)
     if fn is None:
         return False, False, "no async_snapshot"
+    dev = getattr(dc, "device_id", "cam") or "cam"
+    path = os.path.join(out_dir, f"probe_snap_{str(dev)[:8]}.jpg")
     try:
-        res = await asyncio.wait_for(fn(), timeout)
-        return True, bool(res), None
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+    try:
+        res = await asyncio.wait_for(fn(path, timeout=timeout), timeout + 10)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         return True, False, f"{type(exc).__name__}: {exc}"[:120]
+    size = os.path.getsize(path) if os.path.exists(path) else 0
+    if not res:
+        return True, False, f"returned False (file {size}B)"
+    if size < 1024:
+        return True, False, f"claimed success but wrote {size}B"
+    return True, True, None
 
 
 async def _probe_ptz(dc, timeout: float) -> tuple[bool, bool, Optional[str]]:
@@ -146,12 +169,24 @@ async def _probe_talk(session, timeout: float) -> tuple[bool, bool, Optional[str
 
 
 async def _probe_thumbnail(dc, timeout: float) -> tuple[bool, bool, Optional[str]]:
+    """Fetch the latest thumbnail URL.
+
+    Known account sensitivity, measured 2026-08-09: from the OWNING account all
+    six live cameras return a CloudFront URL and the offline one returns None.
+    From the shared-home member the CI runner uses, all six returned nothing -
+    no error, just an empty answer. So a FAIL here on a fleet run may be
+    reporting the runner's account rather than the feature, and that has to be
+    ruled out before it is read as a defect. The error text says which was
+    observed so the two cannot be confused later.
+    """
     fn = getattr(dc, "async_get_latest_thumbnail", None)
     if fn is None:
         return False, False, "no thumbnail method"
     try:
         res = await asyncio.wait_for(fn(), timeout)
-        return True, bool(res), None if res else "no thumbnail returned"
+        return True, bool(res), None if res else (
+            "cloud returned no thumbnail (verify the account before reading "
+            "this as a defect - a shared-home member gets none)")
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -177,18 +212,23 @@ async def _probe_recordings(dc, timeout: float, days: int = 7
 
 
 async def probe_features(device_client, device: dict, session=None,
-                         *, timeout: float = 20.0) -> dict:
+                         *, timeout: float = 10.0, out_dir: str = "/tmp") -> dict:
     """Run every feature probe against one camera. Never raises.
 
     ``session`` is a live stream session where one is open; snapshot and talk
     need it. Without it they report NOT_RUN rather than FAIL, because not
     looking is not the same as looking and finding it broken.
+
+    The default timeout is deliberately 10s, not 20s. Five probes across seven
+    cameras at 20s worst case added ~21 minutes to a ~7 minute fleet run - the
+    first run took 25 minutes. The measured latencies are far below either
+    bound: PTZ acks land in 0.01-0.19s and talk's SPEAKERSTART in 0.01-0.38s.
     """
     out: dict = {}
 
     sup = getattr(device_client, "async_snapshot", None) is not None
     if sup and session is not None:
-        a, ok, err = await _probe_snapshot(device_client, timeout)
+        a, ok, err = await _probe_snapshot(device_client, timeout, out_dir)
     else:
         a, ok, err = False, False, None if sup else "unsupported"
     out["snapshot"] = _verdict(sup, a, ok, err)
