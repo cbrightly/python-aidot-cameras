@@ -88,9 +88,15 @@ Policy, all of it learned on hardware (see `docs/CAMERAS.md`):
   probabilistic (~75-87%), so one miss is not a release blocker. The report
   records how many attempts each camera needed - a drifting attempt count is
   an early warning even when the run is green.
-- **One camera at a time, ~3 min apart.** A camera holds its viewer slot for
-  ~120 s after a session, and rapid reopens cause camera-side flakiness that
-  has nothing to do with the code under test.
+- **One camera at a time, and each camera left alone ~3 min after its own
+  session.** Two different constraints, deliberately kept apart. Opens are
+  strictly sequential because cloud signaling contention is *account-wide* -
+  that is the failure mode behind the historic concurrent-cold-open bug, and
+  nothing in the harness overlaps opens. The ~3 minute cooldown is a different
+  thing: a camera holds its viewer *slot* for ~120 s, so it is owed by the
+  camera that just streamed and waited out only when that same camera is
+  reopened (between attempts, mostly). The next camera in the fleet is a
+  different device whose slot was never taken, so it does not wait.
 - **BUSY is not a pass.** A terminal ack (-50002/-50015) means something else
   is watching - most likely your Home Assistant. It is reported distinctly
   from a media failure, and it still fails the gate. It is also reported
@@ -98,7 +104,11 @@ Policy, all of it learned on hardware (see `docs/CAMERAS.md`):
   first-media wait expired and then spend a pointless DTLS-fallback attempt on
   top, so a contended camera cost most of a minute per attempt.
 
-A full-fleet run takes roughly 15-25 minutes, most of it cooldown.
+A full-fleet run is expected to take under 10 minutes. It used to take 15-25,
+most of it cooldown waited between *different* cameras that owed nothing; the
+per-camera cooldown above removed that. The remaining wall clock is handshakes,
+the hold on each camera, and the retry cooldowns on cameras that needed a
+second attempt. This expectation has not yet been confirmed by a measured run.
 
 ## Runner setup
 

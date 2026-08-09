@@ -13,6 +13,8 @@ import sys
 
 import pytest
 
+from aidot_cameras.const import CONF_ID, CONF_NAME
+
 SCRIPT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "scripts", "live_validate.py",
@@ -39,6 +41,57 @@ def _cam(lv, model, verdict, tier=None, name="cam"):
         "transport": "SDES", "battery": False,
         "attempts": [], "attempts_used": 1, "verdict": verdict,
     }
+
+
+def _recorder(into):
+    async def _fake_sleep(seconds):
+        into.append(seconds)
+    return _fake_sleep
+
+
+def _patch_sleep(lv, monkeypatch):
+    """Make every wait instantaneous and recorded, in order."""
+    slept: list = []
+    monkeypatch.setattr(lv.asyncio, "sleep", _recorder(slept))
+    return slept
+
+
+def _patch_attempts(lv, monkeypatch, verdicts):
+    """Feed ``_validate_camera`` canned per-device verdicts, no cameras needed."""
+    queues = {dev: list(vs) for dev, vs in verdicts.items()}
+
+    async def _fake_attempt(dc, hold, out_dir, attempt):
+        queue = queues[dc.device_id]
+        return {"attempt": attempt, "verdict": queue.pop(0)}
+
+    monkeypatch.setattr(lv, "_attempt", _fake_attempt)
+
+
+class _FakeDeviceClient:
+    def __init__(self, device_id, model):
+        self.device_id = device_id
+        self.info = argparse.Namespace(model_id=model)
+        self.is_sdes_camera = "A000088" not in model
+        self.is_battery_camera = False
+
+
+def _fleet(models):
+    """({'a': 'LK.IPC.A001513', ...}) -> (fake client, {'a': device dict})."""
+    devices = {
+        key: {CONF_NAME: key, CONF_ID: key} for key in models
+    }
+    clients = {key: _FakeDeviceClient(key, model) for key, model in models.items()}
+
+    class _FakeClient:
+        def get_device_client(self, device):
+            return clients[device[CONF_ID]]
+
+    return _FakeClient(), devices
+
+
+def _run_args():
+    return argparse.Namespace(hold=1.0, out_dir="/tmp", cooldown=180.0,
+                              json_out="")
 
 
 def test_model_key_handles_hardware_revisions(lv):
@@ -334,3 +387,132 @@ def test_an_absent_camera_still_reaches_a_failing_verdict(lv, tmp_path):
     assert lv._summarize(report, _args(tmp_path)) == 1
     assert report["verdict"] == "FAIL"
     assert report["required_failed"] == ["Deck"]
+
+
+# --------------------------------------------------------------------------- #
+# the cooldown is owed by a DEVICE, not by the run
+#
+# A camera holds its viewer slot ~120 s after a session, so the wait belongs to
+# the camera that just streamed.  The next camera is a different device with its
+# own free slot and owes nothing.  These pin that policy: a deadline in the past
+# costs zero, a deadline in the future costs exactly the remainder, and the
+# same-camera retry path keeps the full wait it has always had.
+# --------------------------------------------------------------------------- #
+
+def test_a_device_never_opened_in_this_run_owes_nothing(lv):
+    """The map has no entry for it, so the deadline is 0 - i.e. long past."""
+    assert lv._residual_wait(0.0, 12345.0) == 0.0
+
+
+def test_a_device_whose_deadline_has_passed_waits_zero(lv):
+    now = 1_000.0
+    assert lv._residual_wait(now - 0.5, now) == 0.0
+    assert lv._residual_wait(now - 600.0, now) == 0.0
+
+
+def test_a_device_inside_its_window_waits_only_the_remainder(lv):
+    """Not the full cooldown again - only what is left of its own window."""
+    now = 1_000.0
+    not_before = now - 30.0 + 180.0  # streamed 30 s ago, 180 s cooldown
+    assert lv._residual_wait(not_before, now) == pytest.approx(150.0)
+
+
+def test_the_slotless_shortcut_still_shortens(lv):
+    """An ERROR opened no session, so its deadline is the slotless floor."""
+    now = 1_000.0
+    slotless = now + lv._cooldown_after("ERROR", 180.0)
+    held_slot = now + lv._cooldown_after("PASS", 180.0)
+    assert lv._residual_wait(slotless, now) == lv.SLOTLESS_COOLDOWN_S
+    assert lv._residual_wait(slotless, now) < lv._residual_wait(held_slot, now)
+
+
+async def test_wait_until_sleeps_the_remainder_and_says_why(lv, monkeypatch,
+                                                            capsys):
+    """A wait that happens must be visible in the log, with its reason."""
+    slept = []
+    monkeypatch.setattr(lv.asyncio, "sleep", _recorder(slept))
+    monkeypatch.setattr(lv.time, "monotonic", lambda: 1_000.0)
+
+    waited = await lv._wait_until(1_000.0 + 42.0, "'Kitchen'")
+
+    assert waited == pytest.approx(42.0)
+    assert slept == [pytest.approx(42.0)]
+    out = capsys.readouterr().out
+    assert "42s" in out and "Kitchen" in out
+
+
+async def test_wait_until_reports_the_wait_it_did_not_take(lv, monkeypatch,
+                                                           capsys):
+    """A silent speedup cannot be audited from a run's log afterwards.
+
+    A log that simply stopped mentioning cooldowns reads the same whether the
+    wait was skipped on purpose or dropped by accident, so the zero case has to
+    say so too.
+    """
+    slept = []
+    monkeypatch.setattr(lv.asyncio, "sleep", _recorder(slept))
+    monkeypatch.setattr(lv.time, "monotonic", lambda: 1_000.0)
+
+    waited = await lv._wait_until(0.0, "'Kitchen'")
+
+    assert waited == 0.0
+    assert slept == [], "a device that owes nothing must not sleep at all"
+    assert "Kitchen" in capsys.readouterr().out
+
+
+async def test_a_fresh_camera_does_not_wait_for_the_previous_one(lv, monkeypatch):
+    """The whole point: camera B's slot is not affected by camera A's session."""
+    slept = _patch_sleep(lv, monkeypatch)
+    _patch_attempts(lv, monkeypatch, {"a": ["PASS"], "b": ["PASS"]})
+    client, devices = _fleet({"a": "LK.IPC.A001513", "b": "LK.IPC.A000088"})
+    cooldown_until: dict = {}
+
+    await lv._validate_camera(client, devices["a"], _run_args(), cooldown_until)
+    assert cooldown_until["a"] > 0, "a streamed camera must record its deadline"
+    slept.clear()
+
+    await lv._validate_camera(client, devices["b"], _run_args(), cooldown_until)
+
+    assert slept == [], "a different device must not pay for camera A's slot"
+
+
+async def test_the_same_device_reopened_waits_out_its_own_window(lv, monkeypatch):
+    """The residual path: re-opening THIS camera still respects its slot."""
+    slept = _patch_sleep(lv, monkeypatch)
+    _patch_attempts(lv, monkeypatch, {"a": ["PASS", "PASS"]})
+    client, devices = _fleet({"a": "LK.IPC.A001513"})
+    cooldown_until: dict = {}
+
+    await lv._validate_camera(client, devices["a"], _run_args(), cooldown_until)
+    slept.clear()
+    await lv._validate_camera(client, devices["a"], _run_args(), cooldown_until)
+
+    assert len(slept) == 1, "the same device must wait out its own window"
+    assert 0 < slept[0] <= 180.0
+
+
+async def test_the_same_camera_retry_cooldown_is_unchanged(lv, monkeypatch):
+    """Between ATTEMPTS on one camera the full wait stays - same slot.
+
+    This is the wait the speed-up must not touch: attempt 2 reopens the very
+    camera attempt 1 just used, inside its own ~120 s slot window.
+    """
+    slept = _patch_sleep(lv, monkeypatch)
+    _patch_attempts(lv, monkeypatch, {"a": ["NO_MEDIA", "PASS"]})
+    client, devices = _fleet({"a": "LK.IPC.A001513"})
+
+    entry = await lv._validate_camera(client, devices["a"], _run_args(), {})
+
+    assert entry["attempts_used"] == 2
+    assert slept == [180.0], "a same-camera retry must keep the full cooldown"
+
+
+async def test_the_retry_cooldown_still_shortens_after_a_slotless_error(lv,
+                                                                        monkeypatch):
+    slept = _patch_sleep(lv, monkeypatch)
+    _patch_attempts(lv, monkeypatch, {"a": ["ERROR", "PASS"]})
+    client, devices = _fleet({"a": "LK.IPC.A001513"})
+
+    await lv._validate_camera(client, devices["a"], _run_args(), {})
+
+    assert slept == [lv.SLOTLESS_COOLDOWN_S]
