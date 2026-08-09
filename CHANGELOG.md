@@ -25,12 +25,22 @@ it and is the first 1.0.0 pre-release to ship.
   stall, a camera drop, the abandon ceiling. Both the ack and the flag are now
   required.
 
-  `talk_supported` had the same shape of error and is fixed with it. It answered
+  `talk_supported` had the same shape of error and is fixed with it: it answered
   from the talk-state dictionary, which outlives ffmpeg, while the bridge thread
-  and the pump's socket do not - so `async_speak` reused a session that could no
-  longer carry talk instead of opening a fresh one, and the integration's talk
-  service returned success on silence. It now requires the session to still be
-  running.
+  and the pump's socket do not. It now requires the session to still be running.
+
+  Stated precisely, because the first draft of this entry claimed more than was
+  checked: that second fix closes a path nothing currently reaches. `async_speak`
+  reuses `_stream_session` only when it is talk-capable, and none of the three
+  loops that set it - keepalive, streaming, DTLS serve - open with `talk=True`,
+  so on SDES it is never talk-capable and the reuse branch is never taken. The
+  fix is correct and the class of error is real; what has actually been observed
+  is the acknowledgement fail-open above.
+
+  That leaves a measured consequence worth naming: because the live-view session
+  is not talk-capable, every press-to-talk on an SDES camera opens a SECOND
+  camera session while the first is still running. Nothing has measured what
+  that costs in viewer slots.
 
   Measured on the fleet: three SDES cameras returned True and never pulled a
   single audio frame, and the run log contains no SPEAKERSTART line at all. The

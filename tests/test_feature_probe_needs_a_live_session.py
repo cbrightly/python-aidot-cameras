@@ -79,6 +79,19 @@ def test_ptz_is_not_run_when_the_session_is_already_closed():
     assert "closed" in out["ptz_error"]
 
 
+def test_the_snapshot_reports_how_long_it_took():
+    # The SDES snapshot budget has been wrong twice and both times the only
+    # evidence was a verdict, so the replacement budget was a guess. Reporting
+    # the elapsed time makes the next runs answer it.
+    class _Snapper(_DeviceClient):
+        async def async_snapshot(self, path, timeout=10.0):
+            return False        # verdict is irrelevant here; the timing is not
+
+    out = asyncio.run(probe_features(_Snapper(), {}, _Session(alive=True)))
+    assert "snapshot_s" in out
+    assert isinstance(out["snapshot_s"], float)
+
+
 def test_a_session_that_does_not_publish_liveness_counts_as_live():
     # Only SdesSession has is_alive - it tracks the ffmpeg the bridge dies with.
     # The DTLS session keeps no ffmpeg and publishes nothing, and absence of the

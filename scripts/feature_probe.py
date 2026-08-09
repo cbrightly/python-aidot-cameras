@@ -354,8 +354,15 @@ async def probe_features(device_client, device: dict, session=None,
 
     sup = getattr(device_client, "async_snapshot", None) is not None
     if sup and session is not None:
+        _t0 = time.monotonic()
         a, ok, err = await _probe_snapshot(
                 device_client, _snapshot_budget(device, timeout), out_dir)
+        # Record how long it took, pass or fail. The SDES budget has been wrong
+        # twice - 10 s timed out every SDES camera, and 25 s timed out an
+        # A001513 in one run of three - and both times the only evidence was a
+        # verdict, so the next budget was a guess. A number per run accumulates
+        # the distribution instead.
+        out["snapshot_s"] = round(time.monotonic() - _t0, 1)
     else:
         a, ok, err = False, False, None if sup else "unsupported"
     out["snapshot"] = _verdict(sup, a, ok, err)

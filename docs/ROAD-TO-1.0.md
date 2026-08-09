@@ -381,6 +381,20 @@ Two residuals, stated rather than fixed:
   "sent".** `_avio_cmd` returned False and nothing left the host. It is a log
   wording issue on a path whose return value is unaffected, and changing it was
   out of scope here; recorded so it is a decision rather than an oversight.
+- **The SDES snapshot budget is marginal on a battery camera.** Added
+  2026-08-09. An A001513 timed out at the 25 s budget in one of three fleet
+  runs, having passed in the other two and on the other A001513 every time. The
+  budget was already raised once (10 s to 25 s) for this path, which streams to
+  a file and then shells out to ffmpeg. It is deliberately NOT raised again on a
+  single sample; what the next runs need is the elapsed time recorded alongside
+  the verdict so the distribution is visible rather than guessed at. Recorded so
+  it is a decision rather than an oversight.
+- **Every press-to-talk on an SDES camera opens a second session.** Added
+  2026-08-09. `async_speak` reuses `_stream_session` only when it is
+  talk-capable, and none of the three loops that set it open with `talk=True`,
+  so on SDES it never is. The live view keeps its session and talk opens another
+  one alongside it. Nothing has measured what that costs in viewer slots, and
+  the camera holds a slot for about 120 s after a session ends.
 - **PTZ still reports success for bytes that left the socket, not for a camera
   that moved.** Added 2026-08-09. On SDES the command goes out through a closure
   that holds the datagram socket, so `sendto` can succeed after the session it
