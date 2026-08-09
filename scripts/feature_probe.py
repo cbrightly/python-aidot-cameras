@@ -193,7 +193,19 @@ async def _probe_talk(session, timeout: float, hold: float = 6.0
         return False, False, "no talk methods"
     provider, sent = _pcm_provider(frames=400)
     try:
-        await asyncio.wait_for(start(provider), timeout)
+        accepted = await asyncio.wait_for(start(provider), timeout)
+        if accepted is False:
+            # async_start_talk returns False when the camera refuses
+            # SPEAKERSTART (848/851) or talk is not available on the session.
+            # The pump then never gets `speaker_on` and never polls the
+            # provider - so the earlier "no PCM frames pulled" was reporting a
+            # symptom while the API had already given the reason. Read the
+            # return value.
+            try:
+                await asyncio.wait_for(stop(), 5)
+            except Exception:
+                pass
+            return True, False, "camera refused SPEAKERSTART (start_talk False)"
         for _ in range(int(hold / 0.25)):
             await asyncio.sleep(0.25)
             if sent["n"]:
@@ -202,7 +214,9 @@ async def _probe_talk(session, timeout: float, hold: float = 6.0
         # A talk path that accepted the call but never pulled a frame has not
         # been shown to work - the ack is the camera's, the pull is ours.
         return True, sent["n"] > 0, (
-            None if sent["n"] else f"no PCM frames pulled in {hold:.0f}s")
+            None if sent["n"] else
+            f"SPEAKERSTART accepted but the pump never polled us in {hold:.0f}s "
+            f"- it also waits on the camera audio address and speaker_on")
     except asyncio.CancelledError:
         raise
     except Exception as exc:
