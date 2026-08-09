@@ -398,6 +398,30 @@ The bar: **the guard extended beyond `sdes_open`, or a stated reason it does not
 need to be.** The same classes of secret (device passwords, aesKeys, tokens)
 exist elsewhere in the package.
 
+
+### 6. SD-card recordings cannot be retrieved
+
+Added 2026-08-09, found while verifying the features the gate never touched.
+
+`IsSupportPlayback` is not a model capability - it says where a camera's
+recordings live. Measured across the reference fleet:
+
+    A001064, A001513 x2    IsSupportPlayback=1, no SD card   -> cloud
+    A000088 x4             IsSupportPlayback=0, SDcardStatus=1 -> SD card
+
+The library has exactly one retrieval path, `async_open_cloud_playback`, and
+`async_get_cloud_recordings` to list for it. There is no SD-card equivalent. So
+four of the seven cameras on the reference account record continuously to a card
+and **nothing in this package can play any of it back**.
+
+That is a feature gap rather than a defect - nothing regressed, it was never
+built - but the product describes playback without qualifying it by storage, so
+either the capability or the description has to change.
+
+The bar: **implemented, or the docs say which cameras it applies to.** The
+second is cheap and honest; the first needs the vendor's SD retrieval protocol,
+which has not been looked at.
+
 ## Out of scope for 1.0.0
 
 - **The go2rtc add-on.** A private experiment in moving off HACS distribution,

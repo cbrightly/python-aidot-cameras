@@ -54,7 +54,20 @@ def supports_ptz(device: dict) -> bool:
 
 
 def supports_playback(device: dict) -> bool:
-    """The cameras on the reference account all report 0 - SD card, not cloud."""
+    """Whether this camera's recordings live in the CLOUD, not on an SD card.
+
+    Measured 2026-08-09: `IsSupportPlayback` is 1 on the A001064 and both
+    A001513s - which report no SD card - and 0 on every A000088, which reports
+    `SDcardStatus: 1`. So it is not a model capability. It says where this
+    camera's recordings are, and only the cloud ones are reachable by
+    `async_get_cloud_recordings`.
+
+    That makes UNSUPPORTED honest for the API this probes, and it also names a
+    real gap: the library has no SD-card playback path at all - the only
+    retrieval API is `async_open_cloud_playback`. So an A000088's recordings
+    exist and nothing here can fetch them. Recorded in ROAD-TO-1.0 item 4
+    rather than papered over by widening this flag.
+    """
     return str(_props(device).get("IsSupportPlayback", "0")) == "1"
 
 

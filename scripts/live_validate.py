@@ -337,11 +337,17 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int,
     session = None
     result: dict = {"attempt": attempt}
     try:
+        # talk=True so the offer advertises sendrecv audio. Without it an SDES
+        # session never negotiates a return track, `talk_supported` is False,
+        # and a two-way audio probe reports UNSUPPORTED for a camera that
+        # supports it perfectly well - the harness not asking, misread as the
+        # camera not offering.
         session = await dc.async_open_webrtc_stream(
             on_frame=lambda _f: frames.__setitem__("n", frames["n"] + 1),
             timeout=45.0,
             output_path=out,
             max_seconds=max(1, int(hold - 2)),
+            talk=True,
         )
         result["handshake_s"] = round(time.time() - t0, 1)
         result["transport"] = type(session).__name__
