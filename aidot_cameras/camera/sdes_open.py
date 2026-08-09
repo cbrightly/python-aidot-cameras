@@ -494,6 +494,107 @@ def _resolve_sdes_video_pt() -> Optional[int]:
     return pt if pt in _SDES_ANSWER_VIDEO_PTS else None
 
 
+#: The video codecs the SDES OFFER advertises, keyed by payload type, with the
+#: rtpmap/fmtp lines that describe each one.  Deliberately NOT reusing
+#: ``_SDES_ANSWER_VIDEO_PTS``: that tuple is what the answer template carries
+#: and what the pin is validated against, and coupling the offer's wire order to
+#: it means a later reorder of one silently reorders the other.
+_SDES_OFFER_VIDEO_CODECS = {
+    96: (
+        "a=rtpmap:96 H264/90000\r\n"
+        "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
+        "profile-level-id=42e01f\r\n"
+    ),
+    97: (
+        "a=rtpmap:97 H265/90000\r\n"
+        "a=fmtp:97 level-id=93\r\n"
+    ),
+}
+
+#: The order those codecs go on the wire today: H264 first, H265 second.  This
+#: is the shipped default and changing it changes every SDES camera's
+#: negotiation, so it is overridden per-run by env and never edited here.
+_SDES_OFFER_VIDEO_PT_ORDER = (96, 97)
+
+
+def _resolve_sdes_video_pt_order() -> tuple:
+    """EXPERIMENTAL (opt-in, default off): reorder the OFFER's video codec list.
+
+    RFC 3264 section 5.1 makes the ``m=video`` payload-type list a *preference*
+    list, most-preferred first.  The offer this module sends carries ``96 97``,
+    i.e. it already states a preference for H264 -- so the often-repeated
+    shorthand that our offer "expresses no preference" is not what the SDP says.
+    What is true is that nothing here ever *chose* that order: the line arrived
+    verbatim when this path was extracted from ``client.py`` and has never been
+    varied.
+
+    Measured on an A001064, the camera answers H264 most of the time and H265
+    occasionally for an otherwise identical request (nine and two across eleven
+    sessions one afternoon).  Read against the offer, that is a camera which
+    honours our stated first choice most of the time and disregards it some of
+    the time -- which is a reason to expect *less* of reordering than of the
+    pin, and is recorded here so nobody reads this knob as established.
+
+    Why it is worth having anyway: the efficient profile (hevc 2560x1440 at
+    ~1.1 Mbps against h264 1280x720 at 2.5-4.0 Mbps) has only ever appeared when
+    BOTH codecs are on the wire.  ``AIDOT_SDES_VIDEO_PT=97`` narrows to H265 and
+    returns no video at all, 3 of 3 rounds -- narrowing removes the option
+    rather than selecting it.  Reordering is the only untried lever that leaves
+    both codecs offered, so the camera can still fall back to H264.
+
+    Accepts a comma- or space-separated payload-type list (``97,96``, ``97``).
+    Whatever is named goes first, in the order named; every advertised codec not
+    named is appended in the default order.  So this can express a preference
+    and can never narrow the offer: the result is always a permutation of the
+    full advertised set, and an empty or entirely unusable value yields exactly
+    today's order.  Narrowing already has its own variable, and the one time it
+    was measured it cost the picture.
+
+    Unknown payload types and duplicates are dropped rather than honoured: a
+    payload type this offer does not advertise has no rtpmap to go with it, and
+    listing one on the m-line would name a codec the camera was never given the
+    parameters for.
+    """
+    raw = os.environ.get("AIDOT_SDES_VIDEO_PT_ORDER", "") or ""
+    named: list = []
+    for tok in raw.replace(",", " ").split():
+        if not tok.isdigit():
+            continue
+        pt = int(tok)
+        if pt in _SDES_OFFER_VIDEO_CODECS and pt not in named:
+            named.append(pt)
+    return tuple(named) + tuple(
+        pt for pt in _SDES_OFFER_VIDEO_PT_ORDER if pt not in named
+    )
+
+
+def _sdes_offer_video_codec_lines(order=None) -> tuple:
+    """Build the offer's video codec list and its rtpmap/fmtp block.
+
+    Returns ``(pt_list, attrs)`` where ``pt_list`` is the payload-type list for
+    the ``m=video`` line ("96 97") and ``attrs`` is the rtpmap/fmtp lines for
+    those payload types, in the same order.  Both have to move together: an
+    m-line naming a payload type whose rtpmap was left behind is an offer the
+    camera cannot act on.
+
+    ``order`` of None is today's shipped order, so the default output is
+    byte-identical to the literal this replaced.  Anything not advertised is
+    dropped, and an order that ends up empty falls back to the default -- an
+    ``m=video`` line with no payload type at all leaves the camera nothing to
+    send, which is the one outcome worse than an unpinned choice.
+    """
+    pts = tuple(
+        pt for pt in (order if order is not None else _SDES_OFFER_VIDEO_PT_ORDER)
+        if pt in _SDES_OFFER_VIDEO_CODECS
+    )
+    if not pts:
+        pts = _SDES_OFFER_VIDEO_PT_ORDER
+    return (
+        " ".join(str(pt) for pt in pts),
+        "".join(_SDES_OFFER_VIDEO_CODECS[pt] for pt in pts),
+    )
+
+
 def narrow_sdp_payload_types(sdp_text: str, keep_video=None, keep_audio=None) -> str:
     """Rewrite an SDP to advertise a single payload type per media line.
 
@@ -1482,6 +1583,13 @@ class _SdesOpenMixin:
             "spk_eligible_ts": None,  # bridge: first time SPEAKERSTART is eligible
             "stop": False,
         } if _talk_offer else None
+        # Video codec preference, expressed by m-line order (RFC 3264 5.1).
+        # Default is today's 96 97 and the bytes are identical to the literal
+        # this replaced; AIDOT_SDES_VIDEO_PT_ORDER reorders it without ever
+        # narrowing it.
+        _video_pt_order = _resolve_sdes_video_pt_order()
+        _video_pt_list, _video_codec_attrs = _sdes_offer_video_codec_lines(
+            _video_pt_order)
         sdes_offer_sdp = (
             "v=0\r\n"
             f"o=- {ts} {ts} IN IP4 {local_ip}\r\n"
@@ -1520,16 +1628,13 @@ class _SdesOpenMixin:
                 if _audio_sock in _relay_addrs else ""
             )
             # video m-section
-            + f"m=video {_offer_video_port} RTP/SAVPF 96 97\r\n"
+            + f"m=video {_offer_video_port} RTP/SAVPF {_video_pt_list}\r\n"
             f"c=IN IP4 {_offer_video_ip}\r\n"
             "a=recvonly\r\n"
             "a=mid:1\r\n"
             f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
-            "a=rtpmap:96 H264/90000\r\n"
-            "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n"
-            "a=rtpmap:97 H265/90000\r\n"
-            "a=fmtp:97 level-id=93\r\n"
-            "a=rtcp-mux\r\n"
+            + _video_codec_attrs
+            + "a=rtcp-mux\r\n"
             f"a=ice-ufrag:{_ufrag_v}\r\n"
             f"a=ice-pwd:{_pwd_v}\r\n"
             f"a=candidate:1 1 udp 2130706431 {local_ip} {video_port} typ host\r\n"
@@ -1562,8 +1667,21 @@ class _SdesOpenMixin:
             )
         )
 
-        # Opt-in: express a video-codec preference in the OFFER rather than
-        # advertising both 96/97 and letting the camera decide in its answer.
+        # Receipt for the codec order above, emitted only when it differs from
+        # the shipped one.  A run that cannot show the knob was applied cannot
+        # tell a result from a coincidence: an earlier attempt on this question
+        # read as a confirmed effect for two sessions before the missing receipt
+        # showed the pin had never reached the SDP at all.  Ordering happens
+        # before the pin below, so with both set the pin wins and the order is
+        # moot - which is why both lines print rather than one.
+        if _video_pt_order != _SDES_OFFER_VIDEO_PT_ORDER and _status:
+            _status(f"SDES: offer video codec order={_video_pt_list}")
+
+        # Opt-in: NARROW the OFFER to one video codec rather than advertising
+        # both 96/97 and letting the camera decide in its answer.  Distinct from
+        # the ordering above, which only states which of the two we would
+        # rather have and always leaves both on the wire; this one takes the
+        # other away, which for 97 took the video with it.
         #
         # The offer is the SDP that matters here.  Traced live 2026-08-07 with
         # every status line printed: this path sends webrtcReq carrying OUR
