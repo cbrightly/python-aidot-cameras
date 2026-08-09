@@ -91,8 +91,8 @@ all with the measurements recorded:
 
 **What was found instead, and it is the first real lever:** this camera serves
 *two* profiles for an identical request - h264 1280x720 at 2.5-4.0 Mbps, and hevc
-2560x1440 at ~1.1 Mbps - choosing per session, because our offer advertises both
-video codecs and expresses no preference. `AIDOT_SDES_VIDEO_PT` pins the offer
+2560x1440 at ~1.1 Mbps - choosing per session, on an offer that advertises both
+video codecs. `AIDOT_SDES_VIDEO_PT` pins the offer
 and makes the choice deterministic (96 gave h264 720p in 4 of 4). The efficient
 hevc profile appears only when both codecs are offered; what selects it is still
 unknown, which is why the negotiated profile is now logged at INFO on every
@@ -121,6 +121,31 @@ record this item asks for.
 
 Note the profile also differs by model: an A001513's h264 is 1280x960, not
 1280x720, so codec does not imply resolution across a mixed fleet.
+
+**2026-08-08: "our offer expresses no preference" was wrong, checked against the
+code.** RFC 3264 section 5.1 makes the `m=video` payload-type list a preference
+list, most-preferred first, and the offer built at `sdes_open.py` has always
+carried `96 97` - H264 first. What is true is weaker and more useful: nothing
+ever *chose* that order. It arrived verbatim when the SDES open path was split
+out of `client.py` and has never been varied. So the camera is already
+disregarding a stated preference in the sessions where it answers H265, which
+makes reordering a *weaker* candidate than the pin was, not a stronger one -
+recorded here so the next reader does not inherit the stronger framing.
+
+`AIDOT_SDES_VIDEO_PT_ORDER` makes the order settable per run, opt-in and inert
+unset, because reordering is the only untried lever that leaves both codecs on
+the wire - the one condition under which the hevc profile has ever appeared.
+Named payload types lead and the rest are appended, so it cannot narrow the
+offer, which is what killed the H265-only attempt. **The knob exists; the
+hypothesis is untested on hardware.** The experiment that settles it is two
+interleaved arms - `97,96` against unset - alternating rather than blocked
+(this camera's bitrate varies 839-3698 Kbps on its own, so blocked arms measure
+time of day), the sha and the offer's order receipt recorded per session, and
+the `video profile pt=N codec=X` line read from the raw log. It is a categorical
+outcome, so 3/3 against 0/3 reads and 2/3 against 1/3 does not. Two kills: hevc
+at about the control rate says the camera does not read m-line order as a
+constraint, and any session with no video at all says order-preference triggers
+the same failure as narrowing and the knob is unsafe rather than merely opt-in.
 
 The bar: **explained, or documented as accepted** with the measurements. Shipping
 1.0 with an unexplained 5x resource difference on a supported model is a stretch.

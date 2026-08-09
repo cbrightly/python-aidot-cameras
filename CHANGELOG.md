@@ -4,6 +4,51 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [Unreleased]
+
+### Added
+
+- **`AIDOT_SDES_VIDEO_PT_ORDER` sets the video codec preference order in the
+  SDES offer.** Opt-in, inert unless set, and it can reorder but never narrow.
+
+  A correction first, because this file has said otherwise. The offer does not
+  "express no preference": RFC 3264 section 5.1 makes the `m=video` payload-type
+  list a preference list, most-preferred first, and ours has always read `96 97`
+  - H264 first. What is true is that nothing ever chose that order. The line
+  arrived verbatim when the SDES open path was split out of `client.py` and has
+  never been varied.
+
+  That reframes what is known rather than adding to it. On an A001064 the camera
+  answers H264 most sessions and H265 occasionally for an identical request,
+  which read against the offer is a camera that honours our stated first choice
+  most of the time and disregards it some of the time. So expressing a
+  preference is a weaker lever than pinning, not a stronger one, and this ships
+  as an experiment rather than as a fix.
+
+  It is worth having because the efficient profile - hevc 2560x1440 at about
+  1.1 Mbps against h264 1280x720 at 2.5-4.0 Mbps - has only ever appeared when
+  both codecs are on the wire. `AIDOT_SDES_VIDEO_PT=97` narrows the offer to
+  H265 and returns no video at all, 3 of 3 rounds: narrowing removes the option
+  rather than selecting it. Reordering is the only untried lever that leaves
+  both codecs offered, so the camera can still fall back to H264.
+
+  Set it to `97,96` and the offer prefers H265 while still advertising H264.
+  Whatever is named leads and every advertised codec not named is appended, so
+  no value can produce a narrowed or empty video m-line - a video m-line with no
+  payload type is the one outcome worse than an unpinned choice. Unset, the
+  offer is byte-identical to 1.0.0b1, which matters because this path is shared
+  by every SDES camera and changes to shared paths have caused fleet-wide
+  blackouts before.
+
+  A status line reports the order whenever it differs from the shipped one, so a
+  run can tell an effect from a coincidence. The first attempt at the pin looked
+  like a confirmed result for two sessions before a missing receipt showed it had
+  never reached the SDP at all.
+
+  Untested on hardware. Whether the camera acts on m-line order is exactly the
+  open question, and the default is deliberately left alone until a run answers
+  it.
+
 ## [1.0.0b1]
 
 The first pre-release of 1.0.0. **It does not assert that the 1.0.0 bar is met** -
