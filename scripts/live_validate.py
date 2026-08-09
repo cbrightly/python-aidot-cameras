@@ -18,7 +18,10 @@ docs/CAMERAS.md):
   count is reported so a degrading trend is visible.
 - **A camera holds its viewer slot ~120 s** after a session, and reopening it
   too quickly causes camera-side flakiness unrelated to the code under test.
-  Cameras are validated one at a time with a cooldown between attempts.
+  So the cooldown is owed by the camera that just streamed, and is waited out
+  only when that same camera is opened again. Cameras are still validated
+  strictly one at a time - that is a separate constraint (account-wide cloud
+  signaling contention) and it is not what the cooldown is for.
 - **A busy ack (-50002/-50015) is terminal**: someone (probably Home
   Assistant, or a phone app) is watching. That is reported as BUSY, distinctly
   from a media failure, and still fails the gate - a release must not be
@@ -102,6 +105,43 @@ def _cooldown_after(verdict: str, full: float) -> float:
     if verdict in _SLOTLESS_VERDICTS:
         return min(SLOTLESS_COOLDOWN_S, full)
     return full
+
+
+def _residual_wait(not_before: float, now: float) -> float:
+    """Seconds still owed before a device may be opened, 0 if none are.
+
+    The cooldown belongs to the DEVICE, not to the run. A camera holds its
+    viewer slot ~120 s after a session, so the camera that just streamed is the
+    one that has to be left alone; the next camera in the fleet is a different
+    device whose slot was never taken and owes nothing.
+
+    Waiting the full cooldown between EVERY pair of cameras spent that wait on
+    devices that had nothing to release: a seven-camera run slept 15 minutes
+    against roughly 3 minutes of real work. Recording a deadline per device and
+    sleeping only what is left of it removes the idle time and nothing else -
+    the opens stay strictly sequential, because the reason for THAT is cloud
+    signaling contention, which is account-wide and is not what this wait is.
+    """
+    return max(0.0, not_before - now)
+
+
+async def _wait_until(not_before: float, label: str) -> float:
+    """Sleep out whatever this device still owes, and say so either way.
+
+    Both branches print. A run whose log simply stopped mentioning cooldowns
+    would read identically whether the wait was skipped deliberately or dropped
+    by accident, and a release gate that got faster in a way nobody can check
+    afterwards is not a gate anyone should trust.
+    """
+    wait = _residual_wait(not_before, time.monotonic())
+    if wait <= 0:
+        print(f"    no cooldown owed by {label} - it is not holding a viewer"
+              " slot from this run")
+        return 0.0
+    print(f"    waiting {wait:.0f}s for {label}: it streamed recently and holds"
+          " its own viewer slot ~120s")
+    await asyncio.sleep(wait)
+    return wait
 
 
 def _is_camera(device_client) -> bool:
@@ -316,7 +356,13 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int) -> dict:
     return result
 
 
-async def _validate_camera(client, device, args) -> dict:
+async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
+    """Validate one camera. ``cooldown_until`` is the fleet's per-device clock.
+
+    It maps device id -> the monotonic time that device may next be opened, and
+    is both read (before the first attempt) and written (after every attempt)
+    here, so the key can never drift between writer and reader.
+    """
     dc = client.get_device_client(device)
     model = _model_of(dc)
     tier = _classify(model)
@@ -335,6 +381,11 @@ async def _validate_camera(client, device, args) -> dict:
     print(f"\n=== {entry['name']!r}  {model}  ({entry['transport']}"
           f"{', battery' if entry['battery'] else ''}, {tier})")
 
+    # Only THIS camera's own deadline. Normally already past - a camera the run
+    # has not touched yet is not holding a slot for anybody.
+    await _wait_until(cooldown_until.get(dc.device_id, 0.0),
+                      repr(entry["name"]))
+
     for i in range(1, max_attempts + 1):
         if i > 1:
             prev = entry["attempts"][-1].get("verdict", "")
@@ -350,6 +401,14 @@ async def _validate_camera(client, device, args) -> dict:
         print(f"    attempt {i}/{max_attempts}...")
         res = await _attempt(dc, args.hold, args.out_dir, i)
         entry["attempts"].append(res)
+        # This device may now be holding a viewer slot, so record when it may
+        # next be opened. Every exit from this loop passes through here,
+        # including the breaks below - a camera whose deadline went unrecorded
+        # would be reopenable immediately, which is the one thing the cooldown
+        # exists to prevent.
+        cooldown_until[dc.device_id] = time.monotonic() + _cooldown_after(
+            res["verdict"], args.cooldown
+        )
         print(f"    -> {res['verdict']}"
               + (f"  handshake={res['handshake_s']}s" if "handshake_s" in res else "")
               + (f"  frames={res['frames']}" if "frames" in res else "")
@@ -446,21 +505,19 @@ async def _run(args) -> int:
                 ]
 
             # Strictly one camera at a time: concurrent opens contend for the
-            # cloud signaling channel and for the cameras' own stream slots.
-            for idx, cam in enumerate(selected):
-                if idx > 0:
-                    # Space on the PREVIOUS camera's outcome: it is the one that
-                    # may still be holding a slot, not the one about to open.
-                    prev_v = report["cameras"][-1].get("verdict", "")
-                    wait = _cooldown_after(prev_v, args.cooldown)
-                    if wait < args.cooldown:
-                        print(f"\n(previous camera {prev_v} with no session "
-                              f"opened - spacing {wait:.0f}s, not "
-                              f"{args.cooldown:.0f}s)")
-                    else:
-                        print(f"\n(spacing {wait:.0f}s between cameras)")
-                    await asyncio.sleep(wait)
-                report["cameras"].append(await _validate_camera(client, cam, args))
+            # cloud signaling channel, and THAT contention is account-wide -
+            # it is the root of this project's signature failure, concurrent
+            # cold opens serializing through the library's open-gate past Home
+            # Assistant's stream-worker deadline. Nothing below overlaps opens.
+            #
+            # The cooldown is a different constraint and is per-device (see
+            # _residual_wait), so it is carried here as a deadline per camera
+            # and paid only by the camera that owes it.
+            cooldown_until: dict[str, float] = {}
+            for cam in selected:
+                report["cameras"].append(
+                    await _validate_camera(client, cam, args, cooldown_until)
+                )
                 # Write after every camera, not only at the end.  A fleet run
                 # where everything fails takes far longer than a green one (each
                 # dead camera burns the full first-media wait), so it is exactly
@@ -623,7 +680,8 @@ def main() -> int:
     p.add_argument("--hold", type=float, default=16.0,
                    help="seconds to hold each stream (default 16)")
     p.add_argument("--cooldown", type=float, default=DEFAULT_COOLDOWN_S,
-                   help=f"seconds between attempts/cameras (default {DEFAULT_COOLDOWN_S:.0f};"
+                   help="seconds a camera is left alone after a session before"
+                        f" it is opened again (default {DEFAULT_COOLDOWN_S:.0f};"
                         " a camera holds its viewer slot ~120s)")
     p.add_argument("--out-dir", default="/tmp", help="where to write recordings")
     p.add_argument("--json-out", default="live-report.json",
