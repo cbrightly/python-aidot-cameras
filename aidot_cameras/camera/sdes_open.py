@@ -767,6 +767,108 @@ def _record_peer_reflexive(known, discovered, observed, is_self=None):
     return [*discovered, observed]
 
 
+#: How many distinct inbound probe sources the stall report will name. Beyond
+#: this the count alone is kept - a stall is explained by the first few sources,
+#: and an unbounded list would turn one WARNING into a wall of text.
+_MAX_PROBE_SOURCES = 6
+
+
+def _probe_source_verdict(src, turn_peer_ip, turn_peer_port, *,
+                          cam_peer, observed, known, learned):
+    """Say why one inbound STUN probe's source was, or was not, learned.
+
+    Nomination can only aim at an address, and when the camera's answer lists
+    one this host cannot route to, the only usable addresses are the ones its
+    own probes arrive from.  Two vetoes drop a relay-carried probe before it can
+    become a peer-reflexive candidate, and both are silent in the code they
+    guard, so a session that stalls for one reason is indistinguishable from a
+    session that stalled for the other.  This names them apart.
+
+    Takes the values the bridge already computed rather than re-deriving them:
+    ``cam_peer`` is ``_br_cam_peer`` (None once ``_is_self_peer_ip`` has refused
+    the XOR-PEER-ADDRESS) and ``observed`` is ``_br_obs`` (None once the
+    ``_bsrc`` fallback has refused the TURN server's own address too).  A copy
+    of the decision here would rot the first time either site changed.
+
+    ``known`` is "this address is already in the nomination set" and ``learned``
+    is "this call grew the peer-reflexive set"; without both, an address that
+    ``_record_peer_reflexive`` refused on its own policy would be reported as
+    one we are already nominating, which is the opposite of the truth.
+
+    Pure, so the classification is testable without a camera.
+    """
+    if observed:
+        if learned:
+            return "learned"
+        if known:
+            return "known"
+        # _record_peer_reflexive took it and gave nothing back: its own self-IP
+        # check, or the peer-reflexive cap.
+        return "prflx-refused"
+    if turn_peer_ip and not turn_peer_port:
+        return "vetoed-no-peer-port"
+    if turn_peer_ip and not cam_peer:
+        # _is_self_peer_ip matched the XOR-PEER-ADDRESS.
+        return "vetoed-self-ip"
+    # No usable peer address at all, and the packet came from the relay, so the
+    # _bsrc fallback had nothing to offer but the TURN server itself.
+    return "vetoed-turn-source"
+
+
+def _first_media_stall_report(device_id, waited_s, nominated,
+                              use_candidate_sent, binding_success,
+                              trigger_sent, probes, probes_dropped=0):
+    """Build the one line a first-media stall emits.
+
+    A session that never delivers a byte looks, in a log, exactly like one that
+    delivered late: the wait expires, the serve launches with unknown payload
+    types, and nothing states the reason.  The reason is knowable at that
+    moment.  Media only ever follows the AVIO LIVING trigger, that trigger is
+    armed only by an inbound STUN Binding Success Response, and that response
+    only comes back if something we nominated was reachable - so the nominated
+    set, the Binding Success count, the trigger flag and the verdict on every
+    inbound probe source are between them the whole explanation.
+
+    Addresses and counts only.  This line reaches ``home-assistant.log`` and
+    users paste that file into public issue reports.
+
+    ``probes`` is a sequence of ``(source_label, verdict)`` from
+    :func:`_probe_source_verdict`.  Pure, so the wording is testable.
+    """
+    _cands = ", ".join(f"{_ip}:{_port}" for _ip, _port in (nominated or []))
+    _probes = "; ".join(
+        f"{_where} -> {_verdict}" for _where, _verdict in (probes or [])
+    )
+    if probes_dropped:
+        _probes += f"; (+{probes_dropped} more source(s))"
+    _why = ""
+    if not binding_success:
+        _why = (
+            " No inbound STUN Binding Success arrived, so the AVIO LIVING"
+            " trigger was never armed and the camera never started sending."
+        )
+    elif not trigger_sent:
+        _why = (
+            " A Binding Success arrived and the trigger still did not go -"
+            " the trigger is not gated on anything else."
+        )
+    return (
+        "camera %s: SDES first media never arrived (%.0fs)."
+        " nominated=%s; use-candidate=%s; binding-success=%d; trigger=%s;"
+        " probes=%s.%s"
+        % (
+            device_id,
+            waited_s,
+            _cands or "none",
+            "sent" if use_candidate_sent else "not-sent",
+            binding_success,
+            "sent" if trigger_sent else "not-sent",
+            _probes or "none",
+            _why,
+        )
+    )
+
+
 def _ensure_srtp_rx_session(holder, key, build, *, on_built=None, on_error=None):
     """Return the bridge's SRTP receive session, rebuilt when ``key`` changes.
 
@@ -3293,6 +3395,19 @@ class _SdesOpenMixin:
                 _s.sendto(_data, _addr)
             _br_stun_resp_count = 0
             _tutk_trigger_sent = False
+            # Instrumentation for the first-media stall report.  These four are
+            # bridge-thread locals that the main coroutine has to be able to
+            # read when the wait expires, so each is mirrored onto _bridge_fn at
+            # its write site - the same publication _sprop_done uses.  Nothing
+            # here is read by the bridge itself; they only ever describe.
+            _br_binding_success_count = 0   # inbound STUN Binding Success (0x0101)
+            _br_probe_verdicts: dict = {}   # probe source -> why it was/wasn't learned
+            _br_probe_overflow = 0          # sources past _MAX_PROBE_SOURCES
+            _bridge_fn._tutk_trigger_sent = False
+            _bridge_fn._br_stun_resp_count = 0
+            _bridge_fn._br_binding_success_count = 0
+            _bridge_fn._br_probe_verdicts = {}
+            _bridge_fn._br_probe_overflow = 0
             _last_trigger_ts    = 0.0     # time of last AVIO LIVING send
             _trigger_bs         = None    # socket used for trigger
             _trigger_bsrc       = None    # camera addr for trigger
@@ -3799,6 +3914,49 @@ class _SdesOpenMixin:
                                     f" (not in the {len(_bridge_uc_info['cands'])}"
                                     f" advertised candidate(s)) - will nominate it"
                                 )
+                            # Record why this probe's source was, or was not,
+                            # usable.  Both refusals above are silent, and which
+                            # of them fired decides what a fix would change - so
+                            # the fact is kept here and reported once, on the
+                            # stall path, rather than logged per packet.
+                            try:
+                                _br_pv_where = f"{_bsrc[0]}:{_bsrc[1]}"
+                                if _br_turn_peer_ip:
+                                    _br_pv_where += (
+                                        f" via {_br_turn_peer_ip}"
+                                        f":{_br_turn_peer_port}"
+                                    )
+                                if _br_pv_where in _br_probe_verdicts:
+                                    pass
+                                elif len(_br_probe_verdicts) >= _MAX_PROBE_SOURCES:
+                                    _br_probe_overflow += 1
+                                    _bridge_fn._br_probe_overflow = (
+                                        _br_probe_overflow)
+                                else:
+                                    _br_probe_verdicts[_br_pv_where] = (
+                                        _probe_source_verdict(
+                                            _bsrc,
+                                            _br_turn_peer_ip,
+                                            _br_turn_peer_port,
+                                            cam_peer=_br_cam_peer,
+                                            observed=_br_obs,
+                                            known=bool(
+                                                _br_obs is not None
+                                                and (_br_obs in _br_prflx_was
+                                                     or _br_obs in
+                                                     _bridge_uc_info["cands"])
+                                            ),
+                                            learned=(
+                                                _br_prflx_now is not _br_prflx_was
+                                            ),
+                                        )
+                                    )
+                                    # Rebind, never mutate: the reader is the
+                                    # main coroutine on another thread.
+                                    _bridge_fn._br_probe_verdicts = dict(
+                                        _br_probe_verdicts)
+                            except Exception:
+                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_probe_source_verdict', exc_info=True)
                             try:
                                 if _br_turn_peer_ip is None and _bsrc[0] != _hp_host:
                                     _br_prefer_direct_stun[_bs] = True
@@ -3864,6 +4022,8 @@ class _SdesOpenMixin:
                                 else:
                                     _bs.sendto(_bresp, _bsrc)
                                     _br_stun_resp_count += 1
+                                    _bridge_fn._br_stun_resp_count = (
+                                        _br_stun_resp_count)
                                 # Late USE-CANDIDATE: send when answer arrived
                                 # after bridge started (empty at setup time).
                                 if not _bridge_uc_info["sent"] and _bridge_uc_info["ufrag"]:
@@ -3957,6 +4117,16 @@ class _SdesOpenMixin:
                                         f" relay path unusable"
                                     )
                                 continue
+                            # Count the inbound Binding Success BEFORE the
+                            # trigger gate below.  Counting inside it would make
+                            # this an alias for _tutk_trigger_sent and collapse
+                            # two different diagnoses - "none ever arrived" and
+                            # "one arrived and the trigger still did not go" -
+                            # into a single indistinguishable state.
+                            if _bpkt[:2] == b'\x01\x01':
+                                _br_binding_success_count += 1
+                                _bridge_fn._br_binding_success_count = (
+                                    _br_binding_success_count)
                             # STUN BindingSuccess (0x0101) from camera: ICE complete.
                             # Send AES-128-CBC encrypted SESSION_MODE_REQ (AVIO LIVING).
                             #
@@ -3970,6 +4140,7 @@ class _SdesOpenMixin:
                             if (_use_plain_rtp and not _tutk_trigger_sent
                                     and _bpkt[:2] == b'\x01\x01'):
                                 _tutk_trigger_sent = True
+                                _bridge_fn._tutk_trigger_sent = True
                                 import struct as _st_tk
                                 import random as _rand_tk
                                 _ts_ms = int(_time_br.time() * 1000)
@@ -5051,6 +5222,40 @@ class _SdesOpenMixin:
                         " camera's answer during the first-media wait" % _n_nom
                     )
             await asyncio.sleep(0.1)
+        if _first_video_pt[0] is None:
+            # The wait expired with nothing received. Everything needed to say
+            # why is in hand at exactly this moment and was, until now, thrown
+            # away: media only ever follows the AVIO LIVING trigger, that
+            # trigger is armed only by an inbound STUN Binding Success, and
+            # that response only comes back if something we nominated was
+            # reachable. When it was not, the only usable addresses are the
+            # ones the camera's own probes arrived from - and two silent vetoes
+            # can drop a relay-carried probe. One WARNING, on this path only:
+            # an open that delivers media reaches none of this.
+            try:
+                _stall_probes = list(
+                    (getattr(_bridge_fn, "_br_probe_verdicts", None) or {}).items()
+                )
+                _LOGGER.warning("%s", _first_media_stall_report(
+                    device_id=getattr(self, "device_id", "?"),
+                    waited_s=_FIRST_MEDIA_WAIT_S,
+                    nominated=[
+                        *_bridge_uc_info["cands"],
+                        *_bridge_uc_info["prflx"],
+                    ],
+                    use_candidate_sent=bool(_bridge_uc_info["sent"]),
+                    binding_success=int(
+                        getattr(_bridge_fn, "_br_binding_success_count", 0)),
+                    trigger_sent=bool(
+                        getattr(_bridge_fn, "_tutk_trigger_sent", False)),
+                    probes=_stall_probes,
+                    probes_dropped=int(
+                        getattr(_bridge_fn, "_br_probe_overflow", 0)),
+                ))
+            except Exception:
+                _LOGGER.debug("camera %s: swallowed exception in %s",
+                              getattr(self, "device_id", "?"),
+                              '_first_media_stall_report', exc_info=True)
         if _serve_audio and _first_audio_pt[0] is None:
             _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
             while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:
