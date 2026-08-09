@@ -64,6 +64,21 @@ ADVISORY_MODELS = ("A001108", "A001360")
 ATTEMPTS_DTLS = 3
 ATTEMPTS_SDES = 2
 
+# Seconds of session life to leave beyond the recording window, so the probes
+# that ride the OPEN session - talk and PTZ - still have one to ride.
+#
+# `max_seconds` is ffmpeg's -t, and on the SDES path the bridge thread that
+# dispatches SPEAKERSTART and PTZ lives and dies with that process. It was set
+# to hold-2, which put the session's death BEFORE `await asyncio.sleep(hold)`
+# even returned, so every probe ran against a corpse. Run 31332008184 read that
+# as three SDES cameras failing two-way audio; the run log has no SPEAKERSTART
+# line in it at all, because there was nothing left to send one.
+#
+# 14 s covers the talk probe's worst case (2.6 s ack budget + a 6 s hold + stop)
+# and the PTZ nudge, with margin. It buys a longer recording, which costs disk
+# and nothing else.
+LIVE_PROBE_BUDGET_S = 14
+
 # A camera holds its viewer slot ~120 s after a session; leave room past that.
 DEFAULT_COOLDOWN_S = 180.0
 
@@ -346,7 +361,7 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int,
             on_frame=lambda _f: frames.__setitem__("n", frames["n"] + 1),
             timeout=45.0,
             output_path=out,
-            max_seconds=max(1, int(hold - 2)),
+            max_seconds=max(1, int(hold - 2) + LIVE_PROBE_BUDGET_S),
             talk=True,
         )
         result["handshake_s"] = round(time.time() - t0, 1)

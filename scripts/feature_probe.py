@@ -82,6 +82,17 @@ def supports_talk(session: Any) -> bool:
     return bool(flag)
 
 
+def session_alive(session: Any) -> bool:
+    """Whether the session can still carry a command. Unknown counts as alive.
+
+    Only ``SdesSession`` publishes ``is_alive`` (it tracks the ffmpeg process the
+    bridge thread lives and dies with); the DTLS session has no equivalent and
+    keeps no ffmpeg, so absence must not be read as death.
+    """
+    alive = getattr(session, "is_alive", None)
+    return True if alive is None else bool(alive)
+
+
 def _pcm_provider(frames: int = 25):
     """320-byte s16le frames, 20 ms at 8 kHz - silence, so nothing is audible.
 
@@ -195,17 +206,20 @@ async def _probe_talk(session, timeout: float, hold: float = 6.0
     try:
         accepted = await asyncio.wait_for(start(provider), timeout)
         if accepted is False:
-            # async_start_talk returns False when the camera refuses
-            # SPEAKERSTART (848/851) or talk is not available on the session.
-            # The pump then never gets `speaker_on` and never polls the
-            # provider - so the earlier "no PCM frames pulled" was reporting a
-            # symptom while the API had already given the reason. Read the
+            # False now means one of two things, and the library no longer
+            # conflates them with success: the camera refused SPEAKERSTART, or
+            # the command never left this process because the session's bridge
+            # thread was gone. The pump requires `speaker_on` either way, so it
+            # never polls the provider - the earlier "no PCM frames pulled" was
+            # reporting a symptom the API had already been asked about. Read the
             # return value.
             try:
                 await asyncio.wait_for(stop(), 5)
             except Exception:
                 pass
-            return True, False, "camera refused SPEAKERSTART (start_talk False)"
+            return True, False, (
+                "start_talk False - the camera refused SPEAKERSTART, or the "
+                "session could no longer send it")
         for _ in range(int(hold / 0.25)):
             await asyncio.sleep(0.25)
             if sent["n"]:
@@ -285,6 +299,46 @@ async def probe_features(device_client, device: dict, session=None,
     """
     out: dict = {}
 
+    # Talk and PTZ go FIRST, and they go before the snapshot, because both ride
+    # the session that is already open and the snapshot does not - on SDES it
+    # opens a second session of its own and spends up to 25 s in it. Running it
+    # first spent the live session's whole remaining lifetime before talk was
+    # ever asked for, and on the SDES path the bridge thread that dispatches
+    # SPEAKERSTART dies with that session's ffmpeg. Fleet run 31332008184
+    # reported FAIL for all three SDES cameras on exactly that: the log contains
+    # no SPEAKERSTART line at all, because there was no longer a bridge to send
+    # one. Ordering alone is not the whole fix - live_validate also has to leave
+    # the session running long enough - but a probe whose result depends on what
+    # ran before it is not measuring the camera.
+    alive = session is not None and session_alive(session)
+
+    sup = session is not None and supports_talk(session)
+    if session is not None and not alive:
+        # Exercised-and-failed, never-exercised and unsupported are three
+        # different results; this module exists to keep them apart. A closed
+        # session is the second, and saying so names the harness bug instead of
+        # accusing the camera.
+        out["talk"] = NOT_RUN
+        out["talk_error"] = "session closed before the talk probe ran"
+    else:
+        a, ok, err = await _probe_talk(session, timeout) if sup else (False, False, None)
+        out["talk"] = _verdict(sup, a, ok, err)
+        if err:
+            out["talk_error"] = err
+
+    sup = supports_ptz(device)
+    if sup and session is not None and not alive:
+        # PTZ rides `_stream_session._avio_cmd` too. Its sendto can still succeed
+        # on a socket nobody is reading, so a dead session yields PASS on no
+        # evidence - the quieter half of the same defect.
+        out["ptz"] = NOT_RUN
+        out["ptz_error"] = "session closed before the ptz probe ran"
+    else:
+        a, ok, err = await _probe_ptz(device_client, timeout) if sup else (False, False, None)
+        out["ptz"] = _verdict(sup, a, ok, err)
+        if err:
+            out["ptz_error"] = err
+
     sup = getattr(device_client, "async_snapshot", None) is not None
     if sup and session is not None:
         a, ok, err = await _probe_snapshot(
@@ -294,18 +348,6 @@ async def probe_features(device_client, device: dict, session=None,
     out["snapshot"] = _verdict(sup, a, ok, err)
     if err:
         out["snapshot_error"] = err
-
-    sup = supports_ptz(device)
-    a, ok, err = await _probe_ptz(device_client, timeout) if sup else (False, False, None)
-    out["ptz"] = _verdict(sup, a, ok, err)
-    if err:
-        out["ptz_error"] = err
-
-    sup = session is not None and supports_talk(session)
-    a, ok, err = await _probe_talk(session, timeout) if sup else (False, False, None)
-    out["talk"] = _verdict(sup, a, ok, err)
-    if err:
-        out["talk_error"] = err
 
     sup = getattr(device_client, "async_get_latest_thumbnail", None) is not None
     a, ok, err = await _probe_thumbnail(device_client, timeout) if sup else (False, False, None)
