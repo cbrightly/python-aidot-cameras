@@ -207,6 +207,35 @@ def _media_seen(session, frames: int, out_path: str | None) -> tuple[bool, dict]
     return ok, evidence
 
 
+def _passes(result: dict, media_ok: bool) -> bool:
+    """Did this attempt deliver video a viewer could actually watch?
+
+    ``media_ok`` is the older answer: a packet counter, and a byte count from a
+    ``-c copy`` pipeline that never looks inside a packet. Both are satisfied by
+    bytes of the right shape - which is not a hypothetical, it is the defect
+    where undecryptable packets counted as delivered media and a black stream
+    reported healthy indefinitely.
+
+    So a pass now also requires a frame out of a decoder. Promoted from advisory
+    on 2026-08-09 against 19 recorded attempts across three fleet runs: every
+    PASS had decoded frames (46-262) and every NO_MEDIA had zero, so gating
+    changes no historical verdict. It closes the hole rather than moving the bar.
+
+    **A probe that could not RUN does not fail the camera.** If ffmpeg or ffprobe
+    is missing on the runner, or the recording is absent, every camera would fail
+    at once and the gate would be measuring its own environment instead of the
+    fleet. That case reports ``decode_error`` and defers to ``media_ok``, and the
+    distinction is why the probe reports the two separately.
+    """
+    if not media_ok:
+        return False
+    if result.get("decode_error"):
+        return True          # probe unavailable - do not fail the camera for it
+    if "decoded_frames" not in result:
+        return True          # nothing to say; older behaviour
+    return int(result.get("decoded_frames") or 0) > 0
+
+
 async def _decode_probe(path: str, timeout: float = 60.0) -> dict:
     """Decode the recording and report what actually came out of the decoder.
 
@@ -332,13 +361,8 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int) -> dict:
 
         ok, evidence = _media_seen(session, frames["n"], out)
         result.update(evidence)
-        # Advisory for now, deliberately: it is reported but does not gate. The
-        # measurement has never run on this fleet, and a gate that has never
-        # produced a number is not one to start blocking releases with. Promote
-        # it to a PASS condition once one run shows what the cameras actually
-        # give - that is a one-line change to the verdict below.
         result.update(await _decode_probe(out))
-        result["verdict"] = "PASS" if ok else "NO_MEDIA"
+        result["verdict"] = "PASS" if _passes(result, ok) else "NO_MEDIA"
     except AidotCameraBusy as exc:
         # Someone else is watching. Distinct from a media failure - but still
         # not a validated camera, so it does not pass the gate.
