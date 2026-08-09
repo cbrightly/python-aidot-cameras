@@ -1823,13 +1823,22 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                               self.device_id, len(data))
             elif isinstance(body, dict):
                 data = body.get("data") or {}
+                # Keys, never values: this response can carry the per-device
+                # streaming credentials (tutkAccount / tutkPassword - see
+                # docs/DEFERRED_FEATURES.md), and the warning below is logged
+                # at default level, so a whole-body dump lands in every user's
+                # home-assistant.log.  The matched-device log further down
+                # already prints keys only; these two did not.
                 if data:
-                    _LOGGER.debug("batchGetDeviceUserInfo response for %s (status=%d): %s",
-                                  self.device_id, status, body)
+                    _LOGGER.debug(
+                        "batchGetDeviceUserInfo response for %s (status=%d):"
+                        " keys=%s, %d item(s)",
+                        self.device_id, status, sorted(body.keys()), len(data),
+                    )
                 else:
                     _LOGGER.warning(
-                        "batchGetDeviceUserInfo no data for %s (status=%d): %s",
-                        self.device_id, status, body,
+                        "batchGetDeviceUserInfo no data for %s (status=%d): keys=%s",
+                        self.device_id, status, sorted(body.keys()),
                     )
             else:
                 data = {}
