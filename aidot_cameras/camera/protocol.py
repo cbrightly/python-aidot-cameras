@@ -662,8 +662,14 @@ def _load_sprop(devid: str) -> "Optional[str]":
         return None
 
 
-def _save_sprop(devid: str, sprop: str) -> None:
-    """Persist the ``sprop-parameter-sets`` string for ``devid`` (best-effort).
+def _save_sprop(devid: str, sprop: str) -> bool:
+    """Persist the ``sprop-parameter-sets`` for ``devid``.  True if it wrote.
+
+    Returns whether anything was actually cached, because two of the three
+    outcomes here write nothing and the caller announces the write in the only
+    log line this feature has.  An unconditional announcement claims a cache
+    that an unstable camera provably does not have, which is the observable an
+    investigation reads first.
 
     If a DIFFERENT value was already cached, this camera does not keep its
     parameter sets stable: mark it and drop the cache, so nothing is injected
@@ -672,7 +678,7 @@ def _save_sprop(devid: str, sprop: str) -> None:
     loses nothing by the injection being skipped.
     """
     if _sprop_is_unstable(devid):
-        return          # already known unstable; nothing to cache for this camera
+        return False    # already known unstable; nothing to cache for this camera
     try:
         prev = _load_sprop(devid)
         if prev is not None and prev != sprop:
@@ -689,17 +695,19 @@ def _save_sprop(devid: str, sprop: str) -> None:
                 os.remove(_sprop_cache_path(devid))
             except OSError:
                 pass
-            return
+            return False
         os.makedirs(_SPROP_DIR, exist_ok=True)
         tmp = _sprop_cache_path(devid) + ".tmp"
         with open(tmp, "w") as fh:
             fh.write(sprop)
         os.replace(tmp, _sprop_cache_path(devid))
+        return True
     except OSError as exc:
         # Surface (don't swallow): if the cache dir isn't writable the whole
         # sprop feature is silently inert.  AIDOT_SPROP_DIR can redirect it.
         _LOGGER.warning("sprop cache write failed (%s): %s - set AIDOT_SPROP_DIR "
                         "to a writable path", _SPROP_DIR, exc)
+        return False
 
 
 def _inject_sprop(sdp: str, devid: str) -> str:
