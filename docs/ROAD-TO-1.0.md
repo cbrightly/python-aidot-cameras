@@ -154,7 +154,9 @@ Run `31348997269`, `AIDOT_SDES_VIDEO_PT_ORDER=97,96` on the SDES models, with th
 receipt present - `SDES: offer video codec order=97 96` on all 8 opens, so this
 one did reach the SDP, unlike the first attempt at the pin. Six sessions produced
 a profile line and **all six were `pt=96 codec=H264`**. The control is the last
-four runs on the shipped order: **23 of 23 H264**.
+four runs on the shipped order: **23 profile lines, all H264** - lines, not
+independent cameras, since a run emits one per session and several are the
+snapshot's own session on a camera already counted.
 
 Read carefully, because the kill stated above does not quite apply. It assumed a
 control that produces hevc sometimes, so that "hevc at about the control rate"
@@ -172,7 +174,7 @@ not to do.
 
 **The second kill did trigger, and is confounded.** `L2_F8A3` returned no video
 at all on both attempts. That is the unit with an independent, documented stall
-- six of the eight stall reports in item 3 are this camera, several of them from
+- six of the seven stall reports in item 3 are this camera, several of them from
 runs on the shipped order - and both of this run's stall reports name ICE causes
 (`vetoed-self-ip`, and one with no candidates at all), not a codec cause. So it
 does not indict the knob, and it does not clear it either.
@@ -330,9 +332,11 @@ delivers media without it.
 
 #### 2026-08-09: the self-reporting run happened, and it settles the open question
 
-The stall report shipped and has now fired eight times, in runs 31289188625
-(x2), 31292208608 (x2), 31298451465 and 31348997269 (x2, plus one on a snapshot
-session). Read them before anything above.
+The stall report shipped and has now fired seven times: 31289188625 (x2),
+31292208608 (x2), 31298451465 (x1), 31348997269 (x2). Counted directly from the
+device id on each report line, not from a tally - an earlier draft of this
+section got that count and the device wrong together. Read them before anything
+above.
 
 **1. The veto is VERIFIED, not inferred.** Every one of the reports names
 `vetoed-self-ip`. The section above says "INFERRED, not verified: which of the
@@ -353,7 +357,7 @@ point that does contradict the item above, which argues one mechanism. They
 differ in the field that matters, so treating them as one defect is what kept
 this open:
 
-    b5284fc7 = L2_F8A3 (A001513), 6 of 8 - the IoT-SSID unit this item describes:
+    b5284fc7 = L2_F8A3 (A001513), 5 of the 7 - the unit this item describes:
       nominated=192.168.100.3:P1, 173.53.36.206:P2, 54.144.38.43:P3
       use-candidate=sent; binding-success=0; trigger=not-sent
       probes=54.144.38.43:5349 via 173.53.36.206:P1 -> vetoed-self-ip
@@ -365,7 +369,7 @@ this open:
       use-candidate=NOT-SENT; binding-success=0; trigger=not-sent
       probes=192.168.0.129:53246 -> learned; 192.168.0.129:47093 -> learned
 
-    b5284fc7 = L2_F8A3, once (run 31348997269):
+    b5284fc7 = L2_F8A3, the sixth of its reports (run 31348997269):
       nominated=none; use-candidate=not-sent; binding-success=0; probes=none
 
 The second is not an ICE-reachability problem at all. Both probe sources were
