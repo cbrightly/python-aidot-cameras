@@ -589,14 +589,25 @@ they ride the same channel as PTZ and SPEAKERSTART, and `AvioRequestMixin`
 already sends a command and waits for a specific response id on both transports.
 Nothing new is needed to ask the question.
 
-**Two things are genuinely unknown**, and they are the work:
-- The RESPONSE layout. There is no `...ListEventResp` class beside the request
-  ones, so the reply has to be derived from its use sites or read off the wire.
-- Where the media goes. `RECORD_PLAYCONTROL` starts playback, but whether the
-  frames arrive on the existing SRTP media path, on the TCP binary path this
-  package already implements for cloud playback (`camera/playback.py`), or on
-  something else, is not established. That answer decides whether this is a few
-  days of work or a rewrite.
+**The transport question is now answered, and the answer is favourable.** The
+app's SD surface is `LdsTutkChannel` - `getSDRecordList`, `getSDTimeList`,
+`sdRecordSeekPlay`, `sdRecordPause`, `sdRecordResume`, `sdRecordRelease` - and
+that name is misleading. It is the app's camera-channel FACADE, not the native
+TUTK stack: the same class carries `setIsDTLS`, and its `getSDRecordList` body
+does one thing, `sendCtrl(0x318, ...)`. `sendCtrl` is the same generic control
+send that carries PTZ `0x1001` and SPEAKERSTART `0x350`, both of which this
+package already sends on both transports.
+
+So SD listing rides the ordinary AVIO control channel that already works here.
+It is NOT behind the `liveType=0` / TUTK path this project put out of scope for
+1.0.0, which was the risk that made the estimate open-ended.
+
+**One thing is genuinely unknown, and it is the work:** the RESPONSE layout.
+There is no `...ListEventResp` class beside the request ones, so the reply has
+to be read off the wire. Whether playback media then arrives on the existing
+SRTP path or elsewhere follows from the same experiment - `RECORD_PLAYCONTROL`
+is `sendCtrl` too, so the command goes out the way PTZ does, and what comes back
+is the question.
 
 **The cheap first step, if this is picked up:** send `HASLISTEVENT_REQ` to an
 A000088 with a wide time range and log the reply bytes. It is one command on a
