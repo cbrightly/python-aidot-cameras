@@ -835,6 +835,42 @@ def _bridge_should_break(rc, teardown_requested: bool) -> bool:
 _MAX_PRFLX_CANDS = 4
 
 
+def _is_self_transport_address(ip, port, *, local_ip, public_ip, own_ports):
+    """Is this address US, rather than a peer that merely looks like us?
+
+    The guard exists so we never nominate our own address: doing that has this
+    host answering its own connectivity check, which would arm the media trigger
+    at nobody.  What it must NOT do is refuse the camera, and for one common
+    deployment it did - a camera in the same house reaches the TURN server from
+    the same public IP we do, so an address-only comparison called it us.  Seven
+    first-media stalls were that (`vetoed-self-ip`, ROAD-TO-1.0 item 3): the
+    camera's relay-carried Binding Request could not be answered, because the
+    branch that wraps the response in a Send Indication is guarded by this, so
+    ICE never completed and no media ever started.
+
+    ICE identifies a candidate by its transport address, and so does this: our
+    own is one ip:PORT, and a peer sharing our NAT has the same ip with a
+    different port.  Comparing the pair keeps the guard exactly as strong for
+    the case it was written for and stops it catching the camera.
+
+    ``port`` may be None where a caller genuinely does not know it. That keeps
+    the old, conservative answer - widening a decision on an address we cannot
+    fully identify would be guessing, and this guard is the safe default.
+
+    Loopback and this host's own LAN address are us on ANY port: a different
+    port there is still this machine.
+
+    Pure, so the policy is testable without a camera.
+    """
+    if not ip:
+        return False
+    if ip in {"127.0.0.1", "0.0.0.0", local_ip}:
+        return True
+    if public_ip and ip == public_ip:
+        return port is None or port in set(own_ports or ())
+    return False
+
+
 def _record_peer_reflexive(known, discovered, observed, is_self=None):
     """Learn the address a STUN probe actually arrived from.
 
@@ -859,7 +895,7 @@ def _record_peer_reflexive(known, discovered, observed, is_self=None):
     _ip, _port = observed
     if not _ip or not _port:
         return discovered
-    if is_self is not None and is_self(_ip):
+    if is_self is not None and is_self(_ip, _port):
         return discovered
     if observed in known or observed in discovered:
         return discovered
@@ -2386,14 +2422,18 @@ class _SdesOpenMixin:
                 + (f" and :{_hp_port2}" if _hp_port != _hp_port2 else "")
             )
 
-        def _is_self_peer_ip(_ip: "Optional[str]") -> bool:
-            if not _ip:
-                return False
-            if _ip in {"127.0.0.1", "0.0.0.0", local_ip}:
-                return True
-            if _public_ip and _ip == _public_ip:
-                return True
-            return False
+        # The ports our own srflx candidates advertise - the only ports on the
+        # public IP that are actually this host. Anything else there is another
+        # device behind the same NAT, which for this fleet means the camera.
+        _own_srflx_ports = (audio_port, video_port)
+
+        def _is_self_peer_ip(_ip: "Optional[str]", _port: "Optional[int]" = None
+                             ) -> bool:
+            return _is_self_transport_address(
+                _ip, _port,
+                local_ip=local_ip, public_ip=_public_ip,
+                own_ports=_own_srflx_ports,
+            )
 
         _selfloop_drop_count = 0
         _bridge_selfloop_drop_count = 0
@@ -2526,7 +2566,8 @@ class _SdesOpenMixin:
                             if _turn_peer_ip_sw and _prefer_direct_stun.get(_sock, False):
                                 pass
                             elif (_turn_peer_ip_sw and _sock in _relay_addrs
-                                    and not _is_self_peer_ip(_turn_peer_ip_sw)):
+                                    and not _is_self_peer_ip(_turn_peer_ip_sw,
+                                                             _turn_peer_port_sw)):
                                 # Arrived via TURN - respond via Send Indication
                                 _ri_sw = _relay_addrs[_sock]
                                 _t_host_sw, _t_port_sw = _ri_sw[4], _ri_sw[5]
@@ -2552,7 +2593,8 @@ class _SdesOpenMixin:
                                              + _STUN_MAGIC + os.urandom(12)
                                              + _si_body)
                                 _sock.sendto(_send_ind, (_t_host_sw, _t_port_sw))
-                            elif _turn_peer_ip_sw and _is_self_peer_ip(_turn_peer_ip_sw):
+                            elif _turn_peer_ip_sw and _is_self_peer_ip(
+                                    _turn_peer_ip_sw, _turn_peer_port_sw):
                                 # Self-loop Data Indication (peer == our own
                                 # local/srflx address). Responding via TURN
                                 # creates an endless STUN echo loop and no media.
@@ -3081,7 +3123,7 @@ class _SdesOpenMixin:
             # addresses, and still ZERO relay-carried inbound packets.
             # The direct send above is untouched, so directly reachable
             # cameras behave exactly as before.
-            if not _is_self_peer_ip(cam_addr[0]):
+            if not _is_self_peer_ip(cam_addr[0], cam_addr[1]):
                 _turn_send_indication(sock, cam_addr[0], cam_addr[1], _req)
 
         # Every candidate this session actually sent USE-CANDIDATE to, in the
@@ -4002,7 +4044,8 @@ class _SdesOpenMixin:
                         _br_cam_peer = (
                             (_br_turn_peer_ip, _br_turn_peer_port)
                             if _br_turn_peer_ip and _br_turn_peer_port
-                            and not _is_self_peer_ip(_br_turn_peer_ip)
+                            and not _is_self_peer_ip(_br_turn_peer_ip,
+                                                     _br_turn_peer_port)
                             else None
                         )
 
@@ -4110,7 +4153,9 @@ class _SdesOpenMixin:
                                 if _br_turn_peer_ip and _br_prefer_direct_stun.get(_bs, False):
                                     pass
                                 elif (_br_turn_peer_ip and _bs in _relay_addrs
-                                        and not _is_self_peer_ip(_br_turn_peer_ip)):
+                                        and not _is_self_peer_ip(
+                                            _br_turn_peer_ip,
+                                            _br_turn_peer_port)):
                                     # Arrived via TURN - respond via Send Indication
                                     _bri = _relay_addrs[_bs]
                                     _br_t_host, _br_t_port = _bri[4], _bri[5]
@@ -4143,7 +4188,8 @@ class _SdesOpenMixin:
                                         + _br_si_body
                                     )
                                     _bs.sendto(_br_send_ind, (_br_t_host, _br_t_port))
-                                elif _br_turn_peer_ip and _is_self_peer_ip(_br_turn_peer_ip):
+                                elif _br_turn_peer_ip and _is_self_peer_ip(
+                                        _br_turn_peer_ip, _br_turn_peer_port):
                                     _bridge_selfloop_drop_count += 1
                                     if (_bridge_selfloop_drop_count <= 5
                                             or _bridge_selfloop_drop_count % 50 == 0):

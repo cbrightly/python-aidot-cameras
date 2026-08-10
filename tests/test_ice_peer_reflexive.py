@@ -14,7 +14,11 @@ from aidot_cameras.camera.sdes_open import (
 ADVERTISED = [("192.168.100.13", 40000)]
 
 
-def _never_self(_ip):
+def _never_self(_ip, _port=None):
+    # The predicate takes a transport address, not an address: a peer behind
+    # our own NAT shares our public IP on a different port, and refusing it on
+    # the IP alone stalled real streams. See
+    # test_self_peer_is_an_address_not_an_ip.py.
     return False
 
 
@@ -53,8 +57,8 @@ def test_our_own_address_is_never_learned():
 
     Nominating ourselves would form a pair that can never carry camera media.
     """
-    def _is_self(ip):
-        return ip == "192.168.0.110"
+    def _is_self(ip, port=None):
+        return (ip, port) == ("192.168.0.110", 3478)
 
     out = _record_peer_reflexive(
         ADVERTISED, [], ("192.168.0.110", 3478), _is_self)
