@@ -381,6 +381,15 @@ Two residuals, stated rather than fixed:
   "sent".** `_avio_cmd` returned False and nothing left the host. It is a log
   wording issue on a path whose return value is unaffected, and changing it was
   out of scope here; recorded so it is a decision rather than an oversight.
+- **The thumbnail FAIL is the CI account, not the feature - closed
+  2026-08-09.** Every fleet run reports `thumbnail=FAIL` on all six live
+  cameras. The same call was then run from the OWNING account: six of seven
+  cameras returned a CloudFront URL and the seventh, which is offline, returned
+  None - so the cloud serves thumbnails and the shared-home member the runner
+  signs in as simply gets an empty answer for them. The verdict is left as FAIL
+  rather than reclassified, because the call did fail for the identity that made
+  it; what changed is that it is now measured from both sides rather than
+  explained from one.
 - **The SDES snapshot budget is marginal on a battery camera.** Added
   2026-08-09. An A001513 timed out at the 25 s budget in one of three fleet
   runs, having passed in the other two and on the other A001513 every time. The

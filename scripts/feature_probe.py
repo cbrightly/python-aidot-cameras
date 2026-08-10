@@ -257,13 +257,17 @@ async def _probe_talk(session, timeout: float, hold: float = 6.0
 async def _probe_thumbnail(dc, timeout: float) -> tuple[bool, bool, Optional[str]]:
     """Fetch the latest thumbnail URL.
 
-    Known account sensitivity, measured 2026-08-09: from the OWNING account all
-    six live cameras return a CloudFront URL and the offline one returns None.
-    From the shared-home member the CI runner uses, all six returned nothing -
-    no error, just an empty answer. So a FAIL here on a fleet run may be
-    reporting the runner's account rather than the feature, and that has to be
-    ruled out before it is read as a defect. The error text says which was
-    observed so the two cannot be confused later.
+    Account sensitivity, confirmed 2026-08-09 by running the same call from both
+    accounts. From the OWNING account all six live cameras return a CloudFront
+    URL and the seventh, which is offline, correctly returns None. From the
+    shared-home member the CI runner uses, those same six return nothing - no
+    error, just an empty answer.
+
+    So a FAIL here on a fleet run is reporting the runner's account, not the
+    feature, and the verdict is deliberately left as FAIL rather than quietly
+    reclassified: the call really did fail for the identity that made it, and a
+    probe that hides its own failures is the thing this module exists to stop.
+    The error text names the alternative so nobody re-opens it as a defect.
     """
     fn = getattr(dc, "async_get_latest_thumbnail", None)
     if fn is None:
