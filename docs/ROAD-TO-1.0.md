@@ -515,8 +515,46 @@ built - but the product describes playback without qualifying it by storage, so
 either the capability or the description has to change.
 
 The bar: **implemented, or the docs say which cameras it applies to.** The
-second is cheap and honest; the first needs the vendor's SD retrieval protocol,
-which has not been looked at.
+second is cheap and honest; the first needs the vendor's SD retrieval protocol.
+
+#### 2026-08-09: that protocol has now been looked at, and it is reachable
+
+Scoping only - nothing is implemented and nothing has been sent to a camera.
+What changed is that "has not been looked at" is no longer true, so the estimate
+below is from the decompiled client rather than from nothing.
+
+**The command ids are already enumerated** in `docs/APP-PARITY-STATUS.md`, from
+`AVIOCTRLDEFs`, and three of them are this feature:
+
+    0x318 / 792   USER_IPCAM_LISTEVENT_REQ       list recordings in a time range
+    0x4b5 / 1205  USER_IPCAM_HASLISTEVENT_REQ    does this range hold anything
+    0x31a / 794   USER_IPCAM_RECORD_PLAYCONTROL  play / pause / seek / stop
+
+**The request layout is readable.** `AVIOCTRLDEFs$SMsgAVIoctrlListEventReq`
+carries `channel:I`, `startutctime:[B`, `endutctime:[B`, `event:B`, `status:B`,
+with the two times built by `STimeDay.parseContent(year, month, day, wday, hour,
+minute, second)` - and `STimeDay`'s own fields (`year:S` plus six bytes) fix that
+at 8 bytes each.
+
+**The transport already exists.** These are ordinary AVIO IOCtrl commands, so
+they ride the same channel as PTZ and SPEAKERSTART, and `AvioRequestMixin`
+already sends a command and waits for a specific response id on both transports.
+Nothing new is needed to ask the question.
+
+**Two things are genuinely unknown**, and they are the work:
+- The RESPONSE layout. There is no `...ListEventResp` class beside the request
+  ones, so the reply has to be derived from its use sites or read off the wire.
+- Where the media goes. `RECORD_PLAYCONTROL` starts playback, but whether the
+  frames arrive on the existing SRTP media path, on the TCP binary path this
+  package already implements for cloud playback (`camera/playback.py`), or on
+  something else, is not established. That answer decides whether this is a few
+  days of work or a rewrite.
+
+**The cheap first step, if this is picked up:** send `HASLISTEVENT_REQ` to an
+A000088 with a wide time range and log the reply bytes. It is one command on a
+channel that already works, it changes nothing on the camera, and it either
+returns a parseable answer - in which case the response format follows from a
+handful of ranges - or it does not, which is equally decisive.
 
 ## Out of scope for 1.0.0
 
