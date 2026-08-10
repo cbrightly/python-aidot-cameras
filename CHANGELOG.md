@@ -6,6 +6,52 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b3]
+
+Pre-release.
+
+### Fixed
+
+- **A camera behind the same NAT as the host could never start streaming.** ICE
+  identifies a candidate by its transport address; this package's self-check
+  compared the address alone. A camera in the same house reaches the cloud TURN
+  server from the same public IP the host does, on a different port, so that
+  check answered "that is us" about the camera.
+
+  The consequence was worse than a missing candidate. The branch that answers a
+  relay-carried STUN Binding Request - by wrapping the response in a TURN Send
+  Indication back to the camera - is guarded by the same check, so the camera's
+  connectivity check was never answered at all. With no response the check never
+  completes, the AVIO LIVING trigger that gates media is never armed, and the
+  camera sends nothing. Sessions sat for 75 seconds and delivered no video.
+
+  The check now compares `ip:port` against the ports our own server-reflexive
+  candidates advertise, which are the only ports on that address belonging to
+  this host. It is exactly as strong for what it was written for - nominating our
+  own address would have the host answer its own connectivity check - and it no
+  longer catches the camera. A caller that cannot supply a port keeps the old,
+  conservative answer.
+
+  Confirmed on hardware rather than by absence of failure: the fleet runs after
+  this change learn peer-reflexive candidates on the host's own public IP at
+  ports that are not the host's - the exact address class the old check refused -
+  where every earlier run learned none of them. The failure mode this addresses
+  accounted for five of the seven recorded stalls and has not recurred since.
+
+  One rarer stall shape remains and is untouched by this: a session where no
+  connectivity check arrives at all, so there is nothing to learn or nominate.
+  That is a signaling question rather than an ICE one and is tracked in
+  `docs/ROAD-TO-1.0.md`.
+
+### Changed
+
+- The SDES live-view session is opened talk-capable, so two-way audio reuses it
+  instead of opening a second camera session alongside it. A camera holds a
+  viewer slot for about 120 seconds after a session ends, so the second session
+  was not free. The offer change - audio `sendrecv` plus an `a=ssrc` - has run on
+  every camera of the reference fleet across several validation runs with no
+  streaming regression.
+
 ## [1.0.0b2]
 
 Pre-release. `1.0.0b1` was tagged but never published to PyPI; this supersedes

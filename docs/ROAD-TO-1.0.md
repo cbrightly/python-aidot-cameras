@@ -425,10 +425,26 @@ learned one, and two of the four are `173.53.36.206:40888` and
 precisely the address class the old check refused. All six live cameras streamed
 and the run logged no stall at all, L2_F8A3 included at 415 decoded frames.
 
-**What that does not establish.** One run. This failure appears in seven of nine
-runs historically but never on demand, so absence in a single run is weak; the
-learned-candidate lines are the real evidence, because they show the guard
-answering differently on exactly the input it used to get wrong.
+**A second run, 31400620372, adds the more useful kind of evidence: a stall that
+still happened.** L2_F8A3 returned no media on its first attempt and passed on
+its second. The report for it reads:
+
+    nominated=none; use-candidate=not-sent; binding-success=0; probes=none
+
+That is the THIRD shape, not the vetoed one. No probe reached us at all, so
+there was nothing to veto and nothing to nominate - a signaling or answer
+failure rather than an ICE-reachability one. Across the two post-fix runs the
+`vetoed-self-ip` mode, which was 5 of the 7 reports before, has not recurred
+once, while peer-reflexive learning is up from one candidate per run to four and
+five, three of the latter on our own public IP.
+
+**What is now established, and what is not.** The guard demonstrably answers
+differently on exactly the input it used to get wrong, and the dominant failure
+mode has not reappeared. Two runs cannot prove a mode extinct for a failure that
+never appeared on demand. And the empty-shape stall is untouched by this fix -
+it is a different defect that was always in the corpus, now the only one left
+visible, and it needs its own investigation starting at the answer rather than
+at ICE.
 
 ### 4. Coverage holes - closed 2026-08-08
 
