@@ -3477,6 +3477,22 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                     rtsp_push_url=self._keepalive_rtsp_url,
                     timeout=(_FAST_OPEN_TIMEOUT if _use_fast else 120.0),
                     reuse_peer_id=_loop_peer_id,
+                    # Ask for talk so THIS session can carry it. async_speak
+                    # reuses _stream_session only when it is talk-capable, and
+                    # an SDES session that did not ask never gets a return audio
+                    # track - so without this every press-to-talk opened a
+                    # second camera session alongside the live view, and the
+                    # camera holds a viewer slot for about 120 s after one ends.
+                    #
+                    # This changes the SDP offer on the path every SDES live
+                    # view takes, which is the kind of change that has caused
+                    # fleet-wide blackouts here, so it rests on evidence rather
+                    # than reasoning: the release harness has opened all seven
+                    # cameras talk-capable across three fleet runs with no
+                    # streaming regression. The flag reaches only the offer
+                    # (audio sendrecv + a=ssrc) and the shared talk state; it
+                    # does not touch the rtsp_push branch this loop uses.
+                    talk=True,
                 )
             except asyncio.CancelledError:
                 self._fast_attempt_override = None
