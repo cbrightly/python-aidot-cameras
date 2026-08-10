@@ -400,9 +400,35 @@ to it, not the whole of it. So the order is: narrow the veto to ip:port, confirm
 the verdict changes from `vetoed-self-ip` to `learned` on the next stall, and
 only then decide about nomination.
 
-**An honest note on reproducing it.** Five stalls in nine runs, and none in the
+**An honest note on reproducing it.** Seven stalls in nine runs, and none in the
 four most recent. Any fix here has to be validated against a failure that does
 not appear on demand.
+
+#### 2026-08-10: the veto is fixed, and the fix is confirmed by what it learns
+
+`_is_self_peer_ip` compared an address where ICE compares a transport address,
+so a camera behind our own NAT - same public IP, different port - was refused as
+if it were us. The consequence was not only that its address went unlearned: the
+branch that answers a relay-carried Binding Request by wrapping the response in a
+Send Indication is guarded by the same check, so the camera's connectivity check
+was never answered at all. No response, no completed check, no LIVING trigger, no
+media. That is the whole of `binding-success=0; trigger=not-sent`.
+
+Now compared as `ip:port`, against the ports our own srflx candidates advertise -
+the only ports on the public IP that are this host. A caller that cannot supply a
+port keeps the old conservative answer.
+
+**The confirmation is behavioural, not merely an absence of failures.** Run
+31399498436 learned four peer-reflexive candidates where every earlier run
+learned one, and two of the four are `173.53.36.206:40888` and
+`173.53.36.206:52183` - our own public IP on ports that are not ours, which is
+precisely the address class the old check refused. All six live cameras streamed
+and the run logged no stall at all, L2_F8A3 included at 415 decoded frames.
+
+**What that does not establish.** One run. This failure appears in seven of nine
+runs historically but never on demand, so absence in a single run is weak; the
+learned-candidate lines are the real evidence, because they show the guard
+answering differently on exactly the input it used to get wrong.
 
 ### 4. Coverage holes - closed 2026-08-08
 
@@ -500,15 +526,28 @@ Two residuals, stated rather than fixed:
   rather than reclassified, because the call did fail for the identity that made
   it; what changed is that it is now measured from both sides rather than
   explained from one.
-- **The SDES snapshot budget was marginal - measured and fixed 2026-08-09.** An
-  A001513 timed out at the 25 s budget in one of three runs. Rather than retune
-  on that one sample, the probe was made to report elapsed time, and the next
-  run gave the distribution: SDES 17.2 / 17.5 / 23.6 s, DTLS 2.8 / 3.0 / 2.9 s.
-  So 25 s left the slowest camera 1.4 s of margin, which is what a budget set
-  just above the then-known maximum always does - and it is the second time that
-  happened here, the first being 10 s. Now 40 s, about 1.7x the slowest sample,
-  with a test that asserts headroom rather than a number. DTLS is untouched at
-  10 s: it is a different path and an order of magnitude faster.
+- **The SDES snapshot budget was marginal, and the failures were something
+  else - 2026-08-09/10.** An A001513 timed out at the 25 s budget in one of
+  three runs. Rather than retune on that sample the probe was made to report
+  elapsed time, and the next run gave the distribution for HEALTHY snapshots:
+  SDES 17.2 / 17.5 / 23.6 s, DTLS 2.8 / 3.0 / 2.9 s. So 25 s left the slowest a
+  1.4 s margin - what a budget set just above the then-known maximum always
+  does, twice now, the first being 10 s. It is 40 s, about 1.7x the slowest
+  sample, with a test asserting headroom rather than a number.
+
+  **That did not stop the failures, and run 31399498436 says why.** L2_F8A3
+  reported `snapshot_s=50.0`, which is the outer bound (budget + 10) rather than
+  a slow snapshot. Its stream session that run was healthy - first media at
+  +5473 ms, 415 decoded frames - and its snapshot's OWN session logged no
+  first-media line at all. The snapshot timeouts are item 3's stall landing on
+  the second session, not a snapshot that needs longer. The budget is right for
+  healthy snapshots and was never the cause of the failures.
+
+  **This also hides the evidence, which is worth fixing separately.** The
+  first-media stall report fires at 75 s and the snapshot is cancelled at 50 s,
+  so a stalled snapshot session can never explain itself - and raising the
+  budget made that gap wider. Any snapshot failure on an SDES camera should be
+  read as a suspected item 3 stall until the report can reach it.
 - **Every press-to-talk on an SDES camera opens a second session.** Added
   2026-08-09. `async_speak` reuses `_stream_session` only when it is
   talk-capable, and none of the three loops that set it open with `talk=True`,
