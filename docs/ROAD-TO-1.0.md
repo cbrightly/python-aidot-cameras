@@ -294,42 +294,51 @@ holds for hours.
 an open that logs `SDES: sent trigger` and delivers no media, or one that
 delivers media without it.
 
-#### 2026-08-09: the self-reporting run happened, and it corrects three things above
+#### 2026-08-09: the self-reporting run happened, and it settles the open question
 
-The stall report shipped and has now fired five times, in runs 31289188625 (x2),
-31292208608 (x2) and 31298451465. Read them before anything above: each of the
-next three points contradicts what this item said.
+The stall report shipped and has now fired eight times, in runs 31289188625
+(x2), 31292208608 (x2), 31298451465 and 31348997269 (x2, plus one on a snapshot
+session). Read them before anything above.
 
-**1. The veto is VERIFIED, not inferred.** Every one of the five reports names
+**1. The veto is VERIFIED, not inferred.** Every one of the reports names
 `vetoed-self-ip`. The section above says "INFERRED, not verified: which of the
 two vetoes did it. Both are silent." They are not silent any more and the answer
 is the first one.
 
-**2. It is mostly the A001064, not the A001513.** Four of the five stalls are
-the pan-tilt spotlight `b5284fc7`; one is `L2_181`. This item is titled and
-argued around a battery A001513 in a retry loop, and the unit that actually
-stalls under instrumentation is the mains PTZ. The A001513s have passed on the
-first attempt in every run since.
+**2. It is the A001513s, exactly as this item always said.** An earlier version
+of this section claimed the stalling unit was the A001064 PTZ. That was wrong and
+is retracted: it took the device id from a log line that merely sat nearby rather
+than from the device list. Verified against the list, `b5284fc7` is **L2_F8A3**
+and `338603b5` is **L2_181**, both `LK.IPC.A001513`; the A001064 is `12b144cb`
+and appears in none of the reports. The lesson is one this project keeps
+relearning - never source an identifier from something that only sits next to
+it.
 
-**3. There are TWO failure modes here, not one.** They differ in the field that
-matters, so treating them as one defect is what kept this open:
+**3. There are TWO failure modes here, and now a third shape.** This is the
+point that does contradict the item above, which argues one mechanism. They
+differ in the field that matters, so treating them as one defect is what kept
+this open:
 
-    b5284fc7 (A001064), 4 of 4 identical in shape:
+    b5284fc7 = L2_F8A3 (A001513), 6 of 8 - the IoT-SSID unit this item describes:
       nominated=192.168.100.3:P1, 173.53.36.206:P2, 54.144.38.43:P3
       use-candidate=sent; binding-success=0; trigger=not-sent
       probes=54.144.38.43:5349 via 173.53.36.206:P1 -> vetoed-self-ip
              54.144.38.43:5349 via 173.53.36.206:P2 -> vetoed-self-ip
              54.144.38.43:5349 via 54.144.38.43:P3  -> known
 
-    338603b5 (A001513), once:
+    338603b5 = L2_181 (A001513), once:
       nominated=192.168.0.129:53246, 192.168.0.129:47093
       use-candidate=NOT-SENT; binding-success=0; trigger=not-sent
       probes=192.168.0.129:53246 -> learned; 192.168.0.129:47093 -> learned
 
-The second one is not an ICE-reachability problem at all. Both probe sources
-were learned, both are ordinary addresses on this host's own LAN, and then
-nothing was nominated. A separate question with a separate answer, and nothing
-above anticipates it.
+    b5284fc7 = L2_F8A3, once (run 31348997269):
+      nominated=none; use-candidate=not-sent; binding-success=0; probes=none
+
+The second is not an ICE-reachability problem at all. Both probe sources were
+learned, both are ordinary addresses on this host's own LAN, and then nothing
+was nominated. The third is emptier still - no candidates, no probes, nothing to
+nominate at all - which points at signaling or the answer rather than at ICE.
+Neither is anticipated above.
 
 **What the first mode actually says.** `P1` is the port the camera advertises on
 its own host candidate, and it reappears as `173.53.36.206:P1` in the
