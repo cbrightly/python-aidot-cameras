@@ -147,6 +147,40 @@ at about the control rate says the camera does not read m-line order as a
 constraint, and any session with no video at all says order-preference triggers
 the same failure as narrowing and the knob is unsafe rather than merely opt-in.
 
+**2026-08-09: the ordering arm has now been run, and the result is against the
+hypothesis but weaker than the kill above assumed.**
+
+Run `31348997269`, `AIDOT_SDES_VIDEO_PT_ORDER=97,96` on the SDES models, with the
+receipt present - `SDES: offer video codec order=97 96` on all 8 opens, so this
+one did reach the SDP, unlike the first attempt at the pin. Six sessions produced
+a profile line and **all six were `pt=96 codec=H264`**. The control is the last
+four runs on the shipped order: **23 of 23 H264**.
+
+Read carefully, because the kill stated above does not quite apply. It assumed a
+control that produces hevc sometimes, so that "hevc at about the control rate"
+would be meaningful. The control rate is zero. Six sessions therefore cannot
+separate "no effect" from "a small effect", and this arm is blocked rather than
+interleaved. It is evidence against the hypothesis, not the kill.
+
+**The one qualitative result is worth more than the counts.** On one open the
+camera's answer came back with TWO video m-sections - `m=video 9 RTP/SAVPF 97`
+followed by `m=video 9 RTP/SAVPF 96` - where every other answer in the corpus
+carries one. So under a 97-first offer this camera will acknowledge H265 in its
+answer, and then send H264 anyway. That is a direct observation of the camera
+declining a stated preference, which is what the ordering hypothesis needed it
+not to do.
+
+**The second kill did trigger, and is confounded.** `L2_F8A3` returned no video
+at all on both attempts. That is the unit with an independent, documented stall
+- six of the eight stall reports in item 3 are this camera, several of them from
+runs on the shipped order - and both of this run's stall reports name ICE causes
+(`vetoed-self-ip`, and one with no candidates at all), not a codec cause. So it
+does not indict the knob, and it does not clear it either.
+
+`AIDOT_SDES_VIDEO_PT_ORDER` stays: it is opt-in, inert unset, proven to reach the
+SDP, and it is the instrument any future arm would use. It should not be
+described as promising.
+
 The bar: **explained, or documented as accepted** with the measurements. Shipping
 1.0 with an unexplained 5x resource difference on a supported model is a stretch.
 
