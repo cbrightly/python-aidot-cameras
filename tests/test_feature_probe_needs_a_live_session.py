@@ -92,6 +92,21 @@ def test_the_snapshot_reports_how_long_it_took():
     assert isinstance(out["snapshot_s"], float)
 
 
+def test_the_snapshot_budget_clears_the_slowest_measured_snapshot():
+    # Measured across the fleet: SDES 17.2-23.6 s, DTLS 2.8-3.0 s. Two earlier
+    # budgets were set just above the then-known maximum and both timed out a
+    # camera afterwards, so this asserts headroom rather than a value.
+    from feature_probe import _snapshot_budget
+
+    slowest_sdes_seen = 23.6
+    sdes = _snapshot_budget({"modelId": "LK.IPC.A001064"}, 10.0)
+    assert sdes >= slowest_sdes_seen * 1.5, (
+        "an SDES budget without real headroom is how this failed twice")
+    # DTLS is a different path and an order of magnitude faster; widening it
+    # would only slow down reporting a camera that is genuinely broken.
+    assert _snapshot_budget({"modelId": "LK.IPC.A000088"}, 10.0) == 10.0
+
+
 def test_a_session_that_does_not_publish_liveness_counts_as_live():
     # Only SdesSession has is_alive - it tracks the ffmpeg the bridge dies with.
     # The DTLS session keeps no ffmpeg and publishes nothing, and absence of the

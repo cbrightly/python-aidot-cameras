@@ -453,14 +453,15 @@ Two residuals, stated rather than fixed:
   rather than reclassified, because the call did fail for the identity that made
   it; what changed is that it is now measured from both sides rather than
   explained from one.
-- **The SDES snapshot budget is marginal on a battery camera.** Added
-  2026-08-09. An A001513 timed out at the 25 s budget in one of three fleet
-  runs, having passed in the other two and on the other A001513 every time. The
-  budget was already raised once (10 s to 25 s) for this path, which streams to
-  a file and then shells out to ffmpeg. It is deliberately NOT raised again on a
-  single sample; what the next runs need is the elapsed time recorded alongside
-  the verdict so the distribution is visible rather than guessed at. Recorded so
-  it is a decision rather than an oversight.
+- **The SDES snapshot budget was marginal - measured and fixed 2026-08-09.** An
+  A001513 timed out at the 25 s budget in one of three runs. Rather than retune
+  on that one sample, the probe was made to report elapsed time, and the next
+  run gave the distribution: SDES 17.2 / 17.5 / 23.6 s, DTLS 2.8 / 3.0 / 2.9 s.
+  So 25 s left the slowest camera 1.4 s of margin, which is what a budget set
+  just above the then-known maximum always does - and it is the second time that
+  happened here, the first being 10 s. Now 40 s, about 1.7x the slowest sample,
+  with a test that asserts headroom rather than a number. DTLS is untouched at
+  10 s: it is a different path and an order of magnitude faster.
 - **Every press-to-talk on an SDES camera opens a second session.** Added
   2026-08-09. `async_speak` reuses `_stream_session` only when it is
   talk-capable, and none of the three loops that set it open with `talk=True`,

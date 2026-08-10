@@ -109,6 +109,22 @@ def _pcm_provider(frames: int = 25):
     return provider, sent
 
 
+#: SDES snapshot budget, in seconds. Set from measurement rather than from
+#: reasoning, after two guesses were wrong in the same direction.
+#:
+#: Timed across the fleet once `snapshot_s` existed to report it:
+#:
+#:     SDES   A001064 23.6 s   A001513 17.5 s   A001513 17.2 s   (+1 >25 s)
+#:     DTLS   A000088  2.8 s   A000088  3.0 s   A000088  2.9 s
+#:
+#: 10 s timed out every SDES camera. 25 s left the A001064 1.4 s of margin and
+#: timed out an A001513 once in three runs - which is exactly what a budget set
+#: just above the observed maximum does. 40 s is about 1.7x the slowest sample.
+#: The cost of being generous here is only that a genuinely broken snapshot
+#: takes longer to report, and this probe does not gate a release.
+_SDES_SNAPSHOT_BUDGET_S = 40.0
+
+
 def _snapshot_budget(device: dict, base: float) -> float:
     """SDES snapshot needs far longer than DTLS, and the paths differ by design.
 
@@ -119,7 +135,7 @@ def _snapshot_budget(device: dict, base: float) -> float:
     SDES ones, which was the budget being wrong rather than the feature.
     """
     if _model(device) and not any(m in _model(device) for m in ("A000088",)):
-        return max(base, 25.0)
+        return max(base, _SDES_SNAPSHOT_BUDGET_S)
     return base
 
 
