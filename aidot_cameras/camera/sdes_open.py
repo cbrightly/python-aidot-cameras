@@ -955,7 +955,8 @@ def _probe_source_verdict(src, turn_peer_ip, turn_peer_port, *,
 def _first_media_stall_report(device_id, waited_s, nominated,
                               use_candidate_sent, binding_success,
                               trigger_sent, probes, probes_dropped=0,
-                              cancelled=False, media_pkts=0, decrypt_fails=0):
+                              cancelled=False, media_pkts=0, decrypt_fails=0,
+                              answer_cands=-1):
     """Build the one line a first-media stall emits.
 
     A session that never delivers a byte looks, in a log, exactly like one that
@@ -995,6 +996,21 @@ def _first_media_stall_report(device_id, waited_s, nominated,
     # or a caller gave up sooner - a snapshot does, at its own budget - and the
     # session might still have delivered.  Without saying which, an early number
     # reads as a shorter deadline than the one that actually applies.
+    # `nominated=none` has two causes that want different subsystems looked at:
+    # the camera never answered, or it answered carrying no candidates. The
+    # existing corpus already holds a "(no ICE creds in answer)" row that
+    # nothing since has been able to tell apart from a lost answer. -1 means the
+    # caller could not determine it, and is reported as nothing at all rather
+    # than as a zero - "we did not look" and "there were none" is the confusion
+    # this whole line exists to undo.
+    _answer = ""
+    if answer_cands is None:
+        _answer = " answer=none;"
+        _why += ("  The camera never answered, so there was nothing to"
+                 " nominate - this is signaling, not ICE.")
+    elif answer_cands >= 0:
+        _answer = " answer=%d-candidates;" % answer_cands
+
     # The counters exist to separate two sessions that otherwise write the same
     # line: one where the camera sent nothing, and one where it sent media that
     # every SRTP unprotect rejected.  Media counters are gated on the packet
@@ -1010,13 +1026,14 @@ def _first_media_stall_report(device_id, waited_s, nominated,
     _how = " - caller cancelled the wait" if cancelled else ""
     return (
         "camera %s: SDES first media never arrived (%.0fs%s)."
-        " nominated=%s; use-candidate=%s; binding-success=%d; trigger=%s;"
+        " nominated=%s;%s use-candidate=%s; binding-success=%d; trigger=%s;"
         " inbound-media=%d; decrypt-failed=%d; probes=%s.%s"
         % (
             device_id,
             waited_s,
             _how,
             _cands or "none",
+            _answer,
             "sent" if use_candidate_sent else "not-sent",
             binding_success,
             "sent" if trigger_sent else "not-sent",
@@ -5427,6 +5444,30 @@ class _SdesOpenMixin:
             25 s before the explanation would have been written.
             """
             try:
+                # What the answer carried, so `nominated=none` says which cause.
+                # Both sources are consulted: the pre-launch snapshot is empty on
+                # a late answer - measured at +1.3 s - and answer_fut is the only
+                # place that shape's SDP ever appears. -1 when neither can be
+                # read, which reports nothing rather than inventing a zero.
+                _stall_answer = -1
+                _stall_sdp = _pre_launch_answer_sdp or ""
+                if not _stall_sdp and answer_fut is not None and answer_fut.done():
+                    # cancelled() first: .exception() on a cancelled future
+                    # raises, and the answer-wait cancels this one on timeout.
+                    if not answer_fut.cancelled():
+                        try:
+                            if answer_fut.exception() is None:
+                                _stall_sdp = (
+                                    (answer_fut.result() or {}).get("sdp", "") or "")
+                        except Exception:
+                            _stall_sdp = ""
+                if _stall_sdp:
+                    _stall_answer = _stall_sdp.count("a=candidate:")
+                elif answer_fut is not None and (
+                        answer_fut.cancelled()
+                        or (answer_fut.done() and not _stall_sdp)):
+                    # Asked for and never got one.
+                    _stall_answer = None
                 _stall_probes = list(
                     (getattr(_bridge_fn, "_br_probe_verdicts", None) or {}).items()
                 )
@@ -5457,6 +5498,7 @@ class _SdesOpenMixin:
                     media_pkts=int(getattr(_bridge_fn, "_br_media_pkts", 0)),
                     decrypt_fails=int(
                         getattr(_bridge_fn, "_br_decrypt_fails", 0)),
+                    answer_cands=_stall_answer,
                 ))
             except Exception:
                 _LOGGER.debug("camera %s: swallowed exception in %s",
