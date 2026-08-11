@@ -1003,11 +1003,30 @@ nonsense.
 camera in the same session, `event=0x12` was answered and `event=0` was not.
 That variant existed to tell the selector apart from the layout, and it did.
 
-**What is left for item 6:** both cameras that answered report an empty range -
-which fits, since they are the models with no SD card. The A000088s, which have
-the cards, do not answer. So the remaining question is not the protocol but why
-the SD-bearing models stay silent, and that is a much smaller question than a
-P2P transport.
+**What is left for item 6 - and a correction to the paragraph this replaced.**
+An earlier version said the SD-bearing models "do not answer" and called it a
+per-model inversion. That was never established: the A000088s and the SDES
+models were probed in DIFFERENT runs, never side by side, so the comparison
+crossed two runs and two probe configurations. It then fell apart entirely -
+run 31498856848 had the A001064 answer nothing to the same requests it had
+answered an hour earlier, because the probe had grown from three requests to
+seven at an 8 s timeout and was spending up to 56 s against a session whose
+ffmpeg window is 28 s. The probe was measuring itself, for the second time in
+this project.
+
+Fixed: 2.5 s per request, and each request checks the session and records
+`session_closed` rather than `answered: false` when it could not ask. The first
+run that can actually answer the question is the full-fleet one on `d9ec799`,
+where every model is probed in one run under one configuration.
+
+**Separately, and on much firmer ground:** a capture of the vendor app shows its
+event page using a DIFFERENT cloud endpoint from the one this library calls -
+`getRecentEventRecordingList`, which takes a count rather than a time range -
+and getting real events back for an A000088, one of the SD-card models. That is
+implemented as `async_get_recent_recordings` and is now measured on every camera
+in the fleet report. If it returns events, most of this item dissolves: the
+recordings would be reachable from the cloud, just through a door this package
+was not knocking on.
 
 #### (Superseded) 2026-08-11: the cameras do not answer event listing on a live session
 
