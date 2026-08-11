@@ -955,7 +955,7 @@ def _probe_source_verdict(src, turn_peer_ip, turn_peer_port, *,
 def _first_media_stall_report(device_id, waited_s, nominated,
                               use_candidate_sent, binding_success,
                               trigger_sent, probes, probes_dropped=0,
-                              cancelled=False):
+                              cancelled=False, media_pkts=0, decrypt_fails=0):
     """Build the one line a first-media stall emits.
 
     A session that never delivers a byte looks, in a log, exactly like one that
@@ -995,11 +995,23 @@ def _first_media_stall_report(device_id, waited_s, nominated,
     # or a caller gave up sooner - a snapshot does, at its own budget - and the
     # session might still have delivered.  Without saying which, an early number
     # reads as a shorter deadline than the one that actually applies.
+    # The counters exist to separate two sessions that otherwise write the same
+    # line: one where the camera sent nothing, and one where it sent media that
+    # every SRTP unprotect rejected.  Media counters are gated on the packet
+    # being readable - correctly, since an undecryptable packet is not delivered
+    # media - so without these the second case leaves no trace at all.  They
+    # want opposite investigations: the camera, or our keys.
+    if media_pkts and decrypt_fails >= media_pkts:
+        _why += (
+            "  Every one of the %d inbound media packet(s) could not be"
+            " decrypted, so the camera DID send and this is a key problem on"
+            " our side, not silence on its side." % media_pkts
+        )
     _how = " - caller cancelled the wait" if cancelled else ""
     return (
         "camera %s: SDES first media never arrived (%.0fs%s)."
         " nominated=%s; use-candidate=%s; binding-success=%d; trigger=%s;"
-        " probes=%s.%s"
+        " inbound-media=%d; decrypt-failed=%d; probes=%s.%s"
         % (
             device_id,
             waited_s,
@@ -1008,6 +1020,8 @@ def _first_media_stall_report(device_id, waited_s, nominated,
             "sent" if use_candidate_sent else "not-sent",
             binding_success,
             "sent" if trigger_sent else "not-sent",
+            media_pkts,
+            decrypt_fails,
             _probes or "none",
             _why,
         )
@@ -4881,6 +4895,17 @@ class _SdesOpenMixin:
                                     (_bpkt[1] & 0x7F) if len(_bpkt) > 1 else -1,
                                 )
                             _pt_byte = _bpkt[1] if len(_bpkt) > 1 else 0
+                            if _pt_byte < 200 or _pt_byte > 204:
+                                # Every inbound RTP packet, counted BEFORE any
+                                # decryption decision. The media counters are
+                                # deliberately gated on the packet being
+                                # readable, so a session where the camera sent
+                                # plenty and none of it could be decrypted has,
+                                # until here, been indistinguishable from one
+                                # where it sent nothing. Read only by the stall
+                                # report, on a path a healthy open never takes.
+                                _bridge_fn._br_media_pkts = getattr(
+                                    _bridge_fn, '_br_media_pkts', 0) + 1
                             if 200 <= _pt_byte <= 204:
                                 # SRTCP from camera.  For _use_plain_rtp cameras
                                 # the ffmpeg SDP uses RTP/AVP (no crypto).  If we
@@ -5025,6 +5050,13 @@ class _SdesOpenMixin:
                                         _fwd_pkt = _rx_sess.unprotect(_bpkt)
                                         _decrypted = True
                                     except Exception as _srx_dec_e:
+                                        # Uncapped, unlike the log counter below
+                                        # which stops at 8 to keep the log
+                                        # readable. The stall report needs the
+                                        # real total: "8 failures" and "every
+                                        # packet failed" are different findings.
+                                        _bridge_fn._br_decrypt_fails = getattr(
+                                            _bridge_fn, '_br_decrypt_fails', 0) + 1
                                         _ec = getattr(
                                             _bridge_fn, '_decrypt_err_n', 0)
                                         if _ec < 8:
@@ -5422,6 +5454,9 @@ class _SdesOpenMixin:
                     probes_dropped=int(
                         getattr(_bridge_fn, "_br_probe_overflow", 0)),
                     cancelled=_cancelled,
+                    media_pkts=int(getattr(_bridge_fn, "_br_media_pkts", 0)),
+                    decrypt_fails=int(
+                        getattr(_bridge_fn, "_br_decrypt_fails", 0)),
                 ))
             except Exception:
                 _LOGGER.debug("camera %s: swallowed exception in %s",
