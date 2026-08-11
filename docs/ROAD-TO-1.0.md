@@ -559,11 +559,15 @@ Two residuals, stated rather than fixed:
   the second session, not a snapshot that needs longer. The budget is right for
   healthy snapshots and was never the cause of the failures.
 
-  **This also hides the evidence, which is worth fixing separately.** The
-  first-media stall report fires at 75 s and the snapshot is cancelled at 50 s,
-  so a stalled snapshot session can never explain itself - and raising the
-  budget made that gap wider. Any snapshot failure on an SDES camera should be
-  read as a suspected item 3 stall until the report can reach it.
+  **That hid the evidence, and it is fixed as of 2026-08-10.** The stall report
+  fired only when the 75 s wait expired, while the snapshot is cancelled at 50 s
+  - so the session that most needed explaining was the one guaranteed not to
+  explain itself, and raising the budget widened that gap. The report is now
+  emitted on cancellation too, with the time actually waited and a note saying
+  the caller gave up, so the two exits stay distinguishable. Cancellation still
+  propagates unchanged: this package has already shipped one bug where a handler
+  caught `CancelledError` and returned normally, and the re-raise is asserted
+  directly rather than assumed.
 - **Every press-to-talk on an SDES camera opens a second session.** Added
   2026-08-09. `async_speak` reuses `_stream_session` only when it is
   talk-capable, and none of the three loops that set it open with `talk=True`,

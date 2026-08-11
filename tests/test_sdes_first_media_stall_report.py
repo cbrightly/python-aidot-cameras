@@ -30,6 +30,7 @@ source-level guard that the stall path actually calls them (same shape as
 ``test_reap_sets_teardown_flag_before_kill``).
 """
 import inspect
+import re
 import logging
 
 import aidot_cameras.camera.sdes_open as sdes_open
@@ -247,17 +248,24 @@ def test_the_stall_path_calls_the_report_helper_at_warning():
 def test_the_report_is_gated_on_the_wait_actually_having_failed():
     """A working open must emit nothing new above DEBUG.
 
-    Anchored on the dedented ``if``, not the bare substring: the ``while``
-    condition above contains the same text, so a substring search would pass
-    with the guard deleted.
+    There are now two ways out of the wait without media - it expires, or a
+    caller cancels first - so both call the same local emitter and BOTH have to
+    be gated. Asserting on the emitter's call sites rather than on the builder's
+    single call inside it, because the builder now lives in a closure defined
+    before the wait, where no guard could precede it.
     """
     block = _first_media_wait_block()
-    call = block.index("_first_media_stall_report(")
-    guard = block.rindex("\n        if _first_video_pt[0] is None:", 0, call)
-    assert guard < call, (
-        "the stall report must be gated on the first-media wait's own unmet "
-        "exit condition, or every healthy open emits a WARNING"
-    )
+    sites = [m.start() for m in re.finditer(r"_report_first_media_stall\(", block)]
+    # The definition itself is not a call site.
+    sites = [i for i in sites if "def " not in block[max(0, i - 12):i]]
+    assert len(sites) >= 2, (
+        "both the expiry and the cancellation path must emit the report")
+    for call in sites:
+        guard = block.rfind("if _first_video_pt[0] is None:", 0, call)
+        assert guard != -1 and guard < call, (
+            "every stall report must be gated on the wait's own unmet exit "
+            "condition, or a healthy open emits a WARNING"
+        )
 
 
 def test_the_report_sees_the_candidates_the_answer_peek_path_nominated():

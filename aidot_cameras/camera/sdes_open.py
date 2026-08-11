@@ -954,7 +954,8 @@ def _probe_source_verdict(src, turn_peer_ip, turn_peer_port, *,
 
 def _first_media_stall_report(device_id, waited_s, nominated,
                               use_candidate_sent, binding_success,
-                              trigger_sent, probes, probes_dropped=0):
+                              trigger_sent, probes, probes_dropped=0,
+                              cancelled=False):
     """Build the one line a first-media stall emits.
 
     A session that never delivers a byte looks, in a log, exactly like one that
@@ -989,13 +990,20 @@ def _first_media_stall_report(device_id, waited_s, nominated,
             " A Binding Success arrived and the trigger still did not go -"
             " the trigger is not gated on anything else."
         )
+    # ``cancelled`` distinguishes the two ways this line gets written, because
+    # they are different facts about the session: the wait ran its full course,
+    # or a caller gave up sooner - a snapshot does, at its own budget - and the
+    # session might still have delivered.  Without saying which, an early number
+    # reads as a shorter deadline than the one that actually applies.
+    _how = " - caller cancelled the wait" if cancelled else ""
     return (
-        "camera %s: SDES first media never arrived (%.0fs)."
+        "camera %s: SDES first media never arrived (%.0fs%s)."
         " nominated=%s; use-candidate=%s; binding-success=%d; trigger=%s;"
         " probes=%s.%s"
         % (
             device_id,
             waited_s,
+            _how,
             _cands or "none",
             "sent" if use_candidate_sent else "not-sent",
             binding_success,
@@ -5374,44 +5382,18 @@ class _SdesOpenMixin:
         # Nominate as soon as the answer is readable instead.
         _early_nominated = bool(_cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands)
         _media_deadline = time.monotonic() + _FIRST_MEDIA_WAIT_S
-        while _first_video_pt[0] is None and time.monotonic() < _media_deadline:
-            if terminal_error_fut is not None and terminal_error_fut.done():
-                _code, _desc = terminal_error_fut.result()
-                _status(f"camera refused: ack {_code} {_desc}"
-                        " - terminal, abandoning the first-media wait")
-                raise AidotCameraBusy(_code, _desc)
-            if (not _early_nominated and answer_fut is not None
-                    and answer_fut.done() and not answer_fut.cancelled()):
-                # Read-only peek: the real await below still consumes this
-                # future and drives the answer/fallback paths unchanged.
-                # ``cancelled()`` is checked explicitly because the answer-wait
-                # cancels this future on timeout, and ``.exception()`` on a
-                # cancelled future raises CancelledError - a BaseException that
-                # the ``except Exception`` below would NOT catch.
-                _peek_sdp = ""
-                try:
-                    if answer_fut.exception() is None:
-                        _peek_sdp = (answer_fut.result() or {}).get("sdp", "") or ""
-                except Exception:
-                    _peek_sdp = ""
-                _n_nom = _nominate_from_answer_sdp(_peek_sdp)
-                if _n_nom:
-                    _early_nominated = True
-                    _status(
-                        "ICE controlling: nominated %d candidate(s) from the"
-                        " camera's answer during the first-media wait" % _n_nom
-                    )
-            await asyncio.sleep(0.1)
-        if _first_video_pt[0] is None:
-            # The wait expired with nothing received. Everything needed to say
-            # why is in hand at exactly this moment and was, until now, thrown
-            # away: media only ever follows the AVIO LIVING trigger, that
-            # trigger is armed only by an inbound STUN Binding Success, and
-            # that response only comes back if something we nominated was
-            # reachable. When it was not, the only usable addresses are the
-            # ones the camera's own probes arrived from - and two silent vetoes
-            # can drop a relay-carried probe. One WARNING, on this path only:
-            # an open that delivers media reaches none of this.
+        _media_wait_started = time.monotonic()
+
+        def _report_first_media_stall(_waited_s, _cancelled=False):
+            """Emit the one line that says why nothing arrived.
+
+            A local closure, not inline, because there are two ways to leave the
+            wait without media and both need it.  The wait expiring is the
+            obvious one.  The other is a caller giving up first, which is what a
+            snapshot does at its own budget - measured at 50 s against this
+            75 s wait - so the session that most needed explaining was cancelled
+            25 s before the explanation would have been written.
+            """
             try:
                 _stall_probes = list(
                     (getattr(_bridge_fn, "_br_probe_verdicts", None) or {}).items()
@@ -5428,7 +5410,7 @@ class _SdesOpenMixin:
                         _stall_nominated.append(_sn)
                 _LOGGER.warning("%s", _first_media_stall_report(
                     device_id=getattr(self, "device_id", "?"),
-                    waited_s=_FIRST_MEDIA_WAIT_S,
+                    waited_s=_waited_s,
                     nominated=_stall_nominated,
                     use_candidate_sent=bool(
                         _bridge_uc_info["sent"] or _nominated_seen),
@@ -5439,11 +5421,63 @@ class _SdesOpenMixin:
                     probes=_stall_probes,
                     probes_dropped=int(
                         getattr(_bridge_fn, "_br_probe_overflow", 0)),
+                    cancelled=_cancelled,
                 ))
             except Exception:
                 _LOGGER.debug("camera %s: swallowed exception in %s",
                               getattr(self, "device_id", "?"),
                               '_first_media_stall_report', exc_info=True)
+
+        try:
+            while _first_video_pt[0] is None and time.monotonic() < _media_deadline:
+                if terminal_error_fut is not None and terminal_error_fut.done():
+                    _code, _desc = terminal_error_fut.result()
+                    _status(f"camera refused: ack {_code} {_desc}"
+                            " - terminal, abandoning the first-media wait")
+                    raise AidotCameraBusy(_code, _desc)
+                if (not _early_nominated and answer_fut is not None
+                        and answer_fut.done() and not answer_fut.cancelled()):
+                    # Read-only peek: the real await below still consumes this
+                    # future and drives the answer/fallback paths unchanged.
+                    # ``cancelled()`` is checked explicitly because the answer-wait
+                    # cancels this future on timeout, and ``.exception()`` on a
+                    # cancelled future raises CancelledError - a BaseException that
+                    # the ``except Exception`` below would NOT catch.
+                    _peek_sdp = ""
+                    try:
+                        if answer_fut.exception() is None:
+                            _peek_sdp = (answer_fut.result() or {}).get("sdp", "") or ""
+                    except Exception:
+                        _peek_sdp = ""
+                    _n_nom = _nominate_from_answer_sdp(_peek_sdp)
+                    if _n_nom:
+                        _early_nominated = True
+                        _status(
+                            "ICE controlling: nominated %d candidate(s) from the"
+                            " camera's answer during the first-media wait" % _n_nom
+                        )
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            # The caller gave up before the wait could expire - a snapshot
+            # does exactly this at its own budget. Say why nothing arrived
+            # while the evidence is still in hand, then let the
+            # cancellation through untouched: this package has already
+            # shipped one bug where a handler caught CancelledError and
+            # returned normally, and diagnosing a stall must never become a
+            # second one.
+            if _first_video_pt[0] is None:
+                _report_first_media_stall(
+                    time.monotonic() - _media_wait_started, _cancelled=True)
+            raise
+        if _first_video_pt[0] is None:
+            # The wait expired with nothing received. Everything needed to
+            # say why is in hand at exactly this moment and was, until the
+            # report existed, thrown away: media only ever follows the AVIO
+            # LIVING trigger, that trigger is armed only by an inbound STUN
+            # Binding Success, and that response only comes back if
+            # something we nominated was reachable. One WARNING, on this
+            # path only: an open that delivers media reaches none of it.
+            _report_first_media_stall(_FIRST_MEDIA_WAIT_S)
         if _serve_audio and _first_audio_pt[0] is None:
             _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
             while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:
