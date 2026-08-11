@@ -921,6 +921,36 @@ needed to start is above: the command ids, the request layout, and the finding
 that it rides the ordinary control channel rather than the out-of-scope TUTK
 path.
 
+#### 2026-08-11: the cameras do not answer event listing on a live session
+
+Two runs, and the second one counts. The first sent a 22-byte LISTEVENT with
+event=0 and got silence from three A000088s - which meant nothing, because the
+request was wrong: `SMsgAVIoctrlListEventReq` has THREE `parseConent` overloads
+and the one its field list suggests is not the one the WebRTC path uses.
+`KVSWebRTCChannel.getSDRecordList` calls the epoch-long overload, which
+allocates `0x18` - 24 bytes - and passes an event selector of `0x12`.
+
+Corrected to the app's exact bytes and re-run (31496516730): still silence, on
+both A000088s that streamed, across three variants - HASLISTEVENT, LISTEVENT
+with the app's selector, and LISTEVENT with the old one. The request is now
+provably the app's, on the same AVIO channel that carries PTZ and SPEAKERSTART
+successfully in the same session, so the silence is the camera's answer rather
+than a malformed question.
+
+**This makes the earlier scoping too optimistic and it should be read as
+corrected.** "It rides the ordinary control channel, so this is days rather than
+a rewrite" was inferred from `getSDRecordList` being a single `sendCtrl`. That is
+true and insufficient: the app's SD pages call `connectPicChannel` first, which
+is a TUTK concept - an extra AV channel over P2P - with no WebRTC equivalent.
+On the WebRTC channel `picChannelId` is only a rotating request-slot id used by
+`getThumbnais`, not a second connection. So the app may reach SD listing over a
+transport this package deliberately does not implement.
+
+What that leaves: either these cameras answer event listing only over TUTK, or
+some session state the live view does not establish is required. The next
+cheap discriminator is the same probe against the SDES models, since the fleet's
+SD-card cameras and its cloud cameras split exactly along the transport line.
+
 **Confirmed by observation, 2026-08-11: the vendor app does fetch SD playback on
 these cameras.** That is worth more than the static reading, because it rules
 out the one thing that would have made this unbuildable - the cameras
