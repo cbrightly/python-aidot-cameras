@@ -304,10 +304,11 @@ async def _probe_recent_recordings(dc, timeout: float
     """The listing the vendor app actually uses.
 
     Separate from the range query below, and reported separately, because the
-    two have disagreed: every fleet run has had the range query return zero
-    events for every camera, while a capture of the app shows this endpoint
-    returning real events for one of the same cameras. Folding them together
-    would hide exactly the difference that matters.
+    two were once thought to disagree. They do not: on the owner account both
+    return real events for the same cameras (measured 2026-08-11). The zeros
+    this probe has always reported are the shared-home member the runner uses,
+    the same account split already measured for cloud thumbnails - which is why
+    the note below names the account rather than implying a fault.
     """
     fn = getattr(dc, "async_get_recent_recordings", None)
     if fn is None:
@@ -320,7 +321,9 @@ async def _probe_recent_recordings(dc, timeout: float
         return True, False, f"{type(exc).__name__}: {exc}"[:120]
     # Zero is not a failure - a camera can simply have had no events - so this
     # passes either way and reports the count for the record.
-    return True, True, (None if res else "no recent events")
+    return True, True, (None if res else
+                        "no recent events (verify the account before reading "
+                        "this as a defect - a shared-home member gets none)")
 
 
 async def _probe_recordings(dc, timeout: float, days: int = 7
@@ -333,8 +336,12 @@ async def _probe_recordings(dc, timeout: float, days: int = 7
         res = await asyncio.wait_for(fn(now - days * 86400, now), timeout)
         # Zero events is not a failure on its own - a camera can simply have had
         # no motion. The caller has already checked IsSupportPlayback, so
-        # reaching here at all means cloud storage is on.
-        return True, True, None if res else "listing returned 0 events"
+        # reaching here at all means cloud storage is on. On the owner account
+        # this returns a full page against server totals in the hundreds, so a
+        # zero here is the account before it is anything else.
+        return True, True, (None if res else
+                            "listing returned 0 events (verify the account "
+                            "first - a shared-home member sees none)")
     except asyncio.CancelledError:
         raise
     except Exception as exc:
