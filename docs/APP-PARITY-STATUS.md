@@ -132,6 +132,22 @@ than inferred: the follow-up sessions confirm it.
 every value the enum defines, and on the extra value the app itself sends for
 Auto. Five of those seven had never been sent to any camera on this fleet.
 
+### The observable that table used, and the one it did not
+
+Everything above reads **dimensions** - "h264 1280x720", per frame - and for the
+A000088 also bytes/frame. Dimensions are the wrong thing to watch for the
+question the vendor app raises: its SD tap halves the bitrate on the same
+session, the same 5-tuple, with no renegotiation, and there is no reason it must
+change the frame size to do it. So this table is not evidence about bitrate on
+the A001064 either way.
+
+That gap was closed on 2026-08-11 by measuring the rate on both sides of the
+command **inside one session** (`scripts/live_validate.py --quality-arms`, six
+sessions, three sd and three control, interleaved). The arms overlap: sd
+0.852-0.883 against control 0.859-0.940, both explained by a settle over the
+first 8-12 s of the session. The app's 2:1 (a ratio near 0.48) is excluded. Full
+numbers in `docs/ROAD-TO-1.0.md` item 2.
+
 One loose thread, recorded rather than interpreted: value 16 acked in 0.54 s
 against 0.01-0.19 s for the enum values. That is 3-50x slower and might mean the
 firmware does real work for it. It is n=1 against noisy latencies, and the video

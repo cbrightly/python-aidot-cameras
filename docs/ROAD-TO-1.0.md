@@ -126,12 +126,59 @@ The command packet itself could not be isolated: outbound traffic is dense
 66-74 byte RTCP and STUN, the 126-166 byte packets that stand out recur every
 ~2 s throughout rather than at the taps, and the payload is encrypted anyway.
 
+#### Measured inside one session, 2026-08-11
+
+The fourteen-session sweep judged `SETSTREAMCTRL` by the profile the NEXT
+session came back with, and what it read was **dimensions** - "h264 1280x720",
+per frame. The app's own SD tap changes neither of those: same session, same
+5-tuple, and a rate that halves. So that table is not evidence about bitrate in
+either direction, and the command could have been working the whole time while
+being scored against the wrong observable.
+
+It was not. `scripts/live_validate.py --quality-arms` measures the rate either
+side of the command **inside one session**: settle 3 s, window A 12 s, send,
+gap 2 s, window B 12 s, with the rate taken from the bridge's own byte counter
+sampled on the wall clock rather than from a file. Arms alternate per session,
+and the control arm waits out the same gap and sends nothing.
+
+Six sessions on the A001064, no voids, raw data in
+`aidot-captures/aidot-quality-insession-20260811.json`:
+
+    session  arm       window A   window B    B/A
+    1        sd          1828.4     1557.7   0.852
+    2        control     2048.6     1832.8   0.895
+    3        sd          1846.6     1631.1   0.883
+    4        control     2272.2     2135.4   0.940
+    5        sd          1926.0     1657.9   0.861
+    6        control     1882.8     1617.6   0.859
+
+    sd       n=3   mean 0.865   range 0.852-0.883
+    control  n=3   mean 0.898   range 0.859-0.940
+
+The arms overlap - the lowest control ratio sits inside the sd range - and both
+decline 10-14% across the same timeline. The video-only per-second series says
+what that decline is: a settle over the first 8-12 s of the session, with flat
+buckets either side of the tap in both arms, not a step at it. Every sd session
+acked 801 to quality=5 within 0.02 s on a live command channel, so this is not a
+command that failed to go out.
+
+**The app's 2:1 is excluded.** Its SD tap is a ratio of about 0.48, which is
+nowhere near either arm. An effect of a few percent cannot be excluded at this
+sensitivity, but that is not the effect being looked for.
+
+The control also disposes of its own confound. Every control session follows an
+sd session, so a camera that remembered the setting would flatten both arms for
+a boring reason - but the control sessions' window A is if anything higher
+(2049, 2272, 1883) than the sd sessions' (1828, 1847, 1926). Nothing carried
+over.
+
 #### What is actually open now
 
 Narrow, and worth stating precisely because the old framing was so much bigger:
 **our `SETSTREAMCTRL` is byte-identical to the app's, sent in-band mid-session
 on the same transport, and does not change the rate - while the app's does.**
-Sweeping every quality value across fourteen sessions changed nothing.
+Sweeping every quality value across fourteen sessions changed nothing, and the
+in-session measurement those sessions could not make agrees with them.
 
 The bar: **either make SD take effect, or record that it does not and why.**
 The prize is now correctly sized - about 2:1 from SD, and about 24% from
