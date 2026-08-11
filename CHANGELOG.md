@@ -6,6 +6,54 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b4]
+
+Pre-release.
+
+### Added
+
+- **`async_count_cloud_recordings(start_ts, end_ts)`** - a window's event count
+  in one request. The listing endpoint reports the window's true `total`
+  alongside whatever page it serves, and that total is correct even on a
+  one-item page. Counting by paging instead costs one request per ten events:
+  a day holding 1517 events is 152 requests, and a seven-day view that counts
+  by paging fires hundreds every time it is opened. Returns `None` when the
+  call fails, which a caller must not read as zero.
+
+- **`async_get_cloud_plan()`** - the camera's cloud recording subscription
+  (`packageName`, `subscribeStatus`, `startTime`/`endTime` in epoch
+  milliseconds, `videoLength`). It answers the question an empty event list
+  cannot: whether there are no events, or no longer a plan under which events
+  would be kept. Returns `None` on any failure rather than an empty dict,
+  because callers test it for truthiness.
+
+- **`scripts/browse_check.py`** - checks all of the above against real cameras
+  and states a per-camera verdict, so a failed call cannot be read as a passing
+  one.
+
+### Documented
+
+- **The cloud caps a listing page at 10 items whatever `page_size` asks for.**
+  Measured across seven cameras: three holding 53, 48 and 36 events in a day
+  each returned exactly 10 for a 30-item request, and paging in tens recovered
+  every one. The vendor's own client hard-overwrites the field to 10 (5 for a
+  multi-device request), so it is the server's rule rather than a quirk of one
+  account. A caller that asks for 30 gets 10 with no indication it was
+  truncated. Page; do not raise `page_size`.
+
+- **An empty cloud event listing is a question about the account before it is
+  anything else.** Both listing methods had reported zero events for every
+  camera on every fleet run. On the owner account, on the same fleet, ninety
+  minutes after a run that reported zero: the count method returns the full
+  count it asks for on six of seven cameras, and the range query returns a full
+  first page against server totals of 121-1517 over thirty days. The runs use a
+  shared-home member, and report no cloud thumbnail either.
+
+- **Cloud playback is HLS in practice.** `async_get_event_video_media`
+  documents a preference for MP4 over M3U8; three cameras across three model
+  families each returned exactly one entry, type 2. Anything built on it should
+  be designed for HLS.
+
 ## [1.0.0b3]
 
 Pre-release.
