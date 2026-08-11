@@ -677,7 +677,33 @@ The bar was: **tested, or explicitly out of scope for 1.0** and said so here.
 Both holes are decided below, so this item is closed. It keeps its number
 because the working notes refer to it by number.
 
-#### The `liveType=0` / TUTK path: out of scope for 1.0.0
+#### The `liveType=0` / TUTK path: NO LONGER out of scope - Chris, 2026-08-11
+
+**This reverses the decision recorded below. Read the reversal first.**
+
+Chris ruled on 2026-08-11 that TUTK should not be out of scope. What follows is
+the original reasoning, kept because it is still the accurate description of
+what the work costs - not because the decision stands.
+
+One distinction has to survive this reversal, because these notes have already
+conflated the two once. "TUTK" names two different things here:
+
+- **`LdsTutkChannel`, the app's camera-channel FACADE.** Never out of scope and
+  always reachable: `getSDRecordList`, `setResolution` and `sdRecordSeekPlay`
+  are single `sendCtrl` calls over the ordinary AVIO channel this package
+  already speaks, and the class also carries `setIsDTLS`. Nothing here was ever
+  blocked.
+- **The native TUTK P2P stack** - `IOTC_Connect_ByUID_Parallel`,
+  `connectPicChannel`, ctypes into libraries this package does not ship. This is
+  what the paragraphs below mean, and what the 2026-08-11 SD probes point at:
+  two A000088s answered nothing to a byte-exact `LISTEVENT`, and the app's SD
+  pages open a pic channel that has no WebRTC equivalent.
+
+So the scope change is real work, not a flag: implementing or bundling a P2P
+transport. It is recorded here as a decision taken, with its cost stated, rather
+than as a discovery.
+
+#### (Superseded) The `liveType=0` / TUTK path: out of scope for 1.0.0
 
 Not "we ran out of time". The path cannot be entered, and the part of it that
 could be tested is not the part that is uncertain:
@@ -891,8 +917,11 @@ send that carries PTZ `0x1001` and SPEAKERSTART `0x350`, both of which this
 package already sends on both transports.
 
 So SD listing rides the ordinary AVIO control channel that already works here.
-It is NOT behind the `liveType=0` / TUTK path this project put out of scope for
-1.0.0, which was the risk that made the estimate open-ended.
+It is NOT behind the `liveType=0` / TUTK path - or so this read suggested. The
+2026-08-11 probes contradict it: see the section below, where two cameras
+answered nothing to a byte-exact request and the app's SD pages turned out to
+open a pic channel with no WebRTC equivalent. TUTK is also no longer out of
+scope, by Chris's decision the same day.
 
 **One thing is genuinely unknown, and it is the work:** the RESPONSE layout.
 There is no `...ListEventResp` class beside the request ones, so the reply has
