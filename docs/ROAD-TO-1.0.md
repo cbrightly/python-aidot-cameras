@@ -482,6 +482,44 @@ different failure that begins where that one ended.
 
 The bar for this item is unchanged and further away than it looked this morning.
 
+#### 2026-08-11 (later): the post-trigger mode is the camera sending nothing
+
+The report gained two counters - inbound RTP counted BEFORE any decryption
+decision, and decrypt failures without the cap the log uses - because a camera
+that sent nothing and a camera whose media we could not decrypt wrote identical
+lines. Media counters are gated on the packet being readable, correctly, so the
+second case left no trace at all.
+
+Run 31485643934, L2_F8A3 attempt 1:
+
+    nominated=192.168.100.3:48195, 173.53.36.206:34986, 54.144.38.43:59366,
+              173.53.36.206:48195
+    use-candidate=sent; binding-success=6; trigger=sent;
+    inbound-media=0; decrypt-failed=0
+    probes=... via 173.53.36.206:48195 -> learned; ... -> known; ... -> known
+
+**`inbound-media=0`.** The likeliest reading - that the camera sent and we could
+not read it - is ruled out by measurement rather than by argument. Not one RTP
+packet reached the bridge after six Binding Successes and the trigger.
+
+Two side findings in the same line. `173.53.36.206:48195 -> learned`, and that
+address in the nominated set, is the 1.0.0b3 ICE guard fix working on hardware.
+And the A001064's six-attempt persistent state cleared on its own that run
+(529 decoded frames), which is what the control run had already implied.
+
+**What is left, and who owns each.** Either the trigger never reached the camera
+- ours, it is SCTP DATA on a channel whose transport address we choose - or it
+arrived and the camera ignored it, which is not ours. `0x1500` is
+`E_CMD_AVIO_CTRL_SESSION_MODE_REQ` in the vendor's definitions and `0x1501` is
+its RESP, and those answers already arrive on the channel this package parses,
+so `trigger=sent` now reads `sent(acked)` or `sent(unacked)`.
+
+**That question is not yet answered.** Run 31487606119 carried the
+instrumentation and every live camera passed on its first attempt, so nothing
+stalled and nothing was reported. The diagnosis is in place and waiting for a
+recurrence; the honest state is that the next stall answers it, not that it is
+answered.
+
 #### 2026-08-10: the veto is fixed, and the fix is confirmed by what it learns
 
 `_is_self_peer_ip` compared an address where ICE compares a transport address,
