@@ -191,10 +191,21 @@ actually sends was pulled out of `KVSWebRTCChannel` and named against
 | 0x4b5 / 1205 | `USER_IPCAM_HASLISTEVENT_REQ` | no - event list |
 | 0x4b7 / 1207 | `DELLISTEVENT_REQ` | no - event list |
 | 0x4b9 / 1209 | `USER_IPCAM_CUSTOM_COMMAND_REQ` | no - see below |
-| 0x528/0x52a/0x52e | radar start / stop / SD-card start | no |
+| 0x528/0x52a/0x52e | radar start / stop / SD-card start | no - see below |
 | 0x1001 / 4097 | PTZ | yes |
 | 0x1424 / 5156 | heartbeat | yes |
 | 0x1500 / 5376 | LIVING | yes |
+
+**The radar commands are for hardware nobody here owns - closed 2026-08-11.**
+Not "unimplemented", not deferred: unreachable. The cloud device records for all
+seven reference cameras were checked for any radar-shaped property and carry
+none, and the only `IsSupport*` capability flag any of them advertises at all is
+`IsSupportPlayback`. The app's radar surface (`onRadarDataReportListener`,
+`RadarDataParse`, the radar map UI) has no counterpart in what these devices
+report about themselves. Implementing `0x528`/`0x52a`/`0x52e` would mean writing
+a feature that cannot be exercised, let alone validated, on any camera available
+to this project. Revisit only if a device turns up that advertises the
+capability.
 
 **None of them touch the encoder.** The generic escape hatch, `CUSTOM_COMMAND`,
 was the last candidate and it is not one either: in `KVSWebRTCChannel` its only
