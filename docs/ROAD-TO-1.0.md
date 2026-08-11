@@ -314,7 +314,12 @@ which is source archaeology:
 - or a timing campaign - `800` before LIVING, immediately after, mid-session -
   measured with the interleaved harness built for the codec arms.
 
-**This item is CLOSED as documented-accepted, with the numbers above.**
+**SUPERSEDED 2026-08-11 - this close does not survive the capture.** It closed
+the item on a 5x gap that a measurement then showed to be 1.24x, and closed it
+as unexplained when the app's own mechanism turns out to be the command this
+library already sends. The accurate statement is at the top of this item. The
+reasoning above it is kept because the hypotheses it eliminated are still
+eliminated - only the conclusion drawn from them was wrong.
 Thirteen hypotheses have been tried and none explains the gap. The last one the
 item itself nominated - offer codec order - was run with the interleaved,
 receipted design it specified and moved nothing. Nothing further is proposed,
