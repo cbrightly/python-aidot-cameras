@@ -6,6 +6,50 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b5]
+
+Pre-release.
+
+### Added
+
+- **`async_get_sd_recordings(*, session=None, days=7, channel=0)`** - what a
+  camera holds on its own SD card, read over an existing session. Stateless:
+  it asks the session it is handed and never opens one, because listing costs
+  a WebRTC handshake (15-21 s DTLS, 25-70 s SDES cold) and wakes the camera,
+  where the cloud equivalent is one ~200 ms request. Deciding when that is
+  worth spending belongs to the caller.
+
+  It reports three distinct outcomes rather than two, and the distinction is
+  the point: `None` means there was no session to ask through, `answered=False`
+  means the requests went out and the camera said nothing, and `answered=True`
+  with an empty `records` means the camera replied and the card holds nothing
+  in that window. A caller that collapses any two of these shows the same empty
+  list for opposite reasons. `complete` is False when the reply's end flag
+  never arrived or a reply could not be decoded - in both cases there may be
+  more than is shown.
+
+- **The recording-list request builders now ship in the package** -
+  `stimeday`, `haslistevent_payload` and `listevent_payload` in
+  `aidot_cameras.camera.sd_events`, alongside the decoder that was already
+  there. They previously existed only in `scripts/`, which the package cannot
+  import, so nothing in the library could ask a camera this question at all.
+
+  The default event selector is `0` (`SD_EVENT_ANY`), not the vendor app's
+  `0x12` (`SD_EVENT_APP`). Measured 2026-08-11 on an A000088 with a card: the
+  same session and window answered an empty page for `0x12` and four real
+  records for `0`.
+
+### Fixed
+
+- **An occupancy map asked for as records no longer returns invented
+  recordings.** `HASLISTEVENT` answers with a per-hour occupancy map, one byte
+  per hour, while `LISTEVENT` answers with 12-byte records - and a real
+  168-byte map is exactly fourteen 12-byte records, so the record decode
+  succeeded on it and produced fourteen recordings dated `0000-00-00`.
+  `decode_list_event_response(payload, command=HASLISTEVENT_RESP_CMD)` now
+  returns `None`, and the new `decode_hour_map` reads the map as what it is.
+  Callers that pass no `command` are unaffected.
+
 ## [1.0.0b4]
 
 Pre-release.
