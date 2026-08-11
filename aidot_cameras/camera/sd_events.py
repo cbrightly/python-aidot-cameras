@@ -16,17 +16,23 @@ exists before any camera here has answered. What is CONFIRMED from
     ``arraycopy(..., 12)``, and each begins with a two-byte year read via
     ``byteToShort`` - an ``STimeDay``.
 
-What is NOT confirmed is where those header fields sit. The decompiled handler
-addresses them through registers reassigned dozens of times across a
-2000-line switch, and resolving which assignment is live at that point is
-guesswork. So the header offsets below come from the published TUTK
-``SMsgAVIoctrlListEventResp`` layout, which the confirmed facts fit exactly:
-two STimeDays, then channel/total/index/endflag/count, then the records.
+**The header is now measured, not inferred (2026-08-11, run 31497241870).** The
+first version of this module used the published TUTK layout - two STimeDays then
+the counters, 24 bytes - and refused to decode the real replies because they
+were shorter than that. Refusing was correct, and it is how the true layout came
+back readable instead of being forced into the wrong one.
 
-That distinction is load-bearing. `decode_list_event_response` reports which
-reading it used and whether the payload's own length agrees with the record
-count, so the first real reply either confirms the layout or shows precisely
-where it diverges - rather than being silently forced into it.
+Two live replies, and a 12-byte header fits both exactly:
+
+    HASLISTEVENT_RESP  00000000 01000000 0001a800  + 168 bytes
+    LISTEVENT_RESP     00000000 01000000 00010000  + 0 bytes
+
+    channel  uint32 LE   total  uint32 LE   index  end_flag  count  reserved
+
+`count` equals the body length in both - 168 and 0. And 168 is exactly the
+7-day range that was requested, one byte per hour, which is what HASLISTEVENT
+means: a per-hour occupancy map rather than a list. LISTEVENT carries 12-byte
+records in the same body.
 """
 import struct
 from typing import List, NamedTuple, Optional
@@ -34,10 +40,9 @@ from typing import List, NamedTuple, Optional
 #: One record. The size is confirmed from the vendor's own arraycopy.
 EVENT_RECORD_LEN = 12
 
-#: Offset of the first record, from the published TUTK response layout:
-#: two 8-byte STimeDays, then channel, total, index, endflag, count, and three
-#: reserved bytes.
-_HEADER_LEN = 24
+#: Measured from two live replies, not taken from the published struct - the
+#: published one is 24 bytes and neither reply is that long.
+_HEADER_LEN = 12
 
 
 class SdEvent(NamedTuple):
@@ -106,11 +111,15 @@ def decode_list_event_response(payload: bytes) -> Optional[SdEventPage]:
     """
     if payload is None or len(payload) < _HEADER_LEN:
         return None
-    channel, total, index, end_flag, count = struct.unpack_from(
-        "<BBBBB", payload, 16)
+    channel, total = struct.unpack_from("<II", payload, 0)
+    index, end_flag, count, _reserved = struct.unpack_from("<BBBB", payload, 8)
     body = payload[_HEADER_LEN:]
     usable = len(body) // EVENT_RECORD_LEN
-    take = min(count, usable)
+    # `count` is a BYTE count on HASLISTEVENT (one byte per hour) and a RECORD
+    # count on LISTEVENT. Only the record reading is meaningful here, so the
+    # number of records decoded is bounded by what the body can actually hold
+    # rather than by what the header claims.
+    take = usable
     events = [decode_event_record(body, i * EVENT_RECORD_LEN)
               for i in range(take)]
     return SdEventPage(
@@ -120,6 +129,6 @@ def decode_list_event_response(payload: bytes) -> Optional[SdEventPage]:
         page_index=index,
         end_flag=end_flag,
         record_count=count,
-        consistent=(count == usable),
+        consistent=(count == len(body)),
         trailing=len(body) - usable * EVENT_RECORD_LEN,
     )

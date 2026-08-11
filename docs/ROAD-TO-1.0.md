@@ -950,7 +950,48 @@ needed to start is above: the command ids, the request layout, and the finding
 that it rides the ordinary control channel rather than the out-of-scope TUTK
 path.
 
-#### 2026-08-11: the cameras do not answer event listing on a live session
+#### 2026-08-11 (final): the cameras DO answer, and no P2P is needed
+
+Retracting the section below, which is kept because its reasoning is a fair
+record of what the evidence looked like at the time and of how it misled.
+
+Run 31497241870, the same probe against the SDES models:
+
+    Winees (A001064)  HASLISTEVENT -> 0x4b6, 180 bytes
+                      LISTEVENT    -> 0x319, 12 bytes
+    L2_F8A3 (A001513) HASLISTEVENT -> 0x4b6, 180 bytes
+
+**SD event listing works over the ordinary WebRTC AVIO channel.** The inference
+that it needed the native P2P stack - drawn from the A000088s' silence plus
+`connectPicChannel` having no WebRTC equivalent - was wrong. Silence on those
+cameras is a per-model behaviour, not a transport limit.
+
+**The layout, measured rather than assumed.** A 12-byte header fits both replies
+exactly:
+
+    channel uint32 LE | total uint32 LE | index | end_flag | count | reserved
+
+`count` equals the body length in both - 168 and 0. And 168 is exactly the 7-day
+range requested at one byte per hour, which is what HASLISTEVENT returns: an
+occupancy map, not a list. LISTEVENT carries 12-byte records in the same body.
+
+The published TUTK header is 24 bytes and neither reply is that long. The
+decoder had been written to the published layout and REFUSED these payloads
+rather than forcing them, which is the only reason the real shape was legible;
+a decoder that had stretched to fit would have produced a plausible list of
+nonsense.
+
+**The event selector decides whether the camera answers at all.** On the same
+camera in the same session, `event=0x12` was answered and `event=0` was not.
+That variant existed to tell the selector apart from the layout, and it did.
+
+**What is left for item 6:** both cameras that answered report an empty range -
+which fits, since they are the models with no SD card. The A000088s, which have
+the cards, do not answer. So the remaining question is not the protocol but why
+the SD-bearing models stay silent, and that is a much smaller question than a
+P2P transport.
+
+#### (Superseded) 2026-08-11: the cameras do not answer event listing on a live session
 
 Two runs, and the second one counts. The first sent a 22-byte LISTEVENT with
 event=0 and got silence from three A000088s - which meant nothing, because the

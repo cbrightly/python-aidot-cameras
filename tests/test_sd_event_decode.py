@@ -1,18 +1,18 @@
-"""The recording-list decoder, written before any camera here has answered.
+"""The recording-list decoder, half from the vendor client and half from the wire.
 
-The vendor client's own 0x319 handler supplies the parts that matter and this
-pins them: twelve-byte records, an STimeDay per record, a paging end-flag, and a
-per-packet count. What the handler does NOT supply is where its header fields
-sit - it addresses them through registers reassigned dozens of times across a
-2000-line switch - so the header offsets come from the published TUTK layout
-instead.
+The client's own 0x319 handler supplies the record shape - twelve bytes, an
+STimeDay each, a paging end flag, a per-packet count. It does NOT supply where
+the header fields sit, so the first version of this used the published TUTK
+layout, 24 bytes, and refused to decode the real replies because they were
+shorter than that.
 
-That difference is the whole design of these tests. A decoder that quietly
-forces a payload into the layout it expects would turn the first real reply into
-a plausible-looking list of recordings that might be nonsense. So the decoder
-reports whether the payload's own length agrees with the count the header
-declared, and whether anything was left over, and these assert on those signals
-as hard as on the happy path.
+Refusing was the right behaviour and it is why the true layout is now known: a
+decoder that had forced those payloads into 24 bytes would have produced a
+plausible-looking list of recordings that was nonsense, and nobody would have
+looked again. The header is 12 bytes, measured from two live replies in run
+31497241870, and both are pinned here as literal bytes - those two tests are the
+only ones that can be wrong about the wire format, which is exactly why they
+exist.
 """
 import os
 import struct
@@ -36,13 +36,18 @@ def _record(y=2026, mo=8, d=11, h=9, mi=30, s=0, channel=0, event=0x12,
     return _stimeday(y, mo, d, 2, h, mi, s) + bytes((channel, event, status, 0))
 
 
-def _page(records, *, channel=0, total=5, index=0, end_flag=1, count=None):
-    header = (_stimeday(2026, 8, 1, 0, 0, 0, 0)
-              + _stimeday(2026, 8, 11, 2, 23, 59, 59)
-              + bytes((channel, total, index, end_flag,
-                       len(records) if count is None else count))
-              + b"\x00\x00\x00")
-    return header + b"".join(records)
+def _page(records, *, channel=0, total=1, index=0, end_flag=1, count=None):
+    body = b"".join(records)
+    return (struct.pack("<II", channel, total)
+            + bytes((index, end_flag,
+                     len(body) if count is None else count, 0))
+            + body)
+
+
+#: The two replies actually received, from run 31497241870. Tests that use
+#: these are the only ones that can be wrong about the wire format.
+REAL_HASLISTEVENT = bytes.fromhex("00000000010000000001a800") + b"\x00" * 168
+REAL_LISTEVENT = bytes.fromhex("000000000100000000010000")
 
 
 def test_a_record_is_twelve_bytes():
@@ -72,12 +77,32 @@ def test_the_end_flag_is_surfaced_because_the_reply_is_paged():
 
 
 def test_a_count_that_disagrees_with_the_payload_is_reported_not_hidden():
-    # The header claims five records, the payload carries one. That is the
-    # signal that the layout read here is wrong, and it must reach the caller.
-    page = decode_list_event_response(_page([_record()], count=5))
-    assert page.record_count == 5
+    # The header claims a body far larger than the one that arrived. That is
+    # the signal the layout is wrong for this firmware, and it must reach the
+    # caller rather than being smoothed over.
+    page = decode_list_event_response(_page([_record()], count=99))
+    assert page.record_count == 99
     assert len(page.events) == 1, "decode what is there, never invent records"
     assert page.consistent is False
+
+
+def test_the_real_listevent_reply_decodes_as_an_empty_page():
+    # Captured from an A001064. The camera holds no recordings in the range, so
+    # zero records is the right answer - and it must not read as a failure.
+    page = decode_list_event_response(REAL_LISTEVENT)
+    assert page is not None, "the measured 12-byte header must decode"
+    assert page.events == []
+    assert (page.end_flag, page.record_count) == (1, 0)
+    assert page.consistent
+
+
+def test_the_real_haslistevent_reply_is_one_byte_per_hour():
+    # 168 bytes for a 7-day request: 7 x 24. The count field equals the body
+    # length, which is what pins the header at 12 bytes rather than 24.
+    page = decode_list_event_response(REAL_HASLISTEVENT)
+    assert page is not None
+    assert page.record_count == 168 == len(REAL_HASLISTEVENT) - 12
+    assert page.consistent
 
 
 def test_bytes_left_over_after_the_records_are_reported():
@@ -108,7 +133,9 @@ def test_the_page_fields_do_not_shadow_tuple_methods():
     # they are instead.
     page = decode_list_event_response(_page([_record()]))
     assert callable(page.count) and callable(page.index)
-    assert page.record_count == 1
+    # A byte count, not a record count: HASLISTEVENT uses the same field for a
+    # per-hour map, and both live replies have it equal to the body length.
+    assert page.record_count == EVENT_RECORD_LEN
 
 
 if __name__ == "__main__":
