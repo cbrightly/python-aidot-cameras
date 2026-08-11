@@ -956,7 +956,7 @@ def _first_media_stall_report(device_id, waited_s, nominated,
                               use_candidate_sent, binding_success,
                               trigger_sent, probes, probes_dropped=0,
                               cancelled=False, media_pkts=0, decrypt_fails=0,
-                              answer_cands=-1):
+                              answer_cands=-1, trigger_acked=None):
     """Build the one line a first-media stall emits.
 
     A session that never delivers a byte looks, in a log, exactly like one that
@@ -1003,6 +1003,17 @@ def _first_media_stall_report(device_id, waited_s, nominated,
     # caller could not determine it, and is reported as nothing at all rather
     # than as a zero - "we did not look" and "there were none" is the confusion
     # this whole line exists to undo.
+    # `trigger=sent` only ever meant "we transmitted", and the kill showed that
+    # is not enough: a session can send it, complete ICE, and receive nothing.
+    # 0x1500 is SESSION_MODE_REQ in the vendor's definitions and 0x1501 is its
+    # RESP, so the camera is expected to answer - and whether it did separates a
+    # command that never arrived (ours: it is SCTP DATA on a channel whose
+    # transport address we choose) from one it accepted and ignored (theirs).
+    # None means nobody recorded it, which reports nothing rather than a guess.
+    _trigger = "sent" if trigger_sent else "not-sent"
+    if trigger_sent and trigger_acked is not None:
+        _trigger += "(acked)" if trigger_acked else "(unacked)"
+
     _answer = ""
     if answer_cands is None:
         _answer = " answer=none;"
@@ -1036,7 +1047,7 @@ def _first_media_stall_report(device_id, waited_s, nominated,
             _answer,
             "sent" if use_candidate_sent else "not-sent",
             binding_success,
-            "sent" if trigger_sent else "not-sent",
+            _trigger,
             media_pkts,
             decrypt_fails,
             _probes or "none",
@@ -4748,6 +4759,18 @@ class _SdesOpenMixin:
                                         # and logged here long before anything
                                         # could receive them; hand them to
                                         # whoever asked.
+                                        if _sc_cmd == 5377:
+                                            # SESSION_MODE_RESP: the camera's
+                                            # answer to the LIVING trigger.
+                                            # Counted whether or not anything
+                                            # was waiting for it, because the
+                                            # question the stall report asks is
+                                            # "did the trigger arrive", and the
+                                            # trigger is fire-and-forget.
+                                            _bridge_fn._br_session_mode_resp = (
+                                                getattr(
+                                                    _bridge_fn,
+                                                    '_br_session_mode_resp', 0) + 1)
                                         _sc_answered = _dispatch_sctp_avio(
                                             _avio_responses, _sc_pay)
                                         _status(
@@ -5499,6 +5522,8 @@ class _SdesOpenMixin:
                     decrypt_fails=int(
                         getattr(_bridge_fn, "_br_decrypt_fails", 0)),
                     answer_cands=_stall_answer,
+                    trigger_acked=bool(getattr(
+                        _bridge_fn, "_br_session_mode_resp", 0)),
                 ))
             except Exception:
                 _LOGGER.debug("camera %s: swallowed exception in %s",
