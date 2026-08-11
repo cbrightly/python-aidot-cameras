@@ -49,15 +49,18 @@ nothing here can play it back. On the reference fleet that is four of seven
 cameras. The vendor's own commands for it are identified but their responses
 have never been decoded; see `docs/ROAD-TO-1.0.md` item 6.
 
-**The A001064 (PTZ) streams at roughly 2.2 Mbps** where the vendor app takes
-225-500 Kbps from the same camera. It streams correctly at that rate; the cost
-is bandwidth, and on a metered or congested link, contention. Thirteen
-hypotheses have been tested against it, including sweeping every stream-quality
-value the app can send and pinning the offer's codec order in an interleaved,
-receipted campaign - the last of which moved the rate by 1.7%, less than the
-camera's own session-to-session spread. The quality command this library sends
-is byte-for-byte what the app sends on the same transport, so what remains is a
-question of timing or camera state rather than of a missing control.
+**The A001064 (PTZ) streams at roughly 2.2 Mbps, about 24% above the vendor
+app.** Measured from a capture of the app on the same camera: it takes about
+1796 Kbps on HD and about 866 Kbps on SD. An earlier version of this note
+repeated a figure of 225-500 Kbps for the app - that was never measured here,
+and the capture contradicts it at both quality settings.
+
+So the practical difference is a quarter more bandwidth at equivalent quality,
+plus a roughly 2:1 saving that the app's SD control achieves and this library's
+does not. The command sent here is byte-for-byte the app's, in-band and
+mid-session on the same transport, and it does not change the rate; the app's
+does. Streaming is correct either way and the cost is bandwidth, which matters
+on a metered or congested link.
 
 ## Local (LAN) control and account ownership
 
