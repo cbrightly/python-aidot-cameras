@@ -21,14 +21,22 @@ import time
 sys.path.insert(0, os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
+from aidot_cameras.camera.sd_events import (
+    HASLISTEVENT_REQ_CMD,
+    HASLISTEVENT_RESP_CMD,
+    LISTEVENT_REQ_CMD,
+    LISTEVENT_RESP_CMD,
+    SD_EVENT_ANY,
+    SD_EVENT_APP,
+    haslistevent_payload,
+    listevent_payload,
+    stimeday,
+)
 from sd_event_probe import (
     HASLISTEVENT_REQ,
     HASLISTEVENT_RESP,
     LISTEVENT_REQ,
     LISTEVENT_RESP,
-    haslistevent_payload,
-    listevent_payload,
-    stimeday,
 )
 
 # 2026-08-11 12:34:56 UTC, a Tuesday.
@@ -65,11 +73,24 @@ def test_the_listevent_request_is_twenty_four_bytes():
     assert len(listevent_payload(_WHEN - 3600, _WHEN)) == 24
 
 
-def test_the_default_event_selector_is_the_apps():
-    # 0x12, read off KVSWebRTCChannel.getSDRecordList. A selector the camera
-    # does not recognise answers exactly like a firmware that never replies.
+def test_the_default_event_selector_is_the_one_that_answers():
+    # 0, not the app's 0x12. Measured 2026-08-11 on an A000088 with a card:
+    # the same session and window answered an EMPTY page for 0x12 and four
+    # real records for 0. The default carries the measurement so a caller
+    # that says nothing gets the selector that works.
     p = listevent_payload(_WHEN - 3600, _WHEN)
-    assert p[20] == 0x12
+    assert p[20] == 0 == SD_EVENT_ANY
+    assert SD_EVENT_APP == 0x12
+    assert listevent_payload(_WHEN - 3600, _WHEN, event=SD_EVENT_APP)[20] == 0x12
+
+
+def test_the_probe_and_the_package_agree_on_the_command_ids():
+    # One definition, two names: the probe re-exports what the package ships,
+    # so a divergence here means the probe stopped testing the shipped code.
+    assert (HASLISTEVENT_REQ, LISTEVENT_REQ) == (
+        HASLISTEVENT_REQ_CMD, LISTEVENT_REQ_CMD)
+    assert (HASLISTEVENT_RESP, LISTEVENT_RESP) == (
+        HASLISTEVENT_RESP_CMD, LISTEVENT_RESP_CMD)
 
 
 def test_the_channel_leads_and_the_first_time_starts_at_offset_four():
