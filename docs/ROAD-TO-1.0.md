@@ -404,6 +404,35 @@ only then decide about nomination.
 four most recent. Any fix here has to be validated against a failure that does
 not appear on demand.
 
+#### 2026-08-11: the A001064 is now in the persistent state, and the log went blind
+
+`Winees Spotlight Cam_183` (A001064) has returned no media on SIX consecutive
+attempts across three runs, handshakes of 113-120 s each, zero packets and zero
+bytes every time. Every other live camera passed in the same runs.
+
+Two things about it are worth separating, because conflating them wasted a run.
+
+**It is not a code regression.** The failure first appeared on the sha carrying
+the cancellation-report change, which made that change the obvious suspect. A
+control run of the PREVIOUS sha - `e56a1222`, the one that gated green for
+1.0.0b3 - reproduces it exactly: same camera, both attempts, 117.9 s and
+113.6 s. Same runner, same cameras, different code. The change is exonerated and
+the state is camera-side or network-side.
+
+**The log stopped carrying the evidence at the same time.** Those three runs
+produced 364-375 line logs where every earlier run that day produced ~2200, with
+the entire `Validate every camera` step contributing forty lines of command echo
+and no output at all. So the stall report - the one line that would say WHICH
+shape this is - was being written and thrown away. That is fixed by putting the
+reports in `live-report.json`, which the harness writes itself, rather than
+trusting the runner's log capture.
+
+This is the shape the item has always said it could not explain: six in a row
+against a per-session failure rate that has never been anywhere near certain.
+The open question is unchanged - persistent camera-side state, or a loop that
+sustains its own failure - and the next run is the first that can answer it from
+the artifact alone.
+
 #### 2026-08-10: the veto is fixed, and the fix is confirmed by what it learns
 
 `_is_self_peer_ip` compared an address where ICE compares a transport address,

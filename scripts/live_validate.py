@@ -348,6 +348,9 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int,
     out = _recording_path(out_dir, dc.device_id, attempt)
 
     frames = {"n": 0}
+    # Anything left over belongs to the previous attempt; reporting it here
+    # would name a failure on a session that succeeded.
+    _STALLS.drain()
     t0 = time.time()
     session = None
     result: dict = {"attempt": attempt}
@@ -421,6 +424,13 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int,
         result["verdict"] = "ERROR"
         result["error"] = f"{type(exc).__name__}: {exc}"
     finally:
+        # In `finally`, not on the success path: the attempts that stall are
+        # exactly the ones that leave by an exception or a timeout, so anywhere
+        # else would collect the reports that matter least. A stalled snapshot
+        # opens its own session, so one attempt can produce more than one.
+        _stalls = _STALLS.drain()
+        if _stalls:
+            result["stall_reports"] = _stalls
         if session is not None:
             try:
                 await _stop(session)
@@ -711,6 +721,49 @@ def _write_report(report: dict, args, quiet: bool = False) -> None:
         print(f"\nwrote {args.json_out}")
 
 
+#: The opening words of the library's first-media stall report. Matching the
+#: text, not the logger or the level, so an unrelated WARNING from the same
+#: module is never mistaken for a stall - and a rename of the report fails the
+#: tests loudly instead of silently collecting nothing.
+_STALL_MARKER = "SDES first media never arrived"
+
+
+class _StallCollector(logging.Handler):
+    """Keep the stall reports so they reach the artifact, not just the log.
+
+    The report is the only line that says WHY a session delivered nothing, and
+    it lived only in the CI log. Three consecutive runs on 2026-08-10/11 dropped
+    the entire validate step from their logs - 375 lines against ~2200 on every
+    earlier run - while a required camera returned no media six attempts in a
+    row. A diagnostic that is present and unreadable is not a diagnostic.
+
+    Drained per attempt: which attempt stalled is part of the finding, and a
+    run-level list would lose that on a camera that fails once and then passes.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self._seen: list = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        # A handler that raises takes down whatever logged, and here that is the
+        # library's own stall path. Diagnosis must never become the failure.
+        try:
+            message = record.getMessage()
+        except Exception:
+            return
+        if _STALL_MARKER in message:
+            self._seen.append(message)
+
+    def drain(self) -> list:
+        out, self._seen = self._seen, []
+        return out
+
+
+#: Installed by _configure_logging, read by _attempt.
+_STALLS = _StallCollector()
+
+
 def _configure_logging(level_name: str) -> None:
     """Let the library's own log lines out of the process.
 
@@ -739,6 +792,9 @@ def _configure_logging(level_name: str) -> None:
     )
     for name in ("aidot", "aidot_cameras"):
         logging.getLogger(name).setLevel(level)
+    # Attached to the library logger rather than the root: this only ever wants
+    # the library's own reports, and the root carries aiortc/asyncio too.
+    logging.getLogger("aidot_cameras").addHandler(_STALLS)
 
 
 def main() -> int:
