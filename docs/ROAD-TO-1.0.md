@@ -70,7 +70,74 @@ That is not a settling cadence. The clock has not started.
 The bar: **two weeks with no streaming-breaking release.** The cadence is the
 evidence.
 
-### 2. An unexplained 5x bitrate difference - closed 2026-08-11
+### 2. A 1.2x bitrate difference - premise corrected 2026-08-11
+
+**Read this section before any of the history below it. The number this item was
+named for was never measured, and it is wrong.**
+
+Everything under "The original premise, and how it stood for four days" was
+written against the claim that an A001064 takes 1900-3700 Kbps where the vendor
+app takes **225-500 Kbps** from the same camera. On 2026-08-11 the app was
+finally captured doing it, and it does not.
+
+#### What was measured
+
+Capture `aidot-bitrate-20260811-143007.pcap`, with a marker file stamping each
+tap so the windows are exact rather than inferred from the rate changes being
+measured. One live session on the A001064, quality tapped SD then HD:
+
+    window                       secs    pkts      MB      kbps
+    HD / Auto (before any tap)   16.0    3467    3.58    1795.7
+    after tapping SD             27.6    3591    2.99     866.3
+    after tapping HD             25.2    5461    5.61    1777.5
+
+Against this library's own measured rate for the same camera - 2228 kbps mean
+across the interleaved codec campaign, computed from each recording's own
+duration:
+
+    vendor app, HD    ~1796 kbps
+    this library      ~2228 kbps      -> 1.24x, not 5x
+    vendor app, SD     ~866 kbps      -> what a working SD control would buy
+
+**So there is no 5x gap.** There is a 24% difference at equivalent quality, and
+a separate 2:1 saving available from a control that works in the app and does
+not work here. Those are two different, much smaller problems than the one
+thirteen hypotheses were spent on.
+
+Where 225-500 came from is not established. It is not in any measurement in this
+repository, and this capture contradicts it by a wide margin at both quality
+settings.
+
+#### How the app changes it
+
+Three facts from the same capture, and together they say the mechanism is the
+one this library already implements:
+
+* **No renegotiation.** The media 5-tuple `48649 -> 49679` carried 12,701
+  packets across both rates. The session was never rebuilt, so the app is not
+  re-offering at a new quality.
+* **No cloud call.** There is 92 KB of HTTPS near the SD tap and nothing at all
+  at the HD tap. A mechanism that only appears for one of two taps is not the
+  mechanism.
+* **Therefore in-band and mid-session**, on the existing flow - which is exactly
+  what `SETSTREAMCTRL` (0x320) is, and exactly how this library sends it.
+
+The command packet itself could not be isolated: outbound traffic is dense
+66-74 byte RTCP and STUN, the 126-166 byte packets that stand out recur every
+~2 s throughout rather than at the taps, and the payload is encrypted anyway.
+
+#### What is actually open now
+
+Narrow, and worth stating precisely because the old framing was so much bigger:
+**our `SETSTREAMCTRL` is byte-identical to the app's, sent in-band mid-session
+on the same transport, and does not change the rate - while the app's does.**
+Sweeping every quality value across fourteen sessions changed nothing.
+
+The bar: **either make SD take effect, or record that it does not and why.**
+The prize is now correctly sized - about 2:1 from SD, and about 24% from
+whatever accounts for the HD difference - rather than the 5x this item promised.
+
+#### The original premise, and how it stood for four days
 
 An A001064 takes 1900-3700 Kbps where the vendor app takes 225-500 from the same
 camera.
