@@ -60,7 +60,10 @@ def _patch_attempts(lv, monkeypatch, verdicts):
     """Feed ``_validate_camera`` canned per-device verdicts, no cameras needed."""
     queues = {dev: list(vs) for dev, vs in verdicts.items()}
 
-    async def _fake_attempt(dc, hold, out_dir, attempt, device=None):
+    async def _fake_attempt(dc, hold, out_dir, attempt, device=None, **kw):
+        # **kw so a new optional argument on _attempt - pt_order for the codec
+        # campaign was the second - does not fail these tests for a reason that
+        # has nothing to do with the cooldown policy they exist to guard.
         queue = queues[dc.device_id]
         return {"attempt": attempt, "verdict": queue.pop(0)}
 
