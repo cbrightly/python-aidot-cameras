@@ -83,6 +83,52 @@ LIVE_PROBE_BUDGET_S = 14
 # A camera holds its viewer slot ~120 s after a session; leave room past that.
 DEFAULT_COOLDOWN_S = 180.0
 
+# --- the in-session quality campaign -----------------------------------------
+#
+# The 2026-08-07 sweep sent SETSTREAMCTRL and then judged it by the profile the
+# NEXT session came back with. The vendor-app capture of 2026-08-11 shows the
+# app's own SD tap taking effect the other way entirely: no renegotiation (one
+# media 5-tuple carried 12,701 packets across both rates), no cloud call at the
+# HD tap, and the rate changing within seconds INSIDE the session. A sweep
+# looking for a next-session change could therefore have been sending a command
+# that worked perfectly and scoring it against the wrong observable.
+#
+# So this measures the rate before and after the command in ONE session, which
+# nobody has done. The numbers below are sized against the camera, not against
+# comfort:
+#
+# * an A001064 ends its own streaming session roughly every 60-85 s (see
+#   docs/DESIGN-session-continuity.md), and a teardown landing inside the second
+#   window is indistinguishable from a successful halving. 3+12+2+12 = 29 s of
+#   media leaves the measurement finished well inside the shortest lifetime
+#   observed (62 s);
+# * the settle skips the encoder's opening burst, which would otherwise inflate
+#   the first window on every arm including the control;
+# * the gap absorbs the transition, so neither window straddles it.
+#
+# A 2:1 effect does not need long windows; it needs windows that are certainly
+# inside a live session.
+QUALITY_FIRST_MEDIA_S = 20.0
+QUALITY_SETTLE_S = 3.0
+QUALITY_WINDOW_S = 12.0
+QUALITY_GAP_S = 2.0
+# ffmpeg's -t has to cover the whole timeline plus the wait for first media,
+# because the SDES bridge thread - and with it the command channel and the byte
+# counter - lives and dies with that process. A -t that expires inside the
+# second window freezes the counter and reports exactly the result this
+# experiment is hoping for.
+def _quality_max_seconds(window: float) -> int:
+    """ffmpeg's -t for a campaign attempt, from the timeline it has to cover."""
+    return int(QUALITY_FIRST_MEDIA_S + QUALITY_SETTLE_S + window
+               + QUALITY_GAP_S + window + 8)
+
+
+# A session that died, or delivered nothing, during the second window is VOID -
+# it is not a measurement of anything and must not be counted toward the arm.
+# Re-queued rather than dropped, up to this many times across the camera, so a
+# void does not silently shrink an arm to fewer sessions than were asked for.
+QUALITY_VOID_BUDGET = 3
+
 # Cooldown exists to let a camera release the viewer slot it holds for ~120 s
 # after a session. A camera that never answered never opened one, so waiting on
 # it buys nothing - and it is exactly the camera that burns the most wall clock,
@@ -355,6 +401,73 @@ async def _recording_seconds(path: str, timeout: float = 30.0):
     return None
 
 
+async def _video_bitrate_series(path: str, timeout: float = 60.0) -> dict:
+    """Per-second video-only kbps for the whole recording.
+
+    The in-session counter (``media_stats``) is the primary measurement and it
+    is unambiguous, but it counts audio too and it is our own bookkeeping. This
+    is the independent second opinion: video only, straight out of the file the
+    decode probe already reads, with no wall-clock-to-PTS arithmetic anywhere
+    near a window boundary.
+
+    Deliberately a SERIES rather than two aligned windows. Aligning window edges
+    onto PTS needs the offset between "ffmpeg started" and "the first packet it
+    wrote", which is unknown and would be load-bearing at exactly the moment the
+    rate steps. A per-second series shows the step wherever it falls, and its
+    position can then be checked against the tap offset without any boundary
+    arithmetic being trusted.
+
+    Returns ``{"video_kbps_by_second": [...]}`` or ``{"series_error": str}`` -
+    a probe that could not run must never be reported as a flat rate.
+    """
+    if not path or not os.path.exists(path):
+        return {"series_error": "no recording"}
+    try:
+        probe = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "packet=pts_time,size", "-of", "csv=p=0", path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _err = await asyncio.wait_for(probe.communicate(), timeout)
+    except FileNotFoundError:
+        return {"series_error": "ffprobe not found"}
+    except Exception as exc:  # report it, never raise out of a probe
+        return {"series_error": f"{type(exc).__name__}: {exc}"[:120]}
+
+    buckets: dict[int, int] = {}
+    first_pts = None
+    for line in (out or b"").decode("utf-8", "replace").splitlines():
+        parts = line.strip().split(",")
+        if len(parts) < 2:
+            continue
+        try:
+            pts, size = float(parts[0]), int(parts[1])
+        except ValueError:
+            # "N/A" pts on a packet the container could not stamp. Skipping it
+            # loses that packet's bytes rather than mis-placing them, which is
+            # the right way round for a cross-check.
+            continue
+        if first_pts is None:
+            first_pts = pts
+        buckets[int(pts - first_pts)] = buckets.get(int(pts - first_pts), 0) + size
+
+    if not buckets:
+        return {"series_error": "no video packets"}
+    series = [round(buckets.get(s, 0) * 8 / 1000, 1)
+              for s in range(max(buckets) + 1)]
+    # At one-second resolution this stream's PTS are too clumped to read: a
+    # measured A001064 recording alternates 1550 / 3020 / 95 kbps second by
+    # second around a true ~1700, because packets land unevenly either side of
+    # a second boundary (the same stamping ffmpeg reports as "Non-monotonic
+    # DTS" throughout the run). Four-second buckets average that out
+    # while still being far finer than the 12 s windows, so a 2:1 step stays
+    # obvious. Both are reported: the per-second series is what was measured,
+    # the coarse one is what can be read.
+    coarse = [round(sum(buckets.get(s, 0) for s in range(b, b + 4)) * 8 / 4000, 1)
+              for b in range(0, len(series), 4)]
+    return {"video_kbps_by_second": series, "video_kbps_by_4s": coarse}
+
+
 def _recording_path(out_dir: str, device_id: str, attempt: int) -> str:
     """Where this attempt records, clearing a stale file we are allowed to clear.
 
@@ -405,9 +518,289 @@ def _apply_pt_order(arm):
         os.environ.pop(key, None)
 
 
+def _media_sample(session, frames: dict) -> dict:
+    """One reading of everything that counts media, with its own timestamp.
+
+    ``media_stats`` is the SDES bridge's own byte counter, which is what makes
+    an in-session bitrate measurable at all - it is bytes forwarded to ffmpeg,
+    sampled on the wall clock, with no file and no PTS in the way. The DTLS path
+    has no such counter (it decodes in process), so the frame count is carried
+    too and the report says which signal a window was built from. Frames do not
+    make a bitrate: on that transport the per-second video series from the
+    recording is the measurement and this is only liveness.
+    """
+    sample = {"t": time.monotonic(), "frames": frames["n"],
+              "bytes": None, "packets": None}
+    stats_fn = getattr(session, "media_stats", None)
+    if callable(stats_fn):
+        try:
+            stats = stats_fn() or {}
+            sample["bytes"] = stats.get("bytes")
+            sample["packets"] = stats.get("packets")
+        except Exception:
+            pass
+    return sample
+
+
+def _window(start: dict, end: dict) -> dict:
+    """Bitrate across two samples, from the wall clock between them.
+
+    The denominator is the time actually elapsed, never the configured window:
+    an event loop that ran late gives a longer window, and dividing by the
+    nominal 12 s would turn that into a higher bitrate.
+    """
+    seconds = end["t"] - start["t"]
+    out: dict = {"seconds": round(seconds, 2),
+                 "frames": end["frames"] - start["frames"]}
+    if start["bytes"] is not None and end["bytes"] is not None:
+        out["bytes"] = end["bytes"] - start["bytes"]
+        out["packets"] = end["packets"] - start["packets"]
+        if seconds > 0:
+            out["kbps"] = round(out["bytes"] * 8 / seconds / 1000, 1)
+    return out
+
+
+async def _wait_first_media(session, frames: dict, budget: float) -> float | None:
+    """Monotonic time of the first media, or None if none arrived in ``budget``.
+
+    The windows are anchored on first media rather than on the open, because the
+    open returns when signaling finishes and media can be seconds behind it. An
+    unanchored settle would spend itself waiting for the stream to start and the
+    first window would then contain the encoder's opening burst - which is
+    exactly the confound the settle exists to remove.
+    """
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        sample = _media_sample(session, frames)
+        if (sample["packets"] or 0) > 0 or sample["frames"] > 0:
+            return sample["t"]
+        await asyncio.sleep(0.2)
+    return None
+
+
+async def _quality_probe(dc, session, arm: str, frames: dict,
+                         window: float = QUALITY_WINDOW_S) -> dict:
+    """Measure the bitrate either side of a mid-session resolution command.
+
+    One session, two windows, one command between them. ``arm`` is the quality
+    to ask for ("sd"/"hd"); an empty arm is the CONTROL - it waits out the same
+    gap and sends nothing, which is the only way to tell a command that works
+    from a stream that simply settles downward on its own.
+
+    The result is deliberately per-session and self-contained: window B is only
+    ever compared with window A from the SAME session. This camera's own rate
+    varies 839-3698 Kbps between sessions, so any comparison across sessions
+    would measure that variance instead of the command.
+    """
+    out: dict = {
+        "arm": arm or "control",
+        "settle_s": QUALITY_SETTLE_S,
+        "window_s": window,
+        "gap_s": QUALITY_GAP_S,
+    }
+
+    t_first = await _wait_first_media(session, frames, QUALITY_FIRST_MEDIA_S)
+    if t_first is None:
+        out["verdict"] = "VOID"
+        out["void_reason"] = f"no media within {QUALITY_FIRST_MEDIA_S:.0f}s"
+        return out
+    await asyncio.sleep(QUALITY_SETTLE_S)
+    a0 = _media_sample(session, frames)
+    await asyncio.sleep(window)
+    a1 = _media_sample(session, frames)
+    out["window_a"] = _window(a0, a1)
+    # A first window with nothing in it is void for the same reason the second
+    # one is: it is a denominator of zero wearing the clothes of a baseline.
+    if not (out["window_a"].get("packets") or out["window_a"].get("frames")):
+        out["verdict"] = "VOID"
+        out["void_reason"] = "no media in window A"
+        return out
+
+    # The command, on the real call path. `async_set_resolution` reaches its
+    # session through `dc._stream_session`, which only the library's own
+    # keepalive/streaming/serve loops set - a bare `async_open_webrtc_stream`
+    # leaves it None, and with it None the setter REMEMBERS the quality, sends
+    # nothing, and returns True. Standing in for the loop that would own it is
+    # the only way to exercise what Home Assistant exercises.
+    _ACKS.drain()
+    # Recorded on the control arm too: the control has to occupy the same point
+    # in the same timeline, or it is not a control of this measurement.
+    out["tap_after_first_media_s"] = round(time.monotonic() - t_first, 2)
+    if arm:
+        _prev_session = getattr(dc, "_stream_session", None)
+        # Whether the SCTP command channel existed at the moment of the tap.
+        # The setter's True does not distinguish "sent" from "remembered", and
+        # a campaign that cannot tell those apart cannot interpret a null.
+        try:
+            out["cmd_channel_ready"] = bool(session._cmd_chan[0] is not None)
+        except Exception:
+            out["cmd_channel_ready"] = None
+        try:
+            dc._stream_session = session
+            t_cmd = time.monotonic()
+            out["set_resolution_returned"] = bool(
+                await dc.async_set_resolution(arm))
+            out["set_resolution_s"] = round(time.monotonic() - t_cmd, 2)
+        except Exception as exc:
+            out["set_resolution_error"] = f"{type(exc).__name__}: {exc}"[:120]
+        finally:
+            dc._stream_session = _prev_session
+            # The setter remembers the quality and the library re-applies it
+            # whenever a session next starts. Nothing in this harness triggers
+            # that path today, but a control arm that inherited the previous
+            # arm's setting would be a control in name only, and the cost of
+            # ruling it out is one line.
+            dc._desired_quality = None
+        # The camera's own answer (801), which the setter logs at DEBUG and
+        # returns nothing about. An ack proves the command was accepted, not
+        # that it did anything - it is recorded so a null result cannot be
+        # blamed on a command that never arrived.
+        out["ack_log"] = _ACKS.drain()
+    else:
+        out["set_resolution_returned"] = None
+
+    await asyncio.sleep(QUALITY_GAP_S)
+    b0 = _media_sample(session, frames)
+    await asyncio.sleep(window)
+    b1 = _media_sample(session, frames)
+    out["window_b"] = _window(b0, b1)
+
+    # A session that ended inside window B produces a beautiful halving. Both
+    # checks, and they are checks on the SECOND window specifically, because
+    # that is the one whose collapse would be mistaken for the result.
+    alive = getattr(session, "is_alive", None)
+    out["alive_after"] = bool(alive) if isinstance(alive, bool) else None
+    moved = out["window_b"].get("packets")
+    if moved is None:
+        moved = out["window_b"].get("frames")
+    if out["alive_after"] is False or not moved:
+        out["verdict"] = "VOID"
+        out["void_reason"] = ("session ended during the measurement"
+                              if out["alive_after"] is False
+                              else "no media in window B")
+        return out
+
+    ka, kb = out["window_a"].get("kbps"), out["window_b"].get("kbps")
+    if ka and kb:
+        out["kbps_a"], out["kbps_b"] = ka, kb
+        out["ratio_b_over_a"] = round(kb / ka, 3)
+    else:
+        # No byte counter on this transport. The per-second video series from
+        # the recording is then the only bitrate evidence, and it is reported
+        # per attempt either way.
+        out["counter"] = "frames only - no media_stats on this transport"
+    out["verdict"] = "OK"
+    return out
+
+
+def _interleave_arms(arms: list, repeats: int) -> list:
+    """The session order for a quality campaign: arms cycled, never blocked.
+
+    ["sd", ""] x3 is sd, control, sd, control, sd, control - NOT three sd
+    sessions followed by three controls. This camera's own rate varies
+    839-3698 Kbps between sessions, so a blocked campaign measures the time of
+    day; the codec campaign was interleaved for exactly this reason and this is
+    the same experiment one level in.
+    """
+    return [arm for _ in range(max(1, repeats)) for arm in arms]
+
+
+def _void_reason(res: dict) -> str | None:
+    """Why this attempt measured nothing, or None if it measured something.
+
+    A void is not a failed camera and not a result: the session ended inside
+    the measurement, or delivered no media in the second window. Both produce a
+    beautiful apparent halving, so they are named and re-run rather than
+    averaged in.
+    """
+    quality = res.get("quality") or {}
+    if quality.get("verdict") == "VOID":
+        return quality.get("void_reason") or "void"
+    if res.get("verdict") != "PASS":
+        return res.get("verdict")
+    return None
+
+
+def _quality_summary(attempts: list) -> dict:
+    """Per-arm collection of the per-session ratios. No verdict is computed.
+
+    Every session's own numbers are kept, and the arm's spread is reported
+    rather than only its mean: three control ratios that themselves scatter
+    0.6-1.4 mean the windows are too short to conclude anything, and that is a
+    finding rather than a failure - a mean alone would hide it.
+
+    ``kbps_a`` is kept per session for a second reason. If the control sessions
+    that FOLLOW an sd session show a depressed first window, the camera is
+    remembering the setting across sessions; that would be a real result, and
+    without the absolute numbers it would look like a noisy control instead.
+    """
+    per_arm: dict = {}
+    for att in attempts:
+        q = att.get("quality")
+        if not q:
+            continue
+        bucket = per_arm.setdefault(
+            q.get("arm") or "control", {"sessions": [], "void": 0})
+        if q.get("verdict") != "OK":
+            bucket["void"] += 1
+            continue
+        bucket["sessions"].append({
+            "attempt": att.get("attempt"),
+            "kbps_a": q.get("kbps_a"),
+            "kbps_b": q.get("kbps_b"),
+            "ratio": q.get("ratio_b_over_a"),
+            "acked": bool(q.get("ack_log")),
+        })
+    for bucket in per_arm.values():
+        ratios = [s["ratio"] for s in bucket["sessions"] if s["ratio"]]
+        bucket["n"] = len(ratios)
+        if ratios:
+            bucket["ratio_mean"] = round(sum(ratios) / len(ratios), 3)
+            bucket["ratio_min"] = min(ratios)
+            bucket["ratio_max"] = max(ratios)
+    return per_arm
+
+
+def _print_quality_attempt(res: dict) -> None:
+    q = res.get("quality") or {}
+    if not q:
+        return
+    if q.get("verdict") != "OK":
+        print(f"       quality arm={q.get('arm')}: VOID - {q.get('void_reason')}")
+        return
+    ka, kb = q.get("kbps_a"), q.get("kbps_b")
+    rate = (f"A={ka} kbps  B={kb} kbps  B/A={q.get('ratio_b_over_a')}"
+            if ka and kb else f"no byte counter ({q.get('counter')})")
+    print(f"       quality arm={q.get('arm')}  {rate}")
+    if q.get("arm") != "control":
+        print(f"       command: returned={q.get('set_resolution_returned')}"
+              f"  channel_ready={q.get('cmd_channel_ready')}"
+              f"  took={q.get('set_resolution_s')}s"
+              f"  tap at +{q.get('tap_after_first_media_s')}s of media")
+        for line in q.get("ack_log") or ["(no ack line logged)"]:
+            print(f"       camera: {line}")
+
+
+def _print_quality_summary(entry: dict) -> None:
+    print(f"\n    quality campaign, {entry['name']!r} - each ratio is window B "
+          "over window A of the SAME session:")
+    for arm, bucket in entry["quality_summary"].items():
+        ratios = ", ".join(f"{s['ratio']}" for s in bucket["sessions"]
+                           if s["ratio"]) or "-"
+        print(f"      {arm:8} n={bucket.get('n', 0)}  ratios: {ratios}"
+              + (f"  mean={bucket['ratio_mean']}" if "ratio_mean" in bucket else "")
+              + (f"  void={bucket['void']}" if bucket.get("void") else ""))
+        for s in bucket["sessions"]:
+            print(f"        attempt {s['attempt']}: {s['kbps_a']} -> {s['kbps_b']} kbps")
+    print("      read it against the control arm: a stream that settles "
+          "downward on its own does so in both arms.")
+
+
 async def _attempt(dc, hold: float, out_dir: str, attempt: int,
                    device: dict | None = None, pt_order=None,
-                   sd_probe: bool = False) -> dict:
+                   sd_probe: bool = False, quality_arm=None,
+                   max_seconds: int | None = None,
+                   quality_window: float = QUALITY_WINDOW_S) -> dict:
     """One streaming attempt. Never raises; classifies the outcome."""
     from aidot_cameras.exceptions import AidotCameraBusy
 
@@ -430,6 +823,9 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int,
     result: dict = {"attempt": attempt}
     if result_arm is not None:
         result["pt_order_arm"] = result_arm
+    if quality_arm is not None:
+        result["quality_arm"] = quality_arm or "control"
+        _ACKS.drain()
     try:
         # talk=True so the offer advertises sendrecv audio. Without it an SDES
         # session never negotiates a return track, `talk_supported` is False,
@@ -440,12 +836,28 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int,
             on_frame=lambda _f: frames.__setitem__("n", frames["n"] + 1),
             timeout=45.0,
             output_path=out,
-            max_seconds=max(1, int(hold - 2) + LIVE_PROBE_BUDGET_S),
+            max_seconds=(max_seconds if max_seconds is not None
+                         else max(1, int(hold - 2) + LIVE_PROBE_BUDGET_S)),
             talk=True,
         )
         result["handshake_s"] = round(time.time() - t0, 1)
         result["transport"] = type(session).__name__
-        await asyncio.sleep(hold)
+        if quality_arm is None:
+            await asyncio.sleep(hold)
+        else:
+            result["quality"] = await _quality_probe(
+                dc, session, quality_arm, frames, quality_window)
+            # Close the session before reading the recording. Everything the
+            # campaign measures is already in hand (the counter is sampled on
+            # the wall clock, in session), and the per-second video series is
+            # read from a file ffmpeg would otherwise still be writing - so
+            # without this the last seconds of window B, the ones that carry
+            # the effect, are the ones most likely to be missing from the
+            # cross-check. Stopping here also hands the camera back sooner.
+            try:
+                await _stop(session)
+            except Exception:
+                pass
 
         if hasattr(session, "get_stats"):
             try:
@@ -478,27 +890,38 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int,
         # in for the loop that would own it is the only way to measure the real
         # call path, and it is restored immediately afterwards so nothing else
         # inherits a session this function is about to close.
-        _prev_session = getattr(dc, "_stream_session", None)
-        try:
-            dc._stream_session = session
-            # Read-only, opt-in: asks what recordings exist so the response
-            # layout can be read off the wire. Never sends DELLISTEVENT or
-            # RECORD_PLAYCONTROL, so it cannot delete anything or start
-            # playback on a camera in someone's house.
-            if sd_probe:
-                try:
-                    result["sd_events"] = await probe_sd_events(session)
-                except Exception as exc:
-                    result["sd_events_error"] = f"{type(exc).__name__}: {exc}"[:120]
-            result["features"] = await probe_features(dc, device or {}, session)
-        except Exception as exc:
-            result["features_error"] = f"{type(exc).__name__}: {exc}"[:120]
-        finally:
-            dc._stream_session = _prev_session
+        #
+        # Not during a quality campaign. The PTZ nudge MOVES THE CAMERA, and a
+        # scene change is a bitrate change - the probe would be varying the
+        # thing being measured. Two-way audio adds an outbound stream for the
+        # same reason. A campaign attempt therefore reports no features, which
+        # is the honest outcome: it did not run them.
+        if quality_arm is None:
+            _prev_session = getattr(dc, "_stream_session", None)
+            try:
+                dc._stream_session = session
+                # Read-only, opt-in: asks what recordings exist so the response
+                # layout can be read off the wire. Never sends DELLISTEVENT or
+                # RECORD_PLAYCONTROL, so it cannot delete anything or start
+                # playback on a camera in someone's house.
+                if sd_probe:
+                    try:
+                        result["sd_events"] = await probe_sd_events(session)
+                    except Exception as exc:
+                        result["sd_events_error"] = (
+                            f"{type(exc).__name__}: {exc}"[:120])
+                result["features"] = await probe_features(dc, device or {}, session)
+            except Exception as exc:
+                result["features_error"] = f"{type(exc).__name__}: {exc}"[:120]
+            finally:
+                dc._stream_session = _prev_session
 
         ok, evidence = _media_seen(session, frames["n"], out)
         result.update(evidence)
         result.update(await _decode_probe(out))
+        if quality_arm is not None:
+            # Video only, from the file, independent of our own counter.
+            result.update(await _video_bitrate_series(out))
         _secs = await _recording_seconds(out)
         if _secs:
             result["recorded_seconds"] = _secs
@@ -553,10 +976,20 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
     # meant to avoid.
     arms = _parse_arms(getattr(args, "pt_order_arms", "") or "")
     campaigning = bool(arms) and not is_dtls
-    if campaigning:
-        max_attempts = len(arms) * max(1, int(getattr(args, "arm_repeats", 1)))
+    # The quality campaign is the same design one level in: the arms alternate
+    # per SESSION, and the comparison that matters happens INSIDE each session,
+    # so this loop's job is only to run a balanced, interleaved set of them.
+    quality_arms = _parse_arms(getattr(args, "quality_arms", "") or "")
+    quality_window = float(getattr(args, "quality_window", QUALITY_WINDOW_S))
+    repeats = max(1, int(getattr(args, "arm_repeats", 1)))
+    pending = _interleave_arms(quality_arms, repeats)
+    if quality_arms:
+        max_attempts = len(pending)
+    elif campaigning:
+        max_attempts = len(arms) * repeats
     else:
         max_attempts = ATTEMPTS_DTLS if is_dtls else ATTEMPTS_SDES
+    voids = 0
 
     entry: dict = {
         "name": device.get(CONF_NAME),
@@ -575,7 +1008,18 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
     await _wait_until(cooldown_until.get(dc.device_id, 0.0),
                       repr(entry["name"]))
 
-    for i in range(1, max_attempts + 1):
+    i = 0
+    while True:
+        if quality_arms:
+            if not pending:
+                break
+            quality_arm = pending.pop(0)
+        else:
+            quality_arm = None
+            if i >= max_attempts:
+                break
+        i += 1
+        total = i + len(pending) if quality_arms else max_attempts
         if i > 1:
             prev = entry["attempts"][-1].get("verdict", "")
             wait = _cooldown_after(prev, args.cooldown)
@@ -587,11 +1031,16 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
                 print(f"    cooling down {wait:.0f}s before attempt {i} "
                       "(a camera holds its viewer slot ~120s)")
             await asyncio.sleep(wait)
-        print(f"    attempt {i}/{max_attempts}...")
+        print(f"    attempt {i}/{total}..."
+              + (f"  quality arm: {quality_arm or 'control'}"
+                 if quality_arms else ""))
         res = await _attempt(
             dc, args.hold, args.out_dir, i, device,
             pt_order=(arms[(i - 1) % len(arms)] if campaigning else None),
-            sd_probe=bool(getattr(args, "sd_probe", False)))
+            sd_probe=bool(getattr(args, "sd_probe", False)),
+            quality_arm=quality_arm, quality_window=quality_window,
+            max_seconds=(_quality_max_seconds(quality_window)
+                         if quality_arms else None))
         entry["attempts"].append(res)
         # This device may now be holding a viewer slot, so record when it may
         # next be opened. Every exit from this loop passes through here,
@@ -610,19 +1059,37 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
                  if res.get("decode_errors") else "")
               + (f"  decode_probe={res['decode_error']}" if "decode_error" in res else "")
               + (f"  {res['error']}" if "error" in res else ""))
-        if res["verdict"] == "PASS" and not campaigning:
+        if quality_arms:
+            _print_quality_attempt(res)
+            # A void session measured nothing and must not stand in for one of
+            # the sessions this arm was asked for. Re-queued at the back so the
+            # arms stay interleaved rather than retried back-to-back.
+            void = _void_reason(res)
+            if void and voids < QUALITY_VOID_BUDGET:
+                voids += 1
+                pending.append(quality_arm)
+                print(f"    void session ({void}) - re-queueing arm "
+                      f"{quality_arm or 'control'} ({voids}/"
+                      f"{QUALITY_VOID_BUDGET} of the void budget used)")
+        if res["verdict"] == "PASS" and not campaigning and not quality_arms:
             break
         # A camera that has only ever failed WITHOUT opening a session is not
         # being flaky, it is absent. Stop re-asking it; the verdict cannot change
         # and each further attempt costs a full signaling timeout.
+        more_left = bool(pending) if quality_arms else i < max_attempts
         if (len(entry["attempts"]) >= SLOTLESS_MAX_ATTEMPTS
                 and all(a["verdict"] in _SLOTLESS_VERDICTS
                         for a in entry["attempts"])
-                and i < max_attempts):
+                and more_left):
             print(f"    no session opened on {len(entry['attempts'])} attempts - "
                   f"treating as absent, skipping the remaining "
-                  f"{max_attempts - i} attempt(s)")
+                  f"{len(pending) if quality_arms else max_attempts - i}"
+                  " attempt(s)")
             break
+
+    if quality_arms:
+        entry["quality_summary"] = _quality_summary(entry["attempts"])
+        _print_quality_summary(entry)
 
     verdicts = [a["verdict"] for a in entry["attempts"]]
     entry["verdict"] = "PASS" if "PASS" in verdicts else (
@@ -900,12 +1367,39 @@ class _ReceiptCollector(_StallCollector):
             self._seen.append(message.split(_ORDER_MARKER, 1)[1].strip())
 
 
+#: The resolution setter's own account of what the camera said back. The setter
+#: returns True whether the camera acked, stayed silent, or was never asked at
+#: all (no session -> it remembers the value and reports success), so its return
+#: value alone cannot tell a null result from a command that never went out.
+_ACK_MARKER = "set resolution "
+
+
+class _AckCollector(_ReceiptCollector):
+    """Keeps the SETSTREAMCTRL ack lines, which are DEBUG.
+
+    Same trap as the codec receipt one level worse: those are INFO and this is
+    DEBUG, so it collects nothing unless the controls logger is actually at
+    DEBUG. `_configure_logging` lowers that one logger when a quality campaign
+    is running, rather than putting the whole library at DEBUG during a
+    measurement.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return
+        if _ACK_MARKER in message:
+            self._seen.append(message)
+
+
 #: Installed by _configure_logging, read by _attempt.
 _STALLS = _StallCollector()
 _RECEIPTS = _ReceiptCollector()
+_ACKS = _AckCollector()
 
 
-def _configure_logging(level_name: str) -> None:
+def _configure_logging(level_name: str, quality_campaign: bool = False) -> None:
     """Let the library's own log lines out of the process.
 
     Nothing here ever configured logging, so the root logger fell back to
@@ -937,6 +1431,14 @@ def _configure_logging(level_name: str) -> None:
     # the library's own reports, and the root carries aiortc/asyncio too.
     logging.getLogger("aidot_cameras").addHandler(_STALLS)
     logging.getLogger("aidot_cameras").addHandler(_RECEIPTS)
+    logging.getLogger("aidot_cameras").addHandler(_ACKS)
+    if quality_campaign:
+        # One logger, not the library: the ack lines are DEBUG, and a campaign
+        # measuring a bitrate should not also be paying for DEBUG on every
+        # media path it is trying to measure. Raised here rather than asking
+        # the operator to remember --log-level DEBUG, because a collector that
+        # silently gathers nothing has already shipped once on this harness.
+        logging.getLogger("aidot_cameras.camera.controls").setLevel(logging.DEBUG)
 
 
 def main() -> int:
@@ -960,6 +1462,23 @@ def main() -> int:
                         "'|97,96' for default-then-H265-first. An empty arm "
                         "means leave the offer alone. Attempts do not stop on "
                         "success, so both arms are measured on every camera.")
+    p.add_argument("--quality-arms", default="",
+                   help="in-session quality campaign: '|'-separated qualities "
+                        "to apply MID-SESSION, one per session, e.g. 'sd|' for "
+                        "sd-then-control. An empty arm is the control - it "
+                        "waits the same gap and sends nothing. Each session is "
+                        "measured against itself (bitrate before the command "
+                        "vs after), which is the comparison the 2026-08-07 "
+                        "sweep never made. Feature probes are skipped: the PTZ "
+                        "nudge moves the camera, and a scene change is a "
+                        "bitrate change. Use --arm-repeats 3 or more.")
+    p.add_argument("--quality-window", type=float, default=QUALITY_WINDOW_S,
+                   help="seconds per measurement window in a quality campaign "
+                        f"(default {QUALITY_WINDOW_S:.0f}). Two of these plus "
+                        "the settle and gap have to finish inside the session: "
+                        "an A001064 recycles itself every 60-85s, and a "
+                        "teardown inside the second window looks exactly like "
+                        "a bitrate that halved.")
     p.add_argument("--arm-repeats", type=int, default=1,
                    help="how many times to cycle the arms (default 1)")
     p.add_argument("--sd-probe", action="store_true",
@@ -973,7 +1492,7 @@ def main() -> int:
                    help="level for the aidot loggers (default INFO; DEBUG for"
                         " protocol detail, WARNING for the old behaviour)")
     args = p.parse_args()
-    _configure_logging(args.log_level)
+    _configure_logging(args.log_level, bool(args.quality_arms))
     return asyncio.run(_run(args))
 
 
