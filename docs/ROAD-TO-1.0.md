@@ -520,6 +520,12 @@ stalled and nothing was reported. The diagnosis is in place and waiting for a
 recurrence; the honest state is that the next stall answers it, not that it is
 answered.
 
+The same applies to the `answer=` field added alongside it - unit-tested, and
+never yet rendered on hardware, for exactly the same reason. Neither of these
+two fields should be read as confirmed live. What IS confirmed live is the
+inbound-media / decrypt-failed pair, which fired on run 31485643934 and produced
+the finding above.
+
 #### 2026-08-10: the veto is fixed, and the fix is confirmed by what it learns
 
 `_is_self_peer_ip` compared an address where ICE compares a transport address,

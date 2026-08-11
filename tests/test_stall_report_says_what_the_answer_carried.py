@@ -79,6 +79,73 @@ def test_the_line_is_still_one_line():
     assert "\n" not in _report(answer_cands=0)
 
 
+# --------------------------------------------------------------------------- #
+# The derivation, not just the rendering. The field's whole purpose is to keep
+# "never answered" and "answered with nothing" apart, so the code that decides
+# which one to report is where the mistake would actually be made.
+# --------------------------------------------------------------------------- #
+class _Fut:
+    """The answer future, in the states the stall path can find it in."""
+
+    def __init__(self, *, done=True, cancelled=False, exc=None, result=None):
+        self._done, self._cancelled = done, cancelled
+        self._exc, self._result = exc, result
+
+    def done(self):
+        return self._done
+
+    def cancelled(self):
+        return self._cancelled
+
+    def exception(self):
+        return self._exc
+
+    def result(self):
+        return self._result
+
+
+def _derive(pre_launch, fut):
+    from aidot_cameras.camera.sdes_open import _stall_answer_candidates
+    return _stall_answer_candidates(pre_launch, fut)
+
+
+def test_an_answer_that_arrived_with_an_empty_sdp_is_not_called_absent():
+    # The trap: an SDP string that is present but empty is falsy, and treating
+    # falsy as "no answer" claims the camera never replied when it did. That is
+    # the exact error this field exists to prevent, made by the field itself.
+    assert _derive("", _Fut(result={"sdp": ""})) == 0
+
+
+def test_an_answer_with_no_candidate_lines_counts_zero():
+    assert _derive("", _Fut(result={"sdp": "v=0\r\na=ice-ufrag:x\r\n"})) == 0
+
+
+def test_candidates_are_counted_from_the_late_answer_too():
+    sdp = "a=candidate:1 1 udp 1 10.0.0.1 1 typ host\r\na=candidate:2 1 udp 1 10.0.0.2 2 typ srflx\r\n"
+    assert _derive("", _Fut(result={"sdp": sdp})) == 2
+
+
+def test_the_pre_launch_snapshot_is_preferred_when_present():
+    assert _derive("a=candidate:1 1 udp 1 10.0.0.1 1 typ host\r\n", None) == 1
+
+
+def test_a_cancelled_answer_wait_means_the_camera_never_answered():
+    assert _derive("", _Fut(done=False, cancelled=True)) is None
+
+
+def test_an_answer_future_that_failed_is_reported_as_unknown():
+    # An exception is not evidence the camera stayed silent - it could be ours.
+    assert _derive("", _Fut(exc=RuntimeError("boom"))) == -1
+
+
+def test_a_future_that_has_not_resolved_is_unknown_not_absent():
+    assert _derive("", _Fut(done=False)) == -1
+
+
+def test_no_future_at_all_is_unknown():
+    assert _derive("", None) == -1
+
+
 if __name__ == "__main__":
     import traceback
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

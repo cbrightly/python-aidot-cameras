@@ -952,6 +952,47 @@ def _probe_source_verdict(src, turn_peer_ip, turn_peer_port, *,
     return "vetoed-turn-source"
 
 
+def _stall_answer_candidates(pre_launch_sdp, answer_fut):
+    """How many ICE candidates the camera's answer carried, for the stall report.
+
+    Three outcomes, deliberately not two:
+
+      * an integer - the answer arrived and carried this many candidates, which
+        may be zero;
+      * ``None`` - the camera never answered;
+      * ``-1`` - nobody could tell, so the report says nothing at all.
+
+    The distinction that matters is the first against the second, because
+    ``nominated=none`` means one of them and they are investigated in different
+    subsystems. Getting it wrong here would be the same mistake the field exists
+    to prevent, so arrival is decided by whether a RESULT came back, never by
+    whether its SDP string is non-empty: an answer carrying an empty SDP is
+    falsy and is still an answer.
+
+    A future that failed is ``-1`` and not ``None``: an exception is not
+    evidence the camera stayed silent, and it may well have been ours.
+
+    Pure, so the classification is testable without a camera.
+    """
+    if pre_launch_sdp:
+        return pre_launch_sdp.count("a=candidate:")
+    if answer_fut is None:
+        return -1
+    if answer_fut.cancelled():
+        return None
+    if not answer_fut.done():
+        return -1
+    try:
+        if answer_fut.exception() is not None:
+            return -1
+        result = answer_fut.result()
+    except Exception:
+        return -1
+    if result is None:
+        return -1
+    return (result.get("sdp", "") or "").count("a=candidate:")
+
+
 def _first_media_stall_report(device_id, waited_s, nominated,
                               use_candidate_sent, binding_success,
                               trigger_sent, probes, probes_dropped=0,
@@ -5467,30 +5508,13 @@ class _SdesOpenMixin:
             25 s before the explanation would have been written.
             """
             try:
-                # What the answer carried, so `nominated=none` says which cause.
-                # Both sources are consulted: the pre-launch snapshot is empty on
-                # a late answer - measured at +1.3 s - and answer_fut is the only
-                # place that shape's SDP ever appears. -1 when neither can be
-                # read, which reports nothing rather than inventing a zero.
-                _stall_answer = -1
-                _stall_sdp = _pre_launch_answer_sdp or ""
-                if not _stall_sdp and answer_fut is not None and answer_fut.done():
-                    # cancelled() first: .exception() on a cancelled future
-                    # raises, and the answer-wait cancels this one on timeout.
-                    if not answer_fut.cancelled():
-                        try:
-                            if answer_fut.exception() is None:
-                                _stall_sdp = (
-                                    (answer_fut.result() or {}).get("sdp", "") or "")
-                        except Exception:
-                            _stall_sdp = ""
-                if _stall_sdp:
-                    _stall_answer = _stall_sdp.count("a=candidate:")
-                elif answer_fut is not None and (
-                        answer_fut.cancelled()
-                        or (answer_fut.done() and not _stall_sdp)):
-                    # Asked for and never got one.
-                    _stall_answer = None
+                # What the answer carried, so `nominated=none` says which
+                # cause. Both sources are consulted inside the helper: the
+                # pre-launch snapshot is empty on a late answer - measured at
+                # +1.3 s - and the future is the only place that shape's SDP
+                # ever appears.
+                _stall_answer = _stall_answer_candidates(
+                    _pre_launch_answer_sdp, answer_fut)
                 _stall_probes = list(
                     (getattr(_bridge_fn, "_br_probe_verdicts", None) or {}).items()
                 )
