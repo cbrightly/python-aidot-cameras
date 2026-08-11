@@ -45,6 +45,12 @@ understand the system and its shape has settled.
 
 ## Open
 
+**As of 2026-08-11 exactly one item is open: number 1.** Items 2 to 6 are closed
+above, each on its own terms and each saying which terms - two of them are
+"documented as accepted" rather than "solved", and they say so in their own
+words rather than in a summary that rounds them up. Read the item, not this
+line.
+
 ### 1. The discovery rate is still high
 
 Fourteen releases in the four days to 2026-08-07, and the finds were structural
@@ -64,7 +70,7 @@ That is not a settling cadence. The clock has not started.
 The bar: **two weeks with no streaming-breaking release.** The cadence is the
 evidence.
 
-### 2. An unexplained 5x bitrate difference
+### 2. An unexplained 5x bitrate difference - closed 2026-08-11
 
 An A001064 takes 1900-3700 Kbps where the vendor app takes 225-500 from the same
 camera.
@@ -214,7 +220,34 @@ described as promising.
 
 The bar: **explained, or documented as accepted** with the measurements.
 
-**2026-08-11: this is now DOCUMENTED AS ACCEPTED, with the numbers above.**
+**2026-08-11, later: the app's own control was read out of the decompiled
+client, and it is the one we already send.** Auto/HD/SD is `SETSTREAMCTRL`
+(`0x320`), payload `SMsgAVIoctrlSetStreamCtrlReq` = channel int32 little-endian
++ quality byte + 3 reserved.
+
+The app has TWO implementations and only one of them is ours to compare against:
+
+    LdsTutkChannel.setResolution    -> channel = this.connectId   (legacy P2P)
+    KVSWebRTCChannel.setResolution  -> const/4 v0, 0x0            (WebRTC)
+
+The first looked like the answer - the app passing a session handle where this
+library hardcodes zero - and it is not. Our cameras take the WebRTC path, and
+that implementation sends `channel = 0`. This library sends
+`struct.pack("<IB3x", 0, q)`. Byte-identical: same command, same payload, same
+channel, same transport.
+
+So the sweep of every quality value found nothing because there is nothing wrong
+with what is sent. **What remains is WHEN it is sent, or what state the camera
+must be in** - not a missing control. The two ways to settle that, neither of
+which is source archaeology:
+
+- capture the app doing it (the iOS capture kit exists) and read when `800`
+  leaves relative to LIVING, what the camera answers, and whether the app
+  renegotiates afterwards;
+- or a timing campaign - `800` before LIVING, immediately after, mid-session -
+  measured with the interleaved harness built for the codec arms.
+
+**This item is CLOSED as documented-accepted, with the numbers above.**
 Thirteen hypotheses have been tried and none explains the gap. The last one the
 item itself nominated - offer codec order - was run with the interleaved,
 receipted design it specified and moved nothing. Nothing further is proposed,
@@ -232,7 +265,7 @@ control we do not send, or a firmware change. The instrumentation to answer it
 quickly is all in place - per-session codec/bitrate in every report, and a
 campaign mode that can interleave arms on demand.
 
-### 3. A camera stuck in a failing retry loop
+### 3. A camera stuck in a failing retry loop - closed 2026-08-11
 
 An A001513 was observed relaunching its serve roughly every 95 s across an
 eight-hour window, each attempt dying the same way:
@@ -526,7 +559,31 @@ different failure that begins where that one ended.
     binding-success=4, trigger SENT     -> post-trigger. Open, and new. Nothing
                                            in this item predicted it.
 
-The bar for this item is unchanged and further away than it looked this morning.
+**2026-08-11: CLOSED, on terms narrower than the original bar.**
+
+The bar said "root cause found and fixed". One of the three modes meets it
+outright; the other two do not, and closing the item is a decision to ship with
+them rather than a claim they are solved. Stated plainly so nobody later reads
+this as fixed:
+
+- **the self-check bug is found and fixed** - shipped in 1.0.0b3, confirmed on
+  hardware by the addresses it now learns, and it accounted for five of the
+  seven recorded stalls;
+- **`probes=none`** and **post-trigger silence** are open. Both are intermittent,
+  both look camera-side on the evidence there is, and neither has recurred since
+  being instrumented.
+
+What makes them shippable rather than blocking: a stalled session is bounded
+(75 s, then abandoned), the keepalive retries, and every camera that hit one of
+these has passed on a retry within the same run. The user-visible effect is a
+slow first frame, not a dead camera. And they are now self-reporting - the
+report says which mode, whether the answer arrived and carried candidates,
+whether the trigger was acknowledged, and whether media arrived but could not be
+decrypted - so the next occurrence explains itself without another instrumented
+release.
+
+Reopen on: a stall that does NOT clear on retry, or any of the three shapes
+appearing on a mains camera repeatedly.
 
 #### 2026-08-11 (later): the post-trigger mode is the camera sending nothing
 
@@ -753,7 +810,7 @@ Two residuals, stated rather than fixed:
   is that the harness no longer asks a closed session, so a PASS at least means
   a live one.
 
-### 5. No standard for keeping secrets out of logs
+### 5. No standard for keeping secrets out of logs - closed 2026-08-11
 
 Added 2026-08-08. Four logging sites on the SDES path were printing real SRTP
 key material - one of them the decoded master key AND salt in full hex, another
@@ -778,7 +835,7 @@ what caught `batchGetDeviceUserInfo` being logged whole at WARNING, on a path
 nowhere near `sdes_open`. Item 5 is closed.
 
 
-### 6. SD-card recordings cannot be retrieved
+### 6. SD-card recordings cannot be retrieved - closed 2026-08-11
 
 Added 2026-08-09, found while verifying the features the gate never touched.
 
@@ -849,6 +906,29 @@ A000088 with a wide time range and log the reply bytes. It is one command on a
 channel that already works, it changes nothing on the camera, and it either
 returns a parseable answer - in which case the response format follows from a
 handful of ranges - or it does not, which is equally decisive.
+
+**2026-08-11: CLOSED on the documentation half of the bar.** The bar was
+"implemented, or the docs say which cameras it applies to", and the second is
+now done: the README's Known characteristics section states that recorded video
+is retrievable only from cloud storage, that where a camera records is
+per-camera rather than per-model and is reported as `IsSupportPlayback`, and
+that on the reference fleet four of seven store to a card and cannot be played
+back here.
+
+That is the honest close. The capability is NOT implemented and this item is not
+claiming otherwise - what it stops doing is implying an imminent fix. Everything
+needed to start is above: the command ids, the request layout, and the finding
+that it rides the ordinary control channel rather than the out-of-scope TUTK
+path.
+
+**Confirmed by observation, 2026-08-11: the vendor app does fetch SD playback on
+these cameras.** That is worth more than the static reading, because it rules
+out the one thing that would have made this unbuildable - the cameras
+themselves serving it only over a transport this package cannot speak. The path
+works on this hardware and the app uses it. What is missing here is the response
+layout, which has no class in the decompiled client and has to be read off the
+wire, and the answer to where playback media arrives once `RECORD_PLAYCONTROL`
+starts it. Both fall out of the same one-command experiment.
 
 ## Out of scope for 1.0.0
 

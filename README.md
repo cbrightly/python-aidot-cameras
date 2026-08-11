@@ -35,6 +35,30 @@ Other battery models (A001108, A001360) are recognized in code with the same
 battery handling. See [`docs/CAMERAS.md`](docs/CAMERAS.md#supported-cameras) for
 the authoritative table and per-model notes.
 
+## Known characteristics
+
+Two behaviours that are measured, understood as far as the evidence allows, and
+not going to change in this release. Neither is a fault to report.
+
+**Recorded video is retrievable only from cloud storage.** Whether a camera
+records to the cloud or to its own SD card is per-camera, not per-model, and the
+device reports it as `IsSupportPlayback`. This library retrieves cloud
+recordings (`async_get_cloud_recordings`, `async_open_cloud_playback`) and has
+no SD-card equivalent, so a camera storing to a card records normally and
+nothing here can play it back. On the reference fleet that is four of seven
+cameras. The vendor's own commands for it are identified but their responses
+have never been decoded; see `docs/ROAD-TO-1.0.md` item 6.
+
+**The A001064 (PTZ) streams at roughly 2.2 Mbps** where the vendor app takes
+225-500 Kbps from the same camera. It streams correctly at that rate; the cost
+is bandwidth, and on a metered or congested link, contention. Thirteen
+hypotheses have been tested against it, including sweeping every stream-quality
+value the app can send and pinning the offer's codec order in an interleaved,
+receipted campaign - the last of which moved the rate by 1.7%, less than the
+camera's own session-to-session spread. The quality command this library sends
+is byte-for-byte what the app sends on the same transport, so what remains is a
+question of timing or camera state rather than of a missing control.
+
 ## Local (LAN) control and account ownership
 
 Local control over the devices' TCP:10000 channel - both the light/plug protocol
