@@ -2485,6 +2485,14 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
 
         start_ts / end_ts: Unix timestamps in milliseconds.
         page: 1-indexed page number (the server uses 1-based pagination).
+        The server caps a page at 10 items whatever ``page_size`` says -
+        measured 2026-08-11 across seven cameras, and the vendor's own client
+        hard-overwrites the field to 10 (5 for a multi-device request), so it
+        is the server's rule rather than a quirk of one account. A caller that
+        asks for 30 gets 10 and no indication that it was truncated, which is
+        how the Home Assistant browser came to show 10 events out of 1517.
+        Page; do not raise ``page_size``. ``data.total`` in the reply is the
+        true count for the window, and is correct even on a one-item page.
         Returns list of dicts from the server (each has eventUuid, eventDesc, picUrl, etc.).
 
         Uses /api/ipc/playback/eventRecordingList (confirmed from EventListRepos.java).
@@ -2537,6 +2545,106 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
                 "async_get_cloud_recordings failed for %s: %s", self.device_id, exc
             )
             return []
+
+    async def async_count_cloud_recordings(
+        self, start_ts: int, end_ts: int
+    ) -> Optional[int]:
+        """How many cloud events a window holds, in one request.
+
+        The listing endpoint reports the window's true ``total`` alongside
+        whatever page it serves, and that total is correct even on a one-item
+        page - measured 2026-08-11 across seven cameras. So a count costs one
+        request, where counting by paging costs one per ten events: a day
+        holding 1517 events is 152 requests, and a seven-day view that counts
+        by paging fires hundreds every time it is opened.
+
+        Returns None when the call fails. A caller must not read that as zero -
+        "the server did not answer" and "the window is empty" lead to opposite
+        conclusions in a UI, and collapsing them is a defect this project has
+        had to fix before.
+        """
+        import aiohttp
+
+        _body = {
+            "deviceIds": [self.device_id],
+            "pageNum":   1,
+            "pageSize":  1,
+            "recordSta": start_ts,
+            "recordEnd": end_ts,
+        }
+
+        async def _fetch():
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self._aidot_v32_base}/playback/eventRecordingList",
+                    json=_body,
+                    headers=self._aidot_headers(),
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    return await resp.json(content_type=None)
+
+        try:
+            body = await _fetch()
+            if self._is_auth_error(body) and await self._async_refresh_auth_token():
+                body = await _fetch()
+            if not isinstance(body, dict) or body.get("code") != 200:
+                _LOGGER.debug(
+                    "eventRecordingList count for %s: %s", self.device_id, body)
+                return None
+            total = (body.get("data") or {}).get("total")
+            return int(total) if isinstance(total, int) else None
+        except Exception as exc:
+            _LOGGER.debug(
+                "eventRecordingList count failed for %s: %s", self.device_id, exc)
+            return None
+
+    async def async_get_cloud_plan(self) -> Optional[dict]:
+        """The camera's cloud recording subscription, or None.
+
+        Answers the question an empty event list cannot: whether there are no
+        events, or no longer a plan under which events would be kept. Measured
+        2026-08-11 on seven cameras - an active plan reads
+
+            {"packageName": "AI Protection ", "packageType": 1,
+             "subscribeStatus": 1, "startTime": <ms>, "endTime": <ms>,
+             "expiredDays": 15, "videoLength": 60}
+
+        Times are epoch milliseconds. ``videoLength`` is the clip length in
+        seconds.
+
+        Returns None on any failure rather than an empty dict: the caller's
+        question is "is there a plan", and {} answers it wrong.
+
+        Source: the vendor app's own JS bundle -
+        GET /api/ipc/recordPlanController/getPackageInfoByDevId?deviceId=
+        """
+        import aiohttp
+
+        async def _fetch():
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self._aidot_v32_base}/recordPlanController"
+                    "/getPackageInfoByDevId",
+                    params={"deviceId": self.device_id},
+                    headers=self._aidot_headers(),
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    return await resp.json(content_type=None)
+
+        try:
+            body = await _fetch()
+            if self._is_auth_error(body) and await self._async_refresh_auth_token():
+                body = await _fetch()
+            if not isinstance(body, dict) or body.get("code") != 200:
+                _LOGGER.debug(
+                    "getPackageInfoByDevId for %s: %s", self.device_id, body)
+                return None
+            data = body.get("data")
+            return data if isinstance(data, dict) and data else None
+        except Exception as exc:
+            _LOGGER.debug(
+                "getPackageInfoByDevId failed for %s: %s", self.device_id, exc)
+            return None
 
     async def async_get_event_video_media(
         self, event_uuid: str
