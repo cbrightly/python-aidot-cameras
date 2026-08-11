@@ -429,9 +429,58 @@ trusting the runner's log capture.
 
 This is the shape the item has always said it could not explain: six in a row
 against a per-session failure rate that has never been anywhere near certain.
-The open question is unchanged - persistent camera-side state, or a loop that
-sustains its own failure - and the next run is the first that can answer it from
-the artifact alone.
+
+**The artifact answered it on the first run, and the answer is the empty shape.**
+All four reports for that camera, both attempts, both sessions each:
+
+    nominated=none; use-candidate=not-sent; binding-success=0;
+    trigger=not-sent; probes=none
+
+Nothing nominated because the answer carried nothing to nominate, and no probe
+from the camera at all. That is not ICE reachability - there is no candidate
+pair to fail. It is signaling or the answer, and the investigation belongs
+there, starting with what the camera's `webrtcResp` actually contained.
+
+The same run also shows the cancellation report doing its job:
+`(33s - caller cancelled the wait)` on each snapshot session, where before there
+was silence.
+
+#### 2026-08-11: the stated kill fired. The trigger is NOT sufficient for media
+
+The kill written above, before any of this evidence existed, was:
+
+> an open that logs `SDES: sent trigger` and delivers no media, or one that
+> delivers media without it.
+
+`L2_181` attempt 1 in run 31448429413:
+
+    nominated=192.168.0.129:46846, 192.168.0.129:36740; use-candidate=sent;
+    binding-success=4; trigger=sent; probes=192.168.0.129:46846 -> learned
+
+Four inbound Binding Successes, the trigger sent, an ordinary LAN candidate
+learned and nominated - and zero media for the full 75 s. The retry passed.
+
+**What this kills.** The per-session model in this item is "media only ever
+follows the AVIO LIVING trigger, and that trigger is armed only by an inbound
+STUN Binding Success". The 17-open sweep found no exception in either direction
+and the model was stated as necessary AND sufficient. It is still necessary -
+nothing has ever delivered media without the trigger - but it is no longer
+sufficient. Something after the trigger can also fail, and nothing above
+anticipates it.
+
+**What it does not kill.** The ICE guard fix stands: it addressed sessions where
+the check was never answered at all, and those had `binding-success=0`. This is a
+different failure that begins where that one ended.
+
+**Three failure modes are now distinguished, and only one has a fix:**
+
+    binding-success=0, probes vetoed    -> the self-check bug. Fixed 1.0.0b3.
+    binding-success=0, probes=none      -> signaling/answer. Open. A001064,
+                                           persistent, six attempts.
+    binding-success=4, trigger SENT     -> post-trigger. Open, and new. Nothing
+                                           in this item predicted it.
+
+The bar for this item is unchanged and further away than it looked this morning.
 
 #### 2026-08-10: the veto is fixed, and the fix is confirmed by what it learns
 
