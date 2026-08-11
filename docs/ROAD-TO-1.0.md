@@ -677,15 +677,33 @@ The bar was: **tested, or explicitly out of scope for 1.0** and said so here.
 Both holes are decided below, so this item is closed. It keeps its number
 because the working notes refer to it by number.
 
-#### The `liveType=0` / TUTK path: NO LONGER out of scope - Chris, 2026-08-11
+#### The `liveType=0` / TUTK path: OUT OF SCOPE - reaffirmed by Chris, 2026-08-11
 
-**This reverses the decision recorded below. Read the reversal first.**
+The decision moved twice in one day and both moves were evidence-driven, so the
+sequence is worth keeping rather than flattening:
 
-Chris ruled on 2026-08-11 that TUTK should not be out of scope. What follows is
-the original reasoning, kept because it is still the accurate description of
-what the work costs - not because the decision stands.
+1. Out of scope, on the original reasoning below.
+2. Brought INTO scope by Chris when SD retrieval looked like it required the
+   native P2P stack - a reasonable call on what was known at that moment.
+3. Returned to OUT OF SCOPE by Chris the same day, once the SDES cameras
+   answered `HASLISTEVENT` and `LISTEVENT` over the ordinary WebRTC AVIO
+   channel. The thing it was going to be spent on turned out not to need it.
 
-One distinction has to survive this reversal, because these notes have already
+**Reopen only on evidence that explicitly requires it** - a feature demonstrably
+unreachable on the WebRTC path, not an inference that it might be. The inference
+drawn on 2026-08-11 from the A000088s' silence was wrong, and it was wrong in
+the direction of buying an expensive transport nobody needed.
+
+The cost, so a future reopen is priced rather than guessed: `libIOTCAPIs.so` and
+`libAVAPIs.so` are proprietary ARM binaries of about 220 KB each, shipped in the
+APK for arm64-v8a and armeabi-v7a. Using them means bundling vendor binaries in
+a public package - licensing and portability both, since a Home Assistant
+install may be x86 - and not using them means reimplementing the IOTC protocol
+from those binaries. Also worth knowing before anyone starts: `p2pId` is `None`
+on all seven reference cameras, so the path may not even be provisioned for
+this hardware.
+
+One distinction has to survive all of this, because these notes have already
 conflated the two once. "TUTK" names two different things here:
 
 - **`LdsTutkChannel`, the app's camera-channel FACADE.** Never out of scope and
@@ -699,9 +717,9 @@ conflated the two once. "TUTK" names two different things here:
   two A000088s answered nothing to a byte-exact `LISTEVENT`, and the app's SD
   pages open a pic channel that has no WebRTC equivalent.
 
-So the scope change is real work, not a flag: implementing or bundling a P2P
-transport. It is recorded here as a decision taken, with its cost stated, rather
-than as a discovery.
+So a scope change here is real work, not a flag: implementing or bundling a P2P
+transport. That is why it is priced above rather than left as a one-line
+decision.
 
 #### (Superseded) The `liveType=0` / TUTK path: out of scope for 1.0.0
 
