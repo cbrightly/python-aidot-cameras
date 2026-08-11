@@ -74,6 +74,10 @@ from typing import Optional
 #: a firmware that never replies, which is why the request has to be the app's.
 SD_EVENT_ALL = 0x12
 
+#: The 12-byte reply header measured from live replies - see
+#: aidot_cameras/camera/sd_events.py, which reads it the same way.
+_MAP_HEADER_LEN = 12
+
 #: From AVIOCTRLDEFs in the vendor's own client.
 HASLISTEVENT_REQ = 0x4B5
 HASLISTEVENT_RESP = 0x4B6
@@ -154,11 +158,29 @@ def _describe(reply) -> dict:
     # header offsets - the part that could not be confirmed from the decompiled
     # handler - are right for this firmware. The raw hex is kept regardless, so
     # a wrong guess here cannot destroy the evidence.
-    try:
-        from aidot_cameras.camera.sd_events import decode_list_event_response
-        page = decode_list_event_response(payload)
-    except Exception:
-        page = None
+    #
+    # ONLY for LISTEVENT. A HASLISTEVENT body is a per-hour occupancy map - one
+    # byte per hour - not records, and running the record decode over it invents
+    # data: a formatted-but-empty card's 24-byte map decoded as "records: 2"
+    # with a first timestamp of 0000-00-00T00:00:00Z, which is two records that
+    # do not exist and a date that never happened. Measured 2026-08-11, the
+    # first time a camera returned a real map. Exactly the failure a parser is
+    # supposed to have in a probe rather than in a user's browser.
+    page = None
+    if reply.command == LISTEVENT_RESP:
+        try:
+            from aidot_cameras.camera.sd_events import decode_list_event_response
+            page = decode_list_event_response(payload)
+        except Exception:
+            page = None
+    elif reply.command == HASLISTEVENT_RESP and len(payload) > _MAP_HEADER_LEN:
+        hours = payload[_MAP_HEADER_LEN:]
+        out["occupancy"] = {
+            "hours_reported": len(hours),
+            "hours_with_footage": sum(1 for h in hours if h),
+            "first_hour_with_footage": next(
+                (i for i, h in enumerate(hours) if h), None),
+        }
     if page is not None:
         out["decoded"] = {
             "records": len(page.events),
