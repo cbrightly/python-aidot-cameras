@@ -2391,6 +2391,80 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         )
         return None
 
+    async def async_get_recent_recordings(self, total: int = 10) -> "List[dict]":
+        """The camera's most recent cloud event recordings.
+
+        A second listing API, and the one the vendor app actually uses on its
+        event page. Captured 2026-04-05:
+
+            POST /api/ipc/playback/getRecentEventRecordingList
+                 {"deviceIds": [...], "total": 3}
+
+        It matters because `async_get_cloud_recordings` - which asks
+        `eventRecordingList` for a time RANGE - has returned zero events for
+        every camera on the reference fleet in every validation run, while that
+        capture shows this endpoint returning real events for one of the same
+        cameras. Whatever the range query wants, this one does not need it: it
+        takes a count and answers with the newest.
+
+        Two shape differences from every other call in this class, and both
+        would break the usual handling:
+
+        * the response is a BARE JSON ARRAY, not the ``{"code": ..., "data":
+          ...}`` envelope, so there is no code to check and no ``data`` to
+          unwrap;
+        * there is no pagination - ``total`` is "how many do you want", not a
+          page size.
+
+        Each item carries ``eventUuid``, ``eventTime`` (epoch ms), ``deviceId``,
+        ``deviceName``, ``eventCodeList``, ``eventDescList`` and ``picUrl``.
+        Filtered to THIS camera, because the app asks for a whole house at once
+        and the reply is not per-device.
+        """
+        import aiohttp
+
+        body = {"deviceIds": [self.device_id], "total": max(1, int(total))}
+
+        async def _fetch():
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self._aidot_v32_base}/playback/getRecentEventRecordingList",
+                    json=body,
+                    headers=self._aidot_headers(),
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    return await resp.json(content_type=None)
+
+        try:
+            data = await _fetch()
+            # The auth check reads a dict; a list is already a success here.
+            if isinstance(data, dict):
+                if self._is_auth_error(data) and await self._async_refresh_auth_token():
+                    data = await _fetch()
+            if isinstance(data, dict):
+                # An envelope means an error, since success is a bare array.
+                _LOGGER.warning(
+                    "getRecentEventRecordingList code=%s msg=%s for %s",
+                    data.get("code"), data.get("desc") or data.get("msg"),
+                    self.device_id,
+                )
+                return []
+            if not isinstance(data, list):
+                return []
+            mine = [e for e in data
+                    if isinstance(e, dict)
+                    and e.get("deviceId") in (None, self.device_id)]
+            _LOGGER.info(
+                "getRecentEventRecordingList for %s: %d of %d event(s)",
+                self.device_id, len(mine), len(data),
+            )
+            return mine
+        except Exception as exc:
+            _LOGGER.warning(
+                "getRecentEventRecordingList failed for %s: %s",
+                self.device_id, exc)
+            return []
+
     async def async_get_cloud_recordings(
         self,
         start_ts: int,

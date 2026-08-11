@@ -132,8 +132,21 @@ def _describe(reply) -> dict:
 
 
 async def probe_sd_events(session, *, days: int = 7,
-                          timeout: float = 8.0) -> Optional[dict]:
-    """Ask both event commands and return what came back. Never raises."""
+                          timeout: float = 2.5) -> Optional[dict]:
+    """Ask the event commands and return what came back. Never raises.
+
+    The timeout is 2.5 s per request, not 8, and every request checks the
+    session first. Seven requests at 8 s could spend 56 s against a session
+    whose ffmpeg window is 28 s, and that is not hypothetical: it is what made
+    run 31498856848 report silence from a camera that had answered the same
+    requests minutes earlier. A probe whose result depends on how many
+    questions it asks is measuring itself.
+
+    A request skipped because the session had ended is recorded as
+    ``session_closed`` rather than as ``answered: false`` - "we never asked" and
+    "it did not reply" are the distinction this whole harness keeps having to
+    relearn.
+    """
     ask = getattr(session, "async_avio_request", None)
     if ask is None:
         return None
@@ -165,6 +178,10 @@ async def probe_sd_events(session, *, days: int = 7,
         ("haslistevent_1day", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
          haslistevent_payload(now - 86400, now)),
     ):
+        alive = getattr(session, "is_alive", None)
+        if alive is not None and not alive:
+            out[label] = {"session_closed": True}
+            continue
         try:
             reply = await ask(cmd, payload, response_cmd=resp, timeout=timeout)
             out[label] = _describe(reply)

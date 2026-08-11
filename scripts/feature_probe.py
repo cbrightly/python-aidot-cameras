@@ -299,6 +299,30 @@ async def _probe_thumbnail(dc, timeout: float) -> tuple[bool, bool, Optional[str
         return True, False, f"{type(exc).__name__}: {exc}"[:120]
 
 
+async def _probe_recent_recordings(dc, timeout: float
+                                   ) -> tuple[bool, bool, Optional[str]]:
+    """The listing the vendor app actually uses.
+
+    Separate from the range query below, and reported separately, because the
+    two have disagreed: every fleet run has had the range query return zero
+    events for every camera, while a capture of the app shows this endpoint
+    returning real events for one of the same cameras. Folding them together
+    would hide exactly the difference that matters.
+    """
+    fn = getattr(dc, "async_get_recent_recordings", None)
+    if fn is None:
+        return False, False, "no recent-recordings method"
+    try:
+        res = await asyncio.wait_for(fn(total=5), timeout)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        return True, False, f"{type(exc).__name__}: {exc}"[:120]
+    # Zero is not a failure - a camera can simply have had no events - so this
+    # passes either way and reports the count for the record.
+    return True, True, (None if res else "no recent events")
+
+
 async def _probe_recordings(dc, timeout: float, days: int = 7
                             ) -> tuple[bool, bool, Optional[str]]:
     fn = getattr(dc, "async_get_cloud_recordings", None)
@@ -400,5 +424,15 @@ async def probe_features(device_client, device: dict, session=None,
     out["recordings"] = _verdict(sup, a, ok, err)
     if err:
         out["recordings_error"] = err
+
+    # Asked of EVERY camera, not gated on IsSupportPlayback: the whole reason
+    # this exists is that the app returns events for a camera whose recordings
+    # this project had written off, so gating it on the same flag that wrote
+    # them off would guarantee never finding out.
+    sup = getattr(device_client, "async_get_recent_recordings", None) is not None
+    a, ok, err = await _probe_recent_recordings(device_client, timeout) if sup else (False, False, None)
+    out["recent_recordings"] = _verdict(sup, a, ok, err)
+    if err:
+        out["recent_recordings_error"] = err
 
     return out
