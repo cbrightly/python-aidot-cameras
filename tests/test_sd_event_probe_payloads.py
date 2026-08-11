@@ -59,6 +59,19 @@ def test_the_haslistevent_request_is_twenty_two_bytes():
     assert len(haslistevent_payload(_WHEN - 3600, _WHEN)) == 22
 
 
+def test_the_listevent_request_is_twenty_four_bytes():
+    # The overload the WebRTC path uses allocates 0x18, not 0x16. Sending 22
+    # here is what the first probe did, and three cameras answered nothing.
+    assert len(listevent_payload(_WHEN - 3600, _WHEN)) == 24
+
+
+def test_the_default_event_selector_is_the_apps():
+    # 0x12, read off KVSWebRTCChannel.getSDRecordList. A selector the camera
+    # does not recognise answers exactly like a firmware that never replies.
+    p = listevent_payload(_WHEN - 3600, _WHEN)
+    assert p[20] == 0x12
+
+
 def test_the_channel_leads_and_the_first_time_starts_at_offset_four():
     p = haslistevent_payload(_WHEN - 3600, _WHEN, channel=0)
     assert struct.unpack_from("<I", p, 0)[0] == 0
@@ -68,7 +81,7 @@ def test_the_channel_leads_and_the_first_time_starts_at_offset_four():
 
 def test_the_listevent_request_carries_event_and_status_after_the_times():
     p = listevent_payload(_WHEN - 3600, _WHEN, event=3, status=1)
-    assert len(p) == 22
+    assert len(p) == 24
     assert p[20] == 3 and p[21] == 1
 
 

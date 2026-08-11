@@ -26,6 +26,13 @@ import struct
 import time
 from typing import Optional
 
+#: The event selector the app actually asks for. Read off KVSWebRTCChannel's
+#: getSDRecordList: `const/16 v1, 0x12` passed as the `event` argument, with
+#: status 0. The first version of this probe sent event=0 and got silence from
+#: three cameras - a request the camera does not recognise answers exactly like
+#: a firmware that never replies, which is why the request has to be the app's.
+SD_EVENT_ALL = 0x12
+
 #: From AVIOCTRLDEFs in the vendor's own client.
 HASLISTEVENT_REQ = 0x4B5
 HASLISTEVENT_RESP = 0x4B6
@@ -52,8 +59,9 @@ def stimeday(when: float) -> bytes:
     )
 
 
-def haslistevent_payload(start: float, end: float, channel: int = 0) -> bytes:
-    """22 bytes: channel, start, end, and two trailing bytes.
+def haslistevent_payload(start: float, end: float, channel: int = 0,
+                         event: int = SD_EVENT_ALL) -> bytes:
+    """22 bytes: channel, start, end, and a two-byte selector tail.
 
     The length is not a guess - `parseConent` allocates `const/16 v1, 0x16`,
     which is 22, and copies the channel at offset 0 and the first STimeDay at
@@ -61,15 +69,24 @@ def haslistevent_payload(start: float, end: float, channel: int = 0) -> bytes:
     """
     return (struct.pack("<I", channel)
             + stimeday(start) + stimeday(end)
-            + b"\x00\x00")
+            + struct.pack("<H", event & 0xFFFF))
 
 
 def listevent_payload(start: float, end: float, channel: int = 0,
-                      event: int = 0, status: int = 0) -> bytes:
-    """Same head, plus the event and status selectors the request struct names."""
+                      event: int = SD_EVENT_ALL, status: int = 0) -> bytes:
+    """24 bytes, not 22 - and the difference is the whole point.
+
+    `SMsgAVIoctrlListEventReq` has three `parseConent` overloads. The one whose
+    field list this was first written from is not the one the WebRTC path uses:
+    `KVSWebRTCChannel.getSDRecordList` calls the epoch-long overload, which
+    allocates `const/16 v4, 0x18` - 24 bytes - where the other allocates 22.
+    Four bytes of channel, two eight-byte STimeDays, the event and status
+    selectors, then two bytes of tail.
+    """
     return (struct.pack("<I", channel)
             + stimeday(start) + stimeday(end)
-            + bytes((event & 0xFF, status & 0xFF)))
+            + bytes((event & 0xFF, status & 0xFF))
+            + b"\x00\x00")
 
 
 def _describe(reply) -> dict:
@@ -107,6 +124,11 @@ async def probe_sd_events(session, *, days: int = 7,
          haslistevent_payload(now - days * 86400, now)),
         ("listevent", LISTEVENT_REQ, LISTEVENT_RESP,
          listevent_payload(now - days * 86400, now)),
+        # Same command with the selector the first attempt used, so a reply to
+        # one and not the other localises the difference to the selector rather
+        # than to the layout.
+        ("listevent_event0", LISTEVENT_REQ, LISTEVENT_RESP,
+         listevent_payload(now - days * 86400, now, event=0)),
     ):
         try:
             reply = await ask(cmd, payload, response_cmd=resp, timeout=timeout)
