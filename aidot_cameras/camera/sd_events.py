@@ -88,6 +88,26 @@ class SdEventPage(NamedTuple):
     trailing: int
 
 
+#: Reply command ids, so a caller that knows which question it asked can say so.
+LISTEVENT_RESP_CMD = 0x319
+HASLISTEVENT_RESP_CMD = 0x4B6
+
+
+def _consistent(count: int, body_len: int, command: Optional[int]) -> bool:
+    """Does the declared entry count match the body, for THIS reply's entry size?
+
+    Records are 12 bytes each; occupancy-map hours are one byte each. When the
+    command is known the right rule is used. When it is not, either reading is
+    accepted - reporting False for a well-formed page just because the decoder
+    was not told what it was reading would be the check lying about the data.
+    """
+    if command == HASLISTEVENT_RESP_CMD:
+        return count == body_len
+    if command == LISTEVENT_RESP_CMD:
+        return count * EVENT_RECORD_LEN == body_len
+    return count == body_len or count * EVENT_RECORD_LEN == body_len
+
+
 def _stimeday(buf: bytes, off: int) -> tuple:
     year, month, day, _wday, hour, minute, second = struct.unpack_from(
         "<HBBBBBB", buf, off)
@@ -102,7 +122,7 @@ def decode_event_record(buf: bytes, off: int = 0) -> SdEvent:
                    channel, event, status)
 
 
-def decode_list_event_response(payload: bytes) -> Optional[SdEventPage]:
+def decode_list_event_response(payload: bytes, *, command: Optional[int] = None) -> Optional[SdEventPage]:
     """Decode a 0x319 payload, or None if it cannot be one.
 
     None rather than an exception or a half-filled result: this runs against a
@@ -129,6 +149,18 @@ def decode_list_event_response(payload: bytes) -> Optional[SdEventPage]:
         page_index=index,
         end_flag=end_flag,
         record_count=count,
-        consistent=(count == len(body)),
+        # `count` counts ENTRIES in the body, and an entry is not always a
+        # byte. Measured 2026-08-11 against the first live replies carrying real
+        # data: a LISTEVENT_RESP with four records is 12 header + 48 body and
+        # declares count=4, while a HASLISTEVENT_RESP occupancy map declares
+        # count=168 for 168 bytes because there an entry IS one hour-byte.
+        #
+        # So the entry size depends on WHICH reply this is, and the payload
+        # alone cannot always say - a 24-byte body with count=24 is a valid
+        # 24-hour map, and a 24-byte body with count=2 is a valid two-record
+        # page. Pass `command` when it is known. Without it, accept either
+        # reading rather than calling a good page inconsistent, and say in
+        # `consistent` only what can honestly be said.
+        consistent=_consistent(count, len(body), command),
         trailing=len(body) - usable * EVENT_RECORD_LEN,
     )

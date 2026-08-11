@@ -67,11 +67,20 @@ import struct
 import time
 from typing import Optional
 
-#: The event selector the app actually asks for. Read off KVSWebRTCChannel's
-#: getSDRecordList: `const/16 v1, 0x12` passed as the `event` argument, with
-#: status 0. The first version of this probe sent event=0 and got silence from
-#: three cameras - a request the camera does not recognise answers exactly like
-#: a firmware that never replies, which is why the request has to be the app's.
+#: The event selector the app asks for, read off KVSWebRTCChannel's
+#: getSDRecordList: `const/16 v1, 0x12`, with status 0.
+#:
+#: **On an A000088 with a card, 0x12 returns NOTHING and event=0 returns the
+#: records.** Measured 2026-08-11: the same session, same range, same
+#: everything else - `listevent` (0x12) answered with an empty page while
+#: `listevent_event0` answered with four real records, the first stamped
+#: 2026-08-11T20:41:42Z.
+#:
+#: The note that used to be here said the opposite - that event=0 drew silence
+#: from three cameras and the request "has to be the app's". Those three
+#: cameras had no SD card, so every variant answered empty and the comparison
+#: was between two empty answers. Do not read a selector result from a camera
+#: with nothing to list.
 SD_EVENT_ALL = 0x12
 
 #: The 12-byte reply header measured from live replies - see
@@ -170,7 +179,8 @@ def _describe(reply) -> dict:
     if reply.command == LISTEVENT_RESP:
         try:
             from aidot_cameras.camera.sd_events import decode_list_event_response
-            page = decode_list_event_response(payload)
+            page = decode_list_event_response(
+                payload, command=reply.command)
         except Exception:
             page = None
     elif reply.command == HASLISTEVENT_RESP and len(payload) > _MAP_HEADER_LEN:
