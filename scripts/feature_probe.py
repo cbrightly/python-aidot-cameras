@@ -57,23 +57,32 @@ def supports_playback(device: dict) -> bool:
     """Whether this camera's recordings live in the CLOUD, not on an SD card.
 
     Measured 2026-08-09: `IsSupportPlayback` is 1 on the A001064 and both
-    A001513s - which report no SD card - and 0 on every A000088, which reports
-    `SDcardStatus: 1`. So it is not a model capability. It says where this
-    camera's recordings are, and only the cloud ones are reachable by
-    `async_get_cloud_recordings`.
+    A001513s and 0 on every A000088. So it is not a model capability.
 
-    **The second half of that reading was wrong, and is corrected here rather
-    than left for the next person to inherit.** It used to say an A000088's
-    recordings exist and nothing here can fetch them. Measured 2026-08-11 on
-    the owner account: the three live A000088s hold 75, 1417 and 1517 cloud
-    events over thirty days, both listing methods return them, and every one
-    resolves to a playable URL. So `IsSupportPlayback=0` does NOT mean this
-    camera's recordings are unreachable, and nothing should conclude that from
-    it. What the flag actually gates is not established; it is reported and no
-    longer used to skip a probe.
+    **Both halves of the reading that used to follow were wrong, and are
+    corrected here rather than left for the next person to inherit.**
 
-    The real gap it was reaching for is narrower and still open: the library
-    has no SD-CARD retrieval path. That is about the card, not the cloud.
+    It said an A000088's recordings exist and nothing here can fetch them.
+    Measured 2026-08-11 on the owner account: the three live A000088s hold 75,
+    1417 and 1517 cloud events over thirty days, both listing methods return
+    them, and every one resolves to a playable URL. `IsSupportPlayback=0` does
+    NOT mean this camera's recordings are unreachable. What the flag gates is
+    not established; it is reported and no longer used to skip a probe.
+
+    It also said the A000088s "report `SDcardStatus: 1`", taking that as a card
+    being present. `SDcardStatus` is 1 on every A000088 including ones with no
+    card at all: the Bedroom M3 Pro reports `SDcardExistFlag: false` and
+    `SDcardBaseInfo: [false,0,0,0,0]` - no card, zero capacity - and its owner
+    confirms the slot is empty. The two A001513s, which DO answer the
+    recording-list commands, report `SDcardStatus: 0`. So the flag does not mean
+    "card present", and if anything the polarity runs the other way. Read
+    `SDcardExistFlag` and `SDcardBaseInfo` instead.
+
+    That correction matters beyond this function: no camera on the reference
+    fleet currently HAS a card, so the A000088 silence on `HASLISTEVENT` and
+    `LISTEVENT` has never been a fair test of those commands. The real gap is
+    still real - the library has no SD-card retrieval path - but it is about the
+    card, not the cloud, and it is not yet known to be about the firmware.
     """
     return str(_props(device).get("IsSupportPlayback", "0")) == "1"
 
