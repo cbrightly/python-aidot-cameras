@@ -146,9 +146,24 @@ async def probe_sd_events(session, *, days: int = 7,
          listevent_payload(now - days * 86400, now)),
         # Same command with the selector the first attempt used, so a reply to
         # one and not the other localises the difference to the selector rather
-        # than to the layout.
+        # than to the layout. It earned its place: on an A001064 the 0x12
+        # variant was answered and this one was not.
         ("listevent_event0", LISTEVENT_REQ, LISTEVENT_RESP,
          listevent_payload(now - days * 86400, now, event=0)),
+        # The SD-BEARING models (A000088) answer none of the above, while the
+        # models with no card answer readily - the inversion item 6 is now stuck
+        # on. These vary one thing at a time against the request that IS known
+        # to work elsewhere, so a reply identifies which term mattered.
+        ("haslistevent_ch1", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
+         haslistevent_payload(now - days * 86400, now, channel=1)),
+        ("listevent_ch1", LISTEVENT_REQ, LISTEVENT_RESP,
+         listevent_payload(now - days * 86400, now, channel=1)),
+        ("listevent_status1", LISTEVENT_REQ, LISTEVENT_RESP,
+         listevent_payload(now - days * 86400, now, status=1)),
+        # One day rather than seven: HASLISTEVENT answers one byte per hour, so
+        # a 24-byte answer would also confirm the map reading on a second range.
+        ("haslistevent_1day", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
+         haslistevent_payload(now - 86400, now)),
     ):
         try:
             reply = await ask(cmd, payload, response_cmd=resp, timeout=timeout)
