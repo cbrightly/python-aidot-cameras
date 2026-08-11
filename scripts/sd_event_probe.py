@@ -22,74 +22,46 @@ response, and silence points at the channel rather than at the layout - which is
 why the request is sent twice with different time ranges before concluding
 anything.
 
-**Why the A000088s answer nothing - NOT settled. Three things ruled out.**
+**Why the A000088s answered nothing: THE SLOT WAS EMPTY. Settled 2026-08-11.**
 
-Measured, from run 31500427317 and its logs: the two SDES cameras (A001064,
-A001513) answered `HASLISTEVENT` on the live session; all three A000088s
-answered neither command, while the SAME sessions carried inbound AVIO fine -
-851, 852, 5157 and 5377 all arrived and routed. So the DTLS inbound path works
-on that model and these two commands specifically produce no frame at all, not
-even one under an unexpected id. That rules out our routing and rules out a
-mangled response layout.
+A card was inserted into a Bedroom M3 Pro and every command that had been silent
+for months answered on the first try, in the same session, both modes:
 
-Read from the vendor client (`IpcServiceImpl.handleData`), the reason: the app
-does NOT ask for the recording list on the live channel. It keeps a SECOND
-channel for SD work -
+    haslistevent          answered  cmd 1206 (0x4B6)  hex 000000000100000000010000
+    listevent             answered  cmd  793 (0x319)  same
+    listevent_event0      answered        listevent_ch1     answered
+    haslistevent_ch1      answered        listevent_status1 answered
+    haslistevent_1day     answered
+    session mode -> SD    answered  cmd 5377
+    haslistevent (SD)     answered        listevent (SD)    answered
+    session mode -> LIVING answered
 
-    sdWebRTCChannel = LdsChannelManager.getKVSWebRTCChannel(deviceId + "-SD")
+12 bytes: channel 0, total 1, index 0, end_flag 1, count 0 - a well-formed EMPTY
+list, which is exactly right for a card with no recordings on it yet.
 
-- calls `getSDRecordList` on that when its data channel is connected, and falls
-back to `LdsTutkChannel.getSDRecordList` (the out-of-scope TUTK path) when it is
-not. The live channel is keyed on the bare device id.
+The firmware was never refusing these commands. It answers them the moment there
+is a card to answer about, and `SDcardStatus` flipped 1 -> 0 as the card
+registered, so the property that had been read as "has a card" actually means
+the opposite.
 
-That reading was wrong, and the correction cost two cloud calls rather than a
-capture. `-SD` is `LdsChannelManager`'s LOCAL cache key for a channel object,
-not a cloud channel name: `/api/ipc/liveStream/liveStreamParam` returns real AWS
-KVS credentials and a channel ARN for a bare device id, and returns HTTP 400
-`code 680025 "Param error"` for `<deviceId>-SD`. The smali agrees once read that
-way - the SD branch reads the AWS keys, token, ARN and region off the EXISTING
-channel and builds the second one from them. Same AWS channel, second peer
-connection.
+Everything built on that silence was explaining a phenomenon that did not exist:
+the `-SD` channel-name reading, the second-session theory, the session-mode
+experiment, and the inference that SD retrieval might need the out-of-scope TUTK
+stack. None of it was needed. The one lasting lesson is cheaper than any of
+them: **check that the hardware has the thing you are asking about before
+theorising about the protocol.** Three A000088s reported `SDcardExistFlag:
+false` and `SDcardBaseInfo: [false,0,0,0,0]` the entire time, and nothing read
+those fields.
 
-So there is no channel NAME we are failing to send.
+Two things from the detour are worth keeping. `set_session_mode` works and is
+real - the camera accepts IDLE/LIVING/SD on 5376 and echoes the mode back. And
+the response layout below is now confirmed against an A000088 as well as the
+SDES models.
 
-**SD MODE EXISTS, WORKS, AND IS NOT THE ANSWER - measured 2026-08-11.** The
-vendor enum `AVIO_CTRL_SESSION_MODE` is IDLE(0), LIVING(1), SD(2), and
-`changeStream()` sends the ordinal on 0x1500 - which is 5376, the command this
-package already sends as LIVING on every open. So switching a live session to
-SD mode costs one byte on a frame we already build.
-
-An A000088 was asked in both modes, in one session, back to back:
-
-    haslistevent (LIVING mode)   answered: false   sent 22B
-    listevent    (LIVING mode)   answered: false   sent 24B
-    session mode -> SD           answered: TRUE    5377, hex ...02000000
-    haslistevent (SD mode)       answered: false   sent 22B
-    listevent    (SD mode)       answered: false   sent 24B
-    session mode -> LIVING       answered: TRUE    5377, hex ...01000000
-
-The camera accepts the switch and echoes the mode back, so it implements SD
-mode and the AVIO round trip works in both - which is the third independent
-confirmation that our inbound path is fine. The recording-list commands stay
-silent either way. **The mode was not the missing term.**
-
-Also checked and NOT a difference: `getSDRecordList2(JJI...)` looks like a
-different request but `SMsgAVIoctrlListEventReq.parseConent(IJJBB)` builds the
-same 24-byte array, converting epoch millis into the same STimeDay fields. Same
-bytes on the wire.
-
-**Where this actually stands.** Ruled out, each by measurement rather than
-argument: our inbound AVIO path (three ways), the response layout, a channel
-name to send, the session mode, and the `getSDRecordList2` payload variant. The
-A000088 accepts every AVIO command it is asked and answers the ones it
-implements; it does not answer these two in any mode or shape tried.
-
-The cheapest remaining question is not a capture and not code - it is whether
-the vendor app can list an A000088's SD recordings AT ALL. If its SD page is
-empty or absent for an M3 Pro, there is nothing here to reach and this line
-closes. If it does list them, THEN a capture is worth it, and it now has a
-sharp question to answer: what the app sends between switching to SD mode -
-which we can do - and receiving a list, which we cannot.
+STILL UNVERIFIED, and the next thing to do: no reply has ever carried a RECORD.
+Every answer so far is an empty list, so `EVENT_RECORD_LEN` and the 12-byte
+record decode remain untested against real data. Let the card capture a motion
+event, then re-run this probe - a non-empty reply is what validates the decode.
 """
 import struct
 import time
