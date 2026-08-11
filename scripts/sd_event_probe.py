@@ -22,8 +22,7 @@ response, and silence points at the channel rather than at the layout - which is
 why the request is sent twice with different time ranges before concluding
 anything.
 
-**Why the A000088s answer nothing - settled 2026-08-11.** The silence pointed at
-the channel, and the channel is what it turned out to be.
+**Why the A000088s answer nothing - NOT settled. Three things ruled out.**
 
 Measured, from run 31500427317 and its logs: the two SDES cameras (A001064,
 A001513) answered `HASLISTEVENT` on the live session; all three A000088s
@@ -43,16 +42,54 @@ channel for SD work -
 back to `LdsTutkChannel.getSDRecordList` (the out-of-scope TUTK path) when it is
 not. The live channel is keyed on the bare device id.
 
-So this probe asks the right question on the wrong channel, and a firmware that
-serves SD only on the `-SD` channel answers exactly as observed. The SDES models
-being more permissive about it is the anomaly, not the A000088s being broken.
+That reading was wrong, and the correction cost two cloud calls rather than a
+capture. `-SD` is `LdsChannelManager`'s LOCAL cache key for a channel object,
+not a cloud channel name: `/api/ipc/liveStream/liveStreamParam` returns real AWS
+KVS credentials and a channel ARN for a bare device id, and returns HTTP 400
+`code 680025 "Param error"` for `<deviceId>-SD`. The smali agrees once read that
+way - the SD branch reads the AWS keys, token, ARN and region off the EXISTING
+channel and builds the second one from them. Same AWS channel, second peer
+connection.
 
-What is NOT established, and cannot be from static reading: what that second
-channel looks like on OUR transport. This library signals over MQTT `webrtcReq`
-rather than a KVS channel-name registry, so there is no "-SD" string to set -
-the mapping needs a capture of the app opening SD playback. Until then, an SD
-listing on an A000088 is not reachable from here, and no amount of re-running
-this probe against the live session will change that.
+So there is no channel NAME we are failing to send.
+
+**SD MODE EXISTS, WORKS, AND IS NOT THE ANSWER - measured 2026-08-11.** The
+vendor enum `AVIO_CTRL_SESSION_MODE` is IDLE(0), LIVING(1), SD(2), and
+`changeStream()` sends the ordinal on 0x1500 - which is 5376, the command this
+package already sends as LIVING on every open. So switching a live session to
+SD mode costs one byte on a frame we already build.
+
+An A000088 was asked in both modes, in one session, back to back:
+
+    haslistevent (LIVING mode)   answered: false   sent 22B
+    listevent    (LIVING mode)   answered: false   sent 24B
+    session mode -> SD           answered: TRUE    5377, hex ...02000000
+    haslistevent (SD mode)       answered: false   sent 22B
+    listevent    (SD mode)       answered: false   sent 24B
+    session mode -> LIVING       answered: TRUE    5377, hex ...01000000
+
+The camera accepts the switch and echoes the mode back, so it implements SD
+mode and the AVIO round trip works in both - which is the third independent
+confirmation that our inbound path is fine. The recording-list commands stay
+silent either way. **The mode was not the missing term.**
+
+Also checked and NOT a difference: `getSDRecordList2(JJI...)` looks like a
+different request but `SMsgAVIoctrlListEventReq.parseConent(IJJBB)` builds the
+same 24-byte array, converting epoch millis into the same STimeDay fields. Same
+bytes on the wire.
+
+**Where this actually stands.** Ruled out, each by measurement rather than
+argument: our inbound AVIO path (three ways), the response layout, a channel
+name to send, the session mode, and the `getSDRecordList2` payload variant. The
+A000088 accepts every AVIO command it is asked and answers the ones it
+implements; it does not answer these two in any mode or shape tried.
+
+The cheapest remaining question is not a capture and not code - it is whether
+the vendor app can list an A000088's SD recordings AT ALL. If its SD page is
+empty or absent for an M3 Pro, there is nothing here to reach and this line
+closes. If it does list them, THEN a capture is worth it, and it now has a
+sharp question to answer: what the app sends between switching to SD mode -
+which we can do - and receiving a list, which we cannot.
 """
 import struct
 import time
@@ -163,6 +200,57 @@ def _describe(reply) -> dict:
     return out
 
 
+#: `E_CMD_AVIO_CTRL_SESSION_MODE_REQ` - the command that puts a session into a
+#: mode, and the one this package already sends as LIVING on every open.
+SESSION_MODE_REQ = 5376
+SESSION_MODE_RESP = 5377
+
+#: `KVSWebRTCChannel$AVIO_CTRL_SESSION_MODE`, read out of the vendor client as
+#: an enum rather than guessed: IDLE, LIVING, SD - ordinals 0, 1, 2, and
+#: `changeStream()` sends `mode.ordinal()` on 0x1500 (= 5376).
+#:
+#: This package opens every session as LIVING and never leaves it. If the
+#: A000088 firmware serves recording lists only to a session in SD mode, that
+#: alone explains the silence - and it is one byte on a command we already
+#: send, not a second channel and not a different transport.
+SESSION_MODE_IDLE = 0
+SESSION_MODE_LIVING = 1
+SESSION_MODE_SD = 2
+
+
+def session_mode_payload(mode: int, channel: int = 0) -> bytes:
+    """`SMsgAVIoctrlSessionModeReq`: channel int32 LE, mode byte, 3 reserved.
+
+    The same 8-byte shape this package already sends for LIVING, and the same
+    shape `SETSTREAMCTRL` uses - which is what makes this cheap to try.
+    """
+    return struct.pack("<IB3x", channel, mode)
+
+
+async def set_session_mode(session, mode: int, *, timeout: float = 2.5) -> dict:
+    """Switch a live session into ``mode`` and report what came back.
+
+    Returns a dict rather than a bool: "asked and got 5377", "asked and got
+    silence", and "could not ask" are three different answers, and collapsing
+    them is the mistake this harness keeps having to unlearn.
+    """
+    ask = getattr(session, "async_avio_request", None)
+    if ask is None:
+        return {"asked": False, "why": "no async_avio_request on this session"}
+    alive = getattr(session, "is_alive", None)
+    if alive is not None and not alive:
+        return {"asked": False, "why": "session already closed"}
+    payload = session_mode_payload(mode)
+    try:
+        reply = await ask(SESSION_MODE_REQ, payload,
+                          response_cmd=SESSION_MODE_RESP, timeout=timeout)
+    except Exception as exc:
+        return {"asked": True, "error": f"{type(exc).__name__}: {exc}"[:120]}
+    out = {"asked": True, "mode": mode, "sent_len": len(payload)}
+    out.update(_describe(reply))
+    return out
+
+
 async def probe_sd_events(session, *, days: int = 7,
                           timeout: float = 2.5) -> Optional[dict]:
     """Ask the event commands and return what came back. Never raises.
@@ -220,4 +308,42 @@ async def probe_sd_events(session, *, days: int = 7,
             out[label]["sent_len"] = len(payload)
         except Exception as exc:
             out[label] = {"error": f"{type(exc).__name__}: {exc}"[:120]}
+
+    # Everything above was asked of a session in LIVING mode, which is the only
+    # mode this package has ever put a session into. Now switch it to SD and ask
+    # the two that matter again.
+    #
+    # This is the experiment the A000088 silence actually points at. The vendor
+    # enum has three modes - IDLE, LIVING, SD - and `changeStream()` sends the
+    # ordinal on the same 5376 this package already sends as LIVING. A firmware
+    # that serves recording lists only in SD mode would answer exactly as
+    # observed: byte-exact requests, acked heartbeats, and no reply.
+    #
+    # The before/after pair is the whole point. An answer only after the switch
+    # identifies the mode as the missing term; silence in both says the mode was
+    # never it, and the same session asked both, so nothing else moved.
+    out["session_mode_sd"] = await set_session_mode(
+        session, SESSION_MODE_SD, timeout=timeout)
+    for label, cmd, resp, payload in (
+        ("haslistevent_in_sd_mode", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
+         haslistevent_payload(now - days * 86400, now)),
+        ("listevent_in_sd_mode", LISTEVENT_REQ, LISTEVENT_RESP,
+         listevent_payload(now - days * 86400, now)),
+    ):
+        alive = getattr(session, "is_alive", None)
+        if alive is not None and not alive:
+            out[label] = {"session_closed": True}
+            continue
+        try:
+            reply = await ask(cmd, payload, response_cmd=resp, timeout=timeout)
+            out[label] = _describe(reply)
+            out[label]["sent_len"] = len(payload)
+        except Exception as exc:
+            out[label] = {"error": f"{type(exc).__name__}: {exc}"[:120]}
+
+    # Put it back. The caller's session keeps streaming after this returns, and
+    # leaving a viewer's live view parked in SD mode to satisfy a probe would be
+    # the probe breaking the thing it rode in on.
+    out["session_mode_restore"] = await set_session_mode(
+        session, SESSION_MODE_LIVING, timeout=timeout)
     return out
