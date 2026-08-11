@@ -301,6 +301,14 @@ async def probe_sd_events(session, *, days: int = 7,
         # a 24-byte answer would also confirm the map reading on a second range.
         ("haslistevent_1day", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
          haslistevent_payload(now - 86400, now)),
+        # The map came back all-zero on a camera whose LISTEVENT answered with
+        # four real records for the same window - and the map is asked with the
+        # 0x12 selector, the one that returned an EMPTY record page. Same
+        # selector, same suspicion: ask the map with event=0 too.
+        ("haslistevent_event0", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
+         haslistevent_payload(now - days * 86400, now, event=0)),
+        ("haslistevent_1day_event0", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
+         haslistevent_payload(now - 86400, now, event=0)),
     ):
         alive = getattr(session, "is_alive", None)
         if alive is not None and not alive:
