@@ -2400,12 +2400,20 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
             POST /api/ipc/playback/getRecentEventRecordingList
                  {"deviceIds": [...], "total": 3}
 
-        It matters because `async_get_cloud_recordings` - which asks
-        `eventRecordingList` for a time RANGE - has returned zero events for
-        every camera on the reference fleet in every validation run, while that
-        capture shows this endpoint returning real events for one of the same
-        cameras. Whatever the range query wants, this one does not need it: it
-        takes a count and answers with the newest.
+        **Both listings work; the zeros were the account** (measured
+        2026-08-11). Every fleet run had reported zero events from every camera
+        through this call AND through `async_get_cloud_recordings`, which read
+        as two broken listings. On the OWNER account, on the same fleet, ninety
+        minutes after a run that reported zero: this call returns the full count
+        it asks for on six of seven cameras, and the range query returns a full
+        first page against server totals of 121-1517 over thirty days. The
+        seventh camera has no events by any method.
+
+        The fleet runs use a shared-home member. The same runs report no cloud
+        thumbnail either, and the owner/member thumbnail split was measured
+        separately on 2026-08-09 - so an account seeing neither is behaving as
+        the member, not meeting a defect. Read a zero from this method as a
+        question about the account before reading it as a fault.
 
         Two shape differences from every other call in this class, and both
         would break the usual handling:
@@ -2538,6 +2546,14 @@ class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
         Prefers MP4 (type=1) over M3U8 (type=2) because HA's media player and
         most browsers handle direct MP4 more reliably than HLS with signed CDN
         segments.  Falls back to whatever is available.
+
+        **That preference has never once been exercised.** Measured 2026-08-11
+        on the owner account, three cameras across three model families
+        (A001064, A001513, A000088): every reply carried exactly ONE entry, and
+        it was type 2. So playback here is HLS in practice, and anything built
+        on it should be designed for HLS rather than for the MP4 this docstring
+        would lead a reader to expect. The branch is kept because it costs
+        nothing and the field exists in the app's own decoder.
 
         From CloudPlaybackFragment.java / EventListRepos.java:
           POST /api/ipc/playback/getEventVideoUrl
