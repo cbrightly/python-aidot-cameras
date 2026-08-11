@@ -21,6 +21,38 @@ A null answer is a result too. This firmware may implement a request without a
 response, and silence points at the channel rather than at the layout - which is
 why the request is sent twice with different time ranges before concluding
 anything.
+
+**Why the A000088s answer nothing - settled 2026-08-11.** The silence pointed at
+the channel, and the channel is what it turned out to be.
+
+Measured, from run 31500427317 and its logs: the two SDES cameras (A001064,
+A001513) answered `HASLISTEVENT` on the live session; all three A000088s
+answered neither command, while the SAME sessions carried inbound AVIO fine -
+851, 852, 5157 and 5377 all arrived and routed. So the DTLS inbound path works
+on that model and these two commands specifically produce no frame at all, not
+even one under an unexpected id. That rules out our routing and rules out a
+mangled response layout.
+
+Read from the vendor client (`IpcServiceImpl.handleData`), the reason: the app
+does NOT ask for the recording list on the live channel. It keeps a SECOND
+channel for SD work -
+
+    sdWebRTCChannel = LdsChannelManager.getKVSWebRTCChannel(deviceId + "-SD")
+
+- calls `getSDRecordList` on that when its data channel is connected, and falls
+back to `LdsTutkChannel.getSDRecordList` (the out-of-scope TUTK path) when it is
+not. The live channel is keyed on the bare device id.
+
+So this probe asks the right question on the wrong channel, and a firmware that
+serves SD only on the `-SD` channel answers exactly as observed. The SDES models
+being more permissive about it is the anomaly, not the A000088s being broken.
+
+What is NOT established, and cannot be from static reading: what that second
+channel looks like on OUR transport. This library signals over MQTT `webrtcReq`
+rather than a KVS channel-name registry, so there is no "-SD" string to set -
+the mapping needs a capture of the app opening SD playback. Until then, an SD
+listing on an A000088 is not reachable from here, and no amount of re-running
+this probe against the live session will change that.
 """
 import struct
 import time

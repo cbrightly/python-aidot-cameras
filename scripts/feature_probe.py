@@ -62,11 +62,18 @@ def supports_playback(device: dict) -> bool:
     camera's recordings are, and only the cloud ones are reachable by
     `async_get_cloud_recordings`.
 
-    That makes UNSUPPORTED honest for the API this probes, and it also names a
-    real gap: the library has no SD-card playback path at all - the only
-    retrieval API is `async_open_cloud_playback`. So an A000088's recordings
-    exist and nothing here can fetch them. Recorded in ROAD-TO-1.0 item 4
-    rather than papered over by widening this flag.
+    **The second half of that reading was wrong, and is corrected here rather
+    than left for the next person to inherit.** It used to say an A000088's
+    recordings exist and nothing here can fetch them. Measured 2026-08-11 on
+    the owner account: the three live A000088s hold 75, 1417 and 1517 cloud
+    events over thirty days, both listing methods return them, and every one
+    resolves to a playable URL. So `IsSupportPlayback=0` does NOT mean this
+    camera's recordings are unreachable, and nothing should conclude that from
+    it. What the flag actually gates is not established; it is reported and no
+    longer used to skip a probe.
+
+    The real gap it was reaching for is narrower and still open: the library
+    has no SD-CARD retrieval path. That is about the card, not the cloud.
     """
     return str(_props(device).get("IsSupportPlayback", "0")) == "1"
 
@@ -426,11 +433,19 @@ async def probe_features(device_client, device: dict, session=None,
     if err:
         out["thumbnail_error"] = err
 
-    sup = supports_playback(device)
-    a, ok, err = await _probe_recordings(device_client, timeout) if sup else (False, False, None)
-    out["recordings"] = _verdict(sup, a, ok, err)
+    # Asked of EVERY camera. This used to be gated on IsSupportPlayback, and
+    # that flag does not mean what it was read to mean: measured 2026-08-11 on
+    # the owner account, all three live A000088s report IsSupportPlayback=0 and
+    # hold 75, 1417 and 1517 cloud events over thirty days, every one of which
+    # resolves to a playable URL. Gating on it reported UNSUPPORTED for cameras
+    # whose recordings were sitting there the whole time.
+    a, ok, err = await _probe_recordings(device_client, timeout)
+    out["recordings"] = _verdict(True, a, ok, err)
     if err:
         out["recordings_error"] = err
+    # Kept for the record, because the flag is real and something gates on it -
+    # just not this.
+    out["IsSupportPlayback"] = supports_playback(device)
 
     # Asked of EVERY camera, not gated on IsSupportPlayback: the whole reason
     # this exists is that the app returns events for a camera whose recordings
