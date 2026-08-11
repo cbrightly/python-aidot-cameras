@@ -147,8 +147,37 @@ at about the control rate says the camera does not read m-line order as a
 constraint, and any session with no video at all says order-preference triggers
 the same failure as narrowing and the knob is unsafe rather than merely opt-in.
 
-**2026-08-09: the ordering arm has now been run, and the result is against the
-hypothesis but weaker than the kill above assumed.**
+**2026-08-11: the proper campaign ran, and the lever is dead.**
+
+Run `31490379988`: the A001064 alone, six attempts, arms alternating PER ATTEMPT
+between the shipped order and `97,96`, none of them stopping on success so both
+arms were measured on the same camera in the same conditions.
+
+     #      arm   verdict   pt      kbps   secs
+     1  default      PASS   96    2321.1  26.85
+     2    97,96      PASS   96    2338.0  26.85
+     3  default      PASS   96    2195.8  26.75
+     4    97,96      PASS   96    2134.2  26.73
+     5  default      PASS   96    2167.3  26.85
+     6    97,96      PASS   96    2327.4  26.45
+
+Control mean 2228.1 kbps, pinned mean 2266.5 - a difference of +1.7%, smaller
+than the spread within either arm. Codec `pt=96` in all six. Bitrate is computed
+from each recording's OWN duration, not from `max_seconds`, so a short recording
+cannot masquerade as a low bitrate.
+
+**And the arms provably reached the SDP**: six `offer video codec order=97 96`
+receipts in the run log. That is the check the first pin attempt lacked, when a
+result "looked confirmed for two sessions before a missing receipt showed it had
+never reached the SDP at all". (The artifact reported the receipts as null - the
+collector had inherited a WARNING level while the receipt is an INFO line, fixed
+since. The log carried them, which is why this result survives.)
+
+**Reordering the offer changes neither the codec nor the bitrate.** This was the
+last untried lever named in this item. It is now tried, with the design the item
+itself specified, and it does nothing.
+
+**2026-08-09: an earlier, weaker arm - superseded by the campaign above.**
 
 Run `31348997269`, `AIDOT_SDES_VIDEO_PT_ORDER=97,96` on the SDES models, with the
 receipt present - `SDES: offer video codec order=97 96` on all 8 opens, so this
@@ -183,8 +212,25 @@ does not indict the knob, and it does not clear it either.
 SDP, and it is the instrument any future arm would use. It should not be
 described as promising.
 
-The bar: **explained, or documented as accepted** with the measurements. Shipping
-1.0 with an unexplained 5x resource difference on a supported model is a stretch.
+The bar: **explained, or documented as accepted** with the measurements.
+
+**2026-08-11: this is now DOCUMENTED AS ACCEPTED, with the numbers above.**
+Thirteen hypotheses have been tried and none explains the gap. The last one the
+item itself nominated - offer codec order - was run with the interleaved,
+receipted design it specified and moved nothing. Nothing further is proposed,
+because a fourteenth hypothesis with no new evidence behind it is guessing, and
+this item has now cost more than the gap does.
+
+What is accepted: an A001064 takes about 2.2 Mbps where the vendor app takes
+225-500 Kbps from the same camera. It streams correctly at that rate. The cost
+is bandwidth and, on a metered or congested link, contention - not a broken
+feature. It should be stated in the README as a known characteristic of that
+model rather than left as an open investigation implying an imminent fix.
+
+Reopen it only on NEW evidence: a capture of the app's own session showing a
+control we do not send, or a firmware change. The instrumentation to answer it
+quickly is all in place - per-session codec/bitrate in every report, and a
+campaign mode that can interleave arms on demand.
 
 ### 3. A camera stuck in a failing retry loop
 

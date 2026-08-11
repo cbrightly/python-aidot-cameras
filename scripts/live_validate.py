@@ -865,7 +865,19 @@ _ORDER_MARKER = "offer video codec order="
 
 
 class _ReceiptCollector(_StallCollector):
-    """Same mechanism as the stall collector, different line."""
+    """Same mechanism as the stall collector, different line AND level.
+
+    The stall report is a WARNING; the offer receipt is an INFO. Inheriting the
+    parent's WARNING level made this collect nothing at all, and the first real
+    campaign proved how bad that is: six receipts in the run log, None in the
+    artifact, and a null codec result that could not be told apart from a
+    campaign whose arms never reached the SDP - the exact failure the receipt
+    exists to rule out.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setLevel(logging.NOTSET)
 
     def emit(self, record: logging.LogRecord) -> None:
         try:

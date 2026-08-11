@@ -76,14 +76,25 @@ def _record(msg: str) -> logging.LogRecord:
 
 
 def test_the_offer_receipt_is_captured_so_a_null_result_can_be_trusted():
+    # handle(), not emit(). emit() skips the handler's own level check, and
+    # calling it directly is what let this ship collecting nothing: the receipt
+    # is an INFO line and the collector inherited a WARNING level, so the first
+    # real campaign returned six receipts in the log and None in the artifact.
     c = _ReceiptCollector()
-    c.emit(_record("webrtc: SDES: offer video codec order=97 96"))
+    c.handle(_record("webrtc: SDES: offer video codec order=97 96"))
     assert c.drain() == ["97 96"]
+
+
+def test_the_collector_accepts_info_because_the_receipt_is_an_info_line():
+    c = _ReceiptCollector()
+    assert c.level <= logging.INFO, (
+        "a handler whose level is above the line it collects silently collects "
+        "nothing, and a campaign cannot tell that from a null result")
 
 
 def test_unrelated_lines_are_not_mistaken_for_a_receipt():
     c = _ReceiptCollector()
-    c.emit(_record("webrtc: SDES: sent RTCP PLI"))
+    c.handle(_record("webrtc: SDES: sent RTCP PLI"))
     assert c.drain() == []
 
 
