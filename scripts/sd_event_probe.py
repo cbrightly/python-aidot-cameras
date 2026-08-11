@@ -108,6 +108,26 @@ def _describe(reply) -> dict:
     }
     if len(payload) >= 4:
         out["first_u32_le"] = struct.unpack_from("<I", payload, 0)[0]
+    # Try the layout read out of the vendor client, and report the FIT rather
+    # than the result. `consistent` and `trailing` are what say whether the
+    # header offsets - the part that could not be confirmed from the decompiled
+    # handler - are right for this firmware. The raw hex is kept regardless, so
+    # a wrong guess here cannot destroy the evidence.
+    try:
+        from aidot_cameras.camera.sd_events import decode_list_event_response
+        page = decode_list_event_response(payload)
+    except Exception:
+        page = None
+    if page is not None:
+        out["decoded"] = {
+            "records": len(page.events),
+            "record_count_claimed": page.record_count,
+            "total": page.total,
+            "end_flag": page.end_flag,
+            "consistent": page.consistent,
+            "trailing": page.trailing,
+            "first": page.events[0].isoformat() if page.events else None,
+        }
     return out
 
 
