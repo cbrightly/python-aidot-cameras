@@ -54,6 +54,7 @@ from aidot_cameras.credentials import load_credentials
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from feature_probe import probe_features
+from sd_event_probe import probe_sd_events
 
 # Models validated end-to-end on the reference account: these GATE the release.
 REQUIRED_MODELS = ("A000088", "A001513", "A001064")
@@ -405,7 +406,8 @@ def _apply_pt_order(arm):
 
 
 async def _attempt(dc, hold: float, out_dir: str, attempt: int,
-                   device: dict | None = None, pt_order=None) -> dict:
+                   device: dict | None = None, pt_order=None,
+                   sd_probe: bool = False) -> dict:
     """One streaming attempt. Never raises; classifies the outcome."""
     from aidot_cameras.exceptions import AidotCameraBusy
 
@@ -479,6 +481,15 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int,
         _prev_session = getattr(dc, "_stream_session", None)
         try:
             dc._stream_session = session
+            # Read-only, opt-in: asks what recordings exist so the response
+            # layout can be read off the wire. Never sends DELLISTEVENT or
+            # RECORD_PLAYCONTROL, so it cannot delete anything or start
+            # playback on a camera in someone's house.
+            if sd_probe:
+                try:
+                    result["sd_events"] = await probe_sd_events(session)
+                except Exception as exc:
+                    result["sd_events_error"] = f"{type(exc).__name__}: {exc}"[:120]
             result["features"] = await probe_features(dc, device or {}, session)
         except Exception as exc:
             result["features_error"] = f"{type(exc).__name__}: {exc}"[:120]
@@ -579,7 +590,8 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
         print(f"    attempt {i}/{max_attempts}...")
         res = await _attempt(
             dc, args.hold, args.out_dir, i, device,
-            pt_order=(arms[(i - 1) % len(arms)] if campaigning else None))
+            pt_order=(arms[(i - 1) % len(arms)] if campaigning else None),
+            sd_probe=bool(getattr(args, "sd_probe", False)))
         entry["attempts"].append(res)
         # This device may now be holding a viewer slot, so record when it may
         # next be opened. Every exit from this loop passes through here,
@@ -950,6 +962,10 @@ def main() -> int:
                         "success, so both arms are measured on every camera.")
     p.add_argument("--arm-repeats", type=int, default=1,
                    help="how many times to cycle the arms (default 1)")
+    p.add_argument("--sd-probe", action="store_true",
+                   help="ask each camera what recordings it holds "
+                        "(HASLISTEVENT/LISTEVENT) and record the raw reply. "
+                        "Read-only: never deletes and never starts playback.")
     p.add_argument("--out-dir", default="/tmp", help="where to write recordings")
     p.add_argument("--json-out", default="live-report.json",
                    help="machine-readable report path ('' to skip)")
