@@ -769,6 +769,14 @@ The bar: **the guard extended beyond `sdes_open`, or a stated reason it does not
 need to be.** The same classes of secret (device passwords, aesKeys, tokens)
 exist elsewhere in the package.
 
+**2026-08-11: this bar is MET, and had been for days without being recorded
+here.** `tests/test_no_key_material_in_logs.py` walks the whole package -
+`_PACKAGE.rglob("*.py")`, with an assertion that it found more than twenty
+modules so a wrong root fails loudly rather than passing vacuously - and it
+matches secrets by attribute and by dict key, not only by bare local name. It is
+what caught `batchGetDeviceUserInfo` being logged whole at WARNING, on a path
+nowhere near `sdes_open`. Item 5 is closed.
+
 
 ### 6. SD-card recordings cannot be retrieved
 
