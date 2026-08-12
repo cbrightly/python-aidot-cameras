@@ -74,6 +74,23 @@ def test_a_torn_down_session_is_not_a_live_session():
     assert _Camera(_Session({}, alive=False)).has_live_session is False
 
 
+def test_the_predicate_reaches_the_client_a_caller_actually_holds():
+    # Every test above builds the mixin directly, which proves the rule and not
+    # the wiring. A caller reads this off the client it was handed, and reads it
+    # through hasattr - so a name shadowed anywhere in that MRO would not raise,
+    # it would quietly answer "cannot ask" and put the caller straight back to
+    # the behaviour this predicate exists to end.
+    from aidot_cameras.device_client import CameraDeviceClient, LightDeviceClient
+
+    client = object.__new__(CameraDeviceClient)
+    assert client.has_live_session is False
+    client._stream_session = _Session({})
+    assert client.has_live_session is True
+    # And it stays off the client a light gets, like the rest of the camera
+    # surface: that separation is enforced by construction, not by convention.
+    assert not hasattr(LightDeviceClient, "has_live_session")
+
+
 @pytest.mark.asyncio
 async def test_no_session_is_not_an_empty_card():
     # None, not []. A caller cannot tell "could not ask" from "nothing there"
