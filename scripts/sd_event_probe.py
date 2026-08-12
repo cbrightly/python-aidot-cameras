@@ -65,11 +65,27 @@ and 48 of body, count 4, the first stamped 2026-08-11T20:41:42Z. So
 inferred, and the earlier note here saying no reply had ever carried a record is
 superseded.
 
-The same run turned up the two things still worth probing, both recorded below
-rather than here: the event selector inverted - `listevent` with the app's 0x12
-answered an EMPTY page while `listevent_event0` answered with the four records -
-and the occupancy map came back ALL-ZERO for the window whose records were real,
-which is what the `haslistevent_event0` variants exist to test.
+**The selector inverts BOTH commands, and that is now measured (2026-08-12).**
+The open question this probe last left - whether the all-zero occupancy map had
+the same cause as the empty record page - is answered. One session on a
+card-bearing A000088:
+
+    haslistevent             (0x12)   168 hours, 0 with footage
+    haslistevent_event0      (0)      168 hours, 5 with footage, first at 163
+    haslistevent_1day        (0x12)    24 hours, 0 with footage
+    haslistevent_1day_event0 (0)       24 hours, 5 with footage, first at 19
+    listevent                (0x12)    12 bytes, 0 records
+    listevent_event0         (0)      276 bytes, 22 records, end_flag 1,
+                                      consistent, first 2026-08-11T20:41:42Z
+
+So 0x12 answers an empty-but-well-formed reply to EVERY recording question on
+this firmware, and 0 answers all of them with real data. The two event0 maps
+corroborate each other - 168-163 and 24-19 both put the first footage five hours
+before the window end - so the map is internally consistent and usable, not just
+non-zero.
+
+That run also took the record decode from 4 records over 60 bytes to 22 over
+276 (12 header + 22 x 12 body), consistent and with no trailing bytes.
 """
 import struct
 import time
@@ -276,10 +292,12 @@ async def probe_sd_events(session, *, days: int = 7,
         # a 24-byte answer would also confirm the map reading on a second range.
         ("haslistevent_1day", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
          haslistevent_payload(now - 86400, now, event=SD_EVENT_APP)),
-        # The map came back all-zero on a camera whose LISTEVENT answered with
-        # four real records for the same window - and the map is asked with the
-        # 0x12 selector, the one that returned an EMPTY record page. Same
-        # selector, same suspicion: ask the map with event=0 too.
+        # The map is asked with the 0x12 selector, the one that returns an EMPTY
+        # record page, and it used to come back all-zero on a camera whose
+        # LISTEVENT answered with real records for the same window. Same
+        # selector, same cause: CONFIRMED 2026-08-12, these two answer with real
+        # occupancy where their 0x12 twins above answer all-zero. Kept as a pair
+        # so the comparison stays runnable on the next firmware.
         ("haslistevent_event0", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
          haslistevent_payload(now - days * 86400, now, event=0)),
         ("haslistevent_1day_event0", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
