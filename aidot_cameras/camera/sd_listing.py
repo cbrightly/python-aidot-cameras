@@ -35,8 +35,41 @@ _LOGGER = logging.getLogger(__name__)
 _SD_LIST_TIMEOUT_S = 8.0
 
 
+def _session_is_live(session: Any) -> bool:
+    """Is this session object one that could still carry a request?
+
+    Only SDES sessions publish ``is_alive``, so a session already torn down is
+    caught on that transport and not on DTLS. That asymmetry is fine here and
+    must stay fine at every caller: this is a cheap early-out, never the thing
+    that keeps a dead channel from being reported as an empty card. ``answered``
+    does that, on every transport.
+    """
+    if session is None:
+        return False
+    return getattr(session, "is_alive", True) is not False
+
+
 class _CameraSdMixin:
     """The on-device recording query, mixed into CameraMixin."""
+
+    @property
+    def has_live_session(self) -> bool:
+        """Is a stream session up right now?
+
+        Public because callers legitimately need to WAIT for a session without
+        asking it anything. ``start_keepalive`` returns before the handshake it
+        schedules has finished, so a caller that wants to ride the session it
+        just asked for has no way to know when that session has arrived.
+        Probing with a real request is not a substitute: once the session is up,
+        the probe IS the request, and a caller that wanted to send one request
+        has then sent two.
+
+        Best-effort, in the direction that keeps callers honest: a torn-down
+        session reads as live on a transport that does not say otherwise, so a
+        listing taken on the strength of this can still fail and every caller
+        must still handle that.
+        """
+        return _session_is_live(getattr(self, "_stream_session", None))
 
     async def _sd_ask(self, session: Any, cmd: int, payload: bytes,
                       response_cmd: int, timeout: float) -> Optional[Any]:
@@ -84,14 +117,11 @@ class _CameraSdMixin:
         """
         session = session if session is not None else getattr(
             self, "_stream_session", None)
-        if session is None:
-            return None
-        # A cheap early-out for a session already known to be torn down: there
-        # is no point spending two timeouts on it. Only SDES sessions publish
-        # `is_alive`, so this catches some dead sessions and not others - which
-        # is fine, because it is NOT what keeps a dead session from being
-        # reported as an empty card. `answered` does that, on every transport.
-        if getattr(session, "is_alive", True) is False:
+        # No session is "could not ask", and so is a session already known to
+        # be torn down: there is no point spending two timeouts on one. Shared
+        # with `has_live_session` so a caller waiting for a session to exist and
+        # this call deciding it has one cannot come to different answers.
+        if not _session_is_live(session):
             return None
 
         end_ts = time.time()
