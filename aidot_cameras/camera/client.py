@@ -46,6 +46,7 @@ from .playback import (  # re-exported (split into playback.py)
 from .webrtc import WebRTCSession  # re-exported (split into webrtc.py)
 from .sdes import SdesSession  # noqa: F401 - re-exported (split into sdes.py); used by sdes_open mixin
 from .controls import _CameraControlsMixin
+from .sd_listing import _CameraSdMixin
 from .webrtc_open import _WebRTCOpenMixin
 from .sdes_open import _SdesOpenMixin
 from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixin; kept re-exported for back-compat
@@ -859,7 +860,7 @@ def _ack_matches_seq(msg, seq):
     return code if isinstance(code, int) else False
 
 
-class CameraMixin(_CameraControlsMixin, _WebRTCOpenMixin, _SdesOpenMixin):
+class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesOpenMixin):
     """All camera/streaming methods, mixed into DeviceClient via inheritance."""
 
     # Devices without an aesKey never get this set by the core constructor;

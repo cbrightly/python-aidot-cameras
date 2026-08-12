@@ -22,7 +22,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aidot_cameras.camera.sd_events import (
     EVENT_RECORD_LEN,
+    HASLISTEVENT_RESP_CMD,
+    LISTEVENT_RESP_CMD,
     decode_event_record,
+    decode_hour_map,
     decode_list_event_response,
 )
 
@@ -136,6 +139,41 @@ def test_the_page_fields_do_not_shadow_tuple_methods():
     # A byte count, not a record count: HASLISTEVENT uses the same field for a
     # per-hour map, and both live replies have it equal to the body length.
     assert page.record_count == EVENT_RECORD_LEN
+
+
+def test_a_map_asked_for_as_records_is_refused_not_invented():
+    # The real 168-byte map is 14 x 12 bytes, so the record reading "works"
+    # and produces fourteen recordings that do not exist, dated year 0. A
+    # caller that knows which reply it holds must not be able to get them.
+    assert decode_list_event_response(
+        REAL_HASLISTEVENT, command=HASLISTEVENT_RESP_CMD) is None
+
+
+def test_a_map_decodes_to_one_byte_per_hour():
+    hours = decode_hour_map(REAL_HASLISTEVENT)
+    assert hours is not None
+    assert len(hours) == 168, "seven days, one byte per hour"
+    assert not any(hours), "this capture is an empty card"
+
+
+def test_a_map_with_footage_reports_which_hours():
+    payload = bytearray(REAL_HASLISTEVENT)
+    payload[12 + 3] = 1
+    payload[12 + 100] = 2
+    hours = decode_hour_map(bytes(payload))
+    assert [i for i, h in enumerate(hours) if h] == [3, 100]
+
+
+def test_a_record_page_is_not_a_map():
+    # Same guard the other way round: the map decoder must not hand back the
+    # record bytes as if they were hours.
+    assert decode_hour_map(
+        _page([_record()]), command=LISTEVENT_RESP_CMD) is None
+
+
+def test_a_payload_too_short_to_be_a_map_decodes_to_nothing():
+    assert decode_hour_map(b"\x00" * 8) is None
+    assert decode_hour_map(None) is None
 
 
 if __name__ == "__main__":

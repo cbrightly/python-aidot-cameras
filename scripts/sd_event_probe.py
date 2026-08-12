@@ -58,89 +58,61 @@ real - the camera accepts IDLE/LIVING/SD on 5376 and echoes the mode back. And
 the response layout below is now confirmed against an A000088 as well as the
 SDES models.
 
-STILL UNVERIFIED, and the next thing to do: no reply has ever carried a RECORD.
-Every answer so far is an empty list, so `EVENT_RECORD_LEN` and the 12-byte
-record decode remain untested against real data. Let the card capture a motion
-event, then re-run this probe - a non-empty reply is what validates the decode.
+**The record decode is now validated against real data (2026-08-11).** Once the
+card had captured motion, a reply carried FOUR real records - 12 bytes of header
+and 48 of body, count 4, the first stamped 2026-08-11T20:41:42Z. So
+`EVENT_RECORD_LEN` and the 12-byte record layout are measured rather than
+inferred, and the earlier note here saying no reply had ever carried a record is
+superseded.
+
+The same run turned up the two things still worth probing, both recorded below
+rather than here: the event selector inverted - `listevent` with the app's 0x12
+answered an EMPTY page while `listevent_event0` answered with the four records -
+and the occupancy map came back ALL-ZERO for the window whose records were real,
+which is what the `haslistevent_event0` variants exist to test.
 """
 import struct
 import time
 from typing import Optional
 
-#: The event selector the app asks for, read off KVSWebRTCChannel's
-#: getSDRecordList: `const/16 v1, 0x12`, with status 0.
-#:
-#: **On an A000088 with a card, 0x12 returns NOTHING and event=0 returns the
-#: records.** Measured 2026-08-11: the same session, same range, same
-#: everything else - `listevent` (0x12) answered with an empty page while
-#: `listevent_event0` answered with four real records, the first stamped
-#: 2026-08-11T20:41:42Z.
-#:
-#: The note that used to be here said the opposite - that event=0 drew silence
-#: from three cameras and the request "has to be the app's". Those three
-#: cameras had no SD card, so every variant answered empty and the comparison
-#: was between two empty answers. Do not read a selector result from a camera
-#: with nothing to list.
-SD_EVENT_ALL = 0x12
+# One definition of the wire format, and it is the package's - so this probe
+# exercises the code that ships rather than a copy that can drift from it. These
+# used to be defined here, which meant the library could not ask a camera
+# anything at all: a package cannot import from scripts/.
+from aidot_cameras.camera.sd_events import (
+    HASLISTEVENT_REQ_CMD as HASLISTEVENT_REQ,
+    HASLISTEVENT_RESP_CMD as HASLISTEVENT_RESP,
+    LISTEVENT_REQ_CMD as LISTEVENT_REQ,
+    LISTEVENT_RESP_CMD as LISTEVENT_RESP,
+    SD_EVENT_APP,
+    haslistevent_payload,
+    listevent_payload,
+)
+
+# THE SELECTOR, and the trap in reading it.
+#
+# `SD_EVENT_APP` is 0x12, the selector the vendor's app sends, read off
+# KVSWebRTCChannel's getSDRecordList: `const/16 v1, 0x12`, with status 0.
+#
+# **On an A000088 with a card, 0x12 returns NOTHING and event=0 returns the
+# records.** Measured 2026-08-11: the same session, same range, same everything
+# else - `listevent` (0x12) answered with an empty page while
+# `listevent_event0` answered with four real records, the first stamped
+# 2026-08-11T20:41:42Z.
+#
+# An earlier note here said the opposite - that event=0 drew silence from three
+# cameras and the request "has to be the app's". Those three cameras had no SD
+# card, so every variant answered empty and the comparison was between two
+# empty answers. Do not read a selector result from a camera with nothing to
+# list.
+#
+# Every request below states its selector explicitly rather than inheriting the
+# package default, which is 0. That is what keeps each pair of variants a
+# one-variable comparison.
 
 #: The 12-byte reply header measured from live replies - see
 #: aidot_cameras/camera/sd_events.py, which reads it the same way.
 _MAP_HEADER_LEN = 12
-
-#: From AVIOCTRLDEFs in the vendor's own client.
-HASLISTEVENT_REQ = 0x4B5
-HASLISTEVENT_RESP = 0x4B6
-LISTEVENT_REQ = 0x318
-LISTEVENT_RESP = 0x319
-
-
-def stimeday(when: float) -> bytes:
-    """The vendor's 8-byte STimeDay, from `AVIOCTRLDEFs$STimeDay`.
-
-    `unsigned short year` then six single bytes - month, day, wday, hour,
-    minute, second. UTC, because the field is named `startutctime`.
-    """
-    t = time.gmtime(when)
-    return struct.pack(
-        "<HBBBBBB",
-        t.tm_year,
-        t.tm_mon,
-        t.tm_mday,
-        (t.tm_wday + 1) % 7,     # tm_wday is Mon=0; the vendor's wday is Sun=0
-        t.tm_hour,
-        t.tm_min,
-        t.tm_sec,
-    )
-
-
-def haslistevent_payload(start: float, end: float, channel: int = 0,
-                         event: int = SD_EVENT_ALL) -> bytes:
-    """22 bytes: channel, start, end, and a two-byte selector tail.
-
-    The length is not a guess - `parseConent` allocates `const/16 v1, 0x16`,
-    which is 22, and copies the channel at offset 0 and the first STimeDay at
-    offset 4.
-    """
-    return (struct.pack("<I", channel)
-            + stimeday(start) + stimeday(end)
-            + struct.pack("<H", event & 0xFFFF))
-
-
-def listevent_payload(start: float, end: float, channel: int = 0,
-                      event: int = SD_EVENT_ALL, status: int = 0) -> bytes:
-    """24 bytes, not 22 - and the difference is the whole point.
-
-    `SMsgAVIoctrlListEventReq` has three `parseConent` overloads. The one whose
-    field list this was first written from is not the one the WebRTC path uses:
-    `KVSWebRTCChannel.getSDRecordList` calls the epoch-long overload, which
-    allocates `const/16 v4, 0x18` - 24 bytes - where the other allocates 22.
-    Four bytes of channel, two eight-byte STimeDays, the event and status
-    selectors, then two bytes of tail.
-    """
-    return (struct.pack("<I", channel)
-            + stimeday(start) + stimeday(end)
-            + bytes((event & 0xFF, status & 0xFF))
-            + b"\x00\x00")
 
 
 def _describe(reply) -> dict:
@@ -278,29 +250,32 @@ async def probe_sd_events(session, *, days: int = 7,
     out: dict = {}
     for label, cmd, resp, payload in (
         ("haslistevent", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
-         haslistevent_payload(now - days * 86400, now)),
+         haslistevent_payload(now - days * 86400, now, event=SD_EVENT_APP)),
         ("listevent", LISTEVENT_REQ, LISTEVENT_RESP,
-         listevent_payload(now - days * 86400, now)),
+         listevent_payload(now - days * 86400, now, event=SD_EVENT_APP)),
         # Same command with the selector the first attempt used, so a reply to
         # one and not the other localises the difference to the selector rather
         # than to the layout. It earned its place: on an A001064 the 0x12
         # variant was answered and this one was not.
         ("listevent_event0", LISTEVENT_REQ, LISTEVENT_RESP,
          listevent_payload(now - days * 86400, now, event=0)),
-        # The SD-BEARING models (A000088) answer none of the above, while the
-        # models with no card answer readily - the inversion item 6 is now stuck
-        # on. These vary one thing at a time against the request that IS known
-        # to work elsewhere, so a reply identifies which term mattered.
+        # These predate the empty-slot finding above: they were built when the
+        # A000088s answered nothing, to vary one term at a time against the
+        # request that was known to work elsewhere. With a card present all
+        # three answer, so they are kept as a control rather than as a probe.
         ("haslistevent_ch1", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
-         haslistevent_payload(now - days * 86400, now, channel=1)),
+         haslistevent_payload(now - days * 86400, now, channel=1,
+                              event=SD_EVENT_APP)),
         ("listevent_ch1", LISTEVENT_REQ, LISTEVENT_RESP,
-         listevent_payload(now - days * 86400, now, channel=1)),
+         listevent_payload(now - days * 86400, now, channel=1,
+                           event=SD_EVENT_APP)),
         ("listevent_status1", LISTEVENT_REQ, LISTEVENT_RESP,
-         listevent_payload(now - days * 86400, now, status=1)),
+         listevent_payload(now - days * 86400, now, status=1,
+                           event=SD_EVENT_APP)),
         # One day rather than seven: HASLISTEVENT answers one byte per hour, so
         # a 24-byte answer would also confirm the map reading on a second range.
         ("haslistevent_1day", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
-         haslistevent_payload(now - 86400, now)),
+         haslistevent_payload(now - 86400, now, event=SD_EVENT_APP)),
         # The map came back all-zero on a camera whose LISTEVENT answered with
         # four real records for the same window - and the map is asked with the
         # 0x12 selector, the one that returned an EMPTY record page. Same
@@ -333,14 +308,19 @@ async def probe_sd_events(session, *, days: int = 7,
     #
     # The before/after pair is the whole point. An answer only after the switch
     # identifies the mode as the missing term; silence in both says the mode was
-    # never it, and the same session asked both, so nothing else moved.
+    # never it, and the same session asked both, so nothing else moved. That is
+    # why these two name the selector: `haslistevent` and `listevent` above send
+    # 0x12, so these must send 0x12 too. Leaving them on the builders' default -
+    # which is 0 - would move the mode AND the selector between the two halves
+    # of the comparison, and a difference could no longer be attributed to
+    # either.
     out["session_mode_sd"] = await set_session_mode(
         session, SESSION_MODE_SD, timeout=timeout)
     for label, cmd, resp, payload in (
         ("haslistevent_in_sd_mode", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
-         haslistevent_payload(now - days * 86400, now)),
+         haslistevent_payload(now - days * 86400, now, event=SD_EVENT_APP)),
         ("listevent_in_sd_mode", LISTEVENT_REQ, LISTEVENT_RESP,
-         listevent_payload(now - days * 86400, now)),
+         listevent_payload(now - days * 86400, now, event=SD_EVENT_APP)),
     ):
         alive = getattr(session, "is_alive", None)
         if alive is not None and not alive:
