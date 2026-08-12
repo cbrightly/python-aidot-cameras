@@ -58,6 +58,22 @@ class _Camera(_CameraSdMixin):
         self.device_id = "dev-1"
 
 
+def test_no_session_is_not_a_live_session():
+    # The point of the predicate: a caller can wait for a session to exist
+    # without sending anything to find out whether it does.
+    assert _Camera().has_live_session is False
+
+
+def test_a_session_that_exists_is_a_live_session():
+    assert _Camera(_Session({})).has_live_session is True
+
+
+def test_a_torn_down_session_is_not_a_live_session():
+    # Only SDES sessions say so, which is why a caller that acts on this still
+    # has to handle a listing that fails anyway.
+    assert _Camera(_Session({}, alive=False)).has_live_session is False
+
+
 @pytest.mark.asyncio
 async def test_no_session_is_not_an_empty_card():
     # None, not []. A caller cannot tell "could not ask" from "nothing there"
