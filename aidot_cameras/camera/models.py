@@ -48,6 +48,38 @@ def _as_bool(v: Any) -> Optional[bool]:
     return None if i is None else bool(i)
 
 
+def _card_present(attr: dict) -> Optional[bool]:
+    """Is an SD card in the slot? None means nobody said.
+
+    Three states, and the third is the point. Of seven cameras measured
+    2026-08-12, one reported ``SDcardExistFlag: true``, two reported ``false``,
+    and four carried neither key - including an A000088, the same model as all
+    three that did report. So a missing key cannot mean "this model cannot say";
+    it means we do not know, and anything that reads it as "no card" would tell
+    someone with a working camera that their slot is empty.
+
+    ``SDcardExistFlag`` wins where it exists. ``SDcardBaseInfo`` is the fallback
+    and arrives as a STRING holding a JSON array - element 0 agreed with the
+    flag on every camera carrying both. The other four positions are not
+    decoded: ``30432`` is plausibly a 32 GB card's total MB and plausibly
+    something else, and a guess does not belong in a public data model.
+    """
+    if "SDcardExistFlag" in attr:
+        flag = _as_bool(attr.get("SDcardExistFlag"))
+        if flag is not None:
+            return flag
+
+    raw = attr.get("SDcardBaseInfo")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    if isinstance(raw, (list, tuple)) and raw:
+        return _as_bool(raw[0])
+    return None
+
+
 class CameraStatusData(DeviceStatusData):
     """Core status plus camera fields; accepts both typed-model and dict updates."""
 
@@ -74,6 +106,11 @@ class CameraStatusData(DeviceStatusData):
     battery_remaining: Optional[int] = None  # Battery_remaining 0-100 (%)
     occupancy: Optional[bool] = None          # Occupancy live presence
     sd_card_status: Optional[str] = None      # SDcardStatus
+    # Tri-state: True in the slot, False slot empty, None nobody said. Reads
+    # INVERTED on A000088 relative to sd_card_status ("0" with a card, "1"
+    # without, 3/3) - which is why sd_card_status is not used for this and the
+    # two are kept apart. That inversion has no corroboration off A000088.
+    sd_card_present: Optional[bool] = None    # SDcardExistFlag/SDcardBaseInfo[0]
     wifi_rssi: Optional[int] = None           # networkRssi (dBm), cloud property
 
     def update(self, attr) -> None:
@@ -125,6 +162,11 @@ class CameraStatusData(DeviceStatusData):
             self.occupancy = b
         if (v := attr.get("SDcardStatus")) is not None:
             self.sd_card_status = str(v)
+        # Only overwrite on an actual reading. Attribute pushes are partial - a
+        # motion notif carries no card keys - so a silent update must leave what
+        # the last full poll established alone.
+        if (b := _card_present(attr)) is not None:
+            self.sd_card_present = b
         if (i := _as_int(attr.get("networkRssi"))) is not None:
             self.wifi_rssi = i
 
