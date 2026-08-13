@@ -6,6 +6,64 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b7]
+
+Pre-release.
+
+### Added
+
+- **`CameraStatusData.sd_card_present`** - whether there is an SD card in the
+  slot, as a tri-state: `True`, `False`, or `None` for "nobody reported".
+
+  A camera with an empty slot and a camera that could not be asked look
+  identical to every listing call: both return nothing. The cloud has been
+  carrying the answer all along in `SDcardExistFlag` / `SDcardBaseInfo` and
+  nothing read it, so a caller could only report "the camera did not answer"
+  for a camera whose only problem was an empty slot.
+
+  **The third state is the point.** Across seven cameras measured 2026-08-12,
+  one reported `SDcardExistFlag: true`, two reported `false`, and four carried
+  neither key - including a model whose siblings report normally. A missing key
+  therefore cannot mean "this model cannot say"; it means unknown. Collapsing
+  that into `False` would tell someone with a working camera that their slot is
+  empty, which is the same invented answer that `answered` exists to prevent one
+  level down.
+
+  Parsing is defensive because the wire is not consistent: `SDcardExistFlag`
+  wins where present, `SDcardBaseInfo` is the fallback and arrives as a string
+  holding a JSON array (a real list is accepted too), and a value that cannot be
+  decoded yields `None`, never `False`. A partial attribute update leaves a
+  known reading alone.
+
+  `SDcardBaseInfo[1..4]` are deliberately not decoded, and `sd_card_status` is
+  unchanged and kept separate - it reads inverted against this on one model with
+  no corroboration on any other, so the two are not reconciled on a guess.
+
+## [1.0.0b6]
+
+Pre-release.
+
+### Added
+
+- **`has_live_session`** - is a stream session up right now, answered without
+  sending anything.
+
+  `start_keepalive` returns before the handshake it schedules has produced
+  anything, so a caller that wants to ride the session it just asked for had no
+  way to know when that session arrived. Probing with a real request is not a
+  substitute: once the session is up, the probe IS the request, and a caller
+  that meant to send one request has sent two.
+
+  Best-effort in one direction: a torn-down session reads as live on a transport
+  that does not publish `is_alive`, so a listing taken on the strength of it can
+  still fail and callers must handle that. It is a cheap early-out, never the
+  thing that keeps a dead channel from being reported as an empty card -
+  `answered` does that, on every transport.
+
+  The underlying check is not new; `async_get_sd_recordings` already made it.
+  The two now share it, so a caller waiting for a session and the listing
+  deciding it has one cannot come to different answers.
+
 ## [1.0.0b5]
 
 Pre-release.
