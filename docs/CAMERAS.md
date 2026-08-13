@@ -305,6 +305,62 @@ await device_client.async_start_motion_polling(callback, interval=30.0)
 await device_client.async_stop_motion_polling()
 ```
 
+## On-device (SD card) recordings
+
+What the camera holds on its own card, read over a session that already exists.
+
+```python
+if device_client.has_live_session:                       # sends nothing
+    result = await device_client.async_get_sd_recordings(days=7)
+```
+
+**Listing needs a WebRTC session** - 15-21 s on DTLS, 25-70 s cold on SDES, and
+it wakes the camera - where the cloud equivalent is one ~200 ms request. So the
+library never opens one for a listing: it asks the session it is handed, or
+answers `None`. Deciding when a listing is worth a session is policy, and policy
+belongs to the caller that knows what one costs.
+
+`has_live_session` exists because `start_keepalive` returns before the handshake
+it schedules has produced anything. A caller that wants to ride the session it
+just asked for can wait on this flag without sending anything - and must, because
+probing with a real request means that once the session is up, the probe IS the
+request.
+
+### Three outcomes, not two
+
+A caller that collapses any two of these shows a user the same empty list for
+opposite reasons:
+
+| Answer | Meaning |
+| --- | --- |
+| `None` | there was no session to ask through. **Nothing was sent.** |
+| `answered=False` | the requests went out and the camera said nothing. This is what a model that does not implement the commands looks like, and also what a channel that just died looks like. It is **not** a statement about the card. |
+| `answered=True` | the camera replied. Only now does an empty `records` mean the card holds nothing in that window. |
+
+`complete=False` means the reply's end flag never arrived or a page did not
+decode - there may be more on the card than came back. The reply is paged and
+there is no known continuation request, so this reports the truncation rather
+than inventing a second request.
+
+Measured 2026-08-13: one A001064 answered nothing to five asks over 84 s on a
+live session. Some models really do not report their card, and `answered=False`
+is the only honest thing to say about them.
+
+### Is there even a card?
+
+```python
+device_client.status.sd_card_present   # True | False | None
+```
+
+Read from the cloud attributes (`SDcardExistFlag`, falling back to
+`SDcardBaseInfo[0]`), so it costs nothing and opens no session. **`None` means
+nobody reported** - four of seven cameras measured carried neither key, including
+a model whose siblings report normally - so it is NOT evidence that a model
+cannot report. Only an explicit `False` says the slot is empty.
+
+Playing an on-device recording is not implemented; `RECORD_PLAYCONTROL` has never
+been sent.
+
 ## Local (LAN-direct) streaming
 
 The camera **media is peer-to-peer**: when the client and the camera are on the

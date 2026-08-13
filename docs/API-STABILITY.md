@@ -17,6 +17,7 @@ signatures and behaviour across minor versions:
 | `aidot_cameras.client.AidotClient` | account session: login, device list, cleanup |
 | `aidot_cameras.configure_stream_limits` | fleet-wide concurrency limits |
 | `DeviceClient` public methods (`async_*`, `start_keepalive`, `attach_lan_client`) | per-camera control and streaming |
+| `CameraDeviceClient.has_live_session` | whether a stream session is up right now, answered without sending anything |
 | the session objects returned by `async_open_webrtc_stream` | `stop()`, `async_start_talk`, `async_stop_talk`, `get_stats`, `talk_supported`, `is_alive` |
 | `aidot_cameras.camera.models` | `CameraDeviceInformation`, `CameraStatusData` |
 | `aidot_cameras.exceptions` | every exception type |
@@ -24,6 +25,22 @@ signatures and behaviour across minor versions:
 | `aidot_cameras.camera.constants` | published protocol constants (`TALK_PCM_*`) |
 | `aidot_cameras.camera.hwaccel.probe_decoder` | decoder capability probe |
 | documented `AIDOT_*` environment variables | per-install tuning seams |
+
+Two of these carry a promise about what they DO NOT say, and callers depend on it:
+
+- **`CameraStatusData.sd_card_present`** is a tri-state. `True` and `False` are
+  readings; **`None` means no camera reported anything** and is not evidence that
+  a model cannot report. Four of seven cameras measured 2026-08-12 carried
+  neither source key, including a model whose siblings report normally. Code that
+  collapses `None` into `False` will tell someone with a working camera that
+  their card slot is empty.
+- **`async_get_sd_recordings`** answers `None` (no session, nothing sent),
+  `answered=False` (asked, camera silent - NOT a statement about the card), or
+  `answered=True` (only now does an empty `records` mean an empty card).
+
+`has_live_session` is best-effort in one direction: a torn-down session reads as
+live on a transport that does not publish `is_alive`, so a caller that acts on it
+must still handle the listing failing anyway.
 
 Two sessions exist - `WebRTCSession` (DTLS cameras) and `SdesSession` (SDES
 cameras). Which one you get depends on the camera, so treat the return value as
