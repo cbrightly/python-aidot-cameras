@@ -123,3 +123,28 @@ def test_http_and_bare_keepalive_routing_are_unchanged():
     assert _which_loop(None, "http://127.0.0.1:18981/cam.ts") == "serve"
     assert _which_loop(None, None) == "jpeg"
     assert _which_loop(None, "http://127.0.0.1:18981/cam.ts", sdes=True) == "sdes"
+
+
+def test_rtsp_push_mode_publishes_over_tcp(monkeypatch):
+    """DTLS gained the RTSP push destination SDES always had.
+
+    Nothing about the media differs by transport at this point - the mux has
+    already produced MPEG-TS - so the only reason DTLS lacked a push was that
+    no destination was wired.  TCP interleave because a UDP publish fragments
+    a 720p keyframe and the first loss takes the GOP with it.
+    """
+    url = "rtsp://127.0.0.1:8554/driveway"
+    proc, seen = _spawn(monkeypatch, url)
+    assert proc is not None
+    cmd = seen["cmd"]
+    assert cmd[-4:] == ["-f", "rtsp", "-rtsp_transport", "tcp", url][-4:]
+    assert cmd[-1] == url
+    assert "-listen" not in cmd
+    # Media must not reach our own stdout here: the push owns the socket, and a
+    # duplicate copy on fd 1 would corrupt whatever a parent reads.
+    assert seen["stdout"] == asyncio.subprocess.DEVNULL
+    assert "-c" in cmd and cmd[cmd.index("-c") + 1] == "copy"
+
+
+def test_rtsp_url_routes_to_the_serve_loop():
+    assert _which_loop(None, "rtsp://127.0.0.1:8554/driveway") == "serve"

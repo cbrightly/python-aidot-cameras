@@ -6,6 +6,40 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- DTLS cameras can RTSP-push. `rtsp://` is now a destination for the A000088
+  serve loop, the same shape SDES has always had. It was never a protocol
+  limitation - by the time media reaches that point the mux has already
+  produced h264 + AAC whichever transport decrypted it, and the only thing
+  missing was the destination. TCP interleave, because a UDP publish fragments
+  a 720p keyframe and the first loss takes the GOP with it.
+  **Unit-tested; not yet confirmed on hardware** - every attempt so far met a
+  busy camera (ack -50002) while the fleet was in use elsewhere. Treat it as
+  provisional until this note goes away.
+
+### Deprecated
+
+- `async_open_cloud_playback` is deprecated and **does not work**. Measured
+  2026-08-14 against an A001064 with ten cloud clips available: step 1, the
+  MQTT `getPlaybackServerInfoReq`, returns an empty response, so the call
+  returns None before a session exists. Nothing in this library, its tests, its
+  CI or the reference integration calls it, which is how it stayed broken while
+  the README named it as *the* retrieval path for cloud recordings. Use
+  `async_get_cloud_recordings` to list and `async_get_event_video_media` for a
+  playable HLS URL - which is what the integration has been doing all along.
+  Removal in 1.0.0.
+
+### Fixed
+
+- The README and `ROAD-TO-1.0.md` named `async_open_cloud_playback` as the way
+  to retrieve cloud recordings. Both now name the pair that works.
+- `async_open_live_stream` says what it is: the TUTK P2P path, unusable on
+  every camera seen so far because no device returns a `p2pId` and the TUTK
+  native libraries are not redistributable here. Live video goes through
+  `async_open_webrtc_stream` on every supported model.
+
+
 ## [1.0.0b9]
 
 ### Fixed

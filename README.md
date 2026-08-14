@@ -42,9 +42,10 @@ not going to change in this release. Neither is a fault to report.
 
 **Recorded video is retrievable only from cloud storage.** Whether a camera
 records to the cloud or to its own SD card is per-camera, not per-model, and the
-device reports it as `IsSupportPlayback`. This library retrieves cloud
-recordings (`async_get_cloud_recordings`, `async_open_cloud_playback`) and has
-no SD-card equivalent, so a camera storing to a card records normally and
+device reports it as `IsSupportPlayback`. This library lists cloud recordings
+(`async_get_cloud_recordings`) and resolves a playable HLS URL for one
+(`async_get_event_video_media`); it has no SD-card equivalent, so a camera
+storing to a card records normally and
 nothing here can play it back. On the reference fleet that is four of seven
 cameras. The vendor's own commands for it are identified but their responses
 have never been decoded; see `docs/ROAD-TO-1.0.md` item 6.

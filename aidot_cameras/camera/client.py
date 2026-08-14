@@ -3300,6 +3300,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         if self.is_sdes_camera:
             self._stream_task = asyncio.ensure_future(self._sdes_keepalive_loop())
         elif rtsp_push_url and (rtsp_push_url.startswith("http")
+                                or rtsp_push_url.startswith("rtsp")
                                 or rtsp_push_url == "-"):
             # "-" is the stdout producer (go2rtc exec: source).  It belongs to
             # the serve loop exactly as an http listen URL does; leaving it out
@@ -4993,7 +4994,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         re-encoding here dropped the live audio (mpegts PMT-timing on the
         real-time pipe).  Returns the process, or None.
 
-        Two destinations:
+        Three destinations:
 
         - ``serve_url == "-"`` -> STDOUT model: write MPEG-TS to this process's
           own stdout (``pipe:1``), so a parent that spawned us - go2rtc's
@@ -5002,6 +5003,13 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
           no cold-start relay, which is the DTLS analogue of the SDES
           ``{output}`` RTSP push.  Logging already goes to stderr, so stdout
           carries nothing but media.
+        - ``rtsp://`` -> PUSH model: publish to an RTSP server the caller
+          already runs, the same shape the SDES path has always had.  This is
+          not a protocol difference finally overcome - the media reaching this
+          point is identical whichever transport decrypted it, and the only
+          reason DTLS had no push was that nobody wired the destination.  TCP
+          interleave, because a UDP publish of a 720p keyframe fragments and
+          the first loss takes the GOP with it.
         - anything else -> HTTP-listen model, unchanged: serve on a ``-listen``
           socket that go2rtc pulls.
         """
@@ -5013,6 +5021,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         if serve_url == "-":
             out_args = ["-f", "mpegts", "pipe:1"]
             out_target = 1               # this process's real stdout
+        elif serve_url.startswith("rtsp"):
+            out_args = ["-f", "rtsp", "-rtsp_transport", "tcp", serve_url]
+            out_target = asyncio.subprocess.DEVNULL
         else:
             out_args = ["-f", "mpegts", "-listen", "1", serve_url]
             out_target = asyncio.subprocess.DEVNULL
@@ -5056,7 +5067,30 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         end_ts: int,
         on_frame: Callable[[VideoFrame], None],
     ) -> Optional[CloudPlaybackSession]:
-        """Open a cloud-playback session streaming frames for the given time range."""
+        """DEPRECATED and non-functional. Use ``async_get_event_video_media``.
+
+        Measured 2026-08-14 on the owner account against an A001064 with ten
+        cloud clips in the last seven days: step 1 (the MQTT
+        ``getPlaybackServerInfoReq``) returns an empty response, so this method
+        returns None before a session is ever opened.  Nothing in this library,
+        its tests, its CI or the reference integration calls it, which is why
+        that went unnoticed - the README named it as the retrieval path for
+        cloud recordings while it did not work.
+
+        The path that does work, and that the reference integration actually
+        uses, is ``async_get_cloud_recordings`` to list plus
+        ``async_get_event_video_media(event_uuid)`` for a playable HLS URL.
+        This method is scheduled for removal in 1.0.0 and is kept only so an
+        importer gets a warning rather than an AttributeError.
+        """
+        warnings.warn(
+            "async_open_cloud_playback is deprecated and does not work: its "
+            "MQTT handshake returns an empty response (measured 2026-08-14). "
+            "Use async_get_cloud_recordings + async_get_event_video_media. "
+            "It will be removed in 1.0.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         # Open a cloud-playback session and begin streaming VideoFrame objects.
         # start_ts / end_ts: Unix timestamps in milliseconds.
         # on_frame: called in the asyncio event loop for each decoded frame.
@@ -5173,7 +5207,17 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         on_frame: Callable[[VideoFrame], None],
         timeout: float = 60.0,
     ) -> Optional[TutkStreamSession]:
-        """Open a TUTK IOTC P2P live-stream session, delivering frames to on_frame."""
+        """Open a TUTK IOTC P2P live-stream session, delivering frames to on_frame.
+
+        **Not usable on any camera seen so far, and not for want of code.** It
+        needs two things this package cannot supply: a ``p2pId`` (the TUTK UID),
+        which came back None for every device on the reference account, and the
+        proprietary ``libIOTCAPIs.so`` / ``libAVAPIs.so`` from the TUTK SDK,
+        which are not redistributable here. See ``docs/DEFERRED_FEATURES.md``.
+        Live video on every supported model goes through
+        ``async_open_webrtc_stream``; this exists because the protocol was
+        worked out, not because anything reaches it.
+        """
         # Open a TUTK IOTC P2P live-stream session.
         # on_frame: called from the receive thread for each decoded VideoFrame.
         # Returns a running TutkStreamSession, or None on failure.

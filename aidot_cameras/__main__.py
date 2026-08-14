@@ -285,6 +285,10 @@ async def cmd_stream(dev_id: str, output_url: str) -> int:
                 "DTLS stdout mode: writing MPEG-TS (video + AAC audio) to "
                 "stdout for a go2rtc exec: consumer."
             )
+        elif output_url.startswith("rtsp") and not dc.is_sdes_camera:
+            _LOGGER.info(
+                "DTLS RTSP push: publishing video + AAC audio to %s.", output_url
+            )
         elif not output_url.startswith("rtsp") and dc.is_sdes_camera:
             _LOGGER.warning(
                 "SDES camera but output %r is not rtsp:// - the library will "
@@ -292,13 +296,6 @@ async def cmd_stream(dev_id: str, output_url: str) -> int:
                 "For go2rtc exec, pass {output}.",
                 output_url,
             )
-        if output_url.startswith("rtsp") and not dc.is_sdes_camera:
-            sys.exit(
-                f"{dev_id} is a DTLS camera - the library has no RTSP-push path "
-                "for it. Use '-' (stdout, for a go2rtc exec: source) or an "
-                "http://host:port/name.ts serve URL instead."
-            )
-
         await dc.async_login()
         await dc.start_keepalive(
             rtsp_push_url=output_url,

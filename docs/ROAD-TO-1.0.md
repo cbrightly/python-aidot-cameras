@@ -1008,8 +1008,12 @@ recordings live. Measured across the reference fleet:
     A001064, A001513 x2    IsSupportPlayback=1, no SD card   -> cloud
     A000088 x4             IsSupportPlayback=0, SDcardStatus=1 -> SD card
 
-The library has exactly one retrieval path, `async_open_cloud_playback`, and
-`async_get_cloud_recordings` to list for it. There is no SD-card equivalent. So
+The library has exactly one working retrieval path -
+`async_get_cloud_recordings` to list, `async_get_event_video_media` for a
+playable HLS URL. (`async_open_cloud_playback`, named here as the retrieval
+path until 2026-08-14, is deprecated: its MQTT handshake returns an empty
+response, measured against a camera with ten clips available.) There is no
+SD-card equivalent. So
 four of the seven cameras on the reference account record continuously to a card
 and **nothing in this package can play any of it back**.
 
