@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b9]
+
 ### Fixed
 
 - The DTLS stdout producer - `aidot-go2rtc <id> -`, the documented way to run
