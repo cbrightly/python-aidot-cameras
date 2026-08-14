@@ -12,8 +12,11 @@ Run it as ``aidot-go2rtc`` (console script) or ``python -m aidot_cameras``.
 Two modes:
 
   * --list                 Print every camera on the account with its device id
-                           and transport (SDES = RTSP-push capable, DTLS =
-                           HTTP-pull only).  Use this to fill in go2rtc.yaml.
+                           and transport, followed by a paste-ready go2rtc
+                           ``streams:`` block - each camera already paired with
+                           the right output argument, which is the one thing
+                           that differs between the transports and the easiest
+                           thing to get wrong.
 
   * <dev_id> <output_url>   Stream one camera.  Meant to be invoked by go2rtc as
                            an ``exec:`` source - go2rtc substitutes ``{output}``
@@ -66,14 +69,16 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import tempfile
+from typing import Optional
 
 import aiohttp
 
 from .client import AidotClient
-from .const import CONF_DEVICE_LIST, CONF_ID, CONF_MODEL_ID
+from .const import CONF_DEVICE_LIST, CONF_ID, CONF_MODEL_ID, CONF_NAME
 
 _LOGGER = logging.getLogger("aidot.go2rtc")
 
@@ -206,8 +211,30 @@ async def _cameras(client: AidotClient) -> list[dict]:
     ]
 
 
+def _stream_slug(name: Optional[str], dev_id: str) -> str:
+    """A go2rtc stream key from the camera's name (``Front Door`` -> ``front_door``).
+
+    go2rtc stream names end up in URLs, so keep it to lowercase word characters
+    and fall back to the device id when a name is missing or is punctuation
+    only.  Pure (unit-testable)."""
+    slug = re.sub(r"[^a-z0-9]+", "_", (name or "").lower()).strip("_")
+    return slug or f"camera_{dev_id[:8]}"
+
+
+def _go2rtc_source(dev_id: str, is_sdes: bool) -> str:
+    """The ``exec:`` source line for one camera.
+
+    The only difference between the two transports is the output argument:
+    SDES cameras RTSP-push into go2rtc's own ``{output}`` URL, DTLS cameras
+    write MPEG-TS to stdout (``-``).  Getting that backwards is the single most
+    common way to end up with a stream that never starts, which is why --list
+    writes the line out rather than describing it."""
+    out = "{output}" if is_sdes else "-"
+    return f"exec:aidot-go2rtc {dev_id} {out}"
+
+
 async def cmd_list() -> int:
-    """Print device id + transport for every camera, for go2rtc.yaml."""
+    """Print device id + transport for every camera, plus paste-ready go2rtc YAML."""
     async with aiohttp.ClientSession() as session:
         client = await _make_client(session)
         cams = await _cameras(client)
@@ -216,10 +243,20 @@ async def cmd_list() -> int:
             return 1
         print(f"{'device_id':<40}  {'model':<14}  transport")
         print("-" * 72)
+        rows = []
         for d in cams:
             dc = client.get_device_client(d)
-            transport = "SDES (rtsp-push)" if dc.is_sdes_camera else "DTLS (http-pull)"
+            transport = "SDES (rtsp-push)" if dc.is_sdes_camera else "DTLS (stdout)"
             print(f"{d[CONF_ID]:<40}  {(d.get(CONF_MODEL_ID) or ''):<14}  {transport}")
+            rows.append((_stream_slug(d.get(CONF_NAME), d[CONF_ID]),
+                         _go2rtc_source(d[CONF_ID], dc.is_sdes_camera)))
+        width = max(len(slug) for slug, _ in rows) + 1
+        print("\n# Paste into go2rtc.yaml (rename the streams to taste). go2rtc needs")
+        print("# the same AIDOT_* environment variables this command just used.")
+        print("streams:")
+        for slug, source in rows:
+            print(f"  {(slug + ':'):<{width}} {source}")
+        print("\n# Then each camera is at rtsp://<go2rtc-host>:8554/<stream-name>")
     return 0
 
 

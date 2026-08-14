@@ -218,6 +218,81 @@ await session.async_stop_talk()
 See [`docs/CAMERAS.md`](https://github.com/cbrightly/python-aidot-cameras/blob/main/docs/CAMERAS.md) for the full camera API (streaming,
 snapshots, recordings, motion polling, two-way audio, and LAN-direct media).
 
+## Getting an RTSP URL
+
+Want a plain `rtsp://` URL for Frigate, an NVR, or VLC? You can have one, but
+not from this library alone: **it does not run an RTSP server**, and neither do
+the cameras - they have no RTSP and no ONVIF endpoint. The only way video
+leaves them is the cloud-signalled WebRTC handshake and SRTP decrypt this
+library does. Pair it with [go2rtc](https://github.com/AlexxIT/go2rtc) and
+go2rtc publishes the RTSP URL for you.
+
+Three steps, about five minutes.
+
+**1. List your cameras.** The transport column decides one word in step 3, so
+keep the output around:
+
+```console
+$ pip install "python-aidot-cameras[webrtc]"
+$ export AIDOT_USERNAME='you@example.com' AIDOT_PASSWORD='...' AIDOT_COUNTRY=US
+$ aidot-go2rtc --list
+1a2b3c4d...  LK.IPC.A000088  DTLS (http-pull)
+5e6f7a8b...  LK.IPC.A001064  SDES (rtsp-push)
+```
+
+**2. Add one line per camera to `go2rtc.yaml`.** Both forms make go2rtc the
+parent process, so it starts the stream on the first viewer and kills it when
+the last one leaves - nothing talks to your cameras while nobody is watching:
+
+```yaml
+streams:
+  driveway:  exec:aidot-go2rtc 1a2b3c4d... -          # DTLS camera
+  frontdoor: exec:aidot-go2rtc 5e6f7a8b... {output}   # SDES camera
+```
+
+Use `-` for a DTLS camera and `{output}` for an SDES one - that is the whole
+difference, and `--list` told you which is which. (`{output}` is a placeholder
+go2rtc fills in with its own publish URL. It is not something you type at a
+shell; `-` is the form for that.) go2rtc needs the same `AIDOT_*` environment
+variables the CLI does, so set them wherever go2rtc starts.
+
+**3. Use the URL.** go2rtc serves every stream you named at:
+
+```
+rtsp://<go2rtc-host>:8554/driveway
+```
+
+Check it before wiring anything up to it:
+
+```console
+$ ffprobe rtsp://127.0.0.1:8554/driveway
+Stream #0:0: Video: h264 (High), yuv420p, 1280x720, 15 fps
+Stream #0:1: Audio: aac (LC), 48000 Hz, mono
+```
+
+### Details worth knowing
+
+- **Which camera is which.** `--list` reports the transport per device. DTLS is
+  the mains A000088; SDES is the A001064 / A001513 family. Passing the wrong
+  form is not silent - the CLI tells you which one to use and exits.
+- **Audio.** The SDES `{output}` push carries G.711 audio alongside video; the
+  DTLS `-` producer carries AAC (48 kHz mono, resampled from the camera's 8 kHz
+  A-law, because 8 kHz AAC plays silent in a lot of browsers).
+- **A stream that starts with no video** and picks it up a few seconds later is
+  normal: the mux waits for a keyframe so the first GOP is decodable. A stream
+  that stays audio-only is a camera that never sent one - retry the view.
+- **Skipping go2rtc.** `aidot-go2rtc <id> http://127.0.0.1:8555/cam.ts` serves
+  MPEG-TS on a listening socket instead, for a consumer that pulls rather than
+  spawns. That process has to stay running to keep the port bound, so it holds
+  a camera session whether or not anyone is watching. Prefer the `exec:` forms.
+- **From Python**, `rtsp_push_url=` publishes to your own RTSP server directly
+  (SDES cameras only - there is no RTSP-push path for DTLS), and
+  `output_path=` records to a file. `Go2RtcClient.rtsp_url(name)` builds the
+  address above, and `ensure_stream(name, source)` registers a stream with a
+  running go2rtc if you would rather not edit YAML.
+- **Home Assistant users need none of this.** The integration manages go2rtc
+  itself; this section is for standalone use.
+
 ## Home Assistant component and CLI
 
 The Home Assistant custom component (`custom_components/aidot/`) is **not** part

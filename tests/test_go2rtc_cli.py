@@ -12,7 +12,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from aidot_cameras.__main__ import _env_bool, _read_token_file, _write_token_file, main
+from aidot_cameras.__main__ import (
+    _env_bool,
+    _go2rtc_source,
+    _read_token_file,
+    _stream_slug,
+    _write_token_file,
+    main,
+)
 
 
 def test_env_bool_tristate(monkeypatch):
@@ -53,3 +60,24 @@ def test_main_requires_output_url_when_dev_id_given():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_stream_slug_is_url_safe_and_falls_back_to_the_id():
+    assert _stream_slug("Front Door", "abc") == "front_door"
+    assert _stream_slug("Winees Spotlight Cam_183", "abc") == "winees_spotlight_cam_183"
+    # A go2rtc stream name lands in a URL path, so punctuation-only or missing
+    # names must not produce an empty (or slash-bearing) key.
+    assert _stream_slug(None, "7c89a5c1b363") == "camera_7c89a5c1"
+    assert _stream_slug("!!!", "7c89a5c1b363") == "camera_7c89a5c1"
+    assert _stream_slug("Back/Yard #2", "abc") == "back_yard_2"
+
+
+def test_go2rtc_source_pairs_each_transport_with_its_output_argument():
+    """The output argument is the whole difference between the two transports.
+
+    ``{output}`` on a DTLS camera and ``-`` on an SDES one are both rejected by
+    cmd_stream, so a --list that printed the wrong one would hand the user a
+    config that cannot work.
+    """
+    assert _go2rtc_source("dev1", True) == "exec:aidot-go2rtc dev1 {output}"
+    assert _go2rtc_source("dev2", False) == "exec:aidot-go2rtc dev2 -"

@@ -75,3 +75,51 @@ def test_both_modes_still_copy_from_the_mux_pipe(monkeypatch):
 def test_no_serve_url_still_returns_none(monkeypatch):
     proc, seen = _spawn(monkeypatch, "")
     assert proc is None and "cmd" not in seen
+
+
+def _which_loop(monkeypatch, url, *, sdes=False):
+    """Which keepalive loop does start_keepalive pick for ``url``?"""
+    picked = []
+
+    async def _noop():
+        return None
+
+    obj = types.SimpleNamespace(
+        is_sdes_camera=sdes,
+        _stream_task=None,
+        _serve_relay_opt=None,
+        _start_keepalive_renew=lambda: None,
+        _sdes_keepalive_loop=lambda: (picked.append("sdes"), _noop())[1],
+        _dtls_serve_loop=lambda: (picked.append("serve"), _noop())[1],
+        _streaming_loop=lambda: (picked.append("jpeg"), _noop())[1],
+        _maybe_register_go2rtc=lambda *a, **k: _noop(),
+    )
+    fn = CameraMixin.start_keepalive.__get__(obj)
+
+    async def _run():
+        await fn(rtsp_push_url=url)
+        task = obj._stream_task
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(_run())
+    return picked[0] if picked else None
+
+
+def test_stdout_url_routes_to_the_serve_loop():
+    """``-`` has to reach _dtls_serve_loop or the producer never runs.
+
+    It used to fall through the ``startswith("http")`` gate into the on_frame
+    JPEG loop, which opens a perfectly healthy WebRTC session and writes
+    nothing to stdout - a go2rtc exec: source that hangs forever with no error
+    anywhere.  Measured on an A000088: session up, data channel live, zero
+    bytes out.  The unit tests above passed throughout, because they call
+    _spawn_dtls_serve_ffmpeg directly and never ask who calls it.
+    """
+    assert _which_loop(None, "-") == "serve"
+
+
+def test_http_and_bare_keepalive_routing_are_unchanged():
+    assert _which_loop(None, "http://127.0.0.1:18981/cam.ts") == "serve"
+    assert _which_loop(None, None) == "jpeg"
+    assert _which_loop(None, "http://127.0.0.1:18981/cam.ts", sdes=True) == "sdes"

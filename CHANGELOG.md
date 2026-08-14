@@ -8,6 +8,17 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ### Fixed
 
+- The DTLS stdout producer - `aidot-go2rtc <id> -`, the documented way to run
+  an A000088 as a go2rtc `exec:` source - never actually ran. The keepalive
+  router only sent `http` URLs to the serve loop, so `-` fell through to the
+  JPEG keepalive loop: a healthy WebRTC session, a live data channel, and zero
+  bytes on stdout, with no error anywhere. Measured on hardware: 0 bytes before,
+  1.4 MB of MPEG-TS after. The unit tests passed throughout because they called
+  the spawn helper directly and never asked who calls it; there is now a test
+  for the routing itself. Stdout mode also no longer idle-releases - go2rtc owns
+  the process lifetime there, and with no serve port to ask about viewers the
+  fallback could put a live producer to sleep underneath it.
+
 - `on_frame` is annotated `av.VideoFrame` instead of the library's own
   `VideoFrame` dataclass. The callback always received PyAV's frame; the wrong
   annotation made a type checker bless `frame.data` / `frame.timestamp`, which
@@ -23,6 +34,18 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   an ack does not mean the write took: of fourteen attributes probed, eight
   acked and kept their own value. `SdcardRecord_Enable` was in an earlier draft
   and was removed for exactly that reason.
+- `aidot-go2rtc --list` now prints a paste-ready go2rtc `streams:` block under
+  the device table, each camera already paired with the output argument its
+  transport needs (`{output}` for SDES, `-` for DTLS) and named from the
+  camera's own name. That pairing was the one thing users had to get right by
+  reading prose, and getting it wrong produces a stream that never starts. The
+  existing device table is byte-for-byte unchanged, but the block is appended
+  unconditionally - a script parsing `--list` output to its end will now see it.
+- A README section on getting an RTSP URL. The library does not run an RTSP
+  server and the cameras have no RTSP or ONVIF endpoint, so the route users
+  actually want - go2rtc as the parent process, publishing
+  `rtsp://host:8554/<name>` - was documented only inside a CLI docstring.
+
 ### Deprecated
 
 - `async_open_kvs_stream`, the pre-rename alias, now emits a

@@ -3299,7 +3299,14 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         self._start_keepalive_renew()
         if self.is_sdes_camera:
             self._stream_task = asyncio.ensure_future(self._sdes_keepalive_loop())
-        elif rtsp_push_url and rtsp_push_url.startswith("http"):
+        elif rtsp_push_url and (rtsp_push_url.startswith("http")
+                                or rtsp_push_url == "-"):
+            # "-" is the stdout producer (go2rtc exec: source).  It belongs to
+            # the serve loop exactly as an http listen URL does; leaving it out
+            # of this gate sent it to the JPEG keepalive loop instead, which
+            # opens a healthy WebRTC session and writes nothing to stdout.  The
+            # spawn helper had supported "-" the whole time - nothing ever
+            # called it with "-".
             self._stream_task = asyncio.ensure_future(self._dtls_serve_loop())
         else:
             self._stream_task = asyncio.ensure_future(self._streaming_loop())
@@ -4777,6 +4784,16 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             # stream_idle_s / AIDOT_STREAM_IDLE_S override; <= 0 = never release
             # (keep warm for instant re-views; mains cameras only - see P1).
             idle_secs = self._resolve_idle_secs()
+            if serve_url == "-":
+                # Stdout mode: the parent (go2rtc) owns our lifecycle and kills
+                # us when the last viewer leaves, so releasing ourselves is at
+                # best redundant.  It is also unsafe here: there is no serve
+                # port to ask about viewers, so _viewer_present can only answer
+                # "unknown" and the pipe-staleness fallback decides.  A go2rtc
+                # that pauses reading for longer than the window would push us
+                # dormant while it still holds the process - a live producer
+                # that has quietly stopped producing.
+                idle_secs = 0.0
             proc = wfile = stop_flag = mux_thread = None
             cancelled = idle_release = False
             try:
