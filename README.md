@@ -135,9 +135,9 @@ export AIDOT_USERNAME=... AIDOT_PASSWORD=...   # or AIDOT_TOKEN_FILE, see below
 aidot-go2rtc --list                  # discover cameras + their transport
 
 # Stream one camera. Pick the form that matches how you are running it:
-aidot-go2rtc <device_id> -                              # MPEG-TS to stdout
-aidot-go2rtc <device_id> http://127.0.0.1:8555/cam.ts   # serve, then pull it
-aidot-go2rtc <device_id> '{output}'                     # go2rtc exec: source only
+aidot-go2rtc <device_id> -                              # DTLS: MPEG-TS to stdout
+aidot-go2rtc <device_id> '{output}'                     # SDES: go2rtc exec: only
+aidot-go2rtc <device_id> http://127.0.0.1:8555/cam.ts   # either: serve, then pull
 ```
 
 `'{output}'` is a placeholder go2rtc substitutes; run by hand it is passed

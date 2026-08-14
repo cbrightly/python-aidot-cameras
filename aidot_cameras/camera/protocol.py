@@ -2690,10 +2690,16 @@ class AvioRequestMixin:
     def dispatch_avio_frame(self, frame: bytes) -> bool:
         """Offer an inbound control frame to whoever is waiting for it.
 
-        Called from the transports' receive paths (the DTLS DataChannel message
-        handler, the SDES bridge thread).  False - not an error - when nothing
-        was waiting for it, which is the common case: the camera sends session
-        notifications and track switches nobody asked for.
+        False - not an error - when nothing was waiting for it, which is the
+        common case: the camera sends session notifications and track switches
+        nobody asked for.
+
+        This is a hook for a caller that has its own receive path.  Nothing in
+        this library calls it: both transports (the DTLS DataChannel message
+        handler and the SDES bridge thread) hold the response registry directly
+        in their session closure and dispatch into it there, because they run
+        before - and outside - any device-client instance.  The docstring used
+        to claim they came through here, which made it look load-bearing.
         """
         return self._avio_responses.dispatch(frame)
 
