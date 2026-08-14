@@ -7,7 +7,11 @@ import os
 import random
 import time
 import asyncio
-from typing import Any, Callable, List, Optional
+import warnings
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Union
+
+if TYPE_CHECKING:  # annotation only; keeps av off the import path
+    from av import VideoFrame as AvVideoFrame
 
 from ..exceptions import AidotCameraBusy, AidotCameraNotReady
 from ..const import APP_ID as _AIDOT_APP_ID
@@ -44,7 +48,7 @@ from .playback import (  # re-exported (split into playback.py)
     LiveStreamSession,  # noqa: F401 - back-compat re-export (unused in-module)
 )
 from .webrtc import WebRTCSession  # re-exported (split into webrtc.py)
-from .sdes import SdesSession  # noqa: F401 - re-exported (split into sdes.py); used by sdes_open mixin
+from .sdes import SdesSession  # re-exported (split into sdes.py); also the SDES return type
 from .controls import _CameraControlsMixin
 from .sd_listing import _CameraSdMixin
 from .webrtc_open import _WebRTCOpenMixin
@@ -5389,20 +5393,72 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         version = 1 if sdes else 2
         return f"{session}_{rand6}_{live_type}_{stream_id}_{version}"
 
-    async def async_open_webrtc_stream(self, *args, **kwargs) -> "WebRTCSession":
+    async def async_open_webrtc_stream(
+        self,
+        on_frame: "Optional[Callable[[AvVideoFrame], None]]" = None,
+        *,
+        stream_id: int = 0,
+        timeout: float = 30.0,
+        output_path: Optional[str] = None,
+        max_seconds: Optional[float] = None,
+        status_callback: Optional[Callable[[str], None]] = None,
+        force_sdes: Optional[bool] = None,
+        rtsp_push_url: Optional[str] = None,
+        talk_pcm_provider: "Optional[Callable[[], Optional[bytes]]]" = None,
+        talk: bool = False,
+        reuse_peer_id: Optional[str] = None,
+        **kwargs: Any,
+    ) -> "Union[WebRTCSession, SdesSession]":
         """Serialized entry point for opening a WebRTC stream.
 
         Holds the global open-gate during the handshake so concurrent camera
         opens don't drown the shared MQTT signaling channel (see
         _get_webrtc_open_gate); the gate is released as soon as the session is
         established (or fails), so established streams run concurrently.
+
+        The parameters are spelled out rather than forwarded as ``*args,
+        **kwargs`` because this package ships ``py.typed``: an untyped wrapper
+        made ``help()``, IDE completion and downstream type checkers see a
+        function that accepts anything. ``**kwargs`` remains only to carry the
+        underscore-prefixed internals the impl accepts, which are not part of
+        the public surface and are deliberately not named here.
+
+        Returns an ``SdesSession`` on SDES cameras and a ``WebRTCSession`` on
+        DTLS ones. They are not interchangeable - see docs/API-STABILITY.md for
+        the four methods both are promised to have.
         """
         async with _get_webrtc_open_gate():
-            return await self._async_open_webrtc_stream_impl(*args, **kwargs)
+            return await self._async_open_webrtc_stream_impl(
+                on_frame,
+                stream_id=stream_id,
+                timeout=timeout,
+                output_path=output_path,
+                max_seconds=max_seconds,
+                status_callback=status_callback,
+                force_sdes=force_sdes,
+                rtsp_push_url=rtsp_push_url,
+                talk_pcm_provider=talk_pcm_provider,
+                talk=talk,
+                reuse_peer_id=reuse_peer_id,
+                **kwargs,
+            )
 
+    async def async_open_kvs_stream(self, *args: Any, **kwargs: Any):
+        """Deprecated alias for :meth:`async_open_webrtc_stream`.
 
-    # Keep old name as alias
-    async_open_kvs_stream = async_open_webrtc_stream
+        The name predates the rename and is used by nothing in this project, in
+        its tests, or in the reference integration. It was never listed in
+        docs/API-STABILITY.md, so it was never promised - but it has been
+        importable, so it gets a release of warning rather than vanishing.
+        Scheduled for removal in 1.0.0.
+        """
+        warnings.warn(
+            "async_open_kvs_stream is deprecated and will be removed in 1.0.0; "
+            "use async_open_webrtc_stream instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.async_open_webrtc_stream(*args, **kwargs)
 
     # ------------------------------------------------------------------ #
     # SDES-SRTP streaming path (cameras with isDTLS == '0')

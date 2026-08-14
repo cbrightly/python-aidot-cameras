@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/python-aidot-cameras)](https://pypi.org/project/python-aidot-cameras/)
 [![Python versions](https://img.shields.io/pypi/pyversions/python-aidot-cameras)](https://pypi.org/project/python-aidot-cameras/)
-[![License: MIT](https://img.shields.io/pypi/l/python-aidot-cameras)](LICENSE)
+[![License: MIT](https://img.shields.io/pypi/l/python-aidot-cameras)](https://github.com/cbrightly/python-aidot-cameras/blob/main/LICENSE)
 
 Control AIDOT WiFi lights **and cameras** from Python.
 
@@ -15,7 +15,7 @@ recordings/thumbnails, and two-way (push-to-talk) audio.
 Upstream owns the `aidot` import name and handles non-camera devices (lights,
 plugs, switches) with none of this package's code in the path; everything here
 lives under `aidot_cameras`. Taking a new upstream release is a dependency bump
-plus a test run - see [`docs/UPSTREAM.md`](docs/UPSTREAM.md).
+plus a test run - see [`docs/UPSTREAM.md`](https://github.com/cbrightly/python-aidot-cameras/blob/main/docs/UPSTREAM.md).
 
 This repository is the **library** (distribution name `python-aidot-cameras`).
 The Home Assistant custom component (`custom_components/aidot/`) lives in the
@@ -32,7 +32,7 @@ The streaming transport is auto-selected per camera from its model id:
 - **A001064** (PTZ) - SDES-SRTP, wired/mains (role-reversal handshake).
 
 Other battery models (A001108, A001360) are recognized in code with the same
-battery handling. See [`docs/CAMERAS.md`](docs/CAMERAS.md#supported-cameras) for
+battery handling. See [`docs/CAMERAS.md`](https://github.com/cbrightly/python-aidot-cameras/blob/main/docs/CAMERAS.md#supported-cameras) for
 the authoritative table and per-model notes.
 
 ## Known characteristics
@@ -133,7 +133,25 @@ uv tool install "python-aidot-cameras[webrtc]"
 
 export AIDOT_USERNAME=... AIDOT_PASSWORD=...   # or AIDOT_TOKEN_FILE, see below
 aidot-go2rtc --list                  # discover cameras + their transport
-aidot-go2rtc <device_id> '{output}'  # stream one camera (as a go2rtc exec: source)
+
+# Stream one camera. Pick the form that matches how you are running it:
+aidot-go2rtc <device_id> -                              # MPEG-TS to stdout
+aidot-go2rtc <device_id> http://127.0.0.1:8555/cam.ts   # serve, then pull it
+aidot-go2rtc <device_id> '{output}'                     # go2rtc exec: source only
+```
+
+`'{output}'` is a placeholder go2rtc substitutes; run by hand it is passed
+through as an RTSP push URL, which DTLS cameras (A000088) have no path for and
+the tool refuses. Use `-` or an `http://host:port/name.ts` serve for a
+standalone run.
+
+**ffmpeg must be on PATH.** SDES cameras - two of the three validated models -
+stream entirely through an ffmpeg subprocess, and pip cannot install a system
+binary:
+
+```bash
+sudo apt install ffmpeg      # Debian/Ubuntu
+brew install ffmpeg          # macOS
 ```
 
 Authenticates via `AIDOT_USERNAME`/`AIDOT_PASSWORD` (`AIDOT_COUNTRY`, default
@@ -145,11 +163,47 @@ the full list of authentication and stream env vars.
 
 ## Usage
 
-Open a live WebRTC stream from a camera device client:
+Import from `aidot_cameras`, never from `aidot`. The upstream `aidot` package is
+a dependency of this one and its `AidotClient` is lights-only: importing from it
+gives you a client with no camera surface and **no ImportError** to tell you
+why.
+
+Log in, find a camera, and open a stream:
+
+```python
+import aiohttp
+from aidot_cameras.client import AidotClient
+from aidot_cameras.const import CONF_DEVICE_LIST, CONF_NAME
+
+async with aiohttp.ClientSession() as http:
+    client = AidotClient(http, country_code="US", username=..., password=...)
+    await client.async_post_login()
+    devices = (await client.async_get_all_device())[CONF_DEVICE_LIST]
+    cam = next(d for d in devices if d.get(CONF_NAME) == "Front Door")
+    device_client = client.get_device_client(cam)
+```
+
+`get_device_client` returns a `CameraDeviceClient` for a camera. Plain
+`DeviceClient` and `LightDeviceClient` are the lights clients and carry none of
+the camera surface, so a `hasattr` probe against the wrong one fails silently.
+
+Open a live WebRTC stream:
 
 ```python
 session = await device_client.async_open_webrtc_stream(on_frame=cb, timeout=30.0)
 # ... session.stop() when done
+```
+
+`on_frame` receives a PyAV `av.VideoFrame` - use `pts` / `time_base` /
+`to_ndarray()`. It is **DTLS-only** (A000088): SDES cameras (A001513, A001064)
+decode out of process, so `on_frame` never fires for them and no error is
+raised. For those, take the media as a file or a stream instead:
+
+```python
+session = await device_client.async_open_webrtc_stream(
+    output_path="/tmp/live.ts",                      # record, or
+    rtsp_push_url="rtsp://127.0.0.1:8554/cam",       # push to go2rtc
+)
 ```
 
 Two-way (push-to-talk) audio:
@@ -161,7 +215,7 @@ await session.async_start_talk(pcm_provider)   # provider() -> 320B s16le PCM (2
 await session.async_stop_talk()
 ```
 
-See [`docs/CAMERAS.md`](docs/CAMERAS.md) for the full camera API (streaming,
+See [`docs/CAMERAS.md`](https://github.com/cbrightly/python-aidot-cameras/blob/main/docs/CAMERAS.md) for the full camera API (streaming,
 snapshots, recordings, motion polling, two-way audio, and LAN-direct media).
 
 ## Home Assistant component and CLI
@@ -179,7 +233,7 @@ The library reads the following environment variables.
 ### Credentials
 
 Used by the credential helper (`aidot.credentials`); they take priority over any
-stored credentials file. See [`aidot_cameras/credentials.py`](aidot_cameras/credentials.py).
+stored credentials file. See [`aidot_cameras/credentials.py`](https://github.com/cbrightly/python-aidot-cameras/blob/main/aidot_cameras/credentials.py).
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
@@ -193,7 +247,7 @@ The most useful knobs read by the camera client (`aidot_cameras.camera.client`).
 are chosen to work out of the box; override only when tuning. Finer-grained
 internal knobs (audio normalization, keyframe/PLI cadence, retry timing, SDES
 audio, idle release, the sprop cache path) are documented in
-[`docs/CAMERAS.md`](docs/CAMERAS.md#advanced-tuning-environment-variables).
+[`docs/CAMERAS.md`](https://github.com/cbrightly/python-aidot-cameras/blob/main/docs/CAMERAS.md#advanced-tuning-environment-variables).
 
 | Variable | Purpose | Default |
 | --- | --- | --- |

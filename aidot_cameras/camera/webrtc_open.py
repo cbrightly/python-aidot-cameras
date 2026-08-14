@@ -14,11 +14,13 @@ import random
 import struct
 import time
 import logging
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+if TYPE_CHECKING:  # import cost stays out of the runtime path
+    from av import VideoFrame as AvVideoFrame
 
 from ..exceptions import AidotCameraBusy, AidotCameraNotReady
 from .constants import _LIVE_PLAY_NOT_READY, fallback_turn_uris, stun_server_uris
-from .models import VideoFrame
 from .webrtc import WebRTCSession
 from .protocol import (
     AvioResponseRouter,
@@ -234,7 +236,7 @@ def _is_camera_present_signal(topic, msg, device_id):
 class _WebRTCOpenMixin:
     async def _async_open_webrtc_stream_impl(
         self,
-        on_frame: Optional[Callable[["VideoFrame"], None]] = None,
+        on_frame: Optional[Callable[["AvVideoFrame"], None]] = None,
         *,
         stream_id: int = 0,
         timeout: float = 30.0,
@@ -271,7 +273,7 @@ class _WebRTCOpenMixin:
           5. Generate SDP offer -> publish to ``iot/v1/s/{userId}/IPC/webrtcReq``
           6. Receive ``IPC/webrtcResp`` on ``iot/v1/c/{userId}/#`` -> set remote description
           7. Exchange ICE candidates on ``iot/v1/s/{userId}/IPC/iceCandidateReq``
-          8. Receive media tracks -> call ``on_frame`` for each VideoFrame
+          8. Receive media tracks -> call ``on_frame`` for each av.VideoFrame
 
         Topic routing: ALL IPC publish messages (getIceConfigReq, livePlayReq,
         webrtcReq, iceCandidateReq) go to ``iot/v1/s/{userId}/IPC/...``.
@@ -284,6 +286,11 @@ class _WebRTCOpenMixin:
         ----------
         on_frame : callable or None
             Called with each ``av.VideoFrame`` from the camera (DTLS path only).
+            This is PyAV's frame, not ``aidot_cameras.camera.models.VideoFrame``:
+            use ``pts`` / ``time_base`` / ``to_ndarray()``. Reading ``timestamp``
+            or ``data`` on it yields nothing and looks like a dead stream.
+            SDES cameras decode out of process, so ``on_frame`` never fires there -
+            use ``output_path`` or ``rtsp_push_url``.
         stream_id : int
             Stream index: 0 = main stream, 1 = sub-stream.
         timeout : float

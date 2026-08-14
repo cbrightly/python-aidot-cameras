@@ -1,1 +1,3 @@
-include aidot/py.typed
+# py.typed ships via pyproject.toml's package-data; nothing extra is needed
+# here. The previous line pointed at an `aidot/` directory that does not
+# exist in this distribution.

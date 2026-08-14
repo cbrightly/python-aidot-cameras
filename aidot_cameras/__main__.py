@@ -7,7 +7,7 @@ use them: it authenticates to the AiDot cloud, opens the keepalive session for
 one camera, and pushes/serves the decrypted H.264 (+ G711 audio on the RTSP-push
 path) to a URL the consumer reads.
 
-Run it as ``aidot-go2rtc`` (console script) or ``python -m aidot``.
+Run it as ``aidot-go2rtc`` (console script) or ``python -m aidot_cameras``.
 
 Two modes:
 
@@ -293,9 +293,13 @@ async def cmd_stream(dev_id: str, output_url: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The module docstring above IS the reference for every env var this tool
+    # reads, and the README tells users --help will show it. Print it rather
+    # than a one-line summary that leaves them hunting through source.
     parser = argparse.ArgumentParser(
         prog="aidot-go2rtc",
-        description="Bridge an AiDot camera into go2rtc (HA-independent).",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Run with --list first to discover device ids and transports.",
     )
     parser.add_argument("dev_id", nargs="?", help="camera device id (see --list)")

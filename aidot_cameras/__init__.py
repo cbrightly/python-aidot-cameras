@@ -13,6 +13,12 @@ import time as _time
 from .client import AidotClient, CameraClient
 from .device_client import CameraDeviceClient, DeviceInformation, DeviceStatusData
 from .camera.client import configure_stream_limits
+# Promised by docs/API-STABILITY.md and previously not reachable from the
+# package root. Verified to pull no optional dependency: importing these does
+# not drag in av or aiortc, so a plain (non-[webrtc]) install still imports.
+from .camera.models import CameraDeviceInformation, CameraStatusData
+from .camera.sdes import SdesSession
+from .camera.webrtc import WebRTCSession
 from .discover import CameraDiscover, Discover
 from .exceptions import (
     AidotAuthFailed,
@@ -141,12 +147,16 @@ __all__ = [
     "AidotUserOrPassIncorrect",
     "CameraClient",
     "CameraDeviceClient",
+    "CameraDeviceInformation",
     "CameraDiscover",
+    "CameraStatusData",
     "DeviceInformation",
     "DeviceStatusData",
     "Discover",
     "HTTPError",
     "InvalidHost",
     "InvalidURL",
+    "SdesSession",
+    "WebRTCSession",
     "configure_stream_limits",
 ]

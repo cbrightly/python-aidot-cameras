@@ -49,10 +49,26 @@ interchangeable beyond that.
 
 ## Not public
 
+### Public, and previously undeclared
+
+These are imported by the reference consumer (the Home Assistant integration)
+and were therefore already commitments in practice, whatever this table said:
+
+- `aidot_cameras.camera.lan_control` - LAN-direct control helpers.
+- `aidot_cameras.camera.go2rtc` - the go2rtc bridge helpers.
+- `device_session_authenticated` - a module-level function, so the
+  "`DeviceClient` public methods" row above does not cover it.
+
+Named here rather than quietly broken later. `CameraLanClient` appears in the
+README as a user-facing concept and is covered by the client rows.
+
 - Anything named with a leading underscore, at any level - module, class,
   function or attribute. Much of the interesting behaviour lives in
   `_open_sdes_stream_impl`, `_bridge_fn` and friends; none of it is stable.
-- `aidot_cameras._vendor.*`. A vendored aiortc, pinned and patched. It tracks
+- `aidot_cameras._vendor.*`. A vendored aiortc 1.14.0, differing from upstream
+  only by three import rewrites - the exact delta and the re-vendoring procedure
+  are in `aidot_cameras/_vendor/aiortc/VENDOR.md`, and upstream's BSD licence
+  ships beside it. It tracks
   upstream on our schedule and is not part of the contract.
 - The internal protocol helpers in `camera.protocol` other than those named
   above, including the AVIO request and response machinery.
