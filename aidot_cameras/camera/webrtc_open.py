@@ -1055,6 +1055,17 @@ class _WebRTCOpenMixin:
                     "/mqtt", _on_mqtt_ready, outgoing_q,
                 ),
             )
+            # Register with the same backstop the persistent branch uses.  This
+            # session runs for 3600 s and is stopped ONLY by the outgoing_q
+            # sentinel; nothing pushes that sentinel when an open is cancelled,
+            # and until now nothing held a reference either - so a cancelled
+            # open orphaned an executor thread, and its MQTT connection, for a
+            # full hour.  Executor workers are finite: enough orphans and every
+            # run_in_executor in the process blocks, which presents to a caller
+            # as an open that simply never returns.  _release_stream_drain_to_session
+            # clears this on success, so a live session is never reaped.
+            self._stream_mqtt_drain = mqtt_fut
+            self._stream_mqtt_outq = outgoing_q
 
         # Wait for MQTT to be connected and subscribed before proceeding.
         # threading.Event.wait(timeout) returns True if set, False on timeout.

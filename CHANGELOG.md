@@ -6,6 +6,22 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A cancelled open orphaned its MQTT session thread for an hour.** The
+  non-persistent signalling transport runs a 3600 s session in an executor and
+  is stopped only by the `outgoing_q` sentinel. Nothing pushes that sentinel on
+  cancellation, and nothing held a reference to the worker either - so it could
+  not be reaped later. The persistent branch has registered with
+  `_reap_stream_drain` for exactly this reason since it was written; the other
+  branch never did.
+
+  Executor workers are finite. Enough orphans and every `run_in_executor` in
+  the process blocks, which a caller experiences as an open that never returns -
+  the same symptom as the uncancellable drain fixed in 1.0.0b12, and plausibly
+  the mechanism behind it. Found by asking whether that fix had siblings.
+
+
 ## [1.0.0b12]
 
 ### Fixed
