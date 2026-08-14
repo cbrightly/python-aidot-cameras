@@ -14,6 +14,15 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   read empty at runtime and look exactly like a dead stream, and reject
   `frame.to_ndarray()`, which is what works.
 
+### Added
+
+- Local-only control for four camera settings that were readable over LAN but
+  had no control: the timestamp overlay (`OSDEnable`), HDR (`HDRStatus`),
+  floodlight automation (`autoLightEnable`) and voice prompts (`voiceEnable`).
+  Every one was toggled on live hardware and read back, because on this firmware
+  an ack does not mean the write took: of fourteen attributes probed, eight
+  acked and kept their own value. `SdcardRecord_Enable` was in an earlier draft
+  and was removed for exactly that reason.
 ### Deprecated
 
 - `async_open_kvs_stream`, the pre-rename alias, now emits a

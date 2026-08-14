@@ -49,6 +49,24 @@ class _CameraControlsMixin:
         """Turn the camera's status LED on or off."""
         return await self.async_set_device_attribute("LedOnOff", 1 if enabled else 0)
 
+    async def async_set_osd_timestamp(self, enabled: bool) -> bool:
+        """Show or hide the timestamp overlay burned into the video (OSDEnable)."""
+        return await self.async_set_device_attribute("OSDEnable", 1 if enabled else 0)
+
+    async def async_set_auto_light(self, enabled: bool) -> bool:
+        """Enable or disable floodlight automation (autoLightEnable)."""
+        return await self.async_set_device_attribute(
+            "autoLightEnable", 1 if enabled else 0)
+
+    async def async_set_voice_prompts(self, enabled: bool) -> bool:
+        """Enable or disable spoken prompts from the camera speaker (voiceEnable)."""
+        return await self.async_set_device_attribute(
+            "voiceEnable", 1 if enabled else 0)
+
+    async def async_set_hdr(self, enabled: bool) -> bool:
+        """Enable or disable HDR (HDRStatus)."""
+        return await self.async_set_device_attribute("HDRStatus", 1 if enabled else 0)
+
     async def async_set_microphone(self, enabled: bool) -> bool:
         """Enable or disable the camera's microphone."""
         # micEnable: 1=on (default), 0=off

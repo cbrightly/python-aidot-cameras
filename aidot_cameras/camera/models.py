@@ -95,6 +95,14 @@ class CameraStatusData(DeviceStatusData):
     motion_detection: Optional[bool] = None
     motion_sensitivity: Optional[int] = None  # MotionDetection_Sen 1-5
     status_led: Optional[bool] = None
+    #: Timestamp/OSD overlay burned into the video (OSDEnable).
+    osd_timestamp: Optional[bool] = None
+    #: Floodlight automation (autoLightEnable).
+    auto_light: Optional[bool] = None
+    #: Spoken prompts from the camera speaker (voiceEnable).
+    voice_prompts: Optional[bool] = None
+    #: HDR (HDRStatus).
+    hdr: Optional[bool] = None
     microphone: Optional[bool] = None
     night_vision_mode: Optional[str] = None   # "auto" | "on" | "off"
     ir_light: Optional[bool] = None           # nightVisionIRLight 0/1
@@ -138,6 +146,17 @@ class CameraStatusData(DeviceStatusData):
             self.motion_sensitivity = i
         if (b := _as_bool(attr.get("LedOnOff"))) is not None:
             self.status_led = b
+        # Only on an actual reading, like every field here: attribute pushes
+        # are partial, so a motion notif carrying none of these keys must not
+        # clear what the last full poll established.
+        if (b := _as_bool(attr.get("OSDEnable"))) is not None:
+            self.osd_timestamp = b
+        if (b := _as_bool(attr.get("autoLightEnable"))) is not None:
+            self.auto_light = b
+        if (b := _as_bool(attr.get("voiceEnable"))) is not None:
+            self.voice_prompts = b
+        if (b := _as_bool(attr.get("HDRStatus"))) is not None:
+            self.hdr = b
         if (b := _as_bool(attr.get("micEnable"))) is not None:
             self.microphone = b
         if (v := attr.get("nightVisionMode")) is not None:

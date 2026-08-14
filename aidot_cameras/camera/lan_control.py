@@ -56,6 +56,10 @@ ATTR_KEYS = {
     "ptz_tracking": "trackingMode",
     "floodlight": "LightOnOff",
     "siren": "sirenRing",
+    "osd_timestamp": "OSDEnable",
+    "auto_light": "autoLightEnable",
+    "voice_prompts": "voiceEnable",
+    "hdr": "HDRStatus",
 }
 
 
