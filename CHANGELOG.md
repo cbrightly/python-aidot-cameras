@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b12]
+
 ### Fixed
 
 - **An open could hang with no success, no error, and no response to
