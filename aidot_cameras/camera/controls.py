@@ -114,6 +114,16 @@ class _CameraControlsMixin:
 
         Attribute: nightVisionIRLight (0=off, 1=on).
         Note: nightVisionMode still controls the IR cut filter / B&W switch.
+
+        **This does not take on the A000088.** Measured 2026-08-14 by read-back
+        over the local control channel on both A000088 units on the reference
+        fleet: the write is acknowledged and the attribute keeps its previous
+        value. That is ordinary for this firmware - eight of fourteen
+        attributes probed the same day behaved the same way - and it is why the
+        reference integration offers no IR-light switch. No model has been
+        found where a read-back confirms it. The call is kept because the
+        attribute is real and another model may honour it; do not assume a
+        `True` return means the camera changed anything.
         """
         return await self.async_set_device_attribute(
             "nightVisionIRLight", 1 if enabled else 0)

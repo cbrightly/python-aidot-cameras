@@ -6,6 +6,27 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Deprecated
+
+- `async_get_camera_attributes` is deprecated and **does not work**. It waits
+  for a `setDevAttrNotif` the camera never pushes: measured 2026-08-14 as None
+  for an online A000088 and an online A001064, from two different hosts. The
+  obvious confound - a broker evicting us for reusing the account's
+  `mqttClientId` while Home Assistant holds it - was excluded by repeating the
+  call with a unique client id, which changed nothing. Nothing calls it; camera
+  state comes from `async_get_all_device()`'s per-device `properties`, which is
+  what populates every entity in the reference integration. Removal in 1.0.0.
+
+### Changed
+
+- `async_set_ir_light` documents that it **does not take on the A000088**.
+  Confirmed by read-back over the local control channel on both A000088 units:
+  the write is acked and the attribute keeps its previous value. The call is
+  kept because the attribute is real and another model may honour it, but a
+  `True` return is not evidence the camera changed anything. The reference
+  integration no longer offers an IR-light switch for the same reason.
+
+
 ## [1.0.0b10]
 
 ### Added

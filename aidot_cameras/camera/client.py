@@ -2269,7 +2269,19 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         *,
         timeout: float = 8.0,
     ) -> Optional[dict]:
-        """Read camera attributes by announcing user presence and waiting for setDevAttrNotif.
+        """DEPRECATED and non-functional. Read `properties` from the device list.
+
+        Measured 2026-08-14: returns None for an online A000088 and an online
+        A001064, from two different hosts. The obvious confound - a broker
+        evicting us for reusing the account's `mqttClientId` while Home
+        Assistant holds it - was excluded by repeating the call with a unique
+        client id, which changed nothing. The camera never pushes the
+        `setDevAttrNotif` this waits for.
+
+        Nothing calls it. The reference integration reads camera state from
+        `async_get_all_device()`'s per-device `properties` dict, which works and
+        is what populates every entity; this method has been dead alongside it.
+        Scheduled for removal in 1.0.0.
 
         Mirrors the official app flow (l.java + IpcServiceImpl.java):
           1. Subscribe iot/v1/c/{userId}/# and iot/v1/cb/{deviceId}/#
@@ -2279,6 +2291,15 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
         Returns the ``attr`` dict on success, else None.
         """
+        warnings.warn(
+            "async_get_camera_attributes is deprecated and does not work: the "
+            "camera never pushes the setDevAttrNotif it waits for (measured "
+            "2026-08-14 on A000088 and A001064, with client-id contention "
+            "excluded). Read `properties` from async_get_all_device() instead. "
+            "It will be removed in 1.0.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         import json as _json
         import time as _time
 
