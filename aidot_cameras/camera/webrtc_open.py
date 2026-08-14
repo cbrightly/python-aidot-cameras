@@ -1707,15 +1707,24 @@ class _WebRTCOpenMixin:
         # (application != video), so the answer-rebuild stubbed it as DC and
         # discarded H265 entirely.  The camera never got confirmation that
         # video negotiation succeeded and sent nothing on mid:1 either.
-        # H265 mid:2 is INJECTED as a synthetic SDP text section via
-        # _inject_h265_section() in the offer pipeline - NO aiortc transceiver
-        # is created for it.  This is intentional: aiortc does not have H265
-        # in its codec registry and raises OperationError on any stub we give
-        # it for a H265 transceiver.  The camera sees a proper 4-section offer
-        # (audio/H264/H265/DC) from the sent SDP; aiortc only manages the
-        # 3 sections it knows about (audio mid:0 / H264 mid:1 / DC mid:2).
-        # Before calling setRemoteDescription, the answer is stripped of the
-        # H265 stub and DC is renumbered from mid:3 -> mid:2.
+        # HISTORICAL, and the rest of this paragraph used to describe an
+        # injector that no longer exists.  _inject_h265_section() was orphaned
+        # dead code - referenced by this comment, called by nothing - and was
+        # removed in #35.  **We do not offer H265 at any payload type.**  Read
+        # that literally before reasoning from it: a comment claiming otherwise
+        # sent one investigation chasing an H265 decode path the stack does not
+        # need, on the theory that the camera was already negotiating H265.
+        #
+        # Measured 2026-08-13 on an A000088: offered H265 as an extra payload
+        # type in the video section, the camera answered H264 only; offered it
+        # as its own m=video section, the camera dropped the section entirely.
+        # It will not negotiate H265 with us in either shape.
+        #
+        # What remains true is why no injector would help anyway: aiortc has no
+        # H265 in its codec registry and raises OperationError on any stub we
+        # give it for an H265 transceiver.  The camera still SENDS an H265
+        # section in some answers - see select_answer_section, which exists to
+        # pick our H264 section out of the shifted answer that results.
         # SCTP data channel - KVS firmware ALWAYS opens SCTP regardless of
         # whether m=application is in the negotiated answer.  Decoded the
         # post-handshake 0x17 records as SCTP INIT chunks (srcPort=5000
@@ -1723,7 +1732,7 @@ class _WebRTCOpenMixin:
         # at ~6s intervals and tears DTLS down with close_notify after ~22s
         # if it never receives INIT-ACK.  Adding the data channel here
         # creates an SCTP endpoint on our side that answers the INIT.
-        # Without the H265 transceiver, DC stays at mid:2 in aiortc's eyes.
+        # With no H265 transceiver, DC stays at mid:2 in aiortc's eyes.
         # Skipped only for A001064 (see _NO_DATACHANNEL_MODELS).
         # Helper: build the 36-byte AVIO LIVING TUTK frame and send via dc.
         # Extracted so it can be invoked from either dc.on("open") (we created
