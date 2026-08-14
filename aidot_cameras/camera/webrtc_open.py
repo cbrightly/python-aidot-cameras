@@ -34,6 +34,9 @@ from .protocol import (
     _normalize_bundle_ice_credentials,
     _reorder_m_section_ice_attrs,
     _sdp_transport,
+    answer_inserted_a_section,
+    ice_wait_timeout,
+    select_answer_section,
     _terminal_webrtc_ack,
     _upgrade_sctp,
     _webrtc_consume_video,
@@ -2558,6 +2561,13 @@ class _WebRTCOpenMixin:
         _rr_webrtc_resp_topic:   str  = ""
         _rr_webrtc_resp_payload: str  = ""
         _rr_ice_payloads:        list = []  # list of (topic, json_str) tuples
+        # How many answer sections came from a mid other than the offer's. Set
+        # by the normal path's rebuild below; declared here so the ICE wait can
+        # read it whichever path ran.
+        _shifted_picks = 0
+        # True only when the camera ADDED a section, which is the shape the
+        # ICE cap was measured against.
+        _answer_inserted = False
 
         if camera_offer_fut in _rr_done and answer_fut not in _rr_done:
             # ---- ROLE REVERSAL path (e.g. LK.IPC.A001064) ---------------------- #
@@ -3037,14 +3047,52 @@ class _WebRTCOpenMixin:
             # 4-section BUNDLE is aligned) but we only decode H264 and audio.
             _h265_offer_pts: set = set()  # H265 no longer offered; camera won't answer H265 PTs
 
+            # Our offer's video payload types, used both here (to tell the
+            # camera's real video answer from an H265 section it added) and
+            # again by _aiortc_answer below.
+            _offer_video_pts: set = set()
+            for _ol in _offer_sdp.splitlines():
+                if _ol.startswith('m=video'):
+                    _offer_video_pts = set(_ol.split()[3:])
+                    break
+
             _rebuilt: list = list(_ans_header)
             _kept_count = 0
             _stub_count = 0
             _dropped_mids: list = []
+            _claimed_ans_mids: set = set()
             _rejected_mids: set = set()  # mids whose stub has port=0 (excluded from BUNDLE)
             for _m in _offer_mids:
                 _expected_kind = _offer_kinds[_m]
-                _ans_kind, _ans_block = _ans_sections.get(_m, ("", []))
+                # Same mid first, then kind + payload-type overlap.  This camera
+                # sometimes adds an H265 video section at mid 0 and shifts every
+                # later mid by one; matching on mid alone then puts H265 in our
+                # video slot (hard setRemoteDescription failure) or mismatches
+                # every kind at once (reads as declined media).  See
+                # select_answer_section.
+                _pick = select_answer_section(
+                    _m, _expected_kind, _ans_sections,
+                    _offer_video_pts, _claimed_ans_mids,
+                )
+                if _pick is not None:
+                    _claimed_ans_mids.add(_pick[0])
+                    if _pick[0] != _m:
+                        _shifted_picks += 1
+                        _status(
+                            f"answer mid {_pick[0]} taken for offer mid {_m}"
+                            f" ({_expected_kind}): the camera shifted its mids"
+                        )
+                _ans_kind = _expected_kind if _pick is not None else ""
+                _ans_block = list(_pick[1]) if _pick is not None else []
+                if _pick is not None and _pick[0] != _m:
+                    # Renumber to the slot it now occupies. _aiortc_answer
+                    # renumbers again downstream, but leaving a section
+                    # carrying another slot's a=mid inside _rebuilt would make
+                    # the intermediate SDP disagree with its own BUNDLE line.
+                    _ans_block = [
+                        f'a=mid:{_m}' if _bl.startswith('a=mid:') else _bl
+                        for _bl in _ans_block
+                    ]
                 # Force-stub H265 sections: detect by camera's answer m-line
                 # using only our H265 PTs (103/104).
                 _ans_h265 = False
@@ -3070,9 +3118,19 @@ class _WebRTCOpenMixin:
                     _stub_count += 1
                     if _s and _s[0].split()[1] == '0':
                         _rejected_mids.add(_m)
-            for _ans_mid in _ans_sections:
-                if _ans_mid not in _offer_kinds:
-                    _dropped_mids.append(_ans_mid)
+            # Sections the walk never took. An INSERTED section (the camera's
+            # H265 one) ends up here; a dropped-and-renumbered answer leaves
+            # nothing. That is what separates the shape the ICE cap was
+            # measured on from the one it was not - see
+            # answer_inserted_a_section.
+            _unclaimed_ans_mids = [
+                _am for _am in _ans_sections if _am not in _claimed_ans_mids
+            ]
+            _answer_inserted = answer_inserted_a_section(
+                shifted_sections=_shifted_picks,
+                unclaimed_answer_mids=len(_unclaimed_ans_mids),
+            )
+            _dropped_mids.extend(_unclaimed_ans_mids)
 
             if _stub_count or _dropped_mids:
                 _status(
@@ -3196,13 +3254,8 @@ class _WebRTCOpenMixin:
             # bogus single-PT video stub - all of which break aiortc's positional
             # matching.  _aiortc_answer() below selects by content and re-emits.
             import re as _re_ans  # module has no top-level `import re`
-            # Our offer's video payload types (H264 + RTX), used to pick the
-            # camera's REAL video answer section apart from H265/bogus stubs.
-            _offer_video_pts: set = set()
-            for _ol in _offer_sdp.splitlines():
-                if _ol.startswith('m=video'):
-                    _offer_video_pts = set(_ol.split()[3:])
-                    break
+            # _offer_video_pts (our H264 + RTX payload types) is computed above,
+            # where the mid walk needs it, and reused here.
 
             # Set by _aiortc_answer when the camera returns a DC-only answer
             # (both audio and video rejected = media declined, encoder cold).
@@ -3618,7 +3671,19 @@ class _WebRTCOpenMixin:
         async def _on_ice_gather() -> None:
             _LOGGER.info("webrtc: ICE gatheringState -> %s", pc.iceGatheringState)
 
-        deadline = time.monotonic() + timeout
+        # A shifted answer gets a shorter ICE deadline, not a refusal: 6 of 7
+        # measured shifts never connected, but the seventh came up in 8.8 s.
+        # See ice_wait_timeout for the measurement behind the cap.
+        _ice_timeout = ice_wait_timeout(
+            shifted_sections=1 if _answer_inserted else 0,
+            default_timeout=timeout,
+        )
+        if _ice_timeout != timeout:
+            _status(
+                f"answer shifted mids: ICE deadline capped to {_ice_timeout:.0f}s"
+                f" (from {timeout:.0f}s)"
+            )
+        deadline = time.monotonic() + _ice_timeout
         _last_ice_log = time.monotonic()
         _userconnect_midloop_sent = False  # guard: re-send user/connect once at half-timeout
         _second_ans_processed = False  # guard: process second_answer_fut candidates once
@@ -3719,11 +3784,15 @@ class _WebRTCOpenMixin:
             # Mid-loop user/connect retry: if no camera IP yet and ~half of the
             # ICE timeout has elapsed, re-announce user presence so the camera
             # pushes setDevAttrNotif again.  Replaces the invented getDevAttrReq.
+            # Halve the deadline this loop is actually running to (_ice_timeout),
+            # not the caller's: a capped wait compared against the uncapped
+            # timeout is already past half on its first tick, which fires the
+            # one-shot re-announce at t=0 and leaves nothing for mid-loop.
             _remaining = deadline - time.monotonic()
             if (not _userconnect_midloop_sent
                     and cam_ip_q.empty()
                     and _remaining > 0
-                    and _remaining <= timeout / 2.0):
+                    and _remaining <= _ice_timeout / 2.0):
                 outgoing_q.put_nowait((
                     f"iot/v1/cb/{user_id}/user/connect",
                     json.dumps({
@@ -3767,10 +3836,18 @@ class _WebRTCOpenMixin:
             outgoing_q.put_nowait(None)
             _cancel_track_tasks()
             await pc.close()
+            if _answer_inserted:
+                # Before the answer sections were matched by content, a shifted
+                # answer on the live path stubbed every section and raised this
+                # same error, which the caller retries in a fast bounded burst.
+                # Keep that: a shifted answer that did not connect inside the
+                # cap is the camera declining, not a transport fault, and the
+                # generic 15s-gated retry is the wrong response to it.
+                raise AidotCameraNotReady(self.device_id)
             raise RuntimeError(
                 f"async_open_webrtc_stream: ICE connection not established "
                 f"(connState={pc.connectionState}"
-                f"  iceState={pc.iceConnectionState}) within {timeout}s"
+                f"  iceState={pc.iceConnectionState}) within {_ice_timeout}s"
             )
 
         if recorder:

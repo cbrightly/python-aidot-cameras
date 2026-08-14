@@ -243,6 +243,124 @@ def _section_of(lines: list) -> str:
     return ""
 
 
+#: How long to wait for ICE when the camera's answer arrived with its mids
+#: shifted. Measured over 63 opens on an A000088: every successful open
+#: completed ICE between 8.7 s and 10.6 s, and every failure ran the full 45 s
+#: deadline. There is no overlap between the two bands, so a cap sitting above
+#: the success band cannot cost a session that was going to work.
+SHIFTED_ANSWER_ICE_TIMEOUT_S = 15.0
+
+
+def answer_inserted_a_section(*, shifted_sections: int,
+                             unclaimed_answer_mids: int) -> bool:
+    """Did the camera ADD an m-section, rather than drop or reorder one?
+
+    Both shapes shift our mids, and only one of them is the behaviour the ICE
+    cap was measured against. An A000088 that inserts its H265 video section
+    leaves that section unclaimed after the walk, because nothing in our offer
+    wanted it. An A001064 that drops a rejected section and renumbers the rest -
+    quirk 1 of this rebuild - shifts the mids just as much and leaves nothing
+    over.
+
+    The distinction is load-bearing: the cap comes from 63 opens on a mains
+    A000088 that connects in 9 s, and an SDES camera reaching this path through
+    the SDES->DTLS fallback can take 25-70 s to open cold. Cutting its deadline
+    to 15 s on a shape that was never measured would break exactly the streaming
+    this must not break.
+    """
+    return shifted_sections > 0 and unclaimed_answer_mids > 0
+
+
+def ice_wait_timeout(*, shifted_sections: int, default_timeout: float) -> float:
+    """How long to give ICE, given what the camera's answer looked like.
+
+    A shifted answer - one where the camera added its H265 video section and
+    pushed every later mid along - is a strong but NOT certain sign the session
+    is not coming up: 6 of 7 measured shifts failed at ICE, and the seventh
+    established in 8.8 s. So it must still be given room to succeed, just not
+    45 s of it.
+
+    45 s matters because it is past the ~30 s deadline Home Assistant's stream
+    worker allows, which is the failure this project already learned the hard
+    way. Capping at 15 s keeps the one-in-seven that works, fails the rest
+    faster than the old behaviour did, and stays inside that deadline either
+    way.
+
+    Never extends a caller's own timeout - a caller asking for 5 s means 5 s.
+    """
+    if shifted_sections > 0:
+        return min(default_timeout, SHIFTED_ANSWER_ICE_TIMEOUT_S)
+    return default_timeout
+
+
+def select_answer_section(
+    offer_mid: str,
+    offer_kind: str,
+    ans_sections: dict,
+    offer_video_pts: set,
+    claimed: set,
+) -> "Optional[tuple]":
+    """Which answer section fills this offer m-section, or None to stub it.
+
+    ``ans_sections`` maps ``a=mid`` -> ``(kind, lines)``.  ``claimed`` holds the
+    answer mids already given to earlier offer sections, so one section is never
+    handed out twice.  Returns ``(answer_mid, lines)``.
+
+    Same mid first: that is what a compliant answerer sends, and the A001064
+    quirks this rebuild exists for (dropped sections, swapped kinds) are all
+    expressed in mid terms.
+
+    The fallback is for the case the mid walk cannot express.  An A000088 was
+    measured answering an SD-card offer with an extra ``m=video`` carrying
+    ``a=rtpmap:0 H265/90000`` at mid 0, which shifts every later mid by one.
+    Matching by mid then puts H265 in our video slot - and aiortc has no H265
+    in its codec registry, so setRemoteDescription fails outright rather than
+    degrading.  On a live offer the same shift makes every mid mismatch on kind
+    and the whole answer gets stubbed, which reads as a camera declining media.
+    The camera does not add that section every time, so both failures are
+    intermittent.
+
+    So when the same-mid section is the wrong kind, or is a video section
+    sharing no payload type with our offer, the other unclaimed sections of the
+    right kind are considered and the video one with the most payload-type
+    overlap wins.  A video section with no overlap is still preferred over
+    stubbing: a section aiortc may reject beats one that cannot possibly work.
+    """
+    def _pts(entry) -> set:
+        for ln in entry[1]:
+            if ln.startswith("m="):
+                return set(ln.split()[3:])
+        return set()
+
+    def _usable(entry) -> bool:
+        if entry[0] != offer_kind:
+            return False
+        # Payload types only discriminate video, and only when we know ours.
+        if offer_kind != "video" or not offer_video_pts:
+            return True
+        return bool(_pts(entry) & offer_video_pts)
+
+    same = ans_sections.get(offer_mid)
+    if same is not None and offer_mid not in claimed and _usable(same):
+        return (offer_mid, same[1])
+
+    candidates = [
+        (mid, entry) for mid, entry in ans_sections.items()
+        if mid not in claimed and entry[0] == offer_kind
+    ]
+    if not candidates:
+        return None
+    if offer_kind == "video" and offer_video_pts:
+        mid, entry = max(
+            candidates, key=lambda c: (len(_pts(c[1]) & offer_video_pts), c[0])
+        )
+        return (mid, entry[1])
+    # Non-video, or nothing to score with: the earliest unclaimed one of the
+    # right kind, which for a shifted answer is the shifted section.
+    mid, entry = min(candidates, key=lambda c: c[0])
+    return (mid, entry[1])
+
+
 def _compress_sdp_for_camera(sdp: str) -> str:
     """Selective SDP filter matching official Java client's g.b() behaviour.
 
