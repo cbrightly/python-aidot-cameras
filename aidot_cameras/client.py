@@ -994,10 +994,11 @@ class CameraClient(_UpstreamAidotClient):
 AidotClient = CameraClient
 
 
+# Only what docs/API-STABILITY.md actually promises. The three underscore names
+# that used to be here are declared private by that document, and exporting them
+# through `import *` contradicted it. They remain importable by name - the one
+# consumer, tests/test_post_merge_hardening.py, imports _is_camera explicitly.
 __all__ = [
     "AidotClient",
     "CameraClient",
-    "_is_camera",
-    "_is_camera_device",
-    "_spawn_bg",
 ]

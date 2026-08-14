@@ -8,12 +8,23 @@ version = "1.0.0b8"
 description = "Control AiDot/Leedarson WiFi lights and cameras (WebRTC streaming, two-way audio, PTZ, controls)"
 readme = "README.md"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "aidot_cameras/_vendor/aiortc/LICENSE"]
 authors = [{ name = "cbrightly", email = "chris.brightly@gmail.com" }]
 requires-python = ">=3.11"
 classifiers = [
-    "Programming Language :: Python :: 3",
+    # No "License :: OSI Approved" classifier on purpose: this project uses the
+    # PEP 639 form (license = "MIT" plus license-files) and setuptools rejects
+    # declaring both.
+    "Development Status :: 4 - Beta",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
     "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Home Automation",
+    "Typing :: Typed",
 ]
 # Conservative lower bounds only - no upper caps. When installed under Home
 # Assistant, HA core pins aiohttp/cryptography itself; an upper cap here would
@@ -45,8 +56,9 @@ dependencies = [
 
 [project.optional-dependencies]
 webrtc = [
-    # Streaming uses aiortc, VENDORED at aidot_cameras/_vendor/aiortc (byte-identical to
-    # aiortc 1.14.0, only vendored so Home Assistant 2026.7's pinned av==17 is
+    # Streaming uses aiortc, VENDORED at aidot_cameras/_vendor/aiortc (aiortc 1.14.0
+    # with three import rewrites and nothing else - the exact delta is recorded in
+    # aidot_cameras/_vendor/aiortc/VENDOR.md; vendored so Home Assistant 2026.7's pinned av==17 is
     # satisfiable - stock aiortc caps av<17, which makes [webrtc] uninstallable
     # there). These are aiortc's own runtime deps; the PyAV ceiling is widened to
     # <18 (av 17 verified compatible: import + H.264 encode round-trip). Drop the

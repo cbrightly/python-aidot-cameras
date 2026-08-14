@@ -6,6 +6,73 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- `on_frame` is annotated `av.VideoFrame` instead of the library's own
+  `VideoFrame` dataclass. The callback always received PyAV's frame; the wrong
+  annotation made a type checker bless `frame.data` / `frame.timestamp`, which
+  read empty at runtime and look exactly like a dead stream, and reject
+  `frame.to_ndarray()`, which is what works.
+
+### Deprecated
+
+- `async_open_kvs_stream`, the pre-rename alias, now emits a
+  `DeprecationWarning` and is scheduled for removal in 1.0.0. It was never in
+  docs/API-STABILITY.md and nothing in this project, its tests or the reference
+  integration calls it - but it has been importable, so it gets a release of
+  warning rather than vanishing.
+
+### Changed
+
+- `async_open_webrtc_stream` has a real signature instead of `*args, **kwargs`.
+  On a py.typed package the untyped wrapper made `help()`, IDE completion and
+  downstream type checkers see a function accepting anything. The return type is
+  now `WebRTCSession | SdesSession`, which is what it always returned; a
+  downstream mypy run that assumed `WebRTCSession` may newly need a narrowing
+  check. Underscore-prefixed internals stay reachable but unadvertised.
+- The package root now exports `CameraStatusData`, `CameraDeviceInformation`,
+  `WebRTCSession` and `SdesSession`, which docs/API-STABILITY.md already
+  promised. `aidot_cameras.client.__all__` no longer exports three private
+  underscore names that the same document declares are not public; they remain
+  importable by name.
+- docs/API-STABILITY.md now declares `camera.lan_control`, `camera.go2rtc` and
+  `device_session_authenticated`, which the reference integration imports and
+  which were therefore already commitments in practice.
+- The vendored aiortc now ships upstream's BSD licence beside it, and
+  `_vendor/aiortc/VENDOR.md` records the exact delta from 1.14.0 (three import
+  rewrites, nothing behavioural) and how to re-vendor. `pyproject.toml`
+  previously described it as byte-identical, which it was not.
+- `aidot-go2rtc --help` now prints the full environment-variable reference the
+  README says it does.
+- README: a runnable quickstart, the `aidot` vs `aidot_cameras` import trap
+  named, ffmpeg's PATH requirement stated, and links made absolute so they work
+  as the PyPI long description.
+
+## [1.0.0b8]
+
+Pre-release.
+
+### Fixed
+
+- Answer sections are matched to the offer by content when the camera shifts its
+  mids. This firmware sometimes answers with an extra `m=video` carrying
+  `a=rtpmap:0 H265/90000`, pushing every later mid along by one; matching purely
+  by `a=mid` then handed the video slot the H265 section, which aiortc cannot
+  use. On a two-section offer that was a hard `setRemoteDescription` failure; on
+  a three-section one every mid mismatched on kind and the open read as a camera
+  declining media. Both intermittent, both previously hidden behind the retry.
+- A shifted answer now gets a 15s ICE deadline instead of 45s, and raises
+  `AidotCameraNotReady` so the caller's fast retry runs. Measured over 63 opens:
+  every successful open completed ICE in 8.7-10.6s and every failure ran the
+  full 45s. 45s is past the ~30s Home Assistant's stream worker allows.
+
+### Added
+
+- The wire format for playing a recording off a camera's SD card
+  (`RECORD_PLAYCONTROL`). The request and reply decode are implemented; playback
+  itself is not offered, because the camera acknowledges the command and then
+  sends no media. See `docs/CAMERAS.md`.
+
 ## [1.0.0b7]
 
 Pre-release.

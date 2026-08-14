@@ -74,8 +74,10 @@ session = await device_client.async_open_webrtc_stream(on_frame=cb, timeout=30.0
 # ... session.stop() when done
 ```
 
-`test_camera.py` is a local developer CLI harness (not shipped with the library)
-that exercises the full path (`python test_camera.py --webrtc -d "<name>"`); see
+`scripts/smoke_stream.py` exercises the full path against a real camera
+(`python scripts/smoke_stream.py --list`, then `--name "<name>" --hold 15`; it
+exits non-zero if no media arrives). It is in the git repo, not the wheel, so it
+needs a clone rather than a pip install. See
 its `--help`.
 
 ### Signaling handshake (MQTT)
