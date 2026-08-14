@@ -5018,10 +5018,22 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         if _ffmpeg_path() is None:
             _LOGGER.error("DTLS serve: %s", _FFMPEG_MISSING_MSG)
             return None
+        codec_args = ["-c", "copy"]
         if serve_url == "-":
             out_args = ["-f", "mpegts", "pipe:1"]
             out_target = 1               # this process's real stdout
         elif serve_url.startswith("rtsp"):
+            # Audio cannot be copied here, and that is not a preference.  The
+            # mux upstream writes AAC into MPEG-TS, which carries it as ADTS
+            # with no global headers; ffmpeg's RTSP muxer refuses that outright
+            # - "AAC with no global headers is currently not supported" at
+            # header-write, so the publish never starts and video dies with it.
+            # `-bsf:a aac_adtstoasc` does not save it: the header is written
+            # before the filter has produced extradata.  So transcode to G.711
+            # A-law, which is RTP-native, costs almost nothing at 8 kHz mono,
+            # and is exactly what the SDES push has always carried - the two
+            # push paths now put the same thing on the wire.
+            codec_args = ["-c:v", "copy", "-c:a", "pcm_alaw", "-ar", "8000", "-ac", "1"]
             out_args = ["-f", "rtsp", "-rtsp_transport", "tcp", serve_url]
             out_target = asyncio.subprocess.DEVNULL
         else:
@@ -5037,7 +5049,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             # bursty/choppy audio pattern.  Matches the SDES serve's approach.
             "-fflags", "+nobuffer",
             "-i", "pipe:0",
-            "-c", "copy", *out_args,
+            *codec_args, *out_args,
         ]
         try:
             return await asyncio.create_subprocess_exec(

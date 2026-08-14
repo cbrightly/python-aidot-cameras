@@ -143,7 +143,24 @@ def test_rtsp_push_mode_publishes_over_tcp(monkeypatch):
     # Media must not reach our own stdout here: the push owns the socket, and a
     # duplicate copy on fd 1 would corrupt whatever a parent reads.
     assert seen["stdout"] == asyncio.subprocess.DEVNULL
-    assert "-c" in cmd and cmd[cmd.index("-c") + 1] == "copy"
+    # Video copies; audio MUST NOT.  The mux writes AAC into MPEG-TS as ADTS,
+    # and ffmpeg's RTSP muxer rejects AAC with no global headers at header
+    # write - which kills the whole publish, video included.  Reproduced with
+    # the exact argv: "AAC with no global headers is currently not supported".
+    assert cmd[cmd.index("-c:v") + 1] == "copy"
+    assert cmd[cmd.index("-c:a") + 1] == "pcm_alaw"
+    assert "-c" not in cmd, "a blanket -c copy here re-introduces the AAC refusal"
+
+
+def test_the_other_two_destinations_still_copy_everything(monkeypatch):
+    for url in ("-", "http://127.0.0.1:1/x.ts"):
+        _proc, seen = _spawn(monkeypatch, url)
+        cmd = seen["cmd"]
+        assert "-c" in cmd and cmd[cmd.index("-c") + 1] == "copy"
+        assert "-c:a" not in cmd, (
+            "only the RTSP push transcodes audio; MPEG-TS carries the mux's "
+            "AAC as-is and re-encoding it here would burn CPU for nothing"
+        )
 
 
 def test_rtsp_url_routes_to_the_serve_loop():

@@ -14,9 +14,20 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   produced h264 + AAC whichever transport decrypted it, and the only thing
   missing was the destination. TCP interleave, because a UDP publish fragments
   a 720p keyframe and the first loss takes the GOP with it.
-  **Unit-tested; not yet confirmed on hardware** - every attempt so far met a
-  busy camera (ack -50002) while the fleet was in use elsewhere. Treat it as
-  provisional until this note goes away.
+  Audio is transcoded to G.711 A-law rather than copied, and that is not a
+  preference: the mux writes AAC into MPEG-TS as ADTS, and ffmpeg's RTSP muxer
+  refuses AAC with no global headers at header-write - the publish never
+  starts and video dies with it. Reproduced deterministically off a synthetic
+  stream with the exact argv, which is also how the first cut of this feature
+  was caught before it shipped. `-bsf:a aac_adtstoasc` does not help; the
+  header is written before the filter produces extradata. G.711 is RTP-native,
+  costs almost nothing at 8 kHz mono, and is what the SDES push has always
+  carried, so both push paths now put the same thing on the wire.
+  **Still provisional: no camera has streamed through it end to end.** The
+  header-write and the byte flow are confirmed; the fleet was unavailable for
+  the full path (busy acks, a camera that never answered, and ICE closing on
+  the two attempts that did) while Home Assistant held a producer on all
+  seven. Treat it as unproven until this note goes away.
 
 ### Deprecated
 
