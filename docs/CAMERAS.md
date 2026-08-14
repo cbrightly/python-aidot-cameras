@@ -358,8 +358,28 @@ nobody reported** - four of seven cameras measured carried neither key, includin
 a model whose siblings report normally - so it is NOT evidence that a model
 cannot report. Only an explicit `False` says the slot is empty.
 
-Playing an on-device recording is not implemented; `RECORD_PLAYCONTROL` has never
-been sent.
+### Playing one back is NOT offered, and that is a finding
+
+Listing what a card holds works. **Playing a recording off the card does not,
+and the library does not pretend to** - `can_play` is False on every SD record.
+
+This was investigated to a conclusion rather than skipped. The session a
+playback needs is fully understood and reproducible: an SD-mode peer id, an
+offer carrying no local audio sender, and the AVIO session-mode command
+(`0x1500`) set to SD rather than the LIVING every session uses. A camera accepts
+all of it. It then acknowledges the play command in about 50 ms and sends no
+media at all - no video RTP on any payload type, no video RTCP sender report,
+and none of the progress messages the vendor app drives its seek bar from.
+
+What was ruled out along the way, so nobody assumes it is one line of work: the
+channel byte, the event-type byte (swept across every plausible value on a card
+whose records all carry event 0), and the codec - this firmware declines to
+negotiate H265 both as an extra payload type in the video section and as a
+section of its own, so a decode path would have nothing to decode.
+
+If that changes, it will be because someone captures a real playback off the
+wire. Reading the vendor app has been taken as far as it goes.
+
 
 ## Local (LAN-direct) streaming
 

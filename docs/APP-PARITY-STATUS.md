@@ -198,19 +198,33 @@ actually sends was pulled out of `KVSWebRTCChannel` and named against
 
 | id | name | do we send it |
 |----|------|---------------|
-| 0x318 / 792 | `USER_IPCAM_LISTEVENT_REQ` | no - event list |
-| 0x31a / 794 | `USER_IPCAM_RECORD_PLAYCONTROL` | no - SD playback |
+| 0x318 / 792 | `USER_IPCAM_LISTEVENT_REQ` | **yes** - lists what a card holds |
+| 0x31a / 794 | `USER_IPCAM_RECORD_PLAYCONTROL` | wire format only - see below |
 | 0x320 / 800 | `USER_IPCAM_SETSTREAMCTRL_REQ` | yes |
 | 0x322 / 802 | `USER_IPCAM_GETSTREAMCTRL_REQ` | yes |
 | 0x350 / 848 | SPEAKERSTART | yes |
 | 0x351 / 849 | SPEAKERSTOP | yes |
-| 0x4b5 / 1205 | `USER_IPCAM_HASLISTEVENT_REQ` | no - event list |
+| 0x4b5 / 1205 | `USER_IPCAM_HASLISTEVENT_REQ` | **yes** - hourly occupancy map |
 | 0x4b7 / 1207 | `DELLISTEVENT_REQ` | no - event list |
 | 0x4b9 / 1209 | `USER_IPCAM_CUSTOM_COMMAND_REQ` | no - see below |
 | 0x528/0x52a/0x52e | radar start / stop / SD-card start | no - see below |
 | 0x1001 / 4097 | PTZ | yes |
 | 0x1424 / 5156 | heartbeat | yes |
-| 0x1500 / 5376 | LIVING | yes |
+| 0x1500 / 5376 | `AVIO_CTRL_SESSION_MODE` | yes, always mode 1 (LIVING) - see below |
+
+**On-device playback (`0x31a`) was investigated to a conclusion and is not
+feasible - closed 2026-08-13.** The wire format is implemented and correct, and
+the session it needs is fully understood: an SD-mode peerId, an offer with no
+local audio sender, and `0x1500` carrying mode **2 (SD)** rather than the 1
+(LIVING) this library sends for every session. A camera accepts all of that and
+acts on it. It then acknowledges `PLAY_START` in about 50 ms and sends no
+playback media of any kind - no video RTP on any payload type, no video RTCP
+sender report, and none of the `0x31c` progress messages the vendor app relies
+on. The trigger for the media itself was not found, and the leads are exhausted:
+the event type at byte 21 was swept and eliminated, and the camera declines to
+negotiate H265 both as an extra payload type and as its own m-section. Listing
+what a card holds works and is shipped; playing it back is not offered because
+it does not work, not because it was skipped.
 
 **The radar commands are for hardware nobody here owns - closed 2026-08-11.**
 Not "unimplemented", not deferred: unreachable. The cloud device records for all
