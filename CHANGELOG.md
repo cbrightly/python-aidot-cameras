@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b11]
+
 ### Deprecated
 
 - `async_get_camera_attributes` is deprecated and **does not work**. It waits
