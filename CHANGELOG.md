@@ -23,11 +23,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   header is written before the filter produces extradata. G.711 is RTP-native,
   costs almost nothing at 8 kHz mono, and is what the SDES push has always
   carried, so both push paths now put the same thing on the wire.
-  **Still provisional: no camera has streamed through it end to end.** The
-  header-write and the byte flow are confirmed; the fleet was unavailable for
-  the full path (busy acks, a camera that never answered, and ICE closing on
-  the two attempts that did) while Home Assistant held a producer on all
-  seven. Treat it as unproven until this note goes away.
+  Confirmed end to end on an A000088: published into a live go2rtc, pulled back
+  out as `h264 1280x720` plus `pcm_alaw` audio.
+
+  Prefer `-` (stdout) for a go2rtc `exec:` source on a DTLS camera even so. The
+  push has to transcode audio down to 8 kHz G.711, where the stdout producer
+  carries the mux's 48 kHz AAC untouched. Use the push when something other
+  than go2rtc owns the RTSP server.
 
 ### Deprecated
 

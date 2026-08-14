@@ -142,9 +142,9 @@ aidot-go2rtc <device_id> http://127.0.0.1:8555/cam.ts   # either: serve, then pu
 ```
 
 `'{output}'` is a placeholder go2rtc substitutes; run by hand it is passed
-through as an RTSP push URL, which DTLS cameras (A000088) have no path for and
-the tool refuses. Use `-` or an `http://host:port/name.ts` serve for a
-standalone run.
+through as an RTSP push URL. Both transports can push, so `{output}` works on
+any camera - but on a DTLS one prefer `-`, which carries the mux's 48 kHz AAC
+untouched where the push has to transcode audio down to 8 kHz G.711.
 
 **ffmpeg must be on PATH.** SDES cameras - two of the three validated models -
 stream entirely through an ffmpeg subprocess, and pip cannot install a system
@@ -286,8 +286,10 @@ Stream #0:1: Audio: aac (LC), 48000 Hz, mono
   MPEG-TS on a listening socket instead, for a consumer that pulls rather than
   spawns. That process has to stay running to keep the port bound, so it holds
   a camera session whether or not anyone is watching. Prefer the `exec:` forms.
-- **From Python**, `rtsp_push_url=` publishes to your own RTSP server directly
-  (SDES cameras only - there is no RTSP-push path for DTLS), and
+- **Pushing to your own RTSP server** rather than go2rtc: `rtsp_push_url=`
+  from Python, or an `rtsp://` output on the CLI. Both transports support it.
+  A DTLS push transcodes audio to G.711 A-law, matching what SDES has always
+  sent - ffmpeg's RTSP muxer will not accept the AAC that MPEG-TS carries.
   `output_path=` records to a file. `Go2RtcClient.rtsp_url(name)` builds the
   address above, and `ensure_stream(name, source)` registers a stream with a
   running go2rtc if you would rather not edit YAML.
