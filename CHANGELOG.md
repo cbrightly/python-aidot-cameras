@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b10]
+
 ### Added
 
 - DTLS cameras can RTSP-push. `rtsp://` is now a destination for the A000088
