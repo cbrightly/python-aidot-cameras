@@ -2277,18 +2277,26 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         Assistant holds it - was excluded by repeating the call with a unique
         client id, which changed nothing.
 
-        **Reliably returns nothing; the reason is NOT established.** Either the
-        camera does not push the `setDevAttrNotif` this waits for, or this
-        subscribe path does not receive it. An attempt to tell those apart was
-        inconclusive: a probe that logged every inbound topic saw zero
-        messages, but its own control - a self-publish meant to prove the
-        session receives at all - also came back empty, and that control used
-        an arbitrary topic the broker's ACL would likely refuse. So the probe
-        proved nothing in either direction. Note the streaming path uses these
-        same smarthome MQTT credentials and works, so credentials are not the
-        difference. Anyone picking this up: subscribe on these topics during a
-        live stream, where the device channel is known to carry traffic, and
-        see whether attribute pushes appear at all.
+        **The fault is on this side, not the camera's.** Measured by subscribing
+        to these exact topics while a WebRTC open ran in the same window: the
+        stream opened, so signalling demonstrably traversed
+        `iot/v1/cb/{deviceId}/`, and this subscription still received **zero**
+        messages of any kind. A subscription that misses known-live traffic is
+        not evidence about what the camera pushes; it is a broken subscription.
+
+        So the earlier reading - "the camera never pushes it" - was wrong, and
+        `_mqtt_session` is the thing to look at. Note `async_open_cloud_playback`
+        fails at its own `_mqtt_session` step too, so one cause may explain both.
+
+        The leading untested hypothesis is the **client id**. This method
+        appends ``-cmd`` to the account's registered `mqttClientId`, and the
+        streaming path that works uses the base string unmodified; a broker that
+        binds its subscribe ACL to the exact registered id would silently
+        deliver nothing to a suffixed one. Testing that needs care - connecting
+        with the exact id collides with whoever legitimately holds it (a running
+        Home Assistant), and an attempt to do so hung and was abandoned rather
+        than fight a live system for its MQTT identity. A second account, or a
+        window with HA stopped, would settle it.
 
         Nothing calls it. The reference integration reads camera state from
         `async_get_all_device()`'s per-device `properties` dict, which works and

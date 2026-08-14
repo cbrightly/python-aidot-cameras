@@ -9,8 +9,15 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 ### Fixed
 
 - The `async_get_camera_attributes` deprecation said the camera never pushes the
-  notification it waits for. That cause was not established and the text now
-  says so. The probe it rested on logged zero inbound messages, but its own
+  notification it waits for. That was wrong, and the experiment that settles it
+  has now been run: subscribing to those exact topics while a WebRTC open
+  proceeded in the same window received **zero** messages, while the stream
+  itself opened - so signalling demonstrably traversed the same topic prefix.
+  The fault is in this subscribe path, not the camera. `_mqtt_session` is the
+  suspect, `async_open_cloud_playback` fails at its own `_mqtt_session` step,
+  and one client-side bug may explain both. The leading untested hypothesis is
+  the `-cmd` suffix this path appends to the registered `mqttClientId` where
+  the working streaming path uses it unmodified. The probe it rested on logged zero inbound messages, but its own
   control - a self-publish meant to prove the session receives anything - also
   came back empty, on a topic the broker would likely refuse, so it measured
   nothing in either direction. The symptom is unchanged and reproducible: the
