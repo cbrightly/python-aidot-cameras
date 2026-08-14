@@ -6,6 +6,19 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- The `async_get_camera_attributes` deprecation said the camera never pushes the
+  notification it waits for. That cause was not established and the text now
+  says so. The probe it rested on logged zero inbound messages, but its own
+  control - a self-publish meant to prove the session receives anything - also
+  came back empty, on a topic the broker would likely refuse, so it measured
+  nothing in either direction. The symptom is unchanged and reproducible: the
+  call returns None on two model families from two hosts. The streaming path
+  uses the same smarthome MQTT credentials and works, so credentials are not
+  the difference.
+
+
 ## [1.0.0b11]
 
 ### Deprecated

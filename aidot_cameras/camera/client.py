@@ -2275,8 +2275,20 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         A001064, from two different hosts. The obvious confound - a broker
         evicting us for reusing the account's `mqttClientId` while Home
         Assistant holds it - was excluded by repeating the call with a unique
-        client id, which changed nothing. The camera never pushes the
-        `setDevAttrNotif` this waits for.
+        client id, which changed nothing.
+
+        **Reliably returns nothing; the reason is NOT established.** Either the
+        camera does not push the `setDevAttrNotif` this waits for, or this
+        subscribe path does not receive it. An attempt to tell those apart was
+        inconclusive: a probe that logged every inbound topic saw zero
+        messages, but its own control - a self-publish meant to prove the
+        session receives at all - also came back empty, and that control used
+        an arbitrary topic the broker's ACL would likely refuse. So the probe
+        proved nothing in either direction. Note the streaming path uses these
+        same smarthome MQTT credentials and works, so credentials are not the
+        difference. Anyone picking this up: subscribe on these topics during a
+        live stream, where the device channel is known to carry traffic, and
+        see whether attribute pushes appear at all.
 
         Nothing calls it. The reference integration reads camera state from
         `async_get_all_device()`'s per-device `properties` dict, which works and
@@ -2292,10 +2304,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         Returns the ``attr`` dict on success, else None.
         """
         warnings.warn(
-            "async_get_camera_attributes is deprecated and does not work: the "
-            "camera never pushes the setDevAttrNotif it waits for (measured "
-            "2026-08-14 on A000088 and A001064, with client-id contention "
-            "excluded). Read `properties` from async_get_all_device() instead. "
+            "async_get_camera_attributes is deprecated: it reliably returns "
+            "None (measured 2026-08-14 on A000088 and A001064, from two hosts, "
+            "with client-id contention excluded). Whether the camera does not "
+            "push or this path does not receive is not established. Read "
+            "`properties` from async_get_all_device() instead. "
             "It will be removed in 1.0.0.",
             DeprecationWarning,
             stacklevel=2,
