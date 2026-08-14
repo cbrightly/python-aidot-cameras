@@ -18,8 +18,14 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   method already prefers when `AIDOT_PERSISTENT_MQTT` is set.
 
   Three earlier readings of this defect were wrong, all from probes that used
-  the API which drops the transport status. `async_open_cloud_playback` uses
-  the unsuffixed id and is a different failure.
+  the API which drops the transport status.
+
+- `async_open_cloud_playback` now records where it falls. It is a different
+  failure from the above: with HA's entry disabled so nothing competed for the
+  client id, it connects (`rc=0`), publishes its `getPlaybackServerInfoReq`,
+  and receives nothing in 25 s. Healthy transport, no reply - so not a plumbing
+  problem at all. The remaining lead is the request's `srcAddr` of
+  `"0.{userId}"`, a form this codebase already documents as matching nothing.
 
 
 ### Fixed

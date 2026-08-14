@@ -5147,7 +5147,23 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         Measured 2026-08-14 on the owner account against an A001064 with ten
         cloud clips in the last seven days: step 1 (the MQTT
         ``getPlaybackServerInfoReq``) returns an empty response, so this method
-        returns None before a session is ever opened.  Nothing in this library,
+        returns None before a session is ever opened.
+
+        **Where it falls is now pinned: step 1, and not for a transport
+        reason.** Re-run with Home Assistant's entry disabled so nothing
+        competed for the client id, and with the status the production helper
+        discards: the connection succeeds (``rc=0``), the request publishes,
+        and nothing arrives on either subscribed topic within 25 s. So this is
+        not the sibling defect - that one is a refused connect from a suffixed
+        client id - and it is not contention. The cloud does not answer.
+
+        The best remaining lead is the request itself rather than the plumbing.
+        It sends ``srcAddr`` as ``"0.{userId}"``, and this codebase already
+        documents that form as matching nothing: see the comment in
+        ``webrtc_open`` that terminalIndex is the session prefix of the
+        ``mqttClientId`` and that "the camera validates srcAddr against active
+        MQTT sessions; 0.{userId} matches nothing". Whoever picks this up
+        should try the terminalIndex form before assuming the service is gone.  Nothing in this library,
         its tests, its CI or the reference integration calls it, which is why
         that went unnoticed - the README named it as the retrieval path for
         cloud recordings while it did not work.
