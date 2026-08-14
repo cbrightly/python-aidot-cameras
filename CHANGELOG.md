@@ -8,6 +8,22 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ### Fixed
 
+- `async_get_camera_attributes` now says why it failed instead of returning a
+  silent `None`. The cause is settled: it appends `-cmd` to the registered
+  `mqttClientId` and the broker refuses that connect with rc=4, so there is no
+  session at all. A/B'd with Home Assistant's entry disabled - suffixed
+  refused, exact id connects. Dropping the suffix is not the fix, because the
+  exact id belongs to the live streaming connection and a duplicate connect
+  evicts it; the workable route is the shared persistent connection, which this
+  method already prefers when `AIDOT_PERSISTENT_MQTT` is set.
+
+  Three earlier readings of this defect were wrong, all from probes that used
+  the API which drops the transport status. `async_open_cloud_playback` uses
+  the unsuffixed id and is a different failure.
+
+
+### Fixed
+
 - **A cancelled open orphaned its MQTT session thread for an hour.** The
   non-persistent signalling transport runs a 3600 s session in an executor and
   is stopped only by the `outgoing_q` sentinel. Nothing pushes that sentinel on

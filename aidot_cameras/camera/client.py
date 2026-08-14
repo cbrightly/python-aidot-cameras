@@ -2277,26 +2277,31 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         Assistant holds it - was excluded by repeating the call with a unique
         client id, which changed nothing.
 
-        **The fault is on this side, not the camera's.** Measured by subscribing
-        to these exact topics while a WebRTC open ran in the same window: the
-        stream opened, so signalling demonstrably traversed
-        `iot/v1/cb/{deviceId}/`, and this subscription still received **zero**
-        messages of any kind. A subscription that misses known-live traffic is
-        not evidence about what the camera pushes; it is a broken subscription.
+        **Cause found 2026-08-14: the broker refuses the connection outright.**
+        This method appends ``-cmd`` to the account's registered
+        `mqttClientId`, and the broker rejects that connect with CONNACK rc=4,
+        "Bad user name or password" - so there is no session, no subscription,
+        and nothing to receive.  Measured with Home Assistant's entry disabled
+        so nothing else held the id, and confirmed by A/B in the same run: the
+        suffixed id is refused (rc=4) while the **exact** registered id connects
+        cleanly (rc=0).  The credential is bound to that exact string.
 
-        So the earlier reading - "the camera never pushes it" - was wrong, and
-        `_mqtt_session` is the thing to look at. Note `async_open_cloud_playback`
-        fails at its own `_mqtt_session` step too, so one cause may explain both.
+        Every earlier reading of this was wrong, in order: "the camera never
+        pushes it", then "the subscription is broken".  Both came from probes
+        that called `_mqtt_session`, which returns messages and drops the status
+        behind a WARNING - and every probe had suppressed logging.  Asking the
+        API that returns the status (`_mqtt_session_with_status`) produced the
+        answer in one run.
 
-        The leading untested hypothesis is the **client id**. This method
-        appends ``-cmd`` to the account's registered `mqttClientId`, and the
-        streaming path that works uses the base string unmodified; a broker that
-        binds its subscribe ACL to the exact registered id would silently
-        deliver nothing to a suffixed one. Testing that needs care - connecting
-        with the exact id collides with whoever legitimately holds it (a running
-        Home Assistant), and an attempt to do so hung and was abandoned rather
-        than fight a live system for its MQTT identity. A second account, or a
-        window with HA stopped, would settle it.
+        Note the fix is NOT simply dropping the suffix: the exact id is the one
+        the live streaming connection holds, and a duplicate connect evicts it.
+        The suffix was presumably added to avoid exactly that.  The workable
+        route is the shared persistent connection, which is why this method
+        already prefers it when ``AIDOT_PERSISTENT_MQTT`` is set - that path is
+        the same authorized identity and does not need a second connect.
+
+        `async_open_cloud_playback` is NOT the same cause: it uses the
+        unsuffixed id, so it connects and fails somewhere later.
 
         Nothing calls it. The reference integration reads camera state from
         `async_get_all_device()`'s per-device `properties` dict, which works and
@@ -2312,11 +2317,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         Returns the ``attr`` dict on success, else None.
         """
         warnings.warn(
-            "async_get_camera_attributes is deprecated: it reliably returns "
-            "None (measured 2026-08-14 on A000088 and A001064, from two hosts, "
-            "with client-id contention excluded). Whether the camera does not "
-            "push or this path does not receive is not established. Read "
-            "`properties` from async_get_all_device() instead. "
+            "async_get_camera_attributes is deprecated and cannot work on its "
+            "own connection: it appends '-cmd' to the registered mqttClientId "
+            "and the broker refuses that connect with rc=4 (measured "
+            "2026-08-14; the exact id connects, the suffixed one does not). "
+            "Read `properties` from async_get_all_device() instead. "
             "It will be removed in 1.0.0.",
             DeprecationWarning,
             stacklevel=2,
@@ -2432,10 +2437,26 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 )
                 return attr
 
-        _LOGGER.debug(
-            "async_get_camera_attributes: no attr response from %s (got %d msgs)",
-            device_id, len(messages),
-        )
+        if not messages:
+            # A refused connect and a silent camera look identical from here -
+            # zero messages either way - and that ambiguity is what sent three
+            # separate investigations down the wrong path. The suffixed client
+            # id is rejected by the broker with rc=4, so on the non-persistent
+            # route there is no session at all; say so at INFO rather than
+            # leaving a caller to infer camera behaviour from our own failure.
+            _LOGGER.info(
+                "async_get_camera_attributes: no messages for %s. On this "
+                "route the broker refuses the '-cmd' client id (rc=4), so no "
+                "session is established; set AIDOT_PERSISTENT_MQTT=1 to ride "
+                "the authorized connection, or read `properties` from "
+                "async_get_all_device() instead.",
+                device_id,
+            )
+        else:
+            _LOGGER.debug(
+                "async_get_camera_attributes: %d msgs from %s but none carried attr",
+                len(messages), device_id,
+            )
         return None
 
     async def async_get_recent_recordings(self, total: int = 10) -> "List[dict]":
