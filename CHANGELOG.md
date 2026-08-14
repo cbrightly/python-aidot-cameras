@@ -8,6 +8,25 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ### Fixed
 
+- **An open could hang with no success, no error, and no response to
+  cancellation.** The stream-signalling drain waited on `queue.get()` with no
+  timeout inside `run_in_executor`. Cancelling the await cancels only the wait,
+  never the worker thread, so the thread stayed blocked for the life of the
+  process - and an `asyncio.wait_for` around the enclosing open then blocked
+  forever, waiting on a cancellation that could never complete.
+
+  Measured on an A001064: a second consecutive open returned nothing and did not
+  respond to a 130 s hard cap wrapped around it. To a user that is a camera that
+  never loads and never says why; to a caller it is worse than a failure,
+  because the usual defence - wrap it in a timeout - does not work either.
+
+  The wait is now bounded, so the task is cancellable. The stop sentinel still
+  returns immediately, so the normal teardown path is unchanged. The regression
+  test does not merely fail without the fix - it hangs, which is the point.
+
+
+### Fixed
+
 - The `async_get_camera_attributes` deprecation said the camera never pushes the
   notification it waits for. That was wrong, and the experiment that settles it
   has now been run: subscribing to those exact topics while a WebRTC open

@@ -233,6 +233,39 @@ def _is_camera_present_signal(topic, msg, device_id):
     )
 
 
+
+async def _drain_outgoing_queue(loop, outgoing_q, publish, poll_s: float = 1.0) -> None:
+    """Publish queued signalling messages until the stop sentinel (``None``).
+
+    The wait is **bounded on purpose**.  ``queue.get()`` with no timeout cannot
+    be interrupted: cancelling the await cancels only the wait, never the
+    worker thread, so the thread stays blocked for the life of the process and
+    an ``asyncio.wait_for`` around the enclosing open blocks forever - waiting
+    on a cancellation that can never complete.
+
+    Measured on an A001064 (2026-08-14): a second consecutive open returned no
+    success, no error, and did not respond to a 130 s hard cap around it. To a
+    user that is a camera that never loads and never says why; to a caller it
+    is worse than a failure, because wrapping the call in a timeout - the usual
+    defence - does not work either.
+
+    A one-second poll costs one wakeup per second per open and makes the task
+    cancellable, which is the whole point.  The stop sentinel still returns
+    immediately; ``_reap_stream_drain`` keeps pushing it, and that remains the
+    fast path.
+    """
+    import queue as _q
+    while True:
+        try:
+            out = await loop.run_in_executor(
+                None, lambda: outgoing_q.get(timeout=poll_s))
+        except _q.Empty:
+            continue                      # nothing queued; loop so we stay cancellable
+        if out is None:                   # stop sentinel from WebRTCSession.stop()
+            return
+        await publish(out[0], out[1])
+
+
 class _WebRTCOpenMixin:
     async def _async_open_webrtc_stream_impl(
         self,
@@ -999,11 +1032,8 @@ class _WebRTCOpenMixin:
 
             async def _pm_stream_drain():
                 try:
-                    while True:
-                        out = await loop.run_in_executor(None, outgoing_q.get)
-                        if out is None:   # stop sentinel from WebRTCSession.stop()
-                            return
-                        await _pm_stream.publish(out[0], out[1])
+                    await _drain_outgoing_queue(
+                        loop, outgoing_q, _pm_stream.publish)
                 finally:
                     _pm_stream.remove_handler(_on_mqtt_message)
 
