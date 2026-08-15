@@ -154,17 +154,18 @@ class _CameraControlsMixin:
             _LOGGER.error("async_ptz_move: unknown direction %r", direction)
             return False
 
-        # A True return means the frame reached the channel, NOT that the camera
-        # moved. Measured 2026-08-15 on the reference A001064: commands accepted
-        # on a live session, auto-tracking off, speeds 4 and 200, three presses
-        # per direction - and the picture did not shift. Compared as mean frame
-        # difference against LIVE frames (the camera-proxy still is cached and
-        # comes back byte-identical across presses, so it cannot detect motion):
-        # 3.43 across a 4 s pan at speed 200 versus 3.15 for the return leg,
-        # i.e. scene noise, not movement.
+        # A True return means the frame reached the channel, not that the camera
+        # moved - there is no ack and no position feedback. That caveat stands,
+        # but PTZ itself WORKS: measured 2026-08-15 on the reference A001064 at
+        # speeds 4 and 200, mean frame difference 25.2 and 38.6 across a 5 s pan
+        # against a no-command control of 2.6 on the same session and timings.
         #
-        # The AVIO channel gives no position feedback, so nothing here can tell
-        # a moved camera from an ignored command. Treat the result as "sent".
+        # Two earlier readings called it inert and both were instrument
+        # failures: the camera-proxy still is cached (byte-identical across
+        # presses) and short repeated go2rtc pulls return near-identical
+        # keyframes. Compare frames from WITHIN one session recording, and
+        # always run the no-command control - without it, "the picture changed"
+        # and "twenty seconds passed" are the same measurement.
         payload = bytes([code, min(255, max(0, speed)), preset, 0, 0, 0, 0, 0])
         session = self._stream_session
         if session is None:

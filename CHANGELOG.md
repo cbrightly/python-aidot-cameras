@@ -8,6 +8,18 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ### Fixed
 
+- Documentation only: **PTZ works.** Two earlier entries described it as inert
+  on the reference A001064. Both were instrument failures - the camera-proxy
+  still is cached (byte-identical across presses) and short repeated go2rtc
+  pulls return near-identical keyframes. Measured properly, from within one
+  session recording and against a no-command control: mean frame difference
+  25.2 at speed 4 and 38.6 at speed 200 across a 5 s pan, versus 2.62 for the
+  control. The camera advertises `ptzDirection [6,3]`, pan only, and the
+  integration's button gate already honours that.
+
+
+### Fixed
+
 - `async_get_camera_attributes` returns attributes on **every** model. A
   battery camera answers the presence announce and its push is returned as-is;
   mains cameras answer with nothing at all, and rather than report failure for
