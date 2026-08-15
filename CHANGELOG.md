@@ -8,17 +8,27 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ### Fixed
 
-- `async_get_camera_attributes` now says why it failed instead of returning a
-  silent `None`. The cause is settled: it appends `-cmd` to the registered
-  `mqttClientId` and the broker refuses that connect with rc=4, so there is no
-  session at all. A/B'd with Home Assistant's entry disabled - suffixed
-  refused, exact id connects. Dropping the suffix is not the fix, because the
-  exact id belongs to the live streaming connection and a duplicate connect
-  evicts it; the workable route is the shared persistent connection, which this
-  method already prefers when `AIDOT_PERSISTENT_MQTT` is set.
+- **`async_get_camera_attributes` works now.** It appended `-cmd` to the
+  registered `mqttClientId`, and the broker binds the credential to that exact
+  string: the connect was refused outright with CONNACK rc=4, so there was no
+  session, no subscription and nothing to receive. It never worked, on any
+  camera, since it was written.
 
-  Three earlier readings of this defect were wrong, all from probes that used
-  the API which drops the transport status.
+  It now uses the exact id and prefers the shared persistent connection
+  unconditionally - the same identity, with no second connect, which avoids
+  both the refusal and evicting whoever holds the id. The one-off fallback
+  declines outright while a stream is active rather than displacing it.
+
+  Verified on hardware: an A001513 battery camera returns its pushed
+  attributes where it previously returned `None`. Mains cameras answer the
+  presence announce with nothing at all - which matches what the call is for,
+  since the wake-then-read sequence exists to make a sleeping battery camera
+  report battery, SD-card and occupancy. The deprecation added earlier today is
+  withdrawn; a method that works should not carry a warning saying it cannot.
+
+  Three earlier investigations blamed the camera for this, because the helper
+  in use returns messages and drops the transport status behind a warning that
+  every probe had suppressed.
 
 - `async_open_cloud_playback` is resolved and is not fixable here: the cloud
   does not serve `getPlaybackServerInfoReq` on this account. Proven by pairing

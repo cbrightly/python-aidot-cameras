@@ -2269,53 +2269,37 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         *,
         timeout: float = 8.0,
     ) -> Optional[dict]:
-        """DEPRECATED and non-functional. Read `properties` from the device list.
+        """Read camera attributes via the camera's own push (setDevAttrNotif).
 
-        Measured 2026-08-14: returns None for an online A000088 and an online
-        A001064, from two different hosts. The obvious confound - a broker
-        evicting us for reusing the account's `mqttClientId` while Home
-        Assistant holds it - was excluded by repeating the call with a unique
-        client id, which changed nothing.
+        **Works on battery cameras; mains cameras do not answer.** Verified
+        2026-08-15 on an A001513, which returns its pushed attributes, and an
+        A000088, which pushes nothing at all in response to the presence
+        announce. That split matches what the call is for: the wake-then-read
+        sequence below exists so a sleeping battery camera reports battery,
+        SD-card and occupancy. For a mains camera's settings, read
+        ``properties`` from ``async_get_all_device()``.
 
-        **Cause found 2026-08-14: the broker refuses the connection outright.**
-        This method appends ``-cmd`` to the account's registered
-        `mqttClientId`, and the broker rejects that connect with CONNACK rc=4,
-        "Bad user name or password" - so there is no session, no subscription,
-        and nothing to receive.  Measured with Home Assistant's entry disabled
-        so nothing else held the id, and confirmed by A/B in the same run: the
-        suffixed id is refused (rc=4) while the **exact** registered id connects
-        cleanly (rc=0).  The credential is bound to that exact string.
+        This did not work at all until 2026-08-15. It appended ``-cmd`` to the
+        registered ``mqttClientId``, and the broker binds the credential to
+        that exact string: the connect was refused outright with CONNACK rc=4,
+        "Bad user name or password", so there was no session, no subscription
+        and nothing to receive. Three separate readings blamed the camera
+        before anyone asked the transport, because the helper in use returns
+        messages and drops the status behind a suppressed warning.
 
-        Every earlier reading of this was wrong, in order: "the camera never
-        pushes it", then "the subscription is broken".  Both came from probes
-        that called `_mqtt_session`, which returns messages and drops the status
-        behind a WARNING - and every probe had suppressed logging.  Asking the
-        API that returns the status (`_mqtt_session_with_status`) produced the
-        answer in one run.
+        The suffix was presumably there to avoid evicting whoever legitimately
+        holds that id, since a duplicate connect displaces it. The answer to
+        that is the shared persistent connection, now preferred unconditionally
+        - same identity, no second connect. The one-off fallback uses the exact
+        id and declines outright while a stream is active, because losing
+        someone's video to read a settings dict is a bad trade.
 
-        Note the fix is NOT simply dropping the suffix: the exact id is the one
-        the live streaming connection holds, and a duplicate connect evicts it.
-        The suffix was presumably added to avoid exactly that.  The workable
-        route is the shared persistent connection, which is why this method
-        already prefers it when ``AIDOT_PERSISTENT_MQTT`` is set - that path is
-        the same authorized identity and does not need a second connect.
-
-        And dropping the suffix would not be enough anyway.  With the exact id
-        the connect succeeds and the presence announce still drew no
-        ``setDevAttrNotif`` in 25 s from an idle mains camera - which is now a
-        supportable statement rather than a guess, because the same session
-        type was later shown to receive eleven messages when something was
-        actually happening on the account.  So there are two problems here, not
-        one: a connect the broker refuses, and behind it a camera that does not
-        answer the announce.
-
-        `async_open_cloud_playback` is NOT the same cause: it uses the
-        unsuffixed id, so it connects and fails somewhere later.
-
-        Nothing calls it. The reference integration reads camera state from
-        `async_get_all_device()`'s per-device `properties` dict, which works and
-        is what populates every entity; this method has been dead alongside it.
-        Scheduled for removal in 1.0.0.
+        **Caveat worth knowing:** that guard only sees streams on *this*
+        client. Calling the fallback path from a second process while a Home
+        Assistant instance is connected will displace HA's MQTT session,
+        because there is one authorized client id per account and a duplicate
+        connect wins. In-process there is no issue - the persistent connection
+        is shared and no second connect happens.
 
         Mirrors the official app flow (l.java + IpcServiceImpl.java):
           1. Subscribe iot/v1/c/{userId}/# and iot/v1/cb/{deviceId}/#
@@ -2325,16 +2309,6 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
         Returns the ``attr`` dict on success, else None.
         """
-        warnings.warn(
-            "async_get_camera_attributes is deprecated and cannot work on its "
-            "own connection: it appends '-cmd' to the registered mqttClientId "
-            "and the broker refuses that connect with rc=4 (measured "
-            "2026-08-14; the exact id connects, the suffixed one does not). "
-            "Read `properties` from async_get_all_device() instead. "
-            "It will be removed in 1.0.0.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
         import json as _json
         import time as _time
 
@@ -2353,7 +2327,20 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
         mqtt_pwd  = (smarthome_auth or {}).get("mqttPassword") or ""
         _base_cid = (self._user_info.get("mqttClientId") or f"app-{mqtt_user}")
-        client_id = f"{_base_cid}-cmd"
+        # The broker binds the credential to the EXACT registered mqttClientId.
+        # A suffixed connect is refused outright with CONNACK rc=4, "Bad user
+        # name or password" - so the "-cmd" id this used to build could never
+        # establish a session, subscribe to anything, or receive a reply.  It
+        # was not a subtly wrong id; it was no session at all.  (Measured
+        # 2026-08-14 with Home Assistant disabled so nothing competed: suffixed
+        # refused, exact accepted.)
+        #
+        # The suffix was presumably there to avoid evicting the connection that
+        # legitimately holds this id, since a duplicate connect displaces it.
+        # The right answer to that is the shared persistent connection below -
+        # same identity, no second connect - which is why it is now preferred
+        # unconditionally rather than only under AIDOT_PERSISTENT_MQTT.
+        client_id = _base_cid
         user_id   = self.user_id
         device_id = self.device_id
 
@@ -2399,9 +2386,14 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             })
             publish_items.append((_wake_topic, _wake_payload))
 
-        if self._resolve_persistent_mqtt():
+        # Prefer the shared connection whatever the env var says: it already
+        # holds the only client id this broker accepts, so riding it avoids
+        # both the refused connect and the eviction the fallback risks.
+        try:
             pm = await self._get_persistent_mqtt()
-        else:
+        except Exception:
+            _LOGGER.debug("camera %s: persistent MQTT unavailable for attribute read",
+                          getattr(self, "device_id", "?"), exc_info=True)
             pm = None
         if pm is not None:
             messages, _st = await pm.request(
@@ -2417,6 +2409,17 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     "falling back to a per-op session for %s",
                     _st.get("error"), device_id,
                 )
+                if getattr(self, "_streaming_active", False):
+                    # The fallback connects with the id a live stream is using,
+                    # and a duplicate connect evicts it. Losing someone's video
+                    # to read a settings dict is a bad trade, so decline.
+                    _LOGGER.info(
+                        "async_get_camera_attributes: %s is streaming and the "
+                        "persistent connection is unavailable; declining rather "
+                        "than evicting the stream's MQTT session.",
+                        device_id,
+                    )
+                    return None
                 messages = await _mqtt_session(
                     mqtt_url, mqtt_user, mqtt_pwd, client_id,
                     subscribe_topics=sub_topics,
@@ -2454,11 +2457,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             # route there is no session at all; say so at INFO rather than
             # leaving a caller to infer camera behaviour from our own failure.
             _LOGGER.info(
-                "async_get_camera_attributes: no messages for %s. On this "
-                "route the broker refuses the '-cmd' client id (rc=4), so no "
-                "session is established; set AIDOT_PERSISTENT_MQTT=1 to ride "
-                "the authorized connection, or read `properties` from "
-                "async_get_all_device() instead.",
+                "async_get_camera_attributes: %s pushed no setDevAttrNotif. "
+                "Mains cameras have not been seen to answer the presence "
+                "announce at all; battery cameras do, which is what this call "
+                "is for. Read `properties` from async_get_all_device() for a "
+                "mains camera's settings.",
                 device_id,
             )
         else:
