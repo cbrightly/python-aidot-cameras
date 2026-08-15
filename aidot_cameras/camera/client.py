@@ -2300,6 +2300,15 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         already prefers it when ``AIDOT_PERSISTENT_MQTT`` is set - that path is
         the same authorized identity and does not need a second connect.
 
+        And dropping the suffix would not be enough anyway.  With the exact id
+        the connect succeeds and the presence announce still drew no
+        ``setDevAttrNotif`` in 25 s from an idle mains camera - which is now a
+        supportable statement rather than a guess, because the same session
+        type was later shown to receive eleven messages when something was
+        actually happening on the account.  So there are two problems here, not
+        one: a connect the broker refuses, and behind it a camera that does not
+        answer the announce.
+
         `async_open_cloud_playback` is NOT the same cause: it uses the
         unsuffixed id, so it connects and fails somewhere later.
 
@@ -5149,21 +5158,30 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         ``getPlaybackServerInfoReq``) returns an empty response, so this method
         returns None before a session is ever opened.
 
-        **Where it falls is now pinned: step 1, and not for a transport
-        reason.** Re-run with Home Assistant's entry disabled so nothing
-        competed for the client id, and with the status the production helper
-        discards: the connection succeeds (``rc=0``), the request publishes,
-        and nothing arrives on either subscribed topic within 25 s. So this is
-        not the sibling defect - that one is a refused connect from a suffixed
-        client id - and it is not contention. The cloud does not answer.
+        **RESOLVED: the cloud does not serve this request.** Proven by pairing
+        it, in one session, with a request that IS answered -
+        ``lowPowerActiveStateReq``, the battery wake handshake this library
+        relies on in production. Same connection, same subscription, same
+        client id, Home Assistant disabled so nothing competed:
 
-        The best remaining lead is the request itself rather than the plumbing.
-        It sends ``srcAddr`` as ``"0.{userId}"``, and this codebase already
-        documents that form as matching nothing: see the comment in
-        ``webrtc_open`` that terminalIndex is the session prefix of the
-        ``mqttClientId`` and that "the camera validates srcAddr against active
-        MQTT sessions; 0.{userId} matches nothing". Whoever picks this up
-        should try the terminalIndex form before assuming the service is gone.  Nothing in this library,
+            CONTROL wake answered: True    (lowPowerActiveStateResp,
+                                            wakeupStatus, keepAliveState,
+                                            devEventNotif x3, sleepStatus)
+            playback answered:     False   (nothing, 40 s)
+
+        Eleven messages arrived on that subscription. So the transport,
+        credentials, client id and topics are all fine, and every earlier
+        "zero messages" here was a genuine non-answer rather than us failing to
+        listen. ``getPlaybackServerInfoReq`` is simply not served on this
+        account.
+
+        Ruled out along the way, each by measurement rather than argument: the
+        suffixed-client-id defect (this method never had it), contention for
+        the id (HA disabled), and the ``srcAddr`` form - all four variants
+        including the terminalIndex session form drew no reply.
+
+        There is nothing left to fix on this side. The deprecation stands, and
+        removal at 1.0.0 is the right end for it.  Nothing in this library,
         its tests, its CI or the reference integration calls it, which is why
         that went unnoticed - the README named it as the retrieval path for
         cloud recordings while it did not work.

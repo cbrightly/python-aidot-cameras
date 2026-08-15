@@ -20,12 +20,17 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   Three earlier readings of this defect were wrong, all from probes that used
   the API which drops the transport status.
 
-- `async_open_cloud_playback` now records where it falls. It is a different
-  failure from the above: with HA's entry disabled so nothing competed for the
-  client id, it connects (`rc=0`), publishes its `getPlaybackServerInfoReq`,
-  and receives nothing in 25 s. Healthy transport, no reply - so not a plumbing
-  problem at all. The remaining lead is the request's `srcAddr` of
-  `"0.{userId}"`, a form this codebase already documents as matching nothing.
+- `async_open_cloud_playback` is resolved and is not fixable here: the cloud
+  does not serve `getPlaybackServerInfoReq` on this account. Proven by pairing
+  it in one session with a request that *is* answered - the battery wake
+  handshake - on the same connection, subscription and client id: the wake
+  replied with seven messages, the playback request with none in 40 s. Eleven
+  messages arrived on that subscription in total, so the transport was never
+  the problem. Also ruled out by measurement: contention for the client id, and
+  all four `srcAddr` forms including the terminalIndex session form.
+
+  The positive control is the lesson: "nothing came back" is not a result until
+  something else on the same channel comes back.
 
 
 ### Fixed
