@@ -154,6 +154,17 @@ class _CameraControlsMixin:
             _LOGGER.error("async_ptz_move: unknown direction %r", direction)
             return False
 
+        # A True return means the frame reached the channel, NOT that the camera
+        # moved. Measured 2026-08-15 on the reference A001064: commands accepted
+        # on a live session, auto-tracking off, speeds 4 and 200, three presses
+        # per direction - and the picture did not shift. Compared as mean frame
+        # difference against LIVE frames (the camera-proxy still is cached and
+        # comes back byte-identical across presses, so it cannot detect motion):
+        # 3.43 across a 4 s pan at speed 200 versus 3.15 for the return leg,
+        # i.e. scene noise, not movement.
+        #
+        # The AVIO channel gives no position feedback, so nothing here can tell
+        # a moved camera from an ignored command. Treat the result as "sent".
         payload = bytes([code, min(255, max(0, speed)), preset, 0, 0, 0, 0, 0])
         session = self._stream_session
         if session is None:
