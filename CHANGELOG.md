@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b13]
+
 ### Fixed
 
 - **`async_get_camera_attributes` works now.** It appended `-cmd` to the
