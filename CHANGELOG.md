@@ -6,6 +6,26 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- `async_get_camera_attributes` returns attributes on **every** model. A
+  battery camera answers the presence announce and its push is returned as-is;
+  mains cameras answer with nothing at all, and rather than report failure for
+  a reason that has nothing to do with the caller, it now falls back to the
+  device's own `properties` - the same source that populates every entity in
+  the reference integration. Measured: an A000088 goes from 0 attributes to 99
+  and an A001064 from 0 to 87, while the A001513 keeps returning its live push.
+  The two sources differ in shape - a push carries only what changed - so the
+  docstring says to treat the result as what the camera reports rather than a
+  fixed schema.
+
+- The same method now uses the status-bearing MQTT call rather than the wrapper
+  that drops it, and warns when there is no session. "The broker refused our
+  connect" and "the camera stayed quiet" previously arrived as the same empty
+  list, which is the ambiguity that let a rejected client id survive three
+  investigations.
+
+
 ## [1.0.0b13]
 
 ### Fixed

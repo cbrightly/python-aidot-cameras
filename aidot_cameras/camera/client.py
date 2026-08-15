@@ -2264,6 +2264,24 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
 
 
+    def _camera_properties(self) -> "Optional[dict]":
+        """This camera's `properties` dict from the cloud device list.
+
+        The same source the reference integration reads to populate every
+        entity, and the one path proven to reflect writes on every model - a
+        control set through it reads back within one poll on an A000088, an
+        A001064 and an A001513. Used as the fallback when a camera does not
+        answer the presence announce.
+        """
+        # The device client holds its own raw device dict; it does NOT have the
+        # account-wide async_get_all_device, which is on AidotClient. Reading
+        # the local copy also avoids a cloud round-trip on a path that has
+        # already spent its timeout waiting for a push.
+        raw = getattr(self, "_raw_device", None)
+        if isinstance(raw, dict):
+            return raw.get("properties") or None
+        return None
+
     async def async_get_camera_attributes(
         self,
         *,
@@ -2271,13 +2289,20 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
     ) -> Optional[dict]:
         """Read camera attributes via the camera's own push (setDevAttrNotif).
 
-        **Works on battery cameras; mains cameras do not answer.** Verified
-        2026-08-15 on an A001513, which returns its pushed attributes, and an
-        A000088, which pushes nothing at all in response to the presence
-        announce. That split matches what the call is for: the wake-then-read
-        sequence below exists so a sleeping battery camera reports battery,
-        SD-card and occupancy. For a mains camera's settings, read
-        ``properties`` from ``async_get_all_device()``.
+        **Returns attributes on every model.** A battery camera answers the
+        presence announce and its push is returned as-is - that is what the
+        wake-then-read sequence below exists for, so a sleeping camera reports
+        battery, SD-card and occupancy. Mains cameras answer with nothing at
+        all (measured on an A000088 and an A001064), so rather than report
+        failure for a reason that has nothing to do with the caller, this falls
+        back to the device's own ``properties`` dict - the same source that
+        populates every entity in the reference integration, and the one path
+        proven to reflect writes on all three model families.
+
+        Note the two sources differ in shape: a push carries only what changed
+        (often a single key), while the fallback carries the device's full
+        property set (99 keys on an A000088, 87 on an A001064). Treat the
+        result as "what this camera reports", not as a fixed schema.
 
         This did not work at all until 2026-08-15. It appended ``-cmd`` to the
         registered ``mqttClientId``, and the broker binds the credential to
@@ -2386,6 +2411,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             })
             publish_items.append((_wake_topic, _wake_payload))
 
+        _sess_st = None          # transport status, when a per-op session ran
         # Prefer the shared connection whatever the env var says: it already
         # holds the only client id this broker accepts, so riding it avoids
         # both the refused connect and the eviction the fallback risks.
@@ -2420,18 +2446,29 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                         device_id,
                     )
                     return None
-                messages = await _mqtt_session(
+                messages, _sess_st = await _mqtt_session_with_status(
                     mqtt_url, mqtt_user, mqtt_pwd, client_id,
                     subscribe_topics=sub_topics,
                     publish_items=publish_items,
                     duration=timeout,
                 )
         else:
-            messages = await _mqtt_session(
+            # Status-bearing on purpose. The plain wrapper returns messages and
+            # drops the transport status, so "the broker refused our connect"
+            # and "the camera stayed quiet" both arrive as an empty list. That
+            # ambiguity is what let a client id the broker rejects outright go
+            # unnoticed through three investigations.
+            messages, _sess_st = await _mqtt_session_with_status(
                 mqtt_url, mqtt_user, mqtt_pwd, client_id,
                 subscribe_topics=sub_topics,
                 publish_items=publish_items,
                 duration=timeout,
+            )
+        if _sess_st and not _sess_st.get("connected"):
+            _LOGGER.warning(
+                "async_get_camera_attributes: no MQTT session for %s (rc=%s %s) - "
+                "this is a transport failure, not the camera staying quiet.",
+                device_id, _sess_st.get("rc"), _sess_st.get("rc_str"),
             )
 
         for topic, raw in messages:
@@ -2449,26 +2486,27 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 )
                 return attr
 
-        if not messages:
-            # A refused connect and a silent camera look identical from here -
-            # zero messages either way - and that ambiguity is what sent three
-            # separate investigations down the wrong path. The suffixed client
-            # id is rejected by the broker with rc=4, so on the non-persistent
-            # route there is no session at all; say so at INFO rather than
-            # leaving a caller to infer camera behaviour from our own failure.
-            _LOGGER.info(
-                "async_get_camera_attributes: %s pushed no setDevAttrNotif. "
-                "Mains cameras have not been seen to answer the presence "
-                "announce at all; battery cameras do, which is what this call "
-                "is for. Read `properties` from async_get_all_device() for a "
-                "mains camera's settings.",
-                device_id,
-            )
-        else:
+        # No push. Mains cameras never answer the announce - measured on an
+        # A000088, while an A001513 answers - so returning None would make this
+        # useless on half the fleet for a reason that has nothing to do with
+        # the caller. The cloud device list carries the same attributes and is
+        # what populates every entity in the reference integration, so fall
+        # back to it rather than reporting failure.
+        try:
+            _props = self._camera_properties()
+        except Exception:
+            _props = None
+            _LOGGER.debug("camera %s: property fallback failed", device_id, exc_info=True)
+        if _props:
             _LOGGER.debug(
-                "async_get_camera_attributes: %d msgs from %s but none carried attr",
-                len(messages), device_id,
+                "async_get_camera_attributes: %s pushed nothing; returning %d "
+                "attributes from the device list instead.", device_id, len(_props),
             )
+            return _props
+        _LOGGER.info(
+            "async_get_camera_attributes: %s pushed no setDevAttrNotif and the "
+            "device list carried no properties either.", device_id,
+        )
         return None
 
     async def async_get_recent_recordings(self, total: int = 10) -> "List[dict]":
