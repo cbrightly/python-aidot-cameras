@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b14]
+
 ### Fixed
 
 - Documentation only: **PTZ works.** Two earlier entries described it as inert
