@@ -6,6 +6,22 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b15]
+
+### Changed
+
+- Documentation only. The README drops `AIDOT_PLAYBACK_TLS_VERIFY`, which is
+  read solely by the deprecated cloud-playback path the cloud does not serve -
+  documenting a security knob for code that cannot run invites someone to set
+  it and believe they hardened something. It remains described in
+  `DEFERRED_FEATURES.md`. `AIDOT_LIVESTREAM_PARAM` stays documented as an
+  explicit no-op, because that tombstone is what stops the same mistake.
+
+- Control coverage is now recorded per property per model in
+  `docs/1.0.0-READINESS.md`: 11 of 11 confirmed by read-back on the A001064 and
+  A001513, alongside the A000088 that was already complete.
+
+
 ## [1.0.0b14]
 
 ### Fixed
