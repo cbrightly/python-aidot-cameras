@@ -23,6 +23,7 @@ from ..exceptions import AidotCameraBusy, AidotCameraNotReady
 from .constants import _LIVE_PLAY_NOT_READY, fallback_turn_uris, stun_server_uris
 from .webrtc import WebRTCSession
 from .protocol import (
+    extra_static_video_pts,
     AvioResponseRouter,
     _avio_cmd_id,
     _compress_sdp_for_camera,
@@ -157,6 +158,18 @@ async def _keyframe_prompter(send_pli, first_frame, interval: float = 0.7,
         except TimeoutError:
             continue
     return sent
+
+
+def _static_video_pt_enabled(env) -> bool:
+    """``AIDOT_ACCEPT_STATIC_VIDEO_PT=1`` opts in. Default off.
+
+    Off by default because nothing has confirmed the payload on that payload
+    type is H.264 rather than H.265 - SRTP hides it, and this camera family has
+    been measured announcing ``a=rtpmap:0 H265/90000`` in the same slot on a
+    different day. Turn it on against a camera and read the decoded frame
+    count before trusting it.
+    """
+    return str(env.get("AIDOT_ACCEPT_STATIC_VIDEO_PT", "0")) == "1"
 
 
 def _accept_static_video_pts(pc, pts, device_id) -> list:
@@ -2695,6 +2708,10 @@ class _WebRTCOpenMixin:
         # ICE cap was measured against.
         _answer_inserted = False
 
+        # Static video payload types the camera announced that our offer never
+        # carried. Bound here because only the NORMAL (webrtcResp) branch below
+        # computes them - the role-reversal branch never sees an answer SDP.
+        _static_pt_candidates: list = []
         if camera_offer_fut in _rr_done and answer_fut not in _rr_done:
             # ---- ROLE REVERSAL path (e.g. LK.IPC.A001064) ---------------------- #
             # Camera sent webrtcReq (its offer) instead of webrtcResp.
@@ -3010,6 +3027,9 @@ class _WebRTCOpenMixin:
             # ---- NORMAL path: camera sent webrtcResp ---------------------------- #
             answer   = answer_fut.result()
             _ans_sdp = answer["sdp"]
+            # Keep the camera's own text: the rebuild below drops sections, and
+            # the static-payload-type check has to read what the camera said.
+            _ans_sdp_camera = _ans_sdp
             _ans_mlines = [ln for ln in _ans_sdp.splitlines() if ln.startswith("m=")]
             _status(
                 f"webrtcResp received - m=video={_sdp_transport(_ans_sdp, 'video')}"
@@ -3181,6 +3201,19 @@ class _WebRTCOpenMixin:
                 if _ol.startswith('m=video'):
                     _offer_video_pts = set(_ol.split()[3:])
                     break
+
+            # An A000088 announces a video section on a STATIC payload type and
+            # then transmits there; aiortc only ever negotiates dynamic ones,
+            # so the router would discard every packet. Name them now, act on
+            # them once the connection is up.
+            _static_pt_candidates = extra_static_video_pts(
+                _ans_sdp_camera, _offer_video_pts
+            )
+            if _static_pt_candidates:
+                _status(
+                    "answer announces video on static payload type(s) %s"
+                    % _static_pt_candidates
+                )
 
             _rebuilt: list = list(_ans_header)
             _kept_count = 0
@@ -3975,6 +4008,9 @@ class _WebRTCOpenMixin:
                 f"(connState={pc.connectionState}"
                 f"  iceState={pc.iceConnectionState}) within {_ice_timeout}s"
             )
+
+        if _static_pt_candidates and _static_video_pt_enabled(os.environ):
+            _accept_static_video_pts(pc, _static_pt_candidates, device_id)
 
         if recorder:
             await recorder.start()

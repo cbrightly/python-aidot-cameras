@@ -146,3 +146,24 @@ def test_a_broken_peer_connection_does_not_raise():
             raise RuntimeError("boom")
 
     assert _accept_static_video_pts(_Exploding(), [0], "dev") == []
+
+
+def test_env_seam_defaults_to_off():
+    """Off until it is proven on hardware - the payload could be H.265."""
+    from aidot_cameras.camera.webrtc_open import _static_video_pt_enabled
+
+    assert _static_video_pt_enabled({}) is False
+
+
+def test_env_seam_turns_it_on():
+    from aidot_cameras.camera.webrtc_open import _static_video_pt_enabled
+
+    assert _static_video_pt_enabled({"AIDOT_ACCEPT_STATIC_VIDEO_PT": "1"}) is True
+
+
+def test_env_seam_ignores_junk():
+    from aidot_cameras.camera.webrtc_open import _static_video_pt_enabled
+
+    assert _static_video_pt_enabled(
+        {"AIDOT_ACCEPT_STATIC_VIDEO_PT": "yes"}
+    ) is False
