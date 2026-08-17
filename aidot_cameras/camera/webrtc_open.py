@@ -160,6 +160,27 @@ async def _keyframe_prompter(send_pli, first_frame, interval: float = 0.7,
     return sent
 
 
+def _audio_codec_preferences(env=None) -> list:
+    """Audio codecs we offer: everything aiortc has, minus PCMU.
+
+    Measured on the wire 2026-08-17: every camera on the reference fleet sends
+    audio as PCMA (payload type 8). PCMU occupies payload type 0, which one
+    A000088 announces and then uses for VIDEO - and a payload type cannot
+    belong to two receivers at once. Dropping it costs nothing on this hardware
+    and removes the collision before it can happen.
+
+    ``AIDOT_OFFER_PCMU=1`` puts it back, because "no camera we own does this"
+    is not "no camera does this".
+    """
+    from aidot_cameras._vendor.aiortc.rtcrtpsender import RTCRtpSender
+
+    _env = os.environ if env is None else env
+    caps = list(RTCRtpSender.getCapabilities("audio").codecs)
+    if str(_env.get("AIDOT_OFFER_PCMU", "0")) == "1":
+        return caps
+    return [c for c in caps if str(c.mimeType).lower() != "audio/pcmu"]
+
+
 def _static_video_pt_enabled(env) -> bool:
     """``AIDOT_ACCEPT_STATIC_VIDEO_PT=1`` opts in. Default off.
 
@@ -1817,6 +1838,15 @@ class _WebRTCOpenMixin:
         # session. If talk_pcm_provider is supplied at open we attach immediately
         # (backward compatible; SPEAKERSTART then fires on DC open).
         _audio_tcvr   = pc.addTransceiver("audio", direction="sendrecv")  # mid:0
+        try:
+            # Keep payload type 0 out of the audio m-line: an A000088
+            # announces a video section on it and transmits video there.
+            _audio_tcvr.setCodecPreferences(_audio_codec_preferences())
+        except Exception:
+            _LOGGER.debug(
+                "camera %s: swallowed exception in %s",
+                device_id, "setCodecPreferences", exc_info=True,
+            )
         _audio_sender = getattr(_audio_tcvr, "sender", None)
         _talk_holder  = {"provider": talk_pcm_provider}
         _talk_track   = _make_talk_audio_track(

@@ -6,6 +6,37 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- **Video can be accepted on a static RTP payload type the camera announces**
+  (`AIDOT_ACCEPT_STATIC_VIDEO_PT`, **off by default**). An A000088 measured
+  2026-08-17 prepends a bare `m=video ... 0` - no `a=mid`, no `a=rtpmap`, no
+  direction - to an otherwise correct answer, and then transmits its video on
+  payload type 0: 557 kbps in 1114-byte packets, read off the wire, where PCMU
+  (what payload type 0 means by static assignment) would be 64 kbps in
+  172-byte packets. The other A000088 on the same host answers normally and
+  transmits on payload type 101.
+
+  aiortc adopts a remote payload type only when it is dynamic (96-127), so a
+  static one is never negotiated: the router holds no entry and discards every
+  packet, the video tap sees nothing, and the consumer is served audio-only.
+  When enabled, the payload type the camera announced is registered against
+  the video receiver - in its codec table and in the transport router - after
+  the connection is established. A payload type another receiver already
+  claims is refused rather than stolen.
+
+  Off by default because the payload on that payload type is assumed to be
+  H.264 on the strength of the camera's own real m-section, and SRTP hides the
+  bytes that would confirm it; the same camera family has been measured
+  announcing `a=rtpmap:0 H265/90000` in that slot on a different day.
+
+### Changed
+
+- **PCMU is no longer offered for audio** (`AIDOT_OFFER_PCMU=1` restores it).
+  Every camera measured sends PCMA (payload type 8). PCMU occupies payload
+  type 0, which is exactly what the camera above uses for video, and a payload
+  type cannot belong to two receivers - so the offer no longer claims it.
+
 ### Fixed
 
 - **A DTLS session that receives no video is no longer treated as healthy.**
