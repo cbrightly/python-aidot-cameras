@@ -6,6 +6,38 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A DTLS session that receives no video is no longer treated as healthy.**
+  The serve loop's only liveness test was the peer-connection state, which a
+  session carrying audio and no video passes indefinitely. Measured 2026-08-17
+  on an A000088: 62823 audio packets, zero video, held for hours while Home
+  Assistant logged "Stream has no video" on a 10/20/30/40 s retry ladder that
+  never ended and nothing re-opened the camera. A connected session that has
+  not produced a single video frame within `AIDOT_DTLS_VIDEO_GRACE_S` (30 s,
+  `0` disables) is now torn down and re-opened.
+
+  Noticing is only half of it. A video-less session is otherwise a *clean*
+  open, so a loop that simply re-opened would clear its own backoff each time
+  and wake the camera every 15 s for as long as the camera kept answering that
+  way - which the camera measured here does on every open. Consecutive
+  video-less sessions are counted, the backoff escalates as it would for a
+  failed open, and after `AIDOT_DTLS_FUTILE_VIDEO_LIMIT` (5, `0` to keep
+  retrying) the loop stops re-opening and says so. This mirrors the futile
+  keepalive abandon the SDES path has carried since 0.17.1.
+
+  **Scope, stated because the name invites the wider reading:** this catches a
+  session that never delivered video, not one that delivered video and then
+  went dark. The check is one-shot - once any frame has arrived the session is
+  healthy as far as it is concerned - because mid-session loss is a different
+  failure with a different remedy, and a check that claimed both would have to
+  guess which it was looking at.
+
+- The `serve h264 canary` log line names its camera. It counts frames at the
+  tap, upstream of every queue, pipe and muxer, which makes it the measurement
+  an investigation reaches for - and on a multi-camera host it could not say
+  which camera it described.
+
 ## [1.0.0b15]
 
 ### Changed
