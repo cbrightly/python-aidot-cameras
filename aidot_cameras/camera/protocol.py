@@ -293,6 +293,45 @@ def ice_wait_timeout(*, shifted_sections: int, default_timeout: float) -> float:
     return default_timeout
 
 
+def extra_static_video_pts(
+    answer_sdp: str, offer_video_pts: set
+) -> "list[int]":
+    """Static video payload types the camera announced but we never offered.
+
+    An A000088 measured 2026-08-17 prepends a bare ``m=video ... 0`` - no
+    ``a=mid``, no ``a=rtpmap``, no direction - to an otherwise correct answer,
+    and then transmits its video on payload type 0 (557 kbps in 1114-byte
+    packets, read off the wire).  aiortc adopts a remote payload type only when
+    it is dynamic (96-127), so a static one is never negotiated and
+    ``RtpRouter.route_rtp`` discards every packet carrying it.
+
+    Returns the offending payload types in the order announced, deduplicated.
+    Sections the camera rejected (port 0) are skipped: it sends nothing on
+    those.  Anything already in ``offer_video_pts`` is aiortc's to negotiate
+    normally and is not reported here, and neither is a dynamic payload type -
+    aiortc adopts those by itself.
+    """
+    found: "list[int]" = []
+    for line in answer_sdp.replace("\r\n", "\n").split("\n"):
+        if not line.startswith("m=video"):
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue  # malformed m= line - not ours to interpret
+        if parts[1] == "0":
+            continue  # rejected section
+        for tok in parts[3:]:
+            if tok in offer_video_pts:
+                continue
+            try:
+                pt = int(tok)
+            except ValueError:
+                continue
+            if 0 <= pt < 96 and pt not in found:
+                found.append(pt)
+    return found
+
+
 def select_answer_section(
     offer_mid: str,
     offer_kind: str,
