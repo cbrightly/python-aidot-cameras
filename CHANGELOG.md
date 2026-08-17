@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b16]
+
 ### Fixed
 
 - **A DTLS session that receives no video is no longer treated as healthy.**
