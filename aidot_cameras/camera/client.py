@@ -234,6 +234,69 @@ def _in_slow_probe(attempt: int, threshold: int) -> bool:
     return attempt >= threshold
 
 
+def _log_serve_canary(device_id: Optional[str], canary: dict) -> None:
+    """One line per N tapped video frames, naming the camera it counts.
+
+    The canary is the only video-rate measurement upstream of every queue, pipe
+    and muxer, which makes it the number an investigation reaches for - and
+    without the device id it cannot say which camera it describes on a
+    multi-camera host.
+    """
+    _LOGGER.debug(
+        "camera %s: serve h264 canary: frames=%d keyframes=%d"
+        " max_keyframe_gap=%d cur_gap=%d",
+        device_id or "?", canary["frames"], canary["keyframes"],
+        canary["max_gap"], canary["gap"],
+    )
+
+
+def _video_presence_verdict(
+    first_video_at: Optional[float],
+    connected_at: Optional[float],
+    now: float,
+    grace: float,
+) -> str:
+    """Has this session produced video within `grace` seconds of connecting?
+
+    The serve loop's only other liveness test is the ICE/peer-connection state,
+    which a session receiving audio and no video passes forever.  Measured
+    2026-08-17: an A000088 held one for hours - 62823 audio packets, zero video
+    - while Home Assistant retried every 10-40 s and nothing ever re-opened.
+
+    Returns "waiting" while the window is open (or the check is disabled with
+    grace <= 0, or the connection has not completed), "ok" once any video frame
+    has been seen, and "give-up" when the window closed with none.
+
+    Deliberately one-shot: a session that delivered video and then stopped is a
+    different failure with a different remedy, and this check must not claim it.
+    """
+    if first_video_at is not None:
+        return "ok"
+    if grace <= 0 or connected_at is None:
+        return "waiting"
+    return "give-up" if (now - connected_at) > grace else "waiting"
+
+
+def _futile_video_limit(env: Optional[dict] = None) -> int:
+    """Consecutive video-less DTLS sessions before the loop stops re-opening.
+
+    Noticing is only half the fix.  The camera that prompted this answers the
+    same way on every fresh open, and a video-less session is otherwise a CLEAN
+    open - so a loop that simply re-opened would clear the backoff each time and
+    wake the camera every 15 s indefinitely, which is not an improvement on
+    staying quiet.
+
+    ``AIDOT_DTLS_FUTILE_VIDEO_LIMIT=0`` disables the abandon.  Mirrors
+    AIDOT_FUTILE_KEEPALIVE_LIMIT on the SDES path, which exists for the same
+    reason.
+    """
+    _env = os.environ if env is None else env
+    try:
+        return int(_env.get("AIDOT_DTLS_FUTILE_VIDEO_LIMIT", "5"))
+    except (TypeError, ValueError):
+        return 5
+
+
 def _probe_interval(attempt: int, threshold: int, normal_delay: float,
                      slow_interval: float) -> float:
     """Effective DTLS-open retry interval for a failed open.
@@ -4154,7 +4217,10 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             _LOGGER.debug("PLI request failed: %s", _pli_exc)
 
     @staticmethod
-    def _install_encoded_tap(receiver, out_q, is_video: bool, serve: bool = False) -> bool:
+    def _install_encoded_tap(
+        receiver, out_q, is_video: bool, serve: bool = False,
+        device_id: Optional[str] = None,
+    ) -> bool:
         """Tee aiortc's depacketized encoded frames (+ RTP timestamp) into a
         thread-safe queue before decode.  Video frames go as
         ``(bytes, timestamp, is_keyframe)``, audio as ``(bytes, timestamp)``.
@@ -4215,12 +4281,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                                 if _canary["gap"] > _canary["max_gap"]:
                                     _canary["max_gap"] = _canary["gap"]
                             if _canary["frames"] % _CANARY_LOG_EVERY == 0:
-                                _LOGGER.debug(
-                                    "serve h264 canary: frames=%d keyframes=%d"
-                                    " max_keyframe_gap=%d cur_gap=%d",
-                                    _canary["frames"], _canary["keyframes"],
-                                    _canary["max_gap"], _canary["gap"],
-                                )
+                                _log_serve_canary(device_id, _canary)
                     if _skip_decode:
                         # Discarded decode: don't feed the decoder for served
                         # video data frames (see docstring).  Terminator (task
@@ -4248,14 +4309,33 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         """
         got_v = False
         got_a = False
+        # Drop the previous session's canary before looking for this session's
+        # tap. It is read by the serve loop as "has this session delivered
+        # video", and a stale dict with a non-zero frame count would answer yes
+        # for a session that has produced nothing.
+        self._serve_video_canary = None
         for _r in pc.getReceivers():
             _tr = getattr(_r, "track", None)
             if _tr is None:
                 continue
             if _tr.kind == "video" and not got_v:
-                got_v = self._install_encoded_tap(_r, vq, True, serve=True)
+                got_v = self._install_encoded_tap(
+                    _r, vq, True, serve=True, device_id=self.device_id
+                )
+                if got_v:
+                    # Keep the canary reachable from the serve loop: it counts
+                    # frames at the tap, which is the only place that knows
+                    # whether the camera is delivering video at all.  Read off
+                    # the queue rather than set here, so the idempotent
+                    # already-tapped path finds the same dict.
+                    _qd_v = getattr(_r, "_RTCRtpReceiver__decoder_queue", None)
+                    self._serve_video_canary = getattr(
+                        _qd_v, "_aidot_serve_canary", None
+                    )
             elif _tr.kind == "audio" and not got_a:
-                got_a = self._install_encoded_tap(_r, aq, False)
+                got_a = self._install_encoded_tap(
+                    _r, aq, False, device_id=self.device_id
+                )
         return got_v
 
     def _cold_phase(self, label: str) -> None:
@@ -4986,12 +5066,41 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     _stall_pli_armed = True
                     _last_viewer_dtls = loop.time()
                     _serve_port_dtls = _sdes_serve_port(serve_url) or 0
+                    # Video-presence check.  The only other liveness test here is
+                    # _pc_dead(), which reads the ICE/PC state - and a session
+                    # receiving audio and no video passes it forever (measured
+                    # 2026-08-17: hours of it, while HA retried every 10-40s).
+                    _vid_grace = float(
+                        os.environ.get("AIDOT_DTLS_VIDEO_GRACE_S", "30")
+                    )
+                    _connected_at = loop.time()
+                    _first_video_at = None
+                    _no_video = False
                     # Wait for ffmpeg to exit (go2rtc disconnect) or idle release.
                     while self._streaming_active and proc.returncode is None:
                         await asyncio.sleep(0.5)
                         if _pc_dead():
                             break
                         _now = loop.time()
+                        if _first_video_at is None:
+                            _canary_v = getattr(self, "_serve_video_canary", None)
+                            if _canary_v and _canary_v.get("frames", 0) > 0:
+                                _first_video_at = _now
+                        if _video_presence_verdict(
+                            _first_video_at, _connected_at, _now, _vid_grace
+                        ) == "give-up":
+                            _no_video = True
+                            self._futile_video_runs = (
+                                getattr(self, "_futile_video_runs", 0) + 1
+                            )
+                            _LOGGER.warning(
+                                "camera %s: DTLS session connected but delivered "
+                                "no video in %.0fs (audio may be flowing) - "
+                                "re-opening [%d consecutive]",
+                                self.device_id, _vid_grace,
+                                self._futile_video_runs,
+                            )
+                            break
                         _stall = _now - progress[0]
                         if _stall < 0.5:
                             _stall_pli_armed = True       # frames flowing; re-arm
@@ -5045,6 +5154,53 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                         _relay.set_backend(None)  # no backend until next ffmpeg
                     _terminate_proc(proc)
                     proc = None
+                    if _first_video_at is not None:
+                        # A session that delivered video clears the futile run:
+                        # the count is about CONSECUTIVE video-less sessions.
+                        self._futile_video_runs = 0
+                    if _no_video:
+                        # Do not let a video-less session look like a clean open.
+                        # It reached "connected", so the pacer was reset when it
+                        # opened; escalate here instead, or the loop re-opens on
+                        # the bare 15s gate for as long as the camera keeps
+                        # answering this way (it answered the same way on every
+                        # open measured 2026-08-17).  The returned delay is not
+                        # slept on here - the loop's own inter-attempt gate does
+                        # the spacing; what matters is the escalated attempt
+                        # count it leaves behind.
+                        _pacer.session_end_delay(healthy=False)
+                        _limit = _futile_video_limit()
+                        if _limit and self._futile_video_runs >= _limit:
+                            _LOGGER.warning(
+                                "camera %s: %d consecutive DTLS sessions "
+                                "delivered no video - stopping the background "
+                                "serve. The session connects and the camera "
+                                "sends audio only; re-opening cannot fix that "
+                                "and keeps the camera busy. A live view will "
+                                "still open a session; set "
+                                "AIDOT_DTLS_FUTILE_VIDEO_LIMIT=0 to keep "
+                                "retrying.",
+                                self.device_id, self._futile_video_runs,
+                            )
+                            # Same teardown the SDES abandon does. Leaving the
+                            # keepalive marked active and the go2rtc stream
+                            # registered points a viewer at a serve port with
+                            # nothing listening - "connection refused" instead
+                            # of a clean miss - and stops the integration's
+                            # stale-stream watchdog, which keys on the
+                            # keepalive having ended.
+                            self._streaming_active = False
+                            self._cancel_keepalive_renew()
+                            try:
+                                await self._deregister_go2rtc()
+                            except Exception:
+                                _LOGGER.debug(
+                                    "camera %s: go2rtc deregister after video "
+                                    "abandon failed", self.device_id,
+                                    exc_info=True,
+                                )
+                            return
+                        break
                     if idle_release:
                         break
             except asyncio.CancelledError:
