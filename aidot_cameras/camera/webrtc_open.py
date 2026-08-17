@@ -159,6 +159,75 @@ async def _keyframe_prompter(send_pli, first_frame, interval: float = 0.7,
     return sent
 
 
+def _accept_static_video_pts(pc, pts, device_id) -> list:
+    """Route a static video payload type to the video receiver.
+
+    The camera measured 2026-08-17 announces ``m=video ... 0`` and then
+    transmits its H.264 on payload type 0.  aiortc adopts a remote payload type
+    only when it is dynamic (``find_common_codecs``), so PT 0 is never
+    negotiated: the router holds no entry for it and every packet is discarded
+    (``RtpRouter.route_rtp``).
+
+    Add the mapping in the two places that decide the packet's fate - the
+    receiver's codec table, which selects the depacketizer per packet, and the
+    transport router, which decides whether the packet reaches a receiver at
+    all.  Both are read per packet rather than captured when the receiver
+    started, which is why this works after the connection is up.
+
+    Refuses any payload type another receiver already claims: handing audio's
+    payload type to video (or the reverse) would decode one as the other.
+    Best-effort by design - a failure here must not fail a working open.
+    """
+    import copy as _copy_pt
+
+    registered: list = []
+    if not pts:
+        return registered
+    try:
+        _video_rx = None
+        for _tcvr in pc.getTransceivers():
+            if getattr(_tcvr, "kind", None) == "video":
+                _video_rx = getattr(_tcvr, "receiver", None)
+                break
+        if _video_rx is None:
+            return registered
+        _codecs = getattr(_video_rx, "_RTCRtpReceiver__codecs", None)
+        _router = getattr(getattr(_video_rx, "transport", None), "_rtp_router", None)
+        if _codecs is None or _router is None:
+            return registered
+        _h264 = None
+        for _c in _codecs.values():
+            if str(getattr(_c, "mimeType", "")).lower() == "video/h264":
+                _h264 = _c
+                break
+        if _h264 is None:
+            return registered
+        for _pt in pts:
+            if _router.payload_type_table.get(_pt):
+                _LOGGER.info(
+                    "camera %s: video payload type %d is already claimed by "
+                    "another receiver - not remapping it", device_id, _pt,
+                )
+                continue
+            _new = _copy_pt.deepcopy(_h264)
+            _new.payloadType = _pt
+            _codecs[_pt] = _new
+            _router.register_receiver(_video_rx, ssrcs=[], payload_types=[_pt])
+            registered.append(_pt)
+        if registered:
+            _LOGGER.info(
+                "camera %s: accepting video on static payload type(s) %s - the "
+                "camera announced them and aiortc does not negotiate a static "
+                "payload type", device_id, registered,
+            )
+    except Exception:
+        _LOGGER.debug(
+            "camera %s: swallowed exception in %s",
+            device_id, "_accept_static_video_pts", exc_info=True,
+        )
+    return registered
+
+
 def _narrow_pc_ice(ice_servers, *, host_only: bool) -> list:
     """Return the LOCAL RTCPeerConnection's ICE server list for fast_connect.
 
