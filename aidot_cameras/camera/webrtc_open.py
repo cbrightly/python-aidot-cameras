@@ -193,6 +193,91 @@ def _static_video_pt_enabled(env) -> bool:
     return str(env.get("AIDOT_ACCEPT_STATIC_VIDEO_PT", "0")) == "1"
 
 
+#: Default seconds the negotiated video payload type gets to deliver before a
+#: static one is routed to the receiver as a rescue.  Long enough that a
+#: healthy camera has sent its first packets, short enough to sit inside the
+#: serve loop's video-presence grace.  Unlike every other number in this file
+#: it was chosen rather than measured, so it carries an env seam
+#: (``AIDOT_STATIC_PT_RESCUE_S``) - the wait can be retuned against a camera
+#: without a rebuild.
+_STATIC_PT_RESCUE_S = 8.0
+
+
+def _static_pt_rescue_delay(env=None) -> float:
+    """Seconds to wait before rescuing, from the environment."""
+    _env = os.environ if env is None else env
+    try:
+        _v = float(_env.get("AIDOT_STATIC_PT_RESCUE_S", _STATIC_PT_RESCUE_S))
+    except (TypeError, ValueError):
+        return _STATIC_PT_RESCUE_S
+    return _v if _v >= 0 else _STATIC_PT_RESCUE_S
+
+
+def _video_receiver_is_receiving(pc) -> bool:
+    """Has the negotiated video receiver taken delivery of any RTP yet?
+
+    ``RtpRouter.route_rtp`` writes the SSRC of every packet it routes into
+    ``ssrc_table``, so an entry pointing at the video receiver is proof that
+    packets reached it on a payload type aiortc negotiated by itself - and
+    therefore that nothing needs rescuing.
+    """
+    try:
+        for _tcvr in pc.getTransceivers():
+            if getattr(_tcvr, "kind", None) != "video":
+                continue
+            _rx = getattr(_tcvr, "receiver", None)
+            _router = getattr(
+                getattr(_rx, "transport", None), "_rtp_router", None)
+            if _rx is None or _router is None:
+                return False
+            return any(_v is _rx for _v in _router.ssrc_table.values())
+    except Exception:
+        _LOGGER.debug(
+            "swallowed exception in _video_receiver_is_receiving",
+            exc_info=True,
+        )
+    return False
+
+
+async def _rescue_static_video_pts(pc, pts, device_id,
+                                   delay: "float | None" = None) -> list:
+    """Route an announced static video payload type, but only as a rescue.
+
+    Registering it up front breaks a camera that did not need it.  Measured
+    2026-08-17: the unit announces a bare ``m=video ... 0`` alongside a
+    perfectly good ``m=video 101 102`` and usually transmits on 101.  Claiming
+    payload type 0 for the video receiver as well let a second SSRC route into
+    the same receiver, and ``route_rtp`` learns it permanently - two streams
+    interleaved in one jitter buffer, reassembly corrupted, and not one valid
+    keyframe.  That session carried 600 frames and zero keyframes while every
+    other session that hour was healthy; the viewer's playlist held three
+    segments with nothing in them.
+
+    The SDP cannot tell the two cases apart - the camera announces the stub
+    either way - so the wire decides.  Give the negotiated payload type its
+    chance, and only claim the static one if nothing arrived at all, which is
+    the case this was written for.
+    """
+    delay = _static_pt_rescue_delay() if delay is None else delay
+    try:
+        await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        return []
+    if _video_receiver_is_receiving(pc):
+        _LOGGER.info(
+            "camera %s: video is arriving on the negotiated payload type - "
+            "leaving the announced static type(s) %s unrouted",
+            device_id, list(pts),
+        )
+        return []
+    _LOGGER.info(
+        "camera %s: no video on the negotiated payload type after %.0fs - "
+        "routing the announced static type(s) %s to the video receiver",
+        device_id, delay, list(pts),
+    )
+    return _accept_static_video_pts(pc, pts, device_id)
+
+
 def _accept_static_video_pts(pc, pts, device_id) -> list:
     """Route a static video payload type to the video receiver.
 
@@ -4040,7 +4125,20 @@ class _WebRTCOpenMixin:
             )
 
         if _static_pt_candidates and _static_video_pt_enabled(os.environ):
-            _accept_static_video_pts(pc, _static_pt_candidates, device_id)
+            # Deferred on purpose - see _rescue_static_video_pts. Held on self
+            # so the task is not garbage-collected mid-wait; it only ever adds
+            # a routing entry, so a session that ends first leaves it inert.
+            # The previous one is cancelled rather than dropped: these sessions
+            # re-open every 35s on the unit this was written for, which is
+            # shorter than some rescue waits, and simply reassigning would drop
+            # the last strong reference to a task still in its sleep.
+            _prev_rescue = getattr(self, "_static_pt_rescue", None)
+            if _prev_rescue is not None and not _prev_rescue.done():
+                _prev_rescue.cancel()
+            self._static_pt_rescue = asyncio.ensure_future(
+                _rescue_static_video_pts(
+                    pc, _static_pt_candidates, device_id)
+            )
 
         if recorder:
             await recorder.start()

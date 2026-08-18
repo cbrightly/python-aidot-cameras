@@ -167,3 +167,82 @@ def test_env_seam_ignores_junk():
     assert _static_video_pt_enabled(
         {"AIDOT_ACCEPT_STATIC_VIDEO_PT": "yes"}
     ) is False
+
+
+# --- the rescue must not break a camera that did not need it ----------------
+
+import asyncio  # noqa: E402
+
+from aidot_cameras.camera.webrtc_open import (  # noqa: E402
+    _rescue_static_video_pts,
+    _video_receiver_is_receiving,
+)
+
+
+def test_a_receiver_that_has_taken_no_rtp_is_not_receiving():
+    pc, _v, _a, _t = _pc_with_video_and_audio()
+    assert _video_receiver_is_receiving(pc) is False
+
+
+def test_one_routed_packet_makes_it_receiving():
+    """route_rtp learns the SSRC, which is the evidence this reads."""
+    pc, video_rx, _a, transport = _pc_with_video_and_audio()
+    assert transport._rtp_router.route_rtp(_Pkt(101)) is video_rx
+    assert _video_receiver_is_receiving(pc) is True
+
+
+def test_audio_arriving_does_not_count_as_video():
+    pc, _v, audio_rx, transport = _pc_with_video_and_audio()
+    assert transport._rtp_router.route_rtp(_Pkt(8)) is audio_rx
+    assert _video_receiver_is_receiving(pc) is False
+
+
+def test_the_rescue_leaves_a_working_camera_alone():
+    """The regression, 2026-08-17.
+
+    The camera announces the bare `m=video ... 0` stub even when it is about
+    to transmit perfectly good video on 101. Claiming payload type 0 as well
+    let a second SSRC route into the same receiver - route_rtp learns it and
+    keeps it - so two streams shared one jitter buffer, reassembly was
+    corrupted, and the session produced 600 frames and not one keyframe while
+    every other session that hour was healthy.
+    """
+    pc, video_rx, _a, transport = _pc_with_video_and_audio()
+    transport._rtp_router.route_rtp(_Pkt(101))          # video is flowing
+
+    assert asyncio.run(
+        _rescue_static_video_pts(pc, [0], "dev", delay=0)) == []
+    assert transport._rtp_router.route_rtp(_Pkt(0, ssrc=0x999)) is None
+    assert 0 not in video_rx._RTCRtpReceiver__codecs
+
+
+def test_the_rescue_still_saves_a_camera_that_sent_nothing():
+    """The case it was written for: video only ever arrives on PT 0."""
+    pc, video_rx, _a, transport = _pc_with_video_and_audio()
+
+    assert asyncio.run(
+        _rescue_static_video_pts(pc, [0], "dev", delay=0)) == [0]
+    assert transport._rtp_router.route_rtp(_Pkt(0)) is video_rx
+
+
+def test_a_broken_peer_connection_reads_as_not_receiving():
+    class _Exploding:
+        def getTransceivers(self):
+            raise RuntimeError("boom")
+
+    assert _video_receiver_is_receiving(_Exploding()) is False
+
+
+def test_the_rescue_wait_has_an_env_seam():
+    """8s was chosen, not measured - it must be retunable on hardware."""
+    from aidot_cameras.camera.webrtc_open import (
+        _STATIC_PT_RESCUE_S,
+        _static_pt_rescue_delay,
+    )
+
+    assert _static_pt_rescue_delay({}) == _STATIC_PT_RESCUE_S
+    assert _static_pt_rescue_delay({"AIDOT_STATIC_PT_RESCUE_S": "3"}) == 3.0
+    assert _static_pt_rescue_delay(
+        {"AIDOT_STATIC_PT_RESCUE_S": "junk"}) == _STATIC_PT_RESCUE_S
+    assert _static_pt_rescue_delay(
+        {"AIDOT_STATIC_PT_RESCUE_S": "-5"}) == _STATIC_PT_RESCUE_S
