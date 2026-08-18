@@ -234,6 +234,46 @@ def _in_slow_probe(attempt: int, threshold: int) -> bool:
     return attempt >= threshold
 
 
+#: RTP timestamps are 32 bits wide.
+_TS_MODULO = 2 ** 32
+
+#: A forward step larger than this is not a frame interval. Half the counter is
+#: about 13 hours of a 90 kHz clock, so nothing legitimate comes near it.
+_TS_BOGUS_UNWRAP = 2 ** 31
+
+
+def _unwrap_state() -> dict:
+    """Fresh timestamp-correction state for one video tap."""
+    return {"prev_raw": None, "offset": 0}
+
+
+def _correct_ts(state: dict, raw: int) -> int:
+    """Undo unwraps that should not have happened, cumulatively.
+
+    aiortc hands the tap an unwrapped, session-rebased timestamp, and it treats
+    ANY backward step as the 32-bit counter wrapping - so a reordered or
+    re-sent frame comes through as an advance of nearly 2**32, and every
+    timestamp after it stays 2**32 too high. The error accumulates: probed on
+    the live tap 2026-08-18, 1200 frames carried 22 such artifacts and spanned
+    94,493,540,302 ticks, which is 22 x 2**32 on top of the real 7,061,580.
+
+    Each artifact is 2**32 minus a plausible interval (4294961266 is
+    2**32 - 6030), so the frame really moved backward a few thousand ticks.
+    Holding a running offset restores the whole sequence; correcting one step
+    in isolation would leave everything downstream of it shifted.
+
+    The serve mux writes this straight into `pkt.pts`/`pkt.dts`, so uncorrected
+    it puts jumps of about 47,721 seconds into a container whose PTS field is
+    33 bits wide. The content underneath was always fine: those same 1200
+    frames carry an honest 15.3 fps at 6030 ticks per frame, matching the wire.
+    """
+    _prev = state["prev_raw"]
+    if _prev is not None and raw - _prev > _TS_BOGUS_UNWRAP:
+        state["offset"] += _TS_MODULO
+    state["prev_raw"] = raw
+    return raw - state["offset"]
+
+
 def _log_serve_canary(device_id: Optional[str], canary: dict) -> None:
     """One line per N tapped video frames, naming the camera it counts.
 
@@ -244,10 +284,48 @@ def _log_serve_canary(device_id: Optional[str], canary: dict) -> None:
     """
     _LOGGER.debug(
         "camera %s: serve h264 canary: frames=%d keyframes=%d"
-        " max_keyframe_gap=%d cur_gap=%d",
+        " max_keyframe_gap=%d cur_gap=%d unwrap_fixed=%d",
         device_id or "?", canary["frames"], canary["keyframes"],
-        canary["max_gap"], canary["gap"],
+        canary["max_gap"], canary["gap"], canary.get("unwrapped", 0),
     )
+
+
+def _live_video_canary(pc, stored):
+    """The canary that is actually being fed, not the one we happened to store.
+
+    `_install_av_taps` records a reference to the canary of the first video
+    receiver it taps. If the session ends up delivering on a DIFFERENT receiver
+    - or the reference is cleared and not re-set - that stored dict stays at
+    zero frames for the life of the session while another one fills up. The
+    video-presence watchdog then reads "no video" from a session that is
+    streaming perfectly and tears it down.
+
+    Measured 2026-08-18: a camera serving at 0.993x wall clock, canary logging
+    frames=3600 and climbing, and the watchdog firing "delivered no video in
+    30s" every 35 seconds. Its sibling on the released build fired that warning
+    zero times in two and a half hours.
+
+    So prefer the stored reference when it has frames, and otherwise ask the
+    peer connection directly. Best-effort: this must never be the reason a
+    healthy session is judged dead.
+    """
+    if stored and stored.get("frames", 0) > 0:
+        return stored
+    _best = stored
+    try:
+        for _r in pc.getReceivers():
+            _tr = getattr(_r, "track", None)
+            if _tr is None or _tr.kind != "video":
+                continue
+            _qd = getattr(_r, "_RTCRtpReceiver__decoder_queue", None)
+            _c = getattr(_qd, "_aidot_serve_canary", None)
+            if _c and _c.get("frames", 0) > (
+                _best.get("frames", 0) if _best else 0
+            ):
+                _best = _c
+    except Exception:
+        _LOGGER.debug("swallowed exception in _live_video_canary", exc_info=True)
+    return _best
 
 
 def _video_presence_verdict(
@@ -4252,9 +4330,14 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         _orig_put = _qd.put
         _skip_decode = bool(serve and is_video)
         # Served-stream health canary (video-only): observed without decoding.
-        _canary = {"frames": 0, "keyframes": 0, "gap": 0, "max_gap": 0} if _skip_decode else None
+        _canary = ({"frames": 0, "keyframes": 0, "gap": 0, "max_gap": 0,
+                    "unwrapped": 0} if _skip_decode else None)
         if _canary is not None:
             _qd._aidot_serve_canary = _canary
+        # Serve path only: this is the stream we timestamp by hand. The
+        # live-view path hands frames to aiortc's own decoder, which does not
+        # use these values the same way.
+        _unwrap = _unwrap_state() if _skip_decode else None
         _CANARY_LOG_EVERY = 300  # frames (~10-20s of H.264); DEBUG summary cadence
 
         def _tap_put(task, *a, **k):
@@ -4264,6 +4347,16 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     _d = getattr(_enc, "data", None)
                     _ts = getattr(_enc, "timestamp", None)
                     if _d and _ts is not None:
+                        if _unwrap is not None:
+                            # Count ARTIFACTS, not frames carrying the running
+                            # offset - once the offset is non-zero every frame
+                            # differs from its raw value, which made the first
+                            # reading say 6853 of 6900 and told me nothing.
+                            _before = _unwrap["offset"]
+                            _ts = _correct_ts(_unwrap, int(_ts))
+                            if _canary is not None and _unwrap["offset"] != _before:
+                                _canary["unwrapped"] = (
+                                    _canary.get("unwrapped", 0) + 1)
                         _b = bytes(_d)
                         _kf = _h264_has_keyframe(_b) if is_video else False
                         _item = (_b, int(_ts), _kf) if is_video else (_b, int(_ts))
@@ -5083,9 +5176,13 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                             break
                         _now = loop.time()
                         if _first_video_at is None:
-                            _canary_v = getattr(self, "_serve_video_canary", None)
+                            _canary_v = _live_video_canary(
+                                pc, getattr(self, "_serve_video_canary", None))
                             if _canary_v and _canary_v.get("frames", 0) > 0:
                                 _first_video_at = _now
+                                # Keep the one that is actually filling, so the
+                                # canary log line describes the live session.
+                                self._serve_video_canary = _canary_v
                         if _video_presence_verdict(
                             _first_video_at, _connected_at, _now, _vid_grace
                         ) == "give-up":

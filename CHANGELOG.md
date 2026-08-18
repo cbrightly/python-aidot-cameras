@@ -6,6 +6,45 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b17]
+
+### Fixed
+
+- **A served stream no longer runs ahead of wall clock.** A viewer received
+  about 1.8 seconds of media per second, so their buffer grew for as long as
+  they watched and the picture slid steadily into the past - the live view
+  showing footage from minutes earlier, stalling and jumping to catch up.
+  Measured end to end on two A000088 units: **1.821x before, 1.008x and 0.998x
+  after**.
+
+  Two defects, and neither is the camera. Its clock is honest - 1.004x and
+  1.000x of the declared 90000 measured on the wire, 15.1 fps stamped 6030
+  ticks apart.
+
+  First, aiortc reads ANY backward timestamp step as the 32-bit RTP counter
+  wrapping, and unwraps it by adding 2**32. A camera whose pictures arrive out
+  of presentation order therefore produces a phantom jump of about 47,721
+  seconds, and the error accumulates for the life of the session: 1200 frames
+  measured on the live tap carried 22 such artifacts and spanned 22 x 2**32
+  more ticks than the content they described. A running offset undoes them.
+
+  Second, those artifacts had been masking real backward steps. The camera's
+  RTP timestamp carries PRESENTATION time and its pictures do not arrive in
+  presentation order - excursions reach 138060 ticks. The serve mux wrote
+  `pkt.pts = pkt.dts`, so a backward step became a backward DTS, which an
+  mpegts muxer rejects outright. DTS is now emitted in decode order, strictly
+  increasing, with presentation trailing it by `AIDOT_REORDER_SLACK_TICKS`
+  (180000, two seconds).
+
+  The two halves must ship together: correcting the unwrap alone exposes the
+  backward steps and the mux stops producing anything at all.
+
+- **The video-presence watchdog no longer tears down a session that is
+  streaming.** It read a canary reference captured when the tap was installed;
+  when the session delivered on a different receiver that dict stayed at zero
+  frames while another filled, and a healthy camera was re-opened every 35
+  seconds. The check now resolves whichever video canary is actually being fed.
+
 ## [1.0.0b16]
 
 ### Fixed
