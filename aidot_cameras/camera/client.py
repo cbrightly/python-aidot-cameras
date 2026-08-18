@@ -4310,11 +4310,15 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     _ts = getattr(_enc, "timestamp", None)
                     if _d and _ts is not None:
                         if _unwrap is not None:
-                            _fixed = _correct_ts(_unwrap, int(_ts))
-                            if _fixed != int(_ts) and _canary is not None:
+                            # Count ARTIFACTS, not frames carrying the running
+                            # offset - once the offset is non-zero every frame
+                            # differs from its raw value, which made the first
+                            # reading say 6853 of 6900 and told me nothing.
+                            _before = _unwrap["offset"]
+                            _ts = _correct_ts(_unwrap, int(_ts))
+                            if _canary is not None and _unwrap["offset"] != _before:
                                 _canary["unwrapped"] = (
                                     _canary.get("unwrapped", 0) + 1)
-                            _ts = _fixed
                         _b = bytes(_d)
                         _kf = _h264_has_keyframe(_b) if is_video else False
                         _item = (_b, int(_ts), _kf) if is_video else (_b, int(_ts))
@@ -4323,11 +4327,6 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                         except Exception:
                             pass  # full -> drop (PLI re-arms a GOP)
                         if _canary is not None:
-                            if is_video and _canary["frames"] < 1200:
-                                _LOGGER.warning(
-                                    "TAPTS %s %d %d %d",
-                                    device_id, _canary["frames"], int(_ts),
-                                    len(_b))
                             _canary["frames"] += 1
                             if _kf:
                                 _canary["keyframes"] += 1

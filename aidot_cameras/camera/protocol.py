@@ -1125,6 +1125,68 @@ def _idle_release_due(present, last_consumer: float, now: float,
     return (now - last_consumer) > idle_secs
 
 
+#: How far ahead of presentation a picture is told to decode. Must exceed the
+#: largest BACKWARD timestamp excursion the camera produces, or the monotonic
+#: clamp below would push a DTS past its own PTS. Measured 2026-08-18: the
+#: unwrap artifacts encode excursions up to 138060 ticks (1.53 s), so two
+#: seconds carries margin. It shifts DTS earlier, never PTS, so it costs the
+#: player buffer depth rather than reordering anything.
+_REORDER_SLACK_TICKS = 180000
+
+
+def _reorder_slack(env=None) -> int:
+    """Decode-ahead in 90 kHz ticks. ``AIDOT_REORDER_SLACK_TICKS`` overrides."""
+    _env = os.environ if env is None else env
+    try:
+        _v = int(_env.get("AIDOT_REORDER_SLACK_TICKS", _REORDER_SLACK_TICKS))
+    except (TypeError, ValueError):
+        return _REORDER_SLACK_TICKS
+    return _v if _v >= 0 else _REORDER_SLACK_TICKS
+
+
+def video_pts_dts(state: dict, pts: int, slack: int) -> tuple:
+    """A monotonic DTS for a presentation timestamp that is not in decode order.
+
+    The camera's RTP timestamp carries PRESENTATION time, and its pictures do
+    not arrive in presentation order - measured 2026-08-18, timestamps step
+    backward by up to 138060 ticks. Written straight into `pkt.dts`, as this
+    mux did, that is a DTS going backwards, which an mpegts muxer will not
+    accept: the write fails and the mux thread ends, so the camera "serves"
+    while nothing reaches a viewer. That is precisely what happened when the
+    2**32 unwrap artifacts - which had been masking the backward steps - were
+    corrected without also fixing this.
+
+    DTS trails PTS by ``slack`` and is clamped to stay monotonic. Both
+    invariants an mpegts muxer requires then hold by construction:
+
+        dts is non-decreasing        - the clamp
+        dts <= pts for every packet  - slack exceeds the largest excursion,
+                                       and a final min() makes it total
+        dts >= 0 on the first packet - presentation is shifted by the slack
+
+    Total media time still tracks the PTS span, so the stream lands at
+    wall-clock rate rather than the inflated one.
+    """
+    # Shift presentation forward by the slack so DTS starts at zero rather
+    # than at -slack. A negative DTS on the first packet is rejected, which
+    # cost a deploy: frames flowed, the mux logged nothing, and the viewer got
+    # nothing.
+    _dts = pts
+    _prev = state.get("dts")
+    if _prev is not None and _dts <= _prev:
+        _dts = _prev + 1
+    # Presentation trails by the slack, and is RAISED to meet DTS when an
+    # excursion exceeds it. Lowering DTS to meet PTS instead - which is what
+    # this did first - breaks the monotonicity that was the entire point:
+    # replaying 1200 real captured frames through it produced a
+    # non-monotonic DTS, and the muxer emitted nothing.
+    pts = pts + slack
+    if pts < _dts:
+        pts = _dts
+    state["dts"] = _dts
+    return pts, _dts
+
+
 def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
     """Mux tapped video (H.264 copy) + audio (PCMA->AAC) to ``out_fileobj`` as
     RTP-timestamped MPEG-TS.  Runs in a worker thread; the serve's ffmpeg reads
@@ -1235,6 +1297,8 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
         _LOGGER.debug("DTLS A/V mux: audio disabled: %s", exc)
         have_audio = False
     v0 = [None]
+    _ts_state = {}
+    _slack = _reorder_slack()
     a_pts = [0]
     a_rtp0 = [None]      # first audio RTP timestamp (8 kHz units), for gap detection
     a_in = [0]           # 8 kHz samples emitted to the resampler so far (incl. concealed)
@@ -1261,7 +1325,8 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                 v0[0] = ts
             pkt = av.Packet(data)
             pkt.stream = vs
-            pkt.pts = pkt.dts = ts - v0[0]
+            pkt.pts, pkt.dts = video_pts_dts(
+                _ts_state, ts - v0[0], _slack)
             pkt.time_base = Fraction(1, 90000)
             try:
                 out.mux(pkt)
