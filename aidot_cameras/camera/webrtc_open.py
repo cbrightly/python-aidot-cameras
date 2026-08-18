@@ -1201,10 +1201,14 @@ class _WebRTCOpenMixin:
             # (lowPowerActiveStateResp) is what releases the pre-offer wait in
             # _is_camera_present_signal. Gating both would cost a mains camera
             # up to 12 s of cold start waiting for a reply nothing asked for.
-            if getattr(self, "is_battery_camera", False):
+            _is_batt = bool(getattr(self, "is_battery_camera", False))
+            if _is_batt:
+                _status(f"HTTP wake for {device_id} (battery camera)")
                 _spawn_bg(_http_wake())
             else:
-                _status("skipping HTTP wake (mains camera - app parity)")
+                _status(
+                    f"skipping HTTP wake for {device_id}"
+                    " (is_battery_camera=False - app parity)")
             # setKeepAliveTime keeps the camera active for ~25 s after wake so the
             # SCTP + LIVING handshake can complete. For BATTERY cameras a renewal
             # loop (CameraMixin._keepalive_renew_loop, started by start_keepalive)
