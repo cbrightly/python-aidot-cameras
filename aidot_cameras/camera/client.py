@@ -328,6 +328,19 @@ def _live_video_canary(pc, stored):
     return _best
 
 
+#: Consecutive dead attempts before a reused peer id is rotated. The SDES
+#: keepalive loop reuses one peer id across the retries of a wake burst; a
+#: fresh one registers another camera-side session, and the camera frees those
+#: only slowly. Module-level so the loop and its tests share one number.
+#:
+#: Deliberately NOT applied to the DTLS serve loop - see
+#: AIDOT-FINDINGS-family-room-churn-2026-08-18.md. That loop builds a fresh
+#: RTCPeerConnection per attempt, so reusing the peer id across attempts lets a
+#: late answer generated against the PREVIOUS offer claim answer_fut and become
+#: the remote description, with ICE credentials that cannot authenticate.
+_PEERID_MAX_REUSE = 3
+
+
 def _video_presence_verdict(
     first_video_at: Optional[float],
     connected_at: Optional[float],
@@ -3905,8 +3918,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # official app, which resends within one session. Rotate to a fresh
         # peerid after a session that actually delivered media (so the next view
         # is a clean session) or after _PEERID_MAX_REUSE consecutive dead
-        # attempts (so a poisoned peerid can't wedge us permanently).
-        _PEERID_MAX_REUSE = 3
+        # attempts (so a poisoned peerid can't wedge us permanently).  The bound
+        # is the module-level _PEERID_MAX_REUSE so this loop and its tests share
+        # one number.  Safe HERE and not in the DTLS serve loop because this
+        # loop re-offers within one open attempt on one peer connection, so a
+        # late answer still belongs to the offer in flight.
         _loop_peer_id = self.generate_webrtc_peer_id(live_type=2, stream_id=0,
                                                      sdes=True)
         _peer_reuses = 0
