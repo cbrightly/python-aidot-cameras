@@ -1186,7 +1186,25 @@ class _WebRTCOpenMixin:
                         "lowPowerActiveState HTTP failed for %s: %s", device_id, _we
                     )
 
-            _spawn_bg(_http_wake())
+            # App parity: the HTTP wake is gated on the device being
+            # low-power. Verified in the decompiled client 2026-08-18 -
+            # NewLiveFragment calls IpcDeviceBean->isLowPowerDevice() and
+            # `if-eqz` jumps PAST the DeviceWakeUpRepos call, so a mains camera
+            # is never woken over the cloud. We were sending it to every camera
+            # on every open; a mains A000088 that re-opens every 40-90 s was
+            # being told to "wakeup" that often, for a channel whose whole
+            # purpose ("cloud push for deep-sleep cameras") cannot apply to a
+            # camera that never sleeps.
+            #
+            # The MQTT wake above is deliberately NOT gated with it: it rides
+            # an already-open connection, and its cloud ack
+            # (lowPowerActiveStateResp) is what releases the pre-offer wait in
+            # _is_camera_present_signal. Gating both would cost a mains camera
+            # up to 12 s of cold start waiting for a reply nothing asked for.
+            if getattr(self, "is_battery_camera", False):
+                _spawn_bg(_http_wake())
+            else:
+                _status("skipping HTTP wake (mains camera - app parity)")
             # setKeepAliveTime keeps the camera active for ~25 s after wake so the
             # SCTP + LIVING handshake can complete. For BATTERY cameras a renewal
             # loop (CameraMixin._keepalive_renew_loop, started by start_keepalive)
