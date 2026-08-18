@@ -250,6 +250,19 @@ def _log_serve_canary(device_id: Optional[str], canary: dict) -> None:
     )
 
 
+def _canary_has_decodable_video(canary) -> bool:
+    """Has this session delivered anything a viewer could decode?
+
+    Not the same question as "have frames arrived".  The serve mux begins on a
+    keyframe and discards everything before it, so a session carrying only
+    P-frames produces an empty stream no matter how many of them there are.
+    Measured 2026-08-17: one carried 600 frames and zero keyframes through
+    roughly fifteen PLIs, and the viewer's playlist held three segments with no
+    frames in them at all.
+    """
+    return bool(canary) and canary.get("keyframes", 0) > 0
+
+
 def _video_presence_verdict(
     first_video_at: Optional[float],
     connected_at: Optional[float],
@@ -5083,8 +5096,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                             break
                         _now = loop.time()
                         if _first_video_at is None:
-                            _canary_v = getattr(self, "_serve_video_canary", None)
-                            if _canary_v and _canary_v.get("frames", 0) > 0:
+                            if _canary_has_decodable_video(
+                                getattr(self, "_serve_video_canary", None)
+                            ):
                                 _first_video_at = _now
                         if _video_presence_verdict(
                             _first_video_at, _connected_at, _now, _vid_grace
@@ -5093,11 +5107,15 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                             self._futile_video_runs = (
                                 getattr(self, "_futile_video_runs", 0) + 1
                             )
+                            _canary_v = getattr(
+                                self, "_serve_video_canary", None) or {}
                             _LOGGER.warning(
                                 "camera %s: DTLS session connected but delivered "
-                                "no video in %.0fs (audio may be flowing) - "
-                                "re-opening [%d consecutive]",
+                                "no decodable video in %.0fs (%d frame(s), no "
+                                "keyframe; audio may be flowing) - re-opening "
+                                "[%d consecutive]",
                                 self.device_id, _vid_grace,
+                                _canary_v.get("frames", 0),
                                 self._futile_video_runs,
                             )
                             break

@@ -97,3 +97,32 @@ def test_a_session_with_no_video_receiver_drops_the_previous_canary():
 
     assert CameraMixin._install_av_taps(obj, _FakePC(["audio"]), None, None) is False
     assert obj._serve_video_canary is None
+
+
+# --- frames are not the same thing as video ---------------------------------
+
+from aidot_cameras.camera.client import _canary_has_decodable_video  # noqa: E402
+
+
+def test_a_session_with_keyframes_has_delivered_video():
+    assert _canary_has_decodable_video(
+        {"frames": 300, "keyframes": 8}) is True
+
+
+def test_frames_without_a_keyframe_are_not_video():
+    """Measured 2026-08-17, and it is what the viewer actually saw.
+
+    One session carried 600 frames and ZERO keyframes through roughly fifteen
+    PLIs. The serve mux begins on a keyframe and discards everything before it,
+    so it produced an empty stream: the viewer's playlist held three segments
+    and no frames at all. The presence watchdog counted frames, saw 600, and
+    stayed quiet for the whole session - the exact hole it was written to
+    close, one field over.
+    """
+    assert _canary_has_decodable_video(
+        {"frames": 600, "keyframes": 0}) is False
+
+
+def test_an_absent_or_empty_canary_has_delivered_nothing():
+    assert _canary_has_decodable_video(None) is False
+    assert _canary_has_decodable_video({}) is False
