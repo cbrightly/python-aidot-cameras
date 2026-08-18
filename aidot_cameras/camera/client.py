@@ -234,6 +234,46 @@ def _in_slow_probe(attempt: int, threshold: int) -> bool:
     return attempt >= threshold
 
 
+#: RTP timestamps are 32 bits wide.
+_TS_MODULO = 2 ** 32
+
+#: A forward step larger than this is not a frame interval. Half the counter is
+#: about 13 hours of a 90 kHz clock, so nothing legitimate comes near it.
+_TS_BOGUS_UNWRAP = 2 ** 31
+
+
+def _unwrap_state() -> dict:
+    """Fresh timestamp-correction state for one video tap."""
+    return {"prev_raw": None, "offset": 0}
+
+
+def _correct_ts(state: dict, raw: int) -> int:
+    """Undo unwraps that should not have happened, cumulatively.
+
+    aiortc hands the tap an unwrapped, session-rebased timestamp, and it treats
+    ANY backward step as the 32-bit counter wrapping - so a reordered or
+    re-sent frame comes through as an advance of nearly 2**32, and every
+    timestamp after it stays 2**32 too high. The error accumulates: probed on
+    the live tap 2026-08-18, 1200 frames carried 22 such artifacts and spanned
+    94,493,540,302 ticks, which is 22 x 2**32 on top of the real 7,061,580.
+
+    Each artifact is 2**32 minus a plausible interval (4294961266 is
+    2**32 - 6030), so the frame really moved backward a few thousand ticks.
+    Holding a running offset restores the whole sequence; correcting one step
+    in isolation would leave everything downstream of it shifted.
+
+    The serve mux writes this straight into `pkt.pts`/`pkt.dts`, so uncorrected
+    it puts jumps of about 47,721 seconds into a container whose PTS field is
+    33 bits wide. The content underneath was always fine: those same 1200
+    frames carry an honest 15.3 fps at 6030 ticks per frame, matching the wire.
+    """
+    _prev = state["prev_raw"]
+    if _prev is not None and raw - _prev > _TS_BOGUS_UNWRAP:
+        state["offset"] += _TS_MODULO
+    state["prev_raw"] = raw
+    return raw - state["offset"]
+
+
 def _log_serve_canary(device_id: Optional[str], canary: dict) -> None:
     """One line per N tapped video frames, naming the camera it counts.
 
@@ -244,9 +284,9 @@ def _log_serve_canary(device_id: Optional[str], canary: dict) -> None:
     """
     _LOGGER.debug(
         "camera %s: serve h264 canary: frames=%d keyframes=%d"
-        " max_keyframe_gap=%d cur_gap=%d",
+        " max_keyframe_gap=%d cur_gap=%d unwrap_fixed=%d",
         device_id or "?", canary["frames"], canary["keyframes"],
-        canary["max_gap"], canary["gap"],
+        canary["max_gap"], canary["gap"], canary.get("unwrapped", 0),
     )
 
 
@@ -4252,9 +4292,14 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         _orig_put = _qd.put
         _skip_decode = bool(serve and is_video)
         # Served-stream health canary (video-only): observed without decoding.
-        _canary = {"frames": 0, "keyframes": 0, "gap": 0, "max_gap": 0} if _skip_decode else None
+        _canary = ({"frames": 0, "keyframes": 0, "gap": 0, "max_gap": 0,
+                    "unwrapped": 0} if _skip_decode else None)
         if _canary is not None:
             _qd._aidot_serve_canary = _canary
+        # Serve path only: this is the stream we timestamp by hand. The
+        # live-view path hands frames to aiortc's own decoder, which does not
+        # use these values the same way.
+        _unwrap = _unwrap_state() if _skip_decode else None
         _CANARY_LOG_EVERY = 300  # frames (~10-20s of H.264); DEBUG summary cadence
 
         def _tap_put(task, *a, **k):
@@ -4264,6 +4309,12 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     _d = getattr(_enc, "data", None)
                     _ts = getattr(_enc, "timestamp", None)
                     if _d and _ts is not None:
+                        if _unwrap is not None:
+                            _fixed = _correct_ts(_unwrap, int(_ts))
+                            if _fixed != int(_ts) and _canary is not None:
+                                _canary["unwrapped"] = (
+                                    _canary.get("unwrapped", 0) + 1)
+                            _ts = _fixed
                         _b = bytes(_d)
                         _kf = _h264_has_keyframe(_b) if is_video else False
                         _item = (_b, int(_ts), _kf) if is_video else (_b, int(_ts))
@@ -4272,6 +4323,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                         except Exception:
                             pass  # full -> drop (PLI re-arms a GOP)
                         if _canary is not None:
+                            if is_video and _canary["frames"] < 1200:
+                                _LOGGER.warning(
+                                    "TAPTS %s %d %d %d",
+                                    device_id, _canary["frames"], int(_ts),
+                                    len(_b))
                             _canary["frames"] += 1
                             if _kf:
                                 _canary["keyframes"] += 1
