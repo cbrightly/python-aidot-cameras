@@ -284,6 +284,7 @@ class _WebRTCOpenMixin:
         talk_pcm_provider: "Optional[Callable[[], Optional[bytes]]]" = None,
         talk: bool = False,
         reuse_peer_id: Optional[str] = None,
+        ice_wait_timeout_s: Optional[float] = None,
     ) -> "WebRTCSession":
         """Open a liveType=2 WebRTC stream via MQTT signaling.
 
@@ -3731,14 +3732,19 @@ class _WebRTCOpenMixin:
         # A shifted answer gets a shorter ICE deadline, not a refusal: 6 of 7
         # measured shifts never connected, but the seventh came up in 8.8 s.
         # See ice_wait_timeout for the measurement behind the cap.
+        # ICE gets its own budget when the caller supplies one. Without it the
+        # ICE wait inherits `timeout`, which makes the open two sequential
+        # full-length waits rather than one - see _DTLS_SERVE_ICE_WAIT_S. None
+        # keeps the historical behaviour for every other caller.
+        _ice_budget = timeout if ice_wait_timeout_s is None else ice_wait_timeout_s
         _ice_timeout = ice_wait_timeout(
             shifted_sections=1 if _answer_inserted else 0,
-            default_timeout=timeout,
+            default_timeout=_ice_budget,
         )
-        if _ice_timeout != timeout:
+        if _ice_timeout != _ice_budget:
             _status(
                 f"answer shifted mids: ICE deadline capped to {_ice_timeout:.0f}s"
-                f" (from {timeout:.0f}s)"
+                f" (from {_ice_budget:.0f}s)"
             )
         deadline = time.monotonic() + _ice_timeout
         _last_ice_log = time.monotonic()

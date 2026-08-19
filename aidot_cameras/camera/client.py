@@ -161,6 +161,19 @@ def _parse_env_float(name: str, default: float) -> float:
 # spent almost entirely on attempts that could not succeed.
 _DTLS_SERVE_OPEN_TIMEOUT_S = _parse_env_float("AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S", 75.0)
 
+# ICE gets its OWN budget, and deliberately not the one above. The open runs two
+# SEQUENTIAL waits - signalling (_init_deadline, webrtc_open.py:2467) then ICE
+# (webrtc_open.py:3734) - and both used to read `timeout`, so raising the open
+# timeout to 75s doubled the worst case to ~150s while holding the global open
+# gate (cap AIDOT_MAX_CONCURRENT_OPENS, default 2).
+#
+# Nothing measured asked for that. Every late answer (30.7-99.5s, all code=200)
+# was signalling latency. And ice_wait_timeout's own docstring says why a long
+# ICE wait is actively wrong: 45s "is past the ~30 s deadline Home Assistant's
+# stream worker allows, which is the failure this project already learned the
+# hard way". So signalling gets the long wait; ICE keeps the 30s it always had.
+_DTLS_SERVE_ICE_WAIT_S = _parse_env_float("AIDOT_DTLS_SERVE_ICE_WAIT_S", 30.0)
+
 # Strong refs to fire-and-forget tasks: asyncio only keeps weak refs, so a
 # discarded task can be garbage-collected mid-flight. Discarded on completion.
 _BG_TASKS: set = set()
@@ -4979,6 +4992,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             try:
                 session = await self.async_open_webrtc_stream(
                     on_frame=lambda _f: None, timeout=_DTLS_SERVE_OPEN_TIMEOUT_S,
+                    ice_wait_timeout_s=_DTLS_SERVE_ICE_WAIT_S,
                 )
             except asyncio.CancelledError:
                 return
@@ -5900,6 +5914,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         talk_pcm_provider: "Optional[Callable[[], Optional[bytes]]]" = None,
         talk: bool = False,
         reuse_peer_id: Optional[str] = None,
+        ice_wait_timeout_s: Optional[float] = None,
         **kwargs: Any,
     ) -> "Union[WebRTCSession, SdesSession]":
         """Serialized entry point for opening a WebRTC stream.
@@ -5933,6 +5948,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 talk_pcm_provider=talk_pcm_provider,
                 talk=talk,
                 reuse_peer_id=reuse_peer_id,
+                ice_wait_timeout_s=ice_wait_timeout_s,
                 **kwargs,
             )
 
