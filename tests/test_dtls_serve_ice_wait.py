@@ -17,6 +17,10 @@ had. Other callers - notably the SDES keepalive loop, which passes timeout=120 -
 pass nothing and keep the previous inherit-the-timeout behaviour, because
 nothing in this investigation measured battery-camera ICE.
 
+The budget is clamped to the caller's own timeout, because `ice_wait_timeout`
+promises exactly that (protocol.py) and the two values are now independent env
+reads that can disagree.
+
 Repo convention: no pytest-asyncio; drive coroutines with asyncio.run().
 """
 import asyncio
@@ -26,21 +30,36 @@ import aidot_cameras.camera.client as camera_client
 from aidot_cameras.camera.client import CameraMixin
 
 
-def test_serve_ice_wait_stays_at_the_old_thirty_seconds():
-    assert camera_client._DTLS_SERVE_ICE_WAIT_S == 30.0
-
-
-def test_serve_ice_wait_is_shorter_than_the_open_timeout():
-    # The whole point of splitting them: signalling gets the long budget, ICE
-    # does not. If these are ever equal again the split has been undone.
-    assert (camera_client._DTLS_SERVE_ICE_WAIT_S
-            < camera_client._DTLS_SERVE_OPEN_TIMEOUT_S)
-
-
-def test_serve_ice_wait_is_env_tunable(monkeypatch):
+def test_serve_ice_wait_defaults_to_the_old_thirty_seconds(monkeypatch):
+    # delenv first: the constant is bound at import, so without this the
+    # assertion is a statement about the developer's shell, not the code.
+    monkeypatch.delenv("AIDOT_DTLS_SERVE_ICE_WAIT_S", raising=False)
     from aidot_cameras.camera.client import _parse_env_float
-    monkeypatch.setenv("AIDOT_DTLS_SERVE_ICE_WAIT_S", "12.5")
-    assert _parse_env_float("AIDOT_DTLS_SERVE_ICE_WAIT_S", 30.0) == 12.5
+    assert _parse_env_float("AIDOT_DTLS_SERVE_ICE_WAIT_S", 30.0) == 30.0
+
+
+def test_the_constant_is_wired_to_the_env_var_it_documents():
+    # The parse helper is generic, so exercising it proves nothing about the
+    # wiring. Pin the wiring itself: a constant reading the wrong env name is
+    # exactly the bug a _parse_env_float test cannot see.
+    import inspect
+    src = inspect.getsource(camera_client)
+    assert ('_DTLS_SERVE_ICE_WAIT_S = _parse_env_float('
+            '"AIDOT_DTLS_SERVE_ICE_WAIT_S", 30.0)') in src
+
+
+def test_ice_budget_never_extends_the_callers_own_timeout():
+    """ice_wait_timeout promises it (protocol.py): "a caller asking for 5 s
+    means 5 s". The serve loop's ICE budget is read from its OWN env var, so
+    without a clamp an operator setting AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S=20 for
+    faster failure would get 20s signalling + 30s ICE = 50s per failed attempt,
+    worse than the 40s the inherit-the-timeout code gave - on the knob whose
+    entire purpose is to fail faster.
+    """
+    from aidot_cameras.camera.webrtc_open import _resolve_ice_budget
+    assert _resolve_ice_budget(20.0, 30.0) == 20.0   # clamped to the caller
+    assert _resolve_ice_budget(75.0, 30.0) == 30.0   # the split still applies
+    assert _resolve_ice_budget(75.0, None) == 75.0   # unset inherits, as before
 
 
 class _Ready:
@@ -73,7 +92,7 @@ def test_dtls_serve_loop_passes_both_budgets():
 
     assert calls, "async_open_webrtc_stream was never called"
     assert calls[0].get("timeout") == camera_client._DTLS_SERVE_OPEN_TIMEOUT_S
-    assert (calls[0].get("ice_wait_timeout_s")
+    assert (calls[0].get("_ice_wait_timeout_s")
             == camera_client._DTLS_SERVE_ICE_WAIT_S)
 
 
@@ -82,4 +101,4 @@ def test_other_callers_keep_inheriting_the_timeout():
     # opens with timeout=120 and its ICE budget must not silently become 30.
     import inspect
     sig = inspect.signature(CameraMixin._async_open_webrtc_stream_impl)
-    assert sig.parameters["ice_wait_timeout_s"].default is None
+    assert sig.parameters["_ice_wait_timeout_s"].default is None

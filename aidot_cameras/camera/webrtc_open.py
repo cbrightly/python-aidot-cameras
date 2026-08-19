@@ -93,6 +93,27 @@ def _deliver_webrtc_answer(loop, answer_fut, second_answer_fut, answer) -> None:
     loop.call_soon_threadsafe(_deliver)
 
 
+def _resolve_ice_budget(
+    timeout: float, ice_wait_timeout_s: "Optional[float]"
+) -> float:
+    """How long the ICE wait gets, given the caller's two budgets.
+
+    The open runs two SEQUENTIAL waits - signalling then ICE - and both used to
+    read ``timeout``, so a longer open timeout doubled the worst case. A caller
+    may hand ICE its own, shorter budget instead.
+
+    Clamped to ``timeout`` because ``ice_wait_timeout`` promises it: "Never
+    extends a caller's own timeout - a caller asking for 5 s means 5 s". The two
+    values are independent env reads on the serve-loop path
+    (AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S, AIDOT_DTLS_SERVE_ICE_WAIT_S), so they can
+    disagree: without the clamp, lowering the OPEN timeout to 20s to fail faster
+    would buy 20s signalling + 30s ICE, worse than leaving it alone.
+    """
+    if ice_wait_timeout_s is None:
+        return timeout
+    return min(timeout, ice_wait_timeout_s)
+
+
 def _normalize_fingerprint(value: str) -> str:
     """Normalize a sha-256 fingerprint for comparison.
 
@@ -284,7 +305,7 @@ class _WebRTCOpenMixin:
         talk_pcm_provider: "Optional[Callable[[], Optional[bytes]]]" = None,
         talk: bool = False,
         reuse_peer_id: Optional[str] = None,
-        ice_wait_timeout_s: Optional[float] = None,
+        _ice_wait_timeout_s: Optional[float] = None,
     ) -> "WebRTCSession":
         """Open a liveType=2 WebRTC stream via MQTT signaling.
 
@@ -328,7 +349,12 @@ class _WebRTCOpenMixin:
         stream_id : int
             Stream index: 0 = main stream, 1 = sub-stream.
         timeout : float
-            Seconds to wait for ICE connection before raising RuntimeError.
+            Seconds to wait for the camera's webrtcResp, and - unless
+            ``_ice_wait_timeout_s`` is given - for the ICE connection too.
+            These are two SEQUENTIAL waits, so the worst case is both.
+        _ice_wait_timeout_s : float, optional
+            Separate budget for the ICE wait, clamped to ``timeout``. ``None``
+            (default) makes ICE inherit ``timeout``, the historical behaviour.
         output_path : str or None
             Record the stream to this file (e.g. ``/tmp/live.ts``) via
             aiortc MediaRecorder (DTLS) or ffmpeg (SDES).  Supports any
@@ -1491,6 +1517,9 @@ class _WebRTCOpenMixin:
                     _ice_config=(
                         ice_config_fut.result() if ice_config_fut.done() else None
                     ),
+                    # Carry the caller's ICE budget across the fallback, or it
+                    # silently reverts to `timeout` on this path.
+                    _ice_wait_timeout_s=_ice_wait_timeout_s,
                 )
 
         # ------------------------------------------------------------------ #
@@ -3732,11 +3761,7 @@ class _WebRTCOpenMixin:
         # A shifted answer gets a shorter ICE deadline, not a refusal: 6 of 7
         # measured shifts never connected, but the seventh came up in 8.8 s.
         # See ice_wait_timeout for the measurement behind the cap.
-        # ICE gets its own budget when the caller supplies one. Without it the
-        # ICE wait inherits `timeout`, which makes the open two sequential
-        # full-length waits rather than one - see _DTLS_SERVE_ICE_WAIT_S. None
-        # keeps the historical behaviour for every other caller.
-        _ice_budget = timeout if ice_wait_timeout_s is None else ice_wait_timeout_s
+        _ice_budget = _resolve_ice_budget(timeout, _ice_wait_timeout_s)
         _ice_timeout = ice_wait_timeout(
             shifted_sections=1 if _answer_inserted else 0,
             default_timeout=_ice_budget,

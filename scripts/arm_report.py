@@ -51,11 +51,16 @@ def run(path, label, start, end, timeout_s):
     print(f"--- {label}  ({start} .. {end}, {hours:.2f} h, timeout {timeout_s:.0f}s)")
     print(f"    opens                 {len(sent):4d}   ({len(sent)/hours:.1f}/h)")
     print(f"      answered in time    {intime:4d}   ({100*intime/n:.0f}%)")
+    if timeout_s > 30:
+        # Printed directly under "answered in time" because it is a subset of
+        # THAT bucket. Under "never answered" it reads as a subset of the
+        # opposite one, which is how the first treatment-arm output was
+        # misread ("never answered 2 / of which RECOVERED 2").
+        print(f"        of those, RECOVERED {len(recovered):4d}"
+              f"   (answered in 30-{timeout_s:.0f}s; a 30s build fails these)"
+              f" {sorted(recovered)}")
     print(f"      answered too late   {late:4d}")
     print(f"      never answered      {never:4d}")
-    if timeout_s > 30:
-        print(f"      of which RECOVERED  {len(recovered):4d}"
-              f"   (answered in 30-{timeout_s:.0f}s; a 30s build fails these) {sorted(recovered)}")
     print(f"    logged open failures  {len(fails):4d}   ({len(fails)/hours:.1f}/h)")
     print(f"    connected-but-no-video{len(novideo):4d}   ({len(novideo)/hours:.1f}/h)")
 

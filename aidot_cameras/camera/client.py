@@ -359,11 +359,13 @@ def _live_video_canary(pc, stored):
 #: fresh one registers another camera-side session, and the camera frees those
 #: only slowly. Module-level so the loop and its tests share one number.
 #:
-#: Deliberately NOT applied to the DTLS serve loop - see
-#: AIDOT-FINDINGS-family-room-churn-2026-08-18.md. That loop builds a fresh
+#: Deliberately NOT applied to the DTLS serve loop. That loop builds a fresh
 #: RTCPeerConnection per attempt, so reusing the peer id across attempts lets a
-#: late answer generated against the PREVIOUS offer claim answer_fut and become
-#: the remote description, with ICE credentials that cannot authenticate.
+#: late answer generated against the PREVIOUS offer claim answer_fut (which
+#: takes the FIRST answer to arrive, webrtc_open.py _deliver_webrtc_answer) and
+#: become the remote description - carrying ICE credentials that cannot
+#: authenticate, while the attempt's own correct answer is demoted to
+#: candidate-scraping. Tried on 2026-08-18 and reverted; do not resurrect it.
 _PEERID_MAX_REUSE = 3
 
 
@@ -4992,7 +4994,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             try:
                 session = await self.async_open_webrtc_stream(
                     on_frame=lambda _f: None, timeout=_DTLS_SERVE_OPEN_TIMEOUT_S,
-                    ice_wait_timeout_s=_DTLS_SERVE_ICE_WAIT_S,
+                    _ice_wait_timeout_s=_DTLS_SERVE_ICE_WAIT_S,
                 )
             except asyncio.CancelledError:
                 return
@@ -5914,7 +5916,6 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         talk_pcm_provider: "Optional[Callable[[], Optional[bytes]]]" = None,
         talk: bool = False,
         reuse_peer_id: Optional[str] = None,
-        ice_wait_timeout_s: Optional[float] = None,
         **kwargs: Any,
     ) -> "Union[WebRTCSession, SdesSession]":
         """Serialized entry point for opening a WebRTC stream.
@@ -5948,7 +5949,6 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 talk_pcm_provider=talk_pcm_provider,
                 talk=talk,
                 reuse_peer_id=reuse_peer_id,
-                ice_wait_timeout_s=ice_wait_timeout_s,
                 **kwargs,
             )
 
