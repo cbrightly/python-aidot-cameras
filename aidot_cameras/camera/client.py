@@ -141,12 +141,25 @@ def _parse_env_float(name: str, default: float) -> float:
 
 
 # DTLS serve-open timeout: how long a single async_open_webrtc_stream() call
-# in the serve loop is allowed to take before giving up. Left at the
-# _async_open_webrtc_stream_impl default (30.0s) so battery cameras that need
-# the full window to wake still work; tunable via
+# in the serve loop is allowed to take before giving up. Tunable via
 # AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S for operators who want faster-failing
 # retries against a known-dead camera.
-_DTLS_SERVE_OPEN_TIMEOUT_S = _parse_env_float("AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S", 30.0)
+#
+# 75s, not the impl default of 30s. At 30s this cut the offer-resend short:
+# _resend_webrtcreq (webrtc_open.py:2337) re-publishes the same offer at 15s
+# and again at 30s, and the second resend died with the attempt that issued
+# it. Measured on the live fleet 2026-08-18 16:35-17:29, 118 serve-loop opens:
+# 40 answered inside 30s, 65 never answered, and 13 answered LATE at 30.7s to
+# 99.5s - every one of them code=200, i.e. the camera accepted the offer and
+# our timeout simply expired first. Ten of those thirteen land inside 75s, on
+# the peer connection that made the offer, so the answer is directly usable.
+#
+# The cost is real: async_open_webrtc_stream holds the global
+# _WEBRTC_OPEN_GATE (cap AIDOT_MAX_CONCURRENT_OPENS, default 2) for the whole
+# open, so a slow open makes other cameras wait longer. It is worth paying
+# because two thirds of opens were failing, so the gate was already being
+# spent almost entirely on attempts that could not succeed.
+_DTLS_SERVE_OPEN_TIMEOUT_S = _parse_env_float("AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S", 75.0)
 
 # Strong refs to fire-and-forget tasks: asyncio only keeps weak refs, so a
 # discarded task can be garbage-collected mid-flight. Discarded on completion.

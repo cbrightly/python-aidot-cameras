@@ -3,9 +3,9 @@ loop's async_open_webrtc_stream call (aidot_cameras/camera/client.py, ~line 3502
 
 Without a ``timeout`` kwarg that call is hard-pinned to the 30.0s default in
 _async_open_webrtc_stream_impl (webrtc_open.py ~146-151); a dead/wedged DTLS
-camera then burns a full 30s per open attempt.  This makes it tunable while
-keeping the default unchanged (battery cameras can legitimately need the full
-30s to wake).
+camera then burns a full attempt per open.  This makes it tunable, and the
+default is now 75s: at 30s the offer-resend was cut short and answers that
+arrived at 30.7-99.5s were thrown away (see the constant's own comment).
 
 Repo convention: no pytest-asyncio; drive coroutines with asyncio.run().
 """
@@ -35,10 +35,13 @@ def test_parse_env_float_malformed_falls_back_to_default(monkeypatch):
     assert _parse_env_float("AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S", 30.0) == 30.0
 
 
-def test_module_constant_defaults_to_30():
-    # Guards the preserved-behavior requirement: unset env -> 30.0, matching
-    # _async_open_webrtc_stream_impl's prior hard-pinned default exactly.
-    assert camera_client._DTLS_SERVE_OPEN_TIMEOUT_S == 30.0
+def test_module_constant_outlasts_the_second_offer_resend():
+    # _resend_webrtcreq re-publishes the same offer at 15s and again at 30s.
+    # The default MUST outlast the second resend by a wide margin, or the
+    # attempt dies at the moment its last resend goes out and the camera's
+    # answer (measured at 30.7-99.5s, all code=200) lands with nobody waiting.
+    assert camera_client._DTLS_SERVE_OPEN_TIMEOUT_S == 75.0
+    assert camera_client._DTLS_SERVE_OPEN_TIMEOUT_S > 30.0 + 15.0
 
 
 # --- Nice-to-have: the serve loop passes the configured timeout through ---- #
