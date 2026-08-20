@@ -133,7 +133,10 @@ def test_burst_stays_inside_one_peerid_window():
     # the camera frees only slowly (0.12.16).
     import inspect
     _body = inspect.getsource(cc.CameraMixin._sdes_keepalive_loop_inner)
-    assert "_PEERID_MAX_REUSE = 3" in _body
+    # One module-level bound so this loop and its tests share a number. It is
+    # NOT shared with the DTLS serve loop, which does not reuse peer ids across
+    # attempts at all - that was tried and reverted, see the constant.
+    assert cc._PEERID_MAX_REUSE == 3
     assert "burst_max=_PEERID_MAX_REUSE" in _body
 
 

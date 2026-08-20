@@ -6,6 +6,58 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b18]
+
+### Fixed
+
+- **Re-sent frames are no longer served a second time.** The camera re-sends
+  runs of frames it has already sent - 489 of a captured 1200, 40.75%, matching
+  the 41.1% and 45.7% measured live on two cameras. Those repeats reached the
+  muxer, where the monotonic-DTS clamp gave each one `prev + 1`, so up to 41
+  already-served frames landed in the container a single tick apart. A viewer
+  got that as a burst, about twice a second.
+
+  The camera is not at fault and neither is the unwrap correction: measured at
+  the raw tap across three cameras, its timestamps are strictly increasing,
+  spaced for 15 fps, with no duplicates and no backward steps, and each mux
+  queue has exactly one source. The repeats only become visible after
+  `_correct_ts` undoes aiortc's bogus 2**32 unwraps and recovers the camera's
+  real timeline - which genuinely returns to an earlier point.
+
+  Frames whose presentation time has already been served are now dropped rather
+  than muxed a tick apart. This does not change the media rate (1.104x over the
+  fixture either way, since a repeat carries no new presentation time); it
+  removes the burst, and about 41% of the frames muxed and served.
+
+- **A served DTLS camera no longer abandons an open at the instant it last asks
+  again.** The per-attempt open timeout was 30 s, and the offer-resend that
+  exists for exactly this case (`webrtcReq` re-published when the camera has
+  not answered) fires at 15 s and again at 30 s - so the second resend went out
+  as the attempt died, and any answer to it landed with nobody waiting.
+
+  Measured on a live seven-camera fleet over 0.93 h, 122 serve-loop opens: 40
+  answered inside 30 s, 65 never answered at all, and **14 answered LATE, from
+  30.7 s to 99.5 s, every one of them `code=200`** - the camera had accepted the
+  offer and stood a session up; only the timeout had expired. The default is now
+  75 s (`AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S`), which covers 11 of those 14.
+
+  Scope worth knowing: on a healthy fleet this changes nothing. 56 opens against
+  idle cameras answered with a median of 0.42 s and a maximum of 1.48 s - not
+  one came within 20 s of even the old timeout. The late answers appear only
+  when the fleet is already degraded, where the median is 11.73 s. So this is a
+  mitigation for the bad state, not a general speed-up, and it does not by
+  itself explain or fix that state.
+
+- **The ICE wait no longer inherits the open timeout.** An open is two
+  SEQUENTIAL waits - signalling, then ICE - and both read the same value, so
+  raising the open timeout also doubled the worst case, all of it holding the
+  global open gate (`AIDOT_MAX_CONCURRENT_OPENS`, default 2). Nothing measured
+  asked for a longer ICE wait, and a long one is actively wrong: it runs past
+  the roughly 30 s deadline Home Assistant's stream worker allows. ICE now takes
+  its own budget (`AIDOT_DTLS_SERVE_ICE_WAIT_S`, default 30), clamped to the
+  open timeout so lowering that still fails faster. Callers that pass nothing
+  are unchanged.
+
 ## [1.0.0b17]
 
 ### Fixed
@@ -2297,7 +2349,8 @@ h264 1280x960 + PCMA where previously the second in a row failed.
 ### Changed
 - **The DTLS serve-open timeout is now tunable.** The per-attempt WebRTC open
   timeout for a served DTLS camera was hard-pinned at 30 s. It is now
-  configurable via `AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S` (default 30, unchanged), so
+  configurable via `AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S` (default 30 at the time;
+  raised to 75 in a later release, see below), so
   operators can fail faster on a known-dead camera. A malformed value falls back
   to the default.
 

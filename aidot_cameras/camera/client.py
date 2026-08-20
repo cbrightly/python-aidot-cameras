@@ -141,12 +141,38 @@ def _parse_env_float(name: str, default: float) -> float:
 
 
 # DTLS serve-open timeout: how long a single async_open_webrtc_stream() call
-# in the serve loop is allowed to take before giving up. Left at the
-# _async_open_webrtc_stream_impl default (30.0s) so battery cameras that need
-# the full window to wake still work; tunable via
+# in the serve loop is allowed to take before giving up. Tunable via
 # AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S for operators who want faster-failing
 # retries against a known-dead camera.
-_DTLS_SERVE_OPEN_TIMEOUT_S = _parse_env_float("AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S", 30.0)
+#
+# 75s, not the impl default of 30s. At 30s this cut the offer-resend short:
+# _resend_webrtcreq (webrtc_open.py:2337) re-publishes the same offer at 15s
+# and again at 30s, and the second resend died with the attempt that issued
+# it. Measured on the live fleet 2026-08-18 16:35-17:29, 118 serve-loop opens:
+# 40 answered inside 30s, 65 never answered, and 13 answered LATE at 30.7s to
+# 99.5s - every one of them code=200, i.e. the camera accepted the offer and
+# our timeout simply expired first. Ten of those thirteen land inside 75s, on
+# the peer connection that made the offer, so the answer is directly usable.
+#
+# The cost is real: async_open_webrtc_stream holds the global
+# _WEBRTC_OPEN_GATE (cap AIDOT_MAX_CONCURRENT_OPENS, default 2) for the whole
+# open, so a slow open makes other cameras wait longer. It is worth paying
+# because two thirds of opens were failing, so the gate was already being
+# spent almost entirely on attempts that could not succeed.
+_DTLS_SERVE_OPEN_TIMEOUT_S = _parse_env_float("AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S", 75.0)
+
+# ICE gets its OWN budget, and deliberately not the one above. The open runs two
+# SEQUENTIAL waits - signalling (_init_deadline, webrtc_open.py:2467) then ICE
+# (webrtc_open.py:3734) - and both used to read `timeout`, so raising the open
+# timeout to 75s doubled the worst case to ~150s while holding the global open
+# gate (cap AIDOT_MAX_CONCURRENT_OPENS, default 2).
+#
+# Nothing measured asked for that. Every late answer (30.7-99.5s, all code=200)
+# was signalling latency. And ice_wait_timeout's own docstring says why a long
+# ICE wait is actively wrong: 45s "is past the ~30 s deadline Home Assistant's
+# stream worker allows, which is the failure this project already learned the
+# hard way". So signalling gets the long wait; ICE keeps the 30s it always had.
+_DTLS_SERVE_ICE_WAIT_S = _parse_env_float("AIDOT_DTLS_SERVE_ICE_WAIT_S", 30.0)
 
 # Strong refs to fire-and-forget tasks: asyncio only keeps weak refs, so a
 # discarded task can be garbage-collected mid-flight. Discarded on completion.
@@ -326,6 +352,21 @@ def _live_video_canary(pc, stored):
     except Exception:
         _LOGGER.debug("swallowed exception in _live_video_canary", exc_info=True)
     return _best
+
+
+#: Consecutive dead attempts before a reused peer id is rotated. The SDES
+#: keepalive loop reuses one peer id across the retries of a wake burst; a
+#: fresh one registers another camera-side session, and the camera frees those
+#: only slowly. Module-level so the loop and its tests share one number.
+#:
+#: Deliberately NOT applied to the DTLS serve loop. That loop builds a fresh
+#: RTCPeerConnection per attempt, so reusing the peer id across attempts lets a
+#: late answer generated against the PREVIOUS offer claim answer_fut (which
+#: takes the FIRST answer to arrive, webrtc_open.py _deliver_webrtc_answer) and
+#: become the remote description - carrying ICE credentials that cannot
+#: authenticate, while the attempt's own correct answer is demoted to
+#: candidate-scraping. Tried on 2026-08-18 and reverted; do not resurrect it.
+_PEERID_MAX_REUSE = 3
 
 
 def _video_presence_verdict(
@@ -3905,8 +3946,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # official app, which resends within one session. Rotate to a fresh
         # peerid after a session that actually delivered media (so the next view
         # is a clean session) or after _PEERID_MAX_REUSE consecutive dead
-        # attempts (so a poisoned peerid can't wedge us permanently).
-        _PEERID_MAX_REUSE = 3
+        # attempts (so a poisoned peerid can't wedge us permanently).  The bound
+        # is the module-level _PEERID_MAX_REUSE so this loop and its tests share
+        # one number.  Safe HERE and not in the DTLS serve loop because this
+        # loop re-offers within one open attempt on one peer connection, so a
+        # late answer still belongs to the offer in flight.
         _loop_peer_id = self.generate_webrtc_peer_id(live_type=2, stream_id=0,
                                                      sdes=True)
         _peer_reuses = 0
@@ -4950,6 +4994,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             try:
                 session = await self.async_open_webrtc_stream(
                     on_frame=lambda _f: None, timeout=_DTLS_SERVE_OPEN_TIMEOUT_S,
+                    _ice_wait_timeout_s=_DTLS_SERVE_ICE_WAIT_S,
                 )
             except asyncio.CancelledError:
                 return
