@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b18]
+
 ### Fixed
 
 - **Re-sent frames are no longer served a second time.** The camera re-sends
