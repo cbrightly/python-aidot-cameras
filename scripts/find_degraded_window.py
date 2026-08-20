@@ -11,7 +11,11 @@ plus the signals worth correlating against it. A healthy hour looks like the
 
 Usage:  find_degraded_window.py <ha-core-log>            # ANSI already stripped
 """
-import re, sys, datetime, statistics, collections
+import collections
+import datetime
+import re
+import statistics
+import sys
 
 TS = re.compile(r'^(2026-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3})')
 HEALTHY_MEDIAN_S = 0.42     # measured, n=187 across two healthy arms
@@ -22,7 +26,9 @@ def main(path):
     cur = None
     sent, rx = {}, {}
     per_hour = collections.defaultdict(lambda: collections.Counter())
-    for ln in open(path, errors='replace'):
+    with open(path, errors='replace') as fh:
+        lines = fh.readlines()
+    for ln in lines:
         m = TS.match(ln)
         if m:
             cur = datetime.datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S.%f')

@@ -6,7 +6,9 @@ continuation line (SDP dumps etc.) to the last timestamp seen. A naive
 character sorts above '2' - which is most of them - and silently inflates
 every count. That mistake is why the first interim reads looked wrong.
 """
-import re, sys, datetime
+import datetime
+import re
+import sys
 
 TS = re.compile(r'^(2026-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3})')
 
@@ -16,7 +18,9 @@ def run(path, label, start, end, timeout_s):
     cur = None
     sent, rx = {}, {}
     fails, novideo = [], []
-    for ln in open(path, errors='replace'):
+    with open(path, errors='replace') as fh:
+        lines = fh.readlines()
+    for ln in lines:
         m = TS.match(ln)
         if m:
             cur = datetime.datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S.%f')

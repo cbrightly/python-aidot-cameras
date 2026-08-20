@@ -9,13 +9,18 @@ matter and are NOT the same question:
   - time trend  : cycle 2 vs cycle 1 within the same arm
 A ramp cannot separate these; that is why the run alternates.
 """
-import re, sys, datetime, statistics
+import datetime
+import re
+import statistics
+import sys
 
 TS = re.compile(r'^(2026-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3})')
 
 def blocks(path):
     out = []
-    for ln in open(path):
+    with open(path) as fh:
+        lines = fh.readlines()
+    for ln in lines:
         m = re.match(r'BLOCK (\w) cycle(\d) start (\S+ \S+)', ln)
         if m:
             out.append({"arm": m.group(1), "cycle": int(m.group(2)),
@@ -29,7 +34,9 @@ def blocks(path):
 
 def latencies(log, t0, t1):
     cur = None; sent = {}; rx = {}
-    for ln in open(log, errors='replace'):
+    with open(log, errors='replace') as fh:
+        lines = fh.readlines()
+    for ln in lines:
         m = TS.match(ln)
         if m:
             cur = datetime.datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S.%f')
