@@ -8,6 +8,25 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ### Fixed
 
+- **Re-sent frames are no longer served a second time.** The camera re-sends
+  runs of frames it has already sent - 489 of a captured 1200, 40.75%, matching
+  the 41.1% and 45.7% measured live on two cameras. Those repeats reached the
+  muxer, where the monotonic-DTS clamp gave each one `prev + 1`, so up to 41
+  already-served frames landed in the container a single tick apart. A viewer
+  got that as a burst, about twice a second.
+
+  The camera is not at fault and neither is the unwrap correction: measured at
+  the raw tap across three cameras, its timestamps are strictly increasing,
+  spaced for 15 fps, with no duplicates and no backward steps, and each mux
+  queue has exactly one source. The repeats only become visible after
+  `_correct_ts` undoes aiortc's bogus 2**32 unwraps and recovers the camera's
+  real timeline - which genuinely returns to an earlier point.
+
+  Frames whose presentation time has already been served are now dropped rather
+  than muxed a tick apart. This does not change the media rate (1.104x over the
+  fixture either way, since a repeat carries no new presentation time); it
+  removes the burst, and about 41% of the frames muxed and served.
+
 - **A served DTLS camera no longer abandons an open at the instant it last asks
   again.** The per-attempt open timeout was 30 s, and the offer-resend that
   exists for exactly this case (`webrtcReq` re-published when the camera has

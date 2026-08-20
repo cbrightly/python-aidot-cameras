@@ -1144,6 +1144,37 @@ def _reorder_slack(env=None) -> int:
     return _v if _v >= 0 else _REORDER_SLACK_TICKS
 
 
+def is_resent_video_frame(state: dict, pts: int) -> bool:
+    """True when this presentation time has already been served.
+
+    The camera re-sends runs of frames it has already sent. Measured at the raw
+    tap 2026-08-20 across three cameras, its own timestamps are clean - strictly
+    increasing, spaced for 15 fps, no duplicates, no backward steps, and one
+    source per mux queue. But after `_correct_ts` undoes aiortc's bogus 2**32
+    unwraps, the recovered timeline genuinely returns to an earlier point:
+    **489 of the 1200-frame fixture's timestamps repeat one already served**,
+    40.75%, matching the 41.1% and 45.7% measured in what we serve.
+
+    Those repeats used to reach the muxer, where `video_pts_dts`'s monotonic
+    clamp gave each one `prev + 1`. Legal, and unplayable: up to 41
+    already-served frames land in the container a single tick apart - a burst,
+    about twice a second.
+
+    Dropping them costs no media time. The repeats carry no new presentation
+    time, so the rate over the fixture is 1.104x either way; declining to serve
+    a presentation time that has already gone out simply removes the burst.
+
+    Deliberately a high-water mark rather than a set of seen values: the point
+    is not to catch exact duplicates but to refuse anything that cannot be
+    placed after what the viewer has already received.
+    """
+    _hw = state.get("hw")
+    if _hw is not None and pts <= _hw:
+        return True
+    state["hw"] = pts
+    return False
+
+
 def video_pts_dts(state: dict, pts: int, slack: int) -> tuple:
     """A monotonic DTS for a presentation timestamp that is not in decode order.
 
@@ -1323,10 +1354,15 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                     continue  # begin on a keyframe so the GOP is decodable
                 vstarted[0] = True
                 v0[0] = ts
+            _rel = ts - v0[0]
+            if is_resent_video_frame(_ts_state, _rel):
+                # Already served this presentation time. Muxing it again put up
+                # to 41 frames a single tick apart into the container - see
+                # is_resent_video_frame. Dropping costs no media time.
+                continue
             pkt = av.Packet(data)
             pkt.stream = vs
-            pkt.pts, pkt.dts = video_pts_dts(
-                _ts_state, ts - v0[0], _slack)
+            pkt.pts, pkt.dts = video_pts_dts(_ts_state, _rel, _slack)
             pkt.time_base = Fraction(1, 90000)
             try:
                 out.mux(pkt)
