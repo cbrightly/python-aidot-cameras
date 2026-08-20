@@ -78,6 +78,8 @@ from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixi
     _grab_free_port,
     _tcp_table_has_established_on_port,
     _idle_release_due,
+    _DirectTsServer,
+    _direct_serve_enabled,
     _dtls_av_mux_run,
     _h264_has_keyframe,
     _mqtt_session_sync,
@@ -5150,15 +5152,43 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     else:
                         _ff_port = None
                         _ff_url = serve_url
-                    rfd, wfd = os.pipe()
-                    proc = await self._spawn_dtls_serve_ffmpeg(_ff_url, rfd)
-                    os.close(rfd)
-                    if proc is None:
-                        os.close(wfd)
-                        break
-                    if _relay is not None:
-                        _relay.set_backend(_ff_port)
-                    wfile = os.fdopen(wfd, "wb", buffering=0)
+                    # Opt-in: serve the muxed TS straight to the consumer.
+                    # The `-c copy` ffmpeg hop re-packetizes MPEG-TS this mux
+                    # already wrote in the form go2rtc wants, and measured
+                    # 2026-08-20 it is the one component that LOSES timestamps
+                    # (64,981 PES leave the mux with both, 8 of ffmpeg's 12,729
+                    # carry none) - which go2rtc renders as RTP timestamp 0 and
+                    # HA reports as a negative DTS. See _DirectTsServer.
+                    _direct = None
+                    if _direct_serve_enabled():
+                        _direct = _DirectTsServer(_ff_port or 0)
+                        try:
+                            _direct.start()
+                        except OSError as _exc:
+                            _LOGGER.warning(
+                                "camera %s: direct serve could not bind (%s)"
+                                " - falling back to the ffmpeg hop",
+                                getattr(self, "device_id", "?"), _exc)
+                            _direct = None
+                    if _direct is not None:
+                        proc = None
+                        wfile = _direct
+                        if _relay is not None:
+                            _relay.set_backend(_direct.port)
+                        _LOGGER.info(
+                            "camera %s: serving TS directly on port %d"
+                            " (no ffmpeg hop)",
+                            getattr(self, "device_id", "?"), _direct.port)
+                    else:
+                        rfd, wfd = os.pipe()
+                        proc = await self._spawn_dtls_serve_ffmpeg(_ff_url, rfd)
+                        os.close(rfd)
+                        if proc is None:
+                            os.close(wfd)
+                            break
+                        if _relay is not None:
+                            _relay.set_backend(_ff_port)
+                        wfile = os.fdopen(wfd, "wb", buffering=0)
                     progress = [loop.time()]
                     stop_flag = _threading.Event()
                     mux_thread = _threading.Thread(

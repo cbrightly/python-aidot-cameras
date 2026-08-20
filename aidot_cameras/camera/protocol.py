@@ -908,6 +908,124 @@ def _warn_lan_serve(host: "Optional[str]", *, context: str) -> None:
     )
 
 
+def _direct_serve_enabled() -> bool:
+    """Opt-in for serving the muxed TS without the `-c copy` ffmpeg hop."""
+    return os.environ.get("AIDOT_DTLS_DIRECT_SERVE", "").strip() in ("1", "true", "yes")
+
+
+class _DirectTsServer:
+    """Serve the muxed MPEG-TS straight to the consumer, no ffmpeg in between.
+
+    The hop this replaces is `ffmpeg -fflags +nobuffer -i pipe:0 -c copy
+    -f mpegts -listen 1 http://...`. It re-packetizes MPEG-TS that
+    `_dtls_av_mux_run` already wrote in exactly the form go2rtc wants, and
+    measured 2026-08-20 it is the one component in the chain that LOSES
+    timestamps: 64,981 video PES leave the mux with PTS_DTS_flags == 3 (both
+    timestamps) and none missing, while ffmpeg's own output on the wire carried
+    8 PES with flags == 0 in 12,729. go2rtc renders those as RTP timestamp 0 and
+    Home Assistant reports the constant negative DTS.
+
+    Writes are DROPPED when nobody is pulling, deliberately. The mux runs
+    regardless of consumers, and buffering would hand a late consumer a backlog
+    - which is what puts Home Assistant's base timestamp seconds into the stream
+    in the first place. A live view wants the newest bytes, not a queue.
+
+    A consumer that disappears must never propagate into the mux thread, so
+    every socket error is swallowed here and the writer simply becomes a no-op
+    until the next consumer connects.
+    """
+
+    def __init__(self, public_port: int, *, host: str = "127.0.0.1") -> None:
+        self._port = public_port
+        self._host = host
+        self._listen: "Optional[socket.socket]" = None
+        self._accept_thread: "Optional[threading.Thread]" = None
+        self._client: "Optional[socket.socket]" = None
+        self._lock = threading.Lock()
+        self._closed = threading.Event()
+
+    @property
+    def port(self) -> int:
+        return self._port
+
+    def start(self) -> None:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        _warn_lan_serve(self._host, context="direct-serve")
+        s.bind((self._host, self._port))
+        s.listen(8)
+        s.settimeout(0.5)
+        self._port = s.getsockname()[1]
+        self._listen = s
+        self._accept_thread = threading.Thread(
+            target=self._accept_loop, name="direct-ts-accept", daemon=True)
+        self._accept_thread.start()
+
+    def has_consumer(self) -> bool:
+        with self._lock:
+            return self._client is not None
+
+    def pending_bytes(self) -> int:
+        """Always 0 - this server queues nothing. Exists so the no-buffering
+        promise is assertable rather than merely documented."""
+        return 0
+
+    def _accept_loop(self) -> None:
+        while not self._closed.is_set():
+            try:
+                cli, _ = self._listen.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            try:
+                cli.settimeout(5.0)
+                cli.recv(4096)          # consume the request line and headers
+                cli.sendall(
+                    b"HTTP/1.0 200 OK\r\n"
+                    b"Content-Type: video/mp2t\r\n"
+                    b"Cache-Control: no-cache\r\n"
+                    b"Connection: close\r\n\r\n")
+                cli.settimeout(None)
+            except OSError:
+                try: cli.close()
+                except OSError: pass
+                continue
+            with self._lock:
+                old, self._client = self._client, cli
+            if old is not None:
+                try: old.close()
+                except OSError: pass
+
+    def write(self, b: bytes) -> int:
+        with self._lock:
+            cli = self._client
+        if cli is None:
+            return len(b)               # nobody pulling: drop, do not queue
+        try:
+            cli.sendall(b)
+        except OSError:
+            with self._lock:
+                if self._client is cli:
+                    self._client = None
+            try: cli.close()
+            except OSError: pass
+        return len(b)
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self._closed.set()
+        with self._lock:
+            cli, self._client = self._client, None
+        for sock in (cli, self._listen):
+            if sock is not None:
+                try: sock.close()
+                except OSError: pass
+        self._listen = None
+
+
 class _ServeRelay:
     """Keep a public TCP serve port continuously connectable while the real
     server (ffmpeg ``-listen 1``) comes and goes on an internal port.
