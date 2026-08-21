@@ -14,12 +14,19 @@ need `aidot_cameras.camera.webrtc_open: debug`:
 Exit code 0 = all hours healthy, 1 = at least one hour churning, 2 = could not
 tell (no log, or no serve-loop activity). "No activity" is deliberately NOT
 reported as healthy; a quiet fleet is not evidence of a working one.
+Also appends one dated line per run to /config/fleet_health.log so the result is
+visible without waiting for something to go wrong, and so a run that did NOT
+happen is visible as a gap. Trimmed to the last 90 lines.
 """
 import collections
+import datetime
 import os
 import re
 import sys
 import urllib.request
+
+LOGBOOK = "/config/fleet_health.log"
+LOGBOOK_KEEP = 90          # about three months of daily lines
 
 TS = re.compile(r'^(2026-\d\d-\d\d \d\d:\d\d:\d\d)')
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
@@ -38,14 +45,34 @@ def fetch(lines=120000):
         return r.read().decode("utf-8", "replace")
 
 
+def record(line):
+    """One dated line per run, so a healthy day is visible and a missing day is
+    visible as a gap. A monitor that only speaks up on failure cannot be
+    distinguished from a monitor that has stopped running."""
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    try:
+        try:
+            with open(LOGBOOK) as fh:
+                keep = fh.read().splitlines()[-(LOGBOOK_KEEP - 1):]
+        except FileNotFoundError:
+            keep = []
+        keep.append(f"{stamp}  {line}")
+        with open(LOGBOOK, "w") as fh:
+            fh.write("\n".join(keep) + "\n")
+    except OSError:
+        pass                                    # never fail the check over this
+
+
 def main():
     try:
         raw = fetch()
     except Exception as exc:
-        print(f"could not fetch the log: {exc}")
+        msg = f"UNKNOWN - could not fetch the log: {exc}"
+        print(msg); record(msg)
         return 2
     if not raw:
-        print("could not fetch the log: no SUPERVISOR_TOKEN")
+        msg = "UNKNOWN - no SUPERVISOR_TOKEN"
+        print(msg); record(msg)
         return 2
 
     cur = None
@@ -65,7 +92,8 @@ def main():
             per[hour]['novideo'] += 1
 
     if not per:
-        print("no serve-loop activity in the log - cannot tell healthy from idle")
+        msg = "UNKNOWN - no serve-loop activity, cannot tell healthy from idle"
+        print(msg); record(msg)
         return 2
 
     hours = sorted(per)
@@ -84,9 +112,13 @@ def main():
               " use find_degraded_window.py for the answer-latency table"
               " (~0.42s healthy, ~11.7s degraded). Do not judge on one short"
               " window - the defect is bursty.")
+        record(f"CHURNING - {len(bad)}/{len(hours)} hours, worst opens/h "
+               f"{max(per[h]['opens'] for h in bad)}, "
+               f"{sum(per[h]['fails'] for h in bad)} failures")
         return 1
-    print(f"healthy: {len(hours)} hours, opens/h {min(o)}-{max(o)}, "
-          f"{f} open failures total")
+    msg = (f"healthy - {len(hours)} hours, opens/h {min(o)}-{max(o)}, "
+           f"{f} open failures")
+    print(msg); record(msg)
     return 0
 
 
