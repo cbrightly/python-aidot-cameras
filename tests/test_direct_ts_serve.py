@@ -78,6 +78,24 @@ def _pat(pmt_pid=0x1000):
     return _ts(0, pusi=1, payload=b"\x00" + bytes(sec))
 
 
+def _wait_consumer(srv, timeout=3.0):
+    """Block until the accept thread has registered the client.
+
+    `_get` returns as soon as the HTTP response arrives, but the server sends
+    that response BEFORE registering the socket - deliberately, so a media write
+    can never interleave into the header. Writes in that window are dropped by
+    design, which is correct in production (the consumer simply waits for the
+    next keyframe) but makes a test that writes immediately after `_get` racy.
+    glibc happened to win the race; musl did not.
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        if srv.has_consumer():
+            return True
+        time.sleep(0.01)
+    return False
+
+
 def _get(port, path="/cam.ts", read_bytes=None):
     s = socket.create_connection(("127.0.0.1", port), timeout=5)
     s.sendall(f"GET {path} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
@@ -215,6 +233,7 @@ def test_a_late_consumer_is_not_handed_mid_gop_bytes():
         for _ in range(20):                       # stream already running
             srv.write(_ts(0x100, pusi=1))
         sock, head = _get(srv.port, read_bytes=1)
+        assert _wait_consumer(srv)
         body = head.partition(b"\r\n\r\n")[2]
         for _ in range(20):                       # more non-keyframe media
             srv.write(_ts(0x100, pusi=1))
@@ -234,6 +253,7 @@ def test_a_late_consumer_gets_tables_then_a_keyframe():
         for _ in range(10):
             srv.write(_ts(0x100, pusi=1))         # mid-GOP media
         sock, head = _get(srv.port, read_bytes=1)
+        assert _wait_consumer(srv)
         body = head.partition(b"\r\n\r\n")[2]
         srv.write(_ts(0x100, pusi=1, rai=1))      # the next keyframe
         srv.write(_ts(0x100, pusi=1))
@@ -255,6 +275,7 @@ def test_once_synced_it_keeps_forwarding():
         srv.start()
         srv.write(_pat()); srv.write(_ts(0x1000, pusi=1))
         sock, head = _get(srv.port, read_bytes=1)
+        assert _wait_consumer(srv)
         srv.write(_ts(0x100, pusi=1, rai=1))
         for _ in range(6):
             srv.write(_ts(0x100, pusi=1))
@@ -273,12 +294,14 @@ def test_a_reconnecting_consumer_resyncs():
         srv.start()
         srv.write(_pat()); srv.write(_ts(0x1000, pusi=1))
         s1, _ = _get(srv.port, read_bytes=1)
+        assert _wait_consumer(srv)
         srv.write(_ts(0x100, pusi=1, rai=1))
         s1.close()
         time.sleep(0.3)
         for _ in range(5):
             srv.write(_ts(0x100, pusi=1))
         s2, head = _get(srv.port, read_bytes=1)
+        assert _wait_consumer(srv)
         body = head.partition(b"\r\n\r\n")[2]
         body += _drain(s2, n=2, timeout=0.6)
         s2.close()

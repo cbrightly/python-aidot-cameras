@@ -6,7 +6,7 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
-## [1.0.0b19]
+## [1.0.0b20]
 
 ### Fixed
 
