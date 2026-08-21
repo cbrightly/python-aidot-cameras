@@ -148,7 +148,10 @@ untouched where the push has to transcode audio down to 8 kHz G.711.
 
 **ffmpeg must be on PATH.** SDES cameras - two of the three validated models -
 stream entirely through an ffmpeg subprocess, and pip cannot install a system
-binary:
+binary. DTLS cameras no longer serve through it: the muxed MPEG-TS goes straight
+to the consumer, because that hop was the only component in the chain that lost
+timestamps (see `AIDOT_DTLS_DIRECT_SERVE` below). ffmpeg is still required, both
+for the SDES path and as the DTLS fallback when the serve port cannot be bound:
 
 ```bash
 sudo apt install ffmpeg      # Debian/Ubuntu
@@ -345,6 +348,7 @@ audio, idle release, the sprop cache path) are documented in
 | `AIDOT_DTLS_VIDEO_GRACE_S` | How long a connected DTLS session may go without a single video frame before it is torn down and re-opened. A session that receives audio and no video passes every other check the serve loop makes - the peer connection is healthy, ffmpeg respawns for each consumer - so without this it is held open indefinitely while the viewer sees "no video". `0` disables the check. | `30` |
 | `AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S` | How long one WebRTC open attempt for a served DTLS camera may take before it is abandoned and retried. Raised from 30 s because the camera's own offer-resend fires at 30 s, so the attempt used to die at the instant its last resend went out; answers measured arriving at 30.7-99.5 s were discarded as a result. | `75` |
 | `AIDOT_DTLS_SERVE_ICE_WAIT_S` | Separate budget for the ICE half of that open, clamped to `AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S`. The open is two sequential waits - signalling then ICE - so without its own budget the ICE wait inherits the timeout above and doubles the worst case while holding the global open gate. | `30` |
+| `AIDOT_DTLS_DIRECT_SERVE` | Serve the muxed MPEG-TS to go2rtc directly instead of piping it through a `-c copy` ffmpeg. On by default. That hop re-packetized a stream this library already writes in the form go2rtc wants, and it was the only component in the chain that lost timestamps -- 8 video frames carrying none at all in 12,729 of its output, against zero in 64,981 from the muxer. go2rtc rendered those as timestamp 0 and Home Assistant read the result as a jump backwards, restarting the stream about once a minute. Set to `0` to restore the ffmpeg hop; the library also falls back to it automatically if the serve port cannot be bound. | `1` |
 | `AIDOT_DTLS_FUTILE_VIDEO_LIMIT` | Consecutive video-less DTLS sessions after which the serve loop stops re-opening. Noticing alone is not enough: a video-less session is otherwise a clean open, so a loop that simply re-opened would clear its backoff each time and wake the camera every 15 s indefinitely. `0` keeps retrying forever. | `5` |
 | `AIDOT_LOGIN_RETRY_LIMIT` | Consecutive failed LAN logins after which a device is left alone (it is retried again the next time something asks for it). Applies to every device, camera or not - the devices that hit this are lights. | `6` |
 | `AIDOT_LOGIN_RETRY_CAP_S` | Ceiling on the exponential delay between those retries. | `60` |
