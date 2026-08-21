@@ -80,6 +80,7 @@ from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixi
     _idle_release_due,
     _DirectTsServer,
     _direct_serve_enabled,
+    _serve_port,
     _dtls_av_mux_run,
     _h264_has_keyframe,
     _mqtt_session_sync,
@@ -5161,7 +5162,14 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     # HA reports as a negative DTS. See _DirectTsServer.
                     _direct = None
                     if _direct_serve_enabled():
-                        _direct = _DirectTsServer(_ff_port or 0)
+                        # Bind the port the consumer was TOLD about. `_ff_port`
+                        # is only set on the relay branch, so `_ff_port or 0`
+                        # bound a random ephemeral port whenever no relay was
+                        # running - go2rtc dialled the advertised port, found
+                        # nothing, and answered DESCRIBE with 404 while the
+                        # server itself was working.
+                        _direct_port = _ff_port or _serve_port(serve_url) or 0
+                        _direct = _DirectTsServer(_direct_port)
                         try:
                             _direct.start()
                         except OSError as _exc:

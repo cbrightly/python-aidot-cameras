@@ -6,6 +6,43 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b19]
+
+### Fixed
+
+- **Home Assistant no longer restarts a stream every minute or so.** HA logged
+  "Timestamp discontinuity detected: last dts = N, dts = -M" and tore the stream
+  down, roughly 0.91 times a minute per camera. Root-caused by capturing both
+  sides of the serve boundary:
+
+  | | video PES | with no PTS/DTS |
+  |---|---:|---:|
+  | this library's mux | 64,981 | **0** |
+  | the `-c copy` serve ffmpeg | 12,729 | **8** |
+
+  The timestamps are correct when the mux hands the MPEG-TS to ffmpeg and
+  missing when ffmpeg emits it. go2rtc renders a timestampless PES as RTP
+  timestamp 0, and HA's rtpdec then computes `pts = 0 - base_timestamp` - the
+  constant negative DTS. Verified to the tick: the base timestamp read
+  independently off the capture was 756,180, and the logged backward steps were
+  exactly `dts = -756180`.
+
+  The hop earned nothing - it re-packetized MPEG-TS this library already writes
+  in the form go2rtc wants - so it is gone. The mux now serves the consumer
+  directly.
+
+  Measured on four cameras for about 20 minutes each, roughly 64,500 packets:
+  **0 negative timestamps and 0 discontinuity errors**, with audio unchanged at
+  AAC/48 kHz and frame rate nominal. Set `AIDOT_DTLS_DIRECT_SERVE=0` to restore
+  the ffmpeg hop; the library also falls back to it automatically if the serve
+  port cannot be bound.
+
+  Not fixed by rewriting timestamps, and deliberately so: `-fflags +genpts` made
+  it about ten times worse and `-avoid_negative_ts make_zero` about nine times
+  worse plus an unstable stream. The bytes were always right; the hop dropped
+  them.
+
+
 ## [1.0.0b18]
 
 ### Fixed

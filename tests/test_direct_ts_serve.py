@@ -24,40 +24,21 @@ unstable stream. The bytes are right; the hop drops them.
 Opt-in via AIDOT_DTLS_DIRECT_SERVE while it earns trust on real hardware; the
 default path is unchanged.
 
-STATUS 2026-08-21 (later): still 404 on the live fleet with the serve loop's
-None-dereference fixed, so that bug was NOT the explanation either. Three
-things are now eliminated as the difference between this server and the ffmpeg
-hop: PAT/PMT cadence (our mux repeats both every ~8 TS packets), the PMT
-contents (byte-identical to ffmpeg's on the same source - PMT pid 4096, PCR pid
-256, stream_type 0x1b, program_info_len 0), and join position (fixed, and it
-fixed the offline reproduction). The live 404 survives all three. Whatever
-go2rtc needs from the ffmpeg hop has not been found.
+VALIDATED 2026-08-21 and now ON BY DEFAULT. Four cameras, ~20 minutes each,
+about 64,500 packets: **0 negative DTS**, and **0 Home Assistant "Timestamp
+discontinuity" errors** in the window, against a baseline of ~0.91/min on
+ecf4937b alone. Audio intact at aac/48000 - no G.711 downgrade. Frame rate
+nominal (median step 6030 ticks = 14.9 fps).
 
-STATUS 2026-08-21: join-awareness added and it fixed the OFFLINE reproduction -
-a mid-stream join now describes cleanly (`rc: 0, 0,h264,video`) where before it
-gave "non-existing PPS 0 referenced" and no track. On the live fleet go2rtc
-STILL answers DESCRIBE with 404, so join position was a real defect but not the
-whole one. Something else go2rtc needs is still missing; the ffmpeg hop remains
-the only configuration that works. Reverted, default path verified healthy
-(1247 packets).
+Sized to 20 minutes on purpose: the defect is bursty and absent from roughly
+half of two-minute windows, which produced several false "clean" readings
+earlier in this investigation.
 
-EARLIER STATUS 2026-08-20: the server below is correct in isolation - it binds, speaks
-HTTP, streams, and survives a consumer disconnect, all asserted here - but
-enabling it on the live fleet FAILED. go2rtc registered a producer and reported
-no error, yet `DESCRIBE rtsp://.../aidot_<id>` answered **404 Not Found**: go2rtc
-never derived a playable track from the stream. Reverted within minutes; the
-default ffmpeg path was verified healthy again immediately after.
-
-So removing the hop is not a drop-in. What ffmpeg contributes beyond `-c copy`
-is not yet understood - a plausible candidate is that go2rtc probes the incoming
-MPEG-TS for codec information and something in the header cadence our mux emits
-(PAT/PMT interval, or the absence of ffmpeg's own stream signalling) leaves it
-unable to describe a track. That is the next thing to establish, and it is a
-go2rtc-side question rather than a timestamp one.
-
-The tests below are kept because the component is sound and the diagnosis that
-motivated it is measured; what is missing is the go2rtc handshake, not the
-server.
+Three live failures before this worked were all defects in the wiring, not in
+this server or in go2rtc: a `proc.returncode` dereference when there is no
+ffmpeg process, binding an ephemeral port instead of the advertised one when no
+relay holds it, and the missing join-awareness below. The server itself
+describes cleanly against real go2rtc (`rc: 0, h264,video`).
 """
 import os
 import socket
@@ -190,14 +171,16 @@ def test_close_is_idempotent():
     srv.close()
 
 
-def test_the_flag_is_off_by_default(monkeypatch):
+def test_it_is_on_by_default(monkeypatch):
     monkeypatch.delenv("AIDOT_DTLS_DIRECT_SERVE", raising=False)
-    assert _direct_serve_enabled() is False
-
-
-def test_the_flag_opts_in(monkeypatch):
-    monkeypatch.setenv("AIDOT_DTLS_DIRECT_SERVE", "1")
     assert _direct_serve_enabled() is True
+
+
+def test_it_can_be_turned_off(monkeypatch):
+    """An operator escape hatch, and the fallback the serve loop takes anyway
+    when the port cannot be bound."""
+    monkeypatch.setenv("AIDOT_DTLS_DIRECT_SERVE", "0")
+    assert _direct_serve_enabled() is False
 
 
 # --- join-awareness: what the ffmpeg hop was actually contributing ---------- #
@@ -302,3 +285,39 @@ def test_a_reconnecting_consumer_resyncs():
         assert body == b"", "second consumer was handed mid-GOP bytes"
     finally:
         srv.close()
+
+
+# --- binding the port the consumer was actually told about ----------------- #
+
+def test_the_serve_port_is_read_from_the_url():
+    from aidot_cameras.camera.protocol import _serve_port
+    assert _serve_port("http://127.0.0.1:18931/abc.ts") == 18931
+    assert _serve_port("http://0.0.0.0:8099/x.ts") == 8099
+    assert _serve_port("http://[::1]:1234/x.ts") == 1234
+
+
+def test_a_url_without_a_port_yields_none():
+    from aidot_cameras.camera.protocol import _serve_port
+    assert _serve_port("http://127.0.0.1/x.ts") is None
+    assert _serve_port(None) is None
+    assert _serve_port("not a url") is None
+
+
+def test_the_serve_loop_binds_the_advertised_port_when_there_is_no_relay():
+    """The bug this fixes.
+
+    `_DirectTsServer(_ff_port or 0)` bound port 0 - a random ephemeral port -
+    whenever no relay was running, because `_ff_port` is only set on the relay
+    branch. go2rtc was pointed at the advertised URL, found nothing listening,
+    and answered DESCRIBE with 404. The component was fine the whole time: it
+    describes cleanly (`rc: 0, h264,video`) when go2rtc is pointed at the port
+    it actually bound.
+    """
+    import inspect
+
+    import aidot_cameras.camera.client as cc
+    src = inspect.getsource(cc.CameraMixin._dtls_serve_loop_inner)
+    assert "_DirectTsServer(_ff_port or 0)" not in src, (
+        "binds a random port when no relay holds the public one")
+    assert "_serve_port(serve_url)" in src, (
+        "the advertised port must come from the serve URL")

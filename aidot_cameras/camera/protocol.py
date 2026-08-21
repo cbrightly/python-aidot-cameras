@@ -877,6 +877,33 @@ def _serve_host(url: "Optional[str]") -> "Optional[str]":
     return hostport.rsplit(":", 1)[0] if ":" in hostport else hostport
 
 
+def _serve_port(url: "Optional[str]") -> "Optional[int]":
+    """Extract the port from a serve URL (``http://127.0.0.1:18931/x.ts`` -> 18931).
+
+    Returns None when there is no explicit port or the URL is unparseable.
+    Needed because a server that binds anything OTHER than the port the consumer
+    was told about is invisible to it - which is precisely how the direct serve
+    failed: with no relay holding a public port it bound an ephemeral one, and
+    go2rtc dialled the advertised port and found nothing.  Pure (unit-testable)."""
+    if not url:
+        return None
+    rest = url.split("://", 1)[1] if "://" in url else url
+    hostport = rest.split("/", 1)[0]
+    if not hostport:
+        return None
+    if hostport.startswith("["):                       # [ipv6]:port
+        _, _, tail = hostport.partition("]")
+        port = tail[1:] if tail.startswith(":") else ""
+    elif ":" in hostport:
+        port = hostport.rsplit(":", 1)[1]
+    else:
+        return None
+    try:
+        return int(port)
+    except ValueError:
+        return None
+
+
 def _is_loopback_serve_host(host: "Optional[str]") -> bool:
     """True if host is loopback / unset (nothing exposed beyond this machine)."""
     if not host:
@@ -909,8 +936,12 @@ def _warn_lan_serve(host: "Optional[str]", *, context: str) -> None:
 
 
 def _direct_serve_enabled() -> bool:
-    """Opt-in for serving the muxed TS without the `-c copy` ffmpeg hop."""
-    return os.environ.get("AIDOT_DTLS_DIRECT_SERVE", "").strip() in ("1", "true", "yes")
+    """Serve the muxed TS without the `-c copy` ffmpeg hop. On by default.
+
+    Set AIDOT_DTLS_DIRECT_SERVE=0 to fall back to the ffmpeg hop. The fallback
+    also happens automatically if the serve port cannot be bound, so a clash
+    never costs a stream."""
+    return os.environ.get("AIDOT_DTLS_DIRECT_SERVE", "1").strip() not in ("0", "false", "no")
 
 
 class _DirectTsServer:
