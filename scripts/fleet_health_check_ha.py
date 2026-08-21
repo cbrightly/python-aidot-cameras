@@ -26,6 +26,7 @@ import sys
 import urllib.request
 
 LOGBOOK = "/config/fleet_health.log"
+STATE_JSON = "/config/fleet_health.json"
 LOGBOOK_KEEP = 90          # about three months of daily lines
 
 TS = re.compile(r'^(2026-\d\d-\d\d \d\d:\d\d:\d\d)')
@@ -43,6 +44,28 @@ def fetch(lines=120000):
         headers={"Authorization": f"Bearer {tok}"})
     with urllib.request.urlopen(req, timeout=120) as r:
         return r.read().decode("utf-8", "replace")
+
+
+def publish(status, headline, detail=""):
+    """Write the machine-readable state the dashboard sensor reads.
+
+    The sensor's STATE is one short word so the card can colour and icon it;
+    everything a human wants to read lives in attributes. Putting the whole
+    sentence in the state made the card an unreadable wall of text and blew past
+    the 255-character state limit as soon as several hours were listed.
+    """
+    import json
+    payload = {
+        "status": status,                       # healthy | churning | unknown
+        "headline": headline,                   # one short human line
+        "detail": detail[:900],                 # the full report, for the card
+        "checked_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    try:
+        with open(STATE_JSON, "w") as fh:
+            json.dump(payload, fh)
+    except OSError:
+        pass
 
 
 def record(line):
@@ -69,10 +92,12 @@ def main():
     except Exception as exc:
         msg = f"UNKNOWN - could not fetch the log: {exc}"
         print(msg); record(msg)
+        publish("unknown", "Could not read the log", str(exc))
         return 2
     if not raw:
         msg = "UNKNOWN - no SUPERVISOR_TOKEN"
         print(msg); record(msg)
+        publish("unknown", "No supervisor token", "The check could not authenticate.")
         return 2
 
     cur = None
@@ -94,6 +119,8 @@ def main():
     if not per:
         msg = "UNKNOWN - no serve-loop activity, cannot tell healthy from idle"
         print(msg); record(msg)
+        publish("unknown", "No camera activity to judge",
+                "Nothing was streaming, so this is not the same as healthy.")
         return 2
 
     hours = sorted(per)
@@ -112,13 +139,24 @@ def main():
               " use find_degraded_window.py for the answer-latency table"
               " (~0.42s healthy, ~11.7s degraded). Do not judge on one short"
               " window - the defect is bursty.")
+        worst = max(per[h]['opens'] for h in bad)
+        nf = sum(per[h]['fails'] for h in bad)
         record(f"CHURNING - {len(bad)}/{len(hours)} hours, worst opens/h "
-               f"{max(per[h]['opens'] for h in bad)}, "
-               f"{sum(per[h]['fails'] for h in bad)} failures")
+               f"{worst}, {nf} failures")
+        publish("churning",
+                f"{len(bad)} of {len(hours)} hours affected",
+                f"Peak {worst} reconnects/hour and {nf} failed opens. "
+                f"Alarms above {OPENS_ALARM}/hour or {FAILS_ALARM} failures; "
+                f"a quiet fleet sits at 6-12 with none failing. "
+                f"Hours: {', '.join(h[11:] + ':00' for h in bad)}.")
         return 1
     msg = (f"healthy - {len(hours)} hours, opens/h {min(o)}-{max(o)}, "
            f"{f} open failures")
     print(msg); record(msg)
+    publish("healthy",
+            f"All {len(hours)} hours normal",
+            f"{min(o)}-{max(o)} camera reconnects per hour, {f} failed opens. "
+            f"Alarms above {OPENS_ALARM}/hour or {FAILS_ALARM} failures.")
     return 0
 
 
