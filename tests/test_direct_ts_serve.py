@@ -24,6 +24,15 @@ unstable stream. The bytes are right; the hop drops them.
 Opt-in via AIDOT_DTLS_DIRECT_SERVE while it earns trust on real hardware; the
 default path is unchanged.
 
+STATUS 2026-08-21 (later): still 404 on the live fleet with the serve loop's
+None-dereference fixed, so that bug was NOT the explanation either. Three
+things are now eliminated as the difference between this server and the ffmpeg
+hop: PAT/PMT cadence (our mux repeats both every ~8 TS packets), the PMT
+contents (byte-identical to ffmpeg's on the same source - PMT pid 4096, PCR pid
+256, stream_type 0x1b, program_info_len 0), and join position (fixed, and it
+fixed the offline reproduction). The live 404 survives all three. Whatever
+go2rtc needs from the ffmpeg hop has not been found.
+
 STATUS 2026-08-21: join-awareness added and it fixed the OFFLINE reproduction -
 a mid-stream join now describes cleanly (`rc: 0, 0,h264,video`) where before it
 gave "non-existing PPS 0 referenced" and no track. On the live fleet go2rtc

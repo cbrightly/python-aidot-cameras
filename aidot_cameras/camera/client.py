@@ -5244,8 +5244,16 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     _connected_at = loop.time()
                     _first_video_at = None
                     _no_video = False
-                    # Wait for ffmpeg to exit (go2rtc disconnect) or idle release.
-                    while self._streaming_active and proc.returncode is None:
+                    # Wait for ffmpeg to exit (go2rtc disconnect) or idle
+                    # release. On the direct path there is no ffmpeg to exit, so
+                    # the cycle runs until the peer connection dies or the view
+                    # is released. `proc` is None there, and dereferencing it
+                    # here threw an AttributeError the instant the mux started -
+                    # which made two live trials of the direct serve look like a
+                    # go2rtc DESCRIBE failure when the serve cycle had simply
+                    # died on its first iteration.
+                    while (self._streaming_active
+                           and (proc is None or proc.returncode is None)):
                         await asyncio.sleep(0.5)
                         if _pc_dead():
                             break
