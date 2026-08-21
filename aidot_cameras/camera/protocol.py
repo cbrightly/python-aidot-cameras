@@ -930,6 +930,22 @@ class _DirectTsServer:
     - which is what puts Home Assistant's base timestamp seconds into the stream
     in the first place. A live view wants the newest bytes, not a queue.
 
+    JOIN-AWARENESS is the thing the ffmpeg hop was actually contributing, and
+    without it this server does not work. `ffmpeg -listen 1` does not splice an
+    ongoing stream: it STARTS its output when a client connects, so every
+    consumer gets PAT/PMT and the H.264 parameter sets from byte 0. Forwarding
+    the live stream from wherever a consumer happens to arrive drops it
+    mid-GOP, referencing an SPS/PPS it never received. Measured offline: a
+    mid-stream join gives "non-existing PPS 0 referenced" and no track, while
+    the identical bytes from byte 0 describe cleanly - which is why go2rtc
+    registered a producer and then answered DESCRIBE with 404.
+
+    So the last PAT and PMT are cached, and a new consumer is held until the
+    next random-access point (the adaptation field's random_access_indicator,
+    which is what marks a keyframe in MPEG-TS). It then receives PAT, PMT, and
+    media starting at that keyframe - the parameter sets ride in the keyframe's
+    own access unit, which is how these cameras send them.
+
     A consumer that disappears must never propagate into the mux thread, so
     every socket error is swallowed here and the writer simply becomes a no-op
     until the next consumer connects.
@@ -943,6 +959,11 @@ class _DirectTsServer:
         self._client: "Optional[socket.socket]" = None
         self._lock = threading.Lock()
         self._closed = threading.Event()
+        self._tail = b""            # partial TS packet across write() calls
+        self._pat: "Optional[bytes]" = None
+        self._pmt: "Optional[bytes]" = None
+        self._pmt_pid: "Optional[int]" = None
+        self._synced = False        # has the current consumer been given a start
 
     @property
     def port(self) -> int:
@@ -993,21 +1014,83 @@ class _DirectTsServer:
                 continue
             with self._lock:
                 old, self._client = self._client, cli
+                self._synced = False        # a new consumer must resync
             if old is not None:
                 try: old.close()
                 except OSError: pass
 
+    @staticmethod
+    def _pid(pkt: bytes) -> int:
+        return ((pkt[1] & 0x1F) << 8) | pkt[2]
+
+    @staticmethod
+    def _is_random_access(pkt: bytes) -> bool:
+        """True when this TS packet carries a random-access point (keyframe)."""
+        if not (pkt[3] & 0x20):          # no adaptation field
+            return False
+        if pkt[4] == 0:                  # zero-length adaptation field
+            return False
+        return bool(pkt[5] & 0x40)       # random_access_indicator
+
+    def _learn_pmt_pid(self, pat: bytes) -> None:
+        """Read the first program's PMT PID out of a PAT so the PMT can be
+        cached too. Cheap and best-effort: a malformed PAT just leaves the
+        previous value in place."""
+        try:
+            i = 4
+            if pat[3] & 0x20:
+                i += 1 + pat[4]
+            i += 1 + pat[i]              # pointer_field
+            if pat[i] != 0x00:           # table_id must be PAT
+                return
+            self._pmt_pid = ((pat[i + 10] & 0x1F) << 8) | pat[i + 11]
+        except (IndexError, ValueError):
+            return
+
     def write(self, b: bytes) -> int:
+        data = self._tail + b if self._tail else b
+        out = bytearray()
+        i = 0
+        n = len(data)
+        while i + 188 <= n:
+            if data[i] != 0x47:          # resync to the next sync byte
+                j = data.find(b"\x47", i + 1)
+                if j < 0:
+                    i = n
+                    break
+                i = j
+                continue
+            pkt = data[i:i + 188]
+            i += 188
+            pid = self._pid(pkt)
+            if pid == 0:
+                self._pat = pkt
+                self._learn_pmt_pid(pkt)
+            elif self._pmt_pid is not None and pid == self._pmt_pid:
+                self._pmt = pkt
+            if self._synced:
+                out += pkt
+            elif self._is_random_access(pkt):
+                # Start this consumer here: tables first, then the keyframe.
+                if self._pat is not None:
+                    out += self._pat
+                if self._pmt is not None:
+                    out += self._pmt
+                out += pkt
+                self._synced = True
+        self._tail = data[i:] if i < n else b""
+
         with self._lock:
             cli = self._client
-        if cli is None:
-            return len(b)               # nobody pulling: drop, do not queue
+        if cli is None or not out:
+            return len(b)               # nobody pulling, or nothing to send yet
         try:
-            cli.sendall(b)
+            cli.sendall(bytes(out))
         except OSError:
             with self._lock:
                 if self._client is cli:
                     self._client = None
+                self._synced = False
             try: cli.close()
             except OSError: pass
         return len(b)
