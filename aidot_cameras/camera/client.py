@@ -644,7 +644,7 @@ def _build_sdes_serve_cmd(
     - ``output_path`` -> record to file.
     - neither -> ``-f null`` (keep ffmpeg alive draining SRTP, write nothing).
 
-    AUDIO (the http-listen serve only): the mpegts mux writes its PAT/PMT once
+    AUDIO (the http-listen serve and the RTSP push): the mpegts mux writes its PAT/PMT once
     every mapped stream has produced a packet.  Video is ``-c:v copy`` (parameters
     known from the SDP at once); the ``-c:a aac`` encoder needs PCM samples to emit
     a frame, and battery cameras send PCMA sparsely.  So we feed the encoder a
@@ -654,7 +654,10 @@ def _build_sdes_serve_cmd(
     are filled with silence.  go2rtc/HA pulls this mpegts the same way as the
     video-only serve, so the pull model + cold-start relay are unchanged.
     ``volume`` is the stateless hot-mic trim (dynamic normalizers regressed the
-    pipe in testing).  File recording (snapshots/diagnostics) is always -c copy."""
+    pipe in testing).  The RTSP push uses the SAME silence-base mix, for a second
+    reason as well as the sparse-battery one: it publishes G.711 otherwise, and
+    fMP4/MSE cannot carry G.711, so browsers on the MSE path heard nothing.
+    File recording (snapshots/diagnostics) is always -c copy."""
     time_args = ["-t", str(int(max_seconds))] if max_seconds else []
 
     if rtsp_push_url:
@@ -685,11 +688,41 @@ def _build_sdes_serve_cmd(
                 "-f", "mpegts", "-listen", "1",
                 rtsp_push_url,
             ]
+    elif rtsp_push_url and sdes_audio and not push_video_only:
+        # PUSH + audio: encode AAC rather than pass G.711 through.
+        #
+        # Passthrough was right for WebRTC, which carries PCMA natively - but
+        # fMP4/MSE has no mapping for G.711, so every browser on the MSE path got
+        # a silent stream. Measured on the live fleet 2026-08-21: producer
+        # `audio, recvonly, PCMA/8000`, go2rtc sender `pcm_alaw`, and MSE
+        # negotiated `avc1.*` alone with no audio codec at all. Encoding AAC here
+        # makes one publish serve both consumers. Video stays `-c:v copy`; it is
+        # never gated on audio.
+        #
+        # Battery cameras send PCMA sparsely, and an AAC encoder with no input
+        # samples emits no frames - the same hazard the http-listen serve already
+        # solves. Reuse its fix verbatim: a continuous anullsrc under
+        # amix(normalize=0) feeds the encoder from t=0 and is a no-op wherever
+        # real audio is present, so sparse audio cannot stall the publish.
+        dest_args = [
+            "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono",
+            "-filter_complex",
+            ("[0:a]aresample=async=1[a0];"
+             "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
+             f"volume={audio_gain_db}dB[aout]"),
+            "-map", "0:v:0", "-map", "[aout]",
+            "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
+            *time_args,
+            "-f", "rtsp", "-rtsp_transport", "tcp",
+            rtsp_push_url,
+        ]
     elif rtsp_push_url:
-        # PUSH is G.711 passthrough (-c copy) as always - EXCEPT when the audio
-        # payload type was never observed (push_video_only): announcing an
-        # un-narrowed audio line the server cannot accept kills the whole
-        # publish with 400 Bad Request, so map video only and announce clean.
+        # PUSH without usable audio: G.711 passthrough (-c copy) as always -
+        # EXCEPT when the audio payload type was never observed
+        # (push_video_only): announcing an un-narrowed audio line the server
+        # cannot accept kills the whole publish with 400 Bad Request, so map
+        # video only and announce clean. That guard outranks a request for
+        # audio - a silent picture beats no picture.
         dest_args = [
             *(["-map", "0:v:0", "-c:v", "copy"] if push_video_only
               else ["-c", "copy"]),
