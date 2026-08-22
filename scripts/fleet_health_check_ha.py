@@ -176,10 +176,24 @@ def main():
             why.append(f"{nf} failed opens")
         if any(per[h]['novideo'] > NOVIDEO_ALARM for h in bad):
             why.append(f"{nv} opens delivered no picture")
-        record(f"CHURNING - {len(bad)}/{len(hours)} hours; " + "; ".join(why))
+        # Trailing run of clean hours. A window that CONTAINS an incident reads
+        # identically to one that is still in it, which makes a resolved problem
+        # look ongoing until the bad hours age out of the log. Say which it is.
+        bad_set = set(bad)
+        recent_clean = 0
+        for h in reversed(hours):
+            if h in bad_set:
+                break
+            recent_clean += 1
+        tail = (f" - last {recent_clean} hour{'s' if recent_clean != 1 else ''} clean"
+                if recent_clean else "")
+        resolved = (f"The most recent {recent_clean} hour"
+                    f"{'s are' if recent_clean != 1 else ' is'} clean, so this "
+                    f"looks resolved rather than ongoing. " if recent_clean >= 2 else "")
+        record(f"CHURNING - {len(bad)}/{len(hours)} hours{tail}; " + "; ".join(why))
         publish("churning",
-                f"{len(bad)} of {len(hours)} hours affected",
-                "Trigger: " + "; ".join(why) + ". "
+                f"{len(bad)} of {len(hours)} hours affected{tail}",
+                resolved + "Trigger: " + "; ".join(why) + ". "
                 f"Hours: {', '.join(h[11:] + ':00' for h in bad)}.")
         return 1
     msg = (f"healthy - {len(hours)} hours, opens/h {min(o)}-{max(o)}, "
