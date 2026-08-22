@@ -57,7 +57,7 @@ def fetch(lines=120000):
         return r.read().decode("utf-8", "replace")
 
 
-def publish(status, headline, detail=""):
+def publish(status, headline, detail="", heading=""):
     """Write the machine-readable state the dashboard sensor reads.
 
     The sensor's STATE is one short word so the card can colour and icon it;
@@ -68,6 +68,11 @@ def publish(status, headline, detail=""):
     import json
     payload = {
         "status": status,                       # healthy | churning | unknown
+        # The card's title. It lives here, not in the dashboard template, because
+        # only this code knows WHICH alarm fired - a fixed "cameras reconnecting
+        # too often" heading actively misdescribed a run whose real trigger was
+        # the integration being reloaded.
+        "heading": heading or "Camera health",
         "headline": headline,                   # one short human line
         "detail": detail[:900],                 # the full report, for the card
         "checked_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -103,12 +108,14 @@ def main():
     except Exception as exc:
         msg = f"UNKNOWN - could not fetch the log: {exc}"
         print(msg); record(msg)
-        publish("unknown", "Could not read the log", str(exc))
+        publish("unknown", "Could not read the log", str(exc),
+                heading="Camera health unknown")
         return 2
     if not raw:
         msg = "UNKNOWN - no SUPERVISOR_TOKEN"
         print(msg); record(msg)
-        publish("unknown", "No supervisor token", "The check could not authenticate.")
+        publish("unknown", "No supervisor token", "The check could not authenticate.",
+                heading="Camera health unknown")
         return 2
 
     cur = None
@@ -136,7 +143,8 @@ def main():
         msg = "UNKNOWN - no serve-loop activity, cannot tell healthy from idle"
         print(msg); record(msg)
         publish("unknown", "No camera activity to judge",
-                "Nothing was streaming, so this is not the same as healthy.")
+                "Nothing was streaming, so this is not the same as healthy.",
+                heading="Camera health unknown")
         return 2
 
     hours = sorted(per)
@@ -191,10 +199,16 @@ def main():
                     f"{'s are' if recent_clean != 1 else ' is'} clean, so this "
                     f"looks resolved rather than ongoing. " if recent_clean >= 2 else "")
         record(f"CHURNING - {len(bad)}/{len(hours)} hours{tail}; " + "; ".join(why))
+        reload_driven = any(per[h]['reloads'] >= RELOADS_ALARM for h in bad)
+        heading = ("Integration keeps reloading" if reload_driven
+                   else "Cameras reconnecting too often")
+        if recent_clean >= 2:
+            heading += " (looks resolved)"
         publish("churning",
                 f"{len(bad)} of {len(hours)} hours affected{tail}",
                 resolved + "Trigger: " + "; ".join(why) + ". "
-                f"Hours: {', '.join(h[11:] + ':00' for h in bad)}.")
+                f"Hours: {', '.join(h[11:] + ':00' for h in bad)}.",
+                heading=heading)
         return 1
     msg = (f"healthy - {len(hours)} hours, opens/h {min(o)}-{max(o)}, "
            f"{f} open failures")
@@ -205,7 +219,8 @@ def main():
             f"{sum(per[h]['novideo'] for h in hours)} blank opens, "
             f"{sum(per[h]['reloads'] for h in hours)} integration reloads. "
             f"Alarms: >{OPENS_ALARM} reconnects/h, >{FAILS_ALARM} failures, "
-            f">{NOVIDEO_ALARM} blank, or {RELOADS_ALARM}+ reloads in an hour.")
+            f">{NOVIDEO_ALARM} blank, or {RELOADS_ALARM}+ reloads in an hour.",
+            heading="Cameras streaming normally")
     return 0
 
 
