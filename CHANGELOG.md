@@ -6,6 +6,36 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b21]
+
+### Fixed
+
+- **Audio now reaches browsers on SDES cameras.** A camera published over the
+  RTSP push carries G.711 (`PCMA/8000`), and the push passed it through
+  untouched. G.711 is fine for WebRTC, which carries it natively -- but fMP4 /
+  Media Source Extensions has no mapping for it, so any browser on the MSE path
+  negotiated video only and played a silent stream. Measured on a live fleet:
+  the producer advertised `audio, recvonly, PCMA/8000`, go2rtc created a
+  `pcm_alaw` sender, and the MSE handshake came back `avc1.*` with no audio
+  codec at all.
+
+  The push now encodes AAC, so one publish serves both consumers. Video is
+  untouched (`-c:v copy`) and is never gated on audio.
+
+  Two behaviours are deliberately preserved:
+
+  - A camera whose audio payload type was never observed still publishes video
+    only. Announcing an audio line the RTSP server cannot accept fails the whole
+    publish with `400 Bad Request`, and a silent picture beats no picture.
+  - With serve audio disabled, the publish is byte-for-byte the previous
+    `-c copy` passthrough.
+
+  Battery cameras send audio sparsely, and an AAC encoder with no input samples
+  emits no frames. The push therefore reuses the silence base the HTTP-listen
+  serve already used for this: a continuous `anullsrc` under
+  `amix(normalize=0)`, which feeds the encoder from the first moment and is a
+  no-op wherever real audio is present.
+
 ## [1.0.0b20]
 
 ### Fixed
