@@ -33,6 +33,17 @@ TS = re.compile(r'^(2026-\d\d-\d\d \d\d:\d\d:\d\d)')
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 OPENS_ALARM = 60
 FAILS_ALARM = 5
+# Every config-entry reload tears down EVERY camera session: SDES publishers die,
+# go2rtc loses its producers and live view goes black until something reopens the
+# camera. A healthy hour has 0; a restart contributes 1. Two in one hour means
+# something is reloading the integration on a schedule - which is exactly what a
+# stray script doing `POST /api/config/config_entries/entry/<id>/reload` every 30
+# minutes looked like on 2026-08-21, undetected for 1.5 days because this check
+# only watched open/failure RATES and those stayed under their alarms.
+RELOADS_ALARM = 2
+# Opens that connected and carried no picture. Measured 0-3/hour across a day
+# that included a real outage, so this fires only on clearly worse than observed.
+NOVIDEO_ALARM = 5
 
 
 def fetch(lines=120000):
@@ -115,6 +126,11 @@ def main():
             per[hour]['fails'] += 1
         elif 'delivered no video in' in ln:
             per[hour]['novideo'] += 1
+        if 'CameraClient: stored token loaded' in ln:
+            # A fresh CameraClient means async_setup_entry ran, i.e. the config
+            # entry was (re)loaded. The only legitimate sources are a restart or
+            # a deliberate reload.
+            per[hour]['reloads'] += 1
 
     if not per:
         msg = "UNKNOWN - no serve-loop activity, cannot tell healthy from idle"
@@ -126,7 +142,10 @@ def main():
     hours = sorted(per)
     hours = hours[:-1] or hours          # drop the partial trailing hour
     bad = [h for h in hours
-           if per[h]['opens'] > OPENS_ALARM or per[h]['fails'] > FAILS_ALARM]
+           if per[h]['opens'] > OPENS_ALARM
+           or per[h]['fails'] > FAILS_ALARM
+           or per[h]['novideo'] > NOVIDEO_ALARM
+           or per[h]['reloads'] >= RELOADS_ALARM]
     o = [per[h]['opens'] for h in hours]
     f = sum(per[h]['fails'] for h in hours)
     if bad:
@@ -134,20 +153,33 @@ def main():
               + ", ".join(bad))
         for h in bad:
             print(f"  {h}  opens={per[h]['opens']} fails={per[h]['fails']}"
-                  f" novideo={per[h]['novideo']}")
+                  f" novideo={per[h]['novideo']} reloads={per[h]['reloads']}")
         print("Next: set aidot_cameras.camera.webrtc_open=debug, let it run, then"
               " use find_degraded_window.py for the answer-latency table"
               " (~0.42s healthy, ~11.7s degraded). Do not judge on one short"
               " window - the defect is bursty.")
         worst = max(per[h]['opens'] for h in bad)
         nf = sum(per[h]['fails'] for h in bad)
-        record(f"CHURNING - {len(bad)}/{len(hours)} hours, worst opens/h "
-               f"{worst}, {nf} failures")
+        nv = sum(per[h]['novideo'] for h in bad)
+        nr = sum(per[h]['reloads'] for h in bad)
+        # Name the trigger. Saying "reconnects" when the real signal was repeated
+        # reloads sent the last investigation down the wrong path for a day.
+        why = []
+        if any(per[h]['reloads'] >= RELOADS_ALARM for h in bad):
+            why.append(f"the integration was RELOADED {nr}x (every reload kills "
+                       f"all camera sessions - look for anything calling "
+                       f"/api/config/config_entries/entry/<id>/reload, including "
+                       f"leftover scripts)")
+        if any(per[h]['opens'] > OPENS_ALARM for h in bad):
+            why.append(f"up to {worst} reconnects/hour")
+        if any(per[h]['fails'] > FAILS_ALARM for h in bad):
+            why.append(f"{nf} failed opens")
+        if any(per[h]['novideo'] > NOVIDEO_ALARM for h in bad):
+            why.append(f"{nv} opens delivered no picture")
+        record(f"CHURNING - {len(bad)}/{len(hours)} hours; " + "; ".join(why))
         publish("churning",
                 f"{len(bad)} of {len(hours)} hours affected",
-                f"Peak {worst} reconnects/hour and {nf} failed opens. "
-                f"Alarms above {OPENS_ALARM}/hour or {FAILS_ALARM} failures; "
-                f"a quiet fleet sits at 6-12 with none failing. "
+                "Trigger: " + "; ".join(why) + ". "
                 f"Hours: {', '.join(h[11:] + ':00' for h in bad)}.")
         return 1
     msg = (f"healthy - {len(hours)} hours, opens/h {min(o)}-{max(o)}, "
@@ -155,8 +187,11 @@ def main():
     print(msg); record(msg)
     publish("healthy",
             f"All {len(hours)} hours normal",
-            f"{min(o)}-{max(o)} camera reconnects per hour, {f} failed opens. "
-            f"Alarms above {OPENS_ALARM}/hour or {FAILS_ALARM} failures.")
+            f"{min(o)}-{max(o)} reconnects/hour, {f} failed opens, "
+            f"{sum(per[h]['novideo'] for h in hours)} blank opens, "
+            f"{sum(per[h]['reloads'] for h in hours)} integration reloads. "
+            f"Alarms: >{OPENS_ALARM} reconnects/h, >{FAILS_ALARM} failures, "
+            f">{NOVIDEO_ALARM} blank, or {RELOADS_ALARM}+ reloads in an hour.")
     return 0
 
 
