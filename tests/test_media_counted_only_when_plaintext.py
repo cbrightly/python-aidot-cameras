@@ -87,8 +87,12 @@ def test_returns_a_bool_not_a_truthy_value():
 # still pass with the production gate deleted.
 # --------------------------------------------------------------------- #
 
+# The gate may carry additional conditions ahead of the helper (a late
+# retransmission is dropped rather than forwarded, and must not be counted
+# either), so allow a prefix -- but the helper itself, with both its terms,
+# stays mandatory.
 _FWD_COUNTER = re.compile(
-    r"if _should_count_media\((?P<args>[^)]*)\):\s*\n"
+    r"if [^\n]*_should_count_media\((?P<args>[^)]*)\):\s*\n"
     r"\s*_media_progress\[0\] = _time_br\.monotonic\(\)\s*\n"
     r"\s*_media_counts\[0\] \+= 1\s*\n"
     r"\s*_media_counts\[1\] \+= len\(_fwd_pkt\)"

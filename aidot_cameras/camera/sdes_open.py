@@ -264,6 +264,39 @@ def _sdes_nack_enabled() -> bool:
         "0", "", "false", "no", "off")
 
 
+#: How long a retransmission has to arrive in to still be worth forwarding.
+#: The serve runs ``-max_delay 500000``; a repeat later than that is discarded
+#: by ffmpeg anyway, having already emitted the damaged frame.  Same env var as
+#: the serve so the two cannot drift apart.
+_SERVE_REORDER_BUDGET_S = min(
+    float(os.environ.get("AIDOT_SERVE_MAX_DELAY_US", "500000") or 500000) / 1e6,
+    0.5,
+)
+
+
+def _video_repeat_too_late(bridge_fn, seq: int, now: float,
+                           budget: float = _SERVE_REORDER_BUDGET_S) -> bool:
+    """Is this video packet a retransmission that missed the decoder's window?
+
+    A repeat that beats ffmpeg's reorder window is put back in place and
+    repairs the frame -- that is the whole point of asking for it. One that
+    arrives after it cannot: the damaged frame is already out, so forwarding
+    the repeat only inserts an out-of-order packet and the muxer clamps its
+    output DTS. Seen in production once NACK was live, as
+    ``RTP: dropping old packet received too late`` plus a run of
+    ``Non-monotonic DTS`` with the sequence number 4 to 115 behind the newest.
+
+    Shares the NACK tracker deliberately: a second one would not know which
+    packets had ever been missing, so nothing would ever look late.
+    """
+    tracker = getattr(bridge_fn, "_nack_tracker", None)
+    if tracker is None:
+        tracker = NackTracker()
+        bridge_fn._nack_tracker = tracker
+    age = tracker.repeat_age(seq, now)
+    return age is not None and age > budget
+
+
 def _video_nack_seqs(bridge_fn, seq: int, now: float,
                      enabled: "Optional[bool]" = None) -> "list":
     """Sequence numbers to ask the camera to resend, given one forwarded packet.
@@ -3906,7 +3939,7 @@ class _SdesOpenMixin:
                                             "camera %s: SDES serve ffmpeg exit"
                                             " reason (last %d non-repetitive"
                                             " lines; %d NACK(s) sent for %d"
-                                            " packet(s) this session):\n%s",
+                                            " packet(s), %d late repeat(s) dropped this session):\n%s",
                                             _br_dev, len(_serr_why),
                                             getattr(_br_proc,
                                                     "_aidot_nack_sent", 0)
@@ -3914,6 +3947,8 @@ class _SdesOpenMixin:
                                                        "_nack_sent", 0),
                                             getattr(_bridge_fn,
                                                     "_nack_seqs", 0),
+                                            getattr(_bridge_fn,
+                                                    "_nack_late_drops", 0),
                                             "\n".join(_serr_why),
                                         )
                                     if _serr_tail:
@@ -5435,10 +5470,30 @@ class _SdesOpenMixin:
                                                 f" -> SSRC="
                                                 f"0x{_bridge_fn._cam_video_ssrc:08x}"
                                             )
+                            # A retransmission that missed ffmpeg's reorder
+                            # window is worse than nothing: the damaged frame
+                            # is already out, so forwarding it only inserts an
+                            # out-of-order packet and the muxer clamps its
+                            # output DTS.  Skip the send (not a `continue` -
+                            # that would change loop control flow for the whole
+                            # SDES fleet) and do not count it, since the
+                            # consumer cannot use it.
+                            _nk_late = (
+                                _kind == "video"
+                                and len(_bpkt) >= 4
+                                and _video_repeat_too_late(
+                                    _bridge_fn,
+                                    _st_br.unpack_from('!H', _bpkt, 2)[0],
+                                    _time_br.time())
+                            )
+                            if _nk_late:
+                                _bridge_fn._nack_late_drops = getattr(
+                                    _bridge_fn, '_nack_late_drops', 0) + 1
                             try:
-                                _lo_target.sendto(
-                                    _fwd_pkt, ('127.0.0.1', _btgt)
-                                )
+                                if not _nk_late:
+                                    _lo_target.sendto(
+                                        _fwd_pkt, ('127.0.0.1', _btgt)
+                                    )
                                 # Forward unconditionally - ciphertext ffmpeg
                                 # discards is inert, and a `continue` here would
                                 # change loop control flow for the whole SDES
@@ -5448,7 +5503,7 @@ class _SdesOpenMixin:
                                 # keeps is_stalled from ever tripping and the
                                 # session reports healthy while the viewer sees
                                 # black.  See _should_count_media.
-                                if _should_count_media(
+                                if not _nk_late and _should_count_media(
                                         _decrypted, _use_plain_rtp):
                                     _media_progress[0] = _time_br.monotonic()
                                     _media_counts[0] += 1

@@ -3041,8 +3041,11 @@ class NackTracker:
         self.max_requests = max_requests
         self.max_report = max_report
         self._highest = None
-        # seq -> [requests_sent, last_request_ts]. Insertion-ordered, so the
-        # oldest loss is always reported first.
+        # seq -> [requests_sent, last_request_ts, first_missed_ts].
+        # Insertion-ordered, so the oldest loss is always reported first.
+        # first_missed_ts is what `repeat_age` measures from: the decoder has
+        # been waiting since then, which is the same clock ffmpeg's max_delay
+        # is counting on.
         self._pending = {}
 
     def observe(self, seq: int, now: float) -> "list":
@@ -3073,12 +3076,30 @@ class NackTracker:
             missing = self._highest
             for _ in range(signed - 1):
                 missing = (missing + 1) & 0xFFFF
-                self._pending.setdefault(missing, [0, None])
+                self._pending.setdefault(missing, [0, None, now])
             self._highest = seq
         self._pending.pop(seq, None)
 
         self._prune()
         return self._due(now)
+
+    def repeat_age(self, seq: int, now: float) -> "Optional[float]":
+        """How long ``seq`` has been missing, or None if it is not outstanding.
+
+        The bridge uses this to decide whether an arriving retransmission is
+        still worth forwarding. A repeat that beats ffmpeg's ``-max_delay`` is
+        reordered back into place and repairs the frame -- the whole point of
+        asking. One that arrives after it cannot: the damaged frame has already
+        been emitted, so forwarding the repeat only inserts an out-of-order
+        packet and the muxer clamps its output DTS. Seen in production as
+        ``RTP: dropping old packet received too late``.
+
+        Measured from when the loss was FIRST noticed, not from the last
+        request, because that is the interval the decoder has been waiting.
+        """
+        state = self._pending.get(seq & 0xFFFF)
+        return None if state is None else now - state[2]
+
 
     def _prune(self) -> None:
         """Forget losses too old to be worth a retransmission.
@@ -3100,7 +3121,7 @@ class NackTracker:
         for s, state in list(self._pending.items()):
             if len(out) >= self.max_report:
                 break
-            sent, last = state
+            sent, last = state[0], state[1]
             if sent >= self.max_requests:
                 del self._pending[s]
                 continue

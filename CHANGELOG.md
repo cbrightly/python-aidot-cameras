@@ -6,6 +6,23 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [Unreleased]
+
+### Fixed
+
+- **A retransmission that arrives too late is now dropped instead of
+  forwarded.** Asking for a lost packet only helps if the repeat beats
+  ffmpeg's reorder window (`-max_delay 500000`): it is then put back in place
+  and the frame is repaired. A repeat that arrives after it cannot be -- the
+  damaged frame has already been emitted -- so forwarding it just inserts an
+  out-of-order packet and the muxer clamps its output DTS.
+
+  Observed in production once NACK was live: `RTP: dropping old packet
+  received too late`, and on the wire repeats landing with their sequence
+  number 4 to 115 behind the newest, each followed by a run of
+  `Non-monotonic DTS`. Self-inflicted, and now suppressed at the source. The
+  serve-exit log reports how many were dropped.
+
 ## [1.0.0b24]
 
 ### Fixed
