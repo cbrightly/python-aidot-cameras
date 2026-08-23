@@ -27,6 +27,8 @@ from .protocol import (
     AVIO_HDR_LEN,
     REMB_TARGET_BPS,
     AvioResponseRouter,
+    NackTracker,
+    build_nack,
     build_remb,
     _build_sprop,
     parse_avio_response,
@@ -236,6 +238,81 @@ def _widen_media_rcvbuf(sock, kind: str, device_id: str = "?") -> int:
     _LOGGER.debug("camera %s: %s receive buffer %d bytes (asked %d)",
                   device_id, kind, got, _MEDIA_RCVBUF_BYTES)
     return got
+
+
+def _sdes_nack_enabled() -> bool:
+    """Whether to ask the camera to resend video packets that never arrived.
+
+    ON by default, unlike REMB. REMB ships off because it was measured to do
+    nothing; this was measured to be needed. An A001064 over SDES loses ~0.7%
+    of its video RTP packets on the air -- 37 of 56 losses landing INSIDE a
+    frame, same RTP timestamp either side of the sequence gap -- and its
+    keyframes are ~155 packets each, so roughly two thirds of them arrive
+    damaged. ffmpeg reassembles the truncated slice and forwards it; a
+    browser's WebRTC decoder conceals that, and Media Source Extensions kills
+    the pipeline outright (``PIPELINE_ERROR_DECODE``, always on a keyframe).
+
+    The default is ON rather than opt-in because, unlike a bitrate cap, a NACK
+    cannot degrade a camera that ignores it: unsupported feedback is dropped,
+    and a camera on a clean link generates no requests at all -- driveway,
+    measured the same day on the same bridge, has 0.05% loss and zero
+    mid-frame losses. The cost on a healthy fleet is nothing sent.
+
+    Read per call, not at import, so it can be flipped without a restart.
+    """
+    return os.environ.get("AIDOT_SDES_NACK", "1").strip().lower() not in (
+        "0", "", "false", "no", "off")
+
+
+def _video_nack_seqs(bridge_fn, seq: int, now: float,
+                     enabled: "Optional[bool]" = None) -> "list":
+    """Sequence numbers to ask the camera to resend, given one forwarded packet.
+
+    The tracker is cached on ``bridge_fn`` (the same place the PLI and REMB
+    state lives) because it has to see the whole sequence: one rebuilt per
+    packet would never observe a gap, which is the quiet way this could ship
+    doing nothing at all.
+    """
+    if enabled is None:
+        enabled = _sdes_nack_enabled()
+    if not enabled:
+        return []
+    tracker = getattr(bridge_fn, "_nack_tracker", None)
+    if tracker is None:
+        tracker = NackTracker()
+        bridge_fn._nack_tracker = tracker
+    return tracker.observe(seq, now)
+
+
+def _send_video_nack(sock, dst, srtcp_sess, sender_ssrc: int,
+                     media_ssrc: int, lost_seqs: "list") -> bool:
+    """Put one Generic NACK on the camera's RTCP path.  True if it went out.
+
+    Same socket, same destination and same SRTCP session as the PLI, so it
+    inherits the key selection that a PLI has already been observed to
+    authenticate (the RR prefers a different key -- see the SRTP-TX-KEY note).
+
+    That session is built lazily on the first PLI tick, which is scheduled for
+    the moment the first video packet arrives. A loss in the handful of packets
+    before it exists goes out unprotected and the camera will drop it, exactly
+    as the PLI's own plain-text fallback does. The window is a few milliseconds
+    wide and costs at most the first loss event of a session.
+
+    Never raises: this runs inside the bridge's packet loop, and taking the
+    whole stream down to avoid one dropped video packet is a bad trade.
+    """
+    if not lost_seqs:
+        return False
+    try:
+        raw = build_nack(sender_ssrc, media_ssrc, lost_seqs)
+        sock.sendto(
+            srtcp_sess.protect_rtcp(raw) if srtcp_sess is not None else raw,
+            dst,
+        )
+        return True
+    except Exception:
+        _LOGGER.debug("NACK send failed", exc_info=True)
+        return False
 
 
 def _start_serve_stderr_drain(proc, *, maxlines: int = 40) -> None:
@@ -5211,6 +5288,40 @@ class _SdesOpenMixin:
                                 _fwd_pkt = (_fwd_pkt[:4]
                                             + _st_br.pack('!I', _rtp_norm)
                                             + _fwd_pkt[8:])
+                            # Ask the camera to resend anything the air lost.
+                            # The sequence number is in the clear even under
+                            # SRTP, so this reads _bpkt and does not depend on
+                            # the decrypt above having succeeded.
+                            if (_kind == "video"
+                                    and len(_bpkt) >= 12
+                                    and hasattr(_bridge_fn, '_cam_video_ssrc')
+                                    and hasattr(_bridge_fn, '_cam_srtp_sock')):
+                                _nk_seq, _nk_ssrc = _st_br.unpack_from(
+                                    '!H', _bpkt, 2)[0], _st_br.unpack_from(
+                                    '!I', _bpkt, 8)[0]
+                                if _nk_ssrc == _bridge_fn._cam_video_ssrc:
+                                    _nk_lost = _video_nack_seqs(
+                                        _bridge_fn, _nk_seq, _time_br.time())
+                                    if _nk_lost and _send_video_nack(
+                                            _bridge_fn._cam_srtp_sock,
+                                            _bridge_fn._cam_srtp_src,
+                                            getattr(_bridge_fn,
+                                                    '_pli_tx_sess', None),
+                                            0xAB12CD34,
+                                            _bridge_fn._cam_video_ssrc,
+                                            _nk_lost):
+                                        _bridge_fn._nack_sent = getattr(
+                                            _bridge_fn, '_nack_sent', 0) + 1
+                                        _bridge_fn._nack_seqs = getattr(
+                                            _bridge_fn, '_nack_seqs', 0
+                                        ) + len(_nk_lost)
+                                        if _bridge_fn._nack_sent == 1:
+                                            _status(
+                                                f"SDES: sent RTCP NACK #1 for"
+                                                f" {len(_nk_lost)} packet(s)"
+                                                f" -> SSRC="
+                                                f"0x{_bridge_fn._cam_video_ssrc:08x}"
+                                            )
                             try:
                                 _lo_target.sendto(
                                     _fwd_pkt, ('127.0.0.1', _btgt)

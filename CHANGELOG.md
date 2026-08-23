@@ -6,6 +6,60 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b23]
+
+### Added
+
+- **RTCP Generic NACK on the SDES bridge** -- the camera is now asked to resend
+  video RTP packets that never arrived. On by default; set `AIDOT_SDES_NACK=0`
+  to turn it off.
+
+  Measured on an A001064: ~0.7% of its video packets are lost on the air, 37 of
+  56 losses landing INSIDE a frame (identical RTP timestamp either side of the
+  sequence gap). Nothing recovered them -- the bridge sent PLI, REMB and RR but
+  never a NACK -- so ffmpeg reassembled a truncated H.264 slice and forwarded
+  it. Its keyframes are ~155 packets each, which makes roughly two thirds of
+  them arrive damaged. A browser's WebRTC decoder conceals that; Media Source
+  Extensions treats a damaged keyframe as fatal and stops the pipeline with
+  `PIPELINE_ERROR_DECODE`, which is the whole reason that camera played over
+  WebRTC and not over MSE.
+
+  The camera negotiates `nack` for both media in its own answer, so nothing new
+  has to be offered. Unlike the REMB bitrate cap this defaults ON, because a
+  NACK cannot degrade a camera that ignores it -- unsupported feedback is
+  dropped, and a camera on a clean link generates no requests at all (a second
+  camera on the same bridge measured 0.05% loss with zero mid-frame losses and
+  sends none).
+
+  Requests are capped: at most 17 sequence numbers per report, at most 3
+  attempts each 150 ms apart, and abandoned once a packet is 200 behind the
+  newest -- a retransmission that arrives after the decoder has moved on spends
+  bandwidth on a link that is already congested and fixes nothing. A sequence
+  jump larger than 250 is treated as a republished stream, not a loss, so a
+  restart does not trigger a NACK storm.
+
+  Measured on the reference install, same camera, before and after:
+
+  | | before | after |
+  |---|---|---|
+  | losses recovered by a retransmission | 0 of 357 | 1077 of 1094 (98.4%) |
+  | MSE playback runs that survived | 0 of 6 | 16 of 18 |
+
+  The camera retransmits on the original SSRC and payload type -- no RTX
+  stream is negotiated on this path -- so ffmpeg's reorder queue absorbs the
+  repeat with no change to the SDP. Recovery took 45 ms at the median and
+  162 ms at p90.
+
+  The 150 ms retry interval is measured, not chosen. Retrying every 100 ms
+  with four attempts was tried on the same camera at comparable loss and made
+  things markedly WORSE -- 73.6% of losses recovered against 99.2% -- because
+  an interval under the p90 re-asks for packets whose repeat is still in
+  flight, and the duplicate costs an uplink that is already saturated.
+
+  It is not a complete cure on a link this poor: the recovery delay has a tail
+  past ffmpeg's 500 ms `-max_delay`, and a retransmission that arrives after
+  that is discarded with the frame already emitted.
+
 ## [1.0.0b22]
 
 ### Added
