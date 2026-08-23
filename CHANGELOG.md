@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b24]
+
 ### Fixed
 
 - **The NACK now reaches a camera on a relayed session.** It was written
