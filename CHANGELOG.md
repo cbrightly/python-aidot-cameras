@@ -8,6 +8,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b25]
+
 ### Fixed
 
 - **A retransmission that arrives too late is now dropped instead of
