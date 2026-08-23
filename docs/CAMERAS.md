@@ -481,3 +481,4 @@ internals.
 | `AIDOT_AUDIO_GATE_DBFS` | Noise-gate threshold (dBFS) for two-way audio. | `-45` |
 | `AIDOT_FAST_CONNECT_HOST_ONLY` | Within `AIDOT_FAST_CONNECT`, narrows only the local `RTCPeerConnection` to host candidates (skips the ~5 s srflx gather stall). **On-subnet only** - drops srflx/relay fallback. Opt-in. | unset (off) |
 | `AIDOT_SPROP_DIR` | Directory where captured SPS/PPS (sprop) parameter sets are cached. Set to a writable path if the default location is read-only. | `<package dir>` |
+| `AIDOT_SDES_NACK` | Ask the camera to resend video RTP packets that never arrived (RTCP Generic NACK). Loss on a weak link otherwise reaches the player as a truncated H.264 slice, which WebRTC conceals and MSE treats as fatal. **On by default**; `0`/`false`/`no`/`off` disables. | enabled (on) |
