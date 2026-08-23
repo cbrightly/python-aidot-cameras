@@ -4177,9 +4177,23 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 return
 
             if _stalled:
+                # Say whether this will repeat forever.  With idle-release off
+                # (<=0 idle window) the loop never asks whether a viewer is
+                # present, so a camera that stops sending when nobody is
+                # watching is restarted every couple of minutes for the life of
+                # the integration.  Measured on the reference A001064 with
+                # mains_idle_s=0: a fresh session every ~2 min, round the clock,
+                # with no consumer.  "Keep the warm session for instant
+                # re-views" cannot work on a camera like that, and the repeated
+                # restarts read as a defect when they are a setting.
                 _LOGGER.info(
-                    "SDES %s: no media in watchdog window - restarting stream",
+                    "SDES %s: no media in watchdog window - restarting stream%s",
                     self.device_id,
+                    "" if _idle_on else
+                    " (idle-release is OFF for this camera, so this will repeat"
+                    " indefinitely; a camera that stops sending when unwatched"
+                    " cannot be held warm - set a positive idle window to let"
+                    " it go dormant between views)",
                 )
                 _done.cancel()
 

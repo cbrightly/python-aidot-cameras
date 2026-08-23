@@ -607,6 +607,31 @@ def _resolve_sdes_video_pt() -> Optional[int]:
     return pt if pt in _SDES_ANSWER_VIDEO_PTS else None
 
 
+def _serve_video_pt(observed, answer, pinned) -> "Optional[int]":
+    """Which video payload type the serve SDP should narrow to.
+
+    Precedence: **observed beats pinned beats answer.**
+
+    An observed payload type is fact -- it is what is arriving. A pin is our
+    own constraint on the offer, so narrowing past it can only produce a stream
+    the camera was never asked to send. The answer is the weakest of the three:
+    measured 2026-08-23, the reference A001064 ANSWERS 97 (H.265) and SENDS 96
+    (H.264) in every observed session, and trusting the answer when video had
+    not yet been observed built an hevc-only SDP that no hevc ever filled --
+    ffmpeg could not determine dimensions, could not write the RTSP header, and
+    the serve died at startup. That was invisible until the exit reason stopped
+    being flushed out of the stderr tail by Non-monotonic DTS noise.
+
+    Returns None when nothing is known; the caller keeps its own "could not
+    narrow" path rather than having a payload type invented for it.
+    """
+    if observed in _SDP_VIDEO_PTS:
+        return int(observed)
+    if pinned is not None:
+        return int(pinned)
+    return answer
+
+
 #: The video codecs the SDES OFFER advertises, keyed by payload type, with the
 #: rtpmap/fmtp lines that describe each one.  Deliberately NOT reusing
 #: ``_SDES_ANSWER_VIDEO_PTS``: that tuple is what the answer template carries
@@ -5808,14 +5833,28 @@ class _SdesOpenMixin:
                 _LOGGER.debug("camera %s: swallowed exception in %s",
                               getattr(self, "device_id", "?"),
                               'video_pt_from_answer_sdp', exc_info=True)
-            if _answer_video_pt[0] is not None:
+            _pin_pt = _resolve_sdes_video_pt()
+            if _pin_pt is not None:
+                _LOGGER.info(
+                    "camera %s: no video observed before the serve launched; "
+                    "narrowing the SDP to the PINNED payload type %d rather "
+                    "than the camera's answer (%s) - this model answers one "
+                    "codec and sends another.",
+                    getattr(self, "device_id", "?"), _pin_pt,
+                    _answer_video_pt[0],
+                )
+            elif _answer_video_pt[0] is not None:
                 _LOGGER.info(
                     "camera %s: no video observed before the serve launched; "
                     "narrowing the SDP to payload type %d from the camera's "
                     "negotiated answer instead of advertising both codecs.",
                     getattr(self, "device_id", "?"), _answer_video_pt[0],
                 )
-        _keep_v = int(_vpt) if _vpt in _SDP_VIDEO_PTS else _answer_video_pt[0]
+        # observed beats pinned beats answer -- see _serve_video_pt.  The pin
+        # matters here: this camera answers H.265 and sends H.264, so trusting
+        # the answer built an hevc-only SDP and killed the serve at startup.
+        _keep_v = _serve_video_pt(_vpt, _answer_video_pt[0],
+                                  _resolve_sdes_video_pt())
         _keep_a = int(_apt) if _apt in _SDP_AUDIO_PTS else None
         if _serve_audio and _keep_a is None:
             # No audio observed in the window, so the line cannot be narrowed and

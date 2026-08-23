@@ -16,6 +16,19 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   camera. It now goes through the same relay-aware sender as the RR and the
   AVIO trigger.
 
+- **A camera that answers one codec and sends another no longer kills the
+  serve at startup.** When video had not been observed before the serve
+  launched, the SDP was narrowed to the payload type from the camera's
+  *answer*. The reference A001064 answers 97 (H.265) and sends 96 (H.264) in
+  every observed session, so this built an hevc-only SDP that no hevc ever
+  filled: ffmpeg could not determine dimensions, could not write the RTSP
+  header, and exited immediately. The pin (`AIDOT_SDES_VIDEO_PT`) was ON and
+  was being ignored by that fallback. Precedence is now what was **observed**,
+  then what was **pinned**, then what the camera **claimed** -- the answer is
+  the weakest of the three because this model demonstrably does not honour its
+  own. The failure was invisible until the exit reason stopped being flushed
+  out of the stderr tail.
+
 - **A serve that dies no longer hides why.** The exit logger kept the last 40
   stderr lines, and on a lossy camera all 40 are `Non-monotonic DTS`. Both
   camera families step their RTP timestamp backward every exactly 30.0 s
@@ -38,6 +51,11 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   must agree or the camera drops the packet.
 - The serve-exit log reports how many NACKs the session sent, and for how many
   packets -- counters that were previously accumulated and never read.
+- The media-watchdog restart says when idle-release is off for that camera, and
+  therefore that it will repeat indefinitely. Measured on the reference A001064
+  with a zero idle window: a fresh session every ~2 minutes, round the clock,
+  with no viewer. That is the configured behaviour, not a fault, but eleven
+  restarts an hour reads as one.
 
 
 ## [1.0.0b23]
