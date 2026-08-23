@@ -10,6 +10,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b26]
+
 ### Fixed
 
 - **Retransmission requests can no longer pile load onto a link that is losing
