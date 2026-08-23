@@ -40,10 +40,16 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
   Measured on the reference install, same camera, before and after:
 
-  | | before | after |
+  | | NACK off | NACK on |
   |---|---|---|
-  | losses recovered by a retransmission | 0 of 357 | 1077 of 1094 (98.4%) |
-  | MSE playback runs that survived | 0 of 6 | 16 of 18 |
+  | losses recovered by a retransmission | 0 of 357 (and 0 of 204 in a later paired control) | 1077 of 1094 (98.4%) |
+
+  Packet recovery is the measurement to trust here: it is direct, it was taken
+  in both arms of a paired control on the same camera, and it does not depend
+  on judging a player. Browser playback also improved -- runs that failed every
+  attempt before the change played through afterwards -- but that camera's link
+  and its publisher are unstable enough hour to hour that no honest pass-rate
+  figure can be quoted for it.
 
   The camera retransmits on the original SSRC and payload type -- no RTX
   stream is negotiated on this path -- so ffmpeg's reorder queue absorbs the
