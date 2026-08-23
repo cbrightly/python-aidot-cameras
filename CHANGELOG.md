@@ -6,6 +6,34 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b22]
+
+### Added
+
+- **`sprop_is_unstable(device_id)`** -- public, for consumers that register a
+  camera with a stream server.
+
+  A server such as go2rtc builds its decoder configuration (the fMP4 `avcC`
+  box) when a track is first published and reuses it for the life of the stream
+  definition. A camera that changes its H.264 SPS between sessions is therefore
+  published against parameter sets captured in an EARLIER session, and a player
+  using Media Source Extensions -- which configures its decoder from that box
+  once -- then fails to decode every inter-frame and updates the picture only on
+  keyframes. Measured on an A001064, which changes its SPS because the declared
+  frame rate is part of it and the camera lowers frame rate in night mode:
+
+      avcC   SPS: 674d001fe900a00b742000007d20000daf8080   (earlier session)
+      stream SPS: 674d001fe900a00b742000007d200004e34080   (this session)
+
+  On a freshly created stream definition for the same camera the two match, and
+  playback is correct.
+
+  The library already tracked which cameras do this, to decide whether
+  injecting cached `sprop-parameter-sets` is safe; this exposes that same
+  knowledge so a consumer can drop and recreate the stream definition before
+  publishing. It must be done before the publisher connects: removing a
+  definition a publisher is attached to leaves it with nowhere to publish.
+
 ## [1.0.0b21]
 
 ### Fixed

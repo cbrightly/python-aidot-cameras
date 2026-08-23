@@ -768,6 +768,33 @@ def _sprop_is_unstable(devid: str) -> bool:
     return os.path.exists(_sprop_unstable_path(devid))
 
 
+def sprop_is_unstable(devid: str) -> bool:
+    """Public: has this camera been seen to change its H.264 parameter sets?
+
+    Exposed for consumers that register the camera with a stream server. A
+    server such as go2rtc builds its decoder configuration (the fMP4 ``avcC``
+    box) when a track is first published and then reuses it for the life of the
+    stream definition. A camera that changes its SPS between sessions -- an
+    A001064 does, because the declared frame rate lives in the SPS and it drops
+    frame rate in night mode -- therefore ends up published against an ``avcC``
+    captured from an EARLIER session. Media Source Extensions configures its
+    decoder from that box once, so every inter-frame then fails to decode and
+    the picture only updates on keyframes. Measured on the reference install:
+
+        avcC   SPS: 674d001fe900a00b742000007d20000daf8080   (earlier session)
+        stream SPS: 674d001fe900a00b742000007d200004e34080   (this session)
+
+    and, on a fresh stream definition for the same camera, the two match.
+
+    A consumer that sees True here should drop and recreate the stream
+    definition before publishing, so the server rebuilds its track from this
+    session's parameter sets. Do that BEFORE the publisher connects; removing a
+    definition a publisher is already attached to leaves it with nowhere to
+    publish.
+    """
+    return _sprop_is_unstable(devid)
+
+
 def _load_sprop(devid: str) -> "Optional[str]":
     """Cached ``sprop-parameter-sets`` for ``devid`` (captured from a prior
     stream), or None.  Fail-safe: any error -> None (SDP omits sprop = today's
