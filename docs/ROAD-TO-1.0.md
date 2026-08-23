@@ -184,6 +184,40 @@ The bar: **either make SD take effect, or record that it does not and why.**
 The prize is now correctly sized - about 2:1 from SD, and about 24% from
 whatever accounts for the HD difference - rather than the 5x this item promised.
 
+#### ANSWERED 2026-08-23: it does not take effect, and the framing is not why
+
+Run with `scripts/live_validate.py --quality-arms 'sd|' --arm-repeats 2` on the
+A001064 - four sessions, SD alternating with a control that waits the same gap
+and sends nothing, each session measured against **itself**:
+
+| arm | n | ratios (window B / window A) | mean |
+|---|---|---|---|
+| sd | 2 | 0.904, 0.866 | **0.885** |
+| control | 2 | 0.865, 0.862 | **0.863** |
+
+The SD arm is indistinguishable from the control - marginally *higher*, i.e.
+slightly less reduction. Both arms drift down ~14% during a session on their
+own, which is exactly the confound the control exists to expose and which every
+single-arm measurement before this would have read as success.
+
+The camera acked: `set resolution sd (quality=5): camera acked 801
+payload=0000000000000000`, `returned=True channel_ready=True`, tap at +15.0s of
+media. Acked, and inert.
+
+**Critically, this was measured with the framing gap closed.** `1.0.0b27` makes
+our AVIO control header byte-identical to the app's, including the live-play
+dSeq at offset 0 that was previously a random number. So the failure is not the
+command's bytes, not its transport, not its timing, and not its framing.
+
+**What is left.** The app's own SD tap DOES halve the rate (866 vs 1796 kbps,
+measured 2026-08-11), so the camera can do SD - we cannot trigger it. The
+remaining structural difference is the SESSION, not the command: the app drives
+`KVSWebRTCChannel`, and this library opens an SDES-SRTP session. That is the
+next thing to test, and it is a much bigger question than a control byte.
+
+Recorded as **does not work here**, per the bar. It no longer gates 1.0.0: the
+2:1 saving stays unavailable and is documented as such.
+
 #### The original premise, and how it stood for four days
 
 An A001064 takes 1900-3700 Kbps where the vendor app takes 225-500 from the same
