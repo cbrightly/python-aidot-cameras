@@ -6,6 +6,32 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b27]
+
+### Changed
+
+- **AVIO control commands now carry the session dSeq, matching the app.**
+
+  The app's control header (`KVSWebRTCChannel`, decompiled) is 28 bytes
+  little-endian and ours agreed on every field but one: at offset 0 the app
+  writes a per-client counter that starts at 100 and increments on every
+  control command, and we wrote `random.randint(0, 0x7FFFFFFF)`. We already
+  kept that counter -- `_next_dseq`, commented "app parity" -- and used it for
+  `livePlayReq` only. The app routes 16 of its 17 control commands through the
+  dSeq-attaching sender and only the heartbeat (0x1424) without one.
+
+  **This is parity, not a fix, and it is explicitly not the reason
+  SETSTREAMCTRL is ignored.** `button.*_ptz_*` is AVIO 0x1001 sent through the
+  identical frame builder with the same random dSeq, and it is class A on
+  physical evidence -- the camera pans. A camera that pans on a random dSeq is
+  not validating it. Shipping this as a cure for the quality control would have
+  been hypothesis fourteen dressed as a conclusion.
+
+  Verified on hardware after the change: the pan still works. Mean frame
+  difference across a 5 s pan **35.2 and 36.0**, against no-command controls of
+  11.6 and 4.0 on the same session.
+
+
 ## [Unreleased]
 
 ## [Unreleased]

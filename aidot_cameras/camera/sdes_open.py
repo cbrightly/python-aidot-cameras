@@ -4208,10 +4208,20 @@ class _SdesOpenMixin:
                                 # pattern as the LIVING send above).  dcep_sock/dcep_src are the
                                 # socket+addr the SCTP handshake (and LIVING) used.
                                 import struct as _st_pcmd
-                                import random as _r_pcmd
 
                                 def _persistent_sdes_cmd(_cmd, _extra=b''):
-                                    _seq = _r_pcmd.randint(0, 0x7FFFFFFF)
+                                    # dSeq, not a random number.  The app's
+                                    # sendCtrl() takes this from a per-client
+                                    # counter that starts at 100 and increments
+                                    # on every control command, and we keep the
+                                    # same counter for livePlayReq already.
+                                    # Filling the slot randomly was the only
+                                    # field in the 28-byte header that differed
+                                    # from the app's.  Parity, not a fix: PTZ
+                                    # (AVIO 0x1001) pans through this very
+                                    # builder with a random dSeq, so the camera
+                                    # is not validating it.
+                                    _seq = self._next_dseq()
                                     _ts  = int(_time_br.time() * 1000)
                                     _avio = _st_pcmd.pack('<IIqII4x', _seq, _cmd, _ts,
                                                           len(_extra), 0) + _extra
