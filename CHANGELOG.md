@@ -8,6 +8,38 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [Unreleased]
+
+### Fixed
+
+- **Retransmission requests can no longer pile load onto a link that is losing
+  packets because of load.**
+
+  Measured on the reference A001064, same camera and position, wire captures
+  across one day:
+
+  | offered | loss |
+  |---|---|
+  | 2.21 Mbps | 0.37% |
+  | 2.59 Mbps | 0.70% |
+  | 3.07 Mbps | 0.94% |
+  | 3.90 Mbps | 7.25% |
+
+  Loss rises monotonically with offered load, which rules out fixed signal
+  strength -- nothing moved -- and makes the link bandwidth-limited somewhere
+  above ~2 Mbps. A NACK therefore spends the exact resource it is trying to
+  repair, which is why the 100 ms x 4 retry experiment collapsed recovery from
+  99.2% to 73.6% rather than improving it.
+
+  The remaining hole was burst behaviour: every number in a wide gap is
+  eligible at once, so the tracker fired a full report on each of the next
+  several packets -- measured, 12 sends across 31 consecutive packets, aimed at
+  the moment the link was least able to carry them. Reports are now at least
+  20 ms apart, which coalesces a burst into fewer, fuller requests without
+  dropping a single sequence number. At the measured steady-state loss (about
+  two per second) it never triggers, and 20 ms is invisible against a 45 ms
+  median recovery and a 500 ms budget.
+
 ## [1.0.0b25]
 
 ### Fixed
