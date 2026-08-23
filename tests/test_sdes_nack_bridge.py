@@ -27,15 +27,24 @@ class _Holder:
     """Stand-in for the bridge function the tracker is cached on."""
 
 
-class _Sock:
+class _Send:
+    """Stand-in for the bridge's relay-aware sender (`_br_send_to_cam`).
+
+    The NACK must leave the same way every other reply to the camera does.
+    When the camera reached us through our TURN relay, the address a packet
+    arrived FROM is the relay, not the camera, and a raw write there is parsed
+    as a malformed STUN message and dropped -- so a socket-and-address helper
+    is silently inert on a relayed session while still reporting a send.
+    """
+
     def __init__(self, fail=False):
         self.sent = []
         self.fail = fail
 
-    def sendto(self, data, dst):
+    def __call__(self, data):
         if self.fail:
             raise OSError("no route")
-        self.sent.append((data, dst))
+        self.sent.append(data)
 
 
 class _Sess:
@@ -88,11 +97,10 @@ def test_nothing_is_asked_for_while_the_switch_is_off():
 # --- sending it ------------------------------------------------------------ #
 
 def test_it_sends_a_generic_nack_naming_the_media_ssrc():
-    sock = _Sock()
-    assert _send_video_nack(sock, ("10.0.0.5", 5000), None,
+    send = _Send()
+    assert _send_video_nack(send, None,
                             0xAB12CD34, 0x11223344, [1001, 1002]) is True
-    (data, dst), = sock.sent
-    assert dst == ("10.0.0.5", 5000)
+    data, = send.sent
     b0, pt = struct.unpack("!BB", data[:2])
     assert (b0 & 0x1F, pt) == (1, 205)
     assert struct.unpack("!I", data[8:12])[0] == 0x11223344
@@ -100,10 +108,9 @@ def test_it_sends_a_generic_nack_naming_the_media_ssrc():
 
 
 def test_it_encrypts_when_there_is_an_srtcp_session():
-    sock = _Sock()
-    _send_video_nack(sock, ("10.0.0.5", 5000), _Sess(),
-                     0xAB12CD34, 0x11223344, [1001])
-    (data, _), = sock.sent
+    send = _Send()
+    _send_video_nack(send, _Sess(), 0xAB12CD34, 0x11223344, [1001])
+    data, = send.sent
     assert data.startswith(b"SRTCP"), "must go out through the SRTCP session"
     assert decode_nack_seqs(data[5:]) == [1001]
 
@@ -111,12 +118,11 @@ def test_it_encrypts_when_there_is_an_srtcp_session():
 def test_a_send_failure_is_reported_not_raised():
     # This runs inside the bridge's packet loop. An exception here would take
     # the whole stream down to avoid one dropped video packet.
-    assert _send_video_nack(_Sock(fail=True), ("10.0.0.5", 5000), None,
+    assert _send_video_nack(_Send(fail=True), None,
                             0xAB12CD34, 0x11223344, [1001]) is False
 
 
 def test_it_sends_nothing_when_there_is_nothing_to_ask_for():
-    sock = _Sock()
-    assert _send_video_nack(sock, ("10.0.0.5", 5000), None,
-                            0xAB12CD34, 0x11223344, []) is False
-    assert sock.sent == []
+    send = _Send()
+    assert _send_video_nack(send, None, 0xAB12CD34, 0x11223344, []) is False
+    assert send.sent == []

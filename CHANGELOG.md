@@ -6,6 +6,40 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The NACK now reaches a camera on a relayed session.** It was written
+  straight to the address the media arrived from; when the camera reaches us
+  through our TURN relay that address is the relay, and a raw write there is
+  parsed as a malformed STUN message and dropped. Worse, the send "succeeded",
+  so the log claimed a NACK had gone out on a path where nothing reached the
+  camera. It now goes through the same relay-aware sender as the RR and the
+  AVIO trigger.
+
+- **A serve that dies no longer hides why.** The exit logger kept the last 40
+  stderr lines, and on a lossy camera all 40 are `Non-monotonic DTS`. Both
+  camera families step their RTP timestamp backward every exactly 30.0 s
+  (measured: A001064 by 0.05-0.35 s, A001513 by ~2.195 s) and `-c copy` emits
+  one such line per frame until the input catches up, so the sentence that
+  explains the exit was always flushed out. Three investigations of a camera
+  that dies every ~3 minutes never saw it. A second, separate tail now keeps
+  the last non-repetitive lines and is logged first.
+
+### Changed
+
+- The NACK switch is resolved once per session instead of per packet
+  (`os.environ.get` was ~25% of the added per-packet cost at ~300 packets/s
+  per camera), and the tracker skips its prune/report scan entirely when
+  nothing is outstanding -- that scan is O(outstanding) and peaked exactly
+  when the receive loop was already behind. A flip of `AIDOT_SDES_NACK` now
+  takes effect on the next stream open rather than mid-stream.
+- The RTCP sender SSRC is one named constant rather than four literals. It is
+  load-bearing: the SRTP TX policy is keyed on it, so PLI, REMB, RR and NACK
+  must agree or the camera drops the packet.
+- The serve-exit log reports how many NACKs the session sent, and for how many
+  packets -- counters that were previously accumulated and never read.
+
+
 ## [1.0.0b23]
 
 ### Added

@@ -284,13 +284,21 @@ def _video_nack_seqs(bridge_fn, seq: int, now: float,
     return tracker.observe(seq, now)
 
 
-def _send_video_nack(sock, dst, srtcp_sess, sender_ssrc: int,
+def _send_video_nack(send, srtcp_sess, sender_ssrc: int,
                      media_ssrc: int, lost_seqs: "list") -> bool:
     """Put one Generic NACK on the camera's RTCP path.  True if it went out.
 
-    Same socket, same destination and same SRTCP session as the PLI, so it
-    inherits the key selection that a PLI has already been observed to
-    authenticate (the RR prefers a different key -- see the SRTP-TX-KEY note).
+    ``send`` is the bridge's relay-aware sender (``_br_send_to_cam`` bound to
+    the current socket and peer), NOT a raw socket.  When the camera reached
+    us through our TURN relay the address a packet arrived FROM is the relay,
+    and a raw write there is parsed as a malformed STUN message and dropped --
+    so a socket-and-address form is silently inert on a relayed session while
+    still reporting that it sent something.  The RR and the AVIO trigger go
+    out the same way for the same reason.
+
+    Uses the same SRTCP session as the PLI, so it inherits the key selection
+    that a PLI has already been observed to authenticate (the RR prefers a
+    different key -- see the SRTP-TX-KEY note).
 
     That session is built lazily on the first PLI tick, which is scheduled for
     the moment the first video packet arrives. A loss in the handful of packets
@@ -305,17 +313,35 @@ def _send_video_nack(sock, dst, srtcp_sess, sender_ssrc: int,
         return False
     try:
         raw = build_nack(sender_ssrc, media_ssrc, lost_seqs)
-        sock.sendto(
-            srtcp_sess.protect_rtcp(raw) if srtcp_sess is not None else raw,
-            dst,
-        )
+        send(srtcp_sess.protect_rtcp(raw) if srtcp_sess is not None else raw)
         return True
     except Exception:
         _LOGGER.debug("NACK send failed", exc_info=True)
         return False
 
 
-def _start_serve_stderr_drain(proc, *, maxlines: int = 40) -> None:
+#: Sender SSRC on every RTCP we send the camera.  Load-bearing, not cosmetic:
+#: the SRTP TX policy is keyed `ssrc_value=_CAM_RTCP_SENDER_SSRC`, so the PLI,
+#: REMB, RR and NACK must all agree or the camera drops the packet.
+_CAM_RTCP_SENDER_SSRC = 0xAB12CD34
+
+#: ffmpeg lines the serve emits continuously on a healthy-but-lossy stream, and
+#: which therefore cannot be allowed to fill a fixed-size tail.  Both camera
+#: families step their RTP timestamp backward every exactly 30.0 s (measured
+#: 2026-08-23: A001064 by 0.05-0.35 s, A001513 by ~2.195 s), and `-c copy` then
+#: emits one "Non-monotonic DTS" per frame until the input catches up -- tens of
+#: lines, several times a minute.  Every lost packet adds the other two.  A tail
+#: of the last N lines is guaranteed to hold only this, which is why three
+#: investigations of a camera that dies every ~3 minutes never saw the reason.
+_SERVE_STDERR_NOISE = (
+    "Non-monotonic DTS",
+    "RTP: missed",
+    "max delay reached",
+)
+
+
+def _start_serve_stderr_drain(proc, *, maxlines: int = 40,
+                              notable_lines: int = 20) -> None:
     """Drain a serve ffmpeg's stderr continuously into a bounded tail on the proc.
 
     The serve is spawned with ``stderr=PIPE`` but the bridge loop only polls the
@@ -325,19 +351,29 @@ def _start_serve_stderr_drain(proc, *, maxlines: int = 40) -> None:
     otherwise lost (the RTSP-push ANNOUNCE error in particular).  Read it on a
     daemon thread that ends at EOF when the process exits, keeping the last
     ``maxlines`` lines on ``proc._aidot_stderr_tail`` for the exit logger.
+
+    Also keeps ``proc._aidot_stderr_notable``: the last ``notable_lines`` lines
+    that are NOT in ``_SERVE_STDERR_NOISE``.  The raw tail says what the stream
+    was doing; this one says why it stopped, and on a lossy camera it is the
+    only one that can.
     """
     import collections
     import threading
 
     tail = collections.deque(maxlen=maxlines)
+    notable = collections.deque(maxlen=notable_lines)
     proc._aidot_stderr_tail = tail
+    proc._aidot_stderr_notable = notable
     if proc.stderr is None:
         return
 
     def _drain() -> None:
         try:
             for _line in iter(proc.stderr.readline, b""):
-                tail.append(_line.decode("utf-8", "replace").rstrip())
+                text = _line.decode("utf-8", "replace").rstrip()
+                tail.append(text)
+                if not any(n in text for n in _SERVE_STDERR_NOISE):
+                    notable.append(text)
         except Exception:
             pass
 
@@ -3814,6 +3850,27 @@ class _SdesOpenMixin:
                                 if _br_level >= _log_br.WARNING:
                                     _serr_tail = getattr(
                                         _br_proc, "_aidot_stderr_tail", None)
+                                    # The reason first, then the raw tail. On a
+                                    # lossy camera the raw tail is all
+                                    # Non-monotonic DTS and says nothing about
+                                    # why ffmpeg stopped.
+                                    _serr_why = getattr(
+                                        _br_proc, "_aidot_stderr_notable", None)
+                                    if _serr_why:
+                                        _log_br.getLogger(__name__).warning(
+                                            "camera %s: SDES serve ffmpeg exit"
+                                            " reason (last %d non-repetitive"
+                                            " lines; %d NACK(s) sent for %d"
+                                            " packet(s) this session):\n%s",
+                                            _br_dev, len(_serr_why),
+                                            getattr(_br_proc,
+                                                    "_aidot_nack_sent", 0)
+                                            or getattr(_bridge_fn,
+                                                       "_nack_sent", 0),
+                                            getattr(_bridge_fn,
+                                                    "_nack_seqs", 0),
+                                            "\n".join(_serr_why),
+                                        )
                                     if _serr_tail:
                                         _log_br.getLogger(__name__).warning(
                                             "camera %s: SDES serve ffmpeg stderr"
@@ -5178,6 +5235,11 @@ class _SdesOpenMixin:
                                 # Schedule immediate PLI so IDR+SPS arrives in
                                 # the analyzeduration window.
                                 _bridge_fn._last_pli_ts = 0.0
+                                # Resolve the NACK switch ONCE per session: the
+                                # per-packet path runs ~300x/s per camera and
+                                # os.environ.get costs ~250ns of it.  A flip
+                                # now takes effect on the next stream open.
+                                _bridge_fn._nack_on = _sdes_nack_enabled()
                             # For TUTK cameras (_use_plain_rtp) the ffmpeg SDP uses
                             # RTP/AVP (no crypto). After LIVING the camera switches
                             # from TUTK SFrames to standard SRTP, so we decrypt here
@@ -5301,13 +5363,19 @@ class _SdesOpenMixin:
                                     '!I', _bpkt, 8)[0]
                                 if _nk_ssrc == _bridge_fn._cam_video_ssrc:
                                     _nk_lost = _video_nack_seqs(
-                                        _bridge_fn, _nk_seq, _time_br.time())
+                                        _bridge_fn, _nk_seq, _time_br.time(),
+                                        enabled=getattr(_bridge_fn,
+                                                        '_nack_on', True))
                                     if _nk_lost and _send_video_nack(
-                                            _bridge_fn._cam_srtp_sock,
-                                            _bridge_fn._cam_srtp_src,
+                                            # bound now: called synchronously
+                                            # inside the helper, but the loop
+                                            # vars must not be late-bound.
+                                            lambda _d, _s=_bs, _a=_bsrc,
+                                            _p=_br_cam_peer: _br_send_to_cam(
+                                                _s, _d, _a, _p),
                                             getattr(_bridge_fn,
                                                     '_pli_tx_sess', None),
-                                            0xAB12CD34,
+                                            _CAM_RTCP_SENDER_SSRC,
                                             _bridge_fn._cam_video_ssrc,
                                             _nk_lost):
                                         _bridge_fn._nack_sent = getattr(
