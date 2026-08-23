@@ -2950,6 +2950,148 @@ def decode_remb_bitrate(pkt: bytes) -> int:
     return mantissa << exp
 
 
+def build_nack(sender_ssrc: int, media_ssrc: int, lost_seqs: "list") -> bytes:
+    """An RTCP Generic NACK (RFC 4585 s6.2.1) asking for ``lost_seqs`` again.
+
+    Transport-layer feedback: FMT 1, PT 205, then one or more FCI entries of a
+    16-bit packet id and a 16-bit bitmask. Bit ``n`` of the mask means "PID +
+    n + 1 is also missing", so one entry covers 17 sequence numbers.
+
+    ``lost_seqs`` is consumed in the order given, not sorted, so a gap that
+    straddles the 16-bit wrap (65534, 65535, 0, 1) packs into a single entry
+    the way the camera expects. Ascending order is the caller's job;
+    NackTracker already produces it.
+
+    The camera negotiates ``nack`` for both media in its answer (confirmed
+    live on an A001064 over SDES), so it will accept this. As with REMB,
+    negotiation alone changes nothing until one is actually sent.
+    """
+    if not lost_seqs:
+        raise ValueError("a NACK must name at least one sequence number - an "
+                         "empty one asks the camera for nothing")
+
+    ordered = list(dict.fromkeys(int(s) & 0xFFFF for s in lost_seqs))
+    fci = []
+    i = 0
+    while i < len(ordered):
+        pid = ordered[i]
+        blp = 0
+        i += 1
+        while i < len(ordered):
+            offset = (ordered[i] - pid) & 0xFFFF
+            if not 1 <= offset <= 16:
+                break
+            blp |= 1 << (offset - 1)
+            i += 1
+        fci.append(struct.pack("!HH", pid, blp))
+
+    pkt = (struct.pack("!BBH", 0x80 | 1, 205, 0)
+           + struct.pack("!II", sender_ssrc & 0xFFFFFFFF,
+                         media_ssrc & 0xFFFFFFFF)
+           + b"".join(fci))
+    # RTCP length is in 32-bit words, minus one.
+    return pkt[:2] + struct.pack("!H", len(pkt) // 4 - 1) + pkt[4:]
+
+
+def decode_nack_seqs(pkt: bytes) -> "list":
+    """The sequence numbers a Generic NACK asks for. For tests and diagnostics."""
+    out = []
+    for off in range(12, len(pkt), 4):
+        pid, blp = struct.unpack_from("!HH", pkt, off)
+        out.append(pid)
+        for bit in range(16):
+            if blp & (1 << bit):
+                out.append((pid + bit + 1) & 0xFFFF)
+    return out
+
+
+class NackTracker:
+    """Decide which video sequence numbers are worth asking for again.
+
+    Fed every video RTP sequence number the bridge forwards. Returns the
+    numbers to put in a NACK right now, or an empty list.
+
+    The judgement calls, all of which matter on a link that is already
+    congested enough to be dropping packets in the first place:
+
+    * A gap is requested immediately - a retransmission is only useful if it
+      beats the decoder to the frame, and the round trip here is ~126 ms
+      against ffmpeg's 500 ms reorder window. There is time for about two
+      attempts, not for a polite wait.
+    * A number that turns up late is dropped from the list rather than
+      requested again, so reordering costs nothing.
+    * A request is repeated at most ``max_requests`` times, ``retry_after``
+      apart, and abandoned once it is ``max_behind`` packets old. Asking for a
+      packet the decoder has already given up on spends bandwidth to fix
+      nothing.
+    * A jump larger than ``max_gap`` in either direction is a new stream, not
+      a loss. The camera republishes with a fresh random sequence base
+      (RFC 3550 s5.1), and treating that as a 40000-packet loss would emit a
+      NACK storm at the exact moment the stream is trying to start.
+    * One report is capped at ``max_report`` numbers, which is also what fits
+      in a single FCI entry.
+    """
+
+    def __init__(self, *, max_gap: int = 250, max_behind: int = 200,
+                 retry_after: float = 0.15, max_requests: int = 3,
+                 max_report: int = 17) -> None:
+        self.max_gap = max_gap
+        self.max_behind = max_behind
+        self.retry_after = retry_after
+        self.max_requests = max_requests
+        self.max_report = max_report
+        self._highest = None
+        # seq -> [requests_sent, last_request_ts]. Insertion-ordered, so the
+        # oldest loss is always reported first.
+        self._pending = {}
+
+    def observe(self, seq: int, now: float) -> "list":
+        seq &= 0xFFFF
+        if self._highest is None:
+            self._highest = seq
+            return []
+
+        delta = (seq - self._highest) & 0xFFFF
+        signed = delta if delta < 0x8000 else delta - 0x10000
+
+        if abs(signed) > self.max_gap:
+            self._highest = seq
+            self._pending.clear()
+            return []
+
+        if signed > 0:
+            missing = self._highest
+            for _ in range(signed - 1):
+                missing = (missing + 1) & 0xFFFF
+                self._pending.setdefault(missing, [0, None])
+            self._highest = seq
+        self._pending.pop(seq, None)
+
+        self._prune()
+        return self._due(now)
+
+    def _prune(self) -> None:
+        for s in [s for s in self._pending
+                  if (self._highest - s) & 0xFFFF > self.max_behind]:
+            del self._pending[s]
+
+    def _due(self, now: float) -> "list":
+        out = []
+        for s, state in list(self._pending.items()):
+            if len(out) >= self.max_report:
+                break
+            sent, last = state
+            if sent >= self.max_requests:
+                del self._pending[s]
+                continue
+            if last is not None and now - last < self.retry_after:
+                continue
+            state[0] = sent + 1
+            state[1] = now
+            out.append(s)
+        return out
+
+
 def _avio_cmd_id(frame: bytes) -> "Optional[int]":
     """The command id of an AVIO frame, or None if it does not look like one.
 
