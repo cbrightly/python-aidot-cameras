@@ -16,6 +16,29 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   camera. It now goes through the same relay-aware sender as the RR and the
   AVIO trigger.
 
+- **A serve we stopped on purpose is no longer reported as a crash.** This is
+  the "publisher dies every ~3 minutes" that three separate investigations
+  chased on an A001513.
+
+  The exit classifier quieted a locally-initiated teardown only when the exit
+  code was NEGATIVE, on the premise that a stop "routinely ends in a signal
+  death". That is not true for SIGTERM: ffmpeg installs its own handler, does
+  not die by the signal, and calls `exit_program()`, which returns **255** when
+  a signal was received. Python reports a negative code only when the child is
+  killed BY a signal it did not handle -- so our SIGTERM-first teardown
+  produced a positive 255 and fell through to WARNING every time.
+
+  Everything that made it look like a crash follows from that: exit code
+  exactly 255; no stderr at all, because ffmpeg's "Exiting normally, received
+  signal 15." is INFO and the serve runs at `-loglevel warning`; and a ~3
+  minute cadence, which is the idle-release window. An offline reproduction of
+  the camera's real timestamp misbehaviour ran past four minutes without dying,
+  because nothing was signalling it.
+
+  255 with a teardown in flight is now the expected end of a stop. 255 with no
+  teardown in flight still warns -- something outside us signalled the process,
+  which is the distinction the function exists to make.
+
 - **A camera that answers one codec and sends another no longer kills the
   serve at startup.** When video had not been observed before the serve
   launched, the SDP was narrowed to the payload type from the camera's

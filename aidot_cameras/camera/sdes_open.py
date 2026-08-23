@@ -925,19 +925,39 @@ def _sdes_echo_wait_timeout(skip_liveplay: bool) -> float:
 _FFMPEG_EXIT_EPIPE = 224
 
 
+#: What ffmpeg returns when it exits because it received a signal it handled.
+#: `exit_program()` uses 255 whenever `received_nb_signals` is set, so our
+#: SIGTERM-first teardown produces a POSITIVE 255, not a negative rc.
+_FFMPEG_EXIT_SIGNALLED = 255
+
+
 def _classify_ffmpeg_exit(rc: int, teardown_requested: bool) -> int:
     """Log level for the bridge observe loop's "ffmpeg exited" line.
 
     Teardown here is SIGTERM-first with a SIGKILL fallback (SdesSession.stop(),
     the cold-open _reap(), the key-restart proc replace, and the DTLS-fallback
-    abort). A battery camera's ffmpeg cannot exit promptly on a dead UDP input,
-    so a normal locally-initiated stop routinely ends in a signal death (rc < 0,
-    e.g. -9 SIGKILL / -15 SIGTERM) - expected, and should not warn.  Any other
-    non-zero exit - a signal death with no teardown in flight, or a positive
-    ffmpeg error code even during teardown - is unexpected and stays loud.
-    Pure function so the policy is unit-testable without a live bridge thread.
+    abort).
+
+    A teardown ends one of two ways and BOTH are expected:
+
+    * ``rc < 0`` - the SIGKILL fallback, or a SIGTERM the process did not
+      handle. Python reports a negative value only when the child is killed BY
+      a signal.
+    * ``rc == 255`` - **SIGTERM that ffmpeg handled.** ffmpeg installs its own
+      handler, unwinds, and calls ``exit_program()``, which returns 255 when a
+      signal was received. This is the normal path and it is POSITIVE.
+
+    Missing the second case is what made every deliberate stop of an SDES serve
+    look like a crash: exit code 255, no stderr at all (ffmpeg's "Exiting
+    normally, received signal 15." is INFO and the serve runs at
+    ``-loglevel warning``), on the idle-release cadence. Three investigations
+    of a camera that "died every ~3 minutes" were investigating a teardown.
+
+    Anything else non-zero - a signal death or a 255 with NO teardown in
+    flight, or a genuine ffmpeg error code during one - is unexpected and stays
+    loud. Pure function so the policy is unit-testable without a live bridge.
     """
-    if rc < 0 and teardown_requested:
+    if teardown_requested and (rc < 0 or rc == _FFMPEG_EXIT_SIGNALLED):
         return logging.DEBUG
     if rc == _FFMPEG_EXIT_EPIPE:
         # Broken pipe: the consumer went away. That is the NORMAL end of a
