@@ -17,6 +17,22 @@ plugs, switches) with none of this package's code in the path; everything here
 lives under `aidot_cameras`. Taking a new upstream release is a dependency bump
 plus a test run - see [`docs/UPSTREAM.md`](https://github.com/cbrightly/python-aidot-cameras/blob/main/docs/UPSTREAM.md).
 
+> **On the "N commits behind" banner.** GitHub still records this repository as
+> a fork of upstream, so it permanently shows as behind. That count means
+> nothing here: no upstream file is edited or merged, and upstream arrives as an
+> ordinary pip dependency. The number that describes an install is the
+> *resolved* upstream version, which is a range rather than a pin -- upstream
+> shipped two incompatible shapes of the private API this attaches to and both
+> are live, so two people on the same release of this library can be running
+> different upstream releases. To see yours:
+>
+> ```
+> python -c "from importlib.metadata import version; print(version('python-aidot'))"
+> ```
+>
+> Home Assistant users get both versions in the integration's **Download
+> diagnostics** file (integration 2.17.2 and later).
+
 This repository is the **library** (distribution name `python-aidot-cameras`).
 The Home Assistant custom component (`custom_components/aidot/`) lives in the
 companion integration repo
