@@ -215,8 +215,70 @@ remaining structural difference is the SESSION, not the command: the app drives
 `KVSWebRTCChannel`, and this library opens an SDES-SRTP session. That is the
 next thing to test, and it is a much bigger question than a control byte.
 
-Recorded as **does not work here**, per the bar. It no longer gates 1.0.0: the
-2:1 saving stays unavailable and is documented as such.
+Recorded as **does not work here**, per the bar. It no longer gates 1.0.0.
+
+#### UPDATE 2026-08-23, later: the 2:1 saving is available - as a CODEC choice
+
+The sentence this section used to end on - "the 2:1 saving stays unavailable" -
+is wrong, and the correction did not come from the session hypothesis above.
+
+Ten sessions on the A001064 that evening, measured while chasing a different
+lever entirely, separate perfectly by the video payload type they negotiated:
+
+    H264 (pt=96)   1597, 1604, 1623, 1627, 1635, 1643, 1685 kbps
+    H265 (pt=97)    766,  769,  774 kbps
+
+No overlap, across two harnesses and three arm orders. **An H.265 session on
+this camera costs about half an H.264 session** - the same ratio the vendor
+app's SD tap achieves (866 vs 1796) - and unlike every control byte tried here,
+codec selection is entirely ours: it is the payload-type order in our own offer
+(`AIDOT_SDES_VIDEO_PT_ORDER`, and the `sdes_pin_h264` narrowing).
+
+Two things stop this being the answer today, and neither is a bitrate number:
+
+1. **We cannot choose it - tested, and the answer is no.** Eight sessions on
+   the A001064 in blocks of two, half with `AIDOT_SDES_VIDEO_PT_ORDER=97,96`
+   and half without, receipts confirming the reordered payload-type list
+   reached the SDP:
+
+   | arm | H265 sessions |
+   |---|---|
+   | reorder `97,96` | 2 of 4 |
+   | control | 2 of 4 |
+
+   Identical. Pre-registered acceptance was 3 of 4 and at least two more than
+   the control; not met. Narrowing to 97 was already known to return no video
+   at all (3 of 3 rounds), so both ways of asking are now closed: **the camera
+   picks the codec itself, roughly a coin flip, and RFC 3264 preference order
+   does not move it.**
+
+   Watch for a tempting pattern in that data. The first three blocks each read
+   `[96, 97]` - first session H264, second H265 - which looks like a clean
+   session-position rule. The fourth block read `[97, 96]` and killed it. Four
+   of eight sessions were H265 either way.
+
+   The codec finding also exposed a hole in item 2's own record: every
+   in-session SETSTREAMCTRL measurement ever made here (ten of ten across
+   2026-08-11 and 2026-08-23) had landed on H264 sessions, while the app's
+   demonstrated 2:1 rode H265 (pt 98 under the app's numbering). Closed the
+   same night: hd sent mid-session on H265 sessions scored 0.703 and 0.694
+   against controls at 0.743-0.776 - inert on that encode too. "Acked and
+   inert" now stands measured on both codecs, and the capture separately
+   disproved the session-type theory (zero DTLS records in 14,383 app-to-PTZ
+   packets - the app gets its 2:1 on the same SDES session type we open).
+2. **H.265 may be unshippable for the defect that started this.** The original
+   problem is MSE playback, and browser HEVC-over-MSE support is far narrower
+   than H.264. Halving the bitrate is worthless if the client that was failing
+   cannot decode the result.
+
+So the prize is real and is now located. Whether to take it is a product
+decision about HEVC support in the consumer, not a measurement.
+
+This also retires a false positive worth remembering: run as a strict ABAB
+campaign, an unrelated `b=AS:800` knob looked like a decisive 2.1x win purely
+because both H.265 sessions landed in its control arm. **Never alternate arms
+strictly, and always record the negotiated payload type before comparing
+rates.**
 
 #### The original premise, and how it stood for four days
 

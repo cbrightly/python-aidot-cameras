@@ -93,8 +93,8 @@ def rsa_encrypt(message: str, public_key: Any = None) -> str:
     with ``aidot.client.rsa_password_encrypt(message)``, which bakes the key in
     and takes one argument.  Neither signature is available on both shapes, and
     ``aidot_cameras.crypto.rsa_encrypt`` is public surface the integration repo
-    may import (see the back-compat rule in CLAUDE.md), so the two-argument form
-    is kept and satisfied locally.  ``public_key`` defaults to upstream's
+    may import, and public surface is not changed to track an upstream rename,
+    so the two-argument form is kept and satisfied locally.  ``public_key`` defaults to upstream's
     ``PUBLIC_KEY_PEM``, which is the only key any caller ever passed.
     """
     from cryptography.hazmat.backends import default_backend

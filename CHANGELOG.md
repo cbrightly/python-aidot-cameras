@@ -6,6 +6,110 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b28]
+
+### Fixed
+
+- **REMB was written straight to the socket, so it never arrived on a relayed
+  session.**
+
+  This is the NACK bug, still present in the REMB path. When a camera reaches
+  us through our TURN relay, the address a packet arrived FROM is the relay,
+  and raw SRTCP bytes written there are parsed as a malformed STUN message and
+  dropped -- while `sendto` reports success, so the send looks fine and the log
+  says it went out. `_send_video_nack` takes a relay-aware `send` callable for
+  exactly this reason, as do the RR and the AVIO trigger; REMB was left behind.
+
+  It also used a literal `0xAB12CD34` where `_CAM_RTCP_SENDER_SSRC` exists. The
+  SRTP TX policy is keyed on that constant, so a drifting literal is a packet
+  the camera drops.
+
+  Worth recording beyond the code: "REMB was measured to do nothing" is one of
+  the reasons REMB ships off, and on a relayed session that measurement could
+  not have been valid. The conclusion is not being revisited -- the measurement
+  that produced it was on a direct session -- but the caveat belongs on it.
+
+  Exercised on the relayed A001513 with `AIDOT_REMB_TARGET_BPS=500000`: the
+  session passes, the receipt fires, and on the wire 41 RTCP PT=206 go to the
+  camera's TURN allocation alongside 158 PT=205 NACKs. What that does not prove
+  is the wrapping branch -- in that topology the camera's relay candidate is a
+  real forwardable address, so `_br_cam_peer` is correctly None and the old
+  code would have reached it too. The shape the fix exists for, where the
+  camera arrives through OUR allocation, has not been observed here.
+
+### Added
+
+- **`AIDOT_SDES_TMMBR_BPS` / `AIDOT_SDES_TMMBR_AFTER_S`** -- ask the camera not
+  to exceed a bitrate, via RTCP TMMBR (RFC 5104 s4.2.1). Off by default.
+
+  Distinct from REMB, which this camera ignores: REMB reports an *estimate* of
+  available bandwidth, TMMBR states a *bound*, and firmware can honour one
+  without the other. The camera acts on RTCP feedback it never negotiated --
+  our SDES offer advertises no `a=rtcp-fb` line at all, yet the NACKs we send
+  recover 98.4% of losses -- so `ccm tmmbr` being absent from its answer is not
+  a reason to assume it is ignored.
+
+  `AIDOT_SDES_TMMBR_AFTER_S` holds the first TMMBR back by that many seconds of
+  media, measured from the first video packet, so the bound can be measured
+  *within* one session (window A before, window B after) rather than between
+  sessions. That matters: between-session comparison produced two wrong answers
+  on this camera in one day.
+
+  **Measured 2026-08-23, and it does nothing.** Within-session on the A001064,
+  the bound starting at +15 s of media so window A is uncapped and window B is
+  not, both arms otherwise identical control arms that send no quality command:
+
+      tmmbr    ratios 0.745, 0.752   mean 0.748
+      control  ratios 0.737, 0.673   mean 0.705
+
+  The TMMBR arm is marginally *higher* than the control, against a
+  pre-registered acceptance of 0.65. Receipts confirm two TMMBRs went out and
+  both arms negotiated the same codec where it mattered. Shipped off, like
+  REMB, and for the same reason.
+
+- **`AIDOT_SDES_OFFER_BANDWIDTH_KBPS`** -- add a `b=AS:<kbps>` receive-bandwidth
+  ceiling (RFC 4566 s5.8) to the offer's video section. Off by default, and
+  **measured to do nothing** over ten sessions on an A001064. Kept, off,
+  following `AIDOT_REMB_TARGET_BPS`, which ships off for the same reason.
+
+  Kept mostly for the trap it exposed. Run as a strict ABAB campaign it looked
+  like a decisive 2.1x reduction (1631 vs 768 kbps). Re-run AABB it collapsed,
+  and sorting all ten sessions by the payload type they negotiated explained
+  every number without reference to the knob: H264 1597-1685 kbps, H265
+  766-774, no overlap. The camera answered H.265 on three of ten opens on its
+  own, and both landed in the control arm. **Never alternate arms strictly, and
+  record the negotiated payload type before comparing rates.**
+
+### Changed
+
+- **`AIDOT_SDES_VIDEO_PT_ORDER` is now tested on hardware, and it does not
+  select the codec.** It had shipped documented as "experimental and untested".
+
+  The motive was real and is worth knowing: on an A001064 an H265 session costs
+  about half an H264 one (766-774 against 1597-1685 kbps, ten sessions, no
+  overlap), which is the same 2:1 the vendor app gets from its SD control and
+  which no bitrate control we have found can produce. But eight sessions in
+  blocks of two, half with `97,96` and half without and with receipts
+  confirming the reordered list reached the SDP, returned H265 in 2 of 4 either
+  way. Narrowing the offer to 97 was already known to return no video at all.
+  The camera picks, at roughly a coin flip, and RFC 3264 preference order does
+  not move it.
+
+- **`scripts/live_validate.py` can share one login via `AIDOT_TOKEN_FILE`.**
+
+  The AiDot cloud keeps a single live token per account, and a second login
+  invalidates the first. A campaign that held a client open to read a cloud
+  property between sessions lost its own session the moment the first child
+  logged in -- `401 /v17/houses`, then `400 /v17/users/refreshToken`, the
+  refresh token rotated out with it and no recovery. Three of its four arms
+  were lost.
+
+  The write-back token cache already existed for the go2rtc CLI; it moves to
+  `aidot_cameras/cloud_auth.py` and the validator goes through the same door,
+  rather than a second copy of an atomic 0600 token write. With
+  `AIDOT_TOKEN_FILE` unset the validator logs in exactly as before, which is
+  what the release gate does.
+
 ## [1.0.0b27]
 
 ### Changed
@@ -31,10 +135,6 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   difference across a 5 s pan **35.2 and 36.0**, against no-command controls of
   11.6 and 4.0 on the same session.
 
-
-## [Unreleased]
-
-## [Unreleased]
 
 ## [1.0.0b26]
 

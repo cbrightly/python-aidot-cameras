@@ -79,6 +79,27 @@ mid-session on the same transport, and it does not change the rate; the app's
 does. Streaming is correct either way and the cost is bandwidth, which matters
 on a metered or congested link.
 
+**That 2:1 is reachable by another route: the codec.** Ten sessions on this
+camera on 2026-08-23 separate perfectly by the video payload type the session
+negotiated - H264 (pt=96) at 1597-1685 Kbps, H265 (pt=97) at 766-774 Kbps, no
+overlap. An H.265 session costs about half an H.264 one, which is the same
+ratio the app's SD tap achieves, and unlike a control byte the camera ignores,
+the codec is chosen in our own offer.
+
+Two things stand between that and a saving you can switch on:
+
+- **We cannot select it.** Narrowing the offer to 97 does not select it, it
+  removes the option - no video at all in 3 of 3 rounds (see
+  `AIDOT_SDES_VIDEO_PT` below). Reordering the preference list without
+  narrowing it (`AIDOT_SDES_VIDEO_PT_ORDER=97,96`) was then tested directly:
+  eight sessions in blocks of two returned H265 in 2 of 4 with the reorder and
+  2 of 4 without, with receipts confirming the reordered list reached the SDP.
+  The camera chooses, roughly a coin flip, and neither knob moves it.
+- **H.265 may not suit the consumer.** Browser HEVC support over Media Source
+  Extensions is far narrower than H.264, and MSE playback is the reason the
+  bitrate matters here at all. Halving the bitrate is no help if the client
+  that was failing cannot decode the result.
+
 ## Local (LAN) control and account ownership
 
 Local control over the devices' TCP:10000 channel - both the light/plug protocol
@@ -358,7 +379,10 @@ audio, idle release, the sprop cache path) are documented in
 | `AIDOT_SDES_FAST_LIVEPLAY` | Don't block on the `livePlayResp` wait for eligible SDES cameras (~4.5 s faster cold start). Role-reversal models (A001064 PTZ) always excluded for correctness. **On by default**; set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_SDES_NACK` | Ask the camera to resend video RTP packets that never arrived (RTCP Generic NACK). A camera losing packets on a weak link otherwise delivers truncated H.264 slices, which a browser's WebRTC decoder conceals but Media Source Extensions treats as fatal. Measured on an A001064 at ~1-2% loss: 98.4% of losses recovered against none at all without it. Costs nothing on a clean link, where no requests are generated. **On by default**; set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_SDES_VIDEO_PT` | Pin the SDES offer to ONE video codec by payload type, so the camera cannot choose. The offer advertises 96 (H264) and 97 (H265) and the camera decides which to send; on an A001064 that means the same request comes back h264 1280x720 most sessions and hevc 2560x1440 occasionally, at a third of the bitrate. Set to `96` for H264 only (measured h264 720p in 4 of 4 sessions). **Do not set it to `97`** - an H265-only offer returned no video at all in 3 of 3 rounds; narrowing to H265 removes the option rather than selecting it. | unset (both offered) |
-| `AIDOT_SDES_VIDEO_PT_ORDER` | Reorder the SDES offer's video codec list without narrowing it, as a comma-separated preference list (`97,96`). RFC 3264 makes the `m=video` payload-type list a preference list, most-preferred first, and ours has always read `96 97` - not by decision, it has simply never been varied. Whatever is named leads and the rest is appended, so this can express a preference and can never produce a narrowed or empty video m-line. **Experimental and untested on hardware:** whether the camera acts on the order is the open question, so the default is deliberately unchanged. | unset (`96 97`) |
+| `AIDOT_SDES_VIDEO_PT_ORDER` | Reorder the SDES offer's video codec list without narrowing it, as a comma-separated preference list (`97,96`). RFC 3264 makes the `m=video` payload-type list a preference list, most-preferred first, and ours has always read `96 97` - not by decision, it has simply never been varied. Whatever is named leads and the rest is appended, so this can express a preference and can never produce a narrowed or empty video m-line. **Experimental and untested on hardware:** whether the camera acts on the order is the open question, so the default is deliberately unchanged. **Tested on hardware 2026-08-23 and it does not select the codec.** Eight sessions on an A001064 in blocks of two: H265 came back in 2 of 4 with the order reversed and 2 of 4 without it, receipts confirming the reordered list reached the SDP. The motive was real - an H265 session costs about half an H264 one (766-774 vs 1597-1685 Kbps) - but the camera picks the codec itself, roughly a coin flip, and RFC 3264 preference order does not move it. | unset (`96 97`) |
+| `AIDOT_SDES_OFFER_BANDWIDTH_KBPS` | Add a `b=AS:<kbps>` receive-bandwidth ceiling (RFC 4566) to the video section of the SDES offer. **Measured to do nothing** on an A001064 over ten sessions; kept, off, alongside `AIDOT_REMB_TARGET_BPS` for the same reason. Run as a strict ABAB campaign it appeared to give a decisive 2.1x reduction - that was a codec split, not the knob. | unset (no `b=` line) |
+| `AIDOT_SDES_TMMBR_BPS` | Ask the camera not to exceed a bitrate, in bits per second, via RTCP TMMBR (RFC 5104). Distinct from `AIDOT_REMB_TARGET_BPS`: REMB reports an *estimate* of available bandwidth, TMMBR states a *bound*, and firmware can honour one without the other. This camera acts on RTCP feedback it never negotiated (our offer advertises no `a=rtcp-fb` at all, yet NACK recovers 98.4% of losses), so the absence of `ccm tmmbr` from its answer is not a reason to assume it is ignored. **Measured on an A001064 and it does nothing** - within-session, 0.748 against a control of 0.705, i.e. marginally higher. Shipped off. | unset (off) |
+| `AIDOT_SDES_TMMBR_AFTER_S` | Seconds of media to let pass before the first TMMBR, so a bound can be measured *within* one session - window A before it, window B after - instead of between sessions. Measured from the first video packet, not from the open, so a slow-waking camera does not spend window A already capped. | `0` (send from the first video packet) |
 | `AIDOT_DTLS_FAST_LIVEPLAY` | The DTLS (A000088) analogue: skip the `livePlayReq`-echo and `livePlayResp` waits (the dominant LAN cold-start cost) while keeping the full ICE/TURN/DTLS handshake, so remote/relay viewing is unaffected. **On by default**; set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_PERSISTENT_MQTT` | Reuse ONE account-level persistent MQTT connection for commands, attribute fetches, and stream-open signaling (matching the official app) instead of connecting per operation. **On by default** (live soaks cut SDES NO_MEDIA from ~57% to ~11-19%); set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_SERVE_RELAY` | Hold the public stream port via an internal relay that proxies to ffmpeg, so the first (cold) view connects instead of failing while ffmpeg can't pre-bind the port. Set to `0` to serve ffmpeg directly. | `1` (enabled) |

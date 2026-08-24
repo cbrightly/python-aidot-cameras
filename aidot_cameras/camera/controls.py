@@ -196,8 +196,32 @@ class _CameraControlsMixin:
         had been applied. Nothing else re-sent it, so "it will apply on the next
         session" was not true of any code path.
 
+        **On the A001064 this is acked and inert - it does not change the
+        rate, on either codec.** Measured 2026-08-23 with the framing gap
+        closed (1.0.0b27, so the AVIO header including the live-play dSeq is
+        byte-identical to the app's), in-session with a control arm that waits
+        the same gap and sends nothing: sd 0.885 against control 0.863, where
+        a working SD is about 2:1. Re-measured the same night on the H265
+        encode specifically - the codec the vendor app's working toggle rides -
+        because every earlier measurement had landed on H264 sessions: hd on
+        H265 scored 0.703 against controls at 0.743-0.776. Inert there too. The camera answers `801 payload=0000000000000000` every time. The
+        vendor app's own SD tap DOES halve the rate on the same camera, so this
+        is not a firmware that cannot do SD; we cannot trigger it. See
+        docs/ROAD-TO-1.0.md item 2 for the full record, including the five
+        other bitrate controls that turned out to be dead and the codec
+        difference that is worth about the same 2:1.
+
+        The call is kept because it is correct, it is what the app sends, and
+        other models are not covered by that measurement. Callers should not
+        rely on it changing the bitrate.
+
         Source: f0.java g3() -> X2(800, SetStreamCtrlReq.parseContent(0, quality)).
         Payload <IB3x> = channel(0) + quality byte + 3 reserved.
+        The app has three settings, not two: Auto, SD and HD, which
+        `NewLivePresenter.setDefaultResolution` maps from the persistent
+        `props.StreamType` property to quality 16, 5 and 1. This library
+        implements only hd=1 and sd=5; 16 (Auto) was swept and did nothing, and
+        `StreamType` itself is acked-and-ignored on every write.
         """
         q = _STREAM_QUALITY.get(quality.lower())
         if q is None:

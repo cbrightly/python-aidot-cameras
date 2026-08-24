@@ -148,6 +148,14 @@ sessions, three sd and three control, interleaved). The arms overlap: sd
 first 8-12 s of the session. The app's 2:1 (a ratio near 0.48) is excluded. Full
 numbers in `docs/ROAD-TO-1.0.md` item 2.
 
+**A 2:1 does exist on this camera - it is just not this command.** Ten sessions
+on 2026-08-23 separate perfectly by the video payload type negotiated: H264
+(pt=96) at 1597-1685 kbps against H265 (pt=97) at 766-774, no overlap. So the
+saving the app gets from SD is available in principle from the codec, which is
+chosen in our own offer rather than by a control byte the camera ignores.
+Selecting it is unsolved (narrowing to 97 returns no video) and HEVC over MSE
+may not suit the consumer; see `docs/ROAD-TO-1.0.md` item 2.
+
 One loose thread, recorded rather than interpreted: value 16 acked in 0.54 s
 against 0.01-0.19 s for the enum values. That is 3-50x slower and might mean the
 firmware does real work for it. It is n=1 against noisy latencies, and the video
