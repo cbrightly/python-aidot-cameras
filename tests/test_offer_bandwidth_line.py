@@ -132,8 +132,11 @@ def test_applying_a_ceiling_leaves_a_receipt_in_the_log():
 
     src = (pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras"
            / "camera" / "sdes_open.py").read_text()
-    m = re.search(r"_bw_kbps\s*=\s*_sdes_offer_bandwidth_kbps\(\)\s*\n"
-                  r"\s*if _bw_kbps and _status:\s*\n"
+    m = re.search(r"if _bw_kbps and _status:\s*\n"
                   r'\s*_status\(f"[^"]*b=AS:\{_bw_kbps\}"\)', src)
     assert m, ("applying a receive-bandwidth ceiling must emit a status "
                "receipt naming the value that reached the offer")
+    assert src.count("_sdes_offer_bandwidth_kbps()") == 2, (
+        "the knob must be read ONCE per offer (its definition plus one call "
+        "site); a second read lets the receipt disagree with the SDP actually "
+        "sent, which is the false-receipt trap the receipt exists to close")

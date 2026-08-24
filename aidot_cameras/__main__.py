@@ -77,6 +77,7 @@ import aiohttp
 
 from .client import AidotClient
 from .cloud_auth import (  # noqa: F401  (re-exported for callers and tests)
+    CloudAuthUnavailable,
     _install_token_cache,
     _make_client,
     _read_token_file,
@@ -85,8 +86,6 @@ from .cloud_auth import (  # noqa: F401  (re-exported for callers and tests)
 from .const import CONF_DEVICE_LIST, CONF_ID, CONF_MODEL_ID, CONF_NAME
 
 _LOGGER = logging.getLogger("aidot.go2rtc")
-
-DEFAULT_COUNTRY = os.environ.get("AIDOT_COUNTRY", "US")
 
 
 def _env_bool(name: str) -> bool | None:
@@ -131,7 +130,11 @@ def _go2rtc_source(dev_id: str, is_sdes: bool) -> str:
 async def cmd_list() -> int:
     """Print device id + transport for every camera, plus paste-ready go2rtc YAML."""
     async with aiohttp.ClientSession() as session:
-        client = await _make_client(session)
+        # CloudAuthUnavailable is the library-side signal; a CLI exits on it.
+        try:
+            client = await _make_client(session)
+        except CloudAuthUnavailable as exc:
+            sys.exit(str(exc))
         cams = await _cameras(client)
         if not cams:
             print("No IPC cameras found on this account.")
@@ -158,7 +161,10 @@ async def cmd_list() -> int:
 async def cmd_stream(dev_id: str, output_url: str) -> int:
     """Open one camera's keepalive and push/serve it to ``output_url``."""
     async with aiohttp.ClientSession() as session:
-        client = await _make_client(session)
+        try:
+            client = await _make_client(session)
+        except CloudAuthUnavailable as exc:
+            sys.exit(str(exc))
         cams = await _cameras(client)
         device = next((d for d in cams if d[CONF_ID] == dev_id), None)
         if device is None:

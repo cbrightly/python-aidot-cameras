@@ -2950,6 +2950,12 @@ def decode_remb_bitrate(pkt: bytes) -> int:
     return mantissa << exp
 
 
+#: RTPFB feedback message types (RFC 4585 s6.1, RFC 5104 s4.2).
+_RTPFB_PT = 205
+_FMT_NACK = 1
+_FMT_TMMBR = 3
+
+
 def build_nack(sender_ssrc: int, media_ssrc: int, lost_seqs: "list") -> bytes:
     """An RTCP Generic NACK (RFC 4585 s6.2.1) asking for ``lost_seqs`` again.
 
@@ -2985,18 +2991,12 @@ def build_nack(sender_ssrc: int, media_ssrc: int, lost_seqs: "list") -> bytes:
             i += 1
         fci.append(struct.pack("!HH", pid, blp))
 
-    pkt = (struct.pack("!BBH", 0x80 | 1, 205, 0)
+    pkt = (struct.pack("!BBH", 0x80 | _FMT_NACK, _RTPFB_PT, 0)
            + struct.pack("!II", sender_ssrc & 0xFFFFFFFF,
                          media_ssrc & 0xFFFFFFFF)
            + b"".join(fci))
     # RTCP length is in 32-bit words, minus one.
     return pkt[:2] + struct.pack("!H", len(pkt) // 4 - 1) + pkt[4:]
-
-
-#: RTPFB feedback message types (RFC 4585 s6.1, RFC 5104 s4.2).
-_RTPFB_PT = 205
-_FMT_NACK = 1
-_FMT_TMMBR = 3
 
 
 def build_tmmbr(sender_ssrc: int, media_ssrc: int, bitrate_bps: int,

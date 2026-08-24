@@ -50,12 +50,17 @@ _SRC = (pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras"
 
 
 def _remb_block() -> str:
-    """The REMB send, from its guard to the end of its exception handler."""
+    """The REMB cadence block: its guard through to the TMMBR block's start.
+
+    Sliced anchor-to-structural-terminator rather than anchor+N characters -
+    a fixed-width window goes quietly vacuous when comments grow, and a
+    vacuous window makes the negative assertions below pass without guarding
+    anything.
+    """
     src = _SRC.read_text()
-    # Anchor on the sender resolution, which sits just above the guard, so the
-    # window covers how the sender is obtained as well as how it is used.
-    start = src.index("_remb_send = getattr(")
-    return src[start:start + 1400]
+    start = src.index("if (REMB_TARGET_BPS > 0")
+    end = src.index("_tmmbr_bps = getattr(", start)
+    return src[start:end]
 
 
 def test_remb_does_not_write_to_the_raw_socket():
@@ -77,15 +82,19 @@ def test_remb_does_not_fall_back_to_the_socket_when_the_sender_is_missing():
     second; falling back to `sendto` costs correctness on every relayed camera.
     """
     block = _remb_block()
-    assert re.search(r"_remb_send\s*=\s*getattr\(\s*_bridge_fn,\s*'_send_to_cam',\s*None\s*\)",
-                     block), "the sender must be resolved with a None default"
-    assert re.search(r"_remb_send is not None", block), (
-        "the guard must require the relay-aware sender, not fall back")
+    assert re.search(
+        r"_remb_send\s*:=\s*getattr\(\s*\n?\s*_bridge_fn,\s*'_send_to_cam',"
+        r"\s*None\s*\)+\s*\)?\s*is not None", block), (
+        "the guard must resolve the relay-aware sender with a None default "
+        "and require it, not fall back to a socket")
 
 
 def test_remb_uses_the_keyed_sender_ssrc_constant():
     block = _remb_block()
     assert "_CAM_RTCP_SENDER_SSRC" in block
+    assert "_send_video_remb(" in block, (
+        "REMB must go through its helper like NACK and TMMBR do; the inline "
+        "copy is where the raw-socket bug hid")
     assert "0xAB12CD34" not in block, (
         "the SRTP TX policy is keyed on _CAM_RTCP_SENDER_SSRC; a literal here "
         "drifts and the camera drops the packet")

@@ -95,9 +95,12 @@ def test_the_call_site_uses_the_relay_aware_sender_and_the_keyed_ssrc():
              if src.startswith("_send_video_tmmbr(", i)
              and not src[:i].endswith("def ")]
     assert calls, "the bridge must actually send the TMMBR it can build"
-    # Widen behind the call too: the sender is resolved into a local a few
-    # lines above (_tmmbr_send = getattr(_bridge_fn, '_send_to_cam', None)).
-    args = src[max(0, calls[0] - 900):calls[0] + 400]
+    # Window from the cadence block's start to the PLI block that follows,
+    # so it covers how the sender is resolved as well as how it is used -
+    # structural terminators, not a fixed character count that goes vacuous
+    # as comments grow.
+    start = src.index("_tmmbr_bps = getattr(_bridge_fn, '_tmmbr_bps', None)")
+    args = src[start:src.index("_pli_done", start)]
     assert "_cam_srtp_sock.sendto" not in args, (
         "a raw socket write is silently inert on a TURN-relayed session -- "
         "use the bridge's relay-aware sender, as the NACK path does")
@@ -164,8 +167,8 @@ def test_the_bridge_gates_the_send_on_it():
 
     src = (pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras"
            / "camera" / "sdes_open.py").read_text()
-    i = src.index("_tmmbr_send = getattr(_bridge_fn, '_send_to_cam', None)")
-    window = src[i:i + 900]
+    i = src.index("_tmmbr_bps = getattr(_bridge_fn, '_tmmbr_bps', None)")
+    window = src[i:src.index("_pli_done", i)]
     assert "_tmmbr_ready(" in window, (
         "the TMMBR cadence must consult _tmmbr_ready, or AIDOT_SDES_TMMBR_AFTER_S "
         "does nothing and the measurement is between-session again")
@@ -197,8 +200,14 @@ def test_the_switches_are_resolved_once_per_session_not_per_packet():
     assert "_sdes_tmmbr_after_s()" in setup
 
     # And the cadence reads the resolved value rather than the environment.
-    i = src.index("_tmmbr_send = getattr(_bridge_fn, '_send_to_cam', None)")
-    cadence = src[i - 600:i + 900]
+    i = src.index("_tmmbr_bps = getattr(_bridge_fn, '_tmmbr_bps', None)")
+    cadence = src[i:src.index("_pli_done", i)]
     assert "_sdes_tmmbr_bps()" not in cadence, (
         "the cadence must not call os.environ; it runs on the packet loop")
     assert "_sdes_tmmbr_after_s()" not in cadence
+    # Cost ordering inside the guard: the once-a-second cadence gate must sit
+    # BEFORE the readiness math and the sender lookup, or both run per packet.
+    assert cadence.index("_last_tmmbr_ts") < cadence.index("_tmmbr_ready("), (
+        "the 1s cadence gate must run before _tmmbr_ready")
+    assert cadence.index("_tmmbr_ready(") < cadence.index("_send_to_cam"), (
+        "the sender lookup must be the last, rarest check")

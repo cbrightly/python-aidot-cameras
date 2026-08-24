@@ -57,7 +57,6 @@ import time
 
 import aiohttp
 
-from aidot_cameras.client import AidotClient
 from aidot_cameras.const import CONF_DEVICE_LIST, CONF_ID, CONF_NAME
 from aidot_cameras.cloud_auth import _make_client
 from aidot_cameras.credentials import load_credentials
@@ -1119,23 +1118,20 @@ async def _run(args) -> int:
     }
     async with aiohttp.ClientSession() as http:
         # The cloud keeps ONE live token per account, so a login invalidates
-        # whoever held the last one.  With AIDOT_TOKEN_FILE set we reuse the
-        # stored token and write rotations back, which is what lets a campaign
-        # hold a client across sessions while this runs as its child.  Unset -
-        # the release gate's own case - this is the previous behaviour exactly.
-        if os.environ.get("AIDOT_TOKEN_FILE"):
-            os.environ.setdefault("AIDOT_USERNAME", creds["username"])
-            os.environ.setdefault("AIDOT_PASSWORD", creds["password"])
-            os.environ.setdefault("AIDOT_COUNTRY", creds.get("country", "US"))
-            client = await _make_client(http)
-        else:
-            client = AidotClient(
-                http,
-                country_code=creds.get("country", "US"),
-                username=creds["username"],
-                password=creds["password"],
-            )
-            await client.async_post_login()
+        # whoever held the last one.  _make_client reuses a stored token when
+        # AIDOT_TOKEN_FILE is set (writing rotations back, which is what lets a
+        # campaign hold a client across sessions while this runs as its child)
+        # and otherwise performs exactly the password login the gate always
+        # did.  Credentials go in as PARAMETERS: an earlier shim published them
+        # into os.environ for _make_client to re-read, which handed the
+        # decrypted password to every spawned child and carried a dead country
+        # assignment (the old module-level default bound at import time).
+        client = await _make_client(
+            http,
+            username=creds["username"],
+            password=creds["password"],
+            country=creds.get("country", "US"),
+        )
         try:
             devices = (await client.async_get_all_device())[CONF_DEVICE_LIST]
             cameras = [d for d in devices if _is_camera(client.get_device_client(d))]

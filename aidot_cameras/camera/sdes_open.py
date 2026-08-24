@@ -241,19 +241,28 @@ def _widen_media_rcvbuf(sock, kind: str, device_id: str = "?") -> int:
     return got
 
 
-def _sdes_offer_bandwidth_kbps():
-    """A receive-bandwidth ceiling for the offer, in kbps, or None for none.
+def _env_positive(name: str, cast=int, off=None):
+    """Parse ``name`` as a positive number; anything else means ``off``.
 
-    Off unless ``AIDOT_SDES_OFFER_BANDWIDTH_KBPS`` names a positive integer.
-    An unparseable value is off rather than an error: this is read while an
-    offer is being built, and a typo must not take a camera off the air.
+    One body for the experiment knobs below - the third copy of this parser
+    was the rule-of-three moment.  ``off`` is the knob's disabled value (None
+    for the ints, 0.0 for the delay), and unparseable input is disabled rather
+    than an error: these are read while sessions are being built, and a typo
+    must not take a camera off the air.
     """
-    raw = os.environ.get("AIDOT_SDES_OFFER_BANDWIDTH_KBPS")
+    raw = os.environ.get(name)
+    if raw is None:
+        return off
     try:
-        kbps = int(str(raw).strip())
-    except (TypeError, ValueError, AttributeError):
-        return None
-    return kbps if kbps > 0 else None
+        value = cast(raw.strip())
+    except ValueError:
+        return off
+    return value if value > 0 else off
+
+
+def _sdes_offer_bandwidth_kbps():
+    """A receive-bandwidth ceiling for the offer, in kbps, or None for none."""
+    return _env_positive("AIDOT_SDES_OFFER_BANDWIDTH_KBPS")
 
 
 def _offer_bandwidth_line(kbps) -> str:
@@ -381,13 +390,8 @@ def _send_video_nack(send, srtcp_sess, sender_ssrc: int,
     """
     if not lost_seqs:
         return False
-    try:
-        raw = build_nack(sender_ssrc, media_ssrc, lost_seqs)
-        send(srtcp_sess.protect_rtcp(raw) if srtcp_sess is not None else raw)
-        return True
-    except Exception:
-        _LOGGER.debug("NACK send failed", exc_info=True)
-        return False
+    return _send_rtcp_fb(
+        send, srtcp_sess, build_nack(sender_ssrc, media_ssrc, lost_seqs))
 
 
 def _sdes_tmmbr_bps():
@@ -396,11 +400,7 @@ def _sdes_tmmbr_bps():
     Off unless ``AIDOT_SDES_TMMBR_BPS`` names a positive integer.  Unparseable
     is off rather than an error: this is read while a session is running.
     """
-    try:
-        bps = int(str(os.environ.get("AIDOT_SDES_TMMBR_BPS")).strip())
-    except (TypeError, ValueError, AttributeError):
-        return None
-    return bps if bps > 0 else None
+    return _env_positive("AIDOT_SDES_TMMBR_BPS")
 
 
 def _sdes_tmmbr_after_s() -> float:
@@ -413,11 +413,7 @@ def _sdes_tmmbr_after_s() -> float:
     working SD control.  Both windows of one session share the codec and the
     scene, so neither can confound it.
     """
-    try:
-        after = float(str(os.environ.get("AIDOT_SDES_TMMBR_AFTER_S")).strip())
-    except (TypeError, ValueError, AttributeError):
-        return 0.0
-    return after if after > 0 else 0.0
+    return _env_positive("AIDOT_SDES_TMMBR_AFTER_S", cast=float, off=0.0)
 
 
 def _tmmbr_ready(first_video_ts, now: float, after_s: float) -> bool:
@@ -429,6 +425,38 @@ def _tmmbr_ready(first_video_ts, now: float, after_s: float) -> bool:
     if first_video_ts is None:
         return False
     return (now - first_video_ts) >= after_s
+
+
+def _send_rtcp_fb(send, srtcp_sess, raw: bytes) -> bool:
+    """Protect-and-send tail shared by the NACK, TMMBR and REMB helpers.
+
+    One body for the ``protect_rtcp``-if-session-else-raw dance and the
+    swallow-and-debug-log error policy.  It was written three times before
+    this, and the copy that drifted (REMB's, still inline in the loop body)
+    is the one where the raw-socket relay bug hid.  Never raises: these run
+    inside the bridge's packet loop.
+    """
+    try:
+        send(srtcp_sess.protect_rtcp(raw) if srtcp_sess is not None else raw)
+        return True
+    except Exception:
+        _LOGGER.debug("RTCP feedback send failed", exc_info=True)
+        return False
+
+
+def _send_video_remb(send, srtcp_sess, sender_ssrc: int,
+                     media_ssrc: int, target_bps) -> bool:
+    """Put one REMB on the camera's RTCP path.  True if it went out.
+
+    Same shape and same relay-aware ``send`` contract as
+    :func:`_send_video_nack` - the REMB logic previously lived inline in the
+    loop body, and being the only feedback path without a helper is exactly
+    how it kept the raw-socket write long after the NACK path was fixed.
+    """
+    if not target_bps or target_bps <= 0:
+        return False
+    return _send_rtcp_fb(
+        send, srtcp_sess, build_remb(sender_ssrc, [media_ssrc], target_bps))
 
 
 def _send_video_tmmbr(send, srtcp_sess, sender_ssrc: int,
@@ -446,13 +474,8 @@ def _send_video_tmmbr(send, srtcp_sess, sender_ssrc: int,
     """
     if not bitrate_bps or bitrate_bps <= 0:
         return False
-    try:
-        raw = build_tmmbr(sender_ssrc, media_ssrc, bitrate_bps)
-        send(srtcp_sess.protect_rtcp(raw) if srtcp_sess is not None else raw)
-        return True
-    except Exception:
-        _LOGGER.debug("TMMBR send failed", exc_info=True)
-        return False
+    return _send_rtcp_fb(
+        send, srtcp_sess, build_tmmbr(sender_ssrc, media_ssrc, bitrate_bps))
 
 
 #: Sender SSRC on every RTCP we send the camera.  Load-bearing, not cosmetic:
@@ -2008,6 +2031,11 @@ class _SdesOpenMixin:
         # this replaced; AIDOT_SDES_VIDEO_PT_ORDER reorders it without ever
         # narrowing it.
         _video_pt_order = _resolve_sdes_video_pt_order()
+        # Read ONCE and feed both the SDP line and the status receipt below:
+        # two independent env reads let the receipt name a value that never
+        # reached the wire, which is the false-receipt trap the receipt
+        # exists to close.
+        _bw_kbps = _sdes_offer_bandwidth_kbps()
         _video_pt_list, _video_codec_attrs = _sdes_offer_video_codec_lines(
             _video_pt_order)
         sdes_offer_sdp = (
@@ -2050,7 +2078,7 @@ class _SdesOpenMixin:
             # video m-section
             + f"m=video {_offer_video_port} RTP/SAVPF {_video_pt_list}\r\n"
             f"c=IN IP4 {_offer_video_ip}\r\n"
-            + _offer_bandwidth_line(_sdes_offer_bandwidth_kbps())
+            + _offer_bandwidth_line(_bw_kbps)
             + "a=recvonly\r\n"
             "a=mid:1\r\n"
             f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
@@ -2103,7 +2131,6 @@ class _SdesOpenMixin:
         # is not evidence the line reached the wire.  Measured 2026-08-23: a
         # b=AS arm scored identically to its control and the only available
         # check for the knob was reading the env back out of the harness.
-        _bw_kbps = _sdes_offer_bandwidth_kbps()
         if _bw_kbps and _status:
             _status(f"SDES: offer receive-bandwidth ceiling b=AS:{_bw_kbps}")
 
@@ -4199,33 +4226,29 @@ class _SdesOpenMixin:
                     # skipping a tick until the sender exists costs a second,
                     # falling back costs correctness on the very sessions this
                     # is for.
-                    _remb_send = getattr(_bridge_fn, '_send_to_cam', None)
+                    # Guard order is cost order: the module constant first,
+                    # so the default REMB-off config pays nothing per packet
+                    # (the sender lookup used to sit above this line and ran
+                    # ~300x/s for a feature that ships disabled).
                     if (REMB_TARGET_BPS > 0
                             and hasattr(_bridge_fn, '_cam_video_ssrc')
-                            and _remb_send is not None
+                            and (_remb_send := getattr(
+                                _bridge_fn, '_send_to_cam', None)) is not None
                             and _time_br.time() - getattr(
                                 _bridge_fn, '_last_remb_ts', 0.0) >= 1.0):
                         _bridge_fn._last_remb_ts = _time_br.time()
-                        try:
-                            _remb_raw = build_remb(
+                        if _send_video_remb(
+                                _remb_send,
+                                getattr(_bridge_fn, '_pli_tx_sess', None),
                                 _CAM_RTCP_SENDER_SSRC,
-                                [_bridge_fn._cam_video_ssrc],
-                                REMB_TARGET_BPS)
-                            _remb_sess = getattr(_bridge_fn, '_pli_tx_sess', None)
-                            _remb_send(
-                                _remb_sess.protect_rtcp(_remb_raw)
-                                if _remb_sess is not None else _remb_raw)
-                            if not getattr(_bridge_fn, '_remb_logged', False):
-                                _bridge_fn._remb_logged = True
-                                _status(
-                                    f"SDES: sent REMB {REMB_TARGET_BPS // 1000} kbps"
-                                    f" for video SSRC"
-                                    f" 0x{_bridge_fn._cam_video_ssrc:08x}")
-                        except Exception:
-                            _LOGGER.debug(
-                                "camera %s: swallowed exception in %s",
-                                getattr(self, "device_id", "?"), '_remb',
-                                exc_info=True)
+                                _bridge_fn._cam_video_ssrc,
+                                REMB_TARGET_BPS,
+                        ) and not getattr(_bridge_fn, '_remb_logged', False):
+                            _bridge_fn._remb_logged = True
+                            _status(
+                                f"SDES: sent REMB {REMB_TARGET_BPS // 1000} kbps"
+                                f" for video SSRC"
+                                f" 0x{_bridge_fn._cam_video_ssrc:08x}")
 
                     # TMMBR: a BOUND, where REMB above is an ESTIMATE.  Two
                     # different RFC 5104 / 4585 messages, and this firmware can
@@ -4236,17 +4259,23 @@ class _SdesOpenMixin:
                     # every bitrate control tried on this camera so far has
                     # been acked and ignored, and an unmeasured one must not
                     # reach the four cameras that stream fine today.
+                    # Same cost ordering: the per-session bps attr is the
+                    # one cheap read the off-default pays; the cadence gate
+                    # runs before _tmmbr_ready so the readiness math and the
+                    # sender lookup happen at most once a second, not per
+                    # packet, and one time.time() serves both checks.
                     _tmmbr_bps = getattr(_bridge_fn, '_tmmbr_bps', None)
-                    _tmmbr_send = getattr(_bridge_fn, '_send_to_cam', None)
-                    if (_tmmbr_bps and _tmmbr_send is not None
+                    if (_tmmbr_bps
                             and hasattr(_bridge_fn, '_cam_video_ssrc')
+                            and (_tmmbr_now := _time_br.time()) - getattr(
+                                _bridge_fn, '_last_tmmbr_ts', 0.0) >= 1.0
                             and _tmmbr_ready(
                                 getattr(_bridge_fn, '_first_video_ts', None),
-                                _time_br.time(),
+                                _tmmbr_now,
                                 getattr(_bridge_fn, '_tmmbr_after_s', 0.0))
-                            and _time_br.time() - getattr(
-                                _bridge_fn, '_last_tmmbr_ts', 0.0) >= 1.0):
-                        _bridge_fn._last_tmmbr_ts = _time_br.time()
+                            and (_tmmbr_send := getattr(
+                                _bridge_fn, '_send_to_cam', None)) is not None):
+                        _bridge_fn._last_tmmbr_ts = _tmmbr_now
                         if _send_video_tmmbr(
                                 _tmmbr_send,
                                 getattr(_bridge_fn, '_pli_tx_sess', None),
@@ -5477,23 +5506,24 @@ class _SdesOpenMixin:
                                         '!I', _bpkt, 8)[0]
                                 _bridge_fn._cam_srtp_src  = _bsrc
                                 _bridge_fn._cam_srtp_sock = _bs
-                                # Publish the relay-aware sender so the RTCP
-                                # cadence (which runs outside this loop and has
-                                # no socket/peer in scope) can reach the camera
-                                # the same way the NACK does.  Rebuilt only when
-                                # the address changes: this runs ~300x/s per
-                                # camera, which is why _nack_on is resolved once
-                                # per session rather than read per packet.
                                 if getattr(_bridge_fn, '_first_video_ts',
                                            None) is None:
                                     _bridge_fn._first_video_ts = _time_br.time()
-                                if getattr(_bridge_fn, '_send_to_cam_src',
-                                           None) != _bsrc:
-                                    _bridge_fn._send_to_cam_src = _bsrc
-                                    _bridge_fn._send_to_cam = (
-                                        lambda _d, _s=_bs, _a=_bsrc,
-                                        _p=_br_cam_peer: _br_send_to_cam(
-                                            _s, _d, _a, _p))
+                                # Publish the relay-aware sender so the RTCP
+                                # cadence blocks (which have no socket/peer in
+                                # scope) can reach the camera the way the NACK
+                                # does.  This branch runs ONCE per session (it
+                                # sits inside the first-video gate), so the
+                                # sender is frozen at the first video packet's
+                                # source - the same adoption `_cam_srtp_src`
+                                # has always used.  A 1 Hz cadence send to a
+                                # stale address after a mid-session address
+                                # change just drops; the NACK path keeps its
+                                # own per-event binding for exactly that case.
+                                _bridge_fn._send_to_cam = (
+                                    lambda _d, _s=_bs, _a=_bsrc,
+                                    _p=_br_cam_peer: _br_send_to_cam(
+                                        _s, _d, _a, _p))
                                 # Schedule immediate PLI so IDR+SPS arrives in
                                 # the analyzeduration window.
                                 _bridge_fn._last_pli_ts = 0.0

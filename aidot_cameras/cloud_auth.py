@@ -18,7 +18,6 @@ import asyncio
 import json
 import logging
 import os
-import sys
 import tempfile
 
 import aiohttp
@@ -27,7 +26,25 @@ from .client import AidotClient
 
 _LOGGER = logging.getLogger("aidot.cloud_auth")
 
-DEFAULT_COUNTRY = os.environ.get("AIDOT_COUNTRY", "US")
+
+def _default_country() -> str:
+    """The AIDOT_COUNTRY fallback, read at CALL time.
+
+    This used to be a module-level constant bound at import, which made a
+    caller's later os.environ tweak silently ineffective: a creds file with a
+    non-US country logged in as US on the password path. Reading it when the
+    client is built keeps environment and parameters equivalent.
+    """
+    return os.environ.get("AIDOT_COUNTRY", "US")
+
+
+class CloudAuthUnavailable(RuntimeError):
+    """No usable credentials: no readable token file and no username/password.
+
+    Raised instead of ``sys.exit`` so library-side callers (the release
+    validator among them) keep their own error reporting; the go2rtc CLI
+    translates it to an exit in ``__main__``.
+    """
 
 
 def _read_token_file(path: str) -> dict:
@@ -85,19 +102,39 @@ def _install_token_cache(client: AidotClient, path: str) -> None:
     client.set_token_fresh_cb(_cb)
 
 
-async def _make_client(session: aiohttp.ClientSession) -> AidotClient:
-    """Authenticate to the AiDot cloud from the environment.
+async def _make_client(
+    session: aiohttp.ClientSession,
+    *,
+    username: "str | None" = None,
+    password: "str | None" = None,
+    country: "str | None" = None,
+) -> AidotClient:
+    """Authenticate to the AiDot cloud, from parameters or the environment.
 
     Prefers a stored token (AIDOT_TOKEN_FILE) - the same login_info dict the HA
     integration persists - which carries access/refresh tokens so no password
     round-trip is needed.  Falls back to username/password login otherwise.  In
     both cases, if AIDOT_TOKEN_FILE is set we register a write-back cache so
     rotations persist.
+
+    Credentials a caller already holds are passed explicitly; each parameter
+    left as None falls back to its environment variable.  The parameters exist
+    so a caller never has to publish secrets into ``os.environ`` (where every
+    spawned child inherits them) just to reach this function - the shim that
+    did exactly that also carried a dead country assignment, because the old
+    module-level default was bound at import time.
+
+    Raises :class:`CloudAuthUnavailable` when neither a readable token file
+    nor a username/password pair is available.
     """
     loop = asyncio.get_running_loop()
     token_file = os.environ.get("AIDOT_TOKEN_FILE")
-    username = os.environ.get("AIDOT_USERNAME")
-    password = os.environ.get("AIDOT_PASSWORD")
+    if username is None:
+        username = os.environ.get("AIDOT_USERNAME")
+    if password is None:
+        password = os.environ.get("AIDOT_PASSWORD")
+    if country is None:
+        country = _default_country()
 
     if token_file and os.path.exists(token_file):
         try:
@@ -113,14 +150,14 @@ async def _make_client(session: aiohttp.ClientSession) -> AidotClient:
             return client
 
     if not username or not password:
-        sys.exit(
+        raise CloudAuthUnavailable(
             "Set AIDOT_TOKEN_FILE, or AIDOT_USERNAME and AIDOT_PASSWORD, in the "
             "environment."
         )
 
     client = AidotClient(
         session=session,
-        country_code=DEFAULT_COUNTRY,
+        country_code=country,
         username=username,
         password=password,
     )

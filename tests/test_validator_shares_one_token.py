@@ -121,3 +121,62 @@ def test_no_token_file_still_logs_in_with_the_password(tmp_path, monkeypatch):
 def test_the_repo_ships_no_token_file_path_by_default():
     # A default path would make the gate share state between unrelated runs.
     assert os.environ.get("AIDOT_TOKEN_FILE") in (None, "")
+
+
+def test_credentials_travel_as_parameters_not_environment():
+    """The validator must not publish secrets into os.environ.
+
+    The first version of the token branch did exactly that - three
+    setdefault calls so _make_client could re-read the same values - which
+    handed the decrypted password to every spawned child (ffmpeg included)
+    and carried a dead country assignment, because cloud_auth's old
+    module-level country default was bound at import time.
+    """
+    src = _source()
+    assert "os.environ.setdefault(\"AIDOT_USERNAME\"" not in src
+    assert "os.environ.setdefault(\"AIDOT_PASSWORD\"" not in src
+    assert re.search(r"_make_client\(\s*\n?\s*http,\s*\n\s*username=", src), (
+        "credentials must be passed to _make_client as parameters")
+
+
+def test_an_explicit_country_beats_the_environment(tmp_path, monkeypatch):
+    # The dead-shim bug: AIDOT_COUNTRY was snapshotted at cloud_auth import,
+    # so env tweaks after import silently did nothing and a creds-file
+    # country became US. Parameters must win, and must not depend on import
+    # order.
+    import asyncio
+
+    from aidot_cameras import cloud_auth
+
+    monkeypatch.delenv("AIDOT_TOKEN_FILE", raising=False)
+    monkeypatch.setenv("AIDOT_COUNTRY", "US")
+
+    captured = {}
+
+    class _Client:
+        def __init__(self, **kw):
+            captured.update(kw)
+
+        async def async_post_login(self):
+            pass
+
+    monkeypatch.setattr(cloud_auth, "AidotClient", _Client)
+    asyncio.run(cloud_auth._make_client(object(), username="u", password="p",
+                                        country="DE"))
+    assert captured["country_code"] == "DE"
+
+
+def test_missing_credentials_raise_instead_of_exiting(monkeypatch):
+    # cloud_auth is shared library code now; sys.exit belongs to the CLI.
+    # A validator hitting this must reach its own report path, not die with
+    # a CLI-worded message.
+    import asyncio
+
+    import pytest as _pytest
+
+    from aidot_cameras import cloud_auth
+
+    for var in ("AIDOT_TOKEN_FILE", "AIDOT_USERNAME", "AIDOT_PASSWORD"):
+        monkeypatch.delenv(var, raising=False)
+    with _pytest.raises(cloud_auth.CloudAuthUnavailable):
+        asyncio.run(cloud_auth._make_client(object()))
