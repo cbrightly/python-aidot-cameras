@@ -2993,6 +2993,55 @@ def build_nack(sender_ssrc: int, media_ssrc: int, lost_seqs: "list") -> bytes:
     return pkt[:2] + struct.pack("!H", len(pkt) // 4 - 1) + pkt[4:]
 
 
+#: RTPFB feedback message types (RFC 4585 s6.1, RFC 5104 s4.2).
+_RTPFB_PT = 205
+_FMT_NACK = 1
+_FMT_TMMBR = 3
+
+
+def build_tmmbr(sender_ssrc: int, media_ssrc: int, bitrate_bps: int,
+                overhead: int = 60) -> bytes:
+    """A TMMBR (RFC 5104 s4.2.1) telling ``media_ssrc`` not to exceed a rate.
+
+    Distinct from REMB, which this camera was measured to ignore: REMB reports
+    an *estimate* of what the path will bear, TMMBR states a *bound* the sender
+    must respect. They are different messages and a firmware can honour one
+    without the other.
+
+    The bound is encoded as a 17-bit mantissa scaled by a 6-bit exponent, so
+    not every rate is representable. We round the mantissa DOWN, never up: a
+    TMMBR that permits more than the caller asked for is worse than sending
+    none at all on a link that is already saturating.
+
+    ``overhead`` is Measured Overhead, per-packet transport overhead in bytes
+    (9 bits). 60 is the usual IP+UDP+RTP+SRTP figure and is what browsers send.
+    """
+    if bitrate_bps <= 0:
+        raise ValueError(
+            f"a TMMBR must name a positive bitrate, got {bitrate_bps}; a bound "
+            f"of zero asks the camera to stop sending")
+    exp = 0
+    mantissa = int(bitrate_bps)
+    while mantissa >= (1 << 17):
+        mantissa >>= 1
+        exp += 1
+    fci = struct.pack("!II",
+                      media_ssrc & 0xFFFFFFFF,
+                      (exp << 26) | (mantissa << 9) | (max(0, overhead) & 0x1FF))
+    # The header's media-source field is unused for TMMBR and SHALL be zero
+    # (RFC 5104 s4.2.1.2); the limited SSRC travels in the FCI above.
+    pkt = (struct.pack("!BBH", 0x80 | _FMT_TMMBR, _RTPFB_PT, 0)
+           + struct.pack("!II", sender_ssrc & 0xFFFFFFFF, 0)
+           + fci)
+    return pkt[:2] + struct.pack("!H", len(pkt) // 4 - 1) + pkt[4:]
+
+
+def decode_tmmbr_bitrate(pkt: bytes) -> int:
+    """The bound carried by a TMMBR built above, in bits per second."""
+    word = struct.unpack("!I", pkt[16:20])[0]
+    return ((word >> 9) & 0x1FFFF) << (word >> 26)
+
+
 def decode_nack_seqs(pkt: bytes) -> "list":
     """The sequence numbers a Generic NACK asks for. For tests and diagnostics."""
     out = []
