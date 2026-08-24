@@ -22,7 +22,7 @@ observed streaming over the TURN relay with first media at +6.9 s, and the
 three battery A001513s report a WAN address and do not answer unicast
 discovery. So the relay path is exercised in practice, not hypothetical.
 
-Exercised 2026-08-23 on the relayed A001513 (`L2_F8A3`) with
+Exercised 2026-08-23 on the fleet's relayed A001513 with
 `AIDOT_REMB_TARGET_BPS=500000`. Its media arrives through the CAMERA's own TURN
 allocation -- 4821 inbound RTP packets from `3.230.182.123:44960` -- and on the
 wire our feedback goes back to that same address: 41 RTCP PT=206 (PLI/REMB)
