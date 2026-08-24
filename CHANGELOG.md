@@ -6,6 +6,38 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b31]
+
+### Added
+
+- **`media_path` in `SdesSession.media_stats()`: the receipt for which path a
+  session's media actually took** - `direct` or `relay`, classified from the
+  first packet's source address against the session's TURN servers. The
+  connection preference is only a preference (the camera decides where to
+  send from), and until now telling the two apart needed a wire capture.
+  Flows into `scripts/live_validate.py` reports automatically.
+
+- **`AIDOT_SDES_CONNECTION_MODE` / per-open `sdes_connection_mode`: one knob
+  for the media path** - `auto` (default; every reachable candidate, LAN
+  preferred by ICE priority, relay as last resort - the shipped behaviour,
+  now stated and instrumented), `lan` (no relay; same lever as
+  `AIDOT_SDES_SKIP_TURN_PREALLOC`, composed through the same resolver so the
+  battery force-keep applies - a cloud-woken camera has no other path back),
+  and `relay` (experimental).
+
+  `relay` is documented as not steering this fleet, because that was
+  measured rather than assumed: with only the relay candidate on offer, and
+  then again with `c=`/`m=` moved to the relay allocation and a
+  CreatePermission for our own WAN address pre-installed (gated to relay
+  mode - indiscriminate installs caused TURN self-loop storms), an A001064
+  and an A001513 both still dialed our host address directly. The firmware
+  learns it from our own ICE probes and replies to wherever packets came
+  from. Forcing the relay for real means suppressing every direct-path
+  outbound, which is unbuilt. The candidate blocks and c=/m= endpoints now
+  come from tested helpers either way, and every non-default mode leaves a
+  status receipt.
+
+
 ## [1.0.0b30]
 
 ### Fixed

@@ -3540,6 +3540,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         stream_idle_s: Optional[float] = None,
         sdes_fast_liveplay: Optional[bool] = None,
         sdes_skip_turn: Optional[bool] = None,
+        sdes_connection_mode: Optional[str] = None,
         sdes_adaptive: Optional[bool] = None,
         sdes_audio_gain_db: Optional[float] = None,
     ) -> None:
@@ -3616,6 +3617,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             self._sdes_fast_liveplay_opt = sdes_fast_liveplay
         if sdes_skip_turn is not None:
             self._sdes_skip_turn_opt = sdes_skip_turn
+        if sdes_connection_mode is not None:
+            self._sdes_connection_mode_opt = sdes_connection_mode
         if sdes_adaptive is not None:
             self._sdes_adaptive_opt = sdes_adaptive
         if self._stream_task is not None and not self._stream_task.done():
@@ -4701,6 +4704,33 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             )
         return False
 
+    def _resolve_sdes_connection_mode(self) -> str:
+        """Which media path the session should offer: auto, lan, or relay.
+
+        ``auto`` (default) offers every reachable candidate and lets ICE
+        priority prefer the LAN, with the relay as last resort - the shipped
+        behaviour, verified on the full fleet (six of seven direct, only the
+        unreachable unit relayed).  ``lan`` drops the relay entirely (routed
+        through _resolve_sdes_skip_turn so the battery force-keep applies).
+        ``relay`` offers only the relay candidate and force-keeps the
+        pre-allocation.
+
+        Per-open ``sdes_connection_mode`` wins; else AIDOT_SDES_CONNECTION_MODE;
+        else auto.  Anything unrecognised is auto - this is read while opening
+        a stream, and a typo must not stop video.
+        """
+        for raw in (getattr(self, "_sdes_connection_mode_opt", None),
+                    os.environ.get("AIDOT_SDES_CONNECTION_MODE")):
+            if raw is None:
+                continue
+            mode = str(raw).strip().lower()
+            if mode in ("auto", "lan", "relay"):
+                return mode
+            _LOGGER.warning(
+                "camera %s: unknown sdes_connection_mode %r; using auto",
+                getattr(self, "device_id", "?"), raw)
+        return "auto"
+
     def _resolve_sdes_skip_turn(self) -> bool:
         """EXPERIMENTAL (opt-in, default off): skip the blocking SDES TURN relay
         pre-allocation, for cameras reachable LAN-direct.
@@ -4729,6 +4759,15 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         latency win only applies to a mains camera that actually has a host
         candidate on the HA segment."""
         if getattr(self, "is_battery_camera", False):
+            return False
+        # The connection mode composes here rather than in a parallel path, so
+        # everything hanging off this resolver (instrumentation, the adaptive
+        # interplay) sees one answer.  relay force-keeps the pre-allocation -
+        # forcing the relay while skipping its allocation would offer nothing.
+        _mode = self._resolve_sdes_connection_mode()
+        if _mode == "lan":
+            return True
+        if _mode == "relay":
             return False
         opt = getattr(self, "_sdes_skip_turn_opt", None)
         if opt is not None:

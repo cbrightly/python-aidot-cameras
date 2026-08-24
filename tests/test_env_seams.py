@@ -128,11 +128,12 @@ def test_sdes_media_stats_defaults_and_counts():
     sess._media_progress = progress
     sess._first_video_pt = vpt
     sess._first_audio_pt = apt
+    sess._media_path = [None]
 
     stats = sess.media_stats()
     assert stats == {
         "packets": 0, "bytes": 0, "last_media_monotonic": 0.0,
-        "video_pt": None, "audio_pt": None,
+        "video_pt": None, "audio_pt": None, "media_path": None,
     }
 
     # bridge-thread updates are visible through the shared lists

@@ -260,6 +260,98 @@ def _env_positive(name: str, cast=int, off=None):
     return value if value > 0 else off
 
 
+def _turn_entry_ips(entries) -> set:
+    """The server addresses named by ICE entries' ``Uris`` lists.
+
+    Entries look like ``{"Uris": ["stun:3.230.182.123:3478",
+    "turn:3.230.182.123:5349?transport=udp"], ...}``.  The address is what
+    media source classification needs; scheme, port and query are noise.
+    """
+    ips = set()
+    for entry in entries or ():
+        for uri in (entry.get("Uris") or ()):
+            body = str(uri).split(":", 1)[-1]
+            host = body.split("?", 1)[0].rsplit(":", 1)[0].strip("[]")
+            if host:
+                ips.add(host)
+    return ips
+
+
+def _classify_media_path(src_ip, turn_ips) -> "Optional[str]":
+    """"direct" or "relay" for a media source address, or None when unknown.
+
+    Media arriving FROM a TURN server address is relayed - that covers both
+    shapes on this fleet: the camera's own allocation on the vendor TURN (the
+    relayed A001513's media arrives from the TURN address on the camera's
+    allocation port, so the PORT must not participate) and a Data Indication
+    through ours.  Anything else came to us directly.
+    """
+    if not src_ip:
+        return None
+    return "relay" if src_ip in turn_ips else "direct"
+
+
+def _sdes_offer_media_endpoint(mode: str, default_ip: str, default_port: int,
+                               relay_addr, public_ip):
+    """Where the offer's c=/m= points for one media section: (ip, port, is_relay).
+
+    This fleet's firmware nominates by dialing c=/m=, not by reading candidate
+    lines - measured 2026-08-24, an A001064 and an A001513 both dialed direct
+    with only the relay candidate on offer.  So forcing the relay means moving
+    c=/m= to the allocation, which was this path's ORIGINAL design (see the
+    allocation helper's comment) before it was backed out over dropped media.
+
+    The missing piece back then was the permission: the camera's packets reach
+    the TURN server from the house WAN address - OUR srflx address - and
+    without a CreatePermission for it the relay drops everything.  Relay mode
+    therefore requires a known public_ip; without one (or without an
+    allocation) it falls back to the direct endpoint, because a stream on the
+    wrong path beats no stream.
+    """
+    if mode == "relay" and relay_addr and public_ip:
+        return relay_addr[0], relay_addr[1], True
+    return default_ip, default_port, False
+
+
+def _sdes_offer_candidate_lines(mode: str, local_ip: str, port: int,
+                                public_ip, relay_addr) -> str:
+    """The a=candidate block for one media section, shaped by the mode.
+
+    ``auto``  - host + srflx (when a public IP is known) + relay (when the
+                pre-allocation succeeded), in that priority order.  This is the
+                shipped behaviour: the LAN wins by ICE priority (host
+                2130706431 > srflx 1694498815 > relay 16777215) and the relay
+                is the last resort - measured on the full fleet 2026-08-24,
+                six of seven cameras direct and only the unit with no route to
+                us on the relay.
+    ``lan``   - host + srflx only.  Normally moot (lan mode also skips the
+                relay pre-allocation, so there is no relay_addr to omit), but
+                enforced here too so the two levers cannot disagree.
+    ``relay`` - the relay candidate ONLY, so an ICE-speaking camera has
+                nothing else to nominate.  The relay address must still never
+                appear in c=/m= - TURN drops every camera packet without a
+                CreatePermission for the camera's public address, which is
+                unknown - so candidate lines are the entire steering surface,
+                and firmware that ignores ICE and dials c=/m= directly cannot
+                be steered.  With no allocation to offer this falls back to
+                the auto block: an offer with zero candidates is a session
+                that cannot start, and a stream on the wrong path beats no
+                stream.
+    """
+    host = f"a=candidate:1 1 udp 2130706431 {local_ip} {port} typ host\r\n"
+    srflx = (f"a=candidate:2 1 udp 1694498815 {public_ip} {port}"
+             f" typ srflx raddr {local_ip} rport {port}\r\n"
+             if public_ip else "")
+    relay = (f"a=candidate:3 1 udp 16777215 {relay_addr[0]} {relay_addr[1]}"
+             f" typ relay raddr {local_ip} rport {port}\r\n"
+             if relay_addr else "")
+    if mode == "relay" and relay:
+        return relay
+    if mode == "lan":
+        return host + srflx
+    return host + srflx + relay
+
+
 def _sdes_offer_bandwidth_kbps():
     """A receive-bandwidth ceiling for the offer, in kbps, or None for none."""
     return _env_positive("AIDOT_SDES_OFFER_BANDWIDTH_KBPS")
@@ -1864,6 +1956,13 @@ class _SdesOpenMixin:
         # _resolve_sdes_skip_turn).  Either way the cost is instrumented below so
         # the saving is measurable: grep ``signaling-wait[`` for sdes-turn-prealloc.
         _skip_turn_prealloc = self._resolve_sdes_skip_turn()
+        # Which media path to offer (auto | lan | relay).  Resolved once per
+        # open; the candidate blocks below are built from it.  A receipt goes
+        # out whenever it is not the default, because a run that cannot show
+        # the knob was applied cannot tell a result from a coincidence.
+        _conn_mode = self._resolve_sdes_connection_mode()
+        if _conn_mode != "auto" and _status:
+            _status(f"SDES: connection mode {_conn_mode}")
         _turn_t0 = time.monotonic()
         _turn_did = False
         if _sdes_turn_entries and not _fast_connect and not _skip_turn_prealloc:
@@ -1990,10 +2089,18 @@ class _SdesOpenMixin:
         # for the camera's public IP which is unknown; relay in c= causes TURN to
         # drop every camera packet.  Relay is still in a=candidate: for ICE.
         # For LAN cameras (_public_ip is None) fall back to local_ip directly.
-        _offer_audio_ip   = _public_ip or local_ip
-        _offer_audio_port = audio_port
-        _offer_video_ip   = _public_ip or local_ip
-        _offer_video_port = video_port
+        _offer_audio_ip, _offer_audio_port, _relay_in_c_a = _sdes_offer_media_endpoint(
+            _conn_mode, _public_ip or local_ip, audio_port,
+            _relay_addrs.get(_audio_sock), _public_ip)
+        _offer_video_ip, _offer_video_port, _relay_in_c_v = _sdes_offer_media_endpoint(
+            _conn_mode, _public_ip or local_ip, video_port,
+            _relay_addrs.get(_video_sock), _public_ip)
+        _relay_in_c = _relay_in_c_a or _relay_in_c_v
+        if _conn_mode == "relay" and not _relay_in_c and _status:
+            _status("SDES: relay mode fell back to the direct endpoint"
+                    " (no allocation or no public ip)")
+        elif _relay_in_c and _status:
+            _status("SDES: c=/m= at the relay allocation (relay mode)")
         _bundle_hdr_line = (
             "a=group:BUNDLE 0 1 2\r\n" if _dc_probe_fp else "a=group:BUNDLE 0 1\r\n"
         )
@@ -2063,18 +2170,9 @@ class _SdesOpenMixin:
             # the SDP body (confirmed from logcat ground truth 2026-05-22).
             + f"a=ice-ufrag:{_ufrag_a}\r\n"
             f"a=ice-pwd:{_pwd_a}\r\n"
-            f"a=candidate:1 1 udp 2130706431 {local_ip} {audio_port} typ host\r\n"
-            + (
-                f"a=candidate:2 1 udp 1694498815 {_public_ip} {audio_port}"
-                f" typ srflx raddr {local_ip} rport {audio_port}\r\n"
-                if _public_ip else ""
-            )
-            + (
-                f"a=candidate:3 1 udp 16777215 {_relay_addrs[_audio_sock][0]}"
-                f" {_relay_addrs[_audio_sock][1]}"
-                f" typ relay raddr {local_ip} rport {audio_port}\r\n"
-                if _audio_sock in _relay_addrs else ""
-            )
+            + _sdes_offer_candidate_lines(
+                _conn_mode, local_ip, audio_port, _public_ip,
+                _relay_addrs.get(_audio_sock))
             # video m-section
             + f"m=video {_offer_video_port} RTP/SAVPF {_video_pt_list}\r\n"
             f"c=IN IP4 {_offer_video_ip}\r\n"
@@ -2086,18 +2184,9 @@ class _SdesOpenMixin:
             + "a=rtcp-mux\r\n"
             f"a=ice-ufrag:{_ufrag_v}\r\n"
             f"a=ice-pwd:{_pwd_v}\r\n"
-            f"a=candidate:1 1 udp 2130706431 {local_ip} {video_port} typ host\r\n"
-            + (
-                f"a=candidate:2 1 udp 1694498815 {_public_ip} {video_port}"
-                f" typ srflx raddr {local_ip} rport {video_port}\r\n"
-                if _public_ip else ""
-            )
-            + (
-                f"a=candidate:3 1 udp 16777215 {_relay_addrs[_video_sock][0]}"
-                f" {_relay_addrs[_video_sock][1]}"
-                f" typ relay raddr {local_ip} rport {video_port}\r\n"
-                if _video_sock in _relay_addrs else ""
-            )
+            + _sdes_offer_candidate_lines(
+                _conn_mode, local_ip, video_port, _public_ip,
+                _relay_addrs.get(_video_sock))
             # m=application SCTP DataChannel section for SDES cameras.
             # Ground truth from real Leedarson app logcat (2026-05-22):
             #   m=application 9 SCTP webrtc-datachannel
@@ -2563,18 +2652,9 @@ class _SdesOpenMixin:
                 "a=rtcp-mux\r\n"
                 f"a=ice-ufrag:{_ufrag_a}\r\n"
                 f"a=ice-pwd:{_pwd_a}\r\n"
-                f"a=candidate:1 1 udp 2130706431 {local_ip} {audio_port} typ host\r\n"
-                + (
-                    f"a=candidate:2 1 udp 1694498815 {_public_ip} {audio_port}"
-                    f" typ srflx raddr {local_ip} rport {audio_port}\r\n"
-                    if _public_ip else ""
-                )
-                + (
-                    f"a=candidate:3 1 udp 16777215 {_relay_addrs[_audio_sock][0]}"
-                    f" {_relay_addrs[_audio_sock][1]}"
-                    f" typ relay raddr {local_ip} rport {audio_port}\r\n"
-                    if _audio_sock in _relay_addrs else ""
-                )
+                + _sdes_offer_candidate_lines(
+                    _conn_mode, local_ip, audio_port, _public_ip,
+                    _relay_addrs.get(_audio_sock))
                 + f"m=video {_ans_video_port} RTP/SAVPF 96 97\r\n"
                 f"c=IN IP4 {_ans_video_ip}\r\n"
                 "a=sendonly\r\n"
@@ -2588,18 +2668,9 @@ class _SdesOpenMixin:
                 "a=rtcp-mux\r\n"
                 f"a=ice-ufrag:{_ufrag_v}\r\n"
                 f"a=ice-pwd:{_pwd_v}\r\n"
-                f"a=candidate:1 1 udp 2130706431 {local_ip} {video_port} typ host\r\n"
-                + (
-                    f"a=candidate:2 1 udp 1694498815 {_public_ip} {video_port}"
-                    f" typ srflx raddr {local_ip} rport {video_port}\r\n"
-                    if _public_ip else ""
-                )
-                + (
-                    f"a=candidate:3 1 udp 16777215 {_relay_addrs[_video_sock][0]}"
-                    f" {_relay_addrs[_video_sock][1]}"
-                    f" typ relay raddr {local_ip} rport {video_port}\r\n"
-                    if _video_sock in _relay_addrs else ""
-                )
+                + _sdes_offer_candidate_lines(
+                    _conn_mode, local_ip, video_port, _public_ip,
+                    _relay_addrs.get(_video_sock))
             )
             _compressed_sdp_ans = _compress_sdp_req(_relay_answer_sdp)
 
@@ -3777,6 +3848,17 @@ class _SdesOpenMixin:
                 )
             return _perm_ok
 
+        # Relay mode only: the camera dials our relay allocation, and its
+        # packets arrive at the TURN server from the house WAN address - OUR
+        # public address - so that address needs a permission or the path is a
+        # black hole.  Deliberately NOT done outside relay mode: a permission
+        # for our own srflx caused TURN self-loop Data Indications and STUN
+        # echo storms when it was installed indiscriminately (see the warning
+        # in the allocation helper).  In relay mode nothing of ours is sent to
+        # our own allocation, so the loop has no driver.
+        if _relay_in_c and _public_ip:
+            _turn_install_permissions([(_public_ip, 9)], "relay-mode WAN")
+
         if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:
             _turn_install_permissions(_cam_ice_cands, "setup")
 
@@ -3909,6 +3991,12 @@ class _SdesOpenMixin:
         # bridge on the first video RTP packet so the ffmpeg SDP can be narrowed
         # to the matching single codec before ffmpeg is launched.
         _first_video_pt: list = [None]
+        _media_path: list = [None]
+        # Every TURN server address this session could be relayed through:
+        # our allocations plus the ICE entries themselves - the camera can
+        # arrive via its OWN vendor allocation even when ours was skipped.
+        _bridge_turn_ips = ({a[0] for a in _relay_addrs.values()}
+                            | _turn_entry_ips(_sdes_turn_entries))
         # Fallback for the above, filled from the camera's negotiated answer SDP
         # when the wait below expires without a single video packet. Kept in a
         # list for the same reason as _first_video_pt: the serve-restart path
@@ -5504,6 +5592,9 @@ class _SdesOpenMixin:
                                 if len(_bpkt) >= 12:
                                     _bridge_fn._cam_video_ssrc = _st_br.unpack_from(
                                         '!I', _bpkt, 8)[0]
+                                if _media_path[0] is None:
+                                    _media_path[0] = _classify_media_path(
+                                        _bsrc[0], _bridge_turn_ips)
                                 _bridge_fn._cam_srtp_src  = _bsrc
                                 _bridge_fn._cam_srtp_sock = _bs
                                 if getattr(_bridge_fn, '_first_video_ts',
@@ -6618,6 +6709,7 @@ class _SdesOpenMixin:
             talk_state=_talk_state,
             media_progress=_media_progress,
             media_counts=_media_counts,
+            media_path=_media_path,
             teardown_requested=_teardown_holder,
             first_video_pt=_first_video_pt,
             first_audio_pt=_first_audio_pt,

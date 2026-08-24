@@ -53,6 +53,7 @@ class SdesSession(AvioRequestMixin):
         teardown_requested=None,
         first_video_pt=None,
         first_audio_pt=None,
+        media_path=None,
         device_id=None,
         responses=None,
         abort_chan=None,
@@ -81,6 +82,12 @@ class SdesSession(AvioRequestMixin):
         # sent (video 96/97/98, audio 0/8), or None before first media.
         self._first_video_pt = first_video_pt if first_video_pt is not None else [None]
         self._first_audio_pt = first_audio_pt if first_audio_pt is not None else [None]
+        # Shared with the bridge thread: [0] becomes "direct" or "relay" when
+        # the first media packet arrives, classified by its source address
+        # against the session's TURN servers.  The connection mode is only a
+        # preference - the camera decides where to send from - and this is the
+        # receipt that says what actually happened.
+        self._media_path = media_path if media_path is not None else [None]
         # Mutable one-element list shared with the bridge thread: [0] flips True
         # the moment ANY locally-initiated ffmpeg-kill path fires (this stop(),
         # the cold-open _reap(), the key-restart proc replace, or the DTLS-
@@ -229,7 +236,8 @@ class SdesSession(AvioRequestMixin):
         the DTLS path allows.  These counters are the supported substitute:
         non-zero ``packets``/``bytes`` means real media reached the consumer.
 
-        Returns ``{packets, bytes, last_media_monotonic, video_pt, audio_pt}``;
+        Returns ``{packets, bytes, last_media_monotonic, video_pt, audio_pt,
+        media_path}``;
         the payload types are ``None`` until the camera's first packet of that
         kind arrives.
         """
@@ -239,6 +247,7 @@ class SdesSession(AvioRequestMixin):
             "last_media_monotonic": self._media_progress[0],
             "video_pt": self._first_video_pt[0],
             "audio_pt": self._first_audio_pt[0],
+            "media_path": self._media_path[0],
         }
 
     def _drained_stderr_tail(self) -> bytes:
