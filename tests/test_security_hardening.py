@@ -8,7 +8,7 @@ import pytest
 
 from aidot_cameras.camera.lan_control import _MAGIC, _MAX_FRAME_BODY, _read_frame
 from aidot_cameras.camera.models import _as_bool, _as_int
-from aidot_cameras.camera.protocol import _SPROP_DIR, _sprop_cache_path
+from aidot_cameras.camera.protocol import _sprop_cache_path, _sprop_dir
 
 
 # -- models: malformed cloud attrs are skipped, not fatal ----------------------
@@ -34,7 +34,7 @@ def test_as_bool_coerces_or_none():
 @pytest.mark.parametrize("devid", ["../../etc/passwd", "/etc/passwd", "a/b/c", "..", "x\\y"])
 def test_sprop_path_stays_in_cache_dir(devid):
     p = os.path.abspath(_sprop_cache_path(devid))
-    assert os.path.dirname(p) == os.path.abspath(_SPROP_DIR)
+    assert os.path.dirname(p) == os.path.abspath(_sprop_dir())
     assert p.endswith(".sprop")
 
 

@@ -29,7 +29,7 @@ from aidot_cameras.camera import hwaccel
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path, monkeypatch):
     """Per-test cache dir and clean memo state."""
-    monkeypatch.setattr(hwaccel, "_SPROP_DIR", str(tmp_path))
+    monkeypatch.setenv("AIDOT_SPROP_DIR", str(tmp_path))
     monkeypatch.setattr(hwaccel, "_cache_mem", {})
     monkeypatch.setattr(hwaccel, "_identity_memo", None)
     monkeypatch.setattr(hwaccel, "_decoders_memo", None)

@@ -29,7 +29,7 @@ OTHER = "Z0LgHtoCgPRA,aM4wpIA="
 
 @pytest.fixture
 def sprop_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(protocol, "_SPROP_DIR", str(tmp_path))
+    monkeypatch.setenv("AIDOT_SPROP_DIR", str(tmp_path))
     return tmp_path
 
 

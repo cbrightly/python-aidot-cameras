@@ -40,7 +40,7 @@ import threading
 import time
 from typing import List, Optional
 
-from .protocol import _SPROP_DIR  # reuse the same per-user cache root
+from .protocol import _sprop_dir  # reuse the same per-user cache root
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -139,7 +139,7 @@ def _ffmpeg_identity() -> str:
 
 
 def _cache_path() -> str:
-    return os.path.join(_SPROP_DIR, "decoders.json")
+    return os.path.join(_sprop_dir(), "decoders.json")
 
 
 def _load_cache() -> dict:
@@ -152,7 +152,7 @@ def _load_cache() -> dict:
 
 def _save_cache(data: dict) -> None:
     try:
-        os.makedirs(_SPROP_DIR, exist_ok=True)
+        os.makedirs(_sprop_dir(), exist_ok=True)
         tmp = _cache_path() + ".tmp"
         with open(tmp, "w") as fh:
             json.dump(data, fh)

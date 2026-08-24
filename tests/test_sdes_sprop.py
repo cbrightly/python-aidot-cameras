@@ -11,9 +11,6 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# _SPROP_DIR + sprop helpers live in aidot_cameras.camera.protocol after the split;
-# patch the dir there (the module where the helpers read it).
-import aidot_cameras.camera.protocol as _proto
 from aidot_cameras.device_client import (
     _extract_param_sets_from_rtp,
     _build_sprop,
@@ -89,7 +86,7 @@ def test_csrc_header_offset_handled():
 
 def test_cache_roundtrip(monkeypatch):
     d = tempfile.mkdtemp()
-    monkeypatch.setattr(_proto, "_SPROP_DIR", d)
+    monkeypatch.setenv("AIDOT_SPROP_DIR", d)
     devid = "abc123"
     assert _load_sprop(devid) is None          # nothing cached yet
     _save_sprop(devid, SPROP)
@@ -97,7 +94,7 @@ def test_cache_roundtrip(monkeypatch):
 
 
 def test_load_missing_is_none(monkeypatch):
-    monkeypatch.setattr(_proto, "_SPROP_DIR", "/nonexistent/path/xyz")
+    monkeypatch.setenv("AIDOT_SPROP_DIR", "/nonexistent/path/xyz")
     assert _load_sprop("whatever") is None      # fail-safe, no raise
 
 
@@ -127,3 +124,25 @@ if __name__ == "__main__":
             finally:
                 mp.undo()
     raise SystemExit(1 if _fail else 0)
+
+
+def test_the_sprop_dir_is_read_at_call_time(monkeypatch, tmp_path):
+    """AIDOT_SPROP_DIR must work when set AFTER the module is imported.
+
+    The Home Assistant integration can only learn its persistent config path
+    at setup time - long after this module was imported - so a module-level
+    snapshot of the env var silently ignores the integration's setting and
+    the cache lands back in the container-ephemeral home directory. That is
+    the same import-time-binding bug the cloud_auth country default had, and
+    it made integration 2.17.11's persistence fix inert: verified live
+    2026-08-24, the cache directory under /config stayed empty while the
+    library kept writing to the old default path.
+    """
+    from aidot_cameras.camera import protocol
+
+    monkeypatch.setenv("AIDOT_SPROP_DIR", str(tmp_path / "late"))
+    protocol._save_sprop("cafe" * 8, "QUJD,REVG")
+    expected = tmp_path / "late" / ("cafe" * 8 + ".sprop")
+    assert expected.exists(), (
+        "a sprop write after a late env change must land in the new dir")
+    assert protocol._load_sprop("cafe" * 8) == "QUJD,REVG"

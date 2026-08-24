@@ -684,8 +684,18 @@ _XDG_CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
     os.path.expanduser("~"), ".config")
 
 
-_SPROP_DIR = os.environ.get("AIDOT_SPROP_DIR") or os.path.join(
-    _XDG_CONFIG_HOME, "aidot", "sprop")
+def _sprop_dir() -> str:
+    """The sprop cache directory - AIDOT_SPROP_DIR read at CALL time.
+
+    A consumer embedded in a larger process (the Home Assistant integration)
+    can only learn its persistent storage path at setup, after this module is
+    long imported; a module-level snapshot of the env var silently ignored
+    that setting and the cache landed back in the container-ephemeral home
+    directory, so every container recreation cost a startup-churn window.
+    Same lesson as cloud_auth's country default: bind config at call time.
+    """
+    return os.environ.get("AIDOT_SPROP_DIR") or os.path.join(
+        _XDG_CONFIG_HOME, "aidot", "sprop")
 
 
 def _extract_param_sets_from_rtp(pkt: bytes) -> dict:
@@ -740,12 +750,12 @@ def _build_sprop(sps: bytes, pps: bytes) -> str:
 def _sprop_cache_path(devid: str) -> str:
     # `devid` originates from the cloud/device and is interpolated into a
     # filesystem path, so a value containing "/", "\\", ".." or an absolute path
-    # could escape _SPROP_DIR (arbitrary read/write). Reduce it to a safe,
+    # could escape the sprop dir (arbitrary read/write). Reduce it to a safe,
     # collision-resistant filename component.
     safe = re.sub(r"[^A-Za-z0-9_-]", "_", devid or "")
     if not safe or len(devid or "") > 128:
         safe = hashlib.sha256((devid or "").encode("utf-8", "replace")).hexdigest()
-    return os.path.join(_SPROP_DIR, f"{safe}.sprop")
+    return os.path.join(_sprop_dir(), f"{safe}.sprop")
 
 
 def _sprop_unstable_path(devid: str) -> str:
@@ -834,14 +844,14 @@ def _save_sprop(devid: str, sprop: str) -> bool:
                 devid,
             )
             try:
-                os.makedirs(_SPROP_DIR, exist_ok=True)
+                os.makedirs(_sprop_dir(), exist_ok=True)
                 with open(_sprop_unstable_path(devid), "w") as fh:
                     fh.write("parameter sets changed between sessions\n")
                 os.remove(_sprop_cache_path(devid))
             except OSError:
                 pass
             return False
-        os.makedirs(_SPROP_DIR, exist_ok=True)
+        os.makedirs(_sprop_dir(), exist_ok=True)
         tmp = _sprop_cache_path(devid) + ".tmp"
         with open(tmp, "w") as fh:
             fh.write(sprop)
@@ -851,7 +861,7 @@ def _save_sprop(devid: str, sprop: str) -> bool:
         # Surface (don't swallow): if the cache dir isn't writable the whole
         # sprop feature is silently inert.  AIDOT_SPROP_DIR can redirect it.
         _LOGGER.warning("sprop cache write failed (%s): %s - set AIDOT_SPROP_DIR "
-                        "to a writable path", _SPROP_DIR, exc)
+                        "to a writable path", _sprop_dir(), exc)
         return False
 
 
