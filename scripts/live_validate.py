@@ -33,8 +33,17 @@ docs/CAMERAS.md):
 Exit code is 0 only when every REQUIRED camera passed.
 
 Credentials come from ``aidot_cameras.credentials.load_credentials``
-(AIDOT_USERNAME / AIDOT_PASSWORD / AIDOT_COUNTRY, or AIDOT_TOKEN_FILE).
+(AIDOT_USERNAME / AIDOT_PASSWORD / AIDOT_COUNTRY).
 No secrets are stored in this file.
+
+Set ``AIDOT_TOKEN_FILE`` to share one login with other processes. The AiDot
+cloud keeps a single live token per account, so a second login invalidates the
+first: a campaign that holds a client open and runs this script as a child
+loses its own session the moment the first child logs in, and the refresh token
+is rotated out with it, so there is no recovery. With the variable set, this
+goes through ``aidot_cameras.cloud_auth`` - the same path the go2rtc CLI uses -
+which reuses the stored token and writes rotations back. Unset, it logs in
+directly, which is what the release gate does.
 """
 
 import argparse
@@ -50,6 +59,7 @@ import aiohttp
 
 from aidot_cameras.client import AidotClient
 from aidot_cameras.const import CONF_DEVICE_LIST, CONF_ID, CONF_NAME
+from aidot_cameras.cloud_auth import _make_client
 from aidot_cameras.credentials import load_credentials
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1108,14 +1118,25 @@ async def _run(args) -> int:
         "cameras": [],
     }
     async with aiohttp.ClientSession() as http:
-        client = AidotClient(
-            http,
-            country_code=creds.get("country", "US"),
-            username=creds["username"],
-            password=creds["password"],
-        )
-        try:
+        # The cloud keeps ONE live token per account, so a login invalidates
+        # whoever held the last one.  With AIDOT_TOKEN_FILE set we reuse the
+        # stored token and write rotations back, which is what lets a campaign
+        # hold a client across sessions while this runs as its child.  Unset -
+        # the release gate's own case - this is the previous behaviour exactly.
+        if os.environ.get("AIDOT_TOKEN_FILE"):
+            os.environ.setdefault("AIDOT_USERNAME", creds["username"])
+            os.environ.setdefault("AIDOT_PASSWORD", creds["password"])
+            os.environ.setdefault("AIDOT_COUNTRY", creds.get("country", "US"))
+            client = await _make_client(http)
+        else:
+            client = AidotClient(
+                http,
+                country_code=creds.get("country", "US"),
+                username=creds["username"],
+                password=creds["password"],
+            )
             await client.async_post_login()
+        try:
             devices = (await client.async_get_all_device())[CONF_DEVICE_LIST]
             cameras = [d for d in devices if _is_camera(client.get_device_client(d))]
             print(f"found {len(cameras)} camera(s) of {len(devices)} device(s)")
