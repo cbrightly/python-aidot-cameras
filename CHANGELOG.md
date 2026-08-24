@@ -6,6 +6,36 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b30]
+
+### Fixed
+
+- **A credentials-file country other than US now reaches the password login.**
+  The validator's token-sharing branch published credentials into the process
+  environment for the shared login helper to re-read, and the country leg of
+  that shim was dead: the helper's default was bound at module import, so the
+  assignment made after import could never reach it. Credentials now travel
+  as explicit parameters (`_make_client(session, username=..., password=...,
+  country=...)`), which also stops the decrypted password from being exported
+  to every spawned child process.
+
+### Changed
+
+- **Quality pass over the b28/b29 code, from a four-angle review.** REMB goes
+  through a `_send_video_remb` helper like its NACK and TMMBR siblings - the
+  inline copy was where the raw-socket relay bug hid - and all three share
+  one protect-and-send tail. The RTCP cadence guards are cost-ordered so the
+  default configuration pays at most one attribute read per packet on the
+  bridge's packet loop, and the readiness math and sender lookups run at most
+  once a second. One `_env_positive` parser replaces three copied env
+  readers; the `b=AS` knob is read once per offer so its status receipt can
+  never disagree with the SDP actually sent; `build_nack` uses the RTPFB
+  constants defined beside it; a dead module constant and a vacuous rebuild
+  guard are gone. Missing credentials raise `CloudAuthUnavailable` instead of
+  exiting from library code (the go2rtc CLI still exits). No behaviour change
+  on any streaming path is intended; this release exists so the refactor
+  soaks ahead of rc1 rather than having its first field exposure there.
+
 ## [1.0.0b29]
 
 ### Fixed
