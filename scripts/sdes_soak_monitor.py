@@ -25,7 +25,7 @@ Usage
   python scripts/sdes_soak_monitor.py soak.log
 
   # friendlier output: map device ids to names (repeatable)
-  ... | python scripts/sdes_soak_monitor.py --name b5284fc70d1e=Kitchen --name 12b144cb12da="Garage PTZ"
+  ... | python scripts/sdes_soak_monitor.py --name 0a1b2c3d4e5f=FrontDoor --name a9b8c7d6e5f4="Garage PTZ"
 
 No camera or cloud access; pure log parsing. Reads stdin if no file is given.
 """

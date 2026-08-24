@@ -1,5 +1,7 @@
 # What 1.0.0 is waiting on
 
+> Cameras are named by role: "the PTZ" is the single A001064; "unit 88-A..D" are the four A000088s (D retired); "unit 13-A..C" are the three battery A001513s, 13-A being the one on the separate IoT SSID whose sessions ride the TURN relay.
+
 Written 2026-08-07, updated 2026-08-08 after an audit-closing day. The point of
 this file is to make the bar checkable, so that "are we ready" stops being a
 matter of opinion.
@@ -318,9 +320,9 @@ session.
 `31285146195` produced three profile lines - one per SDES camera - where every
 previous run produced zero:
 
-    12b144cb12da (A001064)   video profile pt=96 codec=H264
-    338603b50fce (A001513)   video profile pt=96 codec=H264
-    b5284fc70d1e (A001513)   video profile pt=96 codec=H264
+    the PTZ (A001064)   video profile pt=96 codec=H264
+    unit 13-B0fce (A001513)   video profile pt=96 codec=H264
+    unit 13-A0d1e (A001513)   video profile pt=96 codec=H264
 
 Three of three chose H264. No hevc instance appeared, so this run cannot answer
 what selects it - the question needs a corpus large enough to contain both
@@ -417,7 +419,7 @@ answer, and then send H264 anyway. That is a direct observation of the camera
 declining a stated preference, which is what the ordering hypothesis needed it
 not to do.
 
-**The second kill did trigger, and is confounded.** `L2_F8A3` returned no video
+**The second kill did trigger, and is confounded.** `unit 13-A` returned no video
 at all on both attempts. That is the unit with an independent, documented stall
 - six of the seven stall reports in item 3 are this camera, several of them from
 runs on the shipped order - and both of this run's stall reports name ICE causes
@@ -503,7 +505,7 @@ bimodal with a 63-second empty band: the slowest SDES pass was 16.8 s and the
 fastest no-media was 80.1 s, with nothing in between. Media arrives fast or it
 never arrives - so whatever fails here fails at setup, not by degrading.
 
-**This is one defect wearing three names.** It is also the `camera.kitchen`
+**This is one defect wearing three names.** It is also the unit 13-A camera entity
 no-media case, and the subject of the relay-only investigation: the same unit
 streams fine from other hosts on the same LAN, and the one difference found is
 that it sits on a different SSID from the Home Assistant host while we advertise
@@ -522,7 +524,7 @@ Evidence: the raw logs of five fleet validation runs (31275220411, 31279366049,
 harness started configuring logging, so the library's INFO breadcrumbs are
 present for the first time. A sixth run, 31273232752, was read as well and
 contributes no rows: it predates that harness fix, carries zero `webrtc:` lines,
-and every camera passed, L2_F8A3 included.
+and every camera passed, unit 13-A included.
 
 **The gate.** Media only ever follows the AVIO LIVING trigger
 (`sdes_open.py:3969-4015`, the `SDES: sent trigger` line), and that trigger is
@@ -533,11 +535,11 @@ A001513 and A001064) and is identical on both sides of the split.
 
     open   camera            nominated candidate      trigger  first media
     ----   ---------------   ----------------------   -------  -----------
-    x5     A001064 12b144cb  192.168.0.171:<port>     yes      12.2-12.9 s
-    x5     A001513 338603b5  54.144.38.43:<port>      yes      4.7-6.3 s
-    x3     A001513 b5284fc7  54.144.38.43:<port>      yes      5.6-6.4 s
-    x3     A001513 b5284fc7  192.168.100.3:<port>     NO       none
-    x1     A001513 b5284fc7  (no ICE creds in answer) NO       none
+    x5     A001064 the PTZ  <lan-ip>:<port>     yes      12.2-12.9 s
+    x5     A001513 unit 13-B  54.144.38.43:<port>      yes      4.7-6.3 s
+    x3     A001513 unit 13-A  54.144.38.43:<port>      yes      5.6-6.4 s
+    x3     A001513 unit 13-A  <iot-subnet-ip>:<port>     NO       none
+    x1     A001513 unit 13-A  (no ICE creds in answer) NO       none
 
 13 opens sent the trigger and every one delivered first media. 4 did not and not
 one delivered a byte. 17 of 17, no exception in either direction.
@@ -545,7 +547,7 @@ one delivered a byte. 17 of 17, no exception in either direction.
 **Why it never arms on this unit.** USE-CANDIDATE goes only to the candidates
 carried in the camera's answer, plus peer-reflexive candidates learned from the
 camera's own probes (`sdes_open.py:3083-3099`, `:3788-3800`). On the three
-host-only opens the answer carried exactly one candidate, `192.168.100.3`, on a
+host-only opens the answer carried exactly one candidate, `<iot-subnet-ip>`, on a
 subnet this host has no route to; the fourth carried no ICE credentials at all.
 Nothing we nominated could answer, so no Binding Success came back, so the
 trigger never fired, so the camera never started sending.
@@ -562,7 +564,7 @@ installs (`[setup]`, `[trickle host]`, `[trickle srflx]`, `[trickle relay]`,
 INFERRED, not verified: which of the two vetoes did it. Both are silent.
 
 **Why one unit.** The cloud device records in these runs carry `ssidName`:
-L2_F8A3 is the only camera on the IoT SSID; every other working camera is on the
+unit 13-A is the only camera on the IoT SSID; every other working camera is on the
 main one. This is the mirror image of the disproven relay-only story, not a
 revival of it. That story said *we* advertise a host candidate the camera cannot
 reach. What is measured here is that *the camera* advertises a host candidate
@@ -573,9 +575,9 @@ SSID" - it is to make the relay path usable when the answer is host-only.
 
 **Why a mains camera hit it once and recovered.** Same mechanism, already on
 record in this codebase: `_record_peer_reflexive`'s own docstring
-(`sdes_open.py:737-756`) notes the A001064 PTZ advertising `192.168.100.13` as
+(`sdes_open.py:737-756`) notes the A001064 PTZ advertising an address on a different /24 as
 its only candidate while it sat on that same subnet. That is what peer-reflexive
-learning was added for. The PTZ now reports `192.168.0.171` and passes 5 of 5
+learning was added for. The PTZ now reports `<lan-ip>` and passes 5 of 5
 here, and the learning covers the direct-probe case - just not the relay-carried
 one, which is the only path this battery unit has.
 
@@ -595,7 +597,7 @@ upstream cause through the file muxer (`[mpegts] frame size not set`, exit 255).
 Consistent with, not verified identical to.
 
 **Open sub-question that gates any fix.** A Data Indication reached us while the
-only permission installed was for `192.168.100.3`. Either the cloud TURN server
+only permission installed was for `<iot-subnet-ip>`. Either the cloud TURN server
 does not enforce inbound permissions - in which case a Send-Indication return
 path to the camera's observed address is viable - or the model of the failing
 case is incomplete.
@@ -640,8 +642,8 @@ is the first one.
 **2. It is the A001513s, exactly as this item always said.** An earlier version
 of this section claimed the stalling unit was the A001064 PTZ. That was wrong and
 is retracted: it took the device id from a log line that merely sat nearby rather
-than from the device list. Verified against the list, `b5284fc7` is **L2_F8A3**
-and `338603b5` is **L2_181**, both `LK.IPC.A001513`; the A001064 is `12b144cb`
+than from the device list. Verified against the list, `unit 13-A` is **unit 13-A**
+and `unit 13-B` is **L2_181**, both `LK.IPC.A001513`; the A001064 is `the PTZ`
 and appears in none of the reports. The lesson is one this project keeps
 relearning - never source an identifier from something that only sits next to
 it.
@@ -651,19 +653,19 @@ point that does contradict the item above, which argues one mechanism. They
 differ in the field that matters, so treating them as one defect is what kept
 this open:
 
-    b5284fc7 = L2_F8A3 (A001513), 5 of the 7 - the unit this item describes:
-      nominated=192.168.100.3:P1, 173.53.36.206:P2, 54.144.38.43:P3
+    unit 13-A (A001513), 5 of the 7 - the unit this item describes:
+      nominated=<iot-subnet-ip>:P1, 173.53.36.206:P2, 54.144.38.43:P3
       use-candidate=sent; binding-success=0; trigger=not-sent
       probes=54.144.38.43:5349 via 173.53.36.206:P1 -> vetoed-self-ip
              54.144.38.43:5349 via 173.53.36.206:P2 -> vetoed-self-ip
              54.144.38.43:5349 via 54.144.38.43:P3  -> known
 
-    338603b5 = L2_181 (A001513), once:
-      nominated=192.168.0.129:53246, 192.168.0.129:47093
+    unit 13-B = L2_181 (A001513), once:
+      nominated=192.168.7.21:53246, 192.168.7.21:47093
       use-candidate=NOT-SENT; binding-success=0; trigger=not-sent
-      probes=192.168.0.129:53246 -> learned; 192.168.0.129:47093 -> learned
+      probes=192.168.7.21:53246 -> learned; 192.168.7.21:47093 -> learned
 
-    b5284fc7 = L2_F8A3, the sixth of its reports (run 31348997269):
+    unit 13-A, the sixth of its reports (run 31348997269):
       nominated=none; use-candidate=not-sent; binding-success=0; probes=none
 
 The second is not an ICE-reachability problem at all. Both probe sources were
@@ -700,7 +702,7 @@ not appear on demand.
 
 #### 2026-08-11: the A001064 is now in the persistent state, and the log went blind
 
-`Winees Spotlight Cam_183` (A001064) has returned no media on SIX consecutive
+`the PTZ (A001064)` (A001064) has returned no media on SIX consecutive
 attempts across three runs, handshakes of 113-120 s each, zero packets and zero
 bytes every time. Every other live camera passed in the same runs.
 
@@ -748,8 +750,8 @@ The kill written above, before any of this evidence existed, was:
 
 `L2_181` attempt 1 in run 31448429413:
 
-    nominated=192.168.0.129:46846, 192.168.0.129:36740; use-candidate=sent;
-    binding-success=4; trigger=sent; probes=192.168.0.129:46846 -> learned
+    nominated=192.168.7.21:46846, 192.168.7.21:36740; use-candidate=sent;
+    binding-success=4; trigger=sent; probes=192.168.7.21:46846 -> learned
 
 Four inbound Binding Successes, the trigger sent, an ordinary LAN candidate
 learned and nominated - and zero media for the full 75 s. The retry passed.
@@ -808,9 +810,9 @@ that sent nothing and a camera whose media we could not decrypt wrote identical
 lines. Media counters are gated on the packet being readable, correctly, so the
 second case left no trace at all.
 
-Run 31485643934, L2_F8A3 attempt 1:
+Run 31485643934, unit 13-A attempt 1:
 
-    nominated=192.168.100.3:48195, 173.53.36.206:34986, 54.144.38.43:59366,
+    nominated=<iot-subnet-ip>:48195, 173.53.36.206:34986, 54.144.38.43:59366,
               173.53.36.206:48195
     use-candidate=sent; binding-success=6; trigger=sent;
     inbound-media=0; decrypt-failed=0
@@ -863,10 +865,10 @@ port keeps the old conservative answer.
 learned one, and two of the four are `173.53.36.206:40888` and
 `173.53.36.206:52183` - our own public IP on ports that are not ours, which is
 precisely the address class the old check refused. All six live cameras streamed
-and the run logged no stall at all, L2_F8A3 included at 415 decoded frames.
+and the run logged no stall at all, unit 13-A included at 415 decoded frames.
 
 **A second run, 31400620372, adds the more useful kind of evidence: a stall that
-still happened.** L2_F8A3 returned no media on its first attempt and passed on
+still happened.** unit 13-A returned no media on its first attempt and passed on
 its second. The report for it reads:
 
     nominated=none; use-candidate=not-sent; binding-success=0; probes=none
@@ -1035,7 +1037,7 @@ Two residuals, stated rather than fixed:
   does, twice now, the first being 10 s. It is 40 s, about 1.7x the slowest
   sample, with a test asserting headroom rather than a number.
 
-  **That did not stop the failures, and run 31399498436 says why.** L2_F8A3
+  **That did not stop the failures, and run 31399498436 says why.** unit 13-A
   reported `snapshot_s=50.0`, which is the outer bound (budget + 10) rather than
   a slow snapshot. Its stream session that run was healthy - first media at
   +5473 ms, 415 decoded frames - and its snapshot's OWN session logged no
@@ -1194,9 +1196,9 @@ record of what the evidence looked like at the time and of how it misled.
 
 Run 31497241870, the same probe against the SDES models:
 
-    Winees (A001064)  HASLISTEVENT -> 0x4b6, 180 bytes
+    the PTZ (A001064)  HASLISTEVENT -> 0x4b6, 180 bytes
                       LISTEVENT    -> 0x319, 12 bytes
-    L2_F8A3 (A001513) HASLISTEVENT -> 0x4b6, 180 bytes
+    unit 13-A (A001513) HASLISTEVENT -> 0x4b6, 180 bytes
 
 **SD event listing works over the ordinary WebRTC AVIO channel.** The inference
 that it needed the native P2P stack - drawn from the A000088s' silence plus

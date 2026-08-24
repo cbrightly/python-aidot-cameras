@@ -1175,7 +1175,7 @@ def _record_peer_reflexive(known, discovered, observed, is_self=None):
     route to, the nomination goes into a black hole, and the session sits in
     ICE "Checking" while the camera's probes keep arriving from an address we
     never nominate.  Observed on the A001064 PTZ while it was on a separate
-    192.168.100.0/24: it advertised 192.168.100.13 as its only candidate.
+    192.168.9.0/24: it advertised 192.168.9.13 as its only candidate.
 
     Returns the new discovered list, or ``discovered`` unchanged when there is
     nothing to learn.  Callers must REBIND rather than mutate in place - the

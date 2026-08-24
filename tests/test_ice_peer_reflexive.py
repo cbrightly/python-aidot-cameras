@@ -11,7 +11,7 @@ from aidot_cameras.camera.sdes_open import (
     _record_peer_reflexive,
 )
 
-ADVERTISED = [("192.168.100.13", 40000)]
+ADVERTISED = [("192.168.9.13", 40000)]
 
 
 def _never_self(_ip, _port=None):
@@ -40,7 +40,7 @@ def test_an_advertised_source_is_not_duplicated():
     had before this existed.
     """
     out = _record_peer_reflexive(
-        ADVERTISED, [], ("192.168.100.13", 40000), _never_self)
+        ADVERTISED, [], ("192.168.9.13", 40000), _never_self)
     assert out == []
 
 
@@ -58,10 +58,10 @@ def test_our_own_address_is_never_learned():
     Nominating ourselves would form a pair that can never carry camera media.
     """
     def _is_self(ip, port=None):
-        return (ip, port) == ("192.168.0.110", 3478)
+        return (ip, port) == ("192.168.7.1", 3478)
 
     out = _record_peer_reflexive(
-        ADVERTISED, [], ("192.168.0.110", 3478), _is_self)
+        ADVERTISED, [], ("192.168.7.1", 3478), _is_self)
     assert out == []
 
 

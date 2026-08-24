@@ -12,9 +12,9 @@ kinds of real camera evidence could never satisfy it:
 
 Captured live 2026-08-07:
 
-    topic: iot/v1/cb/338603b50fce.../device/wakeupStatus
+    topic: iot/v1/cb/001122334455.../device/wakeupStatus
     {"service":"device","seq":"240775779d",
-     "srcAddr":"2.338603b50fce46ef8d2545fc7362c967",
+     "srcAddr":"2.00112233445566778899aabbccddeeff",
      "method":"wakeupStatus","tst":1638258124214,"payload":{"extends":null}}
 
 `lowPowerActiveStateResp` remains sufficient on its own, and that is
@@ -36,8 +36,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aidot_cameras.camera.webrtc_open import _is_camera_present_signal
 
-DEV = "b5284fc70d1e4ef7b68692df0170bd3b"
-OTHER = "338603b50fce46ef8d2545fc7362c967"
+DEV = "a9b8c7d6e5f40312213243546576879a"
+OTHER = "00112233445566778899aabbccddeeff"
 UID = "5354ad296b414fe9be581c7116f246e0"
 
 # All three captured verbatim from the live HA host, 2026-08-07.

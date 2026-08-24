@@ -40,9 +40,9 @@ def test_the_log_names_the_camera(caplog):
     during a live investigation, which cost real time and one wrong conclusion.
     """
     with caplog.at_level(logging.DEBUG, logger="aidot_cameras.camera.sdes"):
-        _log_fn(1.0, device_id="12b144cb12da")(b"Error writing trailer")
+        _log_fn(1.0, device_id="0a1b2c3d4e5f")(b"Error writing trailer")
     recs = _stderr_records(caplog)
-    assert recs and "12b144cb12da" in recs[0].getMessage()
+    assert recs and "0a1b2c3d4e5f" in recs[0].getMessage()
 
 
 def test_no_media_unexpected_error_still_warns(caplog):

@@ -36,7 +36,7 @@ def raw_device():
     Usage::
 
         dev = raw_device("A001513")                  # battery SDES profile
-        dev = raw_device("A000088", name="Deck")     # DTLS profile
+        dev = raw_device("A000088", name="Porch")     # DTLS profile
         dev = raw_device("A001513", properties={...})  # override properties
     """
     counter = [0]

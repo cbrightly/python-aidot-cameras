@@ -29,9 +29,9 @@ from aidot_cameras.camera.sdes_open import _first_media_stall_report
 def _report(**over):
     kwargs = dict(
         device_id="cam1", waited_s=75.0,
-        nominated=[("192.168.0.129", 46846)],
+        nominated=[("192.168.7.21", 46846)],
         use_candidate_sent=True, binding_success=4, trigger_sent=True,
-        probes=[("192.168.0.129:46846", "learned")],
+        probes=[("192.168.7.21:46846", "learned")],
     )
     kwargs.update(over)
     return _first_media_stall_report(**kwargs)

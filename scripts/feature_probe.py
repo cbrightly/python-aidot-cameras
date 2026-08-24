@@ -71,7 +71,7 @@ def supports_playback(device: dict) -> bool:
 
     It also said the A000088s "report `SDcardStatus: 1`", taking that as a card
     being present. `SDcardStatus` is 1 on every A000088 including ones with no
-    card at all: the Bedroom M3 Pro reports `SDcardExistFlag: false` and
+    card at all: an A000088 reports `SDcardExistFlag: false` and
     `SDcardBaseInfo: [false,0,0,0,0]` - no card, zero capacity - and its owner
     confirms the slot is empty. The two A001513s, which DO answer the
     recording-list commands, report `SDcardStatus: 0`. So the flag does not mean

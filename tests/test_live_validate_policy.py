@@ -385,11 +385,11 @@ def test_an_absent_camera_still_reaches_a_failing_verdict(lv, tmp_path):
     The saving is wall clock, not leniency: a required model with no working
     camera must still fail the release.
     """
-    report = {"cameras": [_cam(lv, "LK.IPC.A000088", "ERROR", name="Deck")]}
+    report = {"cameras": [_cam(lv, "LK.IPC.A000088", "ERROR", name="Porch")]}
     report["cameras"][0]["attempts_used"] = lv.SLOTLESS_MAX_ATTEMPTS
     assert lv._summarize(report, _args(tmp_path)) == 1
     assert report["verdict"] == "FAIL"
-    assert report["required_failed"] == ["Deck"]
+    assert report["required_failed"] == ["Porch"]
 
 
 # --------------------------------------------------------------------------- #
@@ -436,12 +436,12 @@ async def test_wait_until_sleeps_the_remainder_and_says_why(lv, monkeypatch,
     monkeypatch.setattr(lv.asyncio, "sleep", _recorder(slept))
     monkeypatch.setattr(lv.time, "monotonic", lambda: 1_000.0)
 
-    waited = await lv._wait_until(1_000.0 + 42.0, "'Kitchen'")
+    waited = await lv._wait_until(1_000.0 + 42.0, "'FrontDoor'")
 
     assert waited == pytest.approx(42.0)
     assert slept == [pytest.approx(42.0)]
     out = capsys.readouterr().out
-    assert "42s" in out and "Kitchen" in out
+    assert "42s" in out and "FrontDoor" in out
 
 
 async def test_wait_until_reports_the_wait_it_did_not_take(lv, monkeypatch,
@@ -456,11 +456,11 @@ async def test_wait_until_reports_the_wait_it_did_not_take(lv, monkeypatch,
     monkeypatch.setattr(lv.asyncio, "sleep", _recorder(slept))
     monkeypatch.setattr(lv.time, "monotonic", lambda: 1_000.0)
 
-    waited = await lv._wait_until(0.0, "'Kitchen'")
+    waited = await lv._wait_until(0.0, "'FrontDoor'")
 
     assert waited == 0.0
     assert slept == [], "a device that owes nothing must not sleep at all"
-    assert "Kitchen" in capsys.readouterr().out
+    assert "FrontDoor" in capsys.readouterr().out
 
 
 async def test_a_fresh_camera_does_not_wait_for_the_previous_one(lv, monkeypatch):

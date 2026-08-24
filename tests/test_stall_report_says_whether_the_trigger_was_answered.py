@@ -1,6 +1,6 @@
 """`trigger=sent` records that WE transmitted, which the kill showed is not enough.
 
-Run 31485643934, L2_F8A3 attempt 1: `binding-success=6; trigger=sent;
+Run 31485643934, a battery A001513, attempt 1: `binding-success=6; trigger=sent;
 inbound-media=0; decrypt-failed=0`. So ICE completed, the trigger went out, and
 not one RTP packet arrived - and the new counters rule out the reading that we
 received media and could not decrypt it. The camera sent nothing.

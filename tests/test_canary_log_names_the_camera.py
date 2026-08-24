@@ -20,8 +20,8 @@ CANARY = {"frames": 300, "keyframes": 10, "max_gap": 92, "gap": 4}
 
 def test_canary_line_includes_the_device_id(caplog):
     with caplog.at_level(logging.DEBUG, logger="aidot_cameras.camera.client"):
-        _log_serve_canary("7c89a5c1b36346e5b5c2f77f8554ad63", CANARY)
-    assert "7c89a5c1b36346e5b5c2f77f8554ad63" in caplog.text
+        _log_serve_canary("0a1b2c3d4e5f60718293a4b5c6d7e8f9", CANARY)
+    assert "0a1b2c3d4e5f60718293a4b5c6d7e8f9" in caplog.text
 
 
 def test_canary_line_keeps_its_counters(caplog):

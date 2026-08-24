@@ -17,7 +17,7 @@ e.g. the PTZ) to read stability cleanly. The signaling cost is clean on any SDES
 Run with HA stopped or cameras otherwise idle to avoid contention. Uses the
 public library API, like smoke_stream.py - no extra setup.
 
-  python scripts/sdes_validate.py --name Driveway --cycles 4 --hold 95 --gap 45
+  python scripts/sdes_validate.py --name FrontDoor --cycles 4 --hold 95 --gap 45
   python scripts/sdes_validate.py --name "Garage PTZ" --cycles 4   # clean stability
 """
 import argparse

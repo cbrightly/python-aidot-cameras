@@ -46,14 +46,14 @@ Optional stream knobs:
 go2rtc.yaml example (SDES camera - native RTSP push, video + audio):
 
     streams:
-      frontdoor: exec:aidot-go2rtc 8d2521ea... {output}
+      frontdoor: exec:aidot-go2rtc 0a1b2c3d... {output}
 
 A DTLS camera (A000088) has no RTSP-push path, but a stdout producer works the
 same lazy way. Pass ``-`` as the output and this process writes MPEG-TS (video
 plus AAC audio) to stdout, which go2rtc's exec: source reads directly:
 
     streams:
-      driveway: exec:aidot-go2rtc 7c89a5c1... -
+      garage: exec:aidot-go2rtc 0a1b2c3d... -
 
 go2rtc then owns the lifecycle - spawn on the first viewer, kill when idle -
 exactly as it does with ``{output}`` for an SDES camera. An

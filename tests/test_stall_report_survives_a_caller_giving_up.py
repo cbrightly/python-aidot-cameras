@@ -4,7 +4,7 @@ The first-media stall report is emitted when the 75 s wait expires. Snapshots
 give up sooner - the probe's outer bound is the snapshot budget plus 10, which
 is 50 s - so a snapshot session that stalls is cancelled 25 s before the only
 line that could explain it would have been written. Measured in run
-31399498436: L2_F8A3 reported `snapshot_s=50.0` with its snapshot session
+31399498436: a battery A001513 reported `snapshot_s=50.0` with its snapshot session
 logging no first media at all, and the run contains no stall report for it.
 
 That is the worst shape for a diagnostic: it is present exactly when it is not

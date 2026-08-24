@@ -24,7 +24,7 @@ anything.
 
 **Why the A000088s answered nothing: THE SLOT WAS EMPTY. Settled 2026-08-11.**
 
-A card was inserted into a Bedroom M3 Pro and every command that had been silent
+A card was inserted into an A000088 and every command that had been silent
 for months answered on the first try, in the same session, both modes:
 
     haslistevent          answered  cmd 1206 (0x4B6)  hex 000000000100000000010000

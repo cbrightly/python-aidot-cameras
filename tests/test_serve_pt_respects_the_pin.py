@@ -4,7 +4,7 @@ Measured 2026-08-23 on the reference A001064, with `sdes_pin_h264` ON (so the
 offer advertises H.264 only) and the camera sending pt=96 H264 in every
 observed session:
 
-    camera 12b144cb12da: no video observed before the serve launched;
+    camera 0a1b2c3d4e5f: no video observed before the serve launched;
       narrowing the SDP to payload type 97 from the camera's negotiated answer
     SDES: narrowed ffmpeg SDP to video pt=97 (H265)
 

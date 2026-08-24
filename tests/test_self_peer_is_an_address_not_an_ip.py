@@ -33,7 +33,7 @@ from aidot_cameras.camera.sdes_open import (
     _record_peer_reflexive,
 )
 
-LOCAL = "192.168.0.50"
+LOCAL = "192.168.7.2"
 PUBLIC = "173.53.36.206"
 OURS = (41000, 41002)          # the ports our own srflx candidates advertise
 
@@ -75,7 +75,7 @@ def test_an_unrelated_address_is_never_us():
 def test_the_learner_uses_the_port_too():
     # _record_peer_reflexive is where the address becomes a nomination target,
     # so it has to ask the same question the same way.
-    advertised = [("192.168.100.3", 34400)]
+    advertised = [("192.168.9.3", 34400)]
 
     learned = _record_peer_reflexive(
         advertised, [], (PUBLIC, 49887), _is_self)

@@ -27,7 +27,7 @@ default path is unchanged.
 VALIDATED 2026-08-21 and now ON BY DEFAULT. Four cameras, ~20 minutes each,
 about 64,500 packets: **0 negative DTS**, and **0 Home Assistant "Timestamp
 discontinuity" errors** in the window, against a baseline of ~0.91/min on
-ecf4937b alone. Audio intact at aac/48000 - no G.711 downgrade. Frame rate
+a member of the reference fleet alone. Audio intact at aac/48000 - no G.711 downgrade. Frame rate
 nominal (median step 6030 ticks = 14.9 fps).
 
 Sized to 20 minutes on purpose: the defect is bursty and absent from roughly

@@ -64,11 +64,11 @@ if __name__ == "__main__":
 
 def test_stream_slug_is_url_safe_and_falls_back_to_the_id():
     assert _stream_slug("Front Door", "abc") == "front_door"
-    assert _stream_slug("Winees Spotlight Cam_183", "abc") == "winees_spotlight_cam_183"
+    assert _stream_slug("Front Gate Cam_9", "abc") == "front_gate_cam_9"
     # A go2rtc stream name lands in a URL path, so punctuation-only or missing
     # names must not produce an empty (or slash-bearing) key.
-    assert _stream_slug(None, "7c89a5c1b363") == "camera_7c89a5c1"
-    assert _stream_slug("!!!", "7c89a5c1b363") == "camera_7c89a5c1"
+    assert _stream_slug(None, "0a1b2c3d4e5f") == "camera_0a1b2c3d"
+    assert _stream_slug("!!!", "0a1b2c3d4e5f") == "camera_0a1b2c3d"
     assert _stream_slug("Back/Yard #2", "abc") == "back_yard_2"
 
 

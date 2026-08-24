@@ -47,16 +47,16 @@ _TURN = "3.230.182.123"
 # --------------------------------------------------------------------------- #
 def test_a_direct_probe_that_taught_us_an_address_reads_as_learned():
     assert _probe_source_verdict(
-        ("192.168.0.171", 41234), None, None,
-        cam_peer=None, observed=("192.168.0.171", 41234),
+        ("192.168.7.20", 41234), None, None,
+        cam_peer=None, observed=("192.168.7.20", 41234),
         known=False, learned=True,
     ) == "learned"
 
 
 def test_a_probe_from_an_address_we_already_nominate_is_not_a_veto():
     assert _probe_source_verdict(
-        ("192.168.0.171", 41234), None, None,
-        cam_peer=None, observed=("192.168.0.171", 41234),
+        ("192.168.7.20", 41234), None, None,
+        cam_peer=None, observed=("192.168.7.20", 41234),
         known=True, learned=False,
     ) == "known"
 
@@ -96,16 +96,16 @@ def test_a_peer_address_without_a_port_is_not_reported_as_the_self_ip_veto():
 def test_an_observed_address_the_peer_reflexive_policy_refused_is_not_called_known():
     """_record_peer_reflexive drops silently too (self-IP, or the cap)."""
     assert _probe_source_verdict(
-        ("192.168.0.171", 41234), None, None,
-        cam_peer=None, observed=("192.168.0.171", 41234),
+        ("192.168.7.20", 41234), None, None,
+        cam_peer=None, observed=("192.168.7.20", 41234),
         known=False, learned=False,
     ) == "prflx-refused"
 
 
 def test_a_relay_carried_probe_that_was_learned_still_reads_as_learned():
     assert _probe_source_verdict(
-        (_TURN, 5349), "192.168.100.3", 41234,
-        cam_peer=("192.168.100.3", 41234), observed=("192.168.100.3", 41234),
+        (_TURN, 5349), "192.168.9.3", 41234,
+        cam_peer=("192.168.9.3", 41234), observed=("192.168.9.3", 41234),
         known=False, learned=True,
     ) == "learned"
 
@@ -117,7 +117,7 @@ def _report(**over):
     kwargs = dict(
         device_id="cam1",
         waited_s=75.0,
-        nominated=[("192.168.100.3", 41234)],
+        nominated=[("192.168.9.3", 41234)],
         use_candidate_sent=True,
         binding_success=0,
         trigger_sent=False,
@@ -131,19 +131,19 @@ def _report(**over):
 def test_case_trigger_fired_and_media_still_never_came():
     """The stated kill for the per-session model - it must be legible as one."""
     line = _report(
-        nominated=[("192.168.0.171", 41234)],
+        nominated=[("192.168.7.20", 41234)],
         binding_success=2,
         trigger_sent=True,
-        probes=[("192.168.0.171:41234", "learned")],
+        probes=[("192.168.7.20:41234", "learned")],
     )
     assert "binding-success=2" in line
     assert "trigger=sent" in line
-    assert "192.168.0.171:41234" in line
+    assert "192.168.7.20:41234" in line
 
 
 def test_case_no_binding_success_says_the_trigger_never_armed():
     line = _report(
-        nominated=[("192.168.100.3", 41234)],
+        nominated=[("192.168.9.3", 41234)],
         binding_success=0,
         trigger_sent=False,
         probes=[("3.230.182.123:5349", "vetoed-turn-source")],
@@ -194,7 +194,7 @@ def test_the_line_names_the_camera_and_the_wait_it_expired():
 
 def test_the_line_is_one_line():
     line = _report(
-        nominated=[("192.168.100.3", 41234), ("10.0.0.4", 5000)],
+        nominated=[("192.168.9.3", 41234), ("10.0.0.4", 5000)],
         probes=[("3.230.182.123:5349", "vetoed-turn-source"),
                 ("3.230.182.123:5349 via 203.0.113.7:9000", "vetoed-self-ip")],
     )
@@ -212,7 +212,7 @@ def test_a_truncated_probe_list_says_how_many_it_dropped():
 def test_the_report_carries_no_key_material_shaped_field():
     """Addresses and counts only - this line lands in home-assistant.log."""
     line = _report(
-        nominated=[("192.168.100.3", 41234)],
+        nominated=[("192.168.9.3", 41234)],
         probes=[("3.230.182.123:5349", "vetoed-turn-source")],
     )
     for banned in ("ufrag", "pwd", "inline:", "crypto", "token", "password"):

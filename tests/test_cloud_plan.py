@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import aidot_cameras.camera.client as cc
 
-_ME = "7c89a5c1b36346e5b5c2f77f8554ad63"
+_ME = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
 
 _PLAN = {
     "packageName": "AI Protection ",

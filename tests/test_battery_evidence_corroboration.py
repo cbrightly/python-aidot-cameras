@@ -58,8 +58,8 @@ def _cam(props, model="LK.IPC.A000088"):
 # the regression
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("name", ["M3 Pro_180", "Family Room Cam",
-                                  "Bedroom M3 Pro", "Deck"])
+@pytest.mark.parametrize("name", ["mains-88-a", "mains-88-b",
+                                  "mains-88-c", "mains-88-d"])
 def test_mains_a000088_reporting_batterymode_is_not_a_battery_camera(name):
     """The shipped bug: four mains cameras classified as battery.
 

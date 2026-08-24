@@ -21,7 +21,7 @@ from aidot_cameras.device_client import (
     _save_sprop,
 )
 
-# Real Driveway (A001513) parameter sets captured live 2026-06-08.
+# Real A001513 parameter sets captured live 2026-06-08.
 SPS = bytes.fromhex("27640033ad00ce8050079a6a020203e0000003002000000303c6f207d00bbffff814")
 PPS = bytes.fromhex("28ee3cb0")
 SPROP = "J2QAM60AzoBQB5pqAgID4AAAAwAgAAADA8byB9ALv//4FA==,KO48sA=="
