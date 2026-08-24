@@ -268,6 +268,26 @@ Two things stop this being the answer today, and neither is a bitrate number:
    inert" now stands measured on both codecs, and the capture separately
    disproved the session-type theory (zero DTLS records in 14,383 app-to-PTZ
    packets - the app gets its 2:1 on the same SDES session type we open).
+
+   The app's one remaining visible difference - it sends a quality command AT
+   CONNECT (`onConnected -> setResolution(16)`) where we send none - was also
+   replicated and measured: armed 0.756 against a paired read-only control at
+   0.745 on H264, no effect. The armed-H265 cell could not be filled: the
+   camera answered H264 on all eight overnight attempts, where daytime runs
+   see H265 roughly half the time, so the codec flip itself appears tied to
+   night mode. If anyone fills that last cell, do it in daylight.
+
+   Two last candidates closed 2026-08-24. The app does NOT restart the stream
+   on a quality tap: one video SSRC spans both rate regimes in the 08-11
+   capture with continuous sequence numbers and no re-offer. And connect-time
+   arming - Auto(16) the moment the control channel is up, then sd 16 s
+   later, mirroring the app's `onConnected()` path - has no effect either,
+   against a paired read-only control (settled rates 927 vs 836 kbps, same
+   codec). One n=1 curiosity on record: that sd acked in 2.11 s where enum
+   values ack in 0.01-0.19 s - the only latency signal any quality value has
+   ever produced. The mechanism behind the app's working toggle remains
+   unexplained, and this line is deliberately stopped rather than left
+   implicitly open.
 2. **H.265 may be unshippable for the defect that started this.** The original
    problem is MSE playback, and browser HEVC-over-MSE support is far narrower
    than H.264. Halving the bitrate is worthless if the client that was failing
