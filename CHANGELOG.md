@@ -6,6 +6,20 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b29]
+
+### Fixed
+
+- **Test fixtures and docs use documentation-range and placeholder addresses
+  throughout.** The role-label scrub in 1.0.0b28 renumbered the private
+  addresses and stopped one token short: log excerpts in one doc and one test
+  fixture still carried the real WAN address those sessions egressed from, so
+  the b28 sdist ships it in a single test file (the wheel never carried it,
+  and the same fixture has been in every sdist for weeks). No code change;
+  the self-peer-detection semantics the fixture exercises are unchanged under
+  an RFC 5737 address. This release exists so the current artifact is clean.
+
+
 ## [1.0.0b28]
 
 ### Fixed
