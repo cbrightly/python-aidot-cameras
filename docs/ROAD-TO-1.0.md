@@ -674,10 +674,10 @@ differ in the field that matters, so treating them as one defect is what kept
 this open:
 
     unit 13-A (A001513), 5 of the 7 - the unit this item describes:
-      nominated=<iot-subnet-ip>:P1, 173.53.36.206:P2, 54.144.38.43:P3
+      nominated=<iot-subnet-ip>:P1, <wan-ip>:P2, 54.144.38.43:P3
       use-candidate=sent; binding-success=0; trigger=not-sent
-      probes=54.144.38.43:5349 via 173.53.36.206:P1 -> vetoed-self-ip
-             54.144.38.43:5349 via 173.53.36.206:P2 -> vetoed-self-ip
+      probes=54.144.38.43:5349 via <wan-ip>:P1 -> vetoed-self-ip
+             54.144.38.43:5349 via <wan-ip>:P2 -> vetoed-self-ip
              54.144.38.43:5349 via 54.144.38.43:P3  -> known
 
     unit 13-B = L2_181 (A001513), once:
@@ -695,7 +695,7 @@ nominate at all - which points at signaling or the answer rather than at ICE.
 Neither is anticipated above.
 
 **What the first mode actually says.** `P1` is the port the camera advertises on
-its own host candidate, and it reappears as `173.53.36.206:P1` in the
+its own host candidate, and it reappears as `<wan-ip>:P1` in the
 XOR-PEER-ADDRESS - so the camera's traffic reaches the TURN server from THIS
 host's public IP. The camera is behind the same NAT we are. `_is_self_peer_ip`
 compares the IP alone (`_ip == _public_ip`), so it refuses the camera's own
@@ -707,7 +707,7 @@ IP and a different port, and P1/P2 are never our port. Comparing the pair rather
 than the address is both the ICE-correct rule and the safe one.
 
 **It is still not a fix, and here is what is missing.** Removing the veto would
-let the address be learned; it would not make it reachable. `173.53.36.206:P2`
+let the address be learned; it would not make it reachable. `<wan-ip>:P2`
 is already nominated in all four reports and returns nothing, which is what
 hairpin NAT looks like from here. The reachable return path is a Send Indication
 back through our own allocation to the camera's server-side address - the change
@@ -832,17 +832,17 @@ second case left no trace at all.
 
 Run 31485643934, unit 13-A attempt 1:
 
-    nominated=<iot-subnet-ip>:48195, 173.53.36.206:34986, 54.144.38.43:59366,
-              173.53.36.206:48195
+    nominated=<iot-subnet-ip>:48195, <wan-ip>:34986, 54.144.38.43:59366,
+              <wan-ip>:48195
     use-candidate=sent; binding-success=6; trigger=sent;
     inbound-media=0; decrypt-failed=0
-    probes=... via 173.53.36.206:48195 -> learned; ... -> known; ... -> known
+    probes=... via <wan-ip>:48195 -> learned; ... -> known; ... -> known
 
 **`inbound-media=0`.** The likeliest reading - that the camera sent and we could
 not read it - is ruled out by measurement rather than by argument. Not one RTP
 packet reached the bridge after six Binding Successes and the trigger.
 
-Two side findings in the same line. `173.53.36.206:48195 -> learned`, and that
+Two side findings in the same line. `<wan-ip>:48195 -> learned`, and that
 address in the nominated set, is the 1.0.0b3 ICE guard fix working on hardware.
 And the A001064's six-attempt persistent state cleared on its own that run
 (529 decoded frames), which is what the control run had already implied.
@@ -882,8 +882,8 @@ port keeps the old conservative answer.
 
 **The confirmation is behavioural, not merely an absence of failures.** Run
 31399498436 learned four peer-reflexive candidates where every earlier run
-learned one, and two of the four are `173.53.36.206:40888` and
-`173.53.36.206:52183` - our own public IP on ports that are not ours, which is
+learned one, and two of the four are `<wan-ip>:40888` and
+`<wan-ip>:52183` - our own public IP on ports that are not ours, which is
 precisely the address class the old check refused. All six live cameras streamed
 and the run logged no stall at all, unit 13-A included at 415 decoded frames.
 

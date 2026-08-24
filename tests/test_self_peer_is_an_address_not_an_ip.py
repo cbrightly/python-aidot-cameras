@@ -34,7 +34,7 @@ from aidot_cameras.camera.sdes_open import (
 )
 
 LOCAL = "192.168.7.2"
-PUBLIC = "173.53.36.206"
+PUBLIC = "203.0.113.7"
 OURS = (41000, 41002)          # the ports our own srflx candidates advertise
 
 
