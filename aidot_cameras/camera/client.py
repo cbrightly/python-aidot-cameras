@@ -566,6 +566,36 @@ _SERVE_REORDER_QUEUE = int(os.environ.get("AIDOT_SERVE_REORDER_QUEUE", "500"))
 #: failure this is meant to prevent.
 _SERVE_MAX_DELAY_US = int(os.environ.get("AIDOT_SERVE_MAX_DELAY_US", "500000"))
 
+#: How long (seconds) the serve ffmpeg waits with NO packets on any RTP socket
+#: before its SDP input errors out ("Error during demuxing: Operation timed
+#: out") and the serve dies.  ffmpeg's own default is 10 s (READ_PACKET_TIMEOUT_S,
+#: applied through the sdp demuxer's ``listen_timeout`` option).  Measured on an
+#: A001064 (2026-08-24/25): the camera episodically stops transmitting for
+#: >=10 s mid-session, and every reopen afterwards succeeds immediately, so the
+#: link recovers on a 10-20 s scale.  A mains camera therefore gets 30 s to ride
+#: the gap out; a battery camera keeps ffmpeg's 10 s default, because its stops
+#: are real sleeps that only a reopen (with its wake) ends - waiting longer just
+#: freezes the picture.  ``AIDOT_SERVE_INPUT_TIMEOUT_S`` overrides both.
+_SERVE_INPUT_TIMEOUT_MAINS_S = 30
+_SERVE_INPUT_TIMEOUT_BATTERY_S = 10
+
+
+def _resolve_serve_input_timeout_s(is_battery: bool) -> int:
+    """Seconds the serve's SDP input tolerates total silence before erroring.
+
+    Pure policy (unit-testable): the env override wins for every camera; else
+    mains rides out a transmit gap and battery keeps the fast default.
+    """
+    _env = os.environ.get("AIDOT_SERVE_INPUT_TIMEOUT_S")
+    if _env:
+        try:
+            return max(1, int(_env))
+        except ValueError:
+            pass
+    return (_SERVE_INPUT_TIMEOUT_BATTERY_S if is_battery
+            else _SERVE_INPUT_TIMEOUT_MAINS_S)
+
+
 #: How long to wait after a camera answers -50002 / -50015 ("no free session").
 #: Both loops used to wait _MAX_DELAY (300s) on the belief that the camera
 #: "releases slowly". Measured 2026-08-07 on an A001064: reopening 2s after a
@@ -630,6 +660,7 @@ def _build_sdes_serve_cmd(
     audio_gain_db: float = -8.0,
     push_video_only: bool = False,
     video_decoder: Optional[list] = None,
+    input_timeout_s: Optional[int] = None,
 ) -> list:
     """Build the ffmpeg argv for the SDES bridge serve.
 
@@ -778,6 +809,13 @@ def _build_sdes_serve_cmd(
         # before giving up on a gap rather than stalling the pipeline.
         "-reorder_queue_size", str(_SERVE_REORDER_QUEUE),
         "-max_delay", str(_SERVE_MAX_DELAY_US),
+        # Input silence tolerance: the sdp demuxer's ``listen_timeout`` doubles
+        # as its packet-read timeout (READ_PACKET_TIMEOUT_S, ffmpeg default
+        # 10 s).  See _resolve_serve_input_timeout_s for the mains/battery
+        # policy.  Input option, so it must sit before -i; None keeps ffmpeg's
+        # default (no behavior change for callers that do not opt in).
+        *(["-listen_timeout", str(int(input_timeout_s))]
+          if input_timeout_s is not None else []),
         "-i", sdp_path,
         *dest_args,
     ]

@@ -1218,6 +1218,42 @@ def _classify_ffmpeg_exit(rc: int, teardown_requested: bool) -> int:
     return logging.WARNING
 
 
+#: Mid-session stall nudge (see _stall_nudge_due): enabled by default;
+#: ``AIDOT_SDES_STALL_NUDGE=0`` turns it off and
+#: ``AIDOT_SDES_STALL_NUDGE_AFTER_S`` moves the trigger point.
+_STALL_NUDGE_ENABLED = os.environ.get("AIDOT_SDES_STALL_NUDGE", "1") != "0"
+_STALL_NUDGE_AFTER_S = float(
+    os.environ.get("AIDOT_SDES_STALL_NUDGE_AFTER_S", "2.5"))
+
+
+def _stall_nudge_due(
+    *,
+    silence_s: float,
+    nudges_sent: int,
+    since_last_nudge_s: float,
+    stall_after_s: float = 2.5,
+    max_nudges: int = 3,
+    interval_s: float = 2.0,
+) -> bool:
+    """Whether the bridge should re-send AVIO LIVING for a mid-session stall.
+
+    The A001064 episodically stops transmitting mid-session with no teardown
+    signal; every reopen afterwards succeeds immediately, so the camera is
+    awake and answering handshakes seconds after it stopped (measured
+    2026-08-24/25).  LIVING is the message that starts media on a fresh
+    session, so re-sending it on the live session is the cheapest possible
+    revive attempt.  Bounded (a few sends, spaced out) so a camera that is
+    truly asleep or out of range is not spammed - the serve's input timeout
+    and the keepalive reopen remain the unchanged fallback.  Pure function so
+    the policy is unit-testable without a live bridge.
+    """
+    if silence_s <= stall_after_s:
+        return False
+    if nudges_sent >= max_nudges:
+        return False
+    return since_last_nudge_s >= interval_s
+
+
 def _bridge_should_break(rc, teardown_requested: bool) -> bool:
     """Whether the bridge observe loop should end on this poll() result.
 
@@ -1623,7 +1659,7 @@ class _SdesOpenMixin:
         SDP answer, writes it to a temp file, and launches ffmpeg to receive and
         record the SRTP stream.
         """
-        from .client import CameraMixin, _build_sdes_serve_cmd, _ffmpeg_path, _spawn_bg  # lazy: break client<->sdes_open cycle
+        from .client import CameraMixin, _build_sdes_serve_cmd, _ffmpeg_path, _resolve_serve_input_timeout_s, _spawn_bg  # lazy: break client<->sdes_open cycle
         import base64
         import subprocess
 
@@ -4099,6 +4135,9 @@ class _SdesOpenMixin:
             _trigger_peer       = None    # camera's real addr when relayed
             _sdes_probe_received = False  # True after first 0xC8 probe from camera
             _last_hb_ts         = 0.0     # time of last AVIO HEARTBEAT send
+            _stall_nudges_sent  = 0       # LIVING re-sends for the CURRENT stall
+            _stall_last_nudge   = 0.0     # wall time of the last stall nudge
+            _stall_active       = False   # media had started, then went silent
             # One-shot guard for the "ffmpeg exited" log below: while the held
             # proc keeps reporting the same stale exit code across a
             # teardown-window skip (see _bridge_should_break), only the first
@@ -4537,12 +4576,17 @@ class _SdesOpenMixin:
                             except Exception as _dw_e:
                                 _status(f"SDES DC: DCEP_WAIT LIVING err: {_dw_e}")
 
-                    # Periodic retrigger: resend AVIO LIVING every 2s until probe
-                    # received (camera acknowledged our trigger).
-                    if (_avio_living_sent
-                            and not _sdes_probe_received
-                            and _trigger_bs is not None
-                            and _time_br.time() - _last_trigger_ts >= 2.0):
+                    # One LIVING wire-build, shared by the pre-probe retrigger
+                    # below and the mid-session stall nudge: resend the AVIO
+                    # LIVING(5376) that starts media, encrypted then plaintext
+                    # exactly like the original trigger.
+                    # Default-arg binding (not closure capture): re-defined each
+                    # tick, so the CURRENT trigger socket/addrs are bound at
+                    # definition time and B023 cannot bite.
+                    def _resend_avio_living(
+                            _tb=_trigger_bs,
+                            _tsrc=_trigger_bsrc,
+                            _tpeer=_trigger_peer) -> None:
                         import struct as _st_re2
                         import random as _r_re2
                         _re_ts  = int(_time_br.time() * 1000)
@@ -4568,14 +4612,62 @@ class _SdesOpenMixin:
                             _rsz = len(_rp)
                             try:
                                 _br_send_to_cam(
-                                    _trigger_bs,
+                                    _tb,
                                     bytes([0xC8, 0x00, _rsz >> 8, _rsz & 0xFF]) + _rp,
-                                    _trigger_bsrc,
-                                    _trigger_peer,
+                                    _tsrc,
+                                    _tpeer,
                                 )
                             except Exception:
                                 _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+
+                    # Periodic retrigger: resend AVIO LIVING every 2s until probe
+                    # received (camera acknowledged our trigger).
+                    if (_avio_living_sent
+                            and not _sdes_probe_received
+                            and _trigger_bs is not None
+                            and _time_br.time() - _last_trigger_ts >= 2.0):
+                        _resend_avio_living()
                         _last_trigger_ts = _time_br.time()
+
+                    # Mid-session stall nudge: the camera episodically stops
+                    # transmitting with no teardown signal (A001064, measured
+                    # 2026-08-24/25), the serve's input then times out and the
+                    # session dies - yet the camera answers a FRESH handshake
+                    # immediately afterwards.  So before letting it die, re-send
+                    # the LIVING that starts media.  The AVIO HEARTBEAT alone
+                    # does not do this: heartbeats kept flowing right through
+                    # measured stalls while the media stayed silent.  Bounded by
+                    # _stall_nudge_due; the input timeout and the keepalive
+                    # reopen remain the unchanged fallback.
+                    if (_STALL_NUDGE_ENABLED
+                            and _sdes_probe_received
+                            and _trigger_bs is not None
+                            and _media_progress[0] > 0.0):
+                        _stall_silence = (
+                            _time_br.monotonic() - _media_progress[0])
+                        if _stall_silence <= _STALL_NUDGE_AFTER_S:
+                            if _stall_active:
+                                _stall_active = False
+                                _stall_nudges_sent = 0
+                                # Ask for an immediate IDR so recovery is not
+                                # hostage to the 30s PLI cadence.
+                                _bridge_fn._last_pli_ts = 0.0
+                                _status(
+                                    "SDES: media resumed after stall"
+                                    " - PLI re-armed")
+                        elif _stall_nudge_due(
+                                silence_s=_stall_silence,
+                                nudges_sent=_stall_nudges_sent,
+                                since_last_nudge_s=(
+                                    _time_br.time() - _stall_last_nudge),
+                                stall_after_s=_STALL_NUDGE_AFTER_S):
+                            _stall_active = True
+                            _stall_nudges_sent += 1
+                            _stall_last_nudge = _time_br.time()
+                            _status(
+                                f"SDES: no media for {_stall_silence:.1f}s"
+                                f" - LIVING nudge {_stall_nudges_sent}/3")
+                            _resend_avio_living()
 
                     for _bs in _rl:
                         try:
@@ -6278,6 +6370,8 @@ class _SdesOpenMixin:
             audio_gain_db=self._resolve_sdes_audio_gain_db(),
             push_video_only=_push_video_only,
             video_decoder=_video_decoder,
+            input_timeout_s=_resolve_serve_input_timeout_s(
+                bool(getattr(self, "is_battery_camera", False))),
         )
         # Audio matters even more than video here.  A multi-PT m-line makes ffmpeg
         # bind the depacketizer to the FIRST payload type and silently discard the
