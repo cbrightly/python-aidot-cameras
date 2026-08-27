@@ -6,6 +6,58 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b33]
+
+### Fixed
+
+- **Media is demuxed by the ANSWER's payload numbering instead of a fixed
+  table, which recovers every H265 session on an A001064** - the bridge split
+  a BUNDLEd stream into ffmpeg's audio and video loopbacks from a fixed table
+  (96/97/98 video, 0/8 audio), and that table is wrong for this fleet.
+  Measured across 107 opens: 15 of them (14%) negotiated H265 on payload
+  type 0, said so in the answer (`m=video ... 0` with
+  `a=rtpmap:0 H265/90000`), and then sent full-size video packets on pt=0
+  while audio ran normally on pt=8. The fixed table posted every one of those
+  video packets to the AUDIO loopback, so no video was ever observed, the 75 s
+  first-media wait ran out, and the serve launched into an empty stream and
+  exited - 82 s, then a full reopen. The other 92 opens answered
+  `m=video ... 96` and worked; the separation is perfect in both directions.
+
+  Payload numbering is per-m-section by definition, so the answer already
+  named the kind of every payload type. `answer_pt_kinds()` reads it (a type
+  claimed by both an audio and a video section is dropped rather than guessed
+  at), the bridge consults that map before falling back to the tuples and then
+  to source-socket routing, and `rewrite_rtp_payload_type()` translates a
+  camera-numbered video type into the serve SDP's numbering (0 -> 97) with the
+  marker bit preserved. The translation is gated on plain-RTP models and on
+  the bridge having decrypted the packet, since editing a byte of a packet
+  ffmpeg will itself authenticate would break the SRTP auth tag.
+
+  On hardware a pt=0 session now binds its serve at 11.6 s instead of 82 s and
+  reports `video profile pt=97 codec=H265`; sessions answering pt=96 are
+  unchanged.
+
+- **A video packet arriving before the answer no longer latches as the
+  session's first audio.** The bridge starts before the answer lands, so a
+  video packet on an unexpected payload type could beat the map in. Left alone
+  that narrowed the serve's audio line to a type no audio uses, and the mpegts
+  mux then withholds PAT/PMT waiting for a stream that never produces - which
+  costs the picture, not just the sound.
+
+## [1.0.0b32]
+
+### Fixed
+
+- **SDES serve input-stall tolerance**: mains serves pass `-listen_timeout 30`
+  on the SDP input, whose 10 s default turned a transient media stall into a
+  full serve teardown and cold reopen. Battery cameras keep 10 s - their stops
+  are real sleeps. `AIDOT_SERVE_INPUT_TIMEOUT_S` overrides both.
+
+- **Mid-session LIVING nudge**: on more than 2.5 s of media silence the bridge
+  re-sends the AVIO LIVING trigger (at most 3, 2 s apart) and re-arms the PLI
+  timer on resume so an IDR follows immediately. Heartbeats alone provably do
+  not revive a stalled session. `AIDOT_SDES_STALL_NUDGE=0` disables it.
+
 ## [1.0.0b31]
 
 ### Added
