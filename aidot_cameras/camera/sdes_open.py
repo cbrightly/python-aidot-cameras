@@ -746,6 +746,77 @@ def video_pt_from_answer_sdp(sdp_text: str) -> Optional[int]:
     return None
 
 
+def answer_pt_kinds(sdp_text: str) -> dict:
+    """Map each payload type in the camera's answer to the kind that owns it.
+
+    The bridge demuxes a BUNDLEd stream by RTP payload type, and until this
+    existed it did so from a fixed table: 96/97/98 video, 0/8 audio.  That
+    table is wrong for this fleet.  Measured 2026-08-26 across 107 A001064
+    opens, **15 of them (14%) negotiated H265 on payload type 0** -- announced
+    correctly in the answer as ``m=video ... 0`` with ``a=rtpmap:0 H265/90000``
+    -- and then sent 2668 full-size (1222 B) video packets on pt=0 while audio
+    ran normally on pt=8.  The fixed table posted every one of those video
+    packets to ffmpeg's AUDIO loopback, so no video was ever observed, the 75 s
+    first-media wait ran out, and the serve launched into an empty stream and
+    exited: 82 s wasted, then a full reopen.  The other 92 opens answered
+    ``m=video ... 96`` and worked.  Perfect separation, both directions.
+
+    The answer is the authority on this and is already in hand: PT numbering is
+    per-m-section by definition, so a section's fmt list names the kind of every
+    payload type in it.  ``tests/test_answer_section_selection.py`` records the
+    same renumbering on the A000088 (PT 0 carrying H265), and the DTLS path
+    already selects sections by content for it; the SDES bridge was the one
+    place still trusting a static tuple.
+
+    A payload type claimed by BOTH an audio and a video section is dropped from
+    the map rather than guessed at -- an ambiguous answer is not better evidence
+    than the fallback table, and silently preferring one section would be the
+    same class of assumption this function exists to remove.  Malformed m= lines
+    are skipped, never raised on: this feeds a media path.
+    """
+    kinds: dict = {}
+    dropped: set = set()
+    for raw in (sdp_text or "").splitlines():
+        line = raw.strip()
+        if not line.startswith("m=audio") and not line.startswith("m=video"):
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        kind = "video" if line.startswith("m=video") else "audio"
+        for tok in parts[3:]:
+            try:
+                pt = int(tok)
+            except ValueError:
+                continue
+            if not 0 <= pt <= 127:
+                continue
+            if kinds.get(pt, kind) != kind:
+                dropped.add(pt)
+            kinds[pt] = kind
+    for pt in dropped:
+        kinds.pop(pt, None)
+    return kinds
+
+
+def rewrite_rtp_payload_type(pkt: bytes, pt: int) -> bytes:
+    """Return ``pkt`` with its RTP payload type replaced, marker bit preserved.
+
+    Used only where the bridge itself decrypted the packet (``_use_plain_rtp``),
+    so what is being edited is plaintext on its way to our own loopback -- never
+    a packet ffmpeg will authenticate, where a changed byte would fail the SRTP
+    auth tag.  RTP byte 1 is ``M(1) | PT(7)`` (RFC 3550), so only the low seven
+    bits move.
+
+    A packet too short to hold that byte is returned untouched rather than
+    rejected: this is the media path, and a malformed packet is ffmpeg's to
+    discard, not the bridge's to raise on.
+    """
+    if len(pkt) < 2:
+        return pkt
+    return pkt[:1] + bytes([(pkt[1] & 0x80) | (pt & 0x7F)]) + pkt[2:]
+
+
 #: Video payload types the SDES answer template advertises (H264, H265).
 _SDES_ANSWER_VIDEO_PTS = (96, 97)
 
@@ -4038,6 +4109,10 @@ class _SdesOpenMixin:
         # list for the same reason as _first_video_pt: the serve-restart path
         # reads it from a nested scope.
         _answer_video_pt: list = [None]
+        # PT -> "video"/"audio" from the camera's answer, read by the
+        # bridge demux. Empty until the answer lands (the bridge starts
+        # first), which is exactly when the static-tuple fallback applies.
+        _answer_pt_kinds: dict = {}
         # Same for audio: the ffmpeg SDP advertises BOTH PCMU (0) and PCMA (8),
         # and ffmpeg binds the depacketizer to the first one listed - so the line
         # has to be narrowed to the payload type the camera actually sends, the
@@ -5598,7 +5673,55 @@ class _SdesOpenMixin:
                                     _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
                                 continue
                             _pt = _pt_byte & 0x7F
-                            if _pt in (96, 97, 98):
+                            # The ANSWER decides which payload type is which
+                            # kind; the tuples below are only the fallback for a
+                            # packet that beats the answer in.  See
+                            # answer_pt_kinds: this camera negotiates H265 on
+                            # pt=0 in ~14% of sessions and the fixed tuples sent
+                            # every one of those video streams to the AUDIO
+                            # loopback.
+                            _kind_answered = _answer_pt_kinds.get(_pt)
+                            _pt_out = _pt
+                            if _kind_answered == "video":
+                                _btgt, _lo_target, _kind = (
+                                    _lo_video_port, _lo_v, "video"
+                                )
+                                # The bridge starts before the answer lands, so
+                                # a video packet on an unexpected PT can beat the
+                                # map in by a few hundred ms and latch as the
+                                # session's "first audio".  Left alone that
+                                # narrows the serve's audio line to a payload
+                                # type no audio uses, and the mpegts mux then
+                                # withholds PAT/PMT waiting for a stream that
+                                # never produces - costing the picture, not just
+                                # the sound.  Undo it and let real audio latch.
+                                if _first_audio_pt[0] == _pt:
+                                    _first_audio_pt[0] = None
+                                    _br_first_audio_logged = False
+                                    _status(
+                                        "bridge: pt=%d re-classified as video"
+                                        " from the answer - clearing the audio"
+                                        " latch it took first" % _pt)
+                                # Our serve SDP describes video as 96=H264 /
+                                # 97=H265 only, so a camera-numbered payload
+                                # type we do not advertise must be translated
+                                # into our numbering before ffmpeg sees it -
+                                # the same translation video_pt_from_answer_sdp
+                                # already performs for the SDP side ("the
+                                # camera's own numbering need not agree").
+                                # Gated on _use_plain_rtp because only there is
+                                # the bridge the decryptor and the packet
+                                # reaching ffmpeg plaintext; rewriting a byte
+                                # ffmpeg will itself authenticate breaks SRTP.
+                                if (_pt not in _SDP_VIDEO_PTS
+                                        and _use_plain_rtp
+                                        and _answer_video_pt[0] is not None):
+                                    _pt_out = int(_answer_video_pt[0])
+                            elif _kind_answered == "audio":
+                                _btgt, _lo_target, _kind = (
+                                    _lo_audio_port, _lo_a, "audio"
+                                )
+                            elif _pt in (96, 97, 98):
                                 _btgt, _lo_target, _kind = (
                                     _lo_video_port, _lo_v, "video"
                                 )
@@ -5658,15 +5781,22 @@ class _SdesOpenMixin:
                                     )
                             elif _kind == "video" and not _br_first_video_logged:
                                 _br_first_video_logged = True
-                                _first_video_pt[0] = _pt
-                                _status(f"bridge: first video RTP pt={_pt}")
+                                # _pt_out, not _pt: everything downstream (the
+                                # serve SDP narrowing, _serve_video_pt's
+                                # "observed beats pinned") speaks OUR numbering,
+                                # and the wire PT is preserved in the log line.
+                                _first_video_pt[0] = _pt_out
+                                _status(
+                                    f"bridge: first video RTP pt={_pt_out}"
+                                    + (f" (camera numbered it {_pt})"
+                                       if _pt_out != _pt else ""))
                                 # At INFO, not DEBUG: this is the one line that
                                 # makes a bitrate figure comparable to another
                                 # one, and it is emitted once per session.
                                 _LOGGER.info(
                                     "camera %s: video profile %s",
                                     getattr(self, "device_id", "?"),
-                                    describe_video_profile(_pt),
+                                    describe_video_profile(_pt_out),
                                 )
                                 # Camera answers BUNDLE (all media on one 5-tuple),
                                 # so the talk destination is the same address as
@@ -5891,6 +6021,9 @@ class _SdesOpenMixin:
                             if _nk_late:
                                 _bridge_fn._nack_late_drops = getattr(
                                     _bridge_fn, '_nack_late_drops', 0) + 1
+                            if _pt_out != _pt and _decrypted:
+                                _fwd_pkt = rewrite_rtp_payload_type(
+                                    _fwd_pkt, _pt_out)
                             try:
                                 if not _nk_late:
                                     _lo_target.sendto(
@@ -6177,6 +6310,7 @@ class _SdesOpenMixin:
         _early_nominated = bool(_cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands)
         _media_deadline = time.monotonic() + _FIRST_MEDIA_WAIT_S
         _media_wait_started = time.monotonic()
+        _pt_kinds_read = False
 
         def _report_first_media_stall(_waited_s, _cancelled=False):
             """Emit the one line that says why nothing arrived.
@@ -6242,6 +6376,34 @@ class _SdesOpenMixin:
                     _status(f"camera refused: ack {_code} {_desc}"
                             " - terminal, abandoning the first-media wait")
                     raise AidotCameraBusy(_code, _desc)
+                if (not _pt_kinds_read and answer_fut is not None
+                        and answer_fut.done() and not answer_fut.cancelled()):
+                    # One-shot, here rather than in the answer-logging block
+                    # further down: that block runs AFTER this wait, which is
+                    # 75 s too late for the demux that the map exists to fix.
+                    _pt_kinds_read = True
+                    try:
+                        if answer_fut.exception() is None:
+                            _pk_sdp = (
+                                answer_fut.result() or {}).get("sdp", "") or ""
+                            if _pk_sdp:
+                                _answer_pt_kinds.update(answer_pt_kinds(_pk_sdp))
+                                _answer_video_pt[0] = video_pt_from_answer_sdp(
+                                    _pk_sdp)
+                                _vpts = sorted(
+                                    pt for pt, k in _answer_pt_kinds.items()
+                                    if k == "video")
+                                if any(pt not in _SDP_VIDEO_PTS for pt in _vpts):
+                                    _status(
+                                        "answer numbers video on payload"
+                                        " type(s) %s - demuxing by the answer,"
+                                        " serving as our pt=%s"
+                                        % (_vpts, _answer_video_pt[0]))
+                    except Exception:
+                        _LOGGER.debug(
+                            "camera %s: swallowed exception in %s",
+                            getattr(self, "device_id", "?"),
+                            'answer_pt_kinds', exc_info=True)
                 if (not _early_nominated and answer_fut is not None
                         and answer_fut.done() and not answer_fut.cancelled()):
                     # Read-only peek: the real await below still consumes this
