@@ -6,6 +6,73 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0b34]
+
+### Fixed
+
+- **The SDES data channel is now acknowledged, which ends the A001064's 80.2 s
+  streaming cliff and restores PTZ, two-way audio and SD listing for the whole
+  session.** SCTP puts acknowledgement on the receiver (RFC 4960 s6.2) and this
+  library never sent a SACK. The camera pushed a DATA chunk on the control
+  channel, we acknowledged none of them, its retransmission timer ran to
+  exhaustion, and it ABORTed the association. Measured over 47 stalled sessions,
+  timed from first media:
+
+      last camera DATA on the control channel   58.35 s   sd 0.10
+      last SACK the camera sent us              60.08 s   sd 0.05
+      first SCTP ABORT from the camera          61.42 s   sd 0.10
+      session torn down                         80.2  s
+
+  After the abort the AVIO heartbeat (5156) could no longer reach the camera, so
+  its keepalive clock stopped being refreshed and its own 20 s watchdog closed
+  the session with -50020: 80.2 - 60.08 = 20.1 s against a 20.000 s constant in
+  the camera. On hardware the camera answered every heartbeat with an ABORT from
+  61.4 s; with the fix it answers with a SACK and the session runs unbounded.
+
+  The same dead channel is why PTZ, two-way audio and SD listing stopped
+  answering about a minute into every session - they all ride it. A PTZ command
+  issued at 470 s reached our socket and the camera never saw it.
+
+  The camera's own send pattern is the independent confirmation: DATA used to
+  arrive every ~3 s (retransmissions of unacknowledged chunks) and now arrives
+  once per heartbeat.
+
+- **A fragmented reply is reassembled before it is parsed, which makes SD card
+  listing work on SDES cameras for the first time.** A DATA chunk carries B and E
+  flags (RFC 4960 s3.3.1) and a ~2.8 KB listing page arrives as several ~1.2 KB
+  fragments. Every fragment was handed to `parse_avio_response` as though it were
+  a whole frame: the first was correctly refused (its declared payload length
+  overruns the fragment) and the rest decoded as junk command ids. The reply sat
+  on the wire while the caller timed out and the card read as unreadable. The
+  DTLS path reassembles in its SCTP stack, which is why this only ever affected
+  SDES. An A001064 now returns eight days of recordings.
+
+- **The peer id declares APP_ANDROID instead of a random client class.** The
+  camera reads its client class from the first character of the peer id's second
+  field; the vendor Android app hard-codes `0` there and the vendor web app sends
+  `2`. This library generated six random hex digits, so it announced a uniformly
+  random class - and one outside the defined range eleven times in sixteen. The
+  camera branches on this value, so it is now set to what this client actually
+  is. The remaining five characters stay random per open.
+
+- **The peer id's install-identity field is stable for the life of the process.**
+  It was six fresh random digits on every open (329 distinct ids across 836 opens
+  in 19 hours), so a client reconnecting every couple of minutes looked like
+  hundreds of different clients and the camera's returning-client path could
+  never match.
+
+- **A session whose ICE transport disappears is reopened immediately** rather
+  than after the media watchdog expires. Measured outage 61.2 s -> 31.5 s. With
+  the acknowledgement fix above this path should now be rare.
+
+### Changed
+
+- The measurement knobs (`EXPT_CAP_FILE`, `EXPT_PEERID_FILE`) are off unless
+  `AIDOT_EXPT_CAP_FILE` / `AIDOT_EXPT_PEERID_FILE` names a file. They previously
+  read a hardcoded Home Assistant config path on the event loop for every
+  session, which Home Assistant's blocking-call detector reports. With no env var
+  set the library performs no file I/O for either.
+
 ## [1.0.0b33]
 
 ### Fixed

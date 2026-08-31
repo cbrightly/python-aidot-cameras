@@ -44,6 +44,8 @@ from .protocol import (
     _write_text_file,
 )
 
+import os as _os
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -51,6 +53,100 @@ _LOGGER = logging.getLogger(__name__)
 #: ``net.core.rmem_max`` (4 MB on Home Assistant OS), and doubles what it grants
 #: for bookkeeping, so asking for more than the cap is harmless.
 _MEDIA_RCVBUF_BYTES = 4 * 1024 * 1024
+
+
+#: Most a half-assembled SCTP message may grow to before we drop it. The
+#: largest real reply measured is a ~2.8 KB SD listing page; this is ~23x that,
+#: so it bounds a stream that never sends its E fragment without truncating
+#: anything the camera actually sends.
+_SCTP_REASSEMBLY_CAP = 64 * 1024
+
+
+def _sctp_reassemble(flags: int, stream_id: int, payload: bytes,
+                     buf: dict) -> "Optional[bytes]":
+    """Reassemble a fragmented SCTP DATA message, or None until it is complete.
+
+    RFC 4960 s3.3.1 puts two flags in the DATA chunk header: **B** (0x02) begins
+    a message and **E** (0x01) ends it. A chunk with both set is a whole
+    message; a large one arrives as B, then zero or more middles, then E.
+
+    We never did this. The camera's SD listing reply is ~2.8 KB and arrives as
+    several ~1.2 KB fragments, and every fragment was handed to
+    ``parse_avio_response`` as if it were a complete frame. The first was
+    REJECTED (its declared payload length overruns the fragment, and the parser
+    correctly refuses to hand back a truncated payload), and the rest decoded as
+    junk commands - `cmd=0`, `cmd=304939521`. So the reply sat on the wire while
+    the caller timed out and Home Assistant told the user "the camera did not
+    answer when asked what it holds".
+
+    aiortc reassembles for the DTLS path, which is exactly why SD listing worked
+    there and never on SDES.
+
+    ``buf`` is per-association state, keyed by stream id. A middle or end
+    fragment with no beginning is dropped rather than guessed at, and a stream
+    that never sends its E fragment is capped rather than allowed to grow.
+    """
+    begins = bool(flags & 0x02)
+    ends = bool(flags & 0x01)
+    if begins and ends:
+        buf.pop(stream_id, None)
+        return payload
+    if begins:
+        buf[stream_id] = bytearray(payload)
+        return None
+    held = buf.get(stream_id)
+    if held is None:
+        # A continuation for a message we never saw the start of. Guessing here
+        # would feed the AVIO parser a body with no header.
+        return None
+    held += payload
+    if len(held) > _SCTP_REASSEMBLY_CAP:
+        buf.pop(stream_id, None)
+        return None
+    if ends:
+        return bytes(buf.pop(stream_id))
+    return None
+
+
+def _sctp_sack_chunk(cum_tsn: int, a_rwnd: int = 131072) -> bytes:
+    """An SCTP SACK (RFC 4960 s3.3.4) with no gap blocks and no duplicates.
+
+    SCTP puts acknowledgement on the RECEIVER. We were never sending one: the
+    camera pushed a DATA chunk every ~3 s on the control channel and we replied
+    to none of them, so its retransmission timer ran to exhaustion and it tore
+    the association down with an ABORT at 61.42 s (sd 0.10, n=47) -- after which
+    our AVIO heartbeat could no longer refresh the camera's keepalive clock and
+    ``rtc_session_check_keepalive`` disconnected the whole session 20 s later.
+    That is the 80.2 s cliff, and it is also why PTZ, talkback and SD listing
+    stopped answering about a minute into every session: they all ride this
+    channel.
+
+    Reporting no gap blocks when a chunk IS missing is legal and conservative -
+    the cumulative ack simply does not advance, and the camera retransmits what
+    we have not acknowledged.
+    """
+    import struct as _st_sk
+    body = _st_sk.pack("!IIHH", cum_tsn & 0xFFFFFFFF, a_rwnd, 0, 0)
+    return _st_sk.pack("!BBH", 3, 0, 4 + len(body)) + body
+
+
+def _sctp_advance_cum_tsn(cum: "Optional[int]", tsn: int) -> int:
+    """The cumulative TSN ack after receiving ``tsn``.
+
+    ``cum`` None means this is the first DATA chunk of the association, which
+    defines the base -- the association's initial TSN comes from the handshake,
+    but a camera that starts numbering elsewhere must not wedge us at a
+    cumulative ack it will never reach.
+
+    Only an exactly-next TSN advances the ack. A gap leaves it where it is (the
+    camera retransmits), and so does a duplicate. Arithmetic is modulo 2**32
+    because TSNs wrap.
+    """
+    if cum is None:
+        return tsn & 0xFFFFFFFF
+    if ((tsn - cum) & 0xFFFFFFFF) == 1:
+        return tsn & 0xFFFFFFFF
+    return cum
 
 
 def _sctp_abort_chunk() -> bytes:
@@ -506,6 +602,64 @@ def _sdes_tmmbr_after_s() -> float:
     scene, so neither can confound it.
     """
     return _env_positive("AIDOT_SDES_TMMBR_AFTER_S", cast=float, off=0.0)
+
+
+#: Measurement scaffolding, OFF unless an operator names a file.
+#:
+#: This used to be the hardcoded string "/config/aidot_expt_cap", which meant a
+#: published library opened a Home Assistant path on the event loop for every
+#: session - Home Assistant's own blocking-call detector reports it, and a
+#: transport library has no business knowing where HA keeps its config. Reading
+#: the env var at import costs nothing and leaves the knob available to whoever
+#: is screening a camera.
+EXPT_CAP_FILE = _os.environ.get("AIDOT_EXPT_CAP_FILE")
+
+
+def _sdes_max_session_s(device_id: str, path: "Optional[str]" = None) -> float:
+    """Seconds of media after which to end THIS device's session.  0 = off.
+
+    Measurement scaffolding.  The 80.2 s cliff is decided once per session, so a
+    session that reaches 90 s has already passed it and the next twenty minutes
+    carry no information.  Session throughput is coupled to the outcome - a stall
+    yields a fresh session every ~110 s, a pass yields none for tens of minutes -
+    so without a cap the arm that works starves its own sample.
+
+    The file names one device: ``<device_id>:<seconds>``.  The scoping is not
+    cosmetic: an unscoped cap hits every camera on the SDES path, one of which is
+    a battery device that normally opens about twice an hour and was forced to
+    ~30x that rate before this was caught.  So it FAILS CLOSED - anything that
+    cannot be attributed to a specific device caps nothing.
+    """
+    path = path if path is not None else EXPT_CAP_FILE
+    if not path:
+        # The overwhelmingly common case: no scaffolding, no file I/O at all.
+        return 0.0
+    try:
+        with open(path) as _fh:
+            raw = _fh.read().strip()
+    except OSError:
+        return 0.0
+    head, sep, tail = raw.partition(":")
+    if not sep or not head.strip() or head.strip() != device_id:
+        return 0.0
+    try:
+        seconds = float(tail.strip())
+    except ValueError:
+        return 0.0
+    return seconds if seconds > 0.0 else 0.0
+
+
+def _session_cap_reached(first_media_ts, now: float, cap_s: float) -> bool:
+    """Whether this session has run its allotted media time.
+
+    ``first_media_ts`` None means no media has arrived yet, and an open in
+    progress must never be cut short - the cap measures a session's life, not its
+    birth.  The caller must set a cap ABOVE the 80.2 s cliff; below it every
+    session would read as a stall.
+    """
+    if not cap_s or first_media_ts is None:
+        return False
+    return (now - first_media_ts) >= cap_s
 
 
 def _tmmbr_ready(first_video_ts, now: float, after_s: float) -> bool:
@@ -4122,6 +4276,7 @@ class _SdesOpenMixin:
         # media packet; the keepalive watchdog reads it via SdesSession to
         # restart a session the camera silently stopped feeding.
         _media_progress: list = [0.0]
+        _ice_progress: list = [0.0]
         # Shared with the bridge thread: [packets, bytes] actually forwarded to
         # ffmpeg.  The SDES path decodes nothing in-process, so on_frame never
         # fires and these counters are the only in-process proof media flowed -
@@ -5057,6 +5212,12 @@ class _SdesOpenMixin:
                             # two different diagnoses - "none ever arrived" and
                             # "one arrived and the trigger still did not go" -
                             # into a single indistinguishable state.
+                            # Transport liveness: the camera's binding
+                            # successes and keepalive indications both stop the
+                            # instant its ICE agent tears down, which is what
+                            # tells a teardown apart from a media pause.
+                            if _bpkt[:2] in (b'\x01\x01', b'\x00\x11'):
+                                _ice_progress[0] = _time_br.monotonic()
                             if _bpkt[:2] == b'\x01\x01':
                                 _br_binding_success_count += 1
                                 _bridge_fn._br_binding_success_count = (
@@ -5452,37 +5613,96 @@ class _SdesOpenMixin:
                                         except Exception as _sce8:
                                             _status(f"SDES DC: enc LIVING err: {_sce8}")
                                     elif _pd_ct8 == 0x00 and _sct == 'DONE':
-                                        # SCTP DATA from camera
-                                        _sc_pay = _pd_plain[28:] if len(_pd_plain) > 28 else b''
+                                        # SCTP DATA from camera.  ACKNOWLEDGE IT
+                                        # FIRST: SCTP puts acknowledgement on the
+                                        # receiver, and sending nothing let the
+                                        # camera's retransmission timer run out and
+                                        # ABORT the association at ~61.4 s, which is
+                                        # what produced the 80.2 s cliff and what
+                                        # stopped PTZ/talkback/SD answering a minute
+                                        # into every session.  Ack before dispatch so
+                                        # a handler that raises cannot cost us the ack.
+                                        if len(_pd_plain) >= 20:
+                                            _sc_tsn = int.from_bytes(_pd_plain[16:20], 'big')
+                                            _sc_first_sack = _sctp.get('peer_cum_tsn') is None
+                                            _sctp['peer_cum_tsn'] = _sctp_advance_cum_tsn(
+                                                _sctp.get('peer_cum_tsn'), _sc_tsn)
+                                            if _sc_first_sack:
+                                                # One line per session: the build tag for the
+                                                # SACK fix, and the thing to look for if the
+                                                # 61.4 s ABORT ever comes back.
+                                                _status(
+                                                    f"SDES DC: SACK enabled"
+                                                    f" - acking camera DATA from"
+                                                    f" TSN={_sc_tsn:#010x}"
+                                                )
+                                            try:
+                                                _br_send_to_cam(
+                                                    _bs,
+                                                    _enc_c8_sctp(_sctp_pkt(
+                                                        _sctp['peer_tag'],
+                                                        _sctp_sack_chunk(_sctp['peer_cum_tsn']))),
+                                                    _bsrc, _br_cam_peer)
+                                            except Exception as _sackerr:
+                                                _status(f"SDES DC: SACK send failed: {_sackerr}")
+                                        # Reassemble before parsing.  A DATA chunk
+                                        # carries B/E flags (RFC 4960 s3.3.1) and a
+                                        # large reply - the ~2.8 KB SD listing page -
+                                        # arrives as several ~1.2 KB fragments.  Taking
+                                        # each one for a whole AVIO frame got the first
+                                        # rejected (declared length overruns the
+                                        # fragment) and the rest read as junk commands,
+                                        # so the reply was reported as "the camera did
+                                        # not answer".  Use the chunk's own length
+                                        # rather than the rest of the packet: the
+                                        # declared length is what bounds this chunk.
+                                        _sc_flags = _pd_plain[13] if len(_pd_plain) > 13 else 0x03
+                                        _sc_clen = (int.from_bytes(_pd_plain[14:16], 'big')
+                                                    if len(_pd_plain) >= 16 else 0)
+                                        _sc_sid = (int.from_bytes(_pd_plain[20:22], 'big')
+                                                   if len(_pd_plain) >= 22 else 0)
+                                        _sc_frag = (_pd_plain[28:28 + (_sc_clen - 16)]
+                                                    if _sc_clen >= 16 and len(_pd_plain) > 28
+                                                    else (_pd_plain[28:] if len(_pd_plain) > 28 else b''))
                                         _sc_ppid = (int.from_bytes(_pd_plain[24:28], 'big')
                                                     if len(_pd_plain) >= 28 else 0)
-                                        _sc_cmd = (int.from_bytes(_sc_pay[4:8], 'little')
-                                                   if len(_sc_pay) >= 8 else 0)
-                                        # This is where the camera's answers
-                                        # come back on SDES.  They were parsed
-                                        # and logged here long before anything
-                                        # could receive them; hand them to
-                                        # whoever asked.
-                                        if _sc_cmd == 5377:
-                                            # SESSION_MODE_RESP: the camera's
-                                            # answer to the LIVING trigger.
-                                            # Counted whether or not anything
-                                            # was waiting for it, because the
-                                            # question the stall report asks is
-                                            # "did the trigger arrive", and the
-                                            # trigger is fire-and-forget.
-                                            _bridge_fn._br_session_mode_resp = (
-                                                getattr(
-                                                    _bridge_fn,
-                                                    '_br_session_mode_resp', 0) + 1)
-                                        _sc_answered = _dispatch_sctp_avio(
-                                            _avio_responses, _sc_pay)
-                                        _status(
-                                            f"SDES DC: enc DATA ppid={_sc_ppid}"
-                                            f" cmd={_sc_cmd} {len(_sc_pay)}B"
-                                            f"{' (answered a request)' if _sc_answered else ''}"
-                                            f" {_sc_pay[:32].hex()}"
-                                        )
+                                        _sc_pay = _sctp_reassemble(
+                                            _sc_flags, _sc_sid, _sc_frag,
+                                            _sctp.setdefault('rx_frag', {}))
+                                        # A mid-message fragment: nothing to parse yet.
+                                        # Its TSN is acknowledged above, so the camera
+                                        # will not retransmit it.  Guarded rather than
+                                        # `continue`d - the nearest enclosing loop is the
+                                        # per-socket one, and skipping it would drop the
+                                        # rest of this socket's turn.
+                                        if _sc_pay is not None:
+                                            _sc_cmd = (int.from_bytes(_sc_pay[4:8], 'little')
+                                                       if len(_sc_pay) >= 8 else 0)
+                                            # This is where the camera's answers
+                                            # come back on SDES.  They were parsed
+                                            # and logged here long before anything
+                                            # could receive them; hand them to
+                                            # whoever asked.
+                                            if _sc_cmd == 5377:
+                                                # SESSION_MODE_RESP: the camera's
+                                                # answer to the LIVING trigger.
+                                                # Counted whether or not anything
+                                                # was waiting for it, because the
+                                                # question the stall report asks is
+                                                # "did the trigger arrive", and the
+                                                # trigger is fire-and-forget.
+                                                _bridge_fn._br_session_mode_resp = (
+                                                    getattr(
+                                                        _bridge_fn,
+                                                        '_br_session_mode_resp', 0) + 1)
+                                            _sc_answered = _dispatch_sctp_avio(
+                                                _avio_responses, _sc_pay)
+                                            _status(
+                                                f"SDES DC: enc DATA ppid={_sc_ppid}"
+                                                f" cmd={_sc_cmd} {len(_sc_pay)}B"
+                                                f"{' (answered a request)' if _sc_answered else ''}"
+                                                f" {_sc_pay[:32].hex()}"
+                                            )
                                     else:
                                         # Log SACK (0x03) with cumulative TSN ack for diagnostics
                                         if _pd_ct8 == 0x03 and len(_pd_plain) >= 20:
@@ -6964,6 +7184,7 @@ class _SdesOpenMixin:
             cmd_chan=_cmd_chan,
             talk_state=_talk_state,
             media_progress=_media_progress,
+            ice_progress=_ice_progress,
             media_counts=_media_counts,
             media_path=_media_path,
             teardown_requested=_teardown_holder,

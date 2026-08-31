@@ -52,7 +52,11 @@ from .sdes import SdesSession  # re-exported (split into sdes.py); also the SDES
 from .controls import _CameraControlsMixin
 from .sd_listing import _CameraSdMixin
 from .webrtc_open import _WebRTCOpenMixin
-from .sdes_open import _SdesOpenMixin
+from .sdes_open import (
+    _SdesOpenMixin,
+    _sdes_max_session_s,
+    _session_cap_reached,
+)
 from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixin; kept re-exported for back-compat
     _mqtt_timestamp,
     ReconnectPacer,
@@ -71,6 +75,7 @@ from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixi
     _save_sprop,
     _inject_sprop,
     _sdes_serve_port,
+    sdes_ice_teardown,
     _serve_host,
     _warn_lan_serve,
     _ServeRelay,
@@ -1118,6 +1123,118 @@ def _ack_matches_seq(msg, seq):
     if code == 200:
         return True
     return code if isinstance(code, int) else False
+
+
+_TERMINAL_ID: "Optional[str]" = None
+
+
+def _stable_terminal_id(seed: "Optional[str]" = None, width: int = 6) -> str:
+    """The six-hex terminal field of our peer ids.  Stable, not per-open random.
+
+    The camera parses the peer id as ``<session>_<terminal_id>_%d_%d_%d`` and
+    compares the terminal id against the sessions it already has -
+    ``rtc_session_check_same_terminal_id`` / "rtc session terminal id is same",
+    with paired ``new_terminal_id`` / ``old_terminal_id`` logs.  So the terminal
+    id is how it recognises a client it has seen before.
+
+    We were minting six fresh random hex digits per open: 329 distinct terminal
+    ids across 836 opens in 19 hours, so every reconnect looked like a brand-new
+    client and the camera's "same terminal" path could never fire for us.  A
+    client that reconnects every couple of minutes should look like one client
+    reconnecting.
+
+    Stable for the life of the process.  ``seed`` makes it deterministic for
+    tests and would allow deriving it from a durable identity later; without one
+    it is random per process, which is already the property that matters.
+    """
+    global _TERMINAL_ID
+    if seed is not None:
+        import hashlib
+        return hashlib.sha256(seed.encode()).hexdigest()[:width]
+    if _TERMINAL_ID is None:
+        import os
+        _TERMINAL_ID = os.urandom(16).hex()
+    return _TERMINAL_ID[:width]
+
+
+#: Measurement scaffolding, OFF unless an operator names a file - see the note
+#: on EXPT_CAP_FILE. A published library must not open a Home Assistant config
+#: path on the event loop, and with no env var set this knob does no I/O at all.
+EXPT_PEERID_FILE = os.environ.get("AIDOT_EXPT_PEERID_FILE")
+
+
+def _expt_peer_id_fields(device_id=None, path=None):
+    """Experiment override for one device's peer-id fields, or None.
+
+    The camera parses the peer id with ``%[^_]_%[^_]_%d_%d_%d`` (`parse_peer_id`
+    at 0x298ef8 in the A001064 image) and takes its client class from the FIRST
+    CHARACTER of field 2: ``client_type = field2[0] - '0'``, against
+    ``EN_WEBRTC_CLIENT_TYPE_{APP_ANDROID,APP_IOS,WEB,ALEXA,GOOGLE_HOME}`` = 0..4.
+    The vendor app hard-codes a leading ``'0'`` there; we generate six random hex
+    digits, so we announce a uniformly random class and an out-of-range one 11
+    times in 16.  This exists to pin that character on the live camera.
+
+    Scoped to ONE device, like ``_sdes_max_session_s``.  The scoping is not
+    cosmetic: this override also sets the three trailing integers, and an
+    unscoped file would push an SDES ``_2_0_1`` tail at the DTLS cameras, which
+    silently discard a peer id with the wrong transport digit.  An earlier
+    unscoped experiment knob hit a battery camera and forced it to ~30x its
+    normal wake rate.
+
+    File format, one line::
+
+        <device_id>:[<terminal>_]<live_type>_<stream_id>_<version>
+
+    Three integers set the integers only.  A leading terminal also pins field 2,
+    the field that carries the client class, and comes in two widths:
+
+      * **one hex character** - pins only field 2's FIRST character (the class)
+        and leaves the other five random.  This is the arm you almost always
+        want: it reproduces the observed condition, "class is 4, tail varies",
+        without also making every session's peer id identical.
+      * **six hex characters** - pins the whole of field 2.  Field 1 is already
+        stable per process, so this makes every peer id byte-identical across
+        opens, which is cross-session peer-id REUSE.  The camera has a
+        session-dedup path keyed on the peer id, so a result obtained this way
+        cannot separate the client class from the reuse.  Use it only when reuse
+        is the thing under test.
+
+    FAILS CLOSED on anything it cannot parse, on a device mismatch, and on a
+    caller that passes no device id.  A malformed peer id is rejected by the
+    camera outright, so a half-written override file must never reach the wire.
+    """
+    if not device_id:
+        return None
+    path = path if path is not None else EXPT_PEERID_FILE
+    if not path:
+        return None
+    try:
+        with open(path) as _fh:
+            raw = _fh.read().strip()
+    except OSError:
+        return None
+    head, sep, tail = raw.partition(":")
+    if not sep or head.strip() != device_id:
+        return None
+    parts = tail.strip().split("_")
+    # Three fields sets the integers only; four also pins the terminal id, so
+    # that field can be screened as well.
+    terminal = None
+    if len(parts) == 4:
+        terminal, parts = parts[0], parts[1:]
+        # One hex character (pin the class, keep the tail random) or exactly six
+        # (pin all of field 2). Any other width would change the peer id's shape,
+        # and the camera rejects a malformed peer id outright.
+        if len(terminal) not in (1, 6) or any(c not in "0123456789abcdef" for c in terminal):
+            return None
+    elif len(parts) != 3:
+        return None
+    out = []
+    for q in parts:
+        if not q.isdigit():
+            return None
+        out.append(int(q))
+    return (terminal, out[0], out[1], out[2])
 
 
 class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesOpenMixin):
@@ -4029,7 +4146,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # loop re-offers within one open attempt on one peer connection, so a
         # late answer still belongs to the offer in flight.
         _loop_peer_id = self.generate_webrtc_peer_id(live_type=2, stream_id=0,
-                                                     sdes=True)
+                                                     sdes=True,
+                                                     device_id=self.device_id)
         _peer_reuses = 0
 
         # Wake-readiness retries.  A battery camera that answers livePlayResp with
@@ -4052,7 +4170,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 self._serve_relay.set_backend(None)
             if _peer_reuses >= _PEERID_MAX_REUSE:
                 _loop_peer_id = self.generate_webrtc_peer_id(
-                    live_type=2, stream_id=0, sdes=True)
+                    live_type=2, stream_id=0, sdes=True,
+                    device_id=self.device_id)
                 _peer_reuses = 0
             _peer_reuses += 1
             _use_fast = self._adaptive_next_fast(_adaptive, _fast_failed)
@@ -4138,6 +4257,14 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             _started_at = time.monotonic()
             _done = asyncio.ensure_future(session.wait_done())
             _stalled = False
+            _ice_dead = False
+            # Measurement scaffolding, off by default and device-scoped: end a
+            # session after its allotted media time so a pass costs the same
+            # wall clock as a stall and a RATE can be sampled.  Anchored on
+            # media, never on the open.
+            _cap_s = _sdes_max_session_s(self.device_id)
+            _first_media_at = None
+            _capped = False
             _idle_release = False
             # No-viewer release.  Unlike the DTLS serve (which idle-releases when
             # its mux pipe goes stale), an SDES keepalive otherwise reconnects
@@ -4165,6 +4292,26 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                         time.monotonic(),
                         grace=(_FAST_GRACE if _use_fast else 60.0),
                     ):
+                        _stalled = True
+                        break
+                    if _cap_s:
+                        if _first_media_at is None:
+                            _first_media_at = session.last_media_monotonic
+                        if _session_cap_reached(_first_media_at,
+                                                time.monotonic(), _cap_s):
+                            _capped = True
+                            _stalled = True
+                            break
+                    if sdes_ice_teardown(
+                        session.last_media_monotonic,
+                        session.last_ice_answer_monotonic,
+                        time.monotonic(),
+                    ):
+                        # Media gone AND the camera's STUN answers gone: its ICE
+                        # agent has dropped the transport. Nudging cannot recover
+                        # that, so reopen now instead of serving ~25 s more of
+                        # nothing while the media watchdog runs down.
+                        _ice_dead = True
                         _stalled = True
                         break
                     if _idle_on and _serve_port is not None:
@@ -4217,6 +4364,16 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 )
                 return
 
+            if _capped:
+                _LOGGER.info(
+                    "SDES %s: session cap %.0fs reached - ending session"
+                    " (measurement scaffolding; this session PASSED the"
+                    " 80.2s gate)", self.device_id, _cap_s)
+            if _ice_dead:
+                _LOGGER.info(
+                    "SDES %s: camera ICE transport gone (media and STUN answers"
+                    " both stopped) - reopening now rather than waiting out the"
+                    " media watchdog", self.device_id)
             if _stalled:
                 # Say whether this will repeat forever.  With idle-release off
                 # (<=0 idle window) the loop never asks whether a viewer is
@@ -4252,7 +4409,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 # the next open should be a fresh one rather than re-offering on a
                 # peerid the camera has already finished with.
                 _loop_peer_id = self.generate_webrtc_peer_id(
-                    live_type=2, stream_id=0, sdes=True)
+                    live_type=2, stream_id=0, sdes=True,
+                    device_id=self.device_id)
                 _peer_reuses = 0
             else:
                 if _should_abandon_keepalive(
@@ -6052,24 +6210,66 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
     @staticmethod
     def generate_webrtc_peer_id(
-        live_type: int = 2, stream_id: int = 0, *, sdes: bool = False
+        live_type: int = 2, stream_id: int = 0, *, sdes: bool = False,
+        device_id: "Optional[str]" = None
     ) -> str:
         """Generate a peerId for a WebRTC connection.
 
         Format observed in iOS app telemetry:
         ``{32-hex-session}_{6-hex-random}_{liveType}_{streamId}_{version}``
 
-        The trailing version digit encodes the signalling transport:
-        ``1`` for SDES-SRTP cameras, ``2`` for DTLS-SRTP cameras.
-        iOS app telemetry (2025-03-23) confirms: LK.IPC.A001513 (SDES,
-        ``enableSdes: "1"``) uses ``_1`` and responds; LK.IPC.A000088 /
-        LK.IPC.A001064 (DTLS, ``enableSdes: "0"``) use ``_2`` and respond.
-        SDES cameras appear to silently discard webrtcReq with ``_2``.
+        The trailing digit is set per transport - ``1`` for SDES-SRTP cameras,
+        ``2`` for DTLS-SRTP ones - and empirically the cameras want it that way:
+        an SDES camera silently discards a webrtcReq ending ``_2``.
+
+        The NAME is wrong and the 2025-03 telemetry reading behind it does not
+        survive the decompiled app.  ``KVSWebRTCChannel`` builds this field as
+        ``streamID = !isDefaultHD``, i.e. a stream index in {0, 1} derived from
+        the quality setting - HD is 0, SD is 1.  It is not a transport version
+        and the app can never emit a ``2`` here.  Field 3 is ``playCmd``
+        (LIVE=0, SDCARD=1, PRE_LINK=2) and we send 2 = PRE_LINK for a live view;
+        field 4 is a literal 0 in the app.  All three are left alone for now:
+        they are demonstrably not what the camera classifies a client by (that
+        is field 2's first character - see ``_expt_peer_id_fields``), and
+        changing a digit the cameras currently accept, on a guess, is how the
+        stream stops working.
         """
         import os
-        session = os.urandom(16).hex()          # 32 hex chars
-        rand6   = os.urandom(3).hex()           # 6 hex chars
+        # Field 1 is the install identity - the vendor app puts
+        # DeviceIdUtils.getDeviceId(app) here and it is stable for the life of
+        # the install. Field 2 is per-open random ("0" + 5 random chars in the
+        # app), so it must NOT be pinned.
+        session = _stable_terminal_id(width=32)
+        # Field 2's FIRST CHARACTER is the client class the camera will believe:
+        # `parse_peer_id` (0x298ef8 in the A001064 image) does
+        # `client_type = field2[0] - '0'` against
+        # EN_WEBRTC_CLIENT_TYPE_{APP_ANDROID,APP_IOS,WEB,ALEXA,GOOGLE_HOME} = 0..4.
+        # The vendor Android app hard-codes '0' ("0" + createRandomStr(5)) and the
+        # web app sends '2' (WEB) - two independent clients, each declaring its own
+        # class. We were emitting six random hex digits, so we announced a
+        # uniformly random class and an OUT-OF-RANGE one eleven times in sixteen.
+        # '0' = APP_ANDROID is what we actually are, and the camera branches on
+        # this elsewhere (there is an "H5/Alexa/Google unsupport only h265 device"
+        # path), so an undefined value is not something to keep sending.
+        #
+        # This is NOT what fixes the 80.2 s cliff - that was our SCTP receiver
+        # never sending a SACK (see _sctp_sack_chunk). Classes 3 and 4 merely
+        # bought an exemption from the camera's keepalive watchdog via
+        # `rtc_session_is_smart_home`, which hid the symptom and left the data
+        # channel dead. This field is set correctly because it is correct.
+        rand6   = "0" + os.urandom(3).hex()[1:]  # class 0 + 5 random, fresh per open
         version = 1 if sdes else 2
+        # Experiment override (off by default, fails closed, scoped to one
+        # device): the camera reads its client class from field 2's first
+        # character - see _expt_peer_id_fields.  Without a device id the
+        # override never applies.
+        _fields = _expt_peer_id_fields(device_id)
+        if _fields is not None:
+            _term, live_type, stream_id, version = _fields
+            if _term:
+                # One character pins the class and keeps the tail random; six
+                # pins the whole field. Never let the id change length.
+                rand6 = _term if len(_term) == 6 else _term + rand6[1:]
         return f"{session}_{rand6}_{live_type}_{stream_id}_{version}"
 
     async def async_open_webrtc_stream(

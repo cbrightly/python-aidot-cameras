@@ -678,7 +678,7 @@ class _WebRTCOpenMixin:
         # (the SDES keepalive loop) hold one peerid across retries; None keeps the
         # historical mint-per-attempt behaviour for every other caller.
         peer_id   = reuse_peer_id or self.generate_webrtc_peer_id(
-            live_type=2, stream_id=stream_id, sdes=use_sdes
+            live_type=2, stream_id=stream_id, sdes=use_sdes, device_id=device_id
         )
         loop      = asyncio.get_running_loop()
 
