@@ -6240,24 +6240,34 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # the install. Field 2 is per-open random ("0" + 5 random chars in the
         # app), so it must NOT be pinned.
         session = _stable_terminal_id(width=32)
-        # Field 2's FIRST CHARACTER is the client class the camera will believe:
-        # `parse_peer_id` (0x298ef8 in the A001064 image) does
+        # Field 2's first character is the client class on the A001064:
+        # `parse_peer_id` (0x298ef8 in that image) does
         # `client_type = field2[0] - '0'` against
-        # EN_WEBRTC_CLIENT_TYPE_{APP_ANDROID,APP_IOS,WEB,ALEXA,GOOGLE_HOME} = 0..4.
-        # The vendor Android app hard-codes '0' ("0" + createRandomStr(5)) and the
-        # web app sends '2' (WEB) - two independent clients, each declaring its own
-        # class. We were emitting six random hex digits, so we announced a
-        # uniformly random class and an OUT-OF-RANGE one eleven times in sixteen.
-        # '0' = APP_ANDROID is what we actually are, and the camera branches on
-        # this elsewhere (there is an "H5/Alexa/Google unsupport only h265 device"
-        # path), so an undefined value is not something to keep sending.
+        # EN_WEBRTC_CLIENT_TYPE_{APP_ANDROID,APP_IOS,WEB,ALEXA,GOOGLE_HOME}=0..4,
+        # the vendor Android app hard-codes '0' there and the vendor web app
+        # sends '2'. That is all verified.
         #
-        # This is NOT what fixes the 80.2 s cliff - that was our SCTP receiver
-        # never sending a SACK (see _sctp_sack_chunk). Classes 3 and 4 merely
-        # bought an exemption from the camera's keepalive watchdog via
-        # `rtc_session_is_smart_home`, which hid the symptom and left the data
-        # channel dead. This field is set correctly because it is correct.
-        rand6   = "0" + os.urandom(3).hex()[1:]  # class 0 + 5 random, fresh per open
+        # **It is NOT verified for the rest of the fleet, and pinning it breaks
+        # the A000088.** Setting this character to '0' for every camera was
+        # tried and reverted on 2026-08-31. Against a drained fleet with Home
+        # Assistant stopped, three A000088 cameras went 0 for 3 over nine
+        # attempts - each one completing its DTLS handshake in under two seconds
+        # and then receiving no media at all - while the same build streamed the
+        # A001064 on the first attempt. Reverting THIS LINE ALONE, with every
+        # other change of that release left in place, restored 3 of 3.
+        #
+        # The A000088 is a different SoC (Realtek Ameba, FreeRTOS/KM4) whose
+        # image has never been disassembled. A finding from the A001064's
+        # firmware does not transfer to it, and this camera does not merely
+        # ignore the byte - announcing APP_ANDROID makes it accept the session
+        # and send nothing, which is worse than the random value it replaced.
+        #
+        # So the character stays random. Nothing needs it: the 80.2 s cliff this
+        # was found while chasing is fixed in the SCTP receiver (see
+        # `_sctp_sack_chunk`), not here. Screen it per model with
+        # `_expt_peer_id_fields` before ever setting it again, and get evidence
+        # from EACH model's own firmware.
+        rand6   = os.urandom(3).hex()           # 6 hex chars, fresh per open
         version = 1 if sdes else 2
         # Experiment override (off by default, fails closed, scoped to one
         # device): the camera reads its client class from field 2's first

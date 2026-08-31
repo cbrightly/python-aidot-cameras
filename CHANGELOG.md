@@ -47,13 +47,17 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   DTLS path reassembles in its SCTP stack, which is why this only ever affected
   SDES. An A001064 now returns eight days of recordings.
 
-- **The peer id declares APP_ANDROID instead of a random client class.** The
-  camera reads its client class from the first character of the peer id's second
-  field; the vendor Android app hard-codes `0` there and the vendor web app sends
-  `2`. This library generated six random hex digits, so it announced a uniformly
-  random class - and one outside the defined range eleven times in sixteen. The
-  camera branches on this value, so it is now set to what this client actually
-  is. The remaining five characters stay random per open.
+- The peer id's client-class character is deliberately still random. The
+  A001064 does read its client class from the first character of the peer id's
+  second field - its firmware, the vendor Android app and the vendor web app all
+  agree - and setting it correctly was tried in this release and reverted before
+  publication. Pinning it fleet-wide stops the A000088 streaming: three of them
+  went 0 for 3 over nine attempts, each completing its DTLS handshake in under
+  two seconds and then receiving no media, while the same build streamed the
+  A001064 on the first attempt. Reverting that one line restored 3 of 3. The
+  A000088 is a different SoC whose firmware has never been read, and it does not
+  ignore the byte. Nothing needs the pin - the 80.2 s cliff is fixed in the SCTP
+  receiver above.
 
 - **The peer id's install-identity field is stable for the life of the process.**
   It was six fresh random digits on every open (329 distinct ids across 836 opens

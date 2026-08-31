@@ -176,27 +176,34 @@ class TestEveryCallSitePassesADeviceId:
                 )
 
 
-class TestTheDefaultClassIsAppAndroid:
-    """Field 2's first character is the client class the camera believes.
+class TestTheClassCharacterMustStayRandom:
+    """Pinning field 2's first character broke the A000088, and this is the
+    guard against it coming back.
 
-    We used to emit six random hex digits, which announced a uniformly random
-    class and an out-of-range one 11 times in 16. The vendor Android app
-    hard-codes '0'; the web app sends '2'. We are an app-like client, so '0'.
+    The A001064 really does read its client class from that character - the
+    firmware, the Android app and the web app all agree. Generalising that to
+    the whole fleet was tried on 2026-08-31 and reverted: against a drained
+    fleet with Home Assistant stopped, three A000088 cameras went 0 for 3 over
+    nine attempts, each completing its DTLS handshake in under two seconds and
+    then receiving no media, while the same build streamed the A001064 on the
+    first attempt. Reverting this one line restored 3 of 3.
+
+    Nothing needs the pin: the cliff it was found while chasing is fixed in the
+    SCTP receiver, not here.
     """
 
-    def test_field2_always_starts_with_zero(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", str(tmp_path / "absent"))
-        for _ in range(40):
-            f2 = _gen(device_id=DEV).split("_")[1]
-            assert f2[0] == "0", f"client class must be APP_ANDROID, got {f2!r}"
-            assert len(f2) == 6
+    def test_field2_is_not_pinned_to_a_class(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", None)
+        firsts = {_gen(device_id=DEV).split("_")[1][0] for _ in range(120)}
+        assert len(firsts) > 1, (
+            "field 2's first character is pinned again - that is the client "
+            "class, and pinning it fleet-wide stops the A000088 streaming")
 
-    def test_the_remaining_five_characters_stay_random(self, tmp_path, monkeypatch):
-        """Field 2's tail is per-open in the app too; pinning it whole would be
-        cross-session peer-id reuse."""
-        monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", str(tmp_path / "absent"))
-        tails = {_gen(device_id=DEV).split("_")[1][1:] for _ in range(30)}
-        assert len(tails) > 1
+    def test_field2_is_still_six_hex(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", None)
+        for _ in range(20):
+            f2 = _gen(device_id=DEV).split("_")[1]
+            assert len(f2) == 6 and all(c in "0123456789abcdef" for c in f2)
 
     def test_the_override_can_still_screen_another_class(self, tmp_path, monkeypatch):
         """The knob has to be able to contradict the default, or the class can
@@ -221,5 +228,4 @@ class TestTheOverrideIsOffInAPublishedLibrary:
         monkeypatch.setattr("builtins.open", _spy)
         pid = _gen(device_id=DEV)
         assert SHAPE.match(pid).groups() == ("2", "0", "1")
-        assert pid.split("_")[1][0] == "0"
         assert opened == [], f"opened {opened!r} with the knob off"
