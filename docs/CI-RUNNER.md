@@ -154,6 +154,47 @@ second attempt. This expectation has not yet been confirmed by a measured run.
    *Run workflow* (dispatch) and confirm a green run plus a `live-report.json`
    artifact listing every camera.
 
+## Stop Home Assistant's AiDot integration before every live run
+
+**Required since 1.0.0b34. A live run while Home Assistant is streaming will
+fail, and it will look like a code regression.**
+
+A camera holds its viewer slot for ~120 s and serves a limited number of
+concurrent viewers. If Home Assistant is streaming the fleet, CI's session
+handshakes normally and then receives no media - `NO_MEDIA handshake=1.9s
+frames=0 bytes=0` - and the slot that attempt consumed makes the next two
+attempts fail signalling outright with `no webrtcResp received within 45.0s`.
+Three A000088 cameras failed exactly this way on 2026-08-31 while the same build
+was streaming all three under Home Assistant at that moment.
+
+This is contention for the CAMERA, not for the account. It is unaffected by CI
+using a second account with the house shared to it, because the limit belongs to
+the device.
+
+**Why this got worse.** Before 1.0.0b34 the A001064 tore its own session down
+every 80.2 s and the rest of the fleet churned with it, so Home Assistant was
+constantly between sessions and CI could slip into the gaps. That bug is fixed:
+sessions now persist for hours. Home Assistant no longer lets go, so the overlap
+is permanent rather than occasional.
+
+Disable the integration, wait for the slots to lapse, run, then re-enable:
+
+    # Settings -> Devices & Services -> AiDot -> three dots -> Disable
+    # or, over the websocket API:
+    #   {"type": "config_entries/disable", "entry_id": "<id>", "disabled_by": "user"}
+    # confirm it let go - both should be zero:
+    docker exec homeassistant sh -c 'ps -o args | grep -c "[f]fmpeg.*aidot"'
+    docker logs homeassistant --since 60s 2>&1 | grep -c "sdes-turn-prealloc"
+    # wait ~150 s for viewer slots to lapse, then dispatch the run
+    # re-enable afterwards with disabled_by: null
+
+Leaving it disabled costs live view, motion notifications and recordings, so
+re-enable it as soon as the run completes - pass or fail.
+
+The durable fix is to give the runner its own cameras, so a release gate never
+depends on someone's house being quiet. Until then this step is manual and
+mandatory.
+
 ## Which account should CI use?
 
 **This needs deciding before the gate goes live, and it needs an experiment -
