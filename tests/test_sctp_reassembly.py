@@ -11,8 +11,6 @@ Assistant told the user "the camera did not answer when asked what it holds".
 aiortc reassembles for the DTLS path, which is why SD listing worked there and
 never on SDES.
 """
-import pytest
-
 from aidot_cameras.camera.sdes_open import (
     _SCTP_REASSEMBLY_CAP,
     _sctp_reassemble,
@@ -89,7 +87,8 @@ class TestItRefusesToGuess:
 
 class TestItIsWiredIntoTheReceivePath:
     def test_the_data_branch_reassembles_before_it_parses(self):
-        import inspect, re
+        import inspect
+        import re
         from aidot_cameras.camera import sdes_open
         src = inspect.getsource(sdes_open)
         m = re.search(r"elif _pd_ct8 == 0x00 and _sct == 'DONE':(.*?)_sc_answered",
