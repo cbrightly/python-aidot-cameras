@@ -188,6 +188,35 @@ Disable the integration, wait for the slots to lapse, run, then re-enable:
     # wait ~150 s for viewer slots to lapse, then dispatch the run
     # re-enable afterwards with disabled_by: null
 
+### Never run two live runs back to back
+
+**A failed run wedges the fleet, and the next run inherits it.** Every attempt
+mints a fresh peer id, and a fresh peer id is a NEW camera-side session; the
+camera releases old ones only slowly - **~3-4 minutes measured**. A full-fleet
+run that fails burns up to three attempts on each of seven cameras, so it can
+leave twenty undrained sessions behind it.
+
+Measured 2026-08-31. A contended run failed at 17:24 having made ~20 attempts. A
+second run was dispatched at 17:32 - eight minutes later, with the integration
+disabled and a 150 s wait for viewer slots. It overran 40 minutes and was
+cancelled. The 150 s was calibrated for the ~120 s viewer slot and is irrelevant
+to the per-session drain, which is an order of magnitude longer in aggregate.
+
+The two failure shapes in the first run's stall reports tell them apart:
+
+    probes=none          binding-success=0  trigger=not-sent    camera never reached us
+    binding-success=2    trigger=sent(unacked)  inbound-media=0 ICE fine, camera wedged
+
+**Before re-running after any failure, leave the fleet alone for 15 minutes**
+with the integration disabled. Confirm the cameras are healthy first by
+re-enabling Home Assistant briefly and watching them stream, then disable it
+again and wait out the drain. A run started into a wedged fleet tells you
+nothing and wedges it further.
+
+Note also that a cancelled run's log is DISCARDED by GitHub, so a run you stop
+early costs you the per-camera evidence as well as the time. Let a live run
+finish.
+
 Leaving it disabled costs live view, motion notifications and recordings, so
 re-enable it as soon as the run completes - pass or fail.
 
