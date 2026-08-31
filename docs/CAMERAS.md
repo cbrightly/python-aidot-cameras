@@ -345,8 +345,17 @@ there is no known continuation request, so this reports the truncation rather
 than inventing a second request.
 
 Measured 2026-08-13: one A001064 answered nothing to five asks over 84 s on a
-live session. Some models really do not report their card, and `answered=False`
-is the only honest thing to say about them.
+live session. **That reading was ours, not the camera's, and 1.0.0b34 fixes it.**
+The camera did reply; the reply is ~2.8 KB and arrives as several SCTP fragments,
+and the SDES receive path parsed each fragment as a whole AVIO frame - so the
+first was correctly refused as truncated and the rest decoded as junk command
+ids. `answered=False` was reporting a reply we had thrown away. The DTLS path
+reassembles in its SCTP stack, which is why only SDES cameras ever looked mute.
+
+`answered=False` still means exactly what the table says, and it is still the
+honest answer for a model that genuinely does not implement the commands - but
+it is no longer evidence that any particular model is one of those. No model on
+the reference fleet currently is.
 
 ### Is there even a card?
 
