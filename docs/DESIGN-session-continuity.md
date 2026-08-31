@@ -1,5 +1,22 @@
 # Design: surviving a camera that ends its own streaming session
 
+> ## RESOLVED in 1.0.0b34 - the camera was not ending the session, we were
+>
+> This document was written against "the A001064 ends its own streaming session
+> roughly every 60 to 85 seconds". It does, and the cause was in this library.
+>
+> SCTP puts acknowledgement on the receiver. We never sent a SACK, so the
+> camera's control-channel retransmissions ran to exhaustion and it ABORTed the
+> association at 61.4 s (sd 0.10, n=47). Our keepalive could no longer reach it,
+> and its own 20 s watchdog then closed the session: 80.2 - 60.08 = 20.1 s
+> against a 20.000 s constant in the camera. Sending a SACK ends it. Sessions now
+> run unbounded, and PTZ, two-way audio and SD listing keep working for the whole
+> session instead of dying with the channel about a minute in.
+>
+> Nothing below needs to be built. Keep it for the architectural notes and as a
+> record of how the problem looked from the outside; read the 1.0.0b34 changelog
+> entry for what it actually was.
+
 Status: proposed, not built, and **largely superseded**. Both Phase 0
 measurements came back against it:
 

@@ -271,6 +271,32 @@ def answer_inserted_a_section(*, shifted_sections: int,
     return shifted_sections > 0 and unclaimed_answer_mids > 0
 
 
+def sdes_ice_teardown(last_media: float, last_ice_answer: float, now: float,
+                      media_gap: float = 3.0, ice_gap: float = 6.0) -> bool:
+    """Whether the camera's ICE agent has torn the transport down.
+
+    The A001064 runs Leedarson's fork of the AWS KVS WebRTC SDK C, whose ICE
+    agent transitions CONNECTED -> DISCONNECTED -> FAILED and drops the
+    transport.  Measured over four stock sessions: while the transport is alive
+    the camera answers our STUN binding requests roughly every 2.5 s and sends
+    its own keepalive indication; at the 80.2 s cliff the answers, the
+    indications and the media all stop in the same instant.  A session that
+    survives the cliff keeps all three going.
+
+    Media stopping ALONE can be a pause the camera recovers from - that is what
+    the LIVING nudges are for.  Media stopping AND the STUN answers stopping is
+    the transport being gone, and only a reopen can help.  Acting on that
+    directly saves the ~30 s the media watchdog otherwise spends finding out.
+
+    Fails safe: either clock unstarted (0.0) returns False, so a session that
+    never carried media - or a build where the ICE timestamp is not plumbed
+    through - falls back to the ordinary watchdog rather than being torn down.
+    """
+    if last_media <= 0.0 or last_ice_answer <= 0.0:
+        return False
+    return (now - last_media) > media_gap and (now - last_ice_answer) > ice_gap
+
+
 def ice_wait_timeout(*, shifted_sections: int, default_timeout: float) -> float:
     """How long to give ICE, given what the camera's answer looked like.
 

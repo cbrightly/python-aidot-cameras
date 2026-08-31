@@ -49,6 +49,8 @@ class SdesSession(AvioRequestMixin):
         cmd_chan=None,
         talk_state=None,
         media_progress=None,
+
+        ice_progress=None,
         media_counts=None,
         teardown_requested=None,
         first_video_pt=None,
@@ -74,6 +76,13 @@ class SdesSession(AvioRequestMixin):
         # that stopped sending (battery teardown ~49-72s) and reconnect - ffmpeg
         # itself never exits on a dead UDP input, so wait_done() alone would hang.
         self._media_progress = media_progress if media_progress is not None else [0.0]
+        # Mutable one-element list shared with the bridge thread: [0] holds the
+        # monotonic timestamp of the last STUN binding success or keepalive
+        # indication the camera sent us (0.0 until the first one).  While the
+        # ICE transport is alive the camera answers about every 2.5 s; at the
+        # 80.2 s cliff the answers stop in the same instant media does, which is
+        # how a transport teardown is told apart from a media pause.
+        self._ice_progress = ice_progress if ice_progress is not None else [0.0]
         # Shared with the bridge thread: [packets, bytes] forwarded to ffmpeg.
         # See media_stats() - the SDES path never calls on_frame, so this is the
         # in-process signal that media is actually flowing.
@@ -227,6 +236,11 @@ class SdesSession(AvioRequestMixin):
     def last_media_monotonic(self) -> float:
         """time.monotonic() of the last media packet forwarded, 0.0 if none yet."""
         return self._media_progress[0]
+
+    @property
+    def last_ice_answer_monotonic(self) -> float:
+        """time.monotonic() of the camera's last STUN answer, 0.0 if none yet."""
+        return self._ice_progress[0]
 
     def media_stats(self) -> dict:
         """Snapshot of media actually forwarded to ffmpeg by the bridge.
