@@ -941,6 +941,30 @@ def describe_video_profile(pt) -> str:
 # audio line advertising PCMU on a PCMA camera.
 _FIRST_MEDIA_WAIT_S = 75.0
 
+#: Waking a cold battery camera, on the vendor app's own terms.
+#:
+#: The app's low-power hook re-asserts the wake every 20 s for up to 3 tries
+#: under a 5-minute ceiling, and gates its live view on the device reporting
+#: itself usable. We used to send one wake and offer immediately -- and the
+#: camera TELLS us it is not ready (`livePlayResp` code -50019 on a waking
+#: battery cam), which this path logged and ignored.
+#:
+#: Measured on an A001513: the first open offers into a camera that is still
+#: cold, the wait is abandoned at about 84 s, and the retry then gets media in
+#: 4.9 s because attempt one is what did the waking. So the first view of a
+#: battery camera failed and the second worked.
+#:
+#: The fix is to wait for the camera's own accept before offering, re-asserting
+#: the wake on the app's cadence while we wait -- NOT a longer
+#: `_FIRST_MEDIA_WAIT_S`, which would just fail more slowly and would also
+#: delay giving up on a camera that is genuinely unreachable.
+_WAKE_REASSERT_EVERY_S = 20.0
+_WAKE_REASSERT_MAX = 3
+#: Total time to give a cold battery camera to accept before offering anyway.
+#: Offering anyway is deliberate: a camera that never accepts may still stream,
+#: and refusing to try would turn a slow camera into a broken one.
+_BATTERY_ACCEPT_WAIT_S = 70.0
+
 # How long to wait for the camera's webrtcResp before parsing it for the ICE
 # credentials the nomination needs.  The STUN window ahead of it closes on a
 # fixed schedule, and the answer lands about 2.4 s AFTER it does (measured on an
@@ -2672,6 +2696,64 @@ class _SdesOpenMixin:
         _LOGGER.info(
             "signaling-wait[%s] livePlayReq-echo elapsed=%dms (timeout=%.1fs)",
             self.device_id, int((time.monotonic() - _echo_t0) * 1000), _echo_timeout)
+        # A cold battery camera is not ready to stream when the wake lands, and
+        # it says so -- `livePlayResp` carries -50019 "not ready" while it boots.
+        # Offering into that is what made the FIRST view of a battery camera
+        # fail and the second one work. So wait for its accept first, keeping
+        # the wake alive on the app's cadence, before sending webrtcReq.
+        #
+        # Battery cameras only. A mains camera is already awake, and fast
+        # liveplay stays exactly as it was for them. When a battery camera is
+        # already awake its accept arrives immediately and this costs nothing.
+        if bool(getattr(self, "is_battery_camera", False)):
+            _bw_t0 = time.monotonic()
+            _bw_deadline = _bw_t0 + _BATTERY_ACCEPT_WAIT_S
+            _bw_sent = 0
+            _bw_next = _bw_t0 + _WAKE_REASSERT_EVERY_S
+            _bw_ok = False
+            while time.monotonic() < _bw_deadline:
+                _bw_left = _bw_deadline - time.monotonic()
+                try:
+                    await _asyncio.wait_for(
+                        _asyncio.shield(liveplay_resp_fut),
+                        timeout=min(2.0, max(0.1, _bw_left)))
+                    _bw_ok = True
+                    break
+                except TimeoutError:
+                    pass
+                except Exception:
+                    break            # a failed future is not worth waiting on
+                if (_bw_sent < _WAKE_REASSERT_MAX
+                        and time.monotonic() >= _bw_next):
+                    _bw_sent += 1
+                    _bw_next = time.monotonic() + _WAKE_REASSERT_EVERY_S
+                    _status("battery camera has not accepted yet - re-asserting"
+                            f" the wake ({_bw_sent}/{_WAKE_REASSERT_MAX})")
+                    try:
+                        outgoing_q.put_nowait((
+                            f"iot/v1/s/{user_id}/IPCAM/lowPowerActiveStateReq",
+                            json.dumps({
+                                "method":  "lowPowerActiveStateReq",
+                                "devId":   device_id,
+                                "userId":  user_id,
+                                "service": "IPC",
+                                "payload": {"devId": device_id,
+                                            "status": "wakeup"},
+                            }),
+                        ))
+                        # Re-ask as well: the camera answers livePlayReq once,
+                        # and the first one was sent while it was still asleep.
+                        outgoing_q.put_nowait(
+                            (_live_play_topic_sdes, _live_req_sdes))
+                    except Exception:
+                        _LOGGER.debug(
+                            "camera %s: wake re-assert could not be queued",
+                            device_id, exc_info=True)
+            _LOGGER.info(
+                "signaling-wait[%s] battery-accept elapsed=%dms accepted=%s"
+                " wakes=%d", self.device_id,
+                int((time.monotonic() - _bw_t0) * 1000), _bw_ok, _bw_sent)
+
         # livePlayResp: explicit camera accept/reject before SDP/ICE.
         if _skip_lp:
             _LOGGER.info(
