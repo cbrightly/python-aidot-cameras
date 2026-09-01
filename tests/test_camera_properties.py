@@ -132,3 +132,25 @@ class TestItDoesNotFightTheIntegrationsConnection:
         assert "no reply from" in src
         # INFO, not debug: a silent None is what hid this failure.
         assert "_LOGGER.info" in src.split("no reply from")[0][-200:]
+
+
+class TestRepliesAreMatchedToTheRightCamera:
+    """The persistent connection carries the whole account's traffic.
+
+    Observed live: all four cameras reported identical SD figures, because the
+    matcher keyed on the action alone and each camera accepted whichever reply
+    arrived first.
+    """
+
+    def test_it_filters_on_the_device_id(self):
+        import inspect
+        from aidot_cameras.camera import client as client_mod
+        src = inspect.getsource(client_mod.CameraMixin.async_query_device_action)
+        assert 'body.get("devId")' in src
+        assert "!= device_id" in src
+
+    def test_it_prefers_our_own_seq(self):
+        import inspect
+        from aidot_cameras.camera import client as client_mod
+        src = inspect.getsource(client_mod.CameraMixin.async_query_device_action)
+        assert 'msg.get("seq")' in src

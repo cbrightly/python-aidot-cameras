@@ -4,7 +4,7 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
-## [Unreleased]
+## [1.0.0rc5]
 
 ### Fixed
 
@@ -19,6 +19,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   the persistent connection, exactly as `_mqtt_device_cmd` already did, and
   falls back to a per-op session only when there is none. A missing reply is
   also logged rather than returned silently.
+
+- **One camera could read another camera's answer.** The persistent MQTT
+  connection is subscribed to the whole account, so replies for every device
+  arrive on it, and the matcher keyed on the action alone. Observed live: four
+  cameras all reported identical SD-card figures, which belonged to whichever
+  camera answered first. Replies are now matched on the device id and on the
+  request's own `seq`.
 
 ## [1.0.0rc4]
 

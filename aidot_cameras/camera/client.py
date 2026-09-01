@@ -2723,6 +2723,19 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             body = msg.get("payload") or {}
             if body.get("action") != action:
                 continue
+            # Match the DEVICE too. The persistent connection is subscribed to
+            # the whole account (`iot/v1/c/{userId}/#`), so replies for every
+            # camera arrive here -- matching on the action alone lets one
+            # camera read another's answer. Observed live: four cameras all
+            # reported the same SD figures, which belonged to whichever camera
+            # answered first.
+            _rid = body.get("devId") or msg.get("id")
+            if _rid and _rid != device_id:
+                continue
+            # And prefer our own request when the reply carries a seq.
+            _rseq = msg.get("seq")
+            if _rseq and _rseq != seq:
+                continue
             out = body.get("out")
             if out is not None:
                 return out
