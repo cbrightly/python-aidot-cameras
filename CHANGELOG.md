@@ -6,6 +6,25 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`devActionReq` was going out in a shape the camera ignores.** We sent only
+  `devId`, `action` and `in`; the vendor app's builder also sends `seq` and
+  `tst` at the top level and a `parentId` beside `devId`. Measured against a
+  real camera, the short form drew no reply at all on any response topic. The
+  siren (`playSound`) rides this request, so that control could not have been
+  working.
+
+### Added
+
+- **`async_reboot()`** -- asks a camera to reboot, the same
+  `devActionReq({action: "RebootFunc", in: []})` the app's camera settings page
+  sends. It reports that the request was sent, not that the camera rebooted: a
+  reboot succeeds by leaving the network, so waiting for an acknowledgement
+  would report success as failure. It refuses when the cloud explicitly reports
+  the camera offline, mirroring the app, which only offers the button on a
+  reachable device. The camera is away for a few seconds afterwards.
+
 ## [1.0.0rc3]
 
 ### Fixed

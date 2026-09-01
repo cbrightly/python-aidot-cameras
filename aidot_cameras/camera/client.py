@@ -2376,8 +2376,14 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         timeout: float = 8.0,
         ack_keyword: str = "setDevAttr",
         seq: "Optional[str]" = None,
+        expect_ack: bool = True,
     ) -> bool:
         """Connect MQTT, optionally wake battery camera, publish command, wait for ack.
+
+        ``expect_ack=False`` reports whether the command was PUBLISHED, not
+        whether the camera answered. That is the honest result for an action
+        whose success removes the camera from the network -- a reboot acks by
+        going away, so waiting for one turns a working command into a False.
 
         All setDevAttrReq callers in the APK (b6.java, LiveCameraView, etc.)
         are in live-view screens where the camera is already awake and MQTT-
@@ -2453,6 +2459,17 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 publish_items=publish_items,
                 duration=timeout,
             )
+
+        # A fire-and-forget caller only needs to know the publish left the host.
+        # `_st` separates that from "no ack came back", which the ack scan below
+        # cannot: it returns False for a failed publish and for a camera that
+        # rebooted before answering.
+        if not expect_ack:
+            _published = not (_st and _st.get("error"))
+            _LOGGER.info(
+                "_mqtt_device_cmd: published without waiting for an ack "
+                "(topic=%s published=%s)", pub_topic, _published)
+            return _published
 
         # Two passes, because being sure is worth more than being quick. A
         # response carrying OUR seq is proof; anything else on these topics is
@@ -2546,6 +2563,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         """
         import json as _json
         import random as _random
+        import time as _time
 
         lan = getattr(self, "_lan_client", None)
         if lan is not None:
@@ -2567,11 +2585,17 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             inner["userId"] = str(user_id)
         if cam_pwd:
             inner["password"] = cam_pwd
+        # `tst` matches the app, which stamps every setDevAttrReq and
+        # devActionReq it builds. The camera accepts the message without it --
+        # this path is proven and reads back within one poll -- so this is
+        # parity rather than a fix; it costs nothing and removes one more way
+        # our traffic differs from the vendor's.
         payload = _json.dumps({
             "id":      device_id,
             "method":  "setDevAttrReq",
             "service": "device",
             "seq":     seq,
+            "tst":     int(_time.time() * 1000),
             "payload": inner,
         })
         pub_topic = f"iot/v1/c/{device_id}/device/setDevAttrReq"
@@ -2598,6 +2622,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         params,
         *,
         timeout: float = 4.0,
+        expect_ack: bool = True,
     ) -> bool:
         """Send a devActionReq (e.g. siren/alarm trigger).
 
@@ -2607,23 +2632,42 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     "payload": {"devId": deviceId, "action": action, "in": params}}
         """
         import json as _json
+        import random as _random
+        import time as _time
 
         user_id   = self.user_id
         device_id = self.device_id
 
+        # The app's own builder (main chunk, DeviceControl) sends five things we
+        # did not: `seq`, `tst`, and a `parentId` alongside `devId`. The camera
+        # answers nothing at all to a devActionReq without them -- a RebootFunc
+        # sent in the short form drew zero replies and did not reboot, while the
+        # same action with these fields is what the settings page uses.
+        #
+        # `password` is deliberately NOT sent: the H5 passes it to its wrapper,
+        # but the wrapper does not put it on the wire, and a read-only
+        # `WifiBaseInfo` acks without it.
+        _dev = self._camera_properties() or {}
+        parent_id = (getattr(getattr(self, "info", None), "direct_id", None)
+                     or _dev.get("directId") or _dev.get("parentId") or device_id)
+        seq = f"ap{_random.randint(1000000, 9999999)}"
         payload = _json.dumps({
             "method":  "devActionReq",
             "service": "device",
+            "seq":     seq,
+            "tst":     int(_time.time() * 1000),
             "payload": {
-                "devId":  device_id,
-                "action": action,
-                "in":     params,
+                "devId":    device_id,
+                "parentId": parent_id,
+                "action":   action,
+                "in":       params,
             },
         })
         pub_topic = f"iot/v1/s/{user_id}/device/devActionReq"
         _LOGGER.info("devActionReq: %s %s -> %s", action, params, device_id)
         return await self._mqtt_device_cmd(
-            pub_topic, payload, timeout=timeout, ack_keyword="devAction")
+            pub_topic, payload, timeout=timeout, ack_keyword="devAction",
+            seq=seq, expect_ack=expect_ack)
 
     # Convenience wrappers - confirmed attribute names/types from APK source
 

@@ -87,6 +87,38 @@ class _CameraControlsMixin:
         self.status.siren = on
         return result
 
+    async def async_reboot(self) -> bool:
+        """Ask the camera to reboot. True means the request was SENT.
+
+        The vendor app's camera settings page does exactly this -- its H5
+        bundle calls ``devActionReq({action: "RebootFunc", in: []})`` -- and
+        ``RebootFunc`` also appears in the native ``NewLivePresenter``. It is
+        the same ``devActionReq`` transport the siren already uses.
+
+        Two deliberate choices:
+
+        * **No ack is awaited.** A reboot succeeds by taking the camera off the
+          network, so a camera that reboots before answering would otherwise be
+          reported as a failure. The app passes no timeout for this action
+          either, unlike the reads beside it. So this reports "requested", and
+          the caller must not read it as "rebooted".
+        * **Refused when the cloud says the camera is offline.** The app only
+          renders its reboot button when the device is reachable
+          (``isCanUseStatus``), and a wake-then-reboot on a sleeping battery
+          camera is not something to fire blind.
+
+        The camera is gone for about a minute afterwards (the app's own wording
+        is "The device Needs a minute to reboot"), during which a viewer sees a
+        session that connects and delivers nothing.
+        """
+        if (not self.status.online) and getattr(self, "_cloud_online_explicit", False):
+            _LOGGER.warning(
+                "reboot refused for %s: the cloud reports it offline", self.device_id)
+            return False
+        _LOGGER.info("reboot requested for %s", self.device_id)
+        return await self.async_trigger_device_action(
+            "RebootFunc", [], expect_ack=False)
+
     async def async_set_night_vision(self, mode: str) -> bool:
         """mode: 'auto' (0), 'on' (1), 'off' (2)"""
         _modes = {"auto": 0, "on": 1, "off": 2}
