@@ -108,6 +108,70 @@ def _sctp_reassemble(flags: int, stream_id: int, payload: bytes,
     return None
 
 
+async def _await_rtsp_publish_target(url: "Optional[str]", *,
+                                     timeout: float = 20.0) -> bool:
+    """Wait until an ``rtsp://host:port`` target accepts a connection.
+
+    Publishing into go2rtc is a race after a Home Assistant restart: the serve
+    ffmpeg is launched as soon as media arrives, and go2rtc's RTSP listener may
+    not be back yet. ffmpeg then fails its very first connect with
+    ``Connection refused``, reports ``Could not write header (incorrect codec
+    parameters ?)``, and exits 145 -- which reads as "stream ended" and takes
+    that camera's view down until something retries.
+
+    Measured on a live box: every occurrence of that failure sat inside a
+    one-minute window around an HA restart (11:32, 11:43, 11:49, 11:52, 11:54,
+    11:56, 11:57 on 2026-09-01, and the same shape the night before), and none
+    in steady state.
+
+    Returns True when the port accepts, False on timeout. False is not fatal --
+    the caller launches ffmpeg anyway, because a target that never opens is a
+    different problem and should surface as ffmpeg's own error rather than as a
+    silent refusal to start.
+    """
+    if not url or not url.startswith("rtsp://"):
+        return True
+    try:
+        rest = url[len("rtsp://"):]
+        hostport = rest.split("/", 1)[0]
+        if "@" in hostport:
+            hostport = hostport.rsplit("@", 1)[1]
+        if hostport.startswith("["):            # IPv6 literal
+            if "]" not in hostport:
+                return True                      # malformed: do not block
+            host, _, tail = hostport[1:].partition("]")
+            port = int(tail.lstrip(":") or 554)
+        else:
+            host, _, port_s = hostport.partition(":")
+            port = int(port_s or 554)
+    except (ValueError, IndexError):
+        return True                              # unparseable: do not block
+
+    _deadline = time.monotonic() + timeout
+    _attempt = 0
+    while time.monotonic() < _deadline:
+        _attempt += 1
+        try:
+            _r, _w = await asyncio.wait_for(
+                asyncio.open_connection(host, port), timeout=3.0)
+            _w.close()
+            try:
+                await _w.wait_closed()
+            except Exception:
+                pass
+            if _attempt > 1:
+                _LOGGER.info(
+                    "publish target %s:%s accepted after %d attempts",
+                    host, port, _attempt)
+            return True
+        except (OSError, TimeoutError):
+            await asyncio.sleep(0.5)
+    _LOGGER.warning(
+        "publish target %s:%s did not accept a connection within %.0fs - "
+        "launching ffmpeg anyway so its own error surfaces", host, port, timeout)
+    return False
+
+
 def _sctp_sack_chunk(cum_tsn: int, a_rwnd: int = 131072) -> bytes:
     """An SCTP SACK (RFC 4960 s3.3.4) with no gap blocks and no duplicates.
 
@@ -6820,6 +6884,8 @@ class _SdesOpenMixin:
                        if _keep_a is not None else ""))
             except Exception:
                 _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_open_sdes_stream', exc_info=True)
+        # Do not launch the publisher into a listener that is not up yet.
+        await _await_rtsp_publish_target(rtsp_push_url)
         _LOGGER.info("SDES ffmpeg cmd: %s", " ".join(cmd))
         if _ffmpeg_path() is None:
             # ffmpeg is not installed - clean up and surface a clear error

@@ -6,6 +6,19 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [1.0.0rc4]
 
+### Fixed
+
+- **A camera could fail to publish for a moment after Home Assistant restarts.**
+  The serve ffmpeg is launched as soon as media arrives, and go2rtc's RTSP
+  listener may not be back yet. ffmpeg's first connect was then refused, it
+  reported `Could not write header (incorrect codec parameters ?)` and exited
+  145 -- which reads as "stream ended" and took that camera's view down until
+  something retried. Measured on a live deployment, every occurrence sat inside
+  a one-minute window around a restart and none in steady state. The publisher
+  now waits (bounded) for the target to accept a connection before launching,
+  and still launches afterwards if it never does, so a genuinely dead target
+  surfaces as ffmpeg's own error rather than a silent refusal to start.
+
 ### Added
 
 - **Sound detection, WiFi and SD-card details.** The cameras answer several
