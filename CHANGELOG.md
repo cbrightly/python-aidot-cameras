@@ -4,7 +4,7 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
-## [Unreleased]
+## [1.0.0rc4]
 
 ### Added
 
