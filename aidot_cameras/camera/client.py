@@ -2616,6 +2616,85 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_set_device_attribute', exc_info=True)
         return ok
 
+    async def async_query_device_action(
+        self,
+        action: str,
+        params=None,
+        *,
+        timeout: float = 8.0,
+    ):
+        """Send a read-only devActionReq and return the camera's ``out`` payload.
+
+        :meth:`async_trigger_device_action` answers "did it go", which is all a
+        control needs. But the camera *answers* its ``get`` actions with real
+        data -- wifi details, SD capacity, which sound algorithms are armed --
+        and none of that was reachable while the only helper returned a bool.
+
+        Returns the decoded ``out`` exactly as the camera sent it (list or
+        dict), or ``None`` when nothing came back. ``None`` means UNKNOWN, not
+        "off": several of these actions answer with ``out: null`` on models that
+        do not implement them, and a caller that reads that as a disabled
+        feature will report a camera as having something switched off when it
+        simply cannot say.
+
+        Deliberately built on the module-level session helper rather than on
+        :meth:`_mqtt_device_cmd`: that method reduces a reply to a bool and is
+        the proven control path, so it is left alone.
+        """
+        import json as _json
+        import random as _random
+        import time as _time
+
+        user_id   = self.user_id
+        device_id = self.device_id
+        smarthome_auth = await self._async_get_smarthome_auth()
+        mqtt_url = await self._async_get_mqtt_url()
+        if not mqtt_url:
+            _LOGGER.debug("async_query_device_action: no MQTT URL for %s", device_id)
+            return None
+        mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(user_id)
+        mqtt_pwd  = (smarthome_auth or {}).get("mqttPassword") or ""
+        client_id = (self._user_info.get("mqttClientId") or f"app-{mqtt_user}")
+
+        _dev = self._camera_properties() or {}
+        parent_id = (getattr(getattr(self, "info", None), "direct_id", None)
+                     or _dev.get("directId") or _dev.get("parentId") or device_id)
+        seq = f"ap{_random.randint(1000000, 9999999)}"
+        payload = _json.dumps({
+            "method":  "devActionReq",
+            "service": "device",
+            "seq":     seq,
+            "tst":     int(_time.time() * 1000),
+            "payload": {
+                "devId":    device_id,
+                "parentId": parent_id,
+                "action":   action,
+                "in":       params if params is not None else [],
+            },
+        })
+        publish_items = [
+            (f"iot/v1/s/{user_id}/device/devActionReq", payload),
+        ]
+        messages, _st = await _mqtt_session_with_status(
+            mqtt_url, mqtt_user, mqtt_pwd, client_id,
+            subscribe_topics=[f"iot/v1/c/{user_id}/#", f"iot/v1/cb/{user_id}/#"],
+            publish_items=publish_items,
+            duration=timeout,
+        )
+        for topic, raw in messages:
+            if "devAction" not in topic:
+                continue
+            try:
+                msg = _json.loads(raw)
+            except Exception:
+                continue
+            body = msg.get("payload") or {}
+            if body.get("action") != action:
+                continue
+            return body.get("out")
+        _LOGGER.debug("devActionReq %s: no reply from %s", action, device_id)
+        return None
+
     async def async_trigger_device_action(
         self,
         action: str,

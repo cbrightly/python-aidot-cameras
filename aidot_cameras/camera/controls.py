@@ -9,6 +9,8 @@ mixin must be combined into CameraMixin (it is not usable standalone).
 import logging
 import struct
 
+from typing import Optional
+
 from .constants import _PTZ_DIR_CODES, _STREAM_QUALITY, SETSTREAMCTRL_CMD
 
 _LOGGER = logging.getLogger(__name__)
@@ -86,6 +88,99 @@ class _CameraControlsMixin:
             "playSound", [1 if on else 0, 1, 30])
         self.status.siren = on
         return result
+
+    #: Sound-detection algorithms, in the order the camera reports them. The
+    #: camera answers ``soundAlgorithmGet`` with a list of single-key dicts --
+    #: ``[{"sound_enable": 0}, {"glass_Break": 0}, {"smoke_T3": 0}, ...]`` --
+    #: so the key names come from the camera rather than from us. The vendor
+    #: app's own strings name baby_cry and dog_bark alongside these.
+    #: ``sound_enable`` is the master switch; the rest are individual detectors.
+    SOUND_MASTER_KEY = "sound_enable"
+
+    async def async_get_sound_detection(self) -> "Optional[dict]":
+        """Which sound detectors are armed, as ``{key: bool}``.
+
+        ``None`` means the camera did not answer -- unknown, NOT all-off. A
+        model that does not implement this replies with a null ``out``, and
+        reporting that as a set of disabled switches would invent a state the
+        camera never claimed.
+        """
+        out = await self.async_query_device_action("soundAlgorithmGet")
+        if not isinstance(out, list):
+            return None
+        flags: dict = {}
+        for item in out:
+            if isinstance(item, dict):
+                for key, value in item.items():
+                    flags[key] = bool(value)
+        return flags or None
+
+    async def async_set_sound_detection(self, key: str, enabled: bool) -> bool:
+        """Arm or disarm one sound detector.
+
+        Read-modify-write: the camera is asked for the current list and gets
+        the same structure back with one flag changed. The alternative is
+        inventing a payload schema for ``soundAlgorithmSet``, and the camera
+        reports the shape it wants -- so echo it rather than guess it.
+        """
+        out = await self.async_query_device_action("soundAlgorithmGet")
+        if not isinstance(out, list):
+            _LOGGER.warning(
+                "sound detection: %s did not report its algorithms; not writing",
+                self.device_id)
+            return False
+        found = False
+        payload = []
+        for item in out:
+            if isinstance(item, dict) and key in item:
+                payload.append({key: 1 if enabled else 0})
+                found = True
+            else:
+                payload.append(item)
+        if not found:
+            _LOGGER.warning("sound detection: %s does not report %r", self.device_id, key)
+            return False
+        return await self.async_trigger_device_action("soundAlgorithmSet", payload)
+
+    async def async_get_wifi_info(self) -> "Optional[dict]":
+        """``{"ssid": str, "rssi": int}`` for the camera's own WiFi link.
+
+        The camera answers ``WifiBaseInfo`` with a positional list whose first
+        two entries are the SSID and signal strength. Only those two are named
+        here -- the third is an integer that looks like an encoded address, and
+        naming a field we have not confirmed is how a guess becomes a fact.
+        """
+        out = await self.async_query_device_action("WifiBaseInfo")
+        if not isinstance(out, list) or not out:
+            return None
+        info: dict = {"ssid": out[0] if isinstance(out[0], str) else None}
+        if len(out) > 1 and isinstance(out[1], (int, float)):
+            info["rssi"] = int(out[1])
+        return info
+
+    async def async_get_sd_card_info(self) -> "Optional[dict]":
+        """``{"present": bool, "total": int, "used": int, "raw": list}``.
+
+        ``SDcardBaseInfo`` answers positionally: ``[False, 0, 0, 0, 0]`` with no
+        card, ``[True, 29838, 28848, 3, ...]`` on a nearly-full one.
+
+        Only the first three fields are named. The fourth was almost called
+        "free" -- but 29838 - 28848 is 990, not 3, so it is not a remainder;
+        28848/29838 is 96.7%, which makes 3 look like a percentage. "Looks
+        like" is not confirmation, so it stays unnamed in ``raw`` rather than
+        shipping a field that reports 3 MB free on a 30 GB card.
+
+        Units for ``total`` and ``used`` are unconfirmed too (MB is plausible
+        at these magnitudes), so the numbers are passed through exactly as the
+        camera reports them rather than converted.
+        """
+        out = await self.async_query_device_action("SDcardBaseInfo")
+        if not isinstance(out, list) or not out:
+            return None
+        def _n(i):
+            return int(out[i]) if len(out) > i and isinstance(out[i], (int, float)) else None
+        return {"present": bool(out[0]), "total": _n(1), "used": _n(2),
+                "raw": list(out)}
 
     async def async_reboot(self) -> bool:
         """Ask the camera to reboot. True means the request was SENT.

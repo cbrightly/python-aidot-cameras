@@ -6,6 +6,17 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- **Sound detection, WiFi and SD-card details.** The cameras answer several
+  `devActionReq` reads with real data that nothing could reach while the only
+  helper returned a bool. `async_query_device_action` returns the camera's
+  reply, and on top of it: sound detection (`sound_enable`, `glass_Break`,
+  `smoke_T3`, `smoke_T4`, `baby_cry`, `all_sound` on the cameras measured, read
+  and write), WiFi SSID and signal, and SD-card present/total/used. A camera
+  that does not answer reads as unknown, never as all-off -- battery cameras
+  reply to none of these while asleep.
+
 ### Fixed
 
 - **`devActionReq` was going out in a shape the camera ignores.** We sent only
