@@ -615,6 +615,44 @@ def _sdes_tmmbr_after_s() -> float:
 EXPT_CAP_FILE = _os.environ.get("AIDOT_EXPT_CAP_FILE")
 
 
+#: How long to wait for the broker to echo our own livePlayReq back before
+#: proceeding. Was 5.0 s (1.5 s with fast-liveplay), and it is pure latency:
+#: across 22 h of one deployment the wait ran 169 times and timed out 169 times,
+#: never once ending early, and not a single inbound `livePlayReq` was seen among
+#: 5000+ messages the cameras and broker did send. The success branch has never
+#: executed. On timeout the code proceeds anyway, so the wait has never changed
+#: behaviour - only delayed it, by 44% of a measured 11.4 s time-to-first-frame
+#: on an A001064.
+#:
+#: Kept rather than deleted, and still honoured, because a broker or firmware
+#: that does echo should still short-circuit the wait; only the price of its
+#: absence changes. Override with AIDOT_SDES_LIVEPLAY_ECHO_S (seconds, 0
+#: disables the wait entirely) to measure it against the old value.
+_LIVEPLAY_ECHO_S = 0.25
+#: Fast-liveplay models keep the 1.5 s they were given: that value came out
+#: of its own 3 h live soak, and nothing here measured it.  The 169/169
+#: evidence below is for the 5.0 s non-fast wait only, so only that one
+#: moves.
+_LIVEPLAY_ECHO_S_FAST = 1.5
+
+
+def _sdes_liveplay_echo_timeout(fast_liveplay: bool) -> float:
+    """Seconds to wait for the livePlayReq echo. Never negative.
+
+    A malformed env value is ignored rather than raising: this runs on every
+    open, and an unparseable knob must not be able to stop a camera streaming.
+    """
+    raw = _os.environ.get("AIDOT_SDES_LIVEPLAY_ECHO_S")
+    if raw is not None:
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            val = None
+        if val is not None and val >= 0.0:
+            return val
+    return _LIVEPLAY_ECHO_S_FAST if fast_liveplay else _LIVEPLAY_ECHO_S
+
+
 def _sdes_max_session_s(device_id: str, path: "Optional[str]" = None) -> float:
     """Seconds of media after which to end THIS device's session.  0 = off.
 
@@ -2559,7 +2597,7 @@ class _SdesOpenMixin:
         # (_NO_FAST_LIVEPLAY_MODELS, e.g. A001064) are always excluded; disable
         # elsewhere via AIDOT_SDES_FAST_LIVEPLAY={0,false,no,off}.
         _skip_lp = self._resolve_sdes_fast_liveplay()
-        _echo_timeout = 1.5 if _skip_lp else 5.0
+        _echo_timeout = _sdes_liveplay_echo_timeout(_skip_lp)
         _echo_t0 = time.monotonic()
         try:
             await _asyncio.wait_for(liveplay_echo_ev.wait(), timeout=_echo_timeout)
