@@ -6,6 +6,16 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc1]
+
+Same code as 1.0.0b34, which is published and validated; this is the version
+string moving from beta to release candidate.
+
+`docs/ROAD-TO-1.0.md` names one open item for 1.0.0 - "two weeks with no
+streaming-breaking release", with the cadence as the evidence - and that clock
+has not run yet. An rc says the shape is right without claiming the cadence.
+Still a PEP 440 pre-release, so plain `pip install` and HACS do not pick it up.
+
 ## [1.0.0b34]
 
 ### Fixed
