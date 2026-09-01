@@ -6,6 +6,22 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc2]
+
+### Changed
+
+- SDES open: the `livePlayReq` echo wait on the models excluded from
+  fast-liveplay (the A001064 and the other role-reversal cameras) drops from
+  5.0 s to 0.25 s. Across 22 h of logs it ran 169 times and timed out 169
+  times, and none of the 5000+ inbound messages in that window was a
+  `livePlayReq`; the code proceeds on timeout anyway, so the wait has never
+  changed behaviour, only delayed it. Measured live on an A001064: time to
+  first media falls from 11534 ms (n=4, sd 100) to 6819 ms (n=5, sd 114) --
+  4715 ms, 41% of time-to-first-frame -- with no open failures in either arm.
+  Fast-liveplay models keep their 1.5 s, which came out of its own soak.
+  The wait is still honoured, so a broker that does echo still short-circuits
+  it. Override with `AIDOT_SDES_LIVEPLAY_ECHO_S`.
+
 ## [1.0.0rc1]
 
 Same code as 1.0.0b34, which is published and validated; this is the version
