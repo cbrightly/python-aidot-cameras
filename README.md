@@ -259,6 +259,91 @@ await session.async_stop_talk()
 See [`docs/CAMERAS.md`](https://github.com/cbrightly/python-aidot-cameras/blob/main/docs/CAMERAS.md) for the full camera API (streaming,
 snapshots, recordings, motion polling, two-way audio, and LAN-direct media).
 
+## Camera controls and state
+
+Controls are on the camera device client. Writes are confirmed by reading the
+value back on each model that offers them, because this firmware acknowledges
+writes it then ignores.
+
+```python
+await device_client.async_set_motion_detection(True)
+await device_client.async_set_night_vision("auto")   # auto | on | off
+await device_client.async_set_speaker_volume(50)
+await device_client.async_reboot()                    # see below
+```
+
+### Reboot
+
+```python
+sent = await device_client.async_reboot()
+```
+
+`async_reboot` sends the same `devActionReq({action: "RebootFunc", in: []})` the
+vendor app's camera settings page sends. Two things to know:
+
+* **It reports that the request was SENT, not that the camera rebooted.** A
+  reboot succeeds by taking the camera off the network, so waiting for an
+  acknowledgement would report a working reboot as a failure. Do not read
+  `True` as "it came back".
+* **It refuses when the cloud explicitly reports the camera offline**, mirroring
+  the app, which only offers the button on a reachable device.
+
+The camera is away for a few seconds afterwards, during which a viewer sees a
+session that connects and delivers nothing.
+
+### Sound detection
+
+The cameras can listen for glass breaking, a smoke alarm, a baby crying and a
+dog barking.
+
+```python
+flags = await device_client.async_get_sound_detection()
+# {'sound_enable': False, 'all_sound': True, 'glass_Break': False,
+#  'smoke_T3': False, 'smoke_T4': False, 'baby_cry': False}
+
+await device_client.async_set_sound_detection("glass_Break", True)
+```
+
+The keys come from the camera, not from a fixed table, so a model reporting a
+detector not listed above still works. A write is read-modify-write: the current
+list is fetched and sent back with one flag changed, rather than against a
+payload schema invented here.
+
+**`None` means unknown, never "all off".** A camera that does not answer -- a
+battery camera asleep, or a model without the feature -- returns `None`, and
+treating that as a set of disabled detectors would report a state the camera
+never claimed. A write refuses outright when there is no current list to echo.
+
+### WiFi and SD card
+
+```python
+await device_client.async_get_wifi_info()      # {'ssid': ..., 'rssi': 63}
+await device_client.async_get_sd_card_info()   # {'present': True, 'total': 29838,
+                                               #  'used': 28848, 'raw': [...]}
+```
+
+Only confirmed fields are named. `SDcardBaseInfo` answers positionally and its
+fourth value was nearly called "free" -- but on a card reading 29838 total and
+28848 used it returns 3, which is not a remainder (990) and looks like a
+percentage. It stays unnamed in `raw` rather than shipping a field that reports
+3 MB free on a 30 GB card. The units of `total` and `used` are unconfirmed too,
+so the numbers pass through exactly as the camera reports them.
+
+### Reading anything else the camera answers
+
+```python
+out = await device_client.async_query_device_action("getWorkMode")
+```
+
+`async_query_device_action` sends a read-only `devActionReq` and returns the
+camera's `out` payload. The cameras answer more actions than this library wraps
+-- `getWorkMode`, `getAutoAlarm`, `getRoiHuman` (human/vehicle/package
+detection), `getRoiPrivacy` and others. `None` means no reply, which is not the
+same as "unsupported".
+
+**Do not use it to send actions that change something** unless you know the
+payload shape. `SDcardFormatFunc` is one of the actions the cameras accept.
+
 ## Getting an RTSP URL
 
 Want a plain `rtsp://` URL for Frigate, an NVR, or VLC? You can have one, but

@@ -37,9 +37,9 @@ PRIVATE python-aidot-cameras-ci          PUBLIC python-aidot-cameras
     the sha under test, runs its
     scripts/live_validate.py on the
     LAN runner, logs stay private
-        │
-        └─ posts commit status ─────────► "live-validation" on that sha
-           (LIB_STATUS_TOKEN lives here)        │
+        |
+        +- posts commit status ---------> "live-validation" on that sha
+           (LIB_STATUS_TOKEN lives here)        |
                                           live-gate reads it with its own
                                           GITHUB_TOKEN - no secret needed
 ```
@@ -224,6 +224,24 @@ The durable fix is to give the runner its own cameras, so a release gate never
 depends on someone's house being quiet. Until then this step is manual and
 mandatory.
 
+## Known coverage hole: the direct-TS serve is not gated
+
+The live gate exercises the SDES path through ffmpeg (`serving (sdes ffmpeg
+bound)`) and scores DTLS cameras by counting frames. It never runs
+`_DirectTsServer` -- grep a run's log for `serving TS directly` and you get
+nothing.
+
+Home Assistant **does** use that path for DTLS cameras. So a change to the
+direct-TS serve (the keyframe splice, for one) passes a green gate without its
+code having executed. Verify those by hand on a box until the gate covers them:
+attach a consumer to the serve port and confirm bytes and a decodable stream.
+
+```bash
+wget -q -O /tmp/x.ts http://127.0.0.1:<port>/<device_id>.ts
+ffprobe -v error -show_entries stream=codec_name,codec_type -of csv=p=0 /tmp/x.ts
+# expect: h264,video and aac,audio -- zero bytes means the consumer was never spliced
+```
+
 ## Which account should CI use?
 
 **This needs deciding before the gate goes live, and it needs an experiment -
@@ -313,6 +331,42 @@ main account plus a cached token:
 - Either way, expect BUSY verdicts if someone opens a camera in HA or the
   phone app mid-run. Re-run the workflow; do not "fix" it by loosening the
   gate.
+
+## Publish the library BEFORE pinning it in the integration
+
+The integration's `manifest.json` pins a library version. Home Assistant
+installs that requirement at setup, and **refuses to set the integration up at
+all if it cannot be satisfied**:
+
+```
+Setup failed for custom integration 'aidot':
+  Requirements for aidot not found: ['python-aidot-cameras[webrtc]>=1.0.0rcN']
+```
+
+The config entry then sits `not_loaded`, no coordinators run, and the camera
+entities that remain are stale registry rows rather than working ones. The
+integration's own CI fails the same way, retrying the install five times before
+giving up -- which reads as a test failure and is not one.
+
+Both happened on 2026-09-01, on a deployment and then in CI, from the same
+cause. So the order is:
+
+1. Land the library change and gate it.
+2. Publish the library, and **confirm the wheel is actually on PyPI** -- a
+   created GitHub release is not enough; the publish job waits on an
+   environment approval.
+3. Only then push the integration commit that pins the new version.
+
+Verifying a release exists is not the same as verifying it is installable:
+
+```bash
+python3 -c "import json,urllib.request; d=json.load(urllib.request.urlopen(
+  'https://pypi.org/pypi/python-aidot-cameras/json')); print('1.0.0rcN' in d['releases'])"
+```
+
+If you have already pinned a version that does not exist yet, the deployed
+`manifest.json` can be relaxed locally to unblock a box while the real release
+catches up -- but never commit that relaxation.
 
 ## Emergency override
 

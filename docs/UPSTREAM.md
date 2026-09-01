@@ -10,7 +10,7 @@ Because no upstream file is edited, taking a new upstream release is never a
 merge and never a conflict.  It is **not**, however, always just a version bump:
 see the warning immediately below before assuming a patch release is routine.
 
-## ⚠ Upstream ships two incompatible shapes, and both are live
+## WARNING: upstream ships two incompatible shapes, and both are live
 
 A patch-version bump has twice changed the private API this package attaches to,
 and the second one **reverted the first**:
