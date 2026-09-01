@@ -104,3 +104,31 @@ class TestSdCardInfo:
 
     def test_no_reply_is_none(self):
         assert asyncio.run(_Cam(None).async_get_sd_card_info()) is None
+
+
+class TestItDoesNotFightTheIntegrationsConnection:
+    """The query must reuse the persistent MQTT connection when there is one.
+
+    Opening a fresh session uses the same `mqttClientId` the long-lived
+    connection already holds, and a broker evicts the older session on a
+    duplicate client id. Inside Home Assistant that means the query and the
+    integration knock each other off and the reply never arrives -- which looks
+    exactly like "this camera does not support the action".
+    """
+
+    def test_the_query_prefers_the_persistent_connection(self):
+        import inspect
+        from aidot_cameras.camera import client as client_mod
+        src = inspect.getsource(client_mod.CameraMixin.async_query_device_action)
+        assert "_get_persistent_mqtt" in src, (
+            "the query opens its own MQTT session again - that duplicates the "
+            "client id and the reply is lost inside Home Assistant")
+        assert "_resolve_persistent_mqtt" in src
+
+    def test_a_missing_reply_is_logged_not_silent(self):
+        import inspect
+        from aidot_cameras.camera import client as client_mod
+        src = inspect.getsource(client_mod.CameraMixin.async_query_device_action)
+        assert "no reply from" in src
+        # INFO, not debug: a silent None is what hid this failure.
+        assert "_LOGGER.info" in src.split("no reply from")[0][-200:]

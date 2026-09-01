@@ -4,6 +4,22 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [Unreleased]
+
+### Fixed
+
+- **Camera property reads returned nothing inside Home Assistant.**
+  `async_query_device_action` opened its own MQTT session, which connects with
+  the same `mqttClientId` the integration's long-lived connection already uses
+  -- and a broker evicts the older session on a duplicate client id. The query
+  and the integration knocked each other off, so the reply never arrived and
+  the call returned `None`, indistinguishable from "this camera does not
+  support the action". It only appeared to work when tested with the
+  integration stopped, the one condition that hides the conflict. It now uses
+  the persistent connection, exactly as `_mqtt_device_cmd` already did, and
+  falls back to a per-op session only when there is none. A missing reply is
+  also logged rather than returned silently.
+
 ## [1.0.0rc4]
 
 ### Fixed

@@ -2675,12 +2675,44 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         publish_items = [
             (f"iot/v1/s/{user_id}/device/devActionReq", payload),
         ]
-        messages, _st = await _mqtt_session_with_status(
-            mqtt_url, mqtt_user, mqtt_pwd, client_id,
-            subscribe_topics=[f"iot/v1/c/{user_id}/#", f"iot/v1/cb/{user_id}/#"],
-            publish_items=publish_items,
-            duration=timeout,
-        )
+        sub_topics = [f"iot/v1/c/{user_id}/#", f"iot/v1/cb/{user_id}/#"]
+
+        # Use the PERSISTENT connection when there is one, exactly as
+        # `_mqtt_device_cmd` does. Opening a fresh session here instead looked
+        # harmless and is not: it connects with the same `mqttClientId` the
+        # long-lived connection is already using, and a broker evicts the older
+        # session on a duplicate client id. Inside Home Assistant that means the
+        # query and the integration's own connection knock each other off, and
+        # the reply never arrives -- the request appears to work and simply
+        # returns nothing. It only "worked" when tested with the integration
+        # stopped, which is the one condition that hides the conflict.
+        messages = []
+        pm = await self._get_persistent_mqtt() if self._resolve_persistent_mqtt() else None
+        if pm is not None:
+            messages, _st = await pm.request(
+                publish_items=publish_items,
+                subscribe_topics=sub_topics,
+                timeout=timeout,
+            )
+            if _st and _st.get("error"):
+                _LOGGER.debug(
+                    "async_query_device_action: persistent MQTT failed (%s); "
+                    "falling back for %s", _st.get("error"), device_id)
+                pm = None
+        if pm is None:
+            messages, _st = await _mqtt_session_with_status(
+                mqtt_url, mqtt_user, mqtt_pwd, client_id,
+                subscribe_topics=sub_topics,
+                publish_items=publish_items,
+                duration=timeout,
+            )
+        # Several devAction messages can be in flight on a shared connection,
+        # and some carry no `out` at all (a bare acknowledgement). Taking the
+        # first match therefore loses data: a camera reporting six sound
+        # detectors surfaced only the two from whichever reply arrived first.
+        # So prefer a reply that actually carries a payload, and only fall back
+        # to an empty one when nothing better arrived.
+        _empty_seen = False
         for topic, raw in messages:
             if "devAction" not in topic:
                 continue
@@ -2691,8 +2723,19 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             body = msg.get("payload") or {}
             if body.get("action") != action:
                 continue
-            return body.get("out")
-        _LOGGER.debug("devActionReq %s: no reply from %s", action, device_id)
+            out = body.get("out")
+            if out is not None:
+                return out
+            _empty_seen = True
+        if _empty_seen:
+            _LOGGER.debug("devActionReq %s: only empty replies from %s",
+                          action, device_id)
+            return None
+        # Never return None silently: a caller cannot tell "unsupported" from
+        # "the reply never came back", and a silent None is what made this
+        # failure invisible for an entire debugging session.
+        _LOGGER.info("devActionReq %s: no reply from %s (%d messages seen)",
+                     action, device_id, len(messages))
         return None
 
     async def async_trigger_device_action(
