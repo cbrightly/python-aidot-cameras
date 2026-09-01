@@ -39,6 +39,13 @@ this server or in go2rtc: a `proc.returncode` dereference when there is no
 ffmpeg process, binding an ephemeral port instead of the advertised one when no
 relay holds it, and the missing join-awareness below. The server itself
 describes cleanly against real go2rtc (`rc: 0, h264,video`).
+
+These drive the server directly, so they must announce keyframes the way the
+mux does (`mark_keyframe`). The container's random_access_indicator is no longer
+the primary trigger: it is per-PID, AAC audio sets it ~50x/s, and syncing on it
+spliced a late joiner onto audio with video mid-GOP. It survives only as a
+bounded fallback for a writer that never signals - covered in
+test_direct_ts_keyframe_signal.py.
 """
 import os
 import socket
@@ -133,6 +140,7 @@ def test_a_consumer_gets_an_http_response_then_the_media():
                 if srv.has_consumer():
                     break
                 time.sleep(0.05)
+            srv.mark_keyframe()                    # the mux announces it
             srv.write(_ts(0x100, pusi=1, rai=1))   # keyframe: releases the join
             for _ in range(10):
                 srv.write(_ts(0x100, pusi=1))
@@ -255,6 +263,7 @@ def test_a_late_consumer_gets_tables_then_a_keyframe():
         sock, head = _get(srv.port, read_bytes=1)
         assert _wait_consumer(srv)
         body = head.partition(b"\r\n\r\n")[2]
+        srv.mark_keyframe()                       # the mux announces it
         srv.write(_ts(0x100, pusi=1, rai=1))      # the next keyframe
         srv.write(_ts(0x100, pusi=1))
         body += _drain(sock, n=4)
@@ -276,6 +285,7 @@ def test_once_synced_it_keeps_forwarding():
         srv.write(_pat()); srv.write(_ts(0x1000, pusi=1))
         sock, head = _get(srv.port, read_bytes=1)
         assert _wait_consumer(srv)
+        srv.mark_keyframe()
         srv.write(_ts(0x100, pusi=1, rai=1))
         for _ in range(6):
             srv.write(_ts(0x100, pusi=1))
@@ -295,6 +305,7 @@ def test_a_reconnecting_consumer_resyncs():
         srv.write(_pat()); srv.write(_ts(0x1000, pusi=1))
         s1, _ = _get(srv.port, read_bytes=1)
         assert _wait_consumer(srv)
+        srv.mark_keyframe()
         srv.write(_ts(0x100, pusi=1, rai=1))
         s1.close()
         time.sleep(0.3)

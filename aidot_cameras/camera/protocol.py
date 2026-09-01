@@ -1058,6 +1058,11 @@ class _DirectTsServer:
         self._pmt: "Optional[bytes]" = None
         self._pmt_pid: "Optional[int]" = None
         self._synced = False        # has the current consumer been given a start
+        # Set by the mux immediately before it writes a video keyframe, so a new
+        # consumer can be spliced where the picture is actually decodable.
+        self._kf_pending = False
+        self._kf_ever = False
+        self._waiting_since: "Optional[float]" = None
 
     @property
     def port(self) -> int:
@@ -1141,6 +1146,51 @@ class _DirectTsServer:
         except (IndexError, ValueError):
             return
 
+    #: How long a new consumer may wait for a keyframe signal before the old
+    #: PID-blind random-access test is allowed to start it anyway. The signal is
+    #: the correct trigger, but a stream that never sends one must not hang
+    #: forever - gating solely on a video-pid flag served ZERO bytes when tried
+    #: (2026-08-29), because the muxer does not set it.
+    _LEGACY_SYNC_AFTER_S = 5.0
+
+    def mark_keyframe(self) -> None:
+        """Tell the server the next bytes written begin a video keyframe.
+
+        The mux knows this and used to throw it away: it pulls ``(data, ts, kf)``
+        off the queue and ``kf`` came from ``_h264_has_keyframe`` at the tap.
+        Everything downstream then tried to rediscover it from the container,
+        which does not carry it - PyAV's mpegts muxer does not set
+        ``random_access_indicator`` on the video PID in this stream, so a sync
+        gated on that flag never fires at all.
+
+        Splicing a consumer anywhere else hands it video mid-GOP referencing an
+        SPS/PPS it never received, which decodes as "non-existing PPS 0
+        referenced": a video track that never produces a frame.
+        """
+        if not self._kf_ever:
+            _LOGGER.debug("direct-ts: first keyframe signal reached the server")
+        self._kf_ever = True
+        self._kf_pending = True
+
+    def _legacy_sync_ok(self, pkt: bytes) -> bool:
+        """The pre-signal behaviour, allowed only after a grace period.
+
+        Kept because a source that never calls ``mark_keyframe`` must still be
+        servable. Deliberately NOT the first choice: this test accepts a
+        random-access point on ANY pid, and AAC audio sets that flag ~50x/s, so
+        before the signal existed a late joiner was spliced onto audio and never
+        received a decodable picture.
+        """
+        if self._kf_ever:
+            return False        # this source signals; wait for the real thing
+        if not self._is_random_access(pkt):
+            return False
+        now = time.monotonic()
+        if self._waiting_since is None:
+            self._waiting_since = now
+            return False
+        return (now - self._waiting_since) >= self._LEGACY_SYNC_AFTER_S
+
     def write(self, b: bytes) -> int:
         data = self._tail + b if self._tail else b
         out = bytearray()
@@ -1164,7 +1214,11 @@ class _DirectTsServer:
                 self._pmt = pkt
             if self._synced:
                 out += pkt
-            elif self._is_random_access(pkt):
+            elif self._kf_pending or self._legacy_sync_ok(pkt):
+                _LOGGER.debug(
+                    "direct-ts: spliced a consumer via=%s signals=%s pid=%s",
+                    "keyframe-signal" if self._kf_pending else "legacy-rai",
+                    self._kf_ever, pid)
                 # Start this consumer here: tables first, then the keyframe.
                 if self._pat is not None:
                     out += self._pat
@@ -1172,6 +1226,8 @@ class _DirectTsServer:
                     out += self._pmt
                 out += pkt
                 self._synced = True
+                self._kf_pending = False
+                self._waiting_since = None
         self._tail = data[i:] if i < n else b""
 
         with self._lock:
@@ -1568,6 +1624,16 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
         def close(self):
             self._f.close()
 
+        def mark_keyframe(self):
+            """Forward the keyframe signal when the sink understands it.
+
+            The sink is a _DirectTsServer on the direct path and an os pipe to
+            ffmpeg otherwise; only the former can use this.
+            """
+            fn = getattr(self._f, "mark_keyframe", None)
+            if fn is not None:
+                fn()
+
     wsink = _FailFlagWriter(out_fileobj)
     try:
         # max_interleave_delta (default 10s of stream time): with an AAC stream
@@ -1659,6 +1725,10 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
             pkt.stream = vs
             pkt.pts, pkt.dts = video_pts_dts(_ts_state, _rel, _slack)
             pkt.time_base = Fraction(1, 90000)
+            if kf:
+                # Announce it BEFORE muxing: the bytes this produces are where a
+                # new consumer can safely be spliced, and only we know that.
+                wsink.mark_keyframe()
             try:
                 out.mux(pkt)
                 progress[0] = _t.monotonic()
