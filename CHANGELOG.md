@@ -6,6 +6,23 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc3]
+
+### Fixed
+
+- Direct-TS serve: a new consumer is spliced on a real video keyframe instead
+  of a container flag. The mux knows when it is about to write one and was
+  discarding that knowledge; everything downstream then tried to rediscover it
+  from the container, which does not carry it -- PyAV's mpegts muxer does not
+  set `random_access_indicator` on the video PID for this stream, so a sync
+  gated on that flag never fires. The fallback accepted a random-access point
+  on ANY pid, and AAC audio sets that flag about 50 times a second, so a late
+  joiner was spliced onto audio and handed video mid-GOP referencing an SPS/PPS
+  it never received -- "non-existing PPS 0 referenced", a video track that
+  never produces a frame. The mux now announces the keyframe to the sink before
+  muxing it. The old test survives only as a grace-period fallback for a source
+  that never signals, and is disabled outright once a source has signalled.
+
 ## [1.0.0rc2]
 
 ### Changed
