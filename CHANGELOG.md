@@ -4,31 +4,6 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
-## [Unreleased]
-
-### Fixed
-
-- **The first view of a battery camera could fail while the second worked.** A
-  cold battery camera is not ready when the wake lands, and it says so --
-  `livePlayResp` carries -50019 "not ready" while it boots. This path logged
-  that and sent the offer anyway, then abandoned the wait at about 84 s.
-  Measured on an A001513: the retry then got media in 4.9 s, because the first
-  attempt is what did the waking.
-
-  Battery cameras now wait for the camera's own accept before offering, and
-  keep the wake alive while waiting on the vendor app's cadence -- re-asserting
-  every 20 s for up to 3 tries, re-sending `livePlayReq` each time because the
-  camera answers it once and the first ask went out while it was asleep. The
-  wait is bounded at 70 s and then offers anyway: a camera that never accepts
-  may still stream, and refusing to try would turn a slow camera into a broken
-  one.
-
-  Mains cameras are untouched and fast-liveplay still saves its ~4.5 s for
-  them. When a battery camera is already awake its accept arrives in about a
-  second, so this costs nothing in the common case. `_FIRST_MEDIA_WAIT_S` is
-  deliberately unchanged: a longer single wait fails more slowly and would also
-  delay giving up on a camera that is genuinely unreachable.
-
 ## [1.0.0rc5]
 
 ### Fixed
