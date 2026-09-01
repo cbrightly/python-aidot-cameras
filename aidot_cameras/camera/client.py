@@ -2712,6 +2712,15 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # detectors surfaced only the two from whichever reply arrived first.
         # So prefer a reply that actually carries a payload, and only fall back
         # to an empty one when nothing better arrived.
+        # Two passes' worth of preference, resolved in one:
+        #   best  - right device, right action, our seq, and a payload
+        #   good  - right device, right action, a payload
+        # `seq` is a PREFERENCE, never a filter. Requiring it looked tidy and
+        # was wrong: a camera that does not echo our seq has every one of its
+        # replies discarded, and the call then reports "no reply" for a camera
+        # that answered. Observed live as `no reply from <device> (4 messages
+        # seen)` -- four candidates rejected on the seq alone.
+        best = good = None
         _empty_seen = False
         for topic, raw in messages:
             if "devAction" not in topic:
@@ -2729,17 +2738,29 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             # camera read another's answer. Observed live: four cameras all
             # reported the same SD figures, which belonged to whichever camera
             # answered first.
+            # The device match IS a filter: the persistent connection carries
+            # the whole account, and without this one camera reads another's
+            # answer (observed live as four cameras reporting identical SD
+            # figures).
             _rid = body.get("devId") or msg.get("id")
             if _rid and _rid != device_id:
                 continue
-            # And prefer our own request when the reply carries a seq.
-            _rseq = msg.get("seq")
-            if _rseq and _rseq != seq:
-                continue
             out = body.get("out")
-            if out is not None:
-                return out
-            _empty_seen = True
+            if out is None:
+                _empty_seen = True
+                continue
+            if msg.get("seq") == seq:
+                best = out
+                break
+            if good is None:
+                good = out
+        if best is not None:
+            return best
+        if good is not None:
+            _LOGGER.debug(
+                "devActionReq %s: accepted a reply for %s without a seq match",
+                action, device_id)
+            return good
         if _empty_seen:
             _LOGGER.debug("devActionReq %s: only empty replies from %s",
                           action, device_id)

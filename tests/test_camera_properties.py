@@ -130,8 +130,14 @@ class TestItDoesNotFightTheIntegrationsConnection:
         from aidot_cameras.camera import client as client_mod
         src = inspect.getsource(client_mod.CameraMixin.async_query_device_action)
         assert "no reply from" in src
-        # INFO, not debug: a silent None is what hid this failure.
-        assert "_LOGGER.info" in src.split("no reply from")[0][-200:]
+        # INFO, not debug: a silent None is what hid this failure. Find the
+        # logging call that owns the message rather than guessing at a
+        # character window near it.
+        import re
+        call = re.search(r'_LOGGER\.(\w+)\(\s*\n?\s*"[^"]*no reply from', src)
+        assert call is not None, "the no-reply message is not a logging call"
+        assert call.group(1) == "info", (
+            f"the no-reply message logs at {call.group(1)}, not info")
 
 
 class TestRepliesAreMatchedToTheRightCamera:
@@ -149,8 +155,16 @@ class TestRepliesAreMatchedToTheRightCamera:
         assert 'body.get("devId")' in src
         assert "!= device_id" in src
 
-    def test_it_prefers_our_own_seq(self):
+    def test_seq_is_a_preference_not_a_filter(self):
+        """Requiring the seq discards every reply from a camera that does not
+        echo it -- seen live as "no reply (4 messages seen)" on a camera that
+        had in fact answered four times."""
         import inspect
         from aidot_cameras.camera import client as client_mod
         src = inspect.getsource(client_mod.CameraMixin.async_query_device_action)
-        assert 'msg.get("seq")' in src
+        assert 'msg.get("seq") == seq' in src, "seq should still be preferred"
+        # The rejecting form must be gone.
+        assert "_rseq != seq" not in src
+        assert "if _rseq and" not in src
+        # A reply without a matching seq must still be usable.
+        assert "good" in src

@@ -20,6 +20,15 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   falls back to a per-op session only when there is none. A missing reply is
   also logged rather than returned silently.
 
+- **A camera that does not echo our `seq` had every reply discarded.** The
+  reply matcher required the request's `seq`, which turns a camera that answers
+  into one that appears silent -- seen live as `no reply from <device> (4
+  messages seen)`. The device id remains a hard filter, because the persistent
+  connection carries the whole account and without it one camera reads
+  another's answer. `seq` is now only a preference. On the fleet measured every
+  reply did carry a matching seq, so this removes a latent failure mode rather
+  than a demonstrated one.
+
 - **One camera could read another camera's answer.** The persistent MQTT
   connection is subscribed to the whole account, so replies for every device
   arrive on it, and the matcher keyed on the action alone. Observed live: four
