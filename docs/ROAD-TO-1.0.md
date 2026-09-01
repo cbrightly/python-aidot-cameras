@@ -72,6 +72,29 @@ That is not a settling cadence. The clock has not started.
 The bar: **two weeks with no streaming-breaking release.** The cadence is the
 evidence.
 
+**Status 2026-09-01: the clock still has not started, and rc2 did not start it.**
+The last four weeks kept finding structural defects rather than cosmetic ones:
+
+- **2026-08-31, the 80.2 s cliff.** Root cause was our own SCTP receiver: it
+  never sent a SACK, so the camera's retransmission timer ran out and it tore
+  the association down, and it never reassembled fragmented DATA, so multi-
+  fragment SD listing replies were discarded. Both shipped in `1.0.0b34`.
+- **2026-08-31, a regression caught only by the live gate.** Pinning the peer
+  id's client class to `0` was generalised from A001064 firmware to the whole
+  fleet and took three A000088 cameras from 3/3 to 0/3. 1684 unit tests and a
+  30-minute soak passed it; only real cameras caught it.
+- **2026-09-01, two more streaming defects landed unreleased.** New consumers
+  were spliced onto an audio random-access point rather than a video keyframe,
+  and push cameras registered a go2rtc producer on a port nothing binds.
+
+Three of those four are the kind of find this item exists to count, and two are
+not yet in any release. So the discovery rate is still high and 1.0.0 stable is
+not warranted. `1.0.0rc1`/`rc2` are the right shape: PEP 440 pre-releases, so
+plain `pip` and HACS do not pick them up.
+
+Day zero is the first release that carries the two unreleased fixes above and is
+not itself followed by a structural find. It has not happened yet.
+
 ### 2. A 1.2x bitrate difference - premise corrected 2026-08-11
 
 **Read this section before any of the history below it. The number this item was
