@@ -95,6 +95,51 @@ plain `pip` and HACS do not pick them up.
 Day zero is the first release that carries the two unreleased fixes above and is
 not itself followed by a structural find. It has not happened yet.
 
+#### Corrected 2026-09-02: both fixes shipped, and the finds have moved off the streaming path
+
+The block above says the keyframe-splice and go2rtc-producer fixes "are not yet
+in any release". That stopped being true within hours of it being written, and
+the sentence stood for a day. Resolved against the tags rather than the commit
+log, because two release tags do not point at a `chore:` commit and reading the
+log order gets this wrong:
+
+| fix | commit | first release |
+|---|---|---|
+| splice on a real video keyframe | `6fbe888` | **`v1.0.0rc3`** (`4e09be5`) |
+| wait for the publish target before serving | `ecfb116` | **`v1.0.0rc4`** (tag points at `ecfb116` itself) |
+
+So the stated precondition for day zero -- a release carrying both -- was met by
+`1.0.0rc4` on 2026-09-01.
+
+**What has been found since, and how it classifies.** The bar is specifically
+*streaming-breaking*, so each find has to be placed, not counted:
+
+| release | find | streaming-breaking? |
+|---|---|---|
+| `rc5` | `async_query_device_action` opened a second MQTT session on a duplicate `mqttClientId`, and the broker evicted the integration's live one | No -- control path. Streaming never used that call |
+| `rc5` | one camera could read another's `devActionReq` reply; four cameras reported identical SD figures | No -- control path |
+| `rc6` | the reply matcher required an echoed `seq`, so a camera that answers reads as silent | No -- control path |
+| `rc6` | a camera on an unreachable subnet reported `first media never arrived` instead of naming the cause | No -- diagnostic wording; detection only, no behaviour change |
+| `rc6` | the standalone CLI's env reader folded every non-`"1"` value to an explicit `False`, so `AIDOT_FAST_CONNECT=true` disabled fast connect and `AIDOT_SDES_SERVE_AUDIO=` would have dropped audio | No -- `aidot-go2rtc` only. Home Assistant sets these per camera and never goes through that reader |
+
+**None of the five broke streaming**, and the shape of the finds has changed:
+four of the five are in the control/config path that the property-exposure work
+opened up, and the fifth is confined to the standalone CLI. That is a different
+class from the SCTP receiver or the peer-id regression, both of which took real
+cameras from streaming to not streaming.
+
+**Day zero is therefore `1.0.0rc4`, 2026-09-01.** Two weeks from it is
+**2026-09-15**, and the clock runs only while no streaming-breaking release
+intervenes -- any such release resets it to zero.
+
+**Two cautions against reading this as further along than it is.** First, the
+count is honest but the observation window is not clean: `rc5` and `rc6` each
+fixed real defects, and a control-path defect being non-streaming is a
+classification, not an absence. Second, the finds moved into the control path
+because that is where the new work was; a quiet streaming path may partly
+reflect where attention went. The evidence for 1.0.0 stable is a fortnight of
+this cadence, not the fact that day zero can now be dated.
+
 ### 2. A 1.2x bitrate difference - premise corrected 2026-08-11
 
 **Read this section before any of the history below it. The number this item was

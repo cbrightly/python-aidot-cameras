@@ -8,6 +8,15 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ### Fixed
 
+- **A camera that does not echo our `seq` had every reply discarded.** The
+  reply matcher required the request's `seq`, which turns a camera that answers
+  into one that appears silent -- seen live as `no reply from <device> (4
+  messages seen)`. The device id remains a hard filter, because the persistent
+  connection carries the whole account and without it one camera reads
+  another's answer. `seq` is now only a preference. On the fleet measured every
+  reply did carry a matching seq, so this removes a latent failure mode rather
+  than a demonstrated one.
+
 - **`aidot-go2rtc` turned a truthy env var into an explicit "off".** The CLI's
   env reader tested the literal `"1"`, so every other value became a `False`
   passed down to `start_keepalive` as a deliberate override. `AIDOT_FAST_CONNECT=true`
@@ -69,15 +78,6 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   the persistent connection, exactly as `_mqtt_device_cmd` already did, and
   falls back to a per-op session only when there is none. A missing reply is
   also logged rather than returned silently.
-
-- **A camera that does not echo our `seq` had every reply discarded.** The
-  reply matcher required the request's `seq`, which turns a camera that answers
-  into one that appears silent -- seen live as `no reply from <device> (4
-  messages seen)`. The device id remains a hard filter, because the persistent
-  connection carries the whole account and without it one camera reads
-  another's answer. `seq` is now only a preference. On the fleet measured every
-  reply did carry a matching seq, so this removes a latent failure mode rather
-  than a demonstrated one.
 
 - **One camera could read another camera's answer.** The persistent MQTT
   connection is subscribed to the whole account, so replies for every device
