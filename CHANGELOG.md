@@ -4,7 +4,37 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
-## [Unreleased]
+## [1.0.0rc6]
+
+### Fixed
+
+- **`aidot-go2rtc` turned a truthy env var into an explicit "off".** The CLI's
+  env reader tested the literal `"1"`, so every other value became a `False`
+  passed down to `start_keepalive` as a deliberate override. `AIDOT_FAST_CONNECT=true`
+  -- the spelling the README documents and `webrtc_open` accepts -- therefore
+  *disabled* fast connect rather than enabling it.
+
+  Accepting `1/true/yes/on` is only half of it, because the library's resolvers
+  do not share one convention: `AIDOT_FAST_CONNECT` is a truthy allowlist over a
+  default of off, while `AIDOT_SDES_SERVE_AUDIO` is a falsy denylist over a
+  default of **on**. A single reader cannot mirror both, and folding an
+  unrecognised value to `False` is silently destructive on the second:
+  `AIDOT_SDES_SERVE_AUDIO=` with no value -- what an empty systemd `Environment=`
+  or compose entry produces -- would have dropped audio the library was going to
+  serve, with nothing in the log to say why. Anything not plainly true or false
+  now returns "no opinion", leaving the knob unset so the library's own resolver
+  reads the environment. Verified on an A001064: opened with
+  `AIDOT_SDES_SERVE_AUDIO=true` the serve delivers h264 1280x720 + aac 48000,
+  where the old reader produced video only.
+
+  Only the standalone CLI was affected. Home Assistant sets these per camera and
+  never went through this reader.
+
+- **Two CLI log lines described the wrong path.** The DTLS RTSP push advertised
+  AAC while that path transcodes to G.711 (the RTSP muxer refuses the mux's ADTS
+  AAC), and the warning for an SDES camera given a non-`rtsp://` output promised
+  an HTTP serve for outputs that are not `http` and are in fact taken as a
+  publish target.
 
 ### Changed
 
