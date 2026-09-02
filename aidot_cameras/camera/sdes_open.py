@@ -172,6 +172,57 @@ async def _await_rtsp_publish_target(url: "Optional[str]", *,
     return False
 
 
+def _local_ipv4_networks():
+    """The IPv4 networks this host is actually on, as ``ipaddress`` networks.
+
+    Best-effort and deliberately conservative: it asks the OS which source
+    address it would use to reach the internet and assumes a /24 around it,
+    which is the common home case. A wrong guess here must never block a
+    candidate, so callers treat "not in this set" as a hint, not a verdict.
+    """
+    import ipaddress as _ipa
+    import socket as _sk
+    nets = []
+    try:
+        _s = _sk.socket(_sk.AF_INET, _sk.SOCK_DGRAM)
+        try:
+            _s.connect(("8.8.8.8", 53))
+            _ip = _s.getsockname()[0]
+        finally:
+            _s.close()
+        nets.append(_ipa.ip_network(f"{_ip}/24", strict=False))
+    except Exception:
+        pass
+    return nets
+
+
+def _candidate_is_off_subnet(ip: str) -> bool:
+    """True when ``ip`` is a private address on a subnet this host is not on.
+
+    A camera whose only ICE candidate is such an address cannot be reached
+    directly, no matter how long we wait: the packets leave via the default
+    gateway and are dropped. Measured on an A001513 advertising
+    ``192.168.100.4`` to a host on ``192.168.0.0/24`` -- STUN binding successes
+    still accumulate (they come back by other paths), the data channel never
+    establishes, and the session spends its whole 75 s first-media budget on a
+    path that never had a chance.
+
+    Public addresses return False: those are relay and reflexive candidates and
+    are reached through the gateway by design.
+    """
+    import ipaddress as _ipa
+    try:
+        _a = _ipa.ip_address(ip)
+    except ValueError:
+        return False
+    if not _a.is_private or _a.is_loopback or _a.is_link_local:
+        return False
+    nets = _local_ipv4_networks()
+    if not nets:
+        return False                      # cannot tell - never call it off-subnet
+    return not any(_a in _n for _n in nets)
+
+
 def _sctp_sack_chunk(cum_tsn: int, a_rwnd: int = 131072) -> bytes:
     """An SCTP SACK (RFC 4960 s3.3.4) with no gap blocks and no duplicates.
 
@@ -4223,6 +4274,22 @@ class _SdesOpenMixin:
             _turn_install_permissions([(_public_ip, 9)], "relay-mode WAN")
 
         if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:
+            # Say it plainly when every address the camera offered is on a
+            # subnet this host is not on. Nothing downstream can recover from
+            # that -- the packets leave by the default gateway and are dropped
+            # -- and the symptom otherwise reads as "first media never
+            # arrived", which sends people looking at the camera.
+            _off = [(_i, _p_) for _i, _p_ in _cam_ice_cands
+                    if _candidate_is_off_subnet(_i)]
+            if _off and len(_off) == len(_cam_ice_cands):
+                _LOGGER.warning(
+                    "camera %s: every candidate it offered is on a subnet this"
+                    " host cannot reach (%s). Direct media is impossible; only"
+                    " the relay can carry it. If this camera never streams,"
+                    " it is on a different network segment (a mesh node,"
+                    " extender or guest SSID) rather than broken.",
+                    self.device_id,
+                    ", ".join(f"{_i}:{_p_}" for _i, _p_ in _off))
             _turn_install_permissions(_cam_ice_cands, "setup")
 
             for _c_ip, _c_port in _cam_ice_cands:

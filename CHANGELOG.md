@@ -4,6 +4,26 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [Unreleased]
+
+### Changed
+
+- **A camera on an unreachable subnet now says so.** When every ICE candidate a
+  camera offers is a private address on a network this host is not on, the log
+  states that directly instead of reporting `first media never arrived` 75 s
+  later. Measured on an A001513 advertising `192.168.100.4` to a host on
+  `192.168.0.0/24`: STUN binding successes still accumulate, so connectivity
+  looks fine, but the data channel never establishes and no media ever arrives
+  (`inbound-media=0` with `decrypt-failed=0` -- nothing reached us at all). The
+  old wording sent people looking at the camera; the cause is that it sits on a
+  different network segment, typically a mesh node, extender or guest SSID.
+
+  Detection only. The relay is already advertised and TURN permissions are
+  already installed for every camera candidate; these cameras simply do not use
+  it, and forcing `AIDOT_SDES_CONNECTION_MODE=relay` is documented as not
+  steering them. Public relay and reflexive candidates are never flagged, and
+  when the host's own networks cannot be determined nothing is flagged at all.
+
 ## [1.0.0rc5]
 
 ### Fixed
