@@ -160,9 +160,40 @@ pip install "python-aidot-cameras[webrtc] @ git+https://github.com/cbrightly/pyt
 
 ## Standalone CLI: `aidot-go2rtc`
 
-Bridge a camera into [go2rtc](https://github.com/AlexxIT/go2rtc) (or any
-RTSP/HTTP consumer) **without Home Assistant**. Installing the package provides
-the `aidot-go2rtc` console script; for an isolated tool install use pipx or uv:
+### What it does
+
+These cameras do not speak RTSP. They stream over WebRTC, negotiated through
+AiDot's cloud with a per-session key exchange, which is why you cannot simply
+point VLC or Frigate at one and get a picture.
+
+`aidot-go2rtc` does that negotiation for you and hands the result out as
+something ordinary: an MPEG-TS stream on stdout, an HTTP endpoint, or an RTSP
+push into [go2rtc](https://github.com/AlexxIT/go2rtc). One camera per process.
+From there anything that reads RTSP or TS can consume it.
+
+### Why you would use it
+
+- **You want these cameras in something that is not Home Assistant** -- Frigate,
+  a standalone go2rtc, an NVR, a browser, `ffmpeg` writing to disk.
+- **You want the streaming stack outside Home Assistant's Python environment,**
+  so its dependencies cannot collide with Home Assistant's pins.
+- **You are debugging.** `--list` shows every camera and which transport it uses,
+  and a single camera can be streamed in isolation with the env knobs below,
+  which is far easier to reason about than the same thing inside Home Assistant.
+
+### When you do not need it
+
+**If you use Home Assistant, install the integration instead** -- it does all of
+this for you, and running both at once means two clients competing for the same
+camera. A camera serves a limited number of concurrent viewers and holds a slot
+for about 120 s after one leaves, so the loser gets a clean handshake and then no
+media at all. The limit belongs to the device, so a second AiDot account with the
+house shared to it does not avoid it.
+
+### Installing
+
+Installing the package provides the `aidot-go2rtc` console script; for an
+isolated tool install use pipx or uv:
 
 ```bash
 pipx install "python-aidot-cameras[webrtc]"
@@ -172,16 +203,48 @@ uv tool install "python-aidot-cameras[webrtc]"
 export AIDOT_USERNAME=... AIDOT_PASSWORD=...   # or AIDOT_TOKEN_FILE, see below
 aidot-go2rtc --list                  # discover cameras + their transport
 
-# Stream one camera. Pick the form that matches how you are running it:
-aidot-go2rtc <device_id> -                              # DTLS: MPEG-TS to stdout
-aidot-go2rtc <device_id> '{output}'                     # SDES: go2rtc exec: only
-aidot-go2rtc <device_id> http://127.0.0.1:8555/cam.ts   # either: serve, then pull
+# Stream one camera. The second argument is WHERE the media should go:
+aidot-go2rtc <device_id> -                              # to stdout
+aidot-go2rtc <device_id> '{output}'                     # go2rtc fills this in
+aidot-go2rtc <device_id> http://127.0.0.1:8555/cam.ts   # serve, then pull
 ```
 
-`'{output}'` is a placeholder go2rtc substitutes; run by hand it is passed
-through as an RTSP push URL. Both transports can push, so `{output}` works on
-any camera - but on a DTLS one prefer `-`, which carries the mux's 48 kHz AAC
-untouched where the push has to transcode audio down to 8 kHz G.711.
+**Which form to use.** `--list` tells you each camera's transport, and that
+decides it:
+
+| your camera | use | why |
+| --- | --- | --- |
+| **DTLS** (mains, e.g. A000088) | `-` | keeps the mux's 48 kHz AAC. The push path has to transcode audio down to 8 kHz G.711 |
+| **SDES** (the A001513 and A001064 families) | `'{output}'` | these stream by pushing RTSP; there is nothing to read from stdout |
+| either, if you want to pull | an `http://` URL | the process serves there and waits for a consumer to connect |
+
+`'{output}'` is a placeholder that go2rtc substitutes with the stream's own push
+URL when it launches the process from an `exec:` source -- quote it so your
+shell does not eat the braces. It is not something to type at a shell: run by
+hand the literal text is taken as a publish target and the push fails. To try
+the push path by hand, put a real `rtsp://` URL there instead. Both transports
+can push, so `{output}` works on any camera; the table is about which gives the
+better result, not what is possible.
+
+### Wiring it into go2rtc
+
+`--list` prints a paste-ready `streams:` block for every camera on the account,
+so you rarely have to write this by hand. It looks like this:
+
+```yaml
+streams:
+  front_door: exec:aidot-go2rtc 1234abcd... {output}
+  driveway:   exec:aidot-go2rtc 5678efgh... -
+```
+
+go2rtc launches one process per stream, on demand, and substitutes `{output}`
+with that stream's push URL.
+
+The process needs the same `AIDOT_*` environment variables you used above. It is
+launched as a child of go2rtc, so the practical answer is to put them where
+go2rtc itself gets its environment: export them in the shell before starting it,
+or set them in its service unit or container definition. If a stream fails
+immediately with an authentication error, that is the thing to check first.
 
 **ffmpeg must be on PATH.** SDES cameras - two of the three validated models -
 stream entirely through an ffmpeg subprocess, and pip cannot install a system
@@ -362,7 +425,7 @@ keep the output around:
 $ pip install "python-aidot-cameras[webrtc]"
 $ export AIDOT_USERNAME='you@example.com' AIDOT_PASSWORD='...' AIDOT_COUNTRY=US
 $ aidot-go2rtc --list
-1a2b3c4d...  LK.IPC.A000088  DTLS (http-pull)
+1a2b3c4d...  LK.IPC.A000088  DTLS (stdout)
 5e6f7a8b...  LK.IPC.A001064  SDES (rtsp-push)
 ```
 
@@ -401,9 +464,10 @@ Stream #0:1: Audio: aac (LC), 48000 Hz, mono
 - **Which camera is which.** `--list` reports the transport per device. DTLS is
   the mains A000088; SDES is the A001064 / A001513 family. Passing the wrong
   form is not silent - the CLI tells you which one to use and exits.
-- **Audio.** The SDES `{output}` push carries G.711 audio alongside video; the
-  DTLS `-` producer carries AAC (48 kHz mono, resampled from the camera's 8 kHz
-  A-law, because 8 kHz AAC plays silent in a lot of browsers).
+- **Audio.** Both forms carry AAC at 48 kHz mono, resampled from the camera's
+  8 kHz A-law, because 8 kHz AAC plays silent in a lot of browsers and browsers
+  on the MSE path have no mapping for G.711 at all. Audio is on by default; see
+  `AIDOT_SDES_SERVE_AUDIO` to turn it off.
 - **A stream that starts with no video** and picks it up a few seconds later is
   normal: the mux waits for a keyframe so the first GOP is decodable. A stream
   that stays audio-only is a camera that never sent one - retry the view.
@@ -464,6 +528,7 @@ audio, idle release, the sprop cache path) are documented in
 | `AIDOT_SDES_ADAPTIVE` | Adaptive fast-with-fallback for the SDES keepalive loop: try the fast path first and fall back to the full relay path if a fast attempt delivers no media. A per-device cache skips the fast attempt on later views once it has failed. Truthy value enables. Ignored for battery cameras, where the fast path cannot win and its short grace truncates the cold start. | unset (off) |
 | `AIDOT_SDES_FAST_LIVEPLAY` | Don't block on the `livePlayResp` wait for eligible SDES cameras (~4.5 s faster cold start). Role-reversal models (A001064 PTZ) always excluded for correctness. **On by default**; set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_SDES_LIVEPLAY_ECHO_S` | How long to wait for the broker to echo our own `livePlayReq` back before sending `webrtcReq`, in seconds (`0` disables the wait). The wait was 5.0 s on the models excluded from fast-liveplay and is pure latency: across 22 h of one deployment it ran 169 times and timed out 169 times, never once ending early, with no inbound `livePlayReq` among 5000+ messages the cameras and broker did send. The code proceeds on timeout anyway, so it never changed behaviour, only delayed it. Measured on an A001064: time to first media 11534 ms -> 6819 ms. Still honoured, so a broker that does echo short-circuits it. | 0.25 s (1.5 s for fast-liveplay models) |
+| `AIDOT_SDES_SERVE_AUDIO` | Include the camera's audio in what an SDES camera serves, on both the RTSP-push and http-serve paths. **On by default** for parity with the official app; set to `0`/`false`/`no`/`off` for video only, which is what a consumer that cannot cope with the audio wants. The standalone CLI reads this; inside Home Assistant the per-camera **Camera audio** switch is the same setting and should be used instead. | enabled (on) |
 | `AIDOT_SDES_NACK` | Ask the camera to resend video RTP packets that never arrived (RTCP Generic NACK). A camera losing packets on a weak link otherwise delivers truncated H.264 slices, which a browser's WebRTC decoder conceals but Media Source Extensions treats as fatal. Measured on an A001064 at ~1-2% loss: 98.4% of losses recovered against none at all without it. Costs nothing on a clean link, where no requests are generated. **On by default**; set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_SDES_VIDEO_PT` | Pin the SDES offer to ONE video codec by payload type, so the camera cannot choose. The offer advertises 96 (H264) and 97 (H265) and the camera decides which to send; on an A001064 that means the same request comes back h264 1280x720 most sessions and hevc 2560x1440 occasionally, at a third of the bitrate. Set to `96` for H264 only (measured h264 720p in 4 of 4 sessions). **Do not set it to `97`** - an H265-only offer returned no video at all in 3 of 3 rounds; narrowing to H265 removes the option rather than selecting it. | unset (both offered) |
 | `AIDOT_SDES_VIDEO_PT_ORDER` | Reorder the SDES offer's video codec list without narrowing it, as a comma-separated preference list (`97,96`). RFC 3264 makes the `m=video` payload-type list a preference list, most-preferred first, and ours has always read `96 97` - not by decision, it has simply never been varied. Whatever is named leads and the rest is appended, so this can express a preference and can never produce a narrowed or empty video m-line. **Experimental and untested on hardware:** whether the camera acts on the order is the open question, so the default is deliberately unchanged. **Tested on hardware 2026-08-23 and it does not select the codec.** Eight sessions on an A001064 in blocks of two: H265 came back in 2 of 4 with the order reversed and 2 of 4 without it, receipts confirming the reordered list reached the SDP. The motive was real - an H265 session costs about half an H264 one (766-774 vs 1597-1685 Kbps) - but the camera picks the codec itself, roughly a coin flip, and RFC 3264 preference order does not move it. | unset (`96 97`) |
