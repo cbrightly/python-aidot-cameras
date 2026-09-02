@@ -93,21 +93,32 @@ _LOGGER = logging.getLogger("aidot.go2rtc")
 def _env_bool(name: str) -> bool | None:
     """Tri-state env flag: truthy -> True, falsy -> False, anything else -> None.
 
-    ``None`` means "no opinion", so ``start_keepalive`` leaves the knob unset and
-    the library's own resolver reads the environment itself.  That matters because
-    the library's resolvers do not share one convention: ``AIDOT_FAST_CONNECT`` is
-    a truthy allowlist over a default of off, while ``AIDOT_SDES_SERVE_AUDIO`` is a
-    falsy denylist over a default of *on*.  No single reader here can mirror both,
-    so anything not plainly true or false must not become an override - reading
-    only the literal ``"1"`` made ``AIDOT_FAST_CONNECT=true`` an explicit False that
-    disabled the feature the user asked for, and returning False for an
-    unrecognised value would do the same to ``AIDOT_SDES_SERVE_AUDIO=`` (an
-    ordinary empty-value shape in a systemd unit or a compose file), silently
-    dropping audio the library would have served."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return None
-    val = raw.strip().lower()
+    ``None`` is the whole point, and it is not timidity.  A non-``None`` here is
+    passed to ``start_keepalive``, which stores it as the per-camera option - and
+    every library resolver checks that option *before* it looks at the
+    environment.  So a value returned from here does not merely beat the env var,
+    it outranks the library's entire resolution chain.  This reader knows the
+    spelling of a flag but not what any knob defaults to, so it must decline
+    rather than guess: unset, blank, or a word it cannot read all mean "no
+    opinion", leaving the decision where the default actually lives.
+
+    The library states each knob as "a recognised token flips it, anything else
+    keeps the default", spelled as a truthy allowlist where the default is off
+    (``AIDOT_FAST_CONNECT``) and a falsy denylist where the default is on
+    (``AIDOT_SDES_SERVE_AUDIO``).  Reading only the literal ``"1"`` broke that:
+    ``AIDOT_FAST_CONNECT=true`` became an explicit False and *disabled* the
+    feature.  Folding an unreadable value to False would break it the other way,
+    turning ``AIDOT_SDES_SERVE_AUDIO=`` - an ordinary empty-value shape in a
+    systemd unit or a compose file - into a silent loss of audio.
+
+    Not every knob is safe to route through this.  A handful still compare against
+    a bare ``"0"`` (``AIDOT_SERVE_RELAY``, ``AIDOT_INCLUDE_SHARED_HOUSES``), where
+    a word spelling reads as true whatever it says; passing one of those through
+    here would hand the library an override it disagrees with.  Check the
+    resolver before adding a knob to ``cmd_stream``."""
+    # Unset and unreadable are the same answer, so let the default reach the
+    # tuples rather than branching on it separately.
+    val = os.environ.get(name, "").strip().lower()
     if val in ("1", "true", "yes", "on"):
         return True
     if val in ("0", "false", "no", "off"):
@@ -206,8 +217,7 @@ async def cmd_stream(dev_id: str, output_url: str) -> int:
                 "stdout for a go2rtc exec: consumer."
             )
         elif output_url.startswith("rtsp") and not dc.is_sdes_camera:
-            # The RTSP muxer refuses the mux's ADTS AAC, so this path transcodes
-            # audio to G.711 A-law; '-' is the form that keeps 48 kHz AAC.
+            # Why G.711 here: see the codec_args branch in camera/client.py.
             _LOGGER.info(
                 "DTLS RTSP push: publishing video + G.711 audio to %s. Pass '-' "
                 "instead to keep the mux's 48 kHz AAC.", output_url

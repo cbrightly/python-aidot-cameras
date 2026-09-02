@@ -12,6 +12,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+import aidot_cameras.camera.client as _cc
+
 from aidot_cameras.__main__ import (
     _env_bool,
     _go2rtc_source,
@@ -21,32 +23,32 @@ from aidot_cameras.__main__ import (
     main,
 )
 
+# The serve-audio resolver lives on a mixin; reach it with the same bare-instance
+# stub the rest of the suite uses (tests/test_sdes_serve_audio.py). It reads
+# os.environ at call time and `_sdes_audio_opt` is absent on __new__, so
+# monkeypatch applies.
+_CAM = next(v for v in vars(_cc).values()
+            if isinstance(v, type) and "_resolve_sdes_serve_audio" in v.__dict__)
 
-def test_env_bool_tristate(monkeypatch):
+
+def _cam():
+    return _CAM.__new__(_CAM)
+
+
+def test_env_bool_unset_is_none(monkeypatch):
     """Unset must stay None so the library default wins.
 
-    The tri-state matters more than the truthiness: returning False for an unset
-    var would push an explicit override into ``start_keepalive`` and silence a
-    default the library owns (SDES serve audio is ON by default, not off).
+    A False here would be stored as the per-camera option, which every resolver
+    consults before the environment - so it would outrank the library's whole
+    chain and silence a default it owns.
     """
-    monkeypatch.setenv("AIDOT_X", "1")
-    assert _env_bool("AIDOT_X") is True
-    monkeypatch.setenv("AIDOT_X", "0")
-    assert _env_bool("AIDOT_X") is False
     monkeypatch.delenv("AIDOT_X", raising=False)
-    assert _env_bool("AIDOT_X") is None  # unset -> library default
+    assert _env_bool("AIDOT_X") is None
 
 
 @pytest.mark.parametrize("raw", ["1", "true", "TRUE", "yes", "on", " On "])
 def test_env_bool_accepts_every_spelling_the_library_accepts(monkeypatch, raw):
-    """The CLI must not be stricter about truthiness than the library it drives.
-
-    ``AIDOT_FAST_CONNECT=true`` is the spelling the README documents and the one
-    ``webrtc_open`` honours (``1/true/yes/on``). Reading only the literal ``"1"``
-    turned it into an explicit ``False`` handed to ``start_keepalive``, which
-    *disabled* the feature the user had just switched on - worse than ignoring it,
-    because the env var also outranked the library's own default.
-    """
+    """`AIDOT_FAST_CONNECT=true` is documented and must not read as "off"."""
     monkeypatch.setenv("AIDOT_X", raw)
     assert _env_bool("AIDOT_X") is True
 
@@ -61,32 +63,24 @@ def test_env_bool_falsy_spellings_match_the_library(monkeypatch, raw):
 def test_env_bool_defers_on_anything_it_cannot_read(monkeypatch, raw):
     """An unrecognised value must not become an override.
 
-    The library's resolvers disagree on convention: AIDOT_FAST_CONNECT is a
-    truthy allowlist over a default of off, AIDOT_SDES_SERVE_AUDIO a falsy
-    denylist over a default of ON. Folding an unreadable value to False would
-    therefore be silently destructive on the second one - ``AIDOT_SDES_SERVE_AUDIO=``
-    with no value, which is what an empty systemd `Environment=` or compose entry
-    produces, would hand start_keepalive an explicit False and drop audio the
-    library was going to serve. Returning None leaves the decision where the
-    default lives.
+    `AIDOT_SDES_SERVE_AUDIO=` with no value - an empty systemd `Environment=` or
+    compose entry - would otherwise drop audio the library was going to serve.
     """
     monkeypatch.setenv("AIDOT_X", raw)
     assert _env_bool("AIDOT_X") is None
 
 
-@pytest.mark.parametrize("raw", ["", "  ", "2", "enabled", "1", "on", "0", "off"])
-def test_env_bool_never_contradicts_the_serve_audio_resolver(monkeypatch, raw):
-    """Whatever the CLI decides must agree with the library reading the same var.
+@pytest.mark.parametrize("raw", ["1", "on", "0", "off"])
+def test_env_bool_agrees_with_the_real_serve_audio_resolver(monkeypatch, raw):
+    """Cross-check against the library resolver itself, not a copy of its rule.
 
-    Locks the two readers together on the knob where a disagreement is silent:
-    serve audio defaults ON, so a False the library would not have produced costs
-    the user their audio with nothing in the log to say why.
+    Serve audio defaults ON, so a False the library would not have produced costs
+    the user their audio silently. Re-typing the rule here could not catch that:
+    a hand-built expectation goes stale in lockstep with nothing, and stays green
+    while the two readers drift. So call the resolver and compare.
     """
     monkeypatch.setenv("AIDOT_SDES_SERVE_AUDIO", raw)
-    cli = _env_bool("AIDOT_SDES_SERVE_AUDIO")
-    library = raw.strip().lower() not in ("0", "false", "no", "off")
-    if cli is not None:
-        assert cli is library
+    assert _env_bool("AIDOT_SDES_SERVE_AUDIO") is _cam()._resolve_sdes_serve_audio()
 
 
 def test_token_file_roundtrip_and_mode(tmp_path):
