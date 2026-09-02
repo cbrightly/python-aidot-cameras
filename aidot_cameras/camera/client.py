@@ -5970,8 +5970,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             # `-bsf:a aac_adtstoasc` does not save it: the header is written
             # before the filter has produced extradata.  So transcode to G.711
             # A-law, which is RTP-native, costs almost nothing at 8 kHz mono,
-            # and is exactly what the SDES push has always carried - the two
-            # push paths now put the same thing on the wire.
+            # and was what the SDES push carried until that path moved to AAC
+            # (fMP4/MSE has no G.711 mapping, so browsers got silence there).
             codec_args = ["-c:v", "copy", "-c:a", "pcm_alaw", "-ar", "8000", "-ac", "1"]
             out_args = ["-f", "rtsp", "-rtsp_transport", "tcp", serve_url]
             out_target = asyncio.subprocess.DEVNULL

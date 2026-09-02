@@ -39,18 +39,20 @@ Authentication (in precedence order):
 Optional stream knobs:
 
   AIDOT_FAST_CONNECT=1        LAN-direct mode (skip TURN relay; same-subnet only)
-  AIDOT_SDES_SERVE_AUDIO=1    include audio on the SDES *http-serve* path (off by
-                              default - the AAC-under-loss deadlock). The RTSP-push
-                              path always carries G711 audio regardless.
+  AIDOT_SDES_SERVE_AUDIO=0    audio is ON by default on both SDES output paths
+                              (app parity). Set 0/false/no/off for video only,
+                              which is what a consumer that cannot cope with the
+                              audio wants. Both paths encode AAC 48 kHz.
 
 go2rtc.yaml example (SDES camera - native RTSP push, video + audio):
 
     streams:
       frontdoor: exec:aidot-go2rtc 0a1b2c3d... {output}
 
-A DTLS camera (A000088) has no RTSP-push path, but a stdout producer works the
-same lazy way. Pass ``-`` as the output and this process writes MPEG-TS (video
-plus AAC audio) to stdout, which go2rtc's exec: source reads directly:
+A DTLS camera (A000088) can push RTSP too, but a stdout producer is the better
+default for it and works the same lazy way. Pass ``-`` as the output and this
+process writes MPEG-TS (video plus AAC audio) to stdout, which go2rtc's exec:
+source reads directly:
 
     streams:
       garage: exec:aidot-go2rtc 0a1b2c3d... -
@@ -89,11 +91,28 @@ _LOGGER = logging.getLogger("aidot.go2rtc")
 
 
 def _env_bool(name: str) -> bool | None:
-    """Tri-state env flag: '1' -> True, '0' -> False, unset -> None (library default)."""
+    """Tri-state env flag: truthy -> True, falsy -> False, anything else -> None.
+
+    ``None`` means "no opinion", so ``start_keepalive`` leaves the knob unset and
+    the library's own resolver reads the environment itself.  That matters because
+    the library's resolvers do not share one convention: ``AIDOT_FAST_CONNECT`` is
+    a truthy allowlist over a default of off, while ``AIDOT_SDES_SERVE_AUDIO`` is a
+    falsy denylist over a default of *on*.  No single reader here can mirror both,
+    so anything not plainly true or false must not become an override - reading
+    only the literal ``"1"`` made ``AIDOT_FAST_CONNECT=true`` an explicit False that
+    disabled the feature the user asked for, and returning False for an
+    unrecognised value would do the same to ``AIDOT_SDES_SERVE_AUDIO=`` (an
+    ordinary empty-value shape in a systemd unit or a compose file), silently
+    dropping audio the library would have served."""
     raw = os.environ.get(name)
     if raw is None:
         return None
-    return raw == "1"
+    val = raw.strip().lower()
+    if val in ("1", "true", "yes", "on"):
+        return True
+    if val in ("0", "false", "no", "off"):
+        return False
+    return None
 
 
 async def _cameras(client: AidotClient) -> list[dict]:
@@ -187,14 +206,18 @@ async def cmd_stream(dev_id: str, output_url: str) -> int:
                 "stdout for a go2rtc exec: consumer."
             )
         elif output_url.startswith("rtsp") and not dc.is_sdes_camera:
+            # The RTSP muxer refuses the mux's ADTS AAC, so this path transcodes
+            # audio to G.711 A-law; '-' is the form that keeps 48 kHz AAC.
             _LOGGER.info(
-                "DTLS RTSP push: publishing video + AAC audio to %s.", output_url
+                "DTLS RTSP push: publishing video + G.711 audio to %s. Pass '-' "
+                "instead to keep the mux's 48 kHz AAC.", output_url
             )
         elif not output_url.startswith("rtsp") and dc.is_sdes_camera:
             _LOGGER.warning(
-                "SDES camera but output %r is not rtsp:// - the library will "
-                "HTTP-serve (video only by default) instead of pushing audio+video. "
-                "For go2rtc exec, pass {output}.",
+                "SDES camera but output %r is not rtsp:// - only an http(s) "
+                "output is served for a consumer to pull; anything else is "
+                "treated as a publish target and will fail. For go2rtc exec, "
+                "pass {output} and let go2rtc substitute its own rtsp:// URL.",
                 output_url,
             )
         await dc.async_login()

@@ -23,14 +23,70 @@ from aidot_cameras.__main__ import (
 
 
 def test_env_bool_tristate(monkeypatch):
+    """Unset must stay None so the library default wins.
+
+    The tri-state matters more than the truthiness: returning False for an unset
+    var would push an explicit override into ``start_keepalive`` and silence a
+    default the library owns (SDES serve audio is ON by default, not off).
+    """
     monkeypatch.setenv("AIDOT_X", "1")
     assert _env_bool("AIDOT_X") is True
     monkeypatch.setenv("AIDOT_X", "0")
     assert _env_bool("AIDOT_X") is False
-    monkeypatch.setenv("AIDOT_X", "yes")  # anything but '1' is not-True
-    assert _env_bool("AIDOT_X") is False
     monkeypatch.delenv("AIDOT_X", raising=False)
     assert _env_bool("AIDOT_X") is None  # unset -> library default
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "TRUE", "yes", "on", " On "])
+def test_env_bool_accepts_every_spelling_the_library_accepts(monkeypatch, raw):
+    """The CLI must not be stricter about truthiness than the library it drives.
+
+    ``AIDOT_FAST_CONNECT=true`` is the spelling the README documents and the one
+    ``webrtc_open`` honours (``1/true/yes/on``). Reading only the literal ``"1"``
+    turned it into an explicit ``False`` handed to ``start_keepalive``, which
+    *disabled* the feature the user had just switched on - worse than ignoring it,
+    because the env var also outranked the library's own default.
+    """
+    monkeypatch.setenv("AIDOT_X", raw)
+    assert _env_bool("AIDOT_X") is True
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "No", "off", " OFF "])
+def test_env_bool_falsy_spellings_match_the_library(monkeypatch, raw):
+    monkeypatch.setenv("AIDOT_X", raw)
+    assert _env_bool("AIDOT_X") is False
+
+
+@pytest.mark.parametrize("raw", ["", "  ", "2", "enabled"])
+def test_env_bool_defers_on_anything_it_cannot_read(monkeypatch, raw):
+    """An unrecognised value must not become an override.
+
+    The library's resolvers disagree on convention: AIDOT_FAST_CONNECT is a
+    truthy allowlist over a default of off, AIDOT_SDES_SERVE_AUDIO a falsy
+    denylist over a default of ON. Folding an unreadable value to False would
+    therefore be silently destructive on the second one - ``AIDOT_SDES_SERVE_AUDIO=``
+    with no value, which is what an empty systemd `Environment=` or compose entry
+    produces, would hand start_keepalive an explicit False and drop audio the
+    library was going to serve. Returning None leaves the decision where the
+    default lives.
+    """
+    monkeypatch.setenv("AIDOT_X", raw)
+    assert _env_bool("AIDOT_X") is None
+
+
+@pytest.mark.parametrize("raw", ["", "  ", "2", "enabled", "1", "on", "0", "off"])
+def test_env_bool_never_contradicts_the_serve_audio_resolver(monkeypatch, raw):
+    """Whatever the CLI decides must agree with the library reading the same var.
+
+    Locks the two readers together on the knob where a disagreement is silent:
+    serve audio defaults ON, so a False the library would not have produced costs
+    the user their audio with nothing in the log to say why.
+    """
+    monkeypatch.setenv("AIDOT_SDES_SERVE_AUDIO", raw)
+    cli = _env_bool("AIDOT_SDES_SERVE_AUDIO")
+    library = raw.strip().lower() not in ("0", "false", "no", "off")
+    if cli is not None:
+        assert cli is library
 
 
 def test_token_file_roundtrip_and_mode(tmp_path):
