@@ -992,6 +992,67 @@ def describe_video_profile(pt) -> str:
 # audio line advertising PCMU on a PCMA camera.
 _FIRST_MEDIA_WAIT_S = 75.0
 
+# How long a BATTERY camera that only announced itself mid-wait is given to send
+# media before the attempt is abandoned to the retry.
+#
+# A cold battery camera normally serves fast: measured 2026-09-03 across cold
+# opens with a 150 s settle, first media landed 5.3 s and 10.0 s after the open,
+# with the camera's own wakeupStatus at +5.4 s.  That matches the vendor app,
+# which pulls these cameras up almost instantly.
+#
+# But the first attempt does sometimes stall completely, and when it does the
+# camera answers our livePlayReq after waking and then sends nothing at all -
+# measured, it answered at +46.4 s with 48 s of this window still to run and no
+# media ever arrived, and the open finished at +103.6 s.  The retry that follows
+# publishes a fresh offer and is served in ~5 s.  So a stalled attempt is not
+# worth the rest of a 75 s window, and this ends it early.
+#
+# The grace is bounded from both sides.  Below, by the healthy distribution: it
+# has to sit clear of the slowest good open (10.0 s here, 10.7 s historically)
+# so a merely slow attempt is never mistaken for a stalled one.  Above, by the
+# camera's own sleep timer: a battery camera that wakes for us and gets no
+# session goes back to sleep about 29 s later (measured: awake at +10.9 s,
+# asleep again at +39.8 s), and the retry is only cheap while the camera is
+# still awake - once it has slept, the retry has to wake it all over again.
+# Abandoning at first-sighting + 15 s puts the retry's offer at roughly +25 s to
+# +30 s, inside that window on both measured wake times.
+#
+# Set AIDOT_BATTERY_STALE_OFFER_GRACE_S=0 to restore the previous behaviour.
+_BATTERY_STALE_OFFER_GRACE_S = float(
+    os.environ.get("AIDOT_BATTERY_STALE_OFFER_GRACE_S", "15")
+)
+
+
+def _stale_offer_abandon_due(*, battery: bool, seen_at_start, first_seen_ts,
+                             now: float, grace_s: float) -> bool:
+    """Whether this attempt's offer is stale and the wait should end now.
+
+    ``seen_at_start`` is when the camera had last been heard from as the media
+    wait began, and it is the arming decision: a warm camera has already
+    answered livePlayResp by then, so the detector stays disarmed for the whole
+    attempt - including every retry attempt, where the camera is awake and
+    talking throughout.  Only an attempt that began with silence, and then heard
+    the camera, can be abandoned.
+
+    ``first_seen_ts`` is when the camera FIRST turned up in this attempt, not
+    the last time it said anything.  Measuring from the latest message lets a
+    chatty camera - one emitting a motion event every 5 s while its handshake
+    goes nowhere - keep pushing the decision back: measured, that delayed the
+    abandon to 47 s when the camera had already been present for 29 s of it,
+    and by then the camera had gone back to sleep and the retry had to wake it
+    all over again.
+
+    A camera that never speaks at all is a different shape (unreachable, or on
+    an unroutable subnet) and keeps the full window it has today.
+    """
+    if not battery or grace_s <= 0:
+        return False
+    if seen_at_start is not None:
+        return False
+    if first_seen_ts is None:
+        return False
+    return (now - first_seen_ts) >= grace_s
+
 # How long to wait for the camera's webrtcResp before parsing it for the ICE
 # credentials the nomination needs.  The STUN window ahead of it closes on a
 # fixed schedule, and the answer lands about 2.4 s AFTER it does (measured on an
@@ -6700,6 +6761,12 @@ class _SdesOpenMixin:
         _media_deadline = time.monotonic() + _FIRST_MEDIA_WAIT_S
         _media_wait_started = time.monotonic()
         _pt_kinds_read = False
+        # Arming state for the stale-offer detector: what we had heard from the
+        # camera ITSELF (not the cloud's ack for it) as this wait began.  See
+        # _stale_offer_abandon_due.
+        _seen_at_start = getattr(self, "_camera_device_seen_ts", None)
+        _first_seen_ts = None
+        _stale_offer_abandoned = False
 
         def _report_first_media_stall(_waited_s, _cancelled=False):
             """Emit the one line that says why nothing arrived.
@@ -6760,6 +6827,29 @@ class _SdesOpenMixin:
 
         try:
             while _first_video_pt[0] is None and time.monotonic() < _media_deadline:
+                if _first_seen_ts is None and _seen_at_start is None:
+                    _first_seen_ts = getattr(
+                        self, "_camera_device_seen_ts", None)
+                if _stale_offer_abandon_due(
+                        battery=bool(getattr(self, "is_battery_camera", False)),
+                        seen_at_start=_seen_at_start,
+                        first_seen_ts=_first_seen_ts,
+                        now=time.monotonic(),
+                        grace_s=_BATTERY_STALE_OFFER_GRACE_S):
+                    # The camera was silent when this wait began and has since
+                    # woken, answered, and sent no media for the whole grace.
+                    # Our offer reached it while it was still asleep and it is
+                    # not going to act on it; the retry's fresh offer will be
+                    # served in seconds.  Stop paying for the rest of the window.
+                    _stale_offer_abandoned = True
+                    _status(
+                        "camera turned up %.0fs into the wait and sent no media"
+                        " for the %.0fs since - abandoning this attempt to the"
+                        " retry, while the camera is still awake"
+                        % (_first_seen_ts - _media_wait_started,
+                           _BATTERY_STALE_OFFER_GRACE_S)
+                    )
+                    break
                 if terminal_error_fut is not None and terminal_error_fut.done():
                     _code, _desc = terminal_error_fut.result()
                     _status(f"camera refused: ack {_code} {_desc}"
@@ -6835,7 +6925,9 @@ class _SdesOpenMixin:
             # Binding Success, and that response only comes back if
             # something we nominated was reachable. One WARNING, on this
             # path only: an open that delivers media reaches none of it.
-            _report_first_media_stall(_FIRST_MEDIA_WAIT_S)
+            _report_first_media_stall(
+                time.monotonic() - _media_wait_started
+                if _stale_offer_abandoned else _FIRST_MEDIA_WAIT_S)
         if _serve_audio and _first_audio_pt[0] is None:
             _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
             while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:
