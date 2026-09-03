@@ -4,6 +4,58 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [1.0.0rc7]
+
+### Fixed
+
+- **A battery camera went back to sleep in the middle of its own handshake.**
+  `setKeepAliveTime` was sent once at open time -- which on a cold camera is
+  before it is awake, so it went nowhere -- and then renewed on a cadence
+  measured from the open rather than from the camera's wake. Measured on an
+  A001513: the camera woke at +10.9 s, stayed awake long enough to emit motion
+  events, and was asleep again at +39.8 s with the handshake still running,
+  after which no media ever arrived and the open finished at +103.6 s. The
+  keep-alive is now re-asserted the instant the camera announces itself, which
+  is what the official client's live view does on mount.
+
+- **A stalled first attempt held the full 75 s first-media window.** When a
+  battery camera was silent as the wait began, has since been heard from, and
+  has still sent nothing, the attempt is now abandoned to the retry -- whose
+  fresh offer is served in about 5 s. Measured from the camera's first sighting
+  rather than its latest message, because a camera emitting an event every 5 s
+  while its handshake goes nowhere would otherwise push the decision out until
+  it had gone back to sleep. `AIDOT_BATTERY_STALE_OFFER_GRACE_S` (15 s, `0`
+  disables).
+
+- **Signalling log lines could not be attributed to a camera.** The MQTT
+  connection carries the whole account and every concurrent open's dispatcher
+  logs every message, so one message appeared five or six times and belonged to
+  none of them in particular. Lines now carry the sender, read from `srcAddr`'s
+  prefix convention, and a message that is not from a camera says so rather
+  than being mislabelled as one.
+
+### Performance
+
+- **1.25 s of dead time removed from every SDES open.** The `livePlayReq`-echo
+  wait dropped from 5.0 s to 0.25 s once it was measured, but the fast-liveplay
+  path kept 1.5 s because that evidence covered the other wait only. Measured on
+  its own: 22 runs, 22 timeouts at 1500-1501 ms, no echo ever received. Both
+  paths now use 0.25 s. On an A001064 the cold open went from 7044 ms to
+  6707-6744 ms to first media; on a battery camera the signalling ahead of
+  `webrtcReq` went from ~2.15 s to ~0.82 s.
+
+### Added
+
+- `AIDOT_BATTERY_WAKE_GATE_S` -- hold a battery camera's offer until the camera
+  itself answers, which is the official client's own shape. **Measured on
+  hardware and shipped off (`0`)**: on this camera family the live-play
+  signalling is itself what wakes the camera, so withholding the offer withholds
+  the wake. At a 20 s budget, on a camera settled for ten minutes, the gate ran
+  its whole budget with the camera silent, the offer went out at +20.9 s, the
+  camera's own wake announcement arrived at +23.6 s (after the offer) and first
+  media at +27.0 s -- against 5.4-10.0 s on the same camera with no gate. Kept
+  as a lever for anyone re-testing on other firmware.
+
 ## [1.0.0rc6]
 
 ### Fixed
