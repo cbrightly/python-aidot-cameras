@@ -744,11 +744,15 @@ EXPT_CAP_FILE = _os.environ.get("AIDOT_EXPT_CAP_FILE")
 #: absence changes. Override with AIDOT_SDES_LIVEPLAY_ECHO_S (seconds, 0
 #: disables the wait entirely) to measure it against the old value.
 _LIVEPLAY_ECHO_S = 0.25
-#: Fast-liveplay models keep the 1.5 s they were given: that value came out
-#: of its own 3 h live soak, and nothing here measured it.  The 169/169
-#: evidence below is for the 5.0 s non-fast wait only, so only that one
-#: moves.
-_LIVEPLAY_ECHO_S_FAST = 1.5
+#: The fast-liveplay path used to keep the 1.5 s it was given, because the
+#: 169/169 evidence above was gathered on the non-fast wait only and nothing
+#: had measured this one.  It has now been measured, and it behaves identically:
+#: over 3 h on 2026-09-03 the fast wait ran 22 times and timed out 22 times, at
+#: 1500-1501 ms every time, with zero "livePlayReq echo received" among them.
+#: So it is the same pure latency as its sibling, and it costs 1.25 s of a
+#: 5.4 s time-to-first-media on a cold battery camera - roughly a quarter of the
+#: whole connect.  Same value, same reasoning, same override.
+_LIVEPLAY_ECHO_S_FAST = 0.25
 
 
 def _sdes_liveplay_echo_timeout(fast_liveplay: bool) -> float:
@@ -991,6 +995,103 @@ def describe_video_profile(pt) -> str:
 # it launched blind with BOTH payload types still unknown, which is what left the
 # audio line advertising PCMU on a PCMA camera.
 _FIRST_MEDIA_WAIT_S = 75.0
+
+# How long a BATTERY camera that only announced itself mid-wait is given to send
+# media before the attempt is abandoned to the retry.
+#
+# A cold battery camera normally serves fast: measured 2026-09-03 across cold
+# opens with a 150 s settle, first media landed 5.3 s and 10.0 s after the open,
+# with the camera's own wakeupStatus at +5.4 s.  That matches the vendor app,
+# which pulls these cameras up almost instantly.
+#
+# But the first attempt does sometimes stall completely, and when it does the
+# camera answers our livePlayReq after waking and then sends nothing at all -
+# measured, it answered at +46.4 s with 48 s of this window still to run and no
+# media ever arrived, and the open finished at +103.6 s.  The retry that follows
+# publishes a fresh offer and is served in ~5 s.  So a stalled attempt is not
+# worth the rest of a 75 s window, and this ends it early.
+#
+# The grace is bounded from both sides.  Below, by the healthy distribution: it
+# has to sit clear of the slowest good open (10.0 s here, 10.7 s historically)
+# so a merely slow attempt is never mistaken for a stalled one.  Above, by the
+# camera's own sleep timer: a battery camera that wakes for us and gets no
+# session goes back to sleep about 29 s later (measured: awake at +10.9 s,
+# asleep again at +39.8 s), and the retry is only cheap while the camera is
+# still awake - once it has slept, the retry has to wake it all over again.
+# Abandoning at first-sighting + 15 s puts the retry's offer at roughly +25 s to
+# +30 s, inside that window on both measured wake times.
+#
+# Set AIDOT_BATTERY_STALE_OFFER_GRACE_S=0 to restore the previous behaviour.
+_BATTERY_STALE_OFFER_GRACE_S = float(
+    os.environ.get("AIDOT_BATTERY_STALE_OFFER_GRACE_S", "15")
+)
+
+
+# How long a BATTERY camera's offer waits for the camera to answer first.
+#
+# **Measured on hardware and shipped OFF.** This is the app's own shape - its
+# live view fires keepAliveHandle(), sends the wake, and renders
+# IPC.Status.Sleep rather than opening a session until the device reports
+# itself awake - and on this camera family it is self-defeating, because the
+# live-play signalling is what wakes the camera.  Withholding the offer
+# withholds the wake.
+#
+# Two runs say so.  At 30 s the camera produced no message for the whole gate,
+# the offer went out at +32.1 s and the open ended at +116.8 s against a 75 s
+# failure without it.  At 20 s, on a camera settled for ten minutes: gate
+# elapsed 20044 ms answered=False, webrtcReq at +20.9 s, the camera's own
+# wakeupStatus at +23.6 s - AFTER the offer - and first media at +27.0 s,
+# against 5.4-10.0 s on the same camera with no gate.
+#
+# So the wake evidence follows the offer rather than preceding it, and the
+# useful order is the one we already had: offer immediately, re-assert the
+# keep-alive the moment the camera answers, and abandon an attempt that has
+# stalled (see _BATTERY_STALE_OFFER_GRACE_S).
+#
+# Kept, off, as a lever for anyone re-testing this on other firmware - set
+# AIDOT_BATTERY_WAKE_GATE_S to a number of seconds to enable it.
+_BATTERY_WAKE_GATE_S = float(os.environ.get("AIDOT_BATTERY_WAKE_GATE_S", "0"))
+
+
+def _battery_wake_gate_s(battery: bool, budget: float) -> float:
+    """Seconds to wait for the camera's own answer before offering; 0 = no gate.
+
+    Mains cameras never sleep, so there is nothing to wait for - and the A001064
+    PTZ is mains, which keeps this away from the role-reversal path, whose
+    timing is delicate.
+    """
+    return budget if (battery and budget > 0) else 0.0
+
+
+def _stale_offer_abandon_due(*, battery: bool, seen_at_start, first_seen_ts,
+                             now: float, grace_s: float) -> bool:
+    """Whether this attempt's offer is stale and the wait should end now.
+
+    ``seen_at_start`` is when the camera had last been heard from as the media
+    wait began, and it is the arming decision: a warm camera has already
+    answered livePlayResp by then, so the detector stays disarmed for the whole
+    attempt - including every retry attempt, where the camera is awake and
+    talking throughout.  Only an attempt that began with silence, and then heard
+    the camera, can be abandoned.
+
+    ``first_seen_ts`` is when the camera FIRST turned up in this attempt, not
+    the last time it said anything.  Measuring from the latest message lets a
+    chatty camera - one emitting a motion event every 5 s while its handshake
+    goes nowhere - keep pushing the decision back: measured, that delayed the
+    abandon to 47 s when the camera had already been present for 29 s of it,
+    and by then the camera had gone back to sleep and the retry had to wake it
+    all over again.
+
+    A camera that never speaks at all is a different shape (unreachable, or on
+    an unroutable subnet) and keeps the full window it has today.
+    """
+    if not battery or grace_s <= 0:
+        return False
+    if seen_at_start is not None:
+        return False
+    if first_seen_ts is None:
+        return False
+    return (now - first_seen_ts) >= grace_s
 
 # How long to wait for the camera's webrtcResp before parsing it for the ICE
 # credentials the nomination needs.  The STUN window ahead of it closes on a
@@ -2723,6 +2824,30 @@ class _SdesOpenMixin:
         _LOGGER.info(
             "signaling-wait[%s] livePlayReq-echo elapsed=%dms (timeout=%.1fs)",
             self.device_id, int((time.monotonic() - _echo_t0) * 1000), _echo_timeout)
+        # App parity: do not offer to a battery camera until the camera itself
+        # has said something.  See _battery_wake_gate_s.  Mains cameras skip
+        # this entirely, so the PTZ's role-reversal timing is untouched.
+        _wake_gate_s = _battery_wake_gate_s(
+            bool(getattr(self, "is_battery_camera", False)),
+            _BATTERY_WAKE_GATE_S)
+        if _wake_gate_s > 0:
+            _wg_t0 = time.monotonic()
+            while (getattr(self, "_camera_device_seen_ts", None) is None
+                    and time.monotonic() - _wg_t0 < _wake_gate_s):
+                await _asyncio.sleep(0.05)
+            _wg_seen = getattr(self, "_camera_device_seen_ts", None) is not None
+            _LOGGER.info(
+                "signaling-wait[%s] battery-wake-gate elapsed=%dms answered=%s"
+                " (budget=%.0fs)",
+                self.device_id, int((time.monotonic() - _wg_t0) * 1000),
+                _wg_seen, _wake_gate_s)
+            if _wg_seen:
+                _status("camera answered after %.1fs - offering now"
+                        % (time.monotonic() - _wg_t0))
+            else:
+                _status("camera said nothing in %.0fs - offering anyway"
+                        % _wake_gate_s)
+
         # livePlayResp: explicit camera accept/reject before SDP/ICE.
         if _skip_lp:
             _LOGGER.info(
@@ -6700,6 +6825,12 @@ class _SdesOpenMixin:
         _media_deadline = time.monotonic() + _FIRST_MEDIA_WAIT_S
         _media_wait_started = time.monotonic()
         _pt_kinds_read = False
+        # Arming state for the stale-offer detector: what we had heard from the
+        # camera ITSELF (not the cloud's ack for it) as this wait began.  See
+        # _stale_offer_abandon_due.
+        _seen_at_start = getattr(self, "_camera_device_seen_ts", None)
+        _first_seen_ts = None
+        _stale_offer_abandoned = False
 
         def _report_first_media_stall(_waited_s, _cancelled=False):
             """Emit the one line that says why nothing arrived.
@@ -6760,6 +6891,29 @@ class _SdesOpenMixin:
 
         try:
             while _first_video_pt[0] is None and time.monotonic() < _media_deadline:
+                if _first_seen_ts is None and _seen_at_start is None:
+                    _first_seen_ts = getattr(
+                        self, "_camera_device_seen_ts", None)
+                if _stale_offer_abandon_due(
+                        battery=bool(getattr(self, "is_battery_camera", False)),
+                        seen_at_start=_seen_at_start,
+                        first_seen_ts=_first_seen_ts,
+                        now=time.monotonic(),
+                        grace_s=_BATTERY_STALE_OFFER_GRACE_S):
+                    # The camera was silent when this wait began and has since
+                    # woken, answered, and sent no media for the whole grace.
+                    # Our offer reached it while it was still asleep and it is
+                    # not going to act on it; the retry's fresh offer will be
+                    # served in seconds.  Stop paying for the rest of the window.
+                    _stale_offer_abandoned = True
+                    _status(
+                        "camera turned up %.0fs into the wait and sent no media"
+                        " for the %.0fs since - abandoning this attempt to the"
+                        " retry, while the camera is still awake"
+                        % (_first_seen_ts - _media_wait_started,
+                           _BATTERY_STALE_OFFER_GRACE_S)
+                    )
+                    break
                 if terminal_error_fut is not None and terminal_error_fut.done():
                     _code, _desc = terminal_error_fut.result()
                     _status(f"camera refused: ack {_code} {_desc}"
@@ -6835,7 +6989,9 @@ class _SdesOpenMixin:
             # Binding Success, and that response only comes back if
             # something we nominated was reachable. One WARNING, on this
             # path only: an open that delivers media reaches none of it.
-            _report_first_media_stall(_FIRST_MEDIA_WAIT_S)
+            _report_first_media_stall(
+                time.monotonic() - _media_wait_started
+                if _stale_offer_abandoned else _FIRST_MEDIA_WAIT_S)
         if _serve_audio and _first_audio_pt[0] is None:
             _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
             while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:

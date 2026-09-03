@@ -8,9 +8,13 @@ executed, and on timeout the open proceeds anyway, so the wait has never
 changed behaviour: only delayed it, by 44% of a measured 11.4 s
 time-to-first-frame on an A001064.
 
+Re-measured on the fast-liveplay path 2026-09-03, which had been left at 1.5 s
+because the evidence above was gathered on the non-fast wait only: 22 runs,
+22 timeouts at 1500-1501 ms, zero echoes. Same behaviour, so the same value -
+and on a cold battery camera it was 1.25 s of a 5.4 s time-to-first-media.
+
 The wait is kept so a broker that does echo still short-circuits it. Only the
-price of its absence changed, from 5.0 s to 0.25 s, on the non-fast
-path only.
+price of its absence changed, from 5.0 s to 0.25 s.
 """
 import pytest
 
@@ -25,9 +29,11 @@ class TestTheDefault:
     def test_only_the_non_fast_path_moves(self, monkeypatch):
         monkeypatch.delenv("AIDOT_SDES_LIVEPLAY_ECHO_S", raising=False)
         assert _sdes_liveplay_echo_timeout(False) == _LIVEPLAY_ECHO_S == 0.25
-        # The fast-liveplay models are deliberately NOT changed: their 1.5 s
-        # came out of its own live soak and no measurement here touched it.
-        assert _sdes_liveplay_echo_timeout(True) == _LIVEPLAY_ECHO_S_FAST == 1.5
+        # The fast-liveplay path was held at 1.5 s only because the 169/169
+        # evidence was gathered on the non-fast wait. Measured on its own
+        # 2026-09-03 it behaves identically - 22 runs, 22 timeouts at
+        # 1500-1501 ms, no echo ever - so it moves to the same value.
+        assert _sdes_liveplay_echo_timeout(True) == _LIVEPLAY_ECHO_S_FAST == 0.25
 
     def test_it_is_far_below_the_old_five_seconds(self, monkeypatch):
         """The regression this guards: quietly restoring a multi-second wait for

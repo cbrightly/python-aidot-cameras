@@ -217,7 +217,7 @@ async def _wait_or_event(ev: "asyncio.Event", timeout: float) -> bool:
         return False
 
 
-def _is_camera_present_signal(topic, msg, device_id):
+def _is_camera_present_signal(topic, msg, device_id, *, accept_server_ack=True):
     """Whether this inbound MQTT message releases the pre-offer wake wait.
 
     Two of these clauses recognise the camera's own device-channel traffic and
@@ -228,19 +228,22 @@ def _is_camera_present_signal(topic, msg, device_id):
     srcAddr ("2.{device_id}"), which nothing read.  Both additions are strictly
     additive: they can only recognise more real camera traffic.
 
-    lowPowerActiveStateResp stays sufficient on its own, deliberately.  It is a
-    cloud ack, not the camera: published by the server (clientId "server-..."),
-    addressed to the user channel, carrying no devId, and arriving in ~60 ms
-    whatever the camera is doing.  Waiting for the camera instead was tried and
-    rejected - the official app does not do it.  In the decompiled client,
-    DeviceWakeUpRepos.wakeUpOrSleep fires the MQTT wake fire-and-forget (its
-    handler has no emitter at all) and completes the wake step from the HTTP
-    lowPowerActiveState response: DeviceWakeUpRepos$1.onSuccess calls
-    onNext + onComplete on BOTH the valid and invalid branches.  The string
-    "wakeupStatus" does not appear anywhere in the app.  So publishing the
-    offer on a cloud ack is app behaviour, and holding a battery camera back
-    for device evidence would be a new, unvalidated divergence on the shared
-    open path.
+    lowPowerActiveStateResp stays sufficient on its own for THE GATE, and that
+    is deliberate.  It is a cloud ack rather than the camera - published by the
+    server (clientId "server-...") on the user channel with no devId - and on a
+    warm camera it lands in 0.0-0.3 s, which is a fair proxy for "reachable".
+    Holding a battery camera back for device evidence instead was built and
+    measured on hardware 2026-09-03 and made the case it targets worse - a 30 s
+    gate turned a 75 s failure into a 117 s one - so the gate is left alone.
+    Widening it is not the answer either: a cold battery camera normally
+    announces itself within about 5 s and serves media by 5-10 s, which is why
+    the vendor app pulls these cameras up almost instantly, and the opens that
+    stall do not stall for want of waiting.  See
+    AIDOT-FINDINGS-battery-first-open-2026-09-03.md.
+
+    ``accept_server_ack=False`` therefore exists for OBSERVATION, not gating:
+    the stale-offer detector in sdes_open needs to know when the camera itself
+    turned up, and must not be fooled by the cloud answering on its behalf.
     """
     inner = msg.get("payload") or {}
     return bool(
@@ -250,8 +253,58 @@ def _is_camera_present_signal(topic, msg, device_id):
         or inner.get("devId") == device_id
         or msg.get("devId") == device_id
         or str(msg.get("srcAddr") or "").endswith(device_id)
-        or (msg.get("method") or "") == "lowPowerActiveStateResp"
+        or (accept_server_ack
+            and (msg.get("method") or "") == "lowPowerActiveStateResp")
     )
+
+
+def _signal_device_id(topic, msg):
+    """Which camera a signalling message is from, or None if it is not a camera.
+
+    The MQTT connection carries the whole account and every concurrent open's
+    dispatcher sees every message, so a log line without this cannot be
+    attributed to a camera at all.
+
+    ``srcAddr`` carries the account's prefix convention - ``2.`` device,
+    ``0.`` app, ``9.`` server - so it names the sender exactly and keeps a
+    server message from being mislabelled as a camera.  ``devId`` is the
+    fallback for the device-channel messages that omit srcAddr.  The topic is
+    deliberately NOT parsed: ``iot/v1/c/<id>/...`` carries a user id in that
+    position as often as a device id, and both are 32 hex characters.
+
+    Total: this runs on the MQTT thread for every inbound message, so it
+    swallows anything malformed rather than killing signalling.
+    """
+    try:
+        src = msg.get("srcAddr")
+        if isinstance(src, str) and src.startswith("2.") and len(src) > 2:
+            return src[2:]
+        inner = msg.get("payload")
+        if isinstance(inner, dict) and inner.get("devId"):
+            return str(inner["devId"])
+        if msg.get("devId"):
+            return str(msg["devId"])
+    except Exception:
+        pass
+    return None
+
+
+def _signal_origin(topic, msg, device_id) -> str:
+    """A short "who sent this" tag for a signalling log line.
+
+    Three outcomes, and the difference between them is the whole point: this
+    camera, a different camera on the same account, or nothing that can be
+    named as a camera at all (the cloud's acks and our own echoes, which carry
+    a user id rather than a device id).  Calling that last case "not this
+    camera" would be technically true and actively misleading - it reads as a
+    camera that exists somewhere.
+    """
+    d = _signal_device_id(topic, msg)
+    if d is None:
+        return "dev=-"
+    if d == device_id:
+        return f"dev={d[:12]}"
+    return f"dev={d[:12]} (not this camera)"
 
 
 
@@ -750,6 +803,17 @@ class _WebRTCOpenMixin:
         # the fact by _live_play_not_ready to classify a session that delivered no
         # media.  Cleared per open so a stale code can't misclassify a later one.
         self._last_live_play_code = None
+        # When this open last heard from the CAMERA itself (monotonic), as
+        # opposed to the cloud acking on its behalf.  Read by the SDES
+        # first-media wait to tell a stale offer from a slow one - see
+        # sdes_open._stale_offer_abandon_due.  Cleared per open so a previous
+        # open's evidence cannot disarm this one's detector.  Written from the
+        # MQTT thread and read from the loop: a lone float rebind, never
+        # read-modify-write, so no lock is needed.
+        self._camera_device_seen_ts = None
+        # One-shot per open: the keep-alive re-assert fired when the camera
+        # first announces itself.  See the dispatcher below.
+        _wake_keepalive_sent = [False]
         camera_reconnect_ev: asyncio.Event = asyncio.Event() # set when camera sends device/connect
         # Mutable flag: set True when setDevAttrNotif delivers sptPreconn:1.
         # Confirmed 2026-05-02: both A000088 and A001064 PTZ report
@@ -826,6 +890,36 @@ class _WebRTCOpenMixin:
             # server's wake-ACK is not enough for a battery camera.
             if _is_camera_present_signal(topic, msg, device_id):
                 loop.call_soon_threadsafe(camera_ready_ev.set)
+            # ...and separately, note when the CAMERA itself was heard from.
+            # The gate above is happy with the cloud's ack; the stale-offer
+            # detector is not, and this is the only place that distinction is
+            # visible.
+            if _is_camera_present_signal(topic, msg, device_id,
+                                         accept_server_ack=False):
+                self._camera_device_seen_ts = time.monotonic()
+                # App parity, and the fix for a battery camera that wakes and
+                # then sleeps again mid-handshake.  The official client's live
+                # view fires keepAliveHandle() the moment the device becomes
+                # usable, and gates the view on lowPowerActiveState "wakeup"
+                # until then.  We send setKeepAliveTime once at open time -
+                # which for a cold camera is BEFORE it is awake, so it is sent
+                # into the void - and then renew on a fixed cadence measured
+                # from the open rather than from the camera's own wake.
+                #
+                # Measured 2026-09-03: the camera woke at +10.9 s, stayed awake
+                # long enough to emit motion events, and went back to sleep at
+                # +39.8 s while the handshake was still running; the attempt
+                # then died with no media.  Re-asserting here restarts the
+                # camera's own window from the moment it is actually listening.
+                #
+                # One-shot per open (the renew loop covers the rest), battery
+                # only - a mains camera has no window to restart - and fired
+                # from the loop because this runs on the MQTT thread.
+                if (getattr(self, "is_battery_camera", False)
+                        and not _wake_keepalive_sent[0]):
+                    _wake_keepalive_sent[0] = True
+                    loop.call_soon_threadsafe(
+                        lambda: _spawn_bg(self._async_set_keep_alive()))
             # livePlayResp: explicit camera ack/nack for start-play command.
             # The camera echoes our peer_id (verified live); its payload has NO
             # devId, so the old devId-only match never fired and this future never
@@ -955,8 +1049,10 @@ class _WebRTCOpenMixin:
                             {"IceServerList": _req_ice_list},
                         )
                 loop.call_soon_threadsafe(
-                    lambda m=method, t=topic: _status(
-                        f"camera replied  method={m!r}  endpoint={t.rsplit('/', 1)[-1]}"
+                    lambda m=method, t=topic,
+                    o=_signal_origin(topic, msg, device_id): _status(
+                        f"camera replied  method={m!r}"
+                        f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
                     )
                 )
             elif method == "setDevAttrNotif":
@@ -1029,14 +1125,18 @@ class _WebRTCOpenMixin:
                 if inner.get("devId") == device_id:
                     loop.call_soon_threadsafe(camera_reconnect_ev.set)
                 loop.call_soon_threadsafe(
-                    lambda m=method, t=topic: _status(
-                        f"camera replied  method={m!r}  endpoint={t.rsplit('/', 1)[-1]}"
+                    lambda m=method, t=topic,
+                    o=_signal_origin(topic, msg, device_id): _status(
+                        f"camera replied  method={m!r}"
+                        f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
                     )
                 )
             else:
                 loop.call_soon_threadsafe(
-                    lambda m=method, t=topic: _status(
-                        f"camera replied  method={m!r}  endpoint={t.rsplit('/', 1)[-1]}"
+                    lambda m=method, t=topic,
+                    o=_signal_origin(topic, msg, device_id): _status(
+                        f"camera replied  method={m!r}"
+                        f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
                     )
                 )
 
