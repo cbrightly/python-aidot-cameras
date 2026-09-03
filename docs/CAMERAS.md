@@ -112,6 +112,37 @@ goes straight to webrtcReq/ICE - **on by default**, matching the official app
 (which never waits for `livePlayResp`). Role-reversal models (A001064) are always
 excluded. Disable with `AIDOT_SDES_FAST_LIVEPLAY` in `{0,false,no,off}`.
 
+### Battery cameras and the first open
+
+A battery camera (A001513 and friends) is asleep between views, so the first
+open has to wake it. Three things follow from that, and all three are app
+parity rather than invention - the official client's live view fires its
+keep-alive on mount, sends the wake, and shows a sleeping placeholder instead of
+opening a session until the device reports itself awake.
+
+- **Offer immediately; do not wait for the camera.** The app's live view waits
+  for the device to report itself awake before opening a session, and
+  `AIDOT_BATTERY_WAKE_GATE_S` implements that - but it is **shipped off**,
+  because measuring it showed the live-play signalling is itself what wakes the
+  camera. At a 20 s budget, on a camera settled for ten minutes, the gate ran
+  its whole budget with the camera silent, the offer went out at +20.9 s, the
+  camera's own `wakeupStatus` arrived at +23.6 s (after the offer) and first
+  media at +27.0 s - against 5.4-10.0 s on the same camera with no gate.
+- **The keep-alive is re-asserted when the camera turns up.** `setKeepAliveTime`
+  at open time reaches a sleeping camera not at all, and the renew loop runs on
+  a cadence measured from the open rather than from the camera's wake. A camera
+  that woke for us and got no session went back to sleep about 29 s later with
+  the handshake still running.
+- **A stalled attempt is abandoned to the retry.**
+  `AIDOT_BATTERY_STALE_OFFER_GRACE_S` (15 s, `0` disables) ends the first-media
+  wait early when the camera turned up mid-wait and still sent nothing, rather
+  than holding the full 75 s.
+
+None of this wakes a camera that nobody is watching. Snapshots for a dashboard
+card come from a cached cloud thumbnail, the periodic attribute fetch skips
+battery cameras outright, and startup prewarm excludes them; motion prewarm does
+run, but only when the camera has already woken itself to record.
+
 The **DTLS** path has the targeted equivalent (0.9.0): `dtls_fast_liveplay`
 (`AIDOT_DTLS_FAST_LIVEPLAY` env / `_dtls_fast_liveplay_opt`) skips only the
 up-to-2 s `livePlayResp` wait while keeping the full ICE/TURN/DTLS handshake - so

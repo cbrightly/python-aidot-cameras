@@ -1027,6 +1027,42 @@ _BATTERY_STALE_OFFER_GRACE_S = float(
 )
 
 
+# How long a BATTERY camera's offer waits for the camera to answer first.
+#
+# **Measured on hardware and shipped OFF.** This is the app's own shape - its
+# live view fires keepAliveHandle(), sends the wake, and renders
+# IPC.Status.Sleep rather than opening a session until the device reports
+# itself awake - and on this camera family it is self-defeating, because the
+# live-play signalling is what wakes the camera.  Withholding the offer
+# withholds the wake.
+#
+# Two runs say so.  At 30 s the camera produced no message for the whole gate,
+# the offer went out at +32.1 s and the open ended at +116.8 s against a 75 s
+# failure without it.  At 20 s, on a camera settled for ten minutes: gate
+# elapsed 20044 ms answered=False, webrtcReq at +20.9 s, the camera's own
+# wakeupStatus at +23.6 s - AFTER the offer - and first media at +27.0 s,
+# against 5.4-10.0 s on the same camera with no gate.
+#
+# So the wake evidence follows the offer rather than preceding it, and the
+# useful order is the one we already had: offer immediately, re-assert the
+# keep-alive the moment the camera answers, and abandon an attempt that has
+# stalled (see _BATTERY_STALE_OFFER_GRACE_S).
+#
+# Kept, off, as a lever for anyone re-testing this on other firmware - set
+# AIDOT_BATTERY_WAKE_GATE_S to a number of seconds to enable it.
+_BATTERY_WAKE_GATE_S = float(os.environ.get("AIDOT_BATTERY_WAKE_GATE_S", "0"))
+
+
+def _battery_wake_gate_s(battery: bool, budget: float) -> float:
+    """Seconds to wait for the camera's own answer before offering; 0 = no gate.
+
+    Mains cameras never sleep, so there is nothing to wait for - and the A001064
+    PTZ is mains, which keeps this away from the role-reversal path, whose
+    timing is delicate.
+    """
+    return budget if (battery and budget > 0) else 0.0
+
+
 def _stale_offer_abandon_due(*, battery: bool, seen_at_start, first_seen_ts,
                              now: float, grace_s: float) -> bool:
     """Whether this attempt's offer is stale and the wait should end now.
@@ -2788,6 +2824,30 @@ class _SdesOpenMixin:
         _LOGGER.info(
             "signaling-wait[%s] livePlayReq-echo elapsed=%dms (timeout=%.1fs)",
             self.device_id, int((time.monotonic() - _echo_t0) * 1000), _echo_timeout)
+        # App parity: do not offer to a battery camera until the camera itself
+        # has said something.  See _battery_wake_gate_s.  Mains cameras skip
+        # this entirely, so the PTZ's role-reversal timing is untouched.
+        _wake_gate_s = _battery_wake_gate_s(
+            bool(getattr(self, "is_battery_camera", False)),
+            _BATTERY_WAKE_GATE_S)
+        if _wake_gate_s > 0:
+            _wg_t0 = time.monotonic()
+            while (getattr(self, "_camera_device_seen_ts", None) is None
+                    and time.monotonic() - _wg_t0 < _wake_gate_s):
+                await _asyncio.sleep(0.05)
+            _wg_seen = getattr(self, "_camera_device_seen_ts", None) is not None
+            _LOGGER.info(
+                "signaling-wait[%s] battery-wake-gate elapsed=%dms answered=%s"
+                " (budget=%.0fs)",
+                self.device_id, int((time.monotonic() - _wg_t0) * 1000),
+                _wg_seen, _wake_gate_s)
+            if _wg_seen:
+                _status("camera answered after %.1fs - offering now"
+                        % (time.monotonic() - _wg_t0))
+            else:
+                _status("camera said nothing in %.0fs - offering anyway"
+                        % _wake_gate_s)
+
         # livePlayResp: explicit camera accept/reject before SDP/ICE.
         if _skip_lp:
             _LOGGER.info(
