@@ -744,11 +744,15 @@ EXPT_CAP_FILE = _os.environ.get("AIDOT_EXPT_CAP_FILE")
 #: absence changes. Override with AIDOT_SDES_LIVEPLAY_ECHO_S (seconds, 0
 #: disables the wait entirely) to measure it against the old value.
 _LIVEPLAY_ECHO_S = 0.25
-#: Fast-liveplay models keep the 1.5 s they were given: that value came out
-#: of its own 3 h live soak, and nothing here measured it.  The 169/169
-#: evidence below is for the 5.0 s non-fast wait only, so only that one
-#: moves.
-_LIVEPLAY_ECHO_S_FAST = 1.5
+#: The fast-liveplay path used to keep the 1.5 s it was given, because the
+#: 169/169 evidence above was gathered on the non-fast wait only and nothing
+#: had measured this one.  It has now been measured, and it behaves identically:
+#: over 3 h on 2026-09-03 the fast wait ran 22 times and timed out 22 times, at
+#: 1500-1501 ms every time, with zero "livePlayReq echo received" among them.
+#: So it is the same pure latency as its sibling, and it costs 1.25 s of a
+#: 5.4 s time-to-first-media on a cold battery camera - roughly a quarter of the
+#: whole connect.  Same value, same reasoning, same override.
+_LIVEPLAY_ECHO_S_FAST = 0.25
 
 
 def _sdes_liveplay_echo_timeout(fast_liveplay: bool) -> float:
