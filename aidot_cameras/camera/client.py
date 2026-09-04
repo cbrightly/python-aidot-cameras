@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, List, Optional, Union
 if TYPE_CHECKING:  # annotation only; keeps av off the import path
     from av import VideoFrame as AvVideoFrame
 
-from ..exceptions import AidotCameraBusy, AidotCameraNotReady
+from ..exceptions import AidotCameraBusy, AidotCameraNoMedia, AidotCameraNotReady
 from ..const import APP_ID as _AIDOT_APP_ID
 from ..const import (
     LOGIN_INFO_MQTT_PASSWORD_KEYS,
@@ -4422,6 +4422,32 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 )
                 try:
                     await asyncio.sleep(_BUSY_BACKOFF_S)
+                except asyncio.CancelledError:
+                    return
+                continue
+            except AidotCameraNoMedia as _nomedia:
+                # The camera answered and then sent nothing, so the open was
+                # abandoned rather than serving a stream with no media on it.
+                # Pace it as the session-ended case it stands in for - the fast
+                # not-ready retry when the camera said -50019, the ordinary
+                # unhealthy delay otherwise - and NOT as an open failure, whose
+                # backoff escalates. Getting that wrong would make this worse
+                # than the doomed serve it replaces.
+                self._fast_attempt_override = None
+                _not_ready_burst = self._next_not_ready_burst(
+                    False, _not_ready_burst)
+                _delay, _fast_retry = self._not_ready_retry_delay(
+                    _not_ready_burst, burst_max=_PEERID_MAX_REUSE)
+                if not _fast_retry:
+                    _delay = _pacer.session_end_delay(healthy=False)
+                _LOGGER.info(
+                    "SDES %s: %s - retrying in %.0fs%s",
+                    self.device_id, _nomedia, _delay,
+                    f" [{_not_ready_burst}/{_PEERID_MAX_REUSE}]"
+                    if _fast_retry else "",
+                )
+                try:
+                    await self._backoff_or_offline_pause(_delay)
                 except asyncio.CancelledError:
                     return
                 continue

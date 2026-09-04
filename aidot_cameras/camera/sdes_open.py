@@ -16,7 +16,7 @@ import re
 import time
 from typing import Callable, Optional  # noqa: F401 - method annotations
 
-from ..exceptions import AidotCameraBusy
+from ..exceptions import AidotCameraBusy, AidotCameraNoMedia
 from .constants import (
     _LIVE_PLAY_NOT_READY,
     SDES_SPEAKERSTART_DELAY,
@@ -1141,6 +1141,23 @@ def _post_abandon_media_grace_s(*, abandoned: bool, have_video: bool,
     if not abandoned or have_video or grace_s <= 0:
         return 0.0
     return grace_s
+
+
+def _should_skip_doomed_serve(*, abandoned: bool, have_video: bool) -> bool:
+    """Whether to abandon this attempt instead of serving nothing.
+
+    Only the backstop path.  It fires after the camera itself has been heard
+    from, so a retry has something to talk to; a serve built with no observed
+    payload types is video-only and then receives no media at all, which
+    measured 2026-09-03 as ~14 s of delay and a lost audio track before the
+    retry that actually worked.
+
+    The plain timeout path keeps today's behaviour: there the camera never
+    spoke, HA's stream worker tolerates the transient failure and retries into
+    the serve, and taking that away would change a case this has no evidence
+    about.
+    """
+    return bool(abandoned) and not have_video
 
 
 # --------------------------------------------------------------------------- #
@@ -7316,6 +7333,24 @@ class _SdesOpenMixin:
             else:
                 _status("no media in the %.0fs after the wait was abandoned"
                         % _ab_grace)
+        if _should_skip_doomed_serve(
+                abandoned=_stale_offer_abandoned,
+                have_video=_first_video_pt[0] is not None):
+            # Serving now would build the SDP from nothing observed, produce a
+            # video-only stream, and receive no media on it - measured as ~14 s
+            # of delay and a dropped audio track ahead of the retry that worked.
+            # Go straight to the retry instead.  The cleanup stack closes the
+            # reserved sockets and stops the signalling thread on the way out.
+            _waited = time.monotonic() - _media_wait_started
+            _status("abandoning the attempt rather than serving a stream the"
+                    " camera is not feeding - retrying")
+            _LOGGER.info(
+                "camera %s: no media %.0fs after the camera answered;"
+                " abandoning this attempt to the retry rather than launching a"
+                " serve with nothing to serve",
+                getattr(self, "device_id", "?"), _waited,
+            )
+            raise AidotCameraNoMedia(waited_s=_waited)
         if _serve_audio and _first_audio_pt[0] is None:
             _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
             while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:
