@@ -1461,9 +1461,54 @@ command against a window after it - so this camera's 839-3698 Kbps
 between-session variance never enters the comparison, and a session that
 measured nothing is named as a void and re-run rather than averaged in.
 
-First run dispatched 2026-09-04: A001064 only, arms `sd | hd | control`, 35
-sessions per arm, seed 20260904. Battery models are deliberately excluded -
+#### Result, 2026-09-04: the mid-session sd and hd commands do nothing measurable
+
+A001064 only, arms `sd | hd | control`, seed 20260904, 106 attempts all PASS,
+one void named and re-run rather than averaged in. Battery models were excluded:
 every attempt on one is a wake.
+
+| arm | n | acked | mean | median | sd | IQR |
+|---|---|---|---|---|---|---|
+| control | 35 | - | 0.942 | 0.924 | 0.170 | 0.880-0.947 |
+| sd | 35 | **35/35** | 0.916 | 0.918 | 0.074 | 0.887-0.956 |
+| hd | 35 | **35/35** | 1.056 | 0.907 | 0.453 | 0.872-0.944 |
+
+Mann-Whitney against the control, chosen because the spreads do not support
+normality: **sd p=0.97, hd p=0.51.** Neither is significant.
+
+**The command is delivered.** Both arms were acked by the camera 35 times out of
+35, so this null cannot be blamed on a command that never arrived - which is the
+failure the previous round of quality verdicts could not rule out, and the
+reason the summary was taught to report delivery per arm before this ran.
+
+**Read the medians, not the means.** The `hd` mean of 1.056 is an artefact of a
+long tail - its own spread reaches 2.458 with an sd of 0.453 - and its median,
+0.907, is *below* the control's 0.924. Reported as a mean alone, `hd` would have
+looked like a 12 percent increase. All three IQRs sit on top of each other at
+roughly 0.87-0.95.
+
+**The control is what makes this readable.** Every arm drifts down about 8
+percent: the stream settles on its own between the two windows. Without a
+control arm occupying the same point in the same timeline, `sd`'s 0.916 would
+have been reported as "sd reduces the bitrate by 8 percent". It does not; that
+is what the stream does anyway.
+
+**No cross-session memory.** Sessions following an `sd` arm opened at a median
+1476 Kbps against 1475 after a control - so the camera is not remembering the
+setting between sessions, which would have been a real result hiding as a noisy
+control.
+
+**What this rules out, and what it does not.** With the control's sd of 0.170 at
+n=35 per arm, the smallest difference this could detect is about 0.11, i.e.
+roughly 11 percent of the ratio. So a mid-session quality command that moved the
+bitrate by more than ~11 percent is ruled out. A smaller effect is not, and no
+claim is made about one.
+
+**Still unmeasured:** this covers the mid-session `sd` and `hd` commands only.
+Auto quality, adaptive bitrate, the encoder ramp and TMMBR/REMB response are
+levers of a different shape - they act over minutes rather than at a point - and
+need a design that is not two 12-second windows around a command. Item 7 stays
+open for them.
 
 ## Out of scope for 1.0.0
 
