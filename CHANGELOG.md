@@ -4,6 +4,40 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [1.0.0rc9]
+
+### Fixed
+
+- **The shortened echo wait no longer risks silently disabling a branch.** The
+  wait cut in `1.0.0rc8` rested on one deployment's 17-out-of-17. A camera whose
+  echo lands between the new value and the old 2 s would miss it -- and whether
+  that echo arrives also decides whether the reply is built, whether the ICE
+  window runs 20 s or 2.5 s, and whether the reconnect retry is armed, so the
+  branch would go quiet and stay quiet.
+
+  The short wait is now the wait for a camera never seen to echo. An echo seen
+  at any point -- including after the wait has already expired -- is remembered
+  for that camera, and every later open on it waits the full 2 s again. The late
+  echo is not acted on in the open that saw it: the reply has to be sent before
+  the relay allocation and the connectivity checks, so building it afterwards
+  would reorder the handshake with no camera available to measure the result. It
+  is logged, and the line names the setting that makes the longer wait
+  permanent.
+
+- **The broker's echo of our own answer could be mistaken for the camera's.**
+  It carries our own peer id, so it passed the accept filter, and it resolved
+  the future the nomination reads its addresses from -- which meant a session
+  could nominate its own host and relay-reflexive candidates, with its own
+  credentials, and never connect. Our own answer is now recognised by its sender
+  and dropped rather than delivered. Nothing downstream wants it: the SDES path
+  built that answer and already holds every value in it.
+
+- **Two views of one camera opening at once could disturb each other's
+  handshake.** The marker saying the camera's answer had arrived was stored per
+  camera but read per open, so one open could leave its connectivity window on
+  the other's answer, or lose its own marker to the other's reset. Both windows
+  now ignore a marker older than the open reading it.
+
 ## [1.0.0rc8]
 
 ### Changed
