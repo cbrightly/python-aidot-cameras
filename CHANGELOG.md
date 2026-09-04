@@ -4,6 +4,42 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [1.0.0rc8]
+
+### Changed
+
+- **A cold SDES connect is 2.5 s instead of 6.7 s.** Two waits on that path were
+  spending time on things that had already happened.
+
+  The ICE responder window was written when the camera's answer arrived after it
+  closed, and shortening an earlier wait inverted that: the window then sat for
+  seconds holding the credentials the nomination needed. It blocks the event
+  loop while it runs, so the answer could not be seen from inside it. The answer
+  is now marked ready off that thread, and the window leaves as soon as the
+  credentials are in hand and the camera has started its connectivity checks --
+  which is also all the window was still waiting for, because an incoming media
+  packet already broke out of it, a camera that never probes already left early,
+  and the media bridge takes over answering probes about 30 ms later. A camera
+  that has sent no probe is untouched, which is every relay-path battery camera
+  measured.
+
+  The webrtcReq-echo wait was a flat 2.0 s for the models that were thought to
+  need the reply it builds. Over 18 hours of logs, 61 opens: the 17 that took
+  the wait timed out 17 times out of 17, the reply was never built once, and all
+  17 streamed anyway. It is now 0.25 s, and the timeout is logged rather than
+  swallowed. `AIDOT_SDES_ECHO_WAIT_S` restores the old value.
+
+  Measured over five consecutive cold opens on the reference camera: first media
+  6702 ms -> 4195 ms -> 2489 ms, nomination 4.60 s -> 2.09 s -> 0.34 s. Battery
+  and DTLS cameras are unchanged; neither takes either wait.
+
+### Documentation
+
+- **Retracted: the reference PTZ does not answer one codec and send another.**
+  Read off the wire across 44 cold opens -- 40 negotiated H.264 and 4 negotiated
+  H.265, and in every one the answer matched the bitstream. The old claim reads
+  as a demux bug and very nearly bought a fix for one that does not exist.
+
 ## [1.0.0rc7]
 
 ### Fixed
