@@ -17,8 +17,12 @@ import inspect
 
 import pytest
 
-from aidot_cameras.camera.webrtc_open import _answer_is_from_the_camera
+from aidot_cameras.camera.webrtc_open import (
+    _answer_is_from_the_camera,
+    _deliver_webrtc_answer,
+)
 from aidot_cameras.camera.sdes_open import (
+    _answer_ready_for_this_open,
     _answer_sdp_can_nominate,
     _parse_answer_ice,
     _stun_window_answer_exit_due,
@@ -279,3 +283,73 @@ def test_the_candidate_parse_accepts_a_line_that_ends_at_typ():
     _u, _p, cands, host = _parse_answer_ice(sdp)
     assert cands == [("192.168.0.124", 35488)]
     assert host == ()
+
+
+# --------------------------------------------------------------------------- #
+# Our own echo must not reach the future the nomination reads
+# --------------------------------------------------------------------------- #
+
+def test_our_own_echo_is_dropped_rather_than_routed():
+    """Gating only the readiness marker left the failure it was written to
+    prevent fully reachable: `answer_fut` is where the nomination reads its SDP,
+    so an echo that resolves it makes USE-CANDIDATE address our own host and
+    srflx candidates with our own credentials. Routing it to second_answer_fut
+    instead just feeds the same values to the late-credential recovery."""
+    import asyncio
+
+    async def _run():
+        loop = asyncio.get_running_loop()
+        first, second = loop.create_future(), loop.create_future()
+        _deliver_webrtc_answer(loop, first, second,
+                               {"sdp": _OUR_ANSWER}, from_camera=False)
+        await asyncio.sleep(0)
+        assert not first.done(), "our own SDP must not resolve answer_fut"
+        assert not second.done(), "nor the future the late recovery reads"
+
+        _deliver_webrtc_answer(loop, first, second,
+                               {"sdp": _ANSWER}, from_camera=True)
+        await asyncio.sleep(0)
+        assert first.done() and first.result()["sdp"] == _ANSWER
+
+        _deliver_webrtc_answer(loop, first, second,
+                               {"sdp": _ANSWER}, from_camera=True)
+        await asyncio.sleep(0)
+        assert second.done(), "a later camera answer still reaches the recovery"
+
+    asyncio.run(_run())
+
+
+def test_delivery_defaults_to_treating_an_answer_as_the_cameras():
+    """Every other caller predates the flag; none of them must start dropping
+    answers because a keyword was added."""
+    import inspect
+
+    sig = inspect.signature(_deliver_webrtc_answer)
+    assert sig.parameters["from_camera"].default is True
+
+
+# --------------------------------------------------------------------------- #
+# The marker belongs to one open
+# --------------------------------------------------------------------------- #
+
+def test_a_marker_from_this_open_arms_the_exit():
+    assert _answer_ready_for_this_open(100.0, 99.0) is True
+    assert _answer_ready_for_this_open(99.0, 99.0) is True
+
+
+def test_a_marker_left_by_an_earlier_open_is_inert():
+    """The marker is per-camera state driving a per-open decision. The per-open
+    reset covers the sequential case; two opens overlapping on one camera object
+    would otherwise let one leave its window on the other's answer."""
+    assert _answer_ready_for_this_open(98.9, 99.0) is False
+
+
+def test_no_marker_at_all_is_not_ready():
+    assert _answer_ready_for_this_open(None, 99.0) is False
+
+
+def test_the_window_checks_the_marker_belongs_to_this_open():
+    src = _open_source()
+    assert "_answer_ready_for_this_open" in src
+    assert src.count("_answer_ready_for_this_open") >= 2, (
+        "both STUN windows must use it, not just the first")

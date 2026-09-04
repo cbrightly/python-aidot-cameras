@@ -94,3 +94,61 @@ def test_the_timeout_is_reported_rather_than_swallowed():
 
     src = inspect.getsource(CameraMixin._open_sdes_stream_impl)
     assert "webrtcReq-echo elapsed" in src
+
+
+# --------------------------------------------------------------------------- #
+# A fleet whose echo band is not empty
+# --------------------------------------------------------------------------- #
+#
+# The 17/17 measurement is one deployment. An echo landing between the new wait
+# and the old 2.0 s would miss it, and that flag is a branch selector: it
+# decides whether the webrtcResp is built, whether the ICE window runs 20 s or
+# 2.5 s, and whether the quickConn reconnect retry is armed. So the shortened
+# wait is not unconditional - it is the wait for a device that has never been
+# seen to echo.
+
+def test_a_device_that_has_echoed_goes_back_to_the_full_wait():
+    assert _sdes_echo_wait_timeout(False, echo_seen=True) == 2.0
+
+
+def test_a_device_that_has_never_echoed_keeps_the_short_wait():
+    assert _sdes_echo_wait_timeout(False, echo_seen=False) == 0.25
+
+
+def test_history_does_not_resurrect_the_wait_for_cameras_that_never_take_it():
+    """A001513-class cameras wait 0.0 s and are not part of this at all."""
+    assert _sdes_echo_wait_timeout(True, echo_seen=True) == 0.0
+
+
+def test_an_explicit_override_still_wins_over_the_history(monkeypatch):
+    monkeypatch.setenv("AIDOT_SDES_ECHO_WAIT_S", "0.5")
+    assert _sdes_echo_wait_timeout(False, echo_seen=True) == 0.5
+
+
+def test_the_history_defaults_off_so_the_first_open_is_still_fast():
+    """Callers that predate the flag must not start paying 2.0 s."""
+    assert _sdes_echo_wait_timeout(False) == 0.25
+
+
+def test_a_late_echo_is_recorded_so_the_next_open_waits_for_it():
+    """Recorded, not acted on: the webrtcResp has to be sent before the relay
+    allocation and the ICE window, so building it after the window would be a
+    reordering with no camera to measure it against. Making the NEXT open wait
+    is the part that can be done safely."""
+    import inspect
+
+    from aidot_cameras.camera.client import CameraMixin
+
+    src = inspect.getsource(CameraMixin._open_sdes_stream_impl)
+    assert "_sdes_echo_seen" in src
+    assert "AIDOT_SDES_ECHO_WAIT_S=%.1f" in src, (
+        "the line must name the knob that makes it permanent")
+
+
+def test_the_wait_reads_the_devices_history():
+    import inspect
+
+    from aidot_cameras.camera.client import CameraMixin
+
+    src = inspect.getsource(CameraMixin._open_sdes_stream_impl)
+    assert "echo_seen=" in src

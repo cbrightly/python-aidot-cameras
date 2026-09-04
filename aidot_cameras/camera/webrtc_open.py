@@ -76,12 +76,12 @@ def _answer_is_from_the_camera(*, src_addr, user_id) -> bool:
     would set the answer-is-ready marker and the STUN window would leave having
     heard nothing from the camera at all.
 
-    Scope, stated precisely: this gates only the marker.  It does NOT stop the
-    echo resolving ``answer_fut``, which is where the nomination reads its SDP -
-    that routing is unchanged, and a session whose ``answer_fut`` takes the echo
-    nominates our own addresses whether the window leaves early or late.  Fixing
-    that means applying this predicate at delivery, which changes established
-    behaviour this release has no measurement for.
+    It gates delivery as well as the marker.  ``answer_fut`` is where the
+    nomination reads its SDP, so an echo that resolves it makes the nomination
+    address our own host and srflx candidates with our own credentials - a
+    session that can never be nominated, whether the window leaves early or
+    late.  Nothing downstream wants our own SDP under any circumstance: the
+    SDES path built that answer itself and already holds every value in it.
 
     ``srcAddr`` carries the account's prefix convention - ``2.`` device,
     ``0.`` app, ``9.`` server - and our own messages go out as ``0.{userId}``,
@@ -94,12 +94,19 @@ def _answer_is_from_the_camera(*, src_addr, user_id) -> bool:
     return not str(src_addr).startswith(f"0.{user_id}")
 
 
-def _deliver_webrtc_answer(loop, answer_fut, second_answer_fut, answer) -> None:
+def _deliver_webrtc_answer(loop, answer_fut, second_answer_fut, answer,
+                           from_camera: bool = True) -> None:
     """Route a webrtcResp answer to the first-answer or second-answer future.
 
-    Called from the MQTT (non-loop) thread.  The first accepted answer resolves
-    ``answer_fut``; a later one is the camera's real answer (the first was the
-    broker echo of our own webrtcResp) and resolves ``second_answer_fut``.
+    Called from the MQTT (non-loop) thread.  The first accepted answer from the
+    CAMERA resolves ``answer_fut``; a later one resolves ``second_answer_fut``,
+    which the late-ICE-credential recovery reads.
+
+    ``from_camera`` False means the broker echoed our own webrtcResp back at us.
+    It is dropped rather than routed: it carries our SDP, so resolving
+    ``answer_fut`` with it makes the nomination address our own candidates, and
+    resolving ``second_answer_fut`` feeds the same values to the late-credential
+    recovery. See :func:`_answer_is_from_the_camera`.
 
     One hop, for the reason in ``_resolve_future_threadsafe``: two answers
     drained inside one loop stall would otherwise both take the first branch,
@@ -108,6 +115,13 @@ def _deliver_webrtc_answer(loop, answer_fut, second_answer_fut, answer) -> None:
     about ``answer_fut`` is true.
     """
     def _deliver() -> None:
+        if not from_camera:
+            _LOGGER.debug(
+                "SDES: dropping the broker echo of our own webrtcResp"
+                " (len=%d) - it carries our SDP, not the camera's",
+                len(answer.get("sdp", "")),
+            )
+            return
         if not answer_fut.done():
             answer_fut.set_result(answer)
             return
@@ -1032,15 +1046,17 @@ class _WebRTCOpenMixin:
                         )
                     )
                     return
+                _from_cam = _answer_is_from_the_camera(
+                    src_addr=(inner.get("srcAddr")
+                              or msg.get("srcAddr") or ""),
+                    user_id=user_id)
                 if (self._camera_answer_ice_ready_ts is None
-                        and _answer_is_from_the_camera(
-                            src_addr=(inner.get("srcAddr")
-                                      or msg.get("srcAddr") or ""),
-                            user_id=user_id)
+                        and _from_cam
                         and _answer_sdp_can_nominate(answer.get("sdp", ""))):
                     self._camera_answer_ice_ready_ts = time.monotonic()
                 _deliver_webrtc_answer(
-                    loop, answer_fut, second_answer_fut, answer
+                    loop, answer_fut, second_answer_fut, answer,
+                    from_camera=_from_cam,
                 )
             elif method == "iceCandidateReq":
                 resp_pid = inner.get("peerid")
