@@ -33,6 +33,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   6702 ms -> 4195 ms -> 2489 ms, nomination 4.60 s -> 2.09 s -> 0.34 s. Battery
   and DTLS cameras are unchanged; neither takes either wait.
 
+  One caveat, stated because the evidence is one fleet: whether that echo
+  arrives also selects whether the reply is built, how long the ICE window runs,
+  and whether the reconnect retry is armed. An echo landing between the new
+  value and the old 2.0 s would now miss it. Such an echo is logged when it
+  turns up, and `AIDOT_SDES_ECHO_WAIT_S=2.0` restores the old wait without a
+  build.
+
 ### Documentation
 
 - **Retracted: the reference PTZ does not answer one codec and send another.**

@@ -18,12 +18,20 @@ test_sdes_fast_liveplay (A001064 -> False, A001513 -> True); this file locks
 skip_liveplay -> wait timeout.
 """
 
-import inspect
+import pytest
 
-from aidot_cameras.camera.sdes_open import (
-    _SDES_ECHO_WAIT_S,
-    _sdes_echo_wait_timeout,
-)
+from aidot_cameras.camera.sdes_open import _sdes_echo_wait_timeout
+
+
+@pytest.fixture(autouse=True)
+def _no_operator_override(monkeypatch):
+    """These pin the SHIPPED default, so the env must not reach them.
+
+    Without this the suite goes red for anyone following the README's own
+    instruction to set AIDOT_SDES_ECHO_WAIT_S=2.0 - the tests below would be
+    reading that operator's box rather than this repo's default.
+    """
+    monkeypatch.delenv("AIDOT_SDES_ECHO_WAIT_S", raising=False)
 
 
 def test_a_camera_that_never_echoes_still_waits_nothing():
@@ -31,11 +39,10 @@ def test_a_camera_that_never_echoes_still_waits_nothing():
     assert _sdes_echo_wait_timeout(True) == 0.0
 
 
-def test_the_role_reversal_wait_is_short_enough_not_to_dominate_the_connect():
-    """2.0 s was 45 percent of a 4.2 s cold A001064 connect, spent on an echo
-    that arrived 0 times in 17."""
-    assert _sdes_echo_wait_timeout(False) == _SDES_ECHO_WAIT_S
-    assert 0 < _SDES_ECHO_WAIT_S <= 0.5
+def test_the_role_reversal_wait_is_a_quarter_second():
+    """A literal, not a restatement of the implementation: the deleted test
+    pinned 2.0 and that is what made this change visible."""
+    assert _sdes_echo_wait_timeout(False) == 0.25
 
 
 def test_the_path_is_shortened_not_removed():
@@ -45,16 +52,44 @@ def test_the_path_is_shortened_not_removed():
     assert _sdes_echo_wait_timeout(False) > 0
 
 
-def test_it_is_overridable_without_a_release():
-    """The other measured waits on this path carry an env override so an arm
-    can be flipped on the box without shipping a build."""
-    src = inspect.getsource(inspect.getmodule(_sdes_echo_wait_timeout))
-    assert "AIDOT_SDES_ECHO_WAIT_S" in src
+def test_an_operator_can_restore_the_old_wait_without_a_build(monkeypatch):
+    """The README tells them to set exactly this."""
+    monkeypatch.setenv("AIDOT_SDES_ECHO_WAIT_S", "2.0")
+    assert _sdes_echo_wait_timeout(False) == 2.0
+    assert _sdes_echo_wait_timeout(True) == 0.0
+
+
+def test_the_override_is_read_per_call_not_frozen_at_import(monkeypatch):
+    """Frozen at import, an operator changing it on an HA box sees nothing
+    until a full restart - and the sibling knob does not behave that way."""
+    monkeypatch.setenv("AIDOT_SDES_ECHO_WAIT_S", "1.0")
+    assert _sdes_echo_wait_timeout(False) == 1.0
+    monkeypatch.setenv("AIDOT_SDES_ECHO_WAIT_S", "0.5")
+    assert _sdes_echo_wait_timeout(False) == 0.5
+
+
+@pytest.mark.parametrize("bad", ["abc", "", "1,5", "None", "-1"])
+def test_a_malformed_or_negative_value_falls_back_rather_than_biting(monkeypatch, bad):
+    """Parsed at import this was an ImportError: one typo in an HA env var took
+    down every camera, not one open. Negative reached asyncio.wait_for as a
+    negative timeout AND suppressed its own diagnostic."""
+    monkeypatch.setenv("AIDOT_SDES_ECHO_WAIT_S", bad)
+    assert _sdes_echo_wait_timeout(False) == 0.25
+
+
+def test_a_malformed_value_cannot_break_the_import(monkeypatch):
+    """The failure mode this replaced, asserted directly."""
+    import importlib
+
+    monkeypatch.setenv("AIDOT_SDES_ECHO_WAIT_S", "not-a-number")
+    importlib.reload(importlib.import_module("aidot_cameras.camera.sdes_open"))
 
 
 def test_the_timeout_is_reported_rather_than_swallowed():
     """`except TimeoutError: pass` is how 2.0 s of dead time stayed invisible
     for as long as it did. The other waits on this path log an elapsed line."""
+    import inspect
+
     from aidot_cameras.camera.client import CameraMixin
 
     src = inspect.getsource(CameraMixin._open_sdes_stream_impl)

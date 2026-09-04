@@ -72,10 +72,16 @@ def _answer_is_from_the_camera(*, src_addr, user_id) -> bool:
     The broker echoes our own SDES webrtcResp back on the account topic, it
     carries our own peerid so the accept filter admits it, and its SDP has our
     ice-ufrag, ice-pwd and candidates - so it satisfies the nomination
-    precondition just as the camera's answer does.  Stamping the
-    answer-is-ready marker on it would let the STUN window leave on our own
-    SDP, and the setup nomination would then address our own host and srflx
-    addresses instead of the camera's.
+    precondition just as the camera's answer does.  Without this, our own echo
+    would set the answer-is-ready marker and the STUN window would leave having
+    heard nothing from the camera at all.
+
+    Scope, stated precisely: this gates only the marker.  It does NOT stop the
+    echo resolving ``answer_fut``, which is where the nomination reads its SDP -
+    that routing is unchanged, and a session whose ``answer_fut`` takes the echo
+    nominates our own addresses whether the window leaves early or late.  Fixing
+    that means applying this predicate at delivery, which changes established
+    behaviour this release has no measurement for.
 
     ``srcAddr`` carries the account's prefix convention - ``2.`` device,
     ``0.`` app, ``9.`` server - and our own messages go out as ``0.{userId}``,

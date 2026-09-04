@@ -246,13 +246,16 @@ def test_trickled_candidates_are_permissioned_not_just_the_answer_sdp():
 
 
 def test_trickle_regex_parses_real_camera_candidates():
-    """Byte-for-byte against candidate lines a live A001513 actually sent."""
-    import re
+    """Byte-for-byte against candidate lines a live A001513 actually sent.
 
-    src = _impl_source()
-    trickle = src[src.index("async def _consume_camera_trickle"):]
-    pat = trickle[trickle.index('r"(?:a=)?candidate:'):]
-    pat = pat[len('r"'):pat.index('",\n')]
+    Through the shared parser now: the trickle path used to carry its own copy
+    of the pattern, which could diverge from the one the answer path nominates
+    with. This test reached into the source for that copy; it exercises the
+    shared parser directly instead, and the "same parser" guard in
+    test_nominates_as_soon_as_the_answer_lands.py keeps the two from splitting
+    again.
+    """
+    from aidot_cameras.camera.sdes_open import _parse_candidate_line
 
     lines = {
         "host":  "candidate:0 1 udp 2130706431 203.0.113.9 48776 typ host raddr 0.0.0.0 rport 0 generation 0 network-cost 999",
@@ -265,10 +268,13 @@ def test_trickle_regex_parses_real_camera_candidates():
         "relay": ("198.51.100.20", 21449),
     }
     for kind, line in lines.items():
-        m = re.match(pat, line)
-        assert m, f"{kind} candidate must parse: {line}"
-        assert (m.group(1), int(m.group(2))) == expected[kind]
-        assert m.group(3) == kind
+        parsed = _parse_candidate_line(line)
+        assert parsed, f"{kind} candidate must parse: {line}"
+        assert (parsed[0], parsed[1]) == expected[kind]
+        assert parsed[2] == kind
+        # The same line as it appears in an answer SDP, which is where the
+        # other four callers read it from.
+        assert _parse_candidate_line("a=" + line) == parsed
 
 
 def test_nomination_set_is_rebound_not_mutated():

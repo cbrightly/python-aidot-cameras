@@ -246,6 +246,31 @@ def test_the_stamp_consults_the_sender_check():
     assert "_answer_is_from_the_camera" in src
 
 
+def test_the_retry_window_leaves_early_too():
+    """A camera that quickConns after signalling re-runs ICE in a second, 8 s
+    window. Wiring the exit into only the first one leaves the same delay in the
+    window the fix had not reached."""
+    src = _open_source()
+    assert src.count("_stun_window_answer_exit_due") >= 2
+
+
+def test_a_corrupt_candidate_line_is_still_rejected():
+    """Widening the type token to accept a bare `typ` must not also accept
+    `typo host` or `typhoon`: every parse this collapsed rejected those, and a
+    corrupt line reaching the nomination gets a TURN permission and a probe."""
+    for bad in ("a=candidate:1 1 udp 1 1.2.3.4 5 typo host",
+                "a=candidate:1 1 udp 1 1.2.3.4 5 typhoon"):
+        assert _parse_answer_ice(bad)[2] == [], bad
+
+
+def test_the_trickle_path_reads_candidates_through_the_same_parser():
+    """It kept its own copy of the pattern, so the two could disagree about the
+    same line - which is the gap the collapse exists to close."""
+    src = _open_source()
+    assert "_parse_candidate_line" in src
+    assert "_re_ice" not in src
+
+
 def test_the_candidate_parse_accepts_a_line_that_ends_at_typ():
     """Two of the four parses this collapsed ended at a bare `typ` and captured
     no type token. The shared regex must not reject a line either of them would
