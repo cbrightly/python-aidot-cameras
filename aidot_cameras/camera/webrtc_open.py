@@ -21,6 +21,7 @@ if TYPE_CHECKING:  # import cost stays out of the runtime path
 
 from ..exceptions import AidotCameraBusy, AidotCameraNotReady
 from .constants import _LIVE_PLAY_NOT_READY, fallback_turn_uris, stun_server_uris
+from .sdes_open import _answer_sdp_can_nominate
 from .webrtc import WebRTCSession
 from .protocol import (
     AvioResponseRouter,
@@ -63,6 +64,28 @@ def _resolve_future_threadsafe(loop, fut, value) -> None:
             fut.set_result(value)
 
     loop.call_soon_threadsafe(_resolve)
+
+
+def _answer_is_from_the_camera(*, src_addr, user_id) -> bool:
+    """Whether a webrtcResp came from the camera rather than from us.
+
+    The broker echoes our own SDES webrtcResp back on the account topic, it
+    carries our own peerid so the accept filter admits it, and its SDP has our
+    ice-ufrag, ice-pwd and candidates - so it satisfies the nomination
+    precondition just as the camera's answer does.  Stamping the
+    answer-is-ready marker on it would let the STUN window leave on our own
+    SDP, and the setup nomination would then address our own host and srflx
+    addresses instead of the camera's.
+
+    ``srcAddr`` carries the account's prefix convention - ``2.`` device,
+    ``0.`` app, ``9.`` server - and our own messages go out as ``0.{userId}``,
+    which is the same test the webrtcReq echo already uses.  Device-channel
+    messages that omit srcAddr are treated as the camera's: absent evidence,
+    keep the behaviour that existed before this gate.
+    """
+    if not src_addr:
+        return True
+    return not str(src_addr).startswith(f"0.{user_id}")
 
 
 def _deliver_webrtc_answer(loop, answer_fut, second_answer_fut, answer) -> None:
@@ -811,6 +834,15 @@ class _WebRTCOpenMixin:
         # MQTT thread and read from the loop: a lone float rebind, never
         # read-modify-write, so no lock is needed.
         self._camera_device_seen_ts = None
+        # When this open first saw an answer carrying the ICE credentials and
+        # candidates the nomination needs (monotonic).  Read by the SDES STUN
+        # responder window, which blocks the event loop and so cannot see
+        # answer_fut resolve - call_soon_threadsafe only QUEUES that.  Stamped
+        # here, on the MQTT thread, so the window can leave the moment there is
+        # nothing left to wait for.  Cleared per open, or the second open would
+        # leave its window instantly on the first open's answer.  Same lone
+        # float rebind as above, so no lock.
+        self._camera_answer_ice_ready_ts = None
         # One-shot per open: the keep-alive re-assert fired when the camera
         # first announces itself.  See the dispatcher below.
         _wake_keepalive_sent = [False]
@@ -994,6 +1026,13 @@ class _WebRTCOpenMixin:
                         )
                     )
                     return
+                if (self._camera_answer_ice_ready_ts is None
+                        and _answer_is_from_the_camera(
+                            src_addr=(inner.get("srcAddr")
+                                      or msg.get("srcAddr") or ""),
+                            user_id=user_id)
+                        and _answer_sdp_can_nominate(answer.get("sdp", ""))):
+                    self._camera_answer_ice_ready_ts = time.monotonic()
                 _deliver_webrtc_answer(
                     loop, answer_fut, second_answer_fut, answer
                 )
