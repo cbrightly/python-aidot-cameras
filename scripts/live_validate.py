@@ -52,6 +52,7 @@ import inspect
 import json
 import logging
 import os
+import random as _random
 import sys
 import time
 
@@ -702,16 +703,35 @@ async def _quality_probe(dc, session, arm: str, frames: dict,
     return out
 
 
-def _interleave_arms(arms: list, repeats: int) -> list:
-    """The session order for a quality campaign: arms cycled, never blocked.
+def _interleave_arms(arms: list, repeats: int, seed=None) -> list:
+    """The session order for a quality campaign: balanced blocks, shuffled.
 
-    ["sd", ""] x3 is sd, control, sd, control, sd, control - NOT three sd
-    sessions followed by three controls. This camera's own rate varies
-    839-3698 Kbps between sessions, so a blocked campaign measures the time of
-    day; the codec campaign was interleaved for exactly this reason and this is
-    the same experiment one level in.
+    ["sd", ""] x3 gives three sd and three control sessions in some order -
+    NOT three sd sessions followed by three controls. This camera's own rate
+    varies 839-3698 Kbps between sessions, so a blocked campaign measures the
+    time of day.
+
+    Each repeat is one block containing every arm exactly once, shuffled within
+    the block. That keeps the balance a strict cycle gave while removing its
+    fixed period, which is the part that was wrong: the reference camera varies
+    things of its own between sessions - measured 2026-09-04, 4 of 44 cold opens
+    negotiated H.265 rather than H.264 - and anything of the camera's own that
+    happens to share the cycle's period lands preferentially on one arm and
+    reads as that arm's effect. The b=AS knob nearly produced a false positive
+    from exactly this shape.
+
+    ``seed`` makes a campaign reproducible, so a run that finds something can be
+    re-run in the same order.
     """
-    return [arm for _ in range(max(1, repeats)) for arm in arms]
+    if not arms:
+        return []
+    rng = _random.Random(seed)
+    order: list = []
+    for _ in range(max(1, repeats)):
+        block = list(arms)
+        rng.shuffle(block)
+        order.extend(block)
+    return order
 
 
 def _void_reason(res: dict) -> str | None:
@@ -991,7 +1011,8 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
     quality_arms = _parse_arms(getattr(args, "quality_arms", "") or "")
     quality_window = float(getattr(args, "quality_window", QUALITY_WINDOW_S))
     repeats = max(1, int(getattr(args, "arm_repeats", 1)))
-    pending = _interleave_arms(quality_arms, repeats)
+    pending = _interleave_arms(quality_arms, repeats,
+                               seed=getattr(args, "arm_seed", None))
     if quality_arms:
         max_attempts = len(pending)
     elif campaigning:
@@ -1496,6 +1517,10 @@ def main() -> int:
                         "an A001064 recycles itself every 60-85s, and a "
                         "teardown inside the second window looks exactly like "
                         "a bitrate that halved.")
+    p.add_argument("--arm-seed", type=int, default=None,
+                   help="seed for the per-block arm shuffle. Omit for a fresh "
+                        "random order; set it to re-run a campaign in the same "
+                        "order it was first run in.")
     p.add_argument("--arm-repeats", type=int, default=1,
                    help="how many times to cycle the arms (default 1)")
     p.add_argument("--sd-probe", action="store_true",
