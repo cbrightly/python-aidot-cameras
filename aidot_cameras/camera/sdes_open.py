@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import random
+import re
 import time
 from typing import Callable, Optional  # noqa: F401 - method annotations
 
@@ -1110,6 +1111,133 @@ _PRE_LAUNCH_ANSWER_WAIT_S = 8.0
 _AUDIO_PT_GRACE_S = 1.0
 
 
+# --------------------------------------------------------------------------- #
+# Reading the camera's answer, and leaving the STUN window once it is readable
+# --------------------------------------------------------------------------- #
+#
+# The ICE responder window below runs synchronously and blocks the event loop,
+# so it was written on the assumption stated above the answer harvest: that it
+# "closes ~2.4 s before the camera answers".  Cutting the livePlayReq echo wait
+# from 5.0 s to 0.25 s inverted that.  Measured on a cold A001064 open:
+#
+#     +0.45 s  webrtcReq
+#     +0.72 s  the camera's webrtcResp answer      <- credentials in hand
+#     +5.05 s  window closes on 1.5 s of ICE silence
+#     +5.06 s  USE-CANDIDATE
+#     +6.66 s  first SRTP
+#
+# 4.3 s of a 6.7 s connect spent holding an answer nothing was looking at.
+# Leaving early costs nothing: the bridge thread takes over responding to the
+# camera's binding requests the moment the window closes, and it is the bridge -
+# not the window - that learns peer-reflexive candidates and re-nominates every
+# 2.5 s, so the relay-only and off-subnet recovery paths are untouched.
+# Two of the five parses this replaced ended at a bare ``typ`` and captured no
+# type token, and one accepted a line with no ``a=`` prefix (trickled candidates
+# arrive bare).  Both shapes are accepted so the collapse cannot reject a line
+# one of the old copies would have taken.
+#
+# The type token is optional but still anchored: ``typ ?(\w*)`` also matched
+# ``typo host`` and ``typhoon``, which every parse it replaced rejected, and a
+# corrupt candidate line reaching the nomination gets a TURN permission and a
+# USE-CANDIDATE probe.  ``(?!\w)`` keeps the widening to the one direction the
+# collapse needs.
+_ICE_CAND_RE = re.compile(
+    r"(?:a=)?candidate:\S+ \d+ udp \d+ ([\d.]+) (\d+) typ(?: (\w+))?(?!\w)"
+)
+
+
+def _parse_candidate_line(line):
+    """One ``a=candidate:`` line as ``(ip, port, typ)``, or None.
+
+    Shared with the trickle path, which reads candidates one at a time off
+    ``iceCandidateReq`` rather than out of an SDP, and which kept its own copy
+    of this pattern until the two could disagree about the same line.
+    """
+    m = _ICE_CAND_RE.match((line or "").strip())
+    if not m:
+        return None
+    return m.group(1), int(m.group(2)), (m.group(3) or "")
+
+
+def _parse_answer_ice(sdp):
+    """Pull ICE credentials and UDP candidates out of a camera's answer SDP.
+
+    Returns ``(ufrag, pwd, candidates, host)``: the first ice-ufrag and
+    ice-pwd in the SDP, every udp candidate as an ``(ip, port)`` tuple in the
+    order offered, and the first ``typ host`` candidate - which is the one SCTP
+    is addressed to, and is not necessarily the first candidate listed.
+
+    Taking the FIRST credential pair is an observation, not a contract: our own
+    offer carries distinct per-media credentials, and the nomination sends
+    USE-CANDIDATE on both sockets with the single pair this returns.  That works
+    on the whole reference fleet, so those cameras evidently answer with one
+    pair - but no captured answer in this repo proves it, and a camera that
+    answered per-media credentials would need this split before it could be
+    nominated on both.
+
+    One parser, used by both the nomination and the window's exit predicate.
+    The exit means "the nomination this is about to reach will succeed", and it
+    only means that while both sides read the same SDP the same way.
+    """
+    ufrag = ""
+    pwd = ""
+    cands: list = []
+    host: tuple = ()
+    for line in (sdp or "").splitlines():
+        if line.startswith("a=ice-ufrag:") and not ufrag:
+            ufrag = line[len("a=ice-ufrag:"):].strip()
+        elif line.startswith("a=ice-pwd:") and not pwd:
+            pwd = line[len("a=ice-pwd:"):].strip()
+        elif line.startswith("a=candidate:"):
+            parsed = _parse_candidate_line(line)
+            if parsed:
+                addr = (parsed[0], parsed[1])
+                cands.append(addr)
+                if parsed[2] == "host" and not host:
+                    host = addr
+    return ufrag, pwd, cands, host
+
+
+def _answer_sdp_can_nominate(sdp) -> bool:
+    """Whether this answer carries everything USE-CANDIDATE needs.
+
+    Deliberately the whole precondition and not a proxy for it: an answer with
+    credentials but no candidate, or candidates but no credentials, leaves the
+    nomination with nothing to address, and leaving the window on it would
+    trade 4.3 s of responding for a session that never nominates at all.
+    """
+    ufrag, pwd, cands, _host = _parse_answer_ice(sdp)
+    return bool(ufrag and pwd and cands)
+
+
+def _stun_window_answer_exit_due(*, stun_seen: bool,
+                                 answer_ready: bool) -> bool:
+    """Whether the STUN responder window has nothing left to wait for.
+
+    Every branch of the window carries the delay, so this is not scoped to one.
+    Measured on two cold A001064 opens that took different branches:
+
+      * echo received, webrtcResp sent (the 20 s window): answer at +0.72 s,
+        window ran to +5.05 s and left on 1.5 s of ICE silence.
+      * no echo (the 2.5 s window): answer at +0.22 s, window ran the full
+        2.5 s cap and left on the deadline.
+
+    Both held the answer for the whole window.  Nothing else in the window is
+    load-bearing by then either: an SRTP packet already breaks out of it, a
+    camera that never probes already leaves on ``_pre_stun_idle``, and the
+    bridge thread picks the responder role back up ~30 ms later.
+
+    ``stun_seen`` is the camera's own evidence that it is running ICE: a probe
+    this host actually answered, which is why it is set where the reply is sent
+    and not where the request is parsed - a self-loop Data Indication is a
+    binding request too, and it is our own address coming back through the
+    relay.  Without such a probe there is nothing to nominate a pair *with*, and
+    a relay-only camera that answers early and probes late keeps the behaviour
+    it has today.
+    """
+    return bool(stun_seen and answer_ready)
+
+
 def video_pt_from_answer_sdp(sdp_text: str) -> Optional[int]:
     """Which video payload type to narrow to, taken from the camera's answer SDP.
 
@@ -1343,13 +1471,23 @@ def _serve_video_pt(observed, answer, pinned) -> "Optional[int]":
 
     An observed payload type is fact -- it is what is arriving. A pin is our
     own constraint on the offer, so narrowing past it can only produce a stream
-    the camera was never asked to send. The answer is the weakest of the three:
-    measured 2026-08-23, the reference A001064 ANSWERS 97 (H.265) and SENDS 96
-    (H.264) in every observed session, and trusting the answer when video had
-    not yet been observed built an hevc-only SDP that no hevc ever filled --
-    ffmpeg could not determine dimensions, could not write the RTSP header, and
-    the serve died at startup. That was invisible until the exit reason stopped
-    being flushed out of the stderr tail by Non-monotonic DTS noise.
+    the camera was never asked to send. The answer is the weakest of the three
+    because it can be absent or stale, not because it lies: trusting it when
+    video had not yet been observed once built an hevc-only SDP that no hevc
+    ever filled -- ffmpeg could not determine dimensions, could not write the
+    RTSP header, and the serve died at startup. That was invisible until the
+    exit reason stopped being flushed out of the stderr tail by Non-monotonic
+    DTS noise.
+
+    This docstring used to say the reference A001064 "ANSWERS 97 (H.265) and
+    SENDS 96 (H.264) in every observed session". That is RETRACTED. Measured on
+    2026-09-04 by reading the first decrypted NAL of 44 cold opens: the answer
+    and the wire agree every time. The camera simply picks a codec per session
+    -- 40 of the 44 negotiated H.264 (payload begins 0x67, an H.264 SPS with
+    profile_idc 0x4D level 0x1F, matching the avc1.4D001F go2rtc reports) and 4
+    negotiated H.265 (0x40/0x42/0x44 -- VPS, SPS, PPS -- then 0x62 FU
+    fragments). Both are served correctly today. The retracted claim reads as a
+    demux bug and very nearly bought a fix for one that does not exist.
 
     Returns None when nothing is known; the caller keeps its own "could not
     narrow" path rather than having a payload type invented for it.
@@ -1637,16 +1775,55 @@ async def _sdes_await_answer_or_terminal(
     raise TimeoutError()
 
 
+# Seconds a role-reversal camera gets to echo our webrtcReq back.
+#
+# This was 2.0 s on the reading that A001064 "needs the resulting webrtcResp".
+# Measured over 18 hours of logs on 2026-09-03/04: of 61 SDES opens, the 17 that
+# took this wait timed out 17/17 at a mean of 2.086 s, and neither `camera
+# webrtcReq echo received` nor `webrtcResp sent (SDES` appears once in the whole
+# log.  The webrtcResp was never built, and all 17 streamed regardless - so the
+# 2.0 s was 45 percent of a 4.2 s cold connect, spent on nothing.
+#
+# Shortened rather than removed, exactly as the livePlayReq echo wait was
+# (5.0 -> 0.25 s, 169/169 timeouts): the evidence says the wait times out, not
+# that the branch is wrong, so a camera that does echo promptly still gets its
+# webrtcResp.  Raise AIDOT_SDES_ECHO_WAIT_S to put the old behaviour back
+# without a release.
+#
+# The measurement is one fleet.  An echo that lands between this value and the
+# old 2.0 s would now miss the wait, and _cam_echo_received is a branch
+# selector, not just a log line: it decides whether the webrtcResp is built,
+# whether the ICE window runs 20 s or 2.5 s, and whether the quickConn
+# reconnect retry is armed.  A late echo is therefore reported loudly at the
+# end of the STUN window rather than passing unnoticed, so an operator on a
+# fleet whose band is not empty gets a line naming the knob.
+_SDES_ECHO_WAIT_S = 0.25
+
+
 def _sdes_echo_wait_timeout(skip_liveplay: bool) -> float:
-    """Seconds to block on the camera's webrtcReq echo before proceeding.
+    """Seconds to block on the camera's webrtcReq echo. Never negative.
 
     The echo only ever arrives for role-reversal models (e.g. A001064), which
-    need the resulting webrtcResp and run with ``skip_liveplay`` False (they are
-    hard-excluded from sdes_fast_liveplay) - they keep the full 2.0s wait.  For
-    A001513-class cameras (``skip_liveplay`` True, the default) the echo never
-    arrives and the webrtcResp-building branch is dead/redundant, so don't block
-    on it (saves ~2s of cold-start dead time)."""
-    return 0.0 if skip_liveplay else 2.0
+    build a webrtcResp from it and run with ``skip_liveplay`` False (they are
+    hard-excluded from sdes_fast_liveplay).  For A001513-class cameras
+    (``skip_liveplay`` True, the default) the echo never arrives at all, so they
+    do not block on it.
+
+    Read per call and clamped, like its sibling
+    :func:`_sdes_liveplay_echo_timeout`: a malformed env value is ignored rather
+    than raising, because parsing it at import time makes one typo on an HA box
+    an ImportError that takes down every camera, and freezing it at import means
+    an operator changing it sees nothing until a full restart.
+    """
+    raw = _os.environ.get("AIDOT_SDES_ECHO_WAIT_S")
+    if raw is not None:
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            val = None
+        if val is not None and val >= 0.0:
+            return 0.0 if skip_liveplay else val
+    return 0.0 if skip_liveplay else _SDES_ECHO_WAIT_S
 
 
 # ffmpeg returns AVERROR(EPIPE) = -32 when its output consumer disappears, and a
@@ -3092,10 +3269,12 @@ class _SdesOpenMixin:
         # Only role-reversal models (A001064, _skip_lp False) echo our webrtcReq
         # and need the webrtcResp built below; for A001513-class (_skip_lp True,
         # default) the echo never arrives, so don't block ~2s on it.
+        _echo_wait_s = _sdes_echo_wait_timeout(_skip_lp)
+        _echo_wait_t0 = time.monotonic()
         try:
             await _asyncio.wait_for(
                 _asyncio.shield(_echo_fut),
-                timeout=_sdes_echo_wait_timeout(_skip_lp),
+                timeout=_echo_wait_s,
             )
             _cam_echo_received = True
             _status("camera webrtcReq echo received - building webrtcResp")
@@ -3252,7 +3431,17 @@ class _SdesOpenMixin:
                 f" video={_ans_video_ip}:{_ans_video_port})"
             )
         except TimeoutError:
-            pass  # no echo - camera uses a different signalling variant; proceed
+            # No echo - camera uses a different signalling variant; proceed.
+            # Logged rather than swallowed: `except TimeoutError: pass` is how
+            # 2.0 s of dead time here stayed invisible, and the elapsed line is
+            # what will show it if this wait ever starts being used.
+            _LOGGER.info(
+                "signaling-wait[%s] webrtcReq-echo elapsed=%dms"
+                " (timeout=%.2fs)",
+                getattr(self, "device_id", "?"),
+                int((time.monotonic() - _echo_wait_t0) * 1000),
+                _echo_wait_s,
+            )
 
         # --- Announce our ICE candidates via MQTT (iceCandidateReq) ----------- #
         # The iOS app always sends iceCandidateReq after webrtcReq/webrtcResp.
@@ -3498,12 +3687,31 @@ class _SdesOpenMixin:
         _pre_stun_idle = 0.5   # exit early if no packet at all (non-ICE camera)
         _stun_deadline = time.monotonic() + _stun_max
         _last_pkt_t = time.monotonic()
+        _stun_window_t0 = time.monotonic()
         for _rsock in (_audio_sock, _video_sock):
             try:
                 _rsock.setblocking(False)
             except Exception:
                 _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_is_self_peer_ip', exc_info=True)
         while time.monotonic() < _stun_deadline:
+            # Answer-exit: the only reason to sit here is that the credentials
+            # the nomination needs have not arrived yet.  Once they have - and
+            # the camera has proved it is running ICE by probing us - waiting
+            # longer just delays USE-CANDIDATE, and the bridge thread below
+            # picks the responder role straight back up.  Checked before the
+            # idle test because the answer usually lands while the camera is
+            # still probing hard, so no idle threshold would ever be crossed.
+            if _stun_window_answer_exit_due(
+                    stun_seen=_stun_seen,
+                    answer_ready=getattr(
+                        self, "_camera_answer_ice_ready_ts", None) is not None):
+                _status(
+                    "STUN window: leaving early after %.2fs - answer ICE"
+                    " credentials in hand and camera probing; nominating now"
+                    " (%d binding request(s) answered)"
+                    % (time.monotonic() - _stun_window_t0, _stun_count)
+                )
+                break
             # Idle-exit: threshold depends on whether we've seen any STUN yet
             idle = time.monotonic() - _last_pkt_t
             if _stun_seen:
@@ -3575,8 +3783,15 @@ class _SdesOpenMixin:
                     # replies) must NOT set _stun_seen or they'd trigger the 1.5s
                     # idle-exit prematurely, before camera probes arrive.
                     if _pkt[:2] == b'\x00\x01':
-                        # Binding Request - reply with Binding Success Response
-                        _stun_seen = True
+                        # Binding Request - reply with Binding Success Response.
+                        # _stun_seen is NOT set here.  A self-loop Data
+                        # Indication - our own address echoed back through the
+                        # relay - is a Binding Request too, and the branch below
+                        # drops it precisely because it is not the camera.
+                        # Setting the flag here made one of those count as "the
+                        # camera has started ICE", which is the one thing the
+                        # answer-exit is gated on.  It is set where a probe is
+                        # actually answered instead.
                         if _turn_peer_ip_sw is None and _src[0] != _hp_host:
                             _prefer_direct_stun[_sock] = True
                         _tid = _pkt[8:20]
@@ -3624,6 +3839,7 @@ class _SdesOpenMixin:
                                              + _STUN_MAGIC + os.urandom(12)
                                              + _si_body)
                                 _sock.sendto(_send_ind, (_t_host_sw, _t_port_sw))
+                                _stun_seen = True
                             elif _turn_peer_ip_sw and _is_self_peer_ip(
                                     _turn_peer_ip_sw, _turn_peer_port_sw):
                                 # Self-loop Data Indication (peer == our own
@@ -3640,6 +3856,7 @@ class _SdesOpenMixin:
                                     )
                             else:
                                 _sock.sendto(_resp, _src)
+                                _stun_seen = True
                             _stun_count += 1
                         except Exception:
                             _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_is_self_peer_ip', exc_info=True)
@@ -3729,6 +3946,20 @@ class _SdesOpenMixin:
             _last_pkt_t = time.monotonic()
             _stun_seen = False
             while time.monotonic() < _stun_deadline:
+                # Same exit as the first window.  A camera that quickConns after
+                # signalling re-runs ICE here, and without this it sat the full
+                # 8 s on credentials it already had - the same delay the first
+                # window was fixed for, in the window the fix had not reached.
+                if _stun_window_answer_exit_due(
+                        stun_seen=_stun_seen,
+                        answer_ready=getattr(
+                            self, "_camera_answer_ice_ready_ts", None) is not None):
+                    _status(
+                        "STUN window (retry %d): leaving early after %.2fs -"
+                        " answer ICE credentials in hand and camera probing"
+                        % (_sdes_retries,
+                           time.monotonic() - (_stun_deadline - 8.0)))
+                    break
                 if _stun_seen and time.monotonic() - _last_pkt_t > _idle_limit:
                     break
                 try:
@@ -3747,7 +3978,6 @@ class _SdesOpenMixin:
                             and _pkt_r[4:8] == _STUN_MAGIC):
                         if _pkt_r[:2] != b'\x00\x01':
                             continue   # not a Binding Request; don't trigger idle-exit
-                        _stun_seen = True
                         _tid_r = _pkt_r[8:20]
                         try:
                             _resp_r = _build_stun_binding_success_response(
@@ -3760,6 +3990,7 @@ class _SdesOpenMixin:
                                 magic_cookie=_STUN_MAGIC,
                             )
                             _sk_r.sendto(_resp_r, _src_r)
+                            _stun_seen = True
                             _stun_count += 1
                         except Exception:
                             _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_is_self_peer_ip', exc_info=True)
@@ -3784,12 +4015,17 @@ class _SdesOpenMixin:
         # call_soon_threadsafe(answer_fut.set_result, ...) from the MQTT thread is
         # queued but hasn't fired yet.  One asyncio cycle resolves it.
         await asyncio.sleep(0)
-        # ...but one cycle only helps if the answer had already ARRIVED, and it
-        # has not: the STUN window above runs on a fixed schedule that closes
-        # ~2.4 s before the camera answers.  Wait for it, because the ICE
-        # credentials it carries are what the nomination below needs - without
-        # them the camera is never nominated, stays in ICE "Checking", and never
-        # sends SRTP no matter how long the first-media wait runs.
+        # ...but one cycle only helps if the answer had already ARRIVED.  When it
+        # has, the window above now leaves as soon as it is readable and this
+        # harvest is a formality; when it has not, the window ran to its own
+        # deadline and this wait is the whole story.  Either way, wait for it:
+        # the ICE credentials it carries are what the nomination below needs -
+        # without them the camera is never nominated, stays in ICE "Checking",
+        # and never sends SRTP no matter how long the first-media wait runs.
+        # (This comment used to assert the window "closes ~2.4 s before the
+        # camera answers".  That stopped being true when the livePlayReq echo
+        # wait was cut to 0.25 s, and the window then sat on the answer for
+        # seconds - see _stun_window_answer_exit_due.)
         # shield() so a timeout here cannot cancel the future the real answer
         # await (and the DTLS-fallback path) still consume further down.
         # A TERMINAL refusal races the harvest.  A camera at its viewer cap acks
@@ -4075,31 +4311,19 @@ class _SdesOpenMixin:
         # sending a binding request with the USE-CANDIDATE attribute (0x0025).
         # Without this, the camera stays in ICE "Checking" state indefinitely
         # (hence the continuous duplicate STUN probe log lines) and never streams.
-        import re as _re_ice
 
         # Parse camera's ICE credentials and UDP candidates from its answer SDP.
-        _cam_ice_ufrag: str = ""
-        _cam_ice_pwd:   str = ""
-        _cam_ice_cands: list = []   # list of (ip, port) tuples
-
-        _cam_ice_host: tuple = ()    # (ip, port) of typ host candidate for SCTP
-        if _pre_launch_answer_sdp:
-            for _ice_ln in _pre_launch_answer_sdp.splitlines():
-                if _ice_ln.startswith("a=ice-ufrag:") and not _cam_ice_ufrag:
-                    _cam_ice_ufrag = _ice_ln[len("a=ice-ufrag:"):].strip()
-                elif _ice_ln.startswith("a=ice-pwd:") and not _cam_ice_pwd:
-                    _cam_ice_pwd = _ice_ln[len("a=ice-pwd:"):].strip()
-                elif _ice_ln.startswith("a=candidate:"):
-                    _cand_m = _re_ice.match(
-                        r"a=candidate:\S+ \d+ udp \d+ ([\d.]+) (\d+) typ (\w+)",
-                        _ice_ln,
-                    )
-                    if _cand_m:
-                        _cip, _cport = _cand_m.group(1), int(_cand_m.group(2))
-                        _ctyp = _cand_m.group(3)
-                        _cam_ice_cands.append((_cip, _cport))
-                        if _ctyp == "host" and not _cam_ice_host:
-                            _cam_ice_host = (_cip, _cport)
+        # Credentials and candidates from the camera's answer.  _cam_ice_host is
+        # the typ host candidate, which is what SCTP is addressed to.
+        _cam_ice_ufrag: str
+        _cam_ice_pwd:   str
+        _cam_ice_cands: list        # list of (ip, port) tuples
+        _cam_ice_host:  tuple
+        # Through the shared parser, not a second copy: the STUN window's early
+        # exit above means "the nomination below will succeed", and it only
+        # means that while both read the same SDP the same way.
+        (_cam_ice_ufrag, _cam_ice_pwd, _cam_ice_cands,
+         _cam_ice_host) = _parse_answer_ice(_pre_launch_answer_sdp)
 
         def _send_use_candidate(sock, our_ufrag, our_pwd, cam_ufrag, cam_pwd, cam_addr):
             """Send a STUN Binding Request with ICE-CONTROLLING + USE-CANDIDATE."""
@@ -4181,20 +4405,7 @@ class _SdesOpenMixin:
             """
             if not sdp_text:
                 return 0
-            _u = _p = ""
-            _cands: list = []
-            for _ln in sdp_text.splitlines():
-                if _ln.startswith("a=ice-ufrag:") and not _u:
-                    _u = _ln[len("a=ice-ufrag:"):].strip()
-                elif _ln.startswith("a=ice-pwd:") and not _p:
-                    _p = _ln[len("a=ice-pwd:"):].strip()
-                elif _ln.startswith("a=candidate:"):
-                    _m = _re_ice.match(
-                        r"a=candidate:\S+ \d+ udp \d+ ([\d.]+) (\d+) typ (\w+)",
-                        _ln,
-                    )
-                    if _m:
-                        _cands.append((_m.group(1), int(_m.group(2))))
+            _u, _p, _cands, _ = _parse_answer_ice(sdp_text)
             if not (_u and _p and _cands):
                 return 0
             # Open the relay's door before probing, same invariant the setup and
@@ -6690,15 +6901,14 @@ class _SdesOpenMixin:
                 while _tk_next < len(ice_cands_seen):
                     _tk_line = (ice_cands_seen[_tk_next].get("candidate") or "")
                     _tk_next += 1
-                    _tk_m = _re_ice.match(
-                        r"(?:a=)?candidate:\S+ \d+ udp \d+ ([\d.]+) (\d+) typ (\w+)",
-                        _tk_line,
-                    )
-                    if not _tk_m:
+                    # The shared parser, so a candidate the answer path
+                    # nominates cannot be one this path silently skips.
+                    _tk_parsed = _parse_candidate_line(_tk_line)
+                    if not _tk_parsed:
                         continue
-                    _tk_ip = _tk_m.group(1)
-                    _tk_port = int(_tk_m.group(2))
-                    _tk_typ = _tk_m.group(3)
+                    _tk_ip = _tk_parsed[0]
+                    _tk_port = _tk_parsed[1]
+                    _tk_typ = _tk_parsed[2]
                     if (_tk_ip, _tk_port) in _tk_seen:
                         continue
                     _tk_seen.add((_tk_ip, _tk_port))
@@ -7242,22 +7452,8 @@ class _SdesOpenMixin:
             # parse the camera's ICE credentials now and populate _bridge_uc_info
             # so the bridge can send USE-CANDIDATE on the next camera BindingReq.
             if not _bridge_uc_info["sent"] and not _bridge_uc_info["ufrag"] and _ans_sdp:
-                import re as _re_late_ice
-                _late_ufrag = _late_pwd = ""
-                _late_cands: list = []
-                for _al in _ans_sdp.splitlines():
-                    if _al.startswith("a=ice-ufrag:") and not _late_ufrag:
-                        _late_ufrag = _al[len("a=ice-ufrag:"):].strip()
-                    elif _al.startswith("a=ice-pwd:") and not _late_pwd:
-                        _late_pwd = _al[len("a=ice-pwd:"):].strip()
-                    elif _al.startswith("a=candidate:"):
-                        _cm = _re_late_ice.match(
-                            r"a=candidate:\S+ \d+ udp \d+ ([\d.]+) (\d+) typ",
-                            _al,
-                        )
-                        if _cm:
-                            _late_cands.append(
-                                (_cm.group(1), int(_cm.group(2))))
+                _late_ufrag, _late_pwd, _late_cands, _ = _parse_answer_ice(
+                    _ans_sdp)
                 if _late_ufrag and _late_pwd and _late_cands:
                     _bridge_uc_info["ufrag"]  = _late_ufrag
                     _bridge_uc_info["pwd"]    = _late_pwd
@@ -7460,7 +7656,6 @@ class _SdesOpenMixin:
                 # Spawn a background task to pick it up and inject ICE credentials
                 # into _bridge_uc_info so the bridge can send USE-CANDIDATE.
                 if second_answer_fut is not None:
-                    import re as _re_sa
                     async def _late_second_answer_task():
                         nonlocal _dc_answer_has_app
                         try:
@@ -7471,21 +7666,8 @@ class _SdesOpenMixin:
                             if (_la_sdp
                                     and not _bridge_uc_info["sent"]
                                     and not _bridge_uc_info["ufrag"]):
-                                _la_ufrag = _la_pwd = ""
-                                _la_cands: list = []
-                                for _ll in _la_sdp.splitlines():
-                                    if _ll.startswith("a=ice-ufrag:") and not _la_ufrag:
-                                        _la_ufrag = _ll[len("a=ice-ufrag:"):].strip()
-                                    elif _ll.startswith("a=ice-pwd:") and not _la_pwd:
-                                        _la_pwd = _ll[len("a=ice-pwd:"):].strip()
-                                    elif _ll.startswith("a=candidate:"):
-                                        _cm2 = _re_sa.match(
-                                            r"a=candidate:\S+ \d+ udp \d+ ([\d.]+) (\d+) typ",
-                                            _ll,
-                                        )
-                                        if _cm2:
-                                            _la_cands.append(
-                                                (_cm2.group(1), int(_cm2.group(2))))
+                                (_la_ufrag, _la_pwd, _la_cands,
+                                 _) = _parse_answer_ice(_la_sdp)
                                 if _la_ufrag and _la_pwd and _la_cands:
                                     _bridge_uc_info["ufrag"]  = _la_ufrag
                                     _bridge_uc_info["pwd"]    = _la_pwd
