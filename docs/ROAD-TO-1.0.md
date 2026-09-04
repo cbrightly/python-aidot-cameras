@@ -47,7 +47,7 @@ understand the system and its shape has settled.
 
 ## Open
 
-**As of 2026-09-04 two items are open: numbers 1 and 7.** Items 2 to 6 are
+**As of 2026-09-04 exactly one item is open: number 1.** Items 2 to 7 are
 closed above, each on its own terms and each saying which terms - two of them
 are "documented as accepted" rather than "solved", and they say so in their own
 words rather than in a summary that rounds them up. Read the item, not this
@@ -156,10 +156,27 @@ stale for three days while they did. Placing them against the same bar:
 2026-09-17.**
 
 *Superseded the same day by the scope decision in item 7: the quality campaign
-runs first, and this clock restarts when it ends. 2026-09-17 is no longer the
-date - the date is two weeks from whenever the campaign finishes and the fleet
-is left alone. Item 1 is not satisfied by the calendar; it is satisfied by a
-fortnight of ordinary use, and a fortnight containing a campaign is not that.*
+ran first. It finished on 2026-09-04 and item 7 is closed, so the clock starts
+now rather than at rc7.*
+
+#### The clock starts 2026-09-04
+
+**Day zero is `1.0.0rc9`, 2026-09-04. Two weeks from it is 2026-09-18.** The
+campaign ended that afternoon and the fleet was left alone from then; rc9 is the
+release in the field, and the box was verified running it - pip metadata
+1.0.0rc9, integration 2.20.1, and `sdes_open.py`/`webrtc_open.py` hashing
+byte-identical to the released wheel. A soak measured on hot-patched files
+measures nothing, so that check is part of dating day zero rather than a
+formality.
+
+**The soak covers eight cameras, not nine.** `camera.deck` is an orphaned
+registry entry - `restored: True`, no device behind it, the integration does not
+log it at all - and it was already in that state before any of 2026-09-04's
+work. It is not a streaming failure and must not be scored as one.
+
+Read `sh ~/source/aidot-soak-check.sh` for the running count. It is read-only,
+and it attributes tracebacks rather than printing a raw total, because 96 of one
+day's 111 were throwaway instrumentation.
 
 **What the fleet shows so far.** Over the container log window 2026-09-03 23:10
 to 2026-09-04 15:22: 164 opens reached first media, 564 reached a serve, with
@@ -1414,7 +1431,7 @@ layout, which has no class in the decompiled client and has to be read off the
 wire, and the answer to where playback media arrives once `RECORD_PLAYCONTROL`
 starts it. Both fall out of the same one-command experiment.
 
-### 7. The quality levers have never been measured with enough power - added 2026-09-04
+### 7. The quality levers have never been measured with enough power - closed 2026-09-04
 
 Chris's instruction of 2026-08-31: once the 80.2 s cliff is resolved,
 re-evaluate Auto/SD/HD quality and the other levers previously believed
@@ -1504,13 +1521,30 @@ roughly 11 percent of the ratio. So a mid-session quality command that moved the
 bitrate by more than ~11 percent is ruled out. A smaller effect is not, and no
 claim is made about one.
 
-**Still unmeasured:** this covers the mid-session `sd` and `hd` commands only.
-Auto quality, adaptive bitrate, the encoder ramp and TMMBR/REMB response are
-levers of a different shape - they act over minutes rather than at a point - and
-need a design that is not two 12-second windows around a command. Item 7 stays
-open for them.
+**Closed on these terms.** The question the item was raised to answer - are the
+quality levers doing anything, or were they only ever assessed under an 80 s
+ceiling at n<=6 - is answered for the commands a viewer actually triggers: they
+are delivered, acked, and do nothing measurable above about 11 percent.
+
+**What is deliberately NOT answered, and is now out of scope rather than
+pending:** Auto quality, adaptive bitrate, the encoder ramp and TMMBR/REMB
+response. They are levers of a different shape - they act over minutes rather
+than at a point - so two 12-second windows around a command is the wrong
+instrument, and measuring them needs a design that does not exist yet. They are
+listed under "Out of scope for 1.0.0" below. This is "documented as accepted"
+rather than "solved", and it says so here rather than in a summary line that
+rounds it up.
 
 ## Out of scope for 1.0.0
+
+- **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /
+  REMB response.** Moved here 2026-09-04 when item 7 closed. The mid-session
+  commands a viewer triggers were measured and do nothing above ~11 percent;
+  these four are a different shape, acting over minutes rather than at a point,
+  and no instrument for them exists yet - two 12-second windows around a command
+  is not it. 1.0.0 asserts that the system is understood and its shape has
+  settled, not that every lever has been measured. Whether these do anything is
+  a real question and it stays open as work; it is not a 1.0.0 question.
 
 - **The go2rtc add-on.** A private experiment in moving off HACS distribution,
   never yet run with a real camera, and marked not for public release. 1.0.0
