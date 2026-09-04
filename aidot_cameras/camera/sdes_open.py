@@ -1734,16 +1734,33 @@ async def _sdes_await_answer_or_terminal(
     raise TimeoutError()
 
 
+# Seconds a role-reversal camera gets to echo our webrtcReq back.
+#
+# This was 2.0 s on the reading that A001064 "needs the resulting webrtcResp".
+# Measured over 18 hours of logs on 2026-09-03/04: of 61 SDES opens, the 17 that
+# took this wait timed out 17/17 at a mean of 2.086 s, and neither `camera
+# webrtcReq echo received` nor `webrtcResp sent (SDES` appears once in the whole
+# log.  The webrtcResp was never built, and all 17 streamed regardless - so the
+# 2.0 s was 45 percent of a 4.2 s cold connect, spent on nothing.
+#
+# Shortened rather than removed, exactly as the livePlayReq echo wait was
+# (5.0 -> 0.25 s, 169/169 timeouts): the evidence says the wait times out, not
+# that the branch is wrong, so a camera that does echo promptly still gets its
+# webrtcResp.  Raise AIDOT_SDES_ECHO_WAIT_S to put the old behaviour back
+# without a release.
+_SDES_ECHO_WAIT_S = float(os.environ.get("AIDOT_SDES_ECHO_WAIT_S", "0.25"))
+
+
 def _sdes_echo_wait_timeout(skip_liveplay: bool) -> float:
     """Seconds to block on the camera's webrtcReq echo before proceeding.
 
     The echo only ever arrives for role-reversal models (e.g. A001064), which
-    need the resulting webrtcResp and run with ``skip_liveplay`` False (they are
-    hard-excluded from sdes_fast_liveplay) - they keep the full 2.0s wait.  For
-    A001513-class cameras (``skip_liveplay`` True, the default) the echo never
-    arrives and the webrtcResp-building branch is dead/redundant, so don't block
-    on it (saves ~2s of cold-start dead time)."""
-    return 0.0 if skip_liveplay else 2.0
+    build a webrtcResp from it and run with ``skip_liveplay`` False (they are
+    hard-excluded from sdes_fast_liveplay).  For A001513-class cameras
+    (``skip_liveplay`` True, the default) the echo never arrives at all, so they
+    do not block on it.
+    """
+    return 0.0 if skip_liveplay else _SDES_ECHO_WAIT_S
 
 
 # ffmpeg returns AVERROR(EPIPE) = -32 when its output consumer disappears, and a
@@ -3189,10 +3206,12 @@ class _SdesOpenMixin:
         # Only role-reversal models (A001064, _skip_lp False) echo our webrtcReq
         # and need the webrtcResp built below; for A001513-class (_skip_lp True,
         # default) the echo never arrives, so don't block ~2s on it.
+        _echo_wait_s = _sdes_echo_wait_timeout(_skip_lp)
+        _echo_wait_t0 = time.monotonic()
         try:
             await _asyncio.wait_for(
                 _asyncio.shield(_echo_fut),
-                timeout=_sdes_echo_wait_timeout(_skip_lp),
+                timeout=_echo_wait_s,
             )
             _cam_echo_received = True
             _status("camera webrtcReq echo received - building webrtcResp")
@@ -3349,7 +3368,18 @@ class _SdesOpenMixin:
                 f" video={_ans_video_ip}:{_ans_video_port})"
             )
         except TimeoutError:
-            pass  # no echo - camera uses a different signalling variant; proceed
+            # No echo - camera uses a different signalling variant; proceed.
+            # Logged rather than swallowed: `except TimeoutError: pass` is how
+            # 2.0 s of dead time here stayed invisible, and the elapsed line is
+            # what will show it if this wait ever starts being used.
+            if _echo_wait_s > 0:
+                _LOGGER.info(
+                    "signaling-wait[%s] webrtcReq-echo elapsed=%dms"
+                    " (timeout=%.2fs)",
+                    getattr(self, "device_id", "?"),
+                    int((time.monotonic() - _echo_wait_t0) * 1000),
+                    _echo_wait_s,
+                )
 
         # --- Announce our ICE candidates via MQTT (iceCandidateReq) ----------- #
         # The iOS app always sends iceCandidateReq after webrtcReq/webrtcResp.
