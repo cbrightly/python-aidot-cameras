@@ -1440,13 +1440,23 @@ def _serve_video_pt(observed, answer, pinned) -> "Optional[int]":
 
     An observed payload type is fact -- it is what is arriving. A pin is our
     own constraint on the offer, so narrowing past it can only produce a stream
-    the camera was never asked to send. The answer is the weakest of the three:
-    measured 2026-08-23, the reference A001064 ANSWERS 97 (H.265) and SENDS 96
-    (H.264) in every observed session, and trusting the answer when video had
-    not yet been observed built an hevc-only SDP that no hevc ever filled --
-    ffmpeg could not determine dimensions, could not write the RTSP header, and
-    the serve died at startup. That was invisible until the exit reason stopped
-    being flushed out of the stderr tail by Non-monotonic DTS noise.
+    the camera was never asked to send. The answer is the weakest of the three
+    because it can be absent or stale, not because it lies: trusting it when
+    video had not yet been observed once built an hevc-only SDP that no hevc
+    ever filled -- ffmpeg could not determine dimensions, could not write the
+    RTSP header, and the serve died at startup. That was invisible until the
+    exit reason stopped being flushed out of the stderr tail by Non-monotonic
+    DTS noise.
+
+    This docstring used to say the reference A001064 "ANSWERS 97 (H.265) and
+    SENDS 96 (H.264) in every observed session". That is RETRACTED. Measured on
+    2026-09-04 by reading the first decrypted NAL of 44 cold opens: the answer
+    and the wire agree every time. The camera simply picks a codec per session
+    -- 40 of the 44 negotiated H.264 (payload begins 0x67, an H.264 SPS with
+    profile_idc 0x4D level 0x1F, matching the avc1.4D001F go2rtc reports) and 4
+    negotiated H.265 (0x40/0x42/0x44 -- VPS, SPS, PPS -- then 0x62 FU
+    fragments). Both are served correctly today. The retracted claim reads as a
+    demux bug and very nearly bought a fix for one that does not exist.
 
     Returns None when nothing is known; the caller keeps its own "could not
     narrow" path rather than having a payload type invented for it.
