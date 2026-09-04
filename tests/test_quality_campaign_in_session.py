@@ -285,3 +285,57 @@ if __name__ == "__main__":
             print(f"FAIL {_fn.__name__}")
             traceback.print_exc()
     raise SystemExit(1 if _fail else 0)
+
+
+# --------------------------------------------------------------------------- #
+# A null result has to be distinguishable from a command that never arrived
+# --------------------------------------------------------------------------- #
+#
+# The probe already records the camera's own ack per session, precisely so "the
+# lever does nothing" cannot be confused with "the command never got there".
+# The summary kept that per session and then dropped it on the way to the arm,
+# so an arm could report n=35 and a mean of 0.99 while only a handful of those
+# sessions had the command acked - which is the null this whole campaign exists
+# to avoid drawing.
+
+def _att(n, arm, ratio, acked):
+    return {"attempt": n,
+            "quality": {"arm": arm, "verdict": "OK", "kbps_a": 1000,
+                        "kbps_b": int(1000 * ratio),
+                        "ratio_b_over_a": ratio,
+                        "ack_log": ["801"] if acked else []}}
+
+
+def test_the_arm_reports_how_many_of_its_sessions_were_acked():
+    out = lv._quality_summary([
+        _att(1, "sd", 1.0, True),
+        _att(2, "sd", 1.0, False),
+        _att(3, "sd", 1.0, False),
+    ])
+    assert out["sd"]["n"] == 3
+    assert out["sd"]["acked_n"] == 1, (
+        "without this an arm of unacked sessions reads as a measured null")
+
+
+def test_an_arm_whose_commands_all_landed_says_so():
+    out = lv._quality_summary([_att(1, "hd", 0.5, True),
+                               _att(2, "hd", 0.5, True)])
+    assert out["hd"]["acked_n"] == out["hd"]["n"] == 2
+
+
+def test_the_control_arm_is_not_penalised_for_sending_nothing():
+    """The control deliberately sends no command, so it has no ack and must not
+    look like a delivery failure."""
+    out = lv._quality_summary([_att(1, "control", 1.0, False),
+                               _att(2, "control", 1.0, False)])
+    assert out["control"]["n"] == 2
+    assert out["control"]["acked_n"] == 0
+
+
+def test_voids_still_do_not_enter_the_ack_count():
+    void = {"attempt": 9, "quality": {"arm": "sd", "verdict": "VOID",
+                                      "void_reason": "no media in window B"}}
+    out = lv._quality_summary([_att(1, "sd", 1.0, True), void])
+    assert out["sd"]["n"] == 1
+    assert out["sd"]["void"] == 1
+    assert out["sd"]["acked_n"] == 1

@@ -762,6 +762,15 @@ def _quality_summary(attempts: list) -> dict:
     that FOLLOW an sd session show a depressed first window, the camera is
     remembering the setting across sessions; that would be a real result, and
     without the absolute numbers it would look like a noisy control instead.
+
+    ``acked_n`` is the count of sessions in this arm where the camera answered
+    the command. The probe has always recorded that per session, for the express
+    reason that "the lever does nothing" and "the command never arrived" must
+    not be confused - and this summary then dropped it on the way to the arm. An
+    arm can read n=35 with a mean of 0.99 while only four of those sessions were
+    acked, and that is not a measured null, it is an undelivered command. The
+    control has no ack by construction: it sends nothing, so ``acked_n`` is 0
+    there and means nothing.
     """
     per_arm: dict = {}
     for att in attempts:
@@ -783,6 +792,7 @@ def _quality_summary(attempts: list) -> dict:
     for bucket in per_arm.values():
         ratios = [s["ratio"] for s in bucket["sessions"] if s["ratio"]]
         bucket["n"] = len(ratios)
+        bucket["acked_n"] = sum(1 for s in bucket["sessions"] if s["acked"])
         if ratios:
             bucket["ratio_mean"] = round(sum(ratios) / len(ratios), 3)
             bucket["ratio_min"] = min(ratios)
@@ -816,9 +826,20 @@ def _print_quality_summary(entry: dict) -> None:
     for arm, bucket in entry["quality_summary"].items():
         ratios = ", ".join(f"{s['ratio']}" for s in bucket["sessions"]
                            if s["ratio"]) or "-"
-        print(f"      {arm:8} n={bucket.get('n', 0)}  ratios: {ratios}"
+        # acked is printed for every commanding arm, including when it equals
+        # n - the reader has to be able to see that delivery was checked, not
+        # infer it from the absence of a warning.
+        acked = ""
+        if arm != "control":
+            acked = f"  acked={bucket.get('acked_n', 0)}/{bucket.get('n', 0)}"
+        print(f"      {arm:8} n={bucket.get('n', 0)}{acked}  ratios: {ratios}"
               + (f"  mean={bucket['ratio_mean']}" if "ratio_mean" in bucket else "")
               + (f"  void={bucket['void']}" if bucket.get("void") else ""))
+        if arm != "control" and bucket.get("acked_n", 0) < bucket.get("n", 0):
+            print(f"        NOTE: {bucket.get('n', 0) - bucket.get('acked_n', 0)}"
+                  " of these sessions were never acked by the camera. Those are"
+                  " not evidence about the lever - the command did not arrive."
+                  " Do not read this arm as a null until they are explained.")
         for s in bucket["sessions"]:
             print(f"        attempt {s['attempt']}: {s['kbps_a']} -> {s['kbps_b']} kbps")
     print("      read it against the control arm: a stream that settles "
