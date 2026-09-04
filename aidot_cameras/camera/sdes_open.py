@@ -1167,13 +1167,17 @@ def _parse_answer_ice(sdp):
     order offered, and the first ``typ host`` candidate - which is the one SCTP
     is addressed to, and is not necessarily the first candidate listed.
 
-    Taking the FIRST credential pair is an observation, not a contract: our own
-    offer carries distinct per-media credentials, and the nomination sends
-    USE-CANDIDATE on both sockets with the single pair this returns.  That works
-    on the whole reference fleet, so those cameras evidently answer with one
-    pair - but no captured answer in this repo proves it, and a camera that
-    answered per-media credentials would need this split before it could be
-    nominated on both.
+    Taking the FIRST credential pair is now measured, not assumed.  Our own
+    offer carries distinct per-media credentials and the nomination sends
+    USE-CANDIDATE on both sockets with the single pair this returns, which is
+    only correct if the camera answers one pair for the whole session.  Logging
+    every a=ice-ufrag / a=ice-pwd line of the answer per m-section across four
+    cold opens on two models (A001064 mains, A001513 battery) on 2026-09-04:
+    every answer carried ONE pair, repeated identically in the audio, video and
+    application sections.  The shape is pinned in
+    test_the_first_credential_pair_is_the_only_pair; a camera that answered
+    per-media credentials would need this split before it could be nominated on
+    both sockets.
 
     One parser, used by both the nomination and the window's exit predicate.
     The exit means "the nomination this is about to reach will succeed", and it
