@@ -258,6 +258,43 @@ every watchdog cycle, so it stayed broken until the process restarted. The
 `SDES: narrowed ffmpeg SDP to ...` status line is the signal that narrowing ran;
 its absence is the fault.
 
+### What a cold SDES open costs
+
+Measured on the reference A001064 (mains, LAN-direct), cold opens forced by a
+config-entry reload, `1.0.0rc8`:
+
+| stage | when |
+|---|---|
+| `webrtcReq` sent | +0.5 s |
+| camera's answer accepted | +0.7 s |
+| STUN window leaves, USE-CANDIDATE sent | +0.8 s |
+| SCTP up, AVIO `LIVING` sent | +2.4 s |
+| first SRTP | **+2.5 s** |
+
+That was 6.7 s until two waits on the path were measured and found to be
+spending time on things that had already happened.
+
+The **ICE responder window** was written when the camera's answer arrived after
+it closed. Shortening an earlier wait inverted that, and the window then sat for
+seconds holding the credentials the nomination needed - it blocks the event
+loop, so `answer_fut` cannot resolve from inside it. The MQTT thread now marks
+the answer ready and the window leaves as soon as the credentials are in hand
+*and* the camera has answered a connectivity probe. Leaving early costs nothing:
+an incoming media packet already broke out of the window, a camera that never
+probes already left on the pre-STUN idle, and the bridge thread - which is what
+learns peer-reflexive candidates and re-nominates every 2.5 s - takes the
+responder role back about 30 ms later. A camera that has answered no probe keeps
+its previous behaviour, which is every relay-path battery camera measured.
+
+The **`webrtcReq`-echo wait** was a flat 2.0 s for role-reversal models. Across
+18 h of one deployment, of 61 SDES opens the 17 that took the wait timed out 17
+times out of 17, and the `webrtcResp` it exists to build was never sent once.
+See `AIDOT_SDES_ECHO_WAIT_S` in the README for how it is sized now and what
+happens on a fleet whose echo band is not empty.
+
+Battery models take neither wait; their cold open is dominated by the camera
+waking, and is unchanged.
+
 ### Connection reliability (SDES / battery)
 
 SDES cameras - including battery models (A001513) - stream end-to-end once the
