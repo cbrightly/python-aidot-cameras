@@ -130,7 +130,8 @@ cameras from streaming to not streaming.
 
 **Day zero is therefore `1.0.0rc4`, 2026-09-01.** Two weeks from it is
 **2026-09-15**, and the clock runs only while no streaming-breaking release
-intervenes -- any such release resets it to zero.
+intervenes -- any such release resets it to zero. *(Superseded on 2026-09-04 --
+see below. `rc7` reset it.)*
 
 **Two cautions against reading this as further along than it is.** First, the
 count is honest but the observation window is not clean: `rc5` and `rc6` each
@@ -139,6 +140,37 @@ classification, not an absence. Second, the finds moved into the control path
 because that is where the new work was; a quiet streaming path may partly
 reflect where attention went. The evidence for 1.0.0 stable is a fortnight of
 this cadence, not the fact that day zero can now be dated.
+
+#### Re-dated 2026-09-04: `rc7` reset the clock, so day zero is 2026-09-03
+
+Three releases went out without being classified here, and the tracker stood
+stale for three days while they did. Placing them against the same bar:
+
+| release | date | find | streaming-breaking? |
+|---|---|---|---|
+| `rc7` | 2026-09-03 | A battery camera went back to sleep in the middle of its own handshake. Measured on an A001513: awake at +10.9 s, asleep again at +39.8 s with the handshake still running, **no media ever arrived**, and the open finished at +103.6 s. The matching integration fix (2.19.12) describes the user-visible half: a battery camera's first view failed about half the time | **Yes** |
+| `rc8` | 2026-09-04 | Two waits on the SDES connect path were spending time on things that had already happened -- the ICE responder window sat on an answer it already held, and the `webrtcReq`-echo wait timed out 17 times out of 17. Cold first media 6702 ms -> 2695 ms | No -- latency. A slow connect is not a broken one, and no session failed |
+| `rc9` | 2026-09-04 | Three findings from reviewing `rc8`: the shortened echo wait could silently disable the branch that echo drives, our own echoed answer could resolve the future the nomination reads, and the answer-ready marker was per-camera while the decision was per-open | No, but this is the borderline one. The middle finding would strand a session that can never be nominated -- it is counted as non-breaking because it is pre-existing rather than introduced, and was never observed on this fleet. If it is ever seen in the wild, re-date to `rc9` |
+
+**Day zero is therefore `1.0.0rc7`, 2026-09-03. Two weeks from it is
+2026-09-17.**
+
+**What the fleet shows so far.** Over the container log window 2026-09-03 23:10
+to 2026-09-04 15:22: 164 opens reached first media, 564 reached a serve, with
+**zero** first-media stalls, **zero** camera refusals and **zero** `ERROR` lines
+from this library. Of 111 tracebacks in that window, 96 were throwaway probe
+instrumentation added and removed the same day; of the remaining 15, six are
+inside Home Assistant's own `go2rtc` preload path during a restart, two are
+Frigate, and the one on a thread named `_dtls_av_mux_run` is `yoto_api` reported
+on whichever thread ran its callback. None are this library's.
+
+**A third caution, and it is the important one.** That window is not a soak. It
+is a day of the box being driven hard: a dozen Home Assistant restarts,
+site-packages hot-patched repeatedly, and roughly eighty forced cold opens. A
+quiet library under that is worth something, but it is the opposite of the
+evidence the bar asks for, which is a fortnight of *ordinary* use with nobody
+touching it. Read the numbers above as "nothing broke while being provoked", not
+as soak progress.
 
 ### 2. A 1.2x bitrate difference - premise corrected 2026-08-11
 
