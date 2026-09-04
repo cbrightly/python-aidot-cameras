@@ -162,8 +162,58 @@ def test_the_command_is_sent_on_a_session_the_setter_can_actually_see():
     assert out["set_resolution_returned"] is True
 
 
-def test_the_arms_are_cycled_rather_than_blocked():
-    assert lv._interleave_arms(["sd", ""], 3) == ["sd", "", "sd", "", "sd", ""]
+def test_the_arms_are_balanced_rather_than_blocked():
+    """Each arm appears exactly `repeats` times. A blocked campaign - three sd
+    then three controls - would measure the time of day, because this camera's
+    own rate varies 839-3698 Kbps between sessions."""
+    from collections import Counter
+
+    out = lv._interleave_arms(["sd", ""], 3, seed=1)
+    assert Counter(out) == Counter({"sd": 3, "": 3})
+    assert len(out) == 6
+
+
+def test_the_order_is_randomised_rather_than_a_fixed_cycle():
+    """It used to return a strict sd/control/sd/control cycle. A fixed period is
+    the failure this exists to avoid: the reference camera varies things of its
+    own between sessions - measured 2026-09-04, 4 of 44 cold opens negotiated
+    H.265 rather than H.264 - and anything of the camera's own that happens to
+    share the cycle's period lands preferentially on one arm and is read as that
+    arm's effect. The b=AS knob nearly produced a false positive from exactly
+    this. Balanced blocks, shuffled within each block, keep the balance without
+    the period."""
+    cycle = ["sd", "", "sd", "", "sd", "", "sd", "", "sd", "", "sd", ""]
+    orders = {tuple(lv._interleave_arms(["sd", ""], 6, seed=s)) for s in range(25)}
+    assert len(orders) > 1, "assignment is deterministic - the period is still there"
+    assert any(list(o) != cycle for o in orders)
+
+
+def test_every_block_still_contains_every_arm():
+    """Shuffling must not drift the balance: an arm that goes missing from a
+    block makes the campaign lopsided at whatever n it is stopped at."""
+    from collections import Counter
+
+    for seed in range(10):
+        out = lv._interleave_arms(["sd", "hd", ""], 4, seed=seed)
+        for i in range(0, len(out), 3):
+            assert Counter(out[i:i + 3]) == Counter({"sd": 1, "hd": 1, "": 1})
+
+
+def test_a_seed_makes_a_campaign_reproducible():
+    """A run that finds something has to be re-runnable in the same order."""
+    assert (lv._interleave_arms(["sd", "hd", ""], 5, seed=7)
+            == lv._interleave_arms(["sd", "hd", ""], 5, seed=7))
+
+
+def test_the_control_arm_survives_the_shuffle():
+    """The empty string is the control and is meaningful; a falsy-value filter
+    creeping in would silently drop it and leave nothing to compare against."""
+    out = lv._interleave_arms(["sd", ""], 4, seed=3)
+    assert out.count("") == 4
+
+
+def test_no_arms_means_no_campaign():
+    assert lv._interleave_arms([], 3, seed=1) == []
 
 
 def test_a_void_is_named_so_it_can_be_re_run_instead_of_averaged_in():
