@@ -1110,6 +1110,38 @@ _PRE_LAUNCH_ANSWER_WAIT_S = 8.0
 # Kept tight so a camera that genuinely sends no audio barely delays the picture.
 _AUDIO_PT_GRACE_S = 1.0
 
+# Extra seconds to wait for the FIRST media packet when the stale-offer backstop
+# ended the wait and nothing has been observed yet.
+#
+# The serve SDP is built from the payload types actually observed, so a wait
+# that ends while the first packets are still in flight produces a video-only
+# serve for the whole session.  Measured 2026-09-03: the backstop ended the wait
+# at +39 s, the serve was launched 1 s later with neither type seen ("no video
+# observed ... no audio observed"), and media arrived 4.2 s after that.  The
+# card played and had no sound.
+#
+# _AUDIO_PT_GRACE_S does not cover this: 1 s is sized for a session whose video
+# is already flowing and whose audio is a beat behind, not for one whose media
+# has not started.
+#
+# Only the backstop path gets this.  It fires only after the camera itself has
+# been heard from, which is exactly when media is plausibly imminent; on the
+# plain timeout path the camera never spoke, and waiting longer would just add
+# to a failure that has already taken 75 s.
+#
+# Set AIDOT_ABANDONED_MEDIA_GRACE_S=0 to disable.
+_ABANDONED_MEDIA_GRACE_S = float(
+    os.environ.get("AIDOT_ABANDONED_MEDIA_GRACE_S", "8")
+)
+
+
+def _post_abandon_media_grace_s(*, abandoned: bool, have_video: bool,
+                                grace_s: float) -> float:
+    """Extra seconds to wait for the first media before building the serve SDP."""
+    if not abandoned or have_video or grace_s <= 0:
+        return 0.0
+    return grace_s
+
 
 # --------------------------------------------------------------------------- #
 # Reading the camera's answer, and leaving the STUN window once it is readable
@@ -7265,6 +7297,25 @@ class _SdesOpenMixin:
             _report_first_media_stall(
                 time.monotonic() - _media_wait_started
                 if _stale_offer_abandoned else _FIRST_MEDIA_WAIT_S)
+        # The serve SDP below is built from what has actually been observed, so
+        # ending the wait a moment before the first packets arrive costs this
+        # session its audio for good.  See _ABANDONED_MEDIA_GRACE_S.
+        _ab_grace = _post_abandon_media_grace_s(
+            abandoned=_stale_offer_abandoned,
+            have_video=_first_video_pt[0] is not None,
+            grace_s=_ABANDONED_MEDIA_GRACE_S)
+        if _ab_grace > 0:
+            _ab_t0 = time.monotonic()
+            while (_first_video_pt[0] is None
+                    and time.monotonic() - _ab_t0 < _ab_grace):
+                await asyncio.sleep(0.1)
+            if _first_video_pt[0] is not None:
+                _status("media arrived %.1fs after the wait was abandoned"
+                        " - mapping it rather than serving video only"
+                        % (time.monotonic() - _ab_t0))
+            else:
+                _status("no media in the %.0fs after the wait was abandoned"
+                        % _ab_grace)
         if _serve_audio and _first_audio_pt[0] is None:
             _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
             while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:
