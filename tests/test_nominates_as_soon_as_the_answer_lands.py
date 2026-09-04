@@ -17,8 +17,12 @@ import inspect
 
 import pytest
 
-from aidot_cameras.camera.webrtc_open import _answer_is_from_the_camera
+from aidot_cameras.camera.webrtc_open import (
+    _answer_is_from_the_camera,
+    _deliver_webrtc_answer,
+)
 from aidot_cameras.camera.sdes_open import (
+    _answer_ready_for_this_open,
     _answer_sdp_can_nominate,
     _parse_answer_ice,
     _stun_window_answer_exit_due,
@@ -279,3 +283,122 @@ def test_the_candidate_parse_accepts_a_line_that_ends_at_typ():
     _u, _p, cands, host = _parse_answer_ice(sdp)
     assert cands == [("192.168.0.124", 35488)]
     assert host == ()
+
+
+# --------------------------------------------------------------------------- #
+# Our own echo must not reach the future the nomination reads
+# --------------------------------------------------------------------------- #
+
+def test_our_own_echo_is_dropped_rather_than_routed():
+    """Gating only the readiness marker left the failure it was written to
+    prevent fully reachable: `answer_fut` is where the nomination reads its SDP,
+    so an echo that resolves it makes USE-CANDIDATE address our own host and
+    srflx candidates with our own credentials. Routing it to second_answer_fut
+    instead just feeds the same values to the late-credential recovery."""
+    import asyncio
+
+    async def _run():
+        loop = asyncio.get_running_loop()
+        first, second = loop.create_future(), loop.create_future()
+        _deliver_webrtc_answer(loop, first, second,
+                               {"sdp": _OUR_ANSWER}, from_camera=False)
+        await asyncio.sleep(0)
+        assert not first.done(), "our own SDP must not resolve answer_fut"
+        assert not second.done(), "nor the future the late recovery reads"
+
+        _deliver_webrtc_answer(loop, first, second,
+                               {"sdp": _ANSWER}, from_camera=True)
+        await asyncio.sleep(0)
+        assert first.done() and first.result()["sdp"] == _ANSWER
+
+        _deliver_webrtc_answer(loop, first, second,
+                               {"sdp": _ANSWER}, from_camera=True)
+        await asyncio.sleep(0)
+        assert second.done(), "a later camera answer still reaches the recovery"
+
+    asyncio.run(_run())
+
+
+def test_delivery_defaults_to_treating_an_answer_as_the_cameras():
+    """Every other caller predates the flag; none of them must start dropping
+    answers because a keyword was added."""
+    import inspect
+
+    sig = inspect.signature(_deliver_webrtc_answer)
+    assert sig.parameters["from_camera"].default is True
+
+
+# --------------------------------------------------------------------------- #
+# The marker belongs to one open
+# --------------------------------------------------------------------------- #
+
+def test_a_marker_from_this_open_arms_the_exit():
+    assert _answer_ready_for_this_open(100.0, 99.0) is True
+    assert _answer_ready_for_this_open(99.0, 99.0) is True
+
+
+def test_a_marker_left_by_an_earlier_open_is_inert():
+    """The marker is per-camera state driving a per-open decision. The per-open
+    reset covers the sequential case; two opens overlapping on one camera object
+    would otherwise let one leave its window on the other's answer."""
+    assert _answer_ready_for_this_open(98.9, 99.0) is False
+
+
+def test_no_marker_at_all_is_not_ready():
+    assert _answer_ready_for_this_open(None, 99.0) is False
+
+
+def test_the_window_checks_the_marker_belongs_to_this_open():
+    src = _open_source()
+    assert "_answer_ready_for_this_open" in src
+    assert src.count("_answer_ready_for_this_open") >= 2, (
+        "both STUN windows must use it, not just the first")
+
+
+# --------------------------------------------------------------------------- #
+# One credential pair, measured rather than assumed
+# --------------------------------------------------------------------------- #
+#
+# The nomination sends USE-CANDIDATE on BOTH sockets with the single ufrag/pwd
+# this parser returns, computing the video socket's MESSAGE-INTEGRITY with what
+# the parser found first. That is only correct if the camera answers one pair
+# for the whole session, which nothing here proved.
+#
+# Measured 2026-09-04 by logging every a=ice-ufrag / a=ice-pwd line of the
+# answer, per m-section, across four cold opens on two models (A001064 mains,
+# A001513 battery): every answer carried ONE pair, repeated identically in the
+# audio, video and application sections. Values below are synthesised - the real
+# ones are per-session credentials and do not belong in a repo - but the shape
+# is the shape that was captured.
+
+_ONE_PAIR_ANSWER = "\r\n".join([
+    "v=0",
+    "m=video 9 RTP/SAVP 96",
+    "a=ice-ufrag:9z7F",
+    "a=ice-pwd:mDe5uxBe1msnVNMlu8BwzQPy",
+    "a=candidate:1 1 udp 2130706431 192.168.0.124 33912 typ host",
+    "m=audio 9 RTP/SAVP 8",
+    "a=ice-ufrag:9z7F",
+    "a=ice-pwd:mDe5uxBe1msnVNMlu8BwzQPy",
+    "m=application 9 SCTP webrtc-datachannel",
+    "a=ice-ufrag:9z7F",
+    "a=ice-pwd:mDe5uxBe1msnVNMlu8BwzQPy",
+])
+
+
+def test_the_first_credential_pair_is_the_only_pair():
+    """So nominating both sockets with it is right, not merely lucky."""
+    ufrag, pwd, cands, _host = _parse_answer_ice(_ONE_PAIR_ANSWER)
+    assert ufrag == "9z7F"
+    assert pwd == "mDe5uxBe1msnVNMlu8BwzQPy"
+    assert cands == [("192.168.0.124", 33912)]
+
+    pairs = {
+        (ln[len("a=ice-ufrag:"):].strip() if ln.startswith("a=ice-ufrag:")
+         else ln[len("a=ice-pwd:"):].strip())
+        for ln in _ONE_PAIR_ANSWER.splitlines()
+        if ln.startswith(("a=ice-ufrag:", "a=ice-pwd:"))
+    }
+    assert pairs == {ufrag, pwd}, (
+        "this answer carries more than one credential pair, so the single pair"
+        " the nomination uses on both sockets is no longer the whole story")

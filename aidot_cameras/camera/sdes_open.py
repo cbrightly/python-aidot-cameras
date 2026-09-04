@@ -1167,13 +1167,17 @@ def _parse_answer_ice(sdp):
     order offered, and the first ``typ host`` candidate - which is the one SCTP
     is addressed to, and is not necessarily the first candidate listed.
 
-    Taking the FIRST credential pair is an observation, not a contract: our own
-    offer carries distinct per-media credentials, and the nomination sends
-    USE-CANDIDATE on both sockets with the single pair this returns.  That works
-    on the whole reference fleet, so those cameras evidently answer with one
-    pair - but no captured answer in this repo proves it, and a camera that
-    answered per-media credentials would need this split before it could be
-    nominated on both.
+    Taking the FIRST credential pair is now measured, not assumed.  Our own
+    offer carries distinct per-media credentials and the nomination sends
+    USE-CANDIDATE on both sockets with the single pair this returns, which is
+    only correct if the camera answers one pair for the whole session.  Logging
+    every a=ice-ufrag / a=ice-pwd line of the answer per m-section across four
+    cold opens on two models (A001064 mains, A001513 battery) on 2026-09-04:
+    every answer carried ONE pair, repeated identically in the audio, video and
+    application sections.  The shape is pinned in
+    test_the_first_credential_pair_is_the_only_pair; a camera that answered
+    per-media credentials would need this split before it could be nominated on
+    both sockets.
 
     One parser, used by both the nomination and the window's exit predicate.
     The exit means "the nomination this is about to reach will succeed", and it
@@ -1208,6 +1212,19 @@ def _answer_sdp_can_nominate(sdp) -> bool:
     """
     ufrag, pwd, cands, _host = _parse_answer_ice(sdp)
     return bool(ufrag and pwd and cands)
+
+
+def _answer_ready_for_this_open(stamp, open_started_at) -> bool:
+    """Whether the answer-ready marker was set by the open now running.
+
+    The marker is per-camera state driving a per-open decision.  It is cleared
+    at the start of every open, which covers the ordinary sequential case, but
+    two opens overlapping on one camera object would otherwise let one leave its
+    STUN window on the other's answer - or lose its own stamp to the other's
+    reset.  Comparing against this open's own start makes a stale stamp inert
+    instead.
+    """
+    return stamp is not None and stamp >= open_started_at
 
 
 def _stun_window_answer_exit_due(*, stun_seen: bool,
@@ -1798,10 +1815,22 @@ async def _sdes_await_answer_or_terminal(
 # end of the STUN window rather than passing unnoticed, so an operator on a
 # fleet whose band is not empty gets a line naming the knob.
 _SDES_ECHO_WAIT_S = 0.25
+#: What the wait was before it was measured, and what a device that has actually
+#: produced an echo goes back to.
+_SDES_ECHO_WAIT_LEGACY_S = 2.0
 
 
-def _sdes_echo_wait_timeout(skip_liveplay: bool) -> float:
+def _sdes_echo_wait_timeout(skip_liveplay: bool,
+                            echo_seen: bool = False) -> float:
     """Seconds to block on the camera's webrtcReq echo. Never negative.
+
+    ``echo_seen`` is this device's own history: once an echo has been observed
+    from it - during the wait or, more usefully, after the wait had already
+    expired - every later open on that device waits the full
+    ``_SDES_ECHO_WAIT_LEGACY_S`` again.  That is what keeps the shortened wait
+    honest on a fleet the 17/17 measurement never saw: such a camera pays the
+    miss once, says so in the log, and is never shortened again.  An explicit
+    env value still wins over both.
 
     The echo only ever arrives for role-reversal models (e.g. A001064), which
     build a webrtcResp from it and run with ``skip_liveplay`` False (they are
@@ -1823,7 +1852,9 @@ def _sdes_echo_wait_timeout(skip_liveplay: bool) -> float:
             val = None
         if val is not None and val >= 0.0:
             return 0.0 if skip_liveplay else val
-    return 0.0 if skip_liveplay else _SDES_ECHO_WAIT_S
+    if skip_liveplay:
+        return 0.0
+    return _SDES_ECHO_WAIT_LEGACY_S if echo_seen else _SDES_ECHO_WAIT_S
 
 
 # ffmpeg returns AVERROR(EPIPE) = -32 when its output consumer disappears, and a
@@ -2315,6 +2346,10 @@ class _SdesOpenMixin:
         SDP answer, writes it to a temp file, and launches ffmpeg to receive and
         record the SRTP stream.
         """
+        # When this open began.  The answer-ready marker lives on the camera
+        # object, not the open, so a marker older than this belongs to a
+        # previous open and must not fire this one's early exit.
+        _open_started_at = time.monotonic()
         from .client import CameraMixin, _build_sdes_serve_cmd, _ffmpeg_path, _resolve_serve_input_timeout_s, _spawn_bg  # lazy: break client<->sdes_open cycle
         import base64
         import subprocess
@@ -3269,7 +3304,8 @@ class _SdesOpenMixin:
         # Only role-reversal models (A001064, _skip_lp False) echo our webrtcReq
         # and need the webrtcResp built below; for A001513-class (_skip_lp True,
         # default) the echo never arrives, so don't block ~2s on it.
-        _echo_wait_s = _sdes_echo_wait_timeout(_skip_lp)
+        _echo_wait_s = _sdes_echo_wait_timeout(
+            _skip_lp, echo_seen=bool(getattr(self, "_sdes_echo_seen", False)))
         _echo_wait_t0 = time.monotonic()
         try:
             await _asyncio.wait_for(
@@ -3277,6 +3313,7 @@ class _SdesOpenMixin:
                 timeout=_echo_wait_s,
             )
             _cam_echo_received = True
+            self._sdes_echo_seen = True
             _status("camera webrtcReq echo received - building webrtcResp")
             # Seed _sdes_turn_entries from the echo's IceServerList if the HTTP
             # ice_config fetch returned nothing (empty list).  The echo carries
@@ -3703,8 +3740,9 @@ class _SdesOpenMixin:
             # still probing hard, so no idle threshold would ever be crossed.
             if _stun_window_answer_exit_due(
                     stun_seen=_stun_seen,
-                    answer_ready=getattr(
-                        self, "_camera_answer_ice_ready_ts", None) is not None):
+                    answer_ready=_answer_ready_for_this_open(
+                        getattr(self, "_camera_answer_ice_ready_ts", None),
+                        _open_started_at)):
                 _status(
                     "STUN window: leaving early after %.2fs - answer ICE"
                     " credentials in hand and camera probing; nominating now"
@@ -3866,6 +3904,30 @@ class _SdesOpenMixin:
                     break   # inner per-socket loop
             if _srtp_detected:
                 break       # outer while loop
+        # An echo that missed the shortened wait but turned up anyway.  Recorded,
+        # not acted on: the webrtcResp this would have built has to be sent
+        # BEFORE the relay allocation and the ICE window, so building it now
+        # would be a reordering with no camera to measure it against.  What it
+        # does do is make the NEXT open on this device wait the full legacy
+        # window - so a fleet whose echo band is not empty pays the miss once
+        # and says so, instead of losing the branch silently forever.
+        if (not _cam_echo_received and _echo_fut is not None
+                and not getattr(self, "_sdes_echo_seen", False)):
+            try:
+                _late_echo = _echo_fut.done() and not _echo_fut.cancelled()
+            except Exception:
+                _late_echo = False
+            if _late_echo:
+                self._sdes_echo_seen = True
+                _LOGGER.warning(
+                    "camera %s: the webrtcReq echo arrived %.2fs after a %.2fs"
+                    " wait expired, so no webrtcResp was built for this open."
+                    " Later opens on this camera will wait %.1fs again. Set"
+                    " AIDOT_SDES_ECHO_WAIT_S=%.1f to make that permanent.",
+                    getattr(self, "device_id", "?"),
+                    time.monotonic() - _echo_wait_t0, _echo_wait_s,
+                    _SDES_ECHO_WAIT_LEGACY_S, _SDES_ECHO_WAIT_LEGACY_S,
+                )
         for _rsock in (_audio_sock, _video_sock):
             try:
                 _rsock.setblocking(True)
@@ -3952,8 +4014,9 @@ class _SdesOpenMixin:
                 # window was fixed for, in the window the fix had not reached.
                 if _stun_window_answer_exit_due(
                         stun_seen=_stun_seen,
-                        answer_ready=getattr(
-                            self, "_camera_answer_ice_ready_ts", None) is not None):
+                        answer_ready=_answer_ready_for_this_open(
+                            getattr(self, "_camera_answer_ice_ready_ts", None),
+                            _open_started_at)):
                     _status(
                         "STUN window (retry %d): leaving early after %.2fs -"
                         " answer ICE credentials in hand and camera probing"
