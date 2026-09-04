@@ -47,9 +47,9 @@ understand the system and its shape has settled.
 
 ## Open
 
-**As of 2026-08-11 exactly one item is open: number 1.** Items 2 to 6 are closed
-above, each on its own terms and each saying which terms - two of them are
-"documented as accepted" rather than "solved", and they say so in their own
+**As of 2026-09-04 two items are open: numbers 1 and 7.** Items 2 to 6 are
+closed above, each on its own terms and each saying which terms - two of them
+are "documented as accepted" rather than "solved", and they say so in their own
 words rather than in a summary that rounds them up. Read the item, not this
 line.
 
@@ -154,6 +154,12 @@ stale for three days while they did. Placing them against the same bar:
 
 **Day zero is therefore `1.0.0rc7`, 2026-09-03. Two weeks from it is
 2026-09-17.**
+
+*Superseded the same day by the scope decision in item 7: the quality campaign
+runs first, and this clock restarts when it ends. 2026-09-17 is no longer the
+date - the date is two weeks from whenever the campaign finishes and the fleet
+is left alone. Item 1 is not satisfied by the calendar; it is satisfied by a
+fortnight of ordinary use, and a fortnight containing a campaign is not that.*
 
 **What the fleet shows so far.** Over the container log window 2026-09-03 23:10
 to 2026-09-04 15:22: 164 opens reached first media, 564 reached a serve, with
@@ -1407,6 +1413,57 @@ works on this hardware and the app uses it. What is missing here is the response
 layout, which has no class in the decompiled client and has to be read off the
 wire, and the answer to where playback media arrives once `RECORD_PLAYCONTROL`
 starts it. Both fall out of the same one-command experiment.
+
+### 7. The quality levers have never been measured with enough power - added 2026-09-04
+
+Chris's instruction of 2026-08-31: once the 80.2 s cliff is resolved,
+re-evaluate Auto/SD/HD quality and the other levers previously believed
+implemented. **The cliff was resolved on 2026-08-31** (the SCTP receiver never
+SACKed and never reassembled fragments), so the item is due. It had been carried
+only in working notes and appeared nowhere in this file until now, which is the
+kind of thing this file exists to stop.
+
+Two reasons the re-evaluation is needed, both found during the cliff hunt:
+
+1. **Every session on the A001064 was being truncated at 80.2 s.** Any lever
+   whose effect only appears over minutes - adaptive bitrate, Auto quality
+   switching, encoder ramp, TMMBR/REMB response - had no time to act before the
+   transport was torn down. "Implemented but does nothing" and "never got a
+   chance to do anything" are indistinguishable under an 80 s ceiling.
+
+2. **The n was far too small to judge any of them.** The outcome on this camera
+   is a rate, not a value, and power against an 18 percent to 50 percent effect
+   is under 25 percent at the two to six sessions per arm these levers were
+   assessed with. The bitrate work closed nine angles on that basis. **Do not
+   trust an earlier "measured, does nothing" verdict in this area without
+   checking the n it was reached with.**
+
+**Scope decision, 2026-09-04: this runs BEFORE 1.0.0 final, and the soak clock
+in item 1 restarts when it ends.** The two cannot overlap - a campaign means
+driving the fleet hard for hours, which is the opposite of the ordinary
+untouched use item 1 asks for. The alternative considered and rejected was
+declaring this out of scope and shipping on 09-17.
+
+**A defect in the campaign machinery, found before the first run.**
+`_interleave_arms` returned a strict `sd/control/sd/control` cycle. Balance was
+the point and it had that, but a fixed period is its own hazard: this camera
+varies things of its own between sessions - measured 2026-09-04, 4 of 44 cold
+opens negotiated H.265 rather than H.264 - and anything of the camera's own that
+shares the cycle's period lands preferentially on one arm and reads as that
+arm's effect. The `b=AS` knob nearly produced a false positive from exactly this
+shape. Fixed in `f9f3c84`: balanced blocks, shuffled within each block, with a
+seed so a run can be repeated. The campaign had never been run, so the flaw was
+ahead of us rather than behind.
+
+The measurement design itself was already right and is unchanged: each session
+is compared **against itself** - the bitrate in a window before the mid-session
+command against a window after it - so this camera's 839-3698 Kbps
+between-session variance never enters the comparison, and a session that
+measured nothing is named as a void and re-run rather than averaged in.
+
+First run dispatched 2026-09-04: A001064 only, arms `sd | hd | control`, 35
+sessions per arm, seed 20260904. Battery models are deliberately excluded -
+every attempt on one is a wake.
 
 ## Out of scope for 1.0.0
 
