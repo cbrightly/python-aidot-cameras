@@ -4,6 +4,44 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [1.0.0rc10]
+
+### Fixed
+
+- **A camera that cannot stream no longer costs 86 seconds and a dead ffmpeg on
+  every attempt.** When an open observed no video at all, the serve was launched
+  anyway; ffmpeg then failed immediately -- `Could not find codec parameters ...
+  unspecified size`, `dimensions not set`, `Could not write header` -- and the
+  attempt retried into the same thing. Measured on a camera that dropped off the
+  WiFi: 11 attempts and 6 stalls in 25 minutes, each spawning an ffmpeg that
+  could not start. Such an attempt now abandons to the retry instead.
+
+  This had been limited to one narrow path on the reasoning that the ordinary
+  timeout was a transient Home Assistant's stream worker tolerated and retried
+  into. That is retracted: it was a permanent failure being looped on.
+
+  Press-to-talk, the siren and snapshots share the same open path, need no
+  inbound video, and are explicitly never abandoned by this.
+  `AIDOT_SKIP_DOOMED_SERVE=0` restores the old behaviour.
+
+- **A battery camera's session no longer loses its audio to a few hundred
+  milliseconds.** When the stale-offer backstop ends the wait just before the
+  first packets arrive, the serve was built with nothing observed and stayed
+  video-only for the whole session. It now waits a short grace first -- measured
+  with media arriving 4.2 s after the wait ended. `AIDOT_ABANDONED_MEDIA_GRACE_S`
+  (8 s, `0` disables).
+
+- **A malformed `AIDOT_ABANDONED_MEDIA_GRACE_S` no longer stops the library
+  importing.** It was parsed at import, so one bad value took the integration
+  down at setup rather than degrading. It is now read per open and ignored if
+  unparseable, which also makes the documented `0` escape hatch work without a
+  restart.
+
+- **`AidotCameraNoMedia` is importable from the package root**, like the other
+  camera exceptions. Its own docstring tells callers to pace it differently from
+  an open failure, which they could not do while the name resolved only inside
+  `aidot_cameras.exceptions`.
+
 ## [1.0.0rc9]
 
 ### Fixed
