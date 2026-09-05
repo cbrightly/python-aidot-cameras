@@ -998,6 +998,18 @@ def _new_ice_credentials() -> "tuple":
     signalling log: one ufrag repeated across every m-section, 4 chars, and a
     24-char password) is corroboration, not the reason.
 
+    The firmware treats that first pair as session-wide, which is what makes
+    dropping the later ones survivable. Measured on the wire 2026-09-05 by
+    counting inbound STUN per socket across a real A001064 open::
+
+        {('bridge', 'audio'): 2, ('success', 'audio'): 3,
+         ('bridge', 'video'): 2, ('success', 'video'): 3}
+
+    The camera sends Binding Requests to the VIDEO socket and completes the
+    exchange there, despite the compressed offer carrying no ICE attributes in
+    the video m-section at all. So video ICE inherits, and one pair is
+    sufficient - it is not merely tolerated.
+
     NOTE for anyone changing ``_compress_sdp_req`` to preserve per-section
     credentials: doing that alone reintroduces the mismatch, because the two
     sites are ~2350 lines apart. The behavioural test in
