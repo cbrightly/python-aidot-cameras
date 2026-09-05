@@ -117,24 +117,70 @@ def test_the_no_media_branch_is_handled_before_the_generic_one():
     assert src.index("except AidotCameraNoMedia") < src.index("except Exception")
 
 
-def test_the_no_media_branch_does_not_use_the_open_failure_backoff():
-    """`fail_delay()` escalates on every open failure. This case is not an open
-    failure - the camera answered, it just sent nothing - and the path it stands
-    in for (serve launched, session died) gets the fast not-ready retry. Pacing
-    it as an open failure would be slower than the doomed serve it replaces."""
+def _no_media_branch() -> str:
+    """The handler body, sliced at the NEXT `except ` at the same indent.
+
+    The old version sliced to `except Exception`, which silently mis-slices the
+    moment the branch is reordered or another handler is added between them."""
+    import re
+
     src = _loop_source()
-    branch = src[src.index("except AidotCameraNoMedia"):src.index("except Exception")]
-    assert "_not_ready_retry_delay" in branch, "must reuse the not-ready pacing"
-    assert "fail_delay" not in branch, "must NOT use the escalating open-failure backoff"
+    i = src.index("            except AidotCameraNoMedia")
+    m = re.search(r"\n            except ", src[i + 1:])
+    return src[i:i + 1 + m.start()] if m else src[i:]
+
+
+def test_the_no_media_branch_feeds_the_futile_keepalive_guard():
+    """The guard at the bottom of the loop is what stops a battery camera being
+    woken forever, and its own comment says why: "a unit has already been
+    drained to 5% that way". Continuing straight to the next attempt bypasses
+    it, because the accounting only runs after a session object exists. This
+    branch has to do that accounting itself."""
+    branch = _no_media_branch()
+    assert "_next_no_media_streak" in branch, (
+        "the streak must advance, or the circuit breaker never trips")
+    assert "_should_abandon_keepalive" in branch, (
+        "the branch must be able to stop the keepalive, as the loop bottom can")
+
+
+def test_the_guard_actually_trips_for_a_run_of_no_media_attempts():
+    """Behaviour, not just wiring: the helpers this branch calls must reach the
+    abandon decision for a battery camera that never delivers."""
+    from aidot_cameras.camera.client import (
+        _FUTILE_KEEPALIVE_LIMIT,
+        _next_no_media_streak,
+        _should_abandon_keepalive,
+    )
+
+    streak = 0
+    for _ in range(_FUTILE_KEEPALIVE_LIMIT):
+        streak = _next_no_media_streak(streak, False)
+    assert _should_abandon_keepalive(streak, is_battery=True) is True
+    # A delivered session clears it, so a camera that recovers is not punished.
+    assert _should_abandon_keepalive(
+        _next_no_media_streak(streak, True), is_battery=True) is False
+
+
+def test_the_no_media_branch_paces_as_a_session_that_ended_without_media():
+    """Which is what it is - it just ended before the serve rather than after.
+
+    The earlier version asserted `fail_delay` was absent and called that
+    "not the escalating backoff". That was wrong: session_end_delay(healthy=False)
+    escalates the same shared attempt counter, marginally sooner than
+    fail_delay() does. The escalation is deliberate - a camera that never
+    delivers should back off - so the test now says what is true."""
+    branch = _no_media_branch()
+    assert "_not_ready_retry_delay" in branch, (
+        "a merely-slow camera keeps the fast not-ready burst")
+    assert "session_end_delay" in branch, (
+        "everything else paces as an ended session, escalation included")
 
 
 def test_the_no_media_branch_retries_rather_than_giving_up():
-    """It must loop round to another attempt, not return or re-raise - the retry
-    is the entire point."""
-    src = _loop_source()
-    branch = src[src.index("except AidotCameraNoMedia"):src.index("except Exception")]
+    """It must loop round to another attempt - except when the futile-keepalive
+    guard deliberately stops, which is a `return`, not a failure to retry."""
+    branch = _no_media_branch()
     assert "continue" in branch
-    assert "raise" not in branch
 
 
 # --------------------------------------------------------------------------- #
@@ -159,9 +205,37 @@ def test_the_no_media_branch_retries_rather_than_giving_up():
 # looping on a permanent one. So the skip now applies to the timeout path too:
 # what makes a serve doomed is that no media was observed, not which wait ended.
 
-def test_a_timed_out_attempt_with_nothing_observed_also_skips():
-    """The 2026-09-05 case: not abandoned by the backstop, just silent."""
+def test_a_timed_out_attempt_with_nothing_observed_also_skips(monkeypatch):
+    """The 2026-09-05 case: not abandoned by the backstop, just silent.
+
+    Env cleared, because this pins the SHIPPED default and the knob is read
+    from the ambient environment - an operator who set the documented escape
+    hatch would otherwise get a red suite that has nothing to do with them."""
+    monkeypatch.delenv("AIDOT_SKIP_DOOMED_SERVE", raising=False)
     assert _should_skip_doomed_serve(abandoned=False, have_video=False) is True
+
+
+def test_a_talk_or_snapshot_open_is_never_abandoned(monkeypatch):
+    """The open path is shared. async_speak (siren, announce) and
+    async_snapshot run the same first-media wait with no serve to build, and
+    outbound talk does not need inbound media at all - the SRTP session and the
+    ICE nomination are already up. Aborting those because no video arrived would
+    break the siren on exactly the cameras this was written to help."""
+    monkeypatch.delenv("AIDOT_SKIP_DOOMED_SERVE", raising=False)
+    assert _should_skip_doomed_serve(
+        abandoned=False, have_video=False, serving=False) is False
+    assert _should_skip_doomed_serve(
+        abandoned=True, have_video=False, serving=False) is False
+
+
+def test_the_gate_only_fires_when_a_serve_is_actually_being_built():
+    import inspect
+
+    from aidot_cameras.camera.client import CameraMixin
+
+    src = inspect.getsource(CameraMixin._open_sdes_stream_impl)
+    assert "serving=bool(rtsp_push_url or output_path)" in src, (
+        "the gate must be told whether this open builds a serve at all")
 
 
 def test_the_backstop_case_still_skips():

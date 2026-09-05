@@ -1130,9 +1130,29 @@ _AUDIO_PT_GRACE_S = 1.0
 # to a failure that has already taken 75 s.
 #
 # Set AIDOT_ABANDONED_MEDIA_GRACE_S=0 to disable.
-_ABANDONED_MEDIA_GRACE_S = float(
-    os.environ.get("AIDOT_ABANDONED_MEDIA_GRACE_S", "8")
-)
+_ABANDONED_MEDIA_GRACE_DEFAULT_S = 8.0
+
+
+def _abandoned_media_grace_s() -> float:
+    """Seconds of grace after the backstop. Never negative, never raises.
+
+    Read per call and guarded, like `_sdes_liveplay_echo_timeout` and
+    `_sdes_echo_wait_timeout`. Parsed at import this was a ValueError on any
+    non-numeric value - `AIDOT_ABANDONED_MEDIA_GRACE_S=8s` would stop the whole
+    module importing and take the integration down at setup rather than
+    degrading. Reading it per call also makes the documented `=0` escape hatch
+    work without a process restart, which the import-time version silently
+    required.
+    """
+    raw = _os.environ.get("AIDOT_ABANDONED_MEDIA_GRACE_S")
+    if raw is not None:
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            val = None
+        if val is not None and val >= 0.0:
+            return val
+    return _ABANDONED_MEDIA_GRACE_DEFAULT_S
 
 
 def _post_abandon_media_grace_s(*, abandoned: bool, have_video: bool,
@@ -1143,7 +1163,8 @@ def _post_abandon_media_grace_s(*, abandoned: bool, have_video: bool,
     return grace_s
 
 
-def _should_skip_doomed_serve(*, abandoned: bool, have_video: bool) -> bool:
+def _should_skip_doomed_serve(*, abandoned: bool, have_video: bool,
+                              serving: bool = True) -> bool:
     """Whether to abandon this attempt instead of serving nothing.
 
     What makes a serve doomed is that **no video was observed**, not which wait
@@ -1166,10 +1187,19 @@ def _should_skip_doomed_serve(*, abandoned: bool, have_video: bool) -> bool:
     not start.  That is not a transient being tolerated, it is a permanent
     failure being looped on, so the timeout path is covered too.
 
+    ``serving`` is what keeps this to the case it is named for. The open path
+    is shared: ``async_speak`` (press-to-talk, siren, announce) and
+    ``async_snapshot`` run the same first-media wait with no serve to build,
+    and outbound talk does not need inbound media at all - the SRTP session and
+    the ICE nomination are already up. Aborting those because no video arrived
+    would break the siren on exactly the cameras this was written to help.
+
     ``AIDOT_SKIP_DOOMED_SERVE=0`` restores the old behaviour on the timeout
     path without a release; the backstop case it always covered is unchanged.
     A malformed value is ignored rather than allowed to alter a media path.
     """
+    if not serving:
+        return False
     if have_video:
         return False
     if abandoned:
@@ -7323,6 +7353,51 @@ class _SdesOpenMixin:
                 _report_first_media_stall(
                     time.monotonic() - _media_wait_started, _cancelled=True)
             raise
+        # The serve SDP below is built from what has actually been observed, so
+        # ending the wait a moment before the first packets arrive costs this
+        # session its audio for good.  See _abandoned_media_grace_s.
+        #
+        # The grace runs BEFORE the stall report, not after: a session the grace
+        # rescues goes on to serve normally, and reporting a "first media never
+        # arrived" WARNING for it would contradict that report's own invariant -
+        # "an open that delivers media reaches none of it" - and poison the
+        # signal this camera family is triaged with.
+        _ab_grace = _post_abandon_media_grace_s(
+            abandoned=_stale_offer_abandoned,
+            have_video=_first_video_pt[0] is not None,
+            grace_s=_abandoned_media_grace_s())
+        if _ab_grace > 0:
+            _ab_t0 = time.monotonic()
+            try:
+                while (_first_video_pt[0] is None
+                        and time.monotonic() - _ab_t0 < _ab_grace):
+                    # A terminal refusal can land inside the grace exactly as it
+                    # can inside the main wait. Without this it falls through and
+                    # is reported as AidotCameraNoMedia - whose own docstring
+                    # calls it "the opposite of AidotCameraBusy" - and the loop
+                    # retries at once on a camera that just said it has no free
+                    # session.
+                    if (terminal_error_fut is not None
+                            and terminal_error_fut.done()):
+                        _code, _desc = terminal_error_fut.result()
+                        _status(f"camera refused: ack {_code} {_desc}"
+                                " - terminal, abandoning the grace")
+                        raise AidotCameraBusy(_code, _desc)
+                    await asyncio.sleep(0.1)
+            except asyncio.CancelledError:
+                # Same blind spot the main wait closes: a snapshot cancels at
+                # its own budget, and without this the evidence is discarded.
+                if _first_video_pt[0] is None:
+                    _report_first_media_stall(
+                        time.monotonic() - _media_wait_started, _cancelled=True)
+                raise
+            if _first_video_pt[0] is not None:
+                _status("media arrived %.1fs after the wait was abandoned"
+                        " - mapping it rather than serving video only"
+                        % (time.monotonic() - _ab_t0))
+            else:
+                _status("no media in the %.0fs after the wait was abandoned"
+                        % _ab_grace)
         if _first_video_pt[0] is None:
             # The wait expired with nothing received. Everything needed to
             # say why is in hand at exactly this moment and was, until the
@@ -7334,28 +7409,10 @@ class _SdesOpenMixin:
             _report_first_media_stall(
                 time.monotonic() - _media_wait_started
                 if _stale_offer_abandoned else _FIRST_MEDIA_WAIT_S)
-        # The serve SDP below is built from what has actually been observed, so
-        # ending the wait a moment before the first packets arrive costs this
-        # session its audio for good.  See _ABANDONED_MEDIA_GRACE_S.
-        _ab_grace = _post_abandon_media_grace_s(
-            abandoned=_stale_offer_abandoned,
-            have_video=_first_video_pt[0] is not None,
-            grace_s=_ABANDONED_MEDIA_GRACE_S)
-        if _ab_grace > 0:
-            _ab_t0 = time.monotonic()
-            while (_first_video_pt[0] is None
-                    and time.monotonic() - _ab_t0 < _ab_grace):
-                await asyncio.sleep(0.1)
-            if _first_video_pt[0] is not None:
-                _status("media arrived %.1fs after the wait was abandoned"
-                        " - mapping it rather than serving video only"
-                        % (time.monotonic() - _ab_t0))
-            else:
-                _status("no media in the %.0fs after the wait was abandoned"
-                        % _ab_grace)
         if _should_skip_doomed_serve(
                 abandoned=_stale_offer_abandoned,
-                have_video=_first_video_pt[0] is not None):
+                have_video=_first_video_pt[0] is not None,
+                serving=bool(rtsp_push_url or output_path)):
             # Serving now would build the SDP from nothing observed, produce a
             # video-only stream, and receive no media on it - measured as ~14 s
             # of delay and a dropped audio track ahead of the retry that worked.
@@ -7380,6 +7437,11 @@ class _SdesOpenMixin:
         # Which single payload type (if any) each line can be narrowed to. Audio
         # is usable only when its type was actually observed; otherwise the "0 8"
         # line cannot be narrowed.
+        # NOTE: the no-video case this was written for no longer reaches here -
+        # an open with nothing observed is abandoned above, so _vpt is always
+        # set by this point. What is left is an OBSERVED but unadvertised
+        # payload type, which is why the messages below no longer claim that
+        # no video was seen.
         if (_vpt not in _SDP_VIDEO_PTS and answer_fut is not None
                 and answer_fut.done() and not answer_fut.cancelled()):
             # No video packet arrived inside the window, but the camera's answer
@@ -7399,18 +7461,17 @@ class _SdesOpenMixin:
             _pin_pt = _resolve_sdes_video_pt()
             if _pin_pt is not None:
                 _LOGGER.info(
-                    "camera %s: no video observed before the serve launched; "
-                    "narrowing the SDP to the PINNED payload type %d rather "
-                    "than the camera's answer (%s) - this model answers one "
-                    "codec and sends another.",
+                    "camera %s: the observed payload type is not one this SDP "
+                    "advertises; narrowing to the PINNED payload type %d rather "
+                    "than the camera's answer (%s).",
                     getattr(self, "device_id", "?"), _pin_pt,
                     _answer_video_pt[0],
                 )
             elif _answer_video_pt[0] is not None:
                 _LOGGER.info(
-                    "camera %s: no video observed before the serve launched; "
-                    "narrowing the SDP to payload type %d from the camera's "
-                    "negotiated answer instead of advertising both codecs.",
+                    "camera %s: the observed payload type is not one this SDP "
+                    "advertises; narrowing to payload type %d from the "
+                    "camera's negotiated answer instead of advertising both.",
                     getattr(self, "device_id", "?"), _answer_video_pt[0],
                 )
         # observed beats pinned beats answer -- see _serve_video_pt.  The pin

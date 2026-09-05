@@ -790,9 +790,17 @@ def _quality_summary(attempts: list) -> dict:
             "acked": bool(q.get("ack_log")),
         })
     for bucket in per_arm.values():
-        ratios = [s["ratio"] for s in bucket["sessions"] if s["ratio"]]
+        # Both counted over the SAME sessions. A session can be verdict OK with
+        # no ratio at all - a transport with no byte counter reports "frames
+        # only" - and counting acks over every OK session while n counts only
+        # those with a ratio prints "acked=4/0" and silences the shortfall NOTE,
+        # which is precisely the confusion this was added to remove.
+        # `is not None` rather than truthiness: a ratio of exactly 0.0 is a real
+        # measurement, not a missing one.
+        scored = [s for s in bucket["sessions"] if s["ratio"] is not None]
+        ratios = [s["ratio"] for s in scored]
         bucket["n"] = len(ratios)
-        bucket["acked_n"] = sum(1 for s in bucket["sessions"] if s["acked"])
+        bucket["acked_n"] = sum(1 for s in scored if s["acked"])
         if ratios:
             bucket["ratio_mean"] = round(sum(ratios) / len(ratios), 3)
             bucket["ratio_min"] = min(ratios)
@@ -1543,7 +1551,11 @@ def main() -> int:
                         "random order; set it to re-run a campaign in the same "
                         "order it was first run in.")
     p.add_argument("--arm-repeats", type=int, default=1,
-                   help="how many times to cycle the arms (default 1)")
+                   help="how many BLOCKS of the arms to run (default 1). A "
+                        "block holds every arm exactly once, shuffled - the "
+                        "arms are no longer cycled, because a fixed period "
+                        "hands anything of the camera's own that shares it to "
+                        "one arm. Pass --arm-seed to reproduce a run.")
     p.add_argument("--sd-probe", action="store_true",
                    help="ask each camera what recordings it holds "
                         "(HASLISTEVENT/LISTEVENT) and record the raw reply. "

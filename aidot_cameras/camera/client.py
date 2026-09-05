@@ -4428,12 +4428,52 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             except AidotCameraNoMedia as _nomedia:
                 # The camera answered and then sent nothing, so the open was
                 # abandoned rather than serving a stream with no media on it.
-                # Pace it as the session-ended case it stands in for - the fast
-                # not-ready retry when the camera said -50019, the ordinary
-                # unhealthy delay otherwise - and NOT as an open failure, whose
-                # backoff escalates. Getting that wrong would make this worse
-                # than the doomed serve it replaces.
+                # This IS a session that ended without media - it just ended
+                # before the serve rather than after - so it takes the same
+                # pacing and, crucially, the same accounting.
+                #
+                # The accounting is not optional. Skipping straight to the next
+                # attempt bypasses the futile-keepalive circuit breaker at the
+                # bottom of the loop, and that guard exists because "a unit has
+                # already been drained to 5% that way": without it a battery
+                # camera that answers and never streams is woken forever.
+                #
+                # On pacing, said accurately: session_end_delay(healthy=False)
+                # escalates the same shared attempt counter that fail_delay()
+                # does - marginally sooner, in fact. That is deliberate here. A
+                # camera that never delivers should back off, not hammer; the
+                # fast not-ready burst below is what keeps a merely-slow camera
+                # responsive.
                 self._fast_attempt_override = None
+                _no_media_streak = _next_no_media_streak(_no_media_streak, False)
+                if _should_abandon_keepalive(
+                        _no_media_streak, is_battery=self.is_battery_camera):
+                    _LOGGER.warning(
+                        "camera %s: %d consecutive keepalive attempts delivered "
+                        "no media - stopping the background keepalive to stop "
+                        "waking it. A live view will still open a session; set "
+                        "AIDOT_FUTILE_KEEPALIVE_LIMIT=0 to keep retrying.",
+                        self.device_id, _no_media_streak,
+                    )
+                    self._streaming_active = False
+                    self._cancel_keepalive_renew()
+                    try:
+                        await self._deregister_go2rtc()
+                    except Exception:
+                        _LOGGER.debug("camera %s: go2rtc deregister after "
+                                      "abandon failed", self.device_id,
+                                      exc_info=True)
+                    return
+                # An adaptive fast attempt that reaches here delivered no media,
+                # so it must latch the fallback exactly as the bottom of the
+                # loop would; otherwise every retry re-uses the fast path on a
+                # camera that needs the relay.
+                if _use_fast and not _fast_failed:
+                    _fast_failed = True
+                    self._fast_path_unavailable = True
+                    _LOGGER.info(
+                        "SDES adaptive[%s]: fast attempt delivered no media - "
+                        "falling back to the full relay path", self.device_id)
                 _not_ready_burst = self._next_not_ready_burst(
                     False, _not_ready_burst)
                 _delay, _fast_retry = self._not_ready_retry_delay(

@@ -30,7 +30,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aidot_cameras.camera.sdes_open import (
-    _ABANDONED_MEDIA_GRACE_S,
+    _abandoned_media_grace_s,
     _post_abandon_media_grace_s,
 )
 
@@ -64,14 +64,19 @@ def test_it_can_be_switched_off():
     assert _g(grace_s=-1.0) == 0.0
 
 
-def test_the_shipped_grace_covers_the_measured_gap_with_room():
+def test_the_shipped_grace_covers_the_measured_gap_with_room(monkeypatch):
     """Media arrived 4.2 s after the wait ended. The grace has to clear that
     comfortably, and stay small enough that a session which never delivers pays
     only a little more than it already does."""
-    assert 6.0 <= _ABANDONED_MEDIA_GRACE_S <= 15.0
+    # Read through the accessor with the env cleared: the value comes from
+    # AIDOT_ABANDONED_MEDIA_GRACE_S, so reading it raw makes the suite fail on
+    # any machine where an operator set it - including the documented =0 escape
+    # hatch. The test is about the shipped default, so pin the shipped default.
+    monkeypatch.delenv("AIDOT_ABANDONED_MEDIA_GRACE_S", raising=False)
+    assert 6.0 <= _abandoned_media_grace_s() <= 15.0
 
 
-def test_the_grace_still_leaves_the_backstop_worth_having():
+def test_the_grace_still_leaves_the_backstop_worth_having(monkeypatch):
     """The whole point of ending the wait early is to reach the serve sooner
     than the full window. Grace plus the stale-offer grace must stay well inside
     it, or the backstop has given back what it saved."""
@@ -80,4 +85,7 @@ def test_the_grace_still_leaves_the_backstop_worth_having():
         _FIRST_MEDIA_WAIT_S,
     )
 
-    assert _BATTERY_STALE_OFFER_GRACE_S + _ABANDONED_MEDIA_GRACE_S < _FIRST_MEDIA_WAIT_S / 2
+    monkeypatch.delenv("AIDOT_ABANDONED_MEDIA_GRACE_S", raising=False)
+    monkeypatch.delenv("AIDOT_BATTERY_STALE_OFFER_GRACE_S", raising=False)
+    assert (_BATTERY_STALE_OFFER_GRACE_S + _abandoned_media_grace_s()
+            < _FIRST_MEDIA_WAIT_S / 2)
