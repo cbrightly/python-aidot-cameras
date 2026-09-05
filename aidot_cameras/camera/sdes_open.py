@@ -1146,18 +1146,38 @@ def _post_abandon_media_grace_s(*, abandoned: bool, have_video: bool,
 def _should_skip_doomed_serve(*, abandoned: bool, have_video: bool) -> bool:
     """Whether to abandon this attempt instead of serving nothing.
 
-    Only the backstop path.  It fires after the camera itself has been heard
-    from, so a retry has something to talk to; a serve built with no observed
-    payload types is video-only and then receives no media at all, which
-    measured 2026-09-03 as ~14 s of delay and a lost audio track before the
-    retry that actually worked.
+    What makes a serve doomed is that **no video was observed**, not which wait
+    ended.  A serve built with no observed payload types is video-only and then
+    receives no media at all: measured 2026-09-03 as ~14 s of delay and a lost
+    audio track before the retry that actually worked.
 
-    The plain timeout path keeps today's behaviour: there the camera never
-    spoke, HA's stream worker tolerates the transient failure and retries into
-    the serve, and taking that away would change a case this has no evidence
-    about.
+    This once applied only to the stale-offer backstop, on the reasoning that
+    the plain timeout path was a transient the stream worker tolerated and
+    retried into.  **That is retracted.**  Measured 2026-09-05 on a camera that
+    dropped off the WiFi: every attempt ran the full first-media wait, timed out
+    with nothing observed, launched the serve anyway, and ffmpeg died at once -
+
+        Could not find codec parameters for stream 1 (Video: h264, none):
+                                                            unspecified size
+        [rtsp] dimensions not set
+        [out#0/rtsp] Could not write header (incorrect codec parameters ?)
+
+    11 attempts and 6 stalls in 25 minutes, each spawning an ffmpeg that could
+    not start.  That is not a transient being tolerated, it is a permanent
+    failure being looped on, so the timeout path is covered too.
+
+    ``AIDOT_SKIP_DOOMED_SERVE=0`` restores the old behaviour on the timeout
+    path without a release; the backstop case it always covered is unchanged.
+    A malformed value is ignored rather than allowed to alter a media path.
     """
-    return bool(abandoned) and not have_video
+    if have_video:
+        return False
+    if abandoned:
+        return True
+    raw = _os.environ.get("AIDOT_SKIP_DOOMED_SERVE")
+    if raw is not None and raw.strip().lower() in ("0", "false", "no", "off"):
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------- #
