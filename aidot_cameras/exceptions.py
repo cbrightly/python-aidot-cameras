@@ -45,3 +45,27 @@ class AidotCameraNotReady(AidotError):
     failures: the camera is awake and answering, its media pipeline just isn't
     up.  The DTLS serve loop fast-retries this in a bounded burst instead of
     waiting the full 15s inter-attempt gate."""
+
+
+class AidotCameraNoMedia(AidotError):
+    """The camera was present and sent no media - abandon this attempt, retry now.
+
+    The opposite of [[AidotCameraBusy]], which means stop retrying. This is
+    raised when the stale-offer backstop ended the first-media wait, the grace
+    that follows it expired, and nothing has been observed: building a serve SDP
+    from nothing produces a video-only stream that then receives no media at
+    all, so the attempt is abandoned in favour of the retry, whose fresh offer
+    is what actually gets served.
+
+    Callers pacing a retry must treat this as a session that ended without
+    media, NOT as an open failure: the open-failure backoff escalates, and this
+    case wants the fast not-ready retry it would have got had the doomed serve
+    been launched and died.
+    """
+
+    def __init__(self, waited_s: float) -> None:
+        self.waited_s = waited_s
+        super().__init__(
+            f"camera sent no media in {waited_s:.0f}s after answering - "
+            "abandoning this attempt to the retry"
+        )
