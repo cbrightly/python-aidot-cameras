@@ -13,6 +13,7 @@ import logging
 import os
 import random
 import re
+import secrets as _secrets_mod
 import time
 from typing import Callable, Optional  # noqa: F401 - method annotations
 
@@ -960,6 +961,57 @@ _SDP_AUDIO_PTS = (0, 8)
 # even when the camera numbers that codec differently on the wire - it is our own
 # SDP being rewritten, not the camera's.
 _SDP_VIDEO_PT_BY_CODEC = {"H264": 96, "H265": 97}
+
+#: RFC 5245 s15.4: ``ice-char = ALPHA / DIGIT / "+" / "/"``. Base64, NOT
+#: base64URL - `-` and `_` are not ice-chars. `secrets.token_urlsafe` emits the
+#: URL-safe alphabet, and measured over 4000 generations that put a character
+#: outside this set into 12.5% of our ufrags and 49.9% of our passwords.
+_ICE_CHARS = ("ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+              "abcdefghijklmnopqrstuvwxyz"
+              "0123456789+/")
+
+#: What the vendor app actually sends, read out of its own signalling log:
+#: ufrag 4 chars, password 24. The RFC floor for a password is 22; 24 is what
+#: this fleet's cameras see from the client they were built against.
+_ICE_UFRAG_LEN = 4
+_ICE_PWD_LEN = 24
+
+
+def _new_ice_credentials() -> "tuple":
+    """One ``(ufrag, pwd)`` pair for a whole offer, shaped like the app's.
+
+    ONE pair, and the reason is local and provable rather than inferred from
+    the vendor app. ``_compress_sdp_req`` - the function that builds the
+    wPayload offer the camera actually receives - keeps only the FIRST
+    ``ice-ufrag`` and the FIRST ``ice-pwd`` in the whole document and DROPS the
+    later ones; it does not rewrite them. Verified by replicating its filter on
+    a two-section SDP: the video section comes out with no ICE attributes at
+    all.
+
+    So while we generated a pair per m-section, the camera only ever received
+    the audio pair - and our video socket then computed STUN MESSAGE-INTEGRITY
+    with ``_pwd_v``, a password the camera had never seen. Generating one pair
+    makes both sockets authenticate with the credentials the camera actually
+    holds.
+
+    That the vendor app also sends a single pair (measured from its own
+    signalling log: one ufrag repeated across every m-section, 4 chars, and a
+    24-char password) is corroboration, not the reason.
+
+    NOTE for anyone changing ``_compress_sdp_req`` to preserve per-section
+    credentials: doing that alone reintroduces the mismatch, because the two
+    sites are ~2350 lines apart. The behavioural test in
+    tests/test_ice_credentials_match_the_app.py asserts on the COMPRESSED SDP
+    for exactly that reason.
+    """
+    return (
+        "".join(_secrets_mod.choice(_ICE_CHARS)
+                for _ in range(_ICE_UFRAG_LEN)),
+        "".join(_secrets_mod.choice(_ICE_CHARS)
+                for _ in range(_ICE_PWD_LEN)),
+    )
+
+
 _SDP_CODEC_BY_VIDEO_PT = {pt: codec for codec, pt in _SDP_VIDEO_PT_BY_CODEC.items()}
 
 
@@ -2901,15 +2953,22 @@ class _SdesOpenMixin:
         # SDES-SRTP cameras use SIP-era plain SDP (RFC 3264 + RFC 3711).
         # Use RTP/SAVPF (RFC 4585) - Leedarson firmware expects the feedback
         # profile and silently ignores offers with plain RTP/SAVP.
-        # Include per-m-section ICE credentials and a host candidate so that
-        # newer PTZ firmware (e.g. LK.IPC.A001064) that requires ICE for
-        # address discovery will respond.  Older cameras that don't understand
-        # ICE ignore those attributes and use the port in the m= line directly.
+        # Include ICE credentials and a host candidate so that newer PTZ
+        # firmware (e.g. LK.IPC.A001064) that requires ICE for address
+        # discovery will respond.  Older cameras that don't understand ICE
+        # ignore those attributes and use the port in the m= line directly.
+        # ONE pair for the whole offer, not one per m-section - see
+        # _new_ice_credentials for why, and note _compress_sdp_req below keeps
+        # only the first of each attribute anyway.
         import secrets as _secrets
-        _ufrag_a = _secrets.token_urlsafe(4)[:4]
-        _pwd_a   = _secrets.token_urlsafe(24)[:22]
-        _ufrag_v = _secrets.token_urlsafe(4)[:4]
-        _pwd_v   = _secrets.token_urlsafe(24)[:22]
+        # One pair for the whole offer - see _new_ice_credentials. The video
+        # names are kept as aliases rather than removed: they are threaded
+        # through the STUN responder, the nomination and the bridge, and
+        # collapsing 23 call sites would obscure a change whose whole point is
+        # that the two values are now equal.
+        _ufrag_a, _pwd_a = _new_ice_credentials()
+        _ufrag_v = _ufrag_a
+        _pwd_v = _pwd_a
         # Use srflx (public) IP and direct port in c= and m= for the offer too,
         # for consistency with the answer.  TURN relay requires CreatePermission
         # for the camera's public IP which is unknown; relay in c= causes TURN to
