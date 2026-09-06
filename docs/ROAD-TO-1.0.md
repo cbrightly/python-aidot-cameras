@@ -161,7 +161,10 @@ now rather than at rc7.*
 
 #### The clock starts 2026-09-04
 
-**Day zero is `1.0.0rc9`, 2026-09-04. Two weeks from it is 2026-09-18.** The
+**Day zero is `1.0.0rc9`, 2026-09-04. Two weeks from it is 2026-09-18.**
+*Superseded 2026-09-06 -- this window was broken by instrumentation on
+09-05 and does not count. See "The clock restarts 2026-09-06" below; the
+cautions in the rest of this section still stand.* The
 campaign ended that afternoon and the fleet was left alone from then; rc9 is the
 release in the field, and the box was verified running it - pip metadata
 1.0.0rc9, integration 2.20.1, and `sdes_open.py`/`webrtc_open.py` hashing
@@ -194,6 +197,41 @@ quiet library under that is worth something, but it is the opposite of the
 evidence the bar asks for, which is a fortnight of *ordinary* use with nobody
 touching it. Read the numbers above as "nothing broke while being provoked", not
 as soak progress.
+
+#### The clock restarts 2026-09-06
+
+**Day zero is `1.0.0rc11`, 2026-09-06. Two weeks from it is 2026-09-20.**
+
+The rc9 window is void, and for the reason that made checking the box part of
+dating day zero in the first place. On 2026-09-05 the box was hot-patched with
+throwaway `_WIREPROBE` instrumentation, to settle whether the camera needs ICE
+credentials in each m-section. It answered the question, but a soak measured on
+files that are not the released ones measures nothing, so 09-04 to 09-05 does
+not count and cannot be salvaged.
+
+The restore afterwards was itself a hot patch, which is the part worth
+recording. The box was put back by copying `rc10`'s files over site-packages,
+leaving **pip metadata reporting `1.0.0rc9` while every file was byte-identical
+to `rc10`** -- the same lying version this project has been caught by before.
+Corrected 2026-09-06 with a real install rather than a file copy.
+
+Two releases went out in the meantime, and the bar asks them to be classified
+rather than assumed:
+
+| release | date | find | streaming-breaking? |
+|---|---|---|---|
+| `rc10` | 2026-09-05 | A camera that cannot stream at all was still having a serve launched for it, so every attempt spawned an ffmpeg that failed on the spot and retried into the same thing -- 11 attempts and 6 stalls in 25 minutes on a camera that had dropped off the WiFi. Also: a battery session could lose its audio for its whole length when the first packets arrived a fraction of a second after the wait ended, and a malformed `AIDOT_ABANDONED_MEDIA_GRACE_S` stopped the library importing | **Borderline -- counted yes.** The doomed-serve half only affected cameras that could not stream regardless. The audio half degraded sessions that were otherwise working, and the import failure took the integration down at setup for anyone who set that variable wrong. Either alone would be arguable; together they are enough to reset |
+| `rc11` | 2026-09-06 | Every SDES session signed its video connectivity checks with a password the camera had never been given: the offer carried a credential pair per m-section and only the first survives compression. Also out-of-spec ICE characters in about half of all passwords | No. Nothing was observed broken and no session failed -- the cameras tolerated it. It is a correctness fix, and it is day zero only because it is the release that happens to be in the field |
+
+**The box was verified on the released build before the clock was started.**
+pip metadata `1.0.0rc11`, and `sdes_open.py`, `client.py`, `webrtc_open.py`,
+`exceptions.py` and `__init__.py` all hashing byte-identical to the published
+wheel -- checked against the loaded module after the restart, not just the files
+on disk.
+
+The integration on the box is `2.20.1`. `2.20.2` raises its floor to
+`1.0.0rc11` and publishes separately, but the library the box actually runs is
+already rc11, so the floor is bookkeeping here rather than a runtime difference.
 
 ### 2. A 1.2x bitrate difference - premise corrected 2026-08-11
 
