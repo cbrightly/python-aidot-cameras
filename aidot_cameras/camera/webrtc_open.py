@@ -1786,7 +1786,7 @@ class _WebRTCOpenMixin:
                     for srv in _ice_servers[1:]
                 )
                 if len(_ice_servers) > 1:
-                    _status(
+                    _trace(
                         f"ICE config from getIceConfigResp"
                         f" ({'TURN' if _has_turn_in_resp else 'STUN-only'}):"
                         f" {[s.urls for s in _ice_servers[1:]]}"
@@ -1818,10 +1818,8 @@ class _WebRTCOpenMixin:
                      if _ice_servers and _ice_servers[0].urls
                      else "none")
         _turn_entries = [s.urls for s in _ice_servers[1:]]
-        _status(
-            f"ICE servers: STUN={_stun_url}"
-            f"  relayx{len(_turn_entries)}: {_turn_entries}"
-        )
+        _status(f"ICE servers: STUN={_stun_url}  relayx{len(_turn_entries)}")
+        _trace(f"ICE servers: relay urls {_turn_entries}")
         # Local-pc ICE servers default to the same list the camera receives.
         # fast_connect may narrow the LOCAL pc's gather (TURN-strip, and the
         # opt-in host-only) WITHOUT touching _ice_servers, which still feeds the
@@ -2116,7 +2114,7 @@ class _WebRTCOpenMixin:
             # absence (per BaseKVSCameraView.k():805-815, the official client
             # only sends LIVING for PreCon cameras).
             _kvs_dc = pc.createDataChannel(_dc_label, negotiated=True, id=0)
-            _status(
+            _trace(
                 f"offer: including SCTP datachannel label={_dc_label!r}"
                 f" (pre-negotiated; KVS opens SCTP regardless)"
             )
@@ -2219,7 +2217,7 @@ class _WebRTCOpenMixin:
                     except Exception:
                         _cur = "<error>"
                     if _cur != _last:
-                        _status(f"DC[{_dc_label}] readyState: {_last} -> {_cur}")
+                        _trace(f"DC[{_dc_label}] readyState: {_last} -> {_cur}")
                         _last = _cur
                     if _cur in ("open", "closed"):
                         break
@@ -2255,7 +2253,7 @@ class _WebRTCOpenMixin:
                             async def _noop_rtcp(_pkts, **_kw):
                                 pass
                             _t.sender._send_rtcp = _noop_rtcp
-                            _status(
+                            _trace(
                                 "audio sender: _send_rtcp patched -> no-op"
                                 " (suppresses 0-packet SR audio watchdog)"
                             )
@@ -2383,7 +2381,7 @@ class _WebRTCOpenMixin:
             f"  m=audio={_sdp_transport(_sdp, 'audio')}"
         )
         _mlines = [ln for ln in _sdp.splitlines() if ln.startswith("m=")]
-        _status("SDP m-sections (%d): %s" % (len(_mlines), " | ".join(_mlines)))
+        _trace("SDP m-sections (%d): %s" % (len(_mlines), " | ".join(_mlines)))
 
         def _seq() -> str:
             return f"ap{random.randint(1000000, 9999999)}"
@@ -2415,7 +2413,7 @@ class _WebRTCOpenMixin:
             r'(?m)^a=fingerprint:sha-(?:384|512)[^\r\n]*\r?\n', '', _offer_sdp
         )
         _patched_mlines = [ln for ln in _offer_sdp.splitlines() if ln.startswith("m=")]
-        _status("Offer m-sections (patched): %s" % " | ".join(_patched_mlines))
+        _trace("Offer m-sections (patched): %s" % " | ".join(_patched_mlines))
         # Build IceServerList from available _ice_servers for inclusion in
         # webrtcReq.  The browser always sends IceServerList; without it some
         # camera firmware (e.g. LK.IPC.A001064) does not activate its ICE
@@ -3468,7 +3466,7 @@ class _WebRTCOpenMixin:
                             "__qualname__",
                             "missing",
                         )
-                        _status(
+                        _trace(
                             f"  patch[{_np_idx}] id(dtls)={id(_np_dtls)}"
                             f" id(ice)={id(_np_ice)}"
                             f" dtls.state={getattr(_np_dtls, 'state', '?')}"
@@ -3485,7 +3483,7 @@ class _WebRTCOpenMixin:
                             "__qualname__",
                             "missing",
                         )
-                        _status(f"  patch[{_np_idx}] post.vpi={_np_post_vpi}")
+                        _trace(f"  patch[{_np_idx}] post.vpi={_np_post_vpi}")
                     _status(
                         "fingerprint bypass applied"
                         f" ({len(pc.getTransceivers())} transceivers)"
@@ -3742,7 +3740,7 @@ class _WebRTCOpenMixin:
                             getattr(_srd_tc, "kind", "?"),
                         )
                         _srd_mid = getattr(_srd_tc, "mid", "?")
-                        _status(
+                        _trace(
                             f"  post-SRD[{_srd_idx}]"
                             f" mid={_srd_mid} kind={_srd_kind}"
                             f" dtls.id=0x{id(_srd_dtls):x}"
@@ -3752,7 +3750,7 @@ class _WebRTCOpenMixin:
                             f" vpi={_srd_vpi}"
                         )
                 except Exception as _srd_diag_exc:
-                    _status(f"  post-SRD diag failed: {_srd_diag_exc}")
+                    _trace(f"  post-SRD diag failed: {_srd_diag_exc}")
 
                 # --- Manual iceCandidateReq trickle (DTLS path) ----------- #
                 # The official Android app sends iceCandidateReq for every local
@@ -3871,7 +3869,7 @@ class _WebRTCOpenMixin:
                         _sdp_ice.sdpMid = _sdp_cand_smid
                         _sdp_ice.sdpMLineIndex = max(_sdp_cand_midx, 0)
                         await pc.addIceCandidate(_sdp_ice)
-                        _status(f"addIceCandidate (answer SDP): {_sdp_cand_line[:80]}")
+                        _trace(f"addIceCandidate (answer SDP): {_sdp_cand_line[:80]}")
                     except Exception as _sdp_exc:
                         _LOGGER.debug(
                             "addIceCandidate (answer SDP) error: %s", _sdp_exc
@@ -3884,7 +3882,7 @@ class _WebRTCOpenMixin:
 
         @pc.on("connectionstatechange")
         async def _on_conn_state() -> None:
-            _status(f"WebRTC connectionState -> {pc.connectionState}")
+            _trace(f"WebRTC connectionState -> {pc.connectionState}")
             if pc.connectionState == "failed":
                 # Dump per-transceiver DTLS + ICE state so we can see which
                 # transport actually failed and why.  aiortc transitions
@@ -3895,14 +3893,14 @@ class _WebRTCOpenMixin:
                     for _i, _tc in enumerate(pc.getTransceivers()):
                         _dtls = _tc.receiver.transport
                         _ice  = _dtls.transport
-                        _status(
+                        _trace(
                             f"  transceiver[{_i}] kind={_tc.receiver.track.kind if _tc.receiver.track else '?'}"
                             f"  dtls.state={getattr(_dtls, 'state', '?')}"
                             f"  ice.state={getattr(_ice, 'state', '?')}"
                             f"  ice.role={getattr(getattr(_ice, '_connection', None), 'role', '?')}"
                         )
                 except Exception as _diag_exc:
-                    _status(f"  transceiver state dump failed: {_diag_exc}")
+                    _trace(f"  transceiver state dump failed: {_diag_exc}")
             if pc.connectionState in ("connected", "completed"):
                 connected_ev.set()
             elif pc.connectionState in ("failed", "closed"):
@@ -3910,11 +3908,11 @@ class _WebRTCOpenMixin:
 
         @pc.on("iceconnectionstatechange")
         async def _on_ice_state() -> None:
-            _status(f"ICE connectionState -> {pc.iceConnectionState}")
+            _trace(f"ICE connectionState -> {pc.iceConnectionState}")
 
         @pc.on("icegatheringstatechange")
         async def _on_ice_gather() -> None:
-            _LOGGER.info("webrtc: ICE gatheringState -> %s", pc.iceGatheringState)
+            _LOGGER.debug("webrtc: ICE gatheringState -> %s", pc.iceGatheringState)
 
         # A shifted answer gets a shorter ICE deadline, not a refusal: 6 of 7
         # measured shifts never connected, but the seventh came up in 8.8 s.
