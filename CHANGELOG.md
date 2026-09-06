@@ -4,6 +4,34 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [1.0.0rc11]
+
+### Fixed
+
+- **A camera's video connectivity checks were being answered with credentials
+  it had never been given.** The offer carried a separate ICE username and
+  password for each media section, but the compression step that builds the
+  message the camera actually receives keeps only the *first* pair in the whole
+  document and drops the rest. So the camera only ever held the audio pair,
+  while the video socket signed its STUN exchanges with the video one.
+
+  The offer now carries a single pair for the whole session, which is what the
+  camera holds and what the vendor's own app sends. Confirmed on the wire: the
+  camera sends connectivity checks to the video socket and completes them
+  there, so it does inherit the session pair rather than needing one per
+  section.
+
+  Nothing was visibly broken by this - the cameras tolerated it - but every
+  session was authenticating one of its two sockets against credentials the far
+  end did not have.
+
+- **ICE credentials now use the character set the standard defines.** RFC 5245
+  allows letters, digits, `+` and `/`; we were generating URL-safe base64, which
+  substitutes `-` and `_`. Measured over 4000 generations, that put an
+  out-of-spec character into 12.5% of usernames and 49.9% of passwords. The
+  password is also 24 characters now rather than 22 - the standard's floor, and
+  what the vendor app sends.
+
 ## [1.0.0rc10]
 
 ### Fixed
