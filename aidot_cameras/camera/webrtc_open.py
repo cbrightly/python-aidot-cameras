@@ -2303,7 +2303,7 @@ class _WebRTCOpenMixin:
                             return
                         for _ssrc in _ssrcs:
                             await _recv._send_rtcp_pli(_ssrc)
-                        _status(
+                        _trace(
                             f"video track: sent RTCP PLI (keyframe request)"
                             f" ssrc={_ssrcs}"
                         )
