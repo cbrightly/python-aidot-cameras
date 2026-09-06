@@ -229,9 +229,37 @@ pip metadata `1.0.0rc11`, and `sdes_open.py`, `client.py`, `webrtc_open.py`,
 wheel -- checked against the loaded module after the restart, not just the files
 on disk.
 
+**And verified streaming, not merely installed.** rc11's change is entirely in
+`sdes_open.py`, so the WebRTC sessions that came up on their own after the
+restart prove nothing about it - `webrtc_open.py` is byte-identical between
+rc10 and rc11. A deliberate SDES open on the PTZ was driven instead
+(`camera.record`, 12 s): first video RTP at **+2.5 s**, serving at **+3.0 s**,
+1.6 MB written, SRTP decrypting with RTCP PLI/NACK and SCTP SACKs flowing, and
+zero library ERROR lines, stalls or tracebacks in the window. A `camera_proxy`
+still is not this check - it returns a cached image in under a second without
+opening anything.
+
 The integration on the box is `2.20.1`. `2.20.2` raises its floor to
 `1.0.0rc11` and publishes separately, but the library the box actually runs is
 already rc11, so the floor is bookkeeping here rather than a runtime difference.
+
+**`camera.kitchen` is expected to be `unavailable`, and it is not the orphan.**
+It is `L2_F8A3`, the A001513 that sits on `192.168.100.x` while Home Assistant
+is on `192.168.0.x` -- the same camera the live-validation run reports as its
+one tolerated `ERROR`. Its root cause is routing, not this library. So two of
+the entities are down by design: `camera.deck` (orphaned registry entry, no
+device) and `camera.kitchen` (unroutable). Neither is a soak failure, and a
+window that shows them down is not showing a regression.
+
+**One thing to know before reading a quiet window as a quiet fleet.**
+`webrtc_open` logs every AVIO data-channel message at INFO, keepalives
+included -- about one line per camera per 5 s, 156 lines in ten minutes across
+three cameras, enough that Home Assistant's own limiter fired twice with
+"Module aidot_cameras.camera.webrtc_open is logging too frequently". It is
+long-standing rather than new, so under the release rule it does not justify a
+release of its own, but it makes this module by far the loudest thing in the
+log the soak classifier reads. A sudden absence of these lines means a session
+ended, not that the fleet went quiet.
 
 ### 2. A 1.2x bitrate difference - premise corrected 2026-08-11
 
