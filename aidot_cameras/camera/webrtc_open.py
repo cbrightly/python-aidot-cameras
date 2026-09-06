@@ -31,6 +31,7 @@ from .protocol import (
     _filter_sdp_candidates,
     _install_highport_nomination_patch,
     _ip_looks_ascii_garbled,
+    _make_status_pair,
     _make_talk_audio_track,
     _mqtt_session_sync,
     _mqtt_timestamp,
@@ -878,15 +879,10 @@ class _WebRTCOpenMixin:
         _mqtt_ready_ev     = _threading.Event()
         _mqtt_conn_status: dict = {}
 
-        def _status(msg: str) -> None:
-            """Fire status_callback and log.  Callback is the primary output
-            channel; logging is DEBUG so log files capture detail without INFO
-            flood when the callback is not routing to a logger."""
-            if status_callback:
-                status_callback(msg)
-                _LOGGER.debug("webrtc: %s", msg)
-            else:
-                _LOGGER.info("webrtc: %s", msg)
+        # _status = the lifecycle channel (INFO when nothing else routes it);
+        # _trace = the steady-state channel (always DEBUG).  See
+        # _make_status_pair for why the channel is split in two.
+        _status, _trace = _make_status_pair(status_callback, _LOGGER)
 
         if _numeric_uid_raw is not None and numeric_user_id != user_id:
             _LOGGER.debug("webrtc: numeric userId for payload injection: %s", _numeric_uid_raw)
@@ -1040,7 +1036,7 @@ class _WebRTCOpenMixin:
                     )
                 else:
                     loop.call_soon_threadsafe(
-                        lambda rp=resp_pid: _status(
+                        lambda rp=resp_pid: _trace(
                             f"webrtcResp IGNORED - peerid/devId/dstAddr mismatch:"
                             f" got {rp!r}"
                         )
@@ -1111,7 +1107,7 @@ class _WebRTCOpenMixin:
                         )
                 loop.call_soon_threadsafe(
                     lambda m=method, t=topic,
-                    o=_signal_origin(topic, msg, device_id): _status(
+                    o=_signal_origin(topic, msg, device_id): _trace(
                         f"camera replied  method={m!r}"
                         f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
                     )
@@ -1187,7 +1183,7 @@ class _WebRTCOpenMixin:
                     loop.call_soon_threadsafe(camera_reconnect_ev.set)
                 loop.call_soon_threadsafe(
                     lambda m=method, t=topic,
-                    o=_signal_origin(topic, msg, device_id): _status(
+                    o=_signal_origin(topic, msg, device_id): _trace(
                         f"camera replied  method={m!r}"
                         f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
                     )
@@ -1195,7 +1191,7 @@ class _WebRTCOpenMixin:
             else:
                 loop.call_soon_threadsafe(
                     lambda m=method, t=topic,
-                    o=_signal_origin(topic, msg, device_id): _status(
+                    o=_signal_origin(topic, msg, device_id): _trace(
                         f"camera replied  method={m!r}"
                         f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
                     )
@@ -1613,6 +1609,7 @@ class _WebRTCOpenMixin:
                     output_path=output_path,
                     max_seconds=max_seconds,
                     _status=_status,
+                    _trace=_trace,
                     mqtt_fut=mqtt_fut,
                     liveplay_echo_ev=liveplay_echo_ev,
                     liveplay_resp_fut=liveplay_resp_fut,
@@ -2073,13 +2070,13 @@ class _WebRTCOpenMixin:
                 try:
                     if isinstance(message, (bytes, bytearray)):
                         _avio_responses.dispatch(bytes(message))
-                        _status(
+                        _trace(
                             f"DC[remote:{channel.label}] RX {len(message)}B"
                             f" cmd={_avio_cmd_id(message)}"
                             f" hex={bytes(message)[:32].hex()}"
                         )
                     else:
-                        _status(f"DC[remote:{channel.label}] RX text {message!r}")
+                        _trace(f"DC[remote:{channel.label}] RX text {message!r}")
                 except Exception:
                     _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_on_remote_dc_message', exc_info=True)
 
@@ -2201,13 +2198,13 @@ class _WebRTCOpenMixin:
                 try:
                     if isinstance(message, (bytes, bytearray)):
                         _avio_responses.dispatch(bytes(message))
-                        _status(
+                        _trace(
                             f"DC[{_dc_label}] RX {len(message)}B"
                             f" cmd={_avio_cmd_id(message)}"
                             f" hex={bytes(message)[:32].hex()}"
                         )
                     else:
-                        _status(f"DC[{_dc_label}] RX text {message!r}")
+                        _trace(f"DC[{_dc_label}] RX text {message!r}")
                 except Exception:
                     _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_on_kvs_dc_message', exc_info=True)
 

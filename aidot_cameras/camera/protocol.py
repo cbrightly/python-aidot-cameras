@@ -30,6 +30,41 @@ from .constants import TALK_PCM_FRAME_BYTES, TALK_PCM_RATE
 _LOGGER = logging.getLogger(__name__)
 
 
+def _make_status_pair(status_callback, logger):
+    """Build the ``(_status, _trace)`` pair an open reports progress through.
+
+    Both feed ``status_callback`` when one is present, so the CLI keeps a
+    single unbroken stream.  They differ in what they leave in a log file:
+
+    - ``_status`` is the lifecycle channel -- a bounded handful of lines per
+      open (offer sent, answer received, first video RTP, serving).  With no
+      callback the log IS the channel, so it logs at INFO.
+    - ``_trace`` is the steady-state channel -- per-packet and per-tick
+      diagnostics whose volume is bounded by nothing but session length.  It
+      logs at DEBUG unconditionally.
+
+    The split exists because there was none: under Home Assistant there is
+    never a ``status_callback``, so every message on the channel landed at
+    INFO and the bridge's per-packet diagnostics tripped HA's own
+    "logging too frequently" limiter on an idle box.  Splitting the channel
+    keeps intent readable at each call site without a severity argument
+    threaded through 200-odd of them.
+    """
+    def _status(msg: str) -> None:
+        if status_callback:
+            status_callback(msg)
+            logger.debug("webrtc: %s", msg)
+        else:
+            logger.info("webrtc: %s", msg)
+
+    def _trace(msg: str) -> None:
+        if status_callback:
+            status_callback(msg)
+        logger.debug("webrtc: %s", msg)
+
+    return _status, _trace
+
+
 def _mqtt_timestamp() -> str:
     t = time.time()
     return time.strftime("%Y-%m-%d %H:%M:%S.", time.localtime(t)) + f"{int(t * 1000) % 1000:03d}"

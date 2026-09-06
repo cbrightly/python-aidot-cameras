@@ -3225,7 +3225,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
             data = body.get("data") or {}
             items = data.get("list") or []
-            _LOGGER.info(
+            # One line per poll, and the recordings browser polls: this was the
+            # single highest-count line in a 4-minute window on an idle box.
+            _LOGGER.debug(
                 "eventRecordingList for %s: total=%s returned=%d",
                 self.device_id, data.get("total"), len(items),
             )
