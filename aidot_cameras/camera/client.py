@@ -3225,8 +3225,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
             data = body.get("data") or {}
             items = data.get("list") or []
-            # One line per poll, and the recordings browser polls: this was the
-            # single highest-count line in a 4-minute window on an idle box.
+            # One line per motion poll - _motion_poll_loop calls this every
+            # 30 s per camera, so on a 7-camera account it is 14 lines a minute
+            # forever.  That cadence is deliberate (the app gets motion by FCM
+            # push, which a server-side integration cannot receive); only the
+            # severity was wrong.
             _LOGGER.debug(
                 "eventRecordingList for %s: total=%s returned=%d",
                 self.device_id, data.get("total"), len(items),

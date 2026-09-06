@@ -3750,7 +3750,7 @@ class _WebRTCOpenMixin:
                             f" vpi={_srd_vpi}"
                         )
                 except Exception as _srd_diag_exc:
-                    _trace(f"  post-SRD diag failed: {_srd_diag_exc}")
+                    _status(f"  post-SRD diag failed: {_srd_diag_exc}")
 
                 # --- Manual iceCandidateReq trickle (DTLS path) ----------- #
                 # The official Android app sends iceCandidateReq for every local
@@ -3882,7 +3882,13 @@ class _WebRTCOpenMixin:
 
         @pc.on("connectionstatechange")
         async def _on_conn_state() -> None:
-            _trace(f"WebRTC connectionState -> {pc.connectionState}")
+            # The walk through connecting/connected/closed is commentary, but
+            # entering "failed" is the event a user's log has to keep.  Read
+            # once: the property is live, and reading it for the level and
+            # again for the text could report one state at the other's level.
+            _conn_state = pc.connectionState
+            _say = _status if _conn_state == "failed" else _trace
+            _say(f"WebRTC connectionState -> {_conn_state}")
             if pc.connectionState == "failed":
                 # Dump per-transceiver DTLS + ICE state so we can see which
                 # transport actually failed and why.  aiortc transitions
@@ -3893,14 +3899,14 @@ class _WebRTCOpenMixin:
                     for _i, _tc in enumerate(pc.getTransceivers()):
                         _dtls = _tc.receiver.transport
                         _ice  = _dtls.transport
-                        _trace(
+                        _status(
                             f"  transceiver[{_i}] kind={_tc.receiver.track.kind if _tc.receiver.track else '?'}"
                             f"  dtls.state={getattr(_dtls, 'state', '?')}"
                             f"  ice.state={getattr(_ice, 'state', '?')}"
                             f"  ice.role={getattr(getattr(_ice, '_connection', None), 'role', '?')}"
                         )
                 except Exception as _diag_exc:
-                    _trace(f"  transceiver state dump failed: {_diag_exc}")
+                    _status(f"  transceiver state dump failed: {_diag_exc}")
             if pc.connectionState in ("connected", "completed"):
                 connected_ev.set()
             elif pc.connectionState in ("failed", "closed"):
@@ -3908,7 +3914,9 @@ class _WebRTCOpenMixin:
 
         @pc.on("iceconnectionstatechange")
         async def _on_ice_state() -> None:
-            _trace(f"ICE connectionState -> {pc.iceConnectionState}")
+            _ice_state = pc.iceConnectionState
+            _say = _status if _ice_state == "failed" else _trace
+            _say(f"ICE connectionState -> {_ice_state}")
 
         @pc.on("icegatheringstatechange")
         async def _on_ice_gather() -> None:
