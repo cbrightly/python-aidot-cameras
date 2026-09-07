@@ -4,6 +4,52 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [1.0.0rc12]
+
+### Fixed
+
+- **The library was the loudest thing in a Home Assistant log.** HA's own rate
+  limiter fired against `aidot_cameras.camera.webrtc_open` twice in ten minutes
+  on an idle box with three cameras connected.
+
+  The open reports its progress through a helper designed as a status *channel*
+  for the command-line tool: when something is routing those messages to a
+  screen it logs at DEBUG, and when nothing is, the log itself becomes the
+  channel and it logs at INFO. Under Home Assistant nothing ever routes them,
+  so every message landed at INFO -- per-packet bridge diagnostics and
+  per-tick upkeep sharing a severity with the handful of lines that describe a
+  session's life.
+
+  There is now a second channel for the steady-state messages. It still feeds
+  the command-line tool's stream, so nothing is lost there, but it logs at
+  DEBUG whether or not anything is listening. Measured against an 11.7-hour
+  window from a live box containing 14 real camera opens, INFO lines from the
+  library fall from 39584 to 437 -- from roughly 3400 an hour to 37. The
+  lines that describe a session are deliberately untouched.
+
+- **A camera's decrypted payload was being written to the log in the clear.**
+  One bridge diagnostic dumped the full decrypted contents of a packet as hex,
+  at INFO, which put a camera's audio into a user's log file. That dump and two
+  others are now bounded to a length and a 32-byte prefix. A header is what
+  identifies a packet; the rest was never a useful diagnostic.
+
+- **A connection failure could take the diagnostic that explains it with it.**
+  When a WebRTC connection fails, the library prints each transport's DTLS and
+  ICE state so the failure can be attributed. A single `try` wrapped both the
+  reading and the reporting for every transport, with two consequences: one
+  unreadable transport ended the loop and hid every transport after it, in a
+  diagnostic whose whole purpose is finding the broken one; and if the
+  reporting channel itself raised, the handler called that same broken channel
+  a second time on its way out, and that exception escaped into the WebRTC
+  stack's event dispatch. Each transport is now read and reported
+  independently, and reporting cannot raise.
+
+- **A device-list summary repeated forever.** The line naming accessories this
+  library cannot drive -- Zigbee sensors, remotes -- was rebuilt and logged on
+  every device-list refresh, 143 identical copies in 11.7 hours. It now reports
+  when the set changes, which includes the first time and includes it going
+  away, and keeps the identical repeat at DEBUG.
+
 ## [1.0.0rc11]
 
 ### Fixed

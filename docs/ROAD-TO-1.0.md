@@ -200,7 +200,8 @@ as soak progress.
 
 #### The clock restarts 2026-09-06
 
-**Day zero is `1.0.0rc11`, 2026-09-06. Two weeks from it is 2026-09-20.**
+**Day zero is 2026-09-06. Two weeks from it is 2026-09-20.** It was set by
+`1.0.0rc11` and is unchanged by `1.0.0rc12`, which was cut the same day.
 
 The rc9 window is void, and for the reason that made checking the box part of
 dating day zero in the first place. On 2026-09-05 the box was hot-patched with
@@ -222,6 +223,7 @@ rather than assumed:
 |---|---|---|---|
 | `rc10` | 2026-09-05 | A camera that cannot stream at all was still having a serve launched for it, so every attempt spawned an ffmpeg that failed on the spot and retried into the same thing -- 11 attempts and 6 stalls in 25 minutes on a camera that had dropped off the WiFi. Also: a battery session could lose its audio for its whole length when the first packets arrived a fraction of a second after the wait ended, and a malformed `AIDOT_ABANDONED_MEDIA_GRACE_S` stopped the library importing | **Borderline -- counted yes.** The doomed-serve half only affected cameras that could not stream regardless. The audio half degraded sessions that were otherwise working, and the import failure took the integration down at setup for anyone who set that variable wrong. Either alone would be arguable; together they are enough to reset |
 | `rc11` | 2026-09-06 | Every SDES session signed its video connectivity checks with a password the camera had never been given: the offer carried a credential pair per m-section and only the first survives compression. Also out-of-spec ICE characters in about half of all passwords | No. Nothing was observed broken and no session failed -- the cameras tolerated it. It is a correctness fix, and it is day zero only because it is the release that happens to be in the field |
+| `rc12` | 2026-09-06 | The library was the loudest module in the HA log -- HA's own limiter fired against it twice in ten minutes on an idle box. Also: a bridge diagnostic wrote a camera's decrypted payload to the log in the clear at INFO, and the post-failure transport dump could hide every transport after an unreadable one, or escape into aiortc's event dispatch if its log channel raised | No. Nothing that runs during a working session changed behaviour -- the moves are severity-only, and the failure-dump fix runs only after a connection has already failed. Same day as rc11, so day zero does not move |
 
 **The box was verified on the released build before the clock was started.**
 pip metadata `1.0.0rc11`, and `sdes_open.py`, `client.py`, `webrtc_open.py`,
