@@ -33,11 +33,13 @@ from .protocol import (
     _ip_looks_ascii_garbled,
     _make_status_pair,
     _make_talk_audio_track,
+    _report_failed_transports,
     _mqtt_session_sync,
     _mqtt_timestamp,
     _normalize_bundle_ice_credentials,
     _reorder_m_section_ice_attrs,
     _sdp_transport,
+    _transport_state_channel,
     answer_inserted_a_section,
     ice_wait_timeout,
     select_answer_section,
@@ -3882,31 +3884,17 @@ class _WebRTCOpenMixin:
 
         @pc.on("connectionstatechange")
         async def _on_conn_state() -> None:
-            # The walk through connecting/connected/closed is commentary, but
-            # entering "failed" is the event a user's log has to keep.  Read
-            # once: the property is live, and reading it for the level and
-            # again for the text could report one state at the other's level.
+            # Read once: the property is live, so reading it for the channel
+            # and again for the text could report one state at the other's
+            # level.
             _conn_state = pc.connectionState
-            _say = _status if _conn_state == "failed" else _trace
-            _say(f"WebRTC connectionState -> {_conn_state}")
-            if pc.connectionState == "failed":
-                # Dump per-transceiver DTLS + ICE state so we can see which
-                # transport actually failed and why.  aiortc transitions
-                # connectionState to "failed" on the first transport that
-                # enters either dtlsTransport.state = "failed" or
-                # iceTransport.state = "failed".
-                try:
-                    for _i, _tc in enumerate(pc.getTransceivers()):
-                        _dtls = _tc.receiver.transport
-                        _ice  = _dtls.transport
-                        _status(
-                            f"  transceiver[{_i}] kind={_tc.receiver.track.kind if _tc.receiver.track else '?'}"
-                            f"  dtls.state={getattr(_dtls, 'state', '?')}"
-                            f"  ice.state={getattr(_ice, 'state', '?')}"
-                            f"  ice.role={getattr(getattr(_ice, '_connection', None), 'role', '?')}"
-                        )
-                except Exception as _diag_exc:
-                    _status(f"  transceiver state dump failed: {_diag_exc}")
+            _transport_state_channel(_conn_state, _status, _trace)(
+                f"WebRTC connectionState -> {_conn_state}")
+            if _conn_state == "failed":
+                # Which transport died, on the INFO channel: aiortc fails the
+                # whole connection on the first transport to reach dtls.state
+                # or ice.state "failed", so this is the evidence for why.
+                _report_failed_transports(pc.getTransceivers, _status)
             if pc.connectionState in ("connected", "completed"):
                 connected_ev.set()
             elif pc.connectionState in ("failed", "closed"):
@@ -3915,8 +3903,8 @@ class _WebRTCOpenMixin:
         @pc.on("iceconnectionstatechange")
         async def _on_ice_state() -> None:
             _ice_state = pc.iceConnectionState
-            _say = _status if _ice_state == "failed" else _trace
-            _say(f"ICE connectionState -> {_ice_state}")
+            _transport_state_channel(_ice_state, _status, _trace)(
+                f"ICE connectionState -> {_ice_state}")
 
         @pc.on("icegatheringstatechange")
         async def _on_ice_gather() -> None:
