@@ -241,9 +241,41 @@ zero library ERROR lines, stalls or tracebacks in the window. A `camera_proxy`
 still is not this check - it returns a cached image in under a second without
 opening anything.
 
-The integration on the box is `2.20.1`. `2.20.2` raises its floor to
-`1.0.0rc11` and publishes separately, but the library the box actually runs is
-already rc11, so the floor is bookkeeping here rather than a runtime difference.
+**Updated 2026-09-06 22:19: the box now runs `1.0.0rc12` and integration
+`2.20.3`.** Driven through HACS (`hacs/repository/refresh` then `download` --
+the refresh is required, the cached list still offered 2.20.1) and a core
+restart, confirmed by the restart's own log signature rather than by the
+command returning.
+
+**Verified on the LOADED module, not the files.** rc12 rewrote the
+`ICE servers:` line to print the relay COUNT at INFO and move the URL list to
+DEBUG; the log now reads `ICE servers: STUN=... relayx8` with no trailing
+list, which rc11 could not emit. Alongside it, six line families rc11 logged
+at INFO are absent (`camera replied`, `connectionState ->`, `SDP m-sections`,
+`Offer m-sections (patched)`, `addIceCandidate (answer SDP)`, `readyState:`)
+while every lifecycle line is present: Camera awake, livePlayReq/webrtcReq
+sent, getIceConfigReq sent, WebRTC stream open and serving, all x3 for the
+three mains cameras that came up.
+
+**And verified streaming, not merely installed.** A deliberate SDES open on the
+PTZ (`camera.record`, 12 s): first media **+2769 ms**, serving **+2999 ms**,
+H264 video and PCMA audio, SCTP SACKs flowing -- the same shape as the rc11
+baseline of +2.5 s / +3.0 s.
+
+**The measured point of the release.** Steady state fell from ~3400 library
+INFO lines an hour to **39** (1.6-minute quiet window, one line). HA's rate
+limiter has not fired since the restart. This is the live count the change was
+projected on, now confirmed against the real box.
+
+**Day zero does not move.** rc12 was cut and installed on 2026-09-06, the same
+day rc11 set day zero, and it is not streaming-breaking. Target stays
+2026-09-20.
+
+*One caveat recorded rather than hidden:* the FIRST `camera.record` on the PTZ
+returned 500 with an mp4 muxer error (`non monotonically increasing dts`) on a
+COLD open; an immediate retry on the now-warm session returned 200. rc12
+changes no media-path code, so this is not attributable to it, but it is the
+cold-open join case worth a look on its own.
 
 **`camera.kitchen` is expected to be `unavailable`, and it is not the orphan.**
 It is `L2_F8A3`, the A001513 that sits on `192.168.100.x` while Home Assistant
