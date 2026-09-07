@@ -747,12 +747,22 @@ class CameraClient(_UpstreamAidotClient):
                         "device client cannot be built for it",
                         device.get(CONF_ID), model,
                     )
+        # Which devices this version cannot build is a property of the account,
+        # not an event, and the device list refreshes for the life of the
+        # process - so "reported once" above was only ever once per refresh:
+        # 143 identical lines in 11.7 hours of a real log.  Report it when it
+        # CHANGES (which covers the first time, and covers it going away), and
+        # keep the identical repeat at DEBUG so the detail is still there for
+        # anyone who goes looking.
+        _prev_unbuildable = getattr(self, "_unbuildable_last", None)
         if unbuildable:
-            _LOGGER.info(
+            _LOGGER.log(
+                logging.INFO if unbuildable != _prev_unbuildable else logging.DEBUG,
                 "skipped %d device(s) with no usable aesKey (not supported here): %s",
                 sum(unbuildable.values()),
                 ", ".join(f"{m} x{n}" for m, n in sorted(unbuildable.items())),
             )
+        self._unbuildable_last = unbuildable
 
         product_ids = ",".join(
             sorted(

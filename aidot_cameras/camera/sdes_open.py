@@ -2484,6 +2484,11 @@ class _SdesOpenMixin:
         output_path: Optional[str],
         max_seconds: Optional[float] = None,
         _status=None,
+        # Required, not defaulted: the bridge's per-packet sites call it
+        # unguarded, so a None default would surface a caller that forgot as
+        # an AttributeError inside the bridge thread rather than a TypeError
+        # at the call.  Keyword-only, so ordering after a default is legal.
+        _trace,
         mqtt_fut=None,
         liveplay_echo_ev=None,
         liveplay_resp_fut=None,
@@ -4804,26 +4809,32 @@ class _SdesOpenMixin:
                 _LOGGER.debug("TURN Send indication failed", exc_info=True)
                 return False
 
-        def _turn_install_permissions(_ip_cands, _ip_why):
+        def _turn_install_permissions(_ip_cands, _ip_why, _log=None):
             """CreatePermission for every camera candidate on both allocations.
 
             Non-fatal by design: a socket with no allocation is a no-op, so the
             direct path is untouched.  Returns the number of requests sent.
+
+            ``_log`` is the channel to report on.  The open-time install is a
+            once-per-session lifecycle fact and belongs at INFO; the bridge
+            re-installs every 120 s for the life of the session, which does
+            not.
             """
+            _log = _log or _status
             _perm_ok = 0
             for _c_ip, _c_port in _ip_cands:
                 for _p_sock in (_audio_sock, _video_sock):
                     if _turn_create_permission(_p_sock, _c_ip, _c_port):
                         _perm_ok += 1
             if _perm_ok:
-                _status(
+                _log(
                     f"TURN: installed {_perm_ok} relay permission(s) for"
                     f" {len(_ip_cands)} camera candidate(s) [{_ip_why}] - relay"
                     f" path is now usable if the camera cannot be reached"
                     f" directly"
                 )
             elif _ip_cands and _relay_addrs:
-                _status(
+                _log(
                     f"TURN: NO relay permission installed for {len(_ip_cands)}"
                     f" camera candidate(s) [{_ip_why}] despite"
                     f" {len(_relay_addrs)} allocation(s) - relay path stays a"
@@ -5235,7 +5246,7 @@ class _SdesOpenMixin:
                                 _hb_src,
                             )
                             _last_hb_ts = _time_br.time()
-                            _status(
+                            _trace(
                                 f"SDES: sent AVIO HEARTBEAT(5156) via SCTP"
                                 f" TSN={(_sctp['local_tsn']-1) & 0xFFFFFFFF}"
                                 f" -> {_hb_src[0]}:{_hb_src[1]}"
@@ -5440,7 +5451,7 @@ class _SdesOpenMixin:
                         _pli_n = getattr(_bridge_fn, '_pli_count', 0) + 1
                         _bridge_fn._pli_count = _pli_n
                         if _pli_n <= len(_pli_gaps):
-                            _status(
+                            _trace(
                                 f"SDES: sent RTCP PLI #{_pli_n}"
                                 f" -> SSRC=0x{_pli_media_ssrc:08x}"
                                 f" ({'SRTCP' if _pli_sent else 'plain'})"
@@ -5927,7 +5938,7 @@ class _SdesOpenMixin:
                                             *_cp_old[:3], _cp_new_nonce,
                                             *_cp_old[4:],
                                         )
-                                        _status(
+                                        _trace(
                                             f"TURN: stale nonce on {_cp_what}"
                                             " - refreshed and retrying"
                                         )
@@ -6126,7 +6137,7 @@ class _SdesOpenMixin:
                             # Camera is a=setup:active (DTLS client) - if it sends
                             # DTLS ClientHello, we'd see 0x16 here.
                             if len(_bpkt) >= 4 and 0x14 <= _bpkt[0] <= 0x17:
-                                _status(
+                                _trace(
                                     f"bridge: DTLS record {len(_bpkt)}B"
                                     f" from {_bsrc[0]}:{_bsrc[1]}"
                                     f" ct=0x{_bpkt[0]:02x}"
@@ -6143,7 +6154,7 @@ class _SdesOpenMixin:
                                     _bridge_fn._non_c8_after_done = 0
                                 _bridge_fn._non_c8_after_done += 1
                                 if _bridge_fn._non_c8_after_done <= 5:
-                                    _status(
+                                    _trace(
                                         f"bridge: non-0xC8 after DONE:"
                                         f" {len(_bpkt)}B byte0=0x{_bpkt[0]:02x}"
                                         f" {_bpkt[:24].hex()}"
@@ -6156,7 +6167,7 @@ class _SdesOpenMixin:
                                     _sdes_k_fp = _key_fingerprint(_our_tx_srtp_key_audio)
                                     _sdes_v_fp = _key_fingerprint(
                                         _cam_key_audio or _our_tx_srtp_key_audio)
-                                    _status(
+                                    _trace(
                                         f"bridge: RAW 0x{_bpkt[0]:02x} {len(_bpkt)}B"
                                         f" #{_bridge_fn._c8_raw_count}"
                                         f" our_key={_sdes_k_fp}"
@@ -6245,23 +6256,25 @@ class _SdesOpenMixin:
                                         _status(f"bridge: SDES decrypt error: {_pde}")
                                 # Log for first 5 and every 10th frame
                                 if _bridge_fn._tutk_count <= 5 or _bridge_fn._tutk_count % 10 == 0:
-                                    _status(
+                                    _trace(
                                         f"bridge: TUTK {_kind} SFrame"
                                         f" type=0x{_tk_type:02x} ssrc={_tk_ssrc}"
                                         f" ts={_tk_ts} payload={len(_tk_payload)}B"
                                         f" #{_bridge_fn._tutk_count} (+{_elapsed:.1f}s)"
                                     )
                                     if _bridge_fn._tutk_count <= 5:
-                                        _status(
+                                        _trace(
                                             f"bridge: TUTK raw"
                                             f" type=0x{_tk_type:02x}"
                                             f" ts={_tk_ts} ssrc=0x{_tk_ssrc:08x}"
-                                            f" payload_all={_tk_payload.hex()}"
+                                            f" payload={len(_tk_payload)}B"
+                                            f" [{_tk_payload[:32].hex()}]"
                                         )
                                         if _pd_plain is not None:
-                                            _status(
-                                                f"bridge: TUTK decrypt -> "
-                                                f" plain_all={_pd_plain.hex()}"
+                                            _trace(
+                                                f"bridge: TUTK decrypt ->"
+                                                f" {len(_pd_plain)}B"
+                                                f" [{_pd_plain[:32].hex()}]"
                                             )
                                 # -- Encrypted SCTP state machine (SDES path) --
                                 # Camera sends SCTP handshake (INIT, COOKIE-ECHO, DATA)
@@ -6296,7 +6309,8 @@ class _SdesOpenMixin:
                                                     f"SDES DC: INIT(peer=0x{_sc_p:08x})"
                                                     f" -> INIT-ACK {len(_iak_bytes)}B"
                                                     f" to {_bsrc[0]}:{_bsrc[1]}"
-                                                    f" plain={_iak_plain.hex()}"
+                                                    f" plain[{len(_iak_plain)}B]="
+                                                    f"{_iak_plain[:32].hex()}"
                                                 )
                                             except Exception as _sce8:
                                                 _status(f"SDES DC: enc INIT-ACK err: {_sce8}")
@@ -6435,7 +6449,7 @@ class _SdesOpenMixin:
                                                         '_br_session_mode_resp', 0) + 1)
                                             _sc_answered = _dispatch_sctp_avio(
                                                 _avio_responses, _sc_pay)
-                                            _status(
+                                            _trace(
                                                 f"SDES DC: enc DATA ppid={_sc_ppid}"
                                                 f" cmd={_sc_cmd} {len(_sc_pay)}B"
                                                 f"{' (answered a request)' if _sc_answered else ''}"
@@ -6445,12 +6459,12 @@ class _SdesOpenMixin:
                                         # Log SACK (0x03) with cumulative TSN ack for diagnostics
                                         if _pd_ct8 == 0x03 and len(_pd_plain) >= 20:
                                             _cum_tsn = int.from_bytes(_pd_plain[16:20], 'big')
-                                            _status(
+                                            _trace(
                                                 f"SDES DC: SACK cum_tsn={_cum_tsn:#010x}"
                                                 f" state={_sct}"
                                             )
                                         else:
-                                            _status(
+                                            _trace(
                                                 f"SDES DC: enc SCTP ct=0x{_pd_ct8:02x}"
                                                 f" state={_sct} {len(_pd_plain)}B"
                                             )
@@ -6857,7 +6871,7 @@ class _SdesOpenMixin:
                                             _ssrc_d = (int.from_bytes(
                                                 _bpkt[8:12], 'big')
                                                 if len(_bpkt) >= 12 else 0)
-                                            _status(
+                                            _trace(
                                                 f"bridge: SRTP decrypt err:"
                                                 f" {_srx_dec_e}"
                                                 f" seq={_seq_d}"
@@ -7041,7 +7055,7 @@ class _SdesOpenMixin:
                                 or (_br_now - _br_last_perm) >= 120.0):
                             _br_perm_cands = _perm_key
                             _br_last_perm = _br_now
-                            _turn_install_permissions(_uc_cands, "bridge")
+                            _turn_install_permissions(_uc_cands, "bridge", _trace)
                         # Keep the allocation itself alive.  The server grants
                         # it for a LIFETIME (600 s here) and drops it silently
                         # when that lapses, so refresh well inside the window.
@@ -7053,7 +7067,7 @@ class _SdesOpenMixin:
                                 if _turn_refresh_allocation(_rf_s)
                             )
                             if _rf_ok:
-                                _status(
+                                _trace(
                                     f"TURN: refreshed {_rf_ok} relay"
                                     f" allocation(s)"
                                 )

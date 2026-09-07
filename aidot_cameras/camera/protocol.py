@@ -30,6 +30,95 @@ from .constants import TALK_PCM_FRAME_BYTES, TALK_PCM_RATE
 _LOGGER = logging.getLogger(__name__)
 
 
+def _make_status_pair(status_callback, logger):
+    """Build the ``(_status, _trace)`` pair an open reports progress through.
+
+    Both feed ``status_callback`` when one is present, so the CLI keeps a
+    single unbroken stream.  They differ in what they leave in a log file:
+
+    - ``_status`` is the lifecycle channel -- a bounded handful of lines per
+      open (offer sent, answer received, first video RTP, serving).  With no
+      callback the log IS the channel, so it logs at INFO.
+    - ``_trace`` is the steady-state channel -- per-packet and per-tick
+      diagnostics whose volume is bounded by nothing but session length.  It
+      logs at DEBUG unconditionally.
+
+    The split exists because there was none: under Home Assistant there is
+    never a ``status_callback``, so every message on the channel landed at
+    INFO and the bridge's per-packet diagnostics tripped HA's own
+    "logging too frequently" limiter on an idle box.  Splitting the channel
+    keeps intent readable at each call site without a severity argument
+    threaded through 200-odd of them.
+    """
+    def _status(msg: str) -> None:
+        if status_callback:
+            status_callback(msg)
+            logger.debug("webrtc: %s", msg)
+        else:
+            logger.info("webrtc: %s", msg)
+
+    def _trace(msg: str) -> None:
+        if status_callback:
+            status_callback(msg)
+        logger.debug("webrtc: %s", msg)
+
+    return _status, _trace
+
+
+def _transport_state_channel(state, status, trace):
+    """Which channel a transport state change belongs on.
+
+    The walk toward a working connection -- new, connecting, connected,
+    checking, completed, closed -- is commentary and belongs at DEBUG.
+    Arriving at "failed" is the event a user's log has to keep.
+    """
+    return status if state == "failed" else trace
+
+
+def _report_failed_transports(get_transceivers, report) -> None:
+    """Describe each transceiver's DTLS/ICE state after a connection failure.
+
+    ``report`` is the channel to write on, and it is the INFO one: this runs
+    only once connectionState has already reached "failed", and the states it
+    prints are the evidence for WHICH transport died.  aiortc fails the whole
+    connection on the first transport to enter dtls.state or ice.state
+    "failed", so naming them is the difference between a diagnosable failure
+    and "it did not connect".
+
+    Never raises, and never lets one unreadable transceiver hide the others:
+    a diagnostic that takes down the failure path it is diagnosing, or that
+    reports only up to the first broken transport, is worse than none.
+    """
+    def _say(msg):
+        # The channel fans out to a caller-supplied callback.  If that raises,
+        # the exception would escape into aiortc's event dispatch from inside
+        # the connection-failed handler -- and the enclosing `except` below
+        # would call the same broken channel a second time on its way out.
+        try:
+            report(msg)
+        except Exception:
+            pass
+
+    try:
+        transceivers = list(get_transceivers())
+    except Exception as exc:
+        _say(f"  transceiver state dump failed: {exc}")
+        return
+    for i, tc in enumerate(transceivers):
+        try:
+            dtls  = tc.receiver.transport
+            ice   = dtls.transport
+            track = tc.receiver.track
+            _say(
+                f"  transceiver[{i}] kind={track.kind if track else '?'}"
+                f"  dtls.state={getattr(dtls, 'state', '?')}"
+                f"  ice.state={getattr(ice, 'state', '?')}"
+                f"  ice.role={getattr(getattr(ice, '_connection', None), 'role', '?')}"
+            )
+        except Exception as exc:
+            _say(f"  transceiver[{i}] state unreadable: {exc}")
+
+
 def _mqtt_timestamp() -> str:
     t = time.time()
     return time.strftime("%Y-%m-%d %H:%M:%S.", time.localtime(t)) + f"{int(t * 1000) % 1000:03d}"
