@@ -136,14 +136,28 @@ MQTT and does not use this path.
 
 ## Library install
 
-Install from PyPI (the simplest, recommended method):
+Install from PyPI (the simplest, recommended method). **Pass `--pre`** -- the
+current camera line is published as pre-releases, and without it pip resolves
+`0.17.2`, which predates the whole camera-streaming line:
 
 ```bash
 # lights + camera cloud/control only:
-pip install python-aidot-cameras
+pip install --pre python-aidot-cameras
 # add live WebRTC streaming, snapshots, and two-way audio:
-pip install python-aidot-cameras[webrtc]
+pip install --pre "python-aidot-cameras[webrtc]"
 ```
+
+Leaving `--pre` off is not a conservative choice, it is an old one. `0.17.2`
+is the newest version pip considers final, and it is from 2026-08-08: SDES
+sessions on it stop after about eighty seconds (the data channel never
+acknowledged what the camera sent, so the camera dropped the session), and
+Home Assistant restarts a stream roughly once a minute on it (a muxing hop
+lost its timestamps). Both were fixed in the `1.0.0b` line and neither fix
+can reach you without `--pre`.
+
+`0.17.2` stays on PyPI rather than being yanked because yanking it would move
+existing installs back to `0.17.1`, which is worse. It will stop being what a
+bare `pip install` picks when `1.0.0` is cut final.
 
 `[webrtc]` pulls in the extra dependencies (aiortc, av, ...) needed for live
 streaming, snapshots, and two-way audio. Without it you still get lights plus
@@ -422,7 +436,7 @@ Three steps, about five minutes.
 keep the output around:
 
 ```console
-$ pip install "python-aidot-cameras[webrtc]"
+$ pip install --pre "python-aidot-cameras[webrtc]"
 $ export AIDOT_USERNAME='you@example.com' AIDOT_PASSWORD='...' AIDOT_COUNTRY=US
 $ aidot-go2rtc --list
 1a2b3c4d...  LK.IPC.A000088  DTLS (stdout)
