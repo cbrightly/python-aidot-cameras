@@ -4,6 +4,33 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [1.0.0rc19]
+
+### Changed
+
+- **The serve now stamps its input by ARRIVAL rather than trusting the camera's
+  RTP clock** (`-use_wallclock_as_timestamps 1`; `AIDOT_SERVE_ARRIVAL_TS=0`
+  restores the old behaviour).
+
+  Instrumented at the bridge on an A001513: the camera emits a packet that is
+  the **next in sequence**, that nobody asked to be resent, and whose RTP
+  timestamp is **~1.7 s in the past** - on a 30-second period. Nothing is late,
+  reordered or lost, so no packet is worth dropping and no gate or flush
+  applies. The timestamps themselves arrive broken.
+
+  ffmpeg absorbs it by clamping, which is why live view is unaffected, but it is
+  what makes Home Assistant's recorder refuse a cold mux. For a live source,
+  arrival is the honest clock. Both media share one input, so this applies to
+  audio and video alike and their relative timing is preserved.
+
+  **This ships to be measured on the box, and that is deliberate.** The warning
+  is a muxer complaint and only the box runs `-c copy -f rtsp` into a live
+  go2rtc consumer; four local harnesses failed to reproduce it, so a local A/B
+  proved nothing either way. The on-box baseline is **6.1-6.8 warnings per
+  streaming-minute** on an A001513 under a controlled five-minute view. If the
+  treatment arm does not beat that, this should be reverted rather than kept on
+  the strength of the mechanism alone.
+
 ## [1.0.0rc18]
 
 ### Fixed

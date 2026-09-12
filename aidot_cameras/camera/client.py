@@ -655,6 +655,13 @@ def _should_abandon_keepalive(no_media_streak: int, *, is_battery: bool,
     return no_media_streak >= limit
 
 
+#: Stamp the serve input by arrival instead of trusting the camera's RTP clock.
+#: The A001513 measurably sends backward timestamps; see the builder comment.
+#: AIDOT_SERVE_ARRIVAL_TS=0 trusts the camera again.
+_SERVE_ARRIVAL_TS = os.environ.get(
+    "AIDOT_SERVE_ARRIVAL_TS", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def _build_sdes_serve_cmd(
     *,
     sdp_path: str,
@@ -804,6 +811,29 @@ def _build_sdes_serve_cmd(
         # reordering it thinks it needs - "max delay reached. need to consume
         # packet" - and the serve eventually dies, taking every viewer with it.
         # A brief artefact is a far better outcome than a dropped stream.
+        # Stamp by ARRIVAL rather than by the camera's clock.
+        #
+        # Instrumented on an A001513 2026-09-12: the camera emits a packet that
+        # is the NEXT IN SEQUENCE (seq_delta=1), that nobody asked to be resent
+        # (repeat_age=None, pending=0), and whose RTP timestamp is ~1.7 s in the
+        # PAST - on a 30-second period. Nothing is late, reordered or lost: the
+        # timestamps themselves arrive broken, so there is no packet worth
+        # dropping. ffmpeg absorbs it by clamping ("Non-monotonic DTS ...
+        # changing to"), which is fine for the live view but is what makes Home
+        # Assistant's recorder refuse a cold mux.
+        #
+        # For a live source, arrival IS the honest clock. Both media share one
+        # input - one SDP, one BUNDLEd 5-tuple - so this applies to audio and
+        # video alike and their relative timing is preserved.
+        #
+        # MEASURED ON THE BOX, not locally: four local harnesses could not
+        # reproduce the warning at all, because it is a muxer complaint and only
+        # the box runs `-c copy -f rtsp` into a live go2rtc consumer. The
+        # baseline there is 6.1-6.8 warnings per streaming-minute on an A001513.
+        #
+        # Input option: after -i it would not reach the input at all.
+        # AIDOT_SERVE_ARRIVAL_TS=0 restores the camera's own stamps.
+        *(["-use_wallclock_as_timestamps", "1"] if _SERVE_ARRIVAL_TS else []),
         "-fflags", "+nobuffer+genpts+discardcorrupt",
         "-analyzeduration", "2000000",
         "-probesize", "500000",
