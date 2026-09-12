@@ -23,13 +23,23 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   arrival is the honest clock. Both media share one input, so this applies to
   audio and video alike and their relative timing is preserved.
 
-  **This ships to be measured on the box, and that is deliberate.** The warning
-  is a muxer complaint and only the box runs `-c copy -f rtsp` into a live
-  go2rtc consumer; four local harnesses failed to reproduce it, so a local A/B
-  proved nothing either way. The on-box baseline is **6.1-6.8 warnings per
-  streaming-minute** on an A001513 under a controlled five-minute view. If the
-  treatment arm does not beat that, this should be reverted rather than kept on
-  the strength of the mechanism alone.
+  **MEASURED ON THE BOX, and it works.** The warning is a muxer complaint and
+  only the box runs `-c copy -f rtsp` into a live go2rtc consumer, so four local
+  harnesses failed to reproduce it and a local A/B proved nothing either way.
+  Controlled five-minute views on an A001513, warnings attributed per device:
+
+  | | before (rc18) | after (rc19) |
+  |---|---|---|
+  | backward-DTS warnings | 6.1 and 6.8 per streaming-minute | **0 and 0** |
+  | video vs audio start | 2.7-3.9 s apart | **both 0.000 - 0 ms skew** |
+  | decode errors | 3.8-4.9 /s | 4.7 /s (unchanged) |
+
+  Roughly 67-75 warnings were expected across the ~11 streaming-minutes after
+  the upgrade and none occurred; the last one anywhere is timestamped 21 minutes
+  BEFORE rc19 started running, while 3026 remain in the buffer - so the counter
+  demonstrably still counts. A/V alignment improved as a side effect: on the
+  camera's clock video started seconds after audio, and on arrival stamping they
+  start together.
 
 ## [1.0.0rc18]
 
