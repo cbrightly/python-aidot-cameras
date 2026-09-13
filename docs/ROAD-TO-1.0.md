@@ -1683,6 +1683,25 @@ listed under "Out of scope for 1.0.0" below. This is "documented as accepted"
 rather than "solved", and it says so here rather than in a summary line that
 rounds it up.
 
+#### 2026-09-13: `rc20` resets the clock, and the shape of the find matters
+
+`rc19` shipped arrival stamping and `rc20` fixes a defect it introduced: the
+`-t` bound stopped working, because a wallclock-stamped input does not compose
+with it. That is a fix to code believed good, so it resets the two-week clock.
+
+Two things about it are worth recording against item 1. First, it was found by
+review, not by a user or the live gate - the bounded path is snapshots and the
+drain, which no soak exercises. Second, it does not touch the live stream,
+which passes no bound. So it is a streaming-adjacent regression rather than a
+streaming-breaking one; it resets the clock on the strict reading and the
+strict reading is the one in force.
+
+`rc20` also lands three finds that are not regressions and do not bear on the
+clock: a sub-second bound truncated to zero (present since the bound existed),
+21027/21041 routed as refresh-first (present since the codes were added), and
+two private note filenames in comments (a public-surface defect, not a
+behaviour). Day zero is now the `rc20` release date.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /

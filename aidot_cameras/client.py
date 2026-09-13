@@ -519,19 +519,24 @@ class CameraClient(_UpstreamAidotClient):
         except RuntimeError:
             pass  # no running loop (e.g. called from sync test context)
 
-    async def async_ensure_token(self) -> bool:
+    async def async_ensure_token(self, force_login: bool = False) -> bool:
         """Force a fresh access token for camera/smarthome HTTP calls.
 
         Single-flight: concurrent callers (a burst of camera 21026s) share one
         in-flight refresh instead of each starting their own re-login.
+
+        ``force_login`` skips the refresh token and re-logs in outright, for the
+        codes that mean the session itself is void (21027/21041). Such a caller
+        does NOT join an in-flight refresh-only attempt: that attempt can only
+        deliver the token its own session already invalidated.
         """
         inflight = self._ensure_token_inflight
-        if inflight is not None and not inflight.done():
+        if inflight is not None and not inflight.done() and not force_login:
             return await inflight
         fut = asyncio.get_running_loop().create_future()
         self._ensure_token_inflight = fut
         try:
-            result = await self._do_ensure_token()
+            result = await self._do_ensure_token(force_login)
             fut.set_result(result)
             return result
         except Exception as exc:
@@ -547,8 +552,11 @@ class CameraClient(_UpstreamAidotClient):
             if fut.done() and not fut.cancelled():
                 fut.exception()
 
-    async def _do_ensure_token(self) -> bool:
+    async def _do_ensure_token(self, force_login: bool = False) -> bool:
         """Refresh the token (refresh-token first, then headless full re-login).
+
+        ``force_login`` skips straight to the re-login, for a session the server
+        has declared void - the refresh token died with it.
 
         On the typed shape both paths update ``user_info``, which is a
         dataclass, so neither one reaches ``login_info`` - the dict every device
@@ -559,7 +567,7 @@ class CameraClient(_UpstreamAidotClient):
         run and reports whether a token is now in hand.
         """
         try:
-            if account_refresh_token(self):
+            if not force_login and account_refresh_token(self):
                 if await api_refresh_token(self) is not None:
                     self._reschedule_after_refresh()
                     return True

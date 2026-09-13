@@ -36,7 +36,10 @@ class _Client:
     def _is_auth_error(self, body):
         return isinstance(body, dict) and body.get("code") == 401
 
-    async def _async_refresh_auth_token(self):
+    async def _async_refresh_auth_token(self, data=None):
+        # Mirrors the real signature: the body that failed is handed back so the
+        # recovery can tell an expired token (21026) from a void session
+        # (21027/21041).
         self.refreshed = True
         return True
 

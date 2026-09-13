@@ -4,6 +4,39 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [1.0.0rc20]
+
+### Fixed
+
+- **A `max_seconds` bound is honoured again.** `1.0.0rc19` introduced arrival
+  stamping (`-use_wallclock_as_timestamps 1`), and that input option does not
+  compose with `-t`: the stamps become wall-clock epoch values and the bound is
+  then measured against a timeline that no longer starts near zero. Measured on
+  ffmpeg 8.1.2 a 3 s bound produced an unusable 262-byte file; on 9.0.1 it
+  overran to end-of-input instead. Which way it breaks depends on the ffmpeg
+  build. Moving `-t` to the input side does not help - both placements fail.
+
+  The bound is only ever asked for by a snapshot or the `-f null` drain, never
+  the live stream, so a bounded run now simply gives the flag up. The live serve
+  keeps stamping by arrival; snapshots are bounded again.
+
+- **A sub-second bound no longer becomes `-t 0`.** The bound was built with
+  `int()`, so `max_seconds=0.5` asked ffmpeg for no output at all.
+
+- **A void session goes straight to a full login.** Error codes 21027 and 21041
+  mean the session itself is finished, and the refresh token with it - but they
+  were routed exactly like 21026 (expired access token): refresh first, and a
+  full re-login only if that refresh *failed*. If the refresh endpoint instead
+  handed back a token the server then refused, every call site retried once
+  with it and stopped, and nothing re-logged in. 21026 still refreshes;
+  21027/21041 now re-login directly. `async_ensure_token(force_login=True)` is
+  the new entry point, and a caller's own refresh callback that takes no
+  argument keeps working.
+
+- **Two comments cited private working-note filenames.** Rewritten to carry the
+  fact without the reference, and a test now guards the packaged module and the
+  repo's prose against it.
+
 ## [1.0.0rc19]
 
 ### Changed

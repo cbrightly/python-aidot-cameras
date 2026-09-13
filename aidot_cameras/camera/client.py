@@ -1,5 +1,6 @@
 """Camera / WebRTC / SDES extensions, layered additively over the core DeviceClient."""
 
+import inspect
 import json
 import logging
 from urllib.parse import urlparse
@@ -701,7 +702,12 @@ def _build_sdes_serve_cmd(
     reason as well as the sparse-battery one: it publishes G.711 otherwise, and
     fMP4/MSE cannot carry G.711, so browsers on the MSE path heard nothing.
     File recording (snapshots/diagnostics) is always -c copy."""
-    time_args = ["-t", str(int(max_seconds))] if max_seconds else []
+    # `int()` here truncated every sub-second bound to `-t 0`, which asks ffmpeg
+    # for no output at all. Keep whole seconds whole so the common case stays
+    # readable, and let a fractional bound through as itself.
+    time_args = (
+        ["-t", "%g" % float(max_seconds)] if max_seconds else []
+    )
 
     if rtsp_push_url:
         _warn_lan_serve(_serve_host(rtsp_push_url), context="sdes-serve")
@@ -833,7 +839,16 @@ def _build_sdes_serve_cmd(
         #
         # Input option: after -i it would not reach the input at all.
         # AIDOT_SERVE_ARRIVAL_TS=0 restores the camera's own stamps.
-        *(["-use_wallclock_as_timestamps", "1"] if _SERVE_ARRIVAL_TS else []),
+        #
+        # NEVER together with a `max_seconds` bound. Wallclock stamping rewrites
+        # PTS to epoch values and `-t` then measures against a timeline that no
+        # longer starts near zero; measured on ffmpeg 8.1.2 a 3 s bound produced
+        # an unusable 262-byte file, and on 9.0.1 it overran to end-of-input
+        # instead. Moving `-t` to the input side does not help - both placements
+        # fail. Only a bounded run gives this up, and a bounded run is a
+        # snapshot or the `-f null` drain, never the live stream.
+        *(["-use_wallclock_as_timestamps", "1"]
+          if _SERVE_ARRIVAL_TS and not max_seconds else []),
         "-fflags", "+nobuffer+genpts+discardcorrupt",
         "-analyzeduration", "2000000",
         "-probesize", "500000",
@@ -1335,6 +1350,18 @@ def _wake_plan(*, is_battery: bool, now: float,
     return _WakePlan(True, WAKE_SETTLE_S)
 
 
+def _cb_takes_force_login(cb: Any) -> bool:
+    """Can this token-refresh callback be asked for a full login?
+
+    Ours can; a callback set by an external consumer of this library may take no
+    argument at all, and calling it with one would raise where it used to work.
+    """
+    try:
+        return "force_login" in inspect.signature(cb).parameters
+    except (TypeError, ValueError):  # builtins and C callables have no signature
+        return False
+
+
 class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesOpenMixin):
     """All camera/streaming methods, mixed into DeviceClient via inheritance."""
 
@@ -1826,8 +1853,30 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             return True
         return "login again" in str(data.get("desc", "")).lower()
 
-    async def _async_refresh_auth_token(self) -> bool:
-        """Refresh the access token via the AidotClient callback (in place)."""
+    @staticmethod
+    def _auth_error_needs_full_login(data: Any) -> bool:
+        """True if the SESSION is void, not merely the access token.
+
+        21026 is an expired access token and the refresh token fixes it. 21027
+        and 21041 mean the session is finished and the refresh token with it, so
+        a `/users/refreshToken` round trip is spent for nothing - and if the
+        endpoint hands back a token the server then refuses, the retry-once
+        call sites never reach the full re-login that would actually recover.
+
+        The desc-only "login again" match is deliberately NOT fatal: it carries
+        no code, so it cannot claim which of the two this is.
+        """
+        if not isinstance(data, dict):
+            return False
+        return data.get("code") in (21027, 21041, "21027", "21041")
+
+    async def _async_refresh_auth_token(self, data: Any = None) -> bool:
+        """Refresh the access token via the AidotClient callback (in place).
+
+        ``data`` is the response body that triggered this, so the recovery can
+        match the code: a void session asks for a full login instead of a
+        refresh. Callers that pass nothing keep the refresh-first behaviour.
+        """
         cb = self._token_refresh_cb
         if cb is None:
             return False
@@ -1839,7 +1888,12 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         self._ice_config_expiry = 0.0
         self._cached_device_user_info = None
         self._device_user_info_expiry = 0.0
+        # External consumers set their own callback and it may take no argument,
+        # so ask for the full login only when the callback can hear the request.
+        full_login = self._auth_error_needs_full_login(data)
         try:
+            if full_login and _cb_takes_force_login(cb):
+                return bool(await cb(force_login=True))
             return bool(await cb())
         except Exception as exc:
             _LOGGER.debug("token refresh failed for %s: %s", self.device_id, exc)
@@ -2007,7 +2061,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
         try:
             body = await _fetch()
-            if self._is_auth_error(body) and await self._async_refresh_auth_token():
+            if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
                 body = await _fetch()  # retry once with the refreshed token
 
             data = body.get("data") or {}
@@ -2558,11 +2612,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     await pm.request(publish_items=_wake_items,
                                      subscribe_topics=[], timeout=2.0)
                 else:
-                    # The SAME registered client id, never a variant: a second
-                    # id on this account evicts the live session
-                    # (project_aidot_mqtt_query_traps). Safe because the wake
-                    # session is awaited to completion before the command
-                    # session opens - they never overlap.
+                    # The SAME registered client id, never a variant: the broker
+                    # allows one session per account, so a second id evicts the
+                    # live one. Safe because the wake session is awaited to
+                    # completion before the command session opens - they never
+                    # overlap.
                     await _mqtt_session_with_status(
                         mqtt_url, mqtt_user, mqtt_pwd, client_id,
                         subscribe_topics=[], publish_items=_wake_items,
@@ -3280,7 +3334,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             data = await _fetch()
             # The auth check reads a dict; a list is already a success here.
             if isinstance(data, dict):
-                if self._is_auth_error(data) and await self._async_refresh_auth_token():
+                if self._is_auth_error(data) and await self._async_refresh_auth_token(data):
                     data = await _fetch()
             if isinstance(data, dict):
                 # An envelope means an error, since success is a bare array.
@@ -3354,7 +3408,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
         try:
             body = await _fetch()
-            if self._is_auth_error(body) and await self._async_refresh_auth_token():
+            if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
                 body = await _fetch()  # retry once with the refreshed token
 
             _LOGGER.debug("eventRecordingList raw response for %s: %s", self.device_id, body)
@@ -3423,7 +3477,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
         try:
             body = await _fetch()
-            if self._is_auth_error(body) and await self._async_refresh_auth_token():
+            if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
                 body = await _fetch()
             if not isinstance(body, dict) or body.get("code") != 200:
                 _LOGGER.debug(
@@ -3471,7 +3525,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
         try:
             body = await _fetch()
-            if self._is_auth_error(body) and await self._async_refresh_auth_token():
+            if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
                 body = await _fetch()
             if not isinstance(body, dict) or body.get("code") != 200:
                 _LOGGER.debug(
@@ -3526,7 +3580,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
         try:
             body = await _fetch()
-            if self._is_auth_error(body) and await self._async_refresh_auth_token():
+            if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
                 body = await _fetch()  # retry once with the refreshed token
 
             _LOGGER.debug("getEventVideoUrl raw for %s uuid=%s: %s", self.device_id, event_uuid, body)
@@ -3606,7 +3660,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
         try:
             body = await _fetch()
-            if self._is_auth_error(body) and await self._async_refresh_auth_token():
+            if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
                 body = await _fetch()  # retry once with the refreshed token
 
             _LOGGER.debug("thumbnail eventRecordingList for %s: %s", self.device_id, body)

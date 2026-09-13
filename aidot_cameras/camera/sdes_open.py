@@ -647,9 +647,14 @@ def _video_repeat_too_late(bridge_fn, seq: int, now: float,
     47 packets/s, `max_behind=200` is a 4.3 s prune horizon and `max_gap=250`
     needs 5.3 s of loss to reset, so every one of those jumps falls inside the
     band this guard can see. The late packets are therefore **not
-    retransmissions the tracker ever asked for**, and what they actually are is
-    still unknown - see project_aidot_dts_bursts_are_the_serve_seam. Do not
-    assume this guard covers the DTS bursts; it does not.
+    retransmissions the tracker ever asked for**.
+
+    What they are was settled afterwards: the camera itself emits a packet that
+    is next in sequence, that nobody asked to be resent, and whose RTP timestamp
+    is roughly 1.7 s in the past, on a ~30 s period. No packet is late, so there
+    was never one for this guard to drop - the fix was to stop believing the
+    camera's clock and stamp the serve input by arrival instead. Do not assume
+    this guard covers backward timestamps; it does not, and it never did.
     """
     tracker = getattr(bridge_fn, "_nack_tracker", None)
     if tracker is None:
