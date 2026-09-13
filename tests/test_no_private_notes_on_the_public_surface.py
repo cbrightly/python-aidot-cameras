@@ -17,7 +17,6 @@ file would match itself and the guard could never pass.
 """
 import os
 import re
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -33,23 +32,31 @@ NOTE_NAME = re.compile(r"(?:%s)_[a-z]+_[a-z_]{3,}" % _KINDS)
 TEXT_SUFFIXES = (".py", ".md", ".toml", ".cfg", ".txt", ".yaml", ".yml", ".rst")
 
 
-def _tracked_text_files():
-    out = subprocess.run(
-        ["git", "-C", REPO, "ls-files"], capture_output=True, text=True, check=True
-    ).stdout.split("\n")
-    for rel in out:
-        if not rel or not rel.endswith(TEXT_SUFFIXES):
-            continue
-        if os.path.basename(rel) == SELF:
-            continue  # the guard names the shape it forbids
-        if rel.startswith("tests/"):
-            continue  # see the module docstring
-        yield rel
+# Walked from the filesystem rather than `git ls-files`: CI runs the unit tier
+# inside an Alpine container that does not own the checkout, and git refuses to
+# read a repository owned by another user (exit 128, "dubious ownership"). The
+# scan does not need git - it needs the files a user reads, which are on disk.
+SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache",
+             ".mypy_cache", ".ruff_cache", "build", "dist"}
+
+
+def _text_files():
+    for root, dirs, files in os.walk(REPO):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.endswith(".egg-info"))
+        for fn in sorted(files):
+            if not fn.endswith(TEXT_SUFFIXES):
+                continue
+            rel = os.path.relpath(os.path.join(root, fn), REPO)
+            if fn == SELF:
+                continue  # the guard names the shape it forbids
+            if rel.startswith("tests" + os.sep):
+                continue  # see the module docstring
+            yield rel
 
 
 def test_no_working_note_filenames_anywhere_in_the_repo():
     offenders = []
-    for rel in _tracked_text_files():
+    for rel in _text_files():
         path = os.path.join(REPO, rel)
         try:
             text = open(path, encoding="utf-8", errors="replace").read()
