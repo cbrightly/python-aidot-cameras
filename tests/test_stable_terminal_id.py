@@ -17,6 +17,7 @@ That is worth fixing on its own merits whatever it turns out to do to the 80.2 s
 cliff: a client that reconnects every two minutes should look like one client
 reconnecting, not like hundreds of different ones.
 """
+
 import re
 
 from aidot_cameras.camera.client import CameraMixin, _stable_terminal_id

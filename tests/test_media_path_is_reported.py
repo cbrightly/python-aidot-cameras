@@ -12,6 +12,7 @@ TURN, which is where the relayed A001513's media comes from, and a Data
 Indication through ours); anything else is direct.  The TURN address set is
 per-session, from the ICE entries the open actually used.
 """
+
 from aidot_cameras.camera.sdes_open import _classify_media_path
 
 
@@ -41,9 +42,11 @@ def test_media_stats_carries_the_path():
 
     path_ref = [None]
     import inspect
+
     sig = inspect.signature(SdesSession.__init__)
     assert "media_path" in sig.parameters, (
-        "SdesSession must accept the media_path shared ref the bridge stamps")
+        "SdesSession must accept the media_path shared ref the bridge stamps"
+    )
 
     # Snapshot logic without a live ffmpeg: build the instance bare.
     s = SdesSession.__new__(SdesSession)
@@ -62,13 +65,18 @@ def test_the_bridge_stamps_it_where_the_media_address_is_captured():
     """Source guard: the bridge learns the source once, at first media."""
     import pathlib
 
-    src = (pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras"
-           / "camera" / "sdes_open.py").read_text()
-    i = src.index("_bridge_fn._cam_srtp_src  = _bsrc")
-    window = src[i - 2000:i + 600]
+    src = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "aidot_cameras"
+        / "camera"
+        / "sdes_open.py"
+    ).read_text()
+    i = src.index("_bridge_fn._cam_srtp_src = _bsrc")
+    window = src[i - 2000 : i + 600]
     assert "_classify_media_path(" in window, (
         "the media path must be classified at the same site that captures the "
-        "camera's media address - later sites race the first stats read")
+        "camera's media address - later sites race the first stats read"
+    )
     assert "_media_path[0]" in window
 
 
@@ -79,10 +87,14 @@ def test_turn_ips_come_from_the_uris_the_entries_actually_carry():
     # the b=AS receipt lesson was about.
     from aidot_cameras.camera.sdes_open import _turn_entry_ips
 
-    entries = [{"Uris": ["stun:203.0.113.9:3478",
-                         "turn:203.0.113.9:5349?transport=udp"],
-                "Username": "u", "Password": "p"},
-               {"Uris": ["turn:198.51.100.4:3478"]}]
+    entries = [
+        {
+            "Uris": ["stun:203.0.113.9:3478", "turn:203.0.113.9:5349?transport=udp"],
+            "Username": "u",
+            "Password": "p",
+        },
+        {"Uris": ["turn:198.51.100.4:3478"]},
+    ]
     assert _turn_entry_ips(entries) == {"203.0.113.9", "198.51.100.4"}
     assert _turn_entry_ips([]) == set()
     assert _turn_entry_ips(None) == set()

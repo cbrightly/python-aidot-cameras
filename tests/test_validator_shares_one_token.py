@@ -27,6 +27,7 @@ Unset `AIDOT_TOKEN_FILE` must behave exactly as before -- the release gate runs
 that way, and a change to how it authenticates is not a change worth making
 blind.
 """
+
 import os
 import pathlib
 import re
@@ -43,7 +44,8 @@ def test_the_validator_authenticates_through_the_shared_helper():
     assert re.search(r"from aidot_cameras\.cloud_auth import .*_make_client", src), (
         "live_validate must authenticate through aidot_cameras.cloud_auth so a "
         "shared AIDOT_TOKEN_FILE is honoured; its own async_post_login() call "
-        "invalidates any token another process is holding")
+        "invalidates any token another process is holding"
+    )
     assert "_make_client(" in src
 
 
@@ -88,10 +90,14 @@ def test_a_token_file_is_used_instead_of_logging_in_again(tmp_path, monkeypatch)
     client = asyncio.run(cloud_auth._make_client(session=object()))
 
     assert logins == [], "a stored token must not be followed by a fresh login"
-    assert client.kw.get("token") == {"accessToken": "t", "refreshToken": "r",
-                                      "id": "u"}
+    assert client.kw.get("token") == {
+        "accessToken": "t",
+        "refreshToken": "r",
+        "id": "u",
+    }
     assert getattr(client, "cb", None) is not None, (
-        "a rotation must be written back, or the next holder finds a dead token")
+        "a rotation must be written back, or the next holder finds a dead token"
+    )
 
 
 def test_no_token_file_still_logs_in_with_the_password(tmp_path, monkeypatch):
@@ -133,10 +139,11 @@ def test_credentials_travel_as_parameters_not_environment():
     module-level country default was bound at import time.
     """
     src = _source()
-    assert "os.environ.setdefault(\"AIDOT_USERNAME\"" not in src
-    assert "os.environ.setdefault(\"AIDOT_PASSWORD\"" not in src
+    assert 'os.environ.setdefault("AIDOT_USERNAME"' not in src
+    assert 'os.environ.setdefault("AIDOT_PASSWORD"' not in src
     assert re.search(r"_make_client\(\s*\n?\s*http,\s*\n\s*username=", src), (
-        "credentials must be passed to _make_client as parameters")
+        "credentials must be passed to _make_client as parameters"
+    )
 
 
 def test_an_explicit_country_beats_the_environment(tmp_path, monkeypatch):
@@ -161,8 +168,9 @@ def test_an_explicit_country_beats_the_environment(tmp_path, monkeypatch):
             pass
 
     monkeypatch.setattr(cloud_auth, "AidotClient", _Client)
-    asyncio.run(cloud_auth._make_client(object(), username="u", password="p",
-                                        country="DE"))
+    asyncio.run(
+        cloud_auth._make_client(object(), username="u", password="p", country="DE")
+    )
     assert captured["country_code"] == "DE"
 
 

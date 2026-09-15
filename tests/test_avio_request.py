@@ -15,6 +15,7 @@ Two things are deliberate here:
     faster than the sending call returns, and a waiter registered afterwards
     would miss the reply and report "no answer" from a camera that answered.
 """
+
 import asyncio
 import struct
 from types import SimpleNamespace
@@ -59,9 +60,7 @@ def _sdes_session(send):
 
 async def _ask(session, **kwargs):
     """Start a request, let it send and settle into its wait, hand back the task."""
-    task = asyncio.create_task(
-        session.async_avio_request(SETSTREAMCTRL, **kwargs)
-    )
+    task = asyncio.create_task(session.async_avio_request(SETSTREAMCTRL, **kwargs))
     await asyncio.sleep(0.01)
     return task
 
@@ -83,7 +82,7 @@ async def test_a_dtls_request_returns_the_cameras_reply():
     # The command really went out, and unchanged: same header layout, same body.
     assert len(sent) == 1
     assert struct.unpack_from(_HDR, sent[0])[1] == SETSTREAMCTRL
-    assert sent[0][struct.calcsize(_HDR):] == body
+    assert sent[0][struct.calcsize(_HDR) :] == body
 
 
 async def test_an_sdes_request_returns_the_cameras_reply():

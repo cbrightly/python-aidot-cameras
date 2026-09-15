@@ -27,8 +27,7 @@ LOGGER_NAME = "test_status_and_trace_channels.fake"
 
 
 def _records(caplog, level):
-    return [r for r in caplog.records
-            if r.name == LOGGER_NAME and r.levelno == level]
+    return [r for r in caplog.records if r.name == LOGGER_NAME and r.levelno == level]
 
 
 @pytest.fixture

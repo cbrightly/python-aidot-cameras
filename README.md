@@ -319,8 +319,8 @@ raised. For those, take the media as a file or a stream instead:
 
 ```python
 session = await device_client.async_open_webrtc_stream(
-    output_path="/tmp/live.ts",                      # record, or
-    rtsp_push_url="rtsp://127.0.0.1:8554/cam",       # push to go2rtc
+    output_path="/tmp/live.ts",  # record, or
+    rtsp_push_url="rtsp://127.0.0.1:8554/cam",  # push to go2rtc
 )
 ```
 
@@ -328,7 +328,9 @@ Two-way (push-to-talk) audio:
 
 ```python
 session = await device_client.async_open_webrtc_stream(..., talk=True)
-await session.async_start_talk(pcm_provider)   # provider() -> 320B s16le PCM (20ms @ 8kHz), or None
+await session.async_start_talk(
+    pcm_provider
+)  # provider() -> 320B s16le PCM (20ms @ 8kHz), or None
 # ... speak ...
 await session.async_stop_talk()
 ```
@@ -344,9 +346,9 @@ writes it then ignores.
 
 ```python
 await device_client.async_set_motion_detection(True)
-await device_client.async_set_night_vision("auto")   # auto | on | off
+await device_client.async_set_night_vision("auto")  # auto | on | off
 await device_client.async_set_speaker_volume(50)
-await device_client.async_reboot()                    # see below
+await device_client.async_reboot()  # see below
 ```
 
 ### Reboot
@@ -394,9 +396,9 @@ never claimed. A write refuses outright when there is no current list to echo.
 ### WiFi and SD card
 
 ```python
-await device_client.async_get_wifi_info()      # {'ssid': ..., 'rssi': 63}
-await device_client.async_get_sd_card_info()   # {'present': True, 'total': 29838,
-                                               #  'used': 28848, 'raw': [...]}
+await device_client.async_get_wifi_info()  # {'ssid': ..., 'rssi': 63}
+await device_client.async_get_sd_card_info()  # {'present': True, 'total': 29838,
+#  'used': 28848, 'raw': [...]}
 ```
 
 Only confirmed fields are named. `SDcardBaseInfo` answers positionally and its

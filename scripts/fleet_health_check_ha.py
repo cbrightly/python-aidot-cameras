@@ -18,6 +18,7 @@ Also appends one dated line per run to /config/fleet_health.log so the result is
 visible without waiting for something to go wrong, and so a run that did NOT
 happen is visible as a gap. Trimmed to the last 90 lines.
 """
+
 import collections
 import datetime
 import os
@@ -27,10 +28,10 @@ import urllib.request
 
 LOGBOOK = "/config/fleet_health.log"
 STATE_JSON = "/config/fleet_health.json"
-LOGBOOK_KEEP = 90          # about three months of daily lines
+LOGBOOK_KEEP = 90  # about three months of daily lines
 
-TS = re.compile(r'^(2026-\d\d-\d\d \d\d:\d\d:\d\d)')
-ANSI = re.compile(r'\x1b\[[0-9;]*m')
+TS = re.compile(r"^(2026-\d\d-\d\d \d\d:\d\d:\d\d)")
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
 OPENS_ALARM = 60
 FAILS_ALARM = 5
 # Every config-entry reload tears down EVERY camera session: SDES publishers die,
@@ -52,7 +53,8 @@ def fetch(lines=120000):
         return None
     req = urllib.request.Request(
         f"http://supervisor/core/logs?lines={lines}",
-        headers={"Authorization": f"Bearer {tok}"})
+        headers={"Authorization": f"Bearer {tok}"},
+    )
     with urllib.request.urlopen(req, timeout=120) as r:
         return r.read().decode("utf-8", "replace")
 
@@ -66,15 +68,16 @@ def publish(status, headline, detail="", heading=""):
     the 255-character state limit as soon as several hours were listed.
     """
     import json
+
     payload = {
-        "status": status,                       # healthy | churning | unknown
+        "status": status,  # healthy | churning | unknown
         # The card's title. It lives here, not in the dashboard template, because
         # only this code knows WHICH alarm fired - a fixed "cameras reconnecting
         # too often" heading actively misdescribed a run whose real trigger was
         # the integration being reloaded.
         "heading": heading or "Camera health",
-        "headline": headline,                   # one short human line
-        "detail": detail[:900],                 # the full report, for the card
+        "headline": headline,  # one short human line
+        "detail": detail[:900],  # the full report, for the card
         "checked_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
     try:
@@ -92,14 +95,14 @@ def record(line):
     try:
         try:
             with open(LOGBOOK) as fh:
-                keep = fh.read().splitlines()[-(LOGBOOK_KEEP - 1):]
+                keep = fh.read().splitlines()[-(LOGBOOK_KEEP - 1) :]
         except FileNotFoundError:
             keep = []
         keep.append(f"{stamp}  {line}")
         with open(LOGBOOK, "w") as fh:
             fh.write("\n".join(keep) + "\n")
     except OSError:
-        pass                                    # never fail the check over this
+        pass  # never fail the check over this
 
 
 def main():
@@ -107,15 +110,25 @@ def main():
         raw = fetch()
     except Exception as exc:
         msg = f"UNKNOWN - could not fetch the log: {exc}"
-        print(msg); record(msg)
-        publish("unknown", "Could not read the log", str(exc),
-                heading="Camera health unknown")
+        print(msg)
+        record(msg)
+        publish(
+            "unknown",
+            "Could not read the log",
+            str(exc),
+            heading="Camera health unknown",
+        )
         return 2
     if not raw:
         msg = "UNKNOWN - no SUPERVISOR_TOKEN"
-        print(msg); record(msg)
-        publish("unknown", "No supervisor token", "The check could not authenticate.",
-                heading="Camera health unknown")
+        print(msg)
+        record(msg)
+        publish(
+            "unknown",
+            "No supervisor token",
+            "The check could not authenticate.",
+            heading="Camera health unknown",
+        )
         return 2
 
     cur = None
@@ -127,62 +140,74 @@ def main():
         if cur is None:
             continue
         hour = cur[:13]
-        if 'webrtcReq sent' in ln:
-            per[hour]['opens'] += 1
-        elif 'DTLS serve: open failed' in ln:
-            per[hour]['fails'] += 1
-        elif 'delivered no video in' in ln:
-            per[hour]['novideo'] += 1
-        if 'CameraClient: stored token loaded' in ln:
+        if "webrtcReq sent" in ln:
+            per[hour]["opens"] += 1
+        elif "DTLS serve: open failed" in ln:
+            per[hour]["fails"] += 1
+        elif "delivered no video in" in ln:
+            per[hour]["novideo"] += 1
+        if "CameraClient: stored token loaded" in ln:
             # A fresh CameraClient means async_setup_entry ran, i.e. the config
             # entry was (re)loaded. The only legitimate sources are a restart or
             # a deliberate reload.
-            per[hour]['reloads'] += 1
+            per[hour]["reloads"] += 1
 
     if not per:
         msg = "UNKNOWN - no serve-loop activity, cannot tell healthy from idle"
-        print(msg); record(msg)
-        publish("unknown", "No camera activity to judge",
-                "Nothing was streaming, so this is not the same as healthy.",
-                heading="Camera health unknown")
+        print(msg)
+        record(msg)
+        publish(
+            "unknown",
+            "No camera activity to judge",
+            "Nothing was streaming, so this is not the same as healthy.",
+            heading="Camera health unknown",
+        )
         return 2
 
     hours = sorted(per)
-    hours = hours[:-1] or hours          # drop the partial trailing hour
-    bad = [h for h in hours
-           if per[h]['opens'] > OPENS_ALARM
-           or per[h]['fails'] > FAILS_ALARM
-           or per[h]['novideo'] > NOVIDEO_ALARM
-           or per[h]['reloads'] >= RELOADS_ALARM]
-    o = [per[h]['opens'] for h in hours]
-    f = sum(per[h]['fails'] for h in hours)
+    hours = hours[:-1] or hours  # drop the partial trailing hour
+    bad = [
+        h
+        for h in hours
+        if per[h]["opens"] > OPENS_ALARM
+        or per[h]["fails"] > FAILS_ALARM
+        or per[h]["novideo"] > NOVIDEO_ALARM
+        or per[h]["reloads"] >= RELOADS_ALARM
+    ]
+    o = [per[h]["opens"] for h in hours]
+    f = sum(per[h]["fails"] for h in hours)
     if bad:
-        print(f"CHURN RETURNED in {len(bad)} of {len(hours)} hours: "
-              + ", ".join(bad))
+        print(f"CHURN RETURNED in {len(bad)} of {len(hours)} hours: " + ", ".join(bad))
         for h in bad:
-            print(f"  {h}  opens={per[h]['opens']} fails={per[h]['fails']}"
-                  f" novideo={per[h]['novideo']} reloads={per[h]['reloads']}")
-        print("Next: set aidot_cameras.camera.webrtc_open=debug, let it run, then"
-              " use find_degraded_window.py for the answer-latency table"
-              " (~0.42s healthy, ~11.7s degraded). Do not judge on one short"
-              " window - the defect is bursty.")
-        worst = max(per[h]['opens'] for h in bad)
-        nf = sum(per[h]['fails'] for h in bad)
-        nv = sum(per[h]['novideo'] for h in bad)
-        nr = sum(per[h]['reloads'] for h in bad)
+            print(
+                f"  {h}  opens={per[h]['opens']} fails={per[h]['fails']}"
+                f" novideo={per[h]['novideo']} reloads={per[h]['reloads']}"
+            )
+        print(
+            "Next: set aidot_cameras.camera.webrtc_open=debug, let it run, then"
+            " use find_degraded_window.py for the answer-latency table"
+            " (~0.42s healthy, ~11.7s degraded). Do not judge on one short"
+            " window - the defect is bursty."
+        )
+        worst = max(per[h]["opens"] for h in bad)
+        nf = sum(per[h]["fails"] for h in bad)
+        nv = sum(per[h]["novideo"] for h in bad)
+        nr = sum(per[h]["reloads"] for h in bad)
         # Name the trigger. Saying "reconnects" when the real signal was repeated
         # reloads sent the last investigation down the wrong path for a day.
         why = []
-        if any(per[h]['reloads'] >= RELOADS_ALARM for h in bad):
-            why.append(f"the integration was RELOADED {nr}x (every reload kills "
-                       f"all camera sessions - look for anything calling "
-                       f"/api/config/config_entries/entry/<id>/reload, including "
-                       f"leftover scripts)")
-        if any(per[h]['opens'] > OPENS_ALARM for h in bad):
+        if any(per[h]["reloads"] >= RELOADS_ALARM for h in bad):
+            why.append(
+                f"the integration was RELOADED {nr}x (every reload kills "
+                f"all camera sessions - look for anything calling "
+                f"/api/config/config_entries/entry/<id>/reload, including "
+                f"leftover scripts)"
+            )
+        if any(per[h]["opens"] > OPENS_ALARM for h in bad):
             why.append(f"up to {worst} reconnects/hour")
-        if any(per[h]['fails'] > FAILS_ALARM for h in bad):
+        if any(per[h]["fails"] > FAILS_ALARM for h in bad):
             why.append(f"{nf} failed opens")
-        if any(per[h]['novideo'] > NOVIDEO_ALARM for h in bad):
+        if any(per[h]["novideo"] > NOVIDEO_ALARM for h in bad):
             why.append(f"{nv} opens delivered no picture")
         # Trailing run of clean hours. A window that CONTAINS an incident reads
         # identically to one that is still in it, which makes a resolved problem
@@ -193,34 +218,48 @@ def main():
             if h in bad_set:
                 break
             recent_clean += 1
-        tail = (f" - last {recent_clean} hour{'s' if recent_clean != 1 else ''} clean"
-                if recent_clean else "")
-        resolved = (f"The most recent {recent_clean} hour"
-                    f"{'s are' if recent_clean != 1 else ' is'} clean, so this "
-                    f"looks resolved rather than ongoing. " if recent_clean >= 2 else "")
+        tail = (
+            f" - last {recent_clean} hour{'s' if recent_clean != 1 else ''} clean"
+            if recent_clean
+            else ""
+        )
+        resolved = (
+            f"The most recent {recent_clean} hour"
+            f"{'s are' if recent_clean != 1 else ' is'} clean, so this "
+            f"looks resolved rather than ongoing. "
+            if recent_clean >= 2
+            else ""
+        )
         record(f"CHURNING - {len(bad)}/{len(hours)} hours{tail}; " + "; ".join(why))
-        reload_driven = any(per[h]['reloads'] >= RELOADS_ALARM for h in bad)
-        heading = ("Integration keeps reloading" if reload_driven
-                   else "Cameras reconnecting too often")
+        reload_driven = any(per[h]["reloads"] >= RELOADS_ALARM for h in bad)
+        heading = (
+            "Integration keeps reloading"
+            if reload_driven
+            else "Cameras reconnecting too often"
+        )
         if recent_clean >= 2:
             heading += " (looks resolved)"
-        publish("churning",
-                f"{len(bad)} of {len(hours)} hours affected{tail}",
-                resolved + "Trigger: " + "; ".join(why) + ". "
-                f"Hours: {', '.join(h[11:] + ':00' for h in bad)}.",
-                heading=heading)
+        publish(
+            "churning",
+            f"{len(bad)} of {len(hours)} hours affected{tail}",
+            resolved + "Trigger: " + "; ".join(why) + ". "
+            f"Hours: {', '.join(h[11:] + ':00' for h in bad)}.",
+            heading=heading,
+        )
         return 1
-    msg = (f"healthy - {len(hours)} hours, opens/h {min(o)}-{max(o)}, "
-           f"{f} open failures")
-    print(msg); record(msg)
-    publish("healthy",
-            f"All {len(hours)} hours normal",
-            f"{min(o)}-{max(o)} reconnects/hour, {f} failed opens, "
-            f"{sum(per[h]['novideo'] for h in hours)} blank opens, "
-            f"{sum(per[h]['reloads'] for h in hours)} integration reloads. "
-            f"Alarms: >{OPENS_ALARM} reconnects/h, >{FAILS_ALARM} failures, "
-            f">{NOVIDEO_ALARM} blank, or {RELOADS_ALARM}+ reloads in an hour.",
-            heading="Cameras streaming normally")
+    msg = f"healthy - {len(hours)} hours, opens/h {min(o)}-{max(o)}, {f} open failures"
+    print(msg)
+    record(msg)
+    publish(
+        "healthy",
+        f"All {len(hours)} hours normal",
+        f"{min(o)}-{max(o)} reconnects/hour, {f} failed opens, "
+        f"{sum(per[h]['novideo'] for h in hours)} blank opens, "
+        f"{sum(per[h]['reloads'] for h in hours)} integration reloads. "
+        f"Alarms: >{OPENS_ALARM} reconnects/h, >{FAILS_ALARM} failures, "
+        f">{NOVIDEO_ALARM} blank, or {RELOADS_ALARM}+ reloads in an hour.",
+        heading="Cameras streaming normally",
+    )
     return 0
 
 

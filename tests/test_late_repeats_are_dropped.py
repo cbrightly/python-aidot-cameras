@@ -16,13 +16,14 @@ packet is pure cost by the time it lands.
 The tracker already knows when each loss was first noticed, so it can say how
 old an arriving repeat is; the bridge drops the ones past the budget.
 """
+
 from aidot_cameras.camera.protocol import NackTracker
 
 
 def test_a_repeat_that_arrives_promptly_is_not_late():
     t = NackTracker()
     t.observe(1000, now=0.0)
-    t.observe(1003, now=0.0)          # 1001, 1002 now missing
+    t.observe(1003, now=0.0)  # 1001, 1002 now missing
     assert t.repeat_age(1001, now=0.05) == 0.05
 
 
@@ -52,7 +53,7 @@ def test_the_age_is_measured_from_when_the_loss_was_FIRST_noticed():
     t = NackTracker(retry_after=0.1)
     t.observe(1000, now=0.0)
     t.observe(1003, now=0.0)
-    t.observe(1004, now=0.2)          # a retry goes out here
+    t.observe(1004, now=0.2)  # a retry goes out here
     assert t.repeat_age(1001, now=0.3) == 0.3
 
 

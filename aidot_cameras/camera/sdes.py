@@ -28,7 +28,6 @@ _LOGGER = logging.getLogger(__name__)
 SDES_SPEAKER_ACK_TIMEOUT_S = SDES_SPEAKERSTART_DELAY + SPEAKER_ACK_TIMEOUT_S
 
 
-
 class SdesSession(AvioRequestMixin):
     """Active SDES-SRTP stream session managed by an ffmpeg subprocess.
 
@@ -49,7 +48,6 @@ class SdesSession(AvioRequestMixin):
         cmd_chan=None,
         talk_state=None,
         media_progress=None,
-
         ice_progress=None,
         media_counts=None,
         teardown_requested=None,
@@ -63,11 +61,11 @@ class SdesSession(AvioRequestMixin):
         # Which camera this session belongs to, for logging only.  Optional so
         # an existing caller that does not pass it still works; the logs then
         # read "?" exactly as they did before.
-        self._device_id  = device_id or "?"
-        self._proc       = proc
-        self._sdp_path   = sdp_path
+        self._device_id = device_id or "?"
+        self._proc = proc
+        self._sdp_path = sdp_path
         self._outgoing_q = outgoing_q
-        self._mqtt_fut   = mqtt_fut
+        self._mqtt_fut = mqtt_fut
         self._audio_sock = audio_sock
         self._video_sock = video_sock
         # Mutable one-element list shared with the bridge thread: [0] holds the
@@ -112,7 +110,7 @@ class SdesSession(AvioRequestMixin):
         )
         # Mutable one-element list shared with the bridge thread.  Bridge sets
         # [0] to a callable(cmd, payload) once the SCTP channel is up.
-        self._cmd_chan   = cmd_chan if cmd_chan is not None else [None]
+        self._cmd_chan = cmd_chan if cmd_chan is not None else [None]
         # Matches inbound AVIO replies to the commands that asked for them.
         # Created here, not lazily: the bridge thread dispatches into it.
         self._avio_responses = (
@@ -127,7 +125,7 @@ class SdesSession(AvioRequestMixin):
         # Shared talk state (dict) for outbound two-way audio, or None when the
         # session was not opened talk-capable (offer stayed recvonly).  Populated
         # by the bridge (camera audio addr) and by async_start_talk (provider).
-        self._talk_state  = talk_state
+        self._talk_state = talk_state
         self._talk_thread = None
 
     def _avio_cmd(self, cmd: int, payload: bytes = b"") -> bool:
@@ -189,6 +187,7 @@ class SdesSession(AvioRequestMixin):
         waiter = self._avio_responses.expect(851)
         if self._talk_thread is None or not self._talk_thread.is_alive():
             import threading
+
             self._talk_thread = threading.Thread(
                 target=_run_sdes_talk_pump, args=(self._talk_state,), daemon=True
             )
@@ -298,12 +297,10 @@ class SdesSession(AvioRequestMixin):
             return
         text = stderr_bytes.decode(errors="replace")
         expected_no_media = self.last_media_monotonic == 0.0 and (
-            "Output file is empty" in text
-            or "Could not find codec parameters" in text
+            "Output file is empty" in text or "Could not find codec parameters" in text
         )
         (_LOGGER.debug if expected_no_media else _LOGGER.warning)(
-            "camera %s: ffmpeg SDES stderr:\n%s",
-            getattr(self, "_device_id", "?"), text
+            "camera %s: ffmpeg SDES stderr:\n%s", getattr(self, "_device_id", "?"), text
         )
 
     @staticmethod
@@ -343,7 +340,7 @@ class SdesSession(AvioRequestMixin):
             self._talk_state["want_speaker"] = False
             self._talk_state["spk_eligible_ts"] = None
             if self._talk_state.get("speaker_on"):
-                for _ in range(40):                  # up to ~0.8s (> bridge select tick)
+                for _ in range(40):  # up to ~0.8s (> bridge select tick)
                     if not self._talk_state.get("speaker_on"):
                         break
                     await asyncio.sleep(0.02)
@@ -365,12 +362,17 @@ class SdesSession(AvioRequestMixin):
         if _abort is not None:
             try:
                 if _abort():
-                    _LOGGER.debug("camera %s: sent SCTP ABORT at teardown",
-                                  self._device_id)
+                    _LOGGER.debug(
+                        "camera %s: sent SCTP ABORT at teardown", self._device_id
+                    )
             except Exception:
                 # Never let closing politely stop us closing at all.
-                _LOGGER.debug("camera %s: swallowed exception in %s",
-                              self._device_id, 'stop', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    self._device_id,
+                    "stop",
+                    exc_info=True,
+                )
         # Flag this as a locally-initiated teardown BEFORE signalling ffmpeg, so
         # the bridge thread's observe loop never races a look at a stale False
         # if it polls the exit code immediately after terminate()/kill().
@@ -387,7 +389,7 @@ class SdesSession(AvioRequestMixin):
             try:
                 await _stop_loop.run_in_executor(None, lambda: self._proc.wait(5))
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
         # Read drained stderr in the executor with a hard timeout: proc.stderr.read()
         # blocks until EOF, which never arrives if the killed process is still a
         # zombie / stuck in uninterruptible I/O - doing it inline would hang the
@@ -399,32 +401,33 @@ class SdesSession(AvioRequestMixin):
                 _stop_loop.run_in_executor(None, self._proc.stderr.read),
                 timeout=2.0,
             )
-        except Exception:   # incl. asyncio.TimeoutError - never let teardown hang here
-            _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
+        except Exception:  # incl. asyncio.TimeoutError - never let teardown hang here
+            _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
             # On timeout the executor thread is still blocked in stderr.read() on
             # a wedged ffmpeg; close the pipe so that read returns instead of
             # pinning a default-pool thread for the life of the process.
             try:
                 self._proc.stderr.close()
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
         self._log_ffmpeg_stderr(stderr_bytes or self._drained_stderr_tail())
         import os
+
         try:
             os.unlink(self._sdp_path)
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
         for _sock in (self._audio_sock, self._video_sock):
             if _sock is not None:
                 try:
                     _sock.close()
                 except Exception:
-                    _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
+                    _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
         self._outgoing_q.put_nowait(None)
         try:
             await asyncio.wait_for(self._mqtt_fut, timeout=5.0)
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
 
 
 def _run_sdes_talk_pump(state: dict) -> None:
@@ -441,6 +444,7 @@ def _run_sdes_talk_pump(state: dict) -> None:
     import time as _t
     import struct as _st
     import base64 as _b64
+
     try:
         import pylibsrtp as _pls
     except Exception:
@@ -459,8 +463,12 @@ def _run_sdes_talk_pump(state: dict) -> None:
         # (speaker_on).  SPEAKERSTART/STOP are sent on the bridge thread to keep
         # all SCTP DATA on one thread; audio is plain SRTP on the media socket
         # (no shared SCTP state) so it is safe to send from here.
-        if (_provider is not None and _src is not None and _sock is not None
-                and state.get("speaker_on")):
+        if (
+            _provider is not None
+            and _src is not None
+            and _sock is not None
+            and state.get("speaker_on")
+        ):
             if _tx is None:
                 try:
                     _pol = _pls.Policy(
@@ -486,12 +494,22 @@ def _run_sdes_talk_pump(state: dict) -> None:
             else:
                 _alaw = pcm_to_alaw(_pcm)
                 if _alaw:
-                    _hdr = _st.pack('!BBHII', 0x80, 8,
-                                    _seq & 0xFFFF, _ts & 0xFFFFFFFF, int(state["ssrc"]))
+                    _hdr = _st.pack(
+                        "!BBHII",
+                        0x80,
+                        8,
+                        _seq & 0xFFFF,
+                        _ts & 0xFFFFFFFF,
+                        int(state["ssrc"]),
+                    )
                     try:
                         _sock.sendto(_tx.protect(_hdr + _alaw), _src)
                     except Exception:
-                        _LOGGER.debug("swallowed exception in %s", '_run_sdes_talk_pump', exc_info=True)
+                        _LOGGER.debug(
+                            "swallowed exception in %s",
+                            "_run_sdes_talk_pump",
+                            exc_info=True,
+                        )
                     _seq = (_seq + 1) & 0xFFFF
                     _ts = (_ts + len(_alaw)) & 0xFFFFFFFF
             # Active talk: hold 20 ms pacing for the audio cadence.

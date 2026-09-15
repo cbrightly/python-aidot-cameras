@@ -12,6 +12,7 @@ including an A000088, the same model as all three that do report. So absence
 cannot mean "this model cannot report it", and anything that collapses unknown
 into "no card" would tell someone with a working camera it has no card.
 """
+
 from aidot_cameras.camera.models import CameraStatusData
 
 
@@ -90,5 +91,6 @@ def test_it_arrives_through_the_cloud_properties_path_too():
     # device record's `properties`. The probe read it off the latter.
     s = CameraStatusData()
     s.update_from_camera_attributes(
-        {"SDcardExistFlag": False, "SDcardBaseInfo": "[false,0,0,0,0]"})
+        {"SDcardExistFlag": False, "SDcardBaseInfo": "[false,0,0,0,0]"}
+    )
     assert s.sd_card_present is False

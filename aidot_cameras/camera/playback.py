@@ -18,11 +18,25 @@ from typing import Callable, List, Optional
 
 from ..crypto import aes_ecb_decrypt_str_key, aes_ecb_encrypt_str_key
 from .constants import (
-    _CMD_HB_REQ, _CMD_HB_RES, _CMD_LOGIN_REQ, _CMD_LOGIN_RES,
-    _CMD_PARAM, _CMD_STREAM_REQ, _CMD_STREAM_RES, _CMD_SUBCMD,
-    _HDR_CONTEXT, _HDR_ENC_TYPE, _HDR_FMT, _HDR_PREFIX_FMT, _HDR_PREFIX_SIZE,
-    _HDR_RESERVE, _HDR_RESULT, _HDR_SUFFIX_FMT, _HDR_SUFFIX_SIZE,
-    _HDR_VERSION, _SF_HDR_SIZE,
+    _CMD_HB_REQ,
+    _CMD_HB_RES,
+    _CMD_LOGIN_REQ,
+    _CMD_LOGIN_RES,
+    _CMD_PARAM,
+    _CMD_STREAM_REQ,
+    _CMD_STREAM_RES,
+    _CMD_SUBCMD,
+    _HDR_CONTEXT,
+    _HDR_ENC_TYPE,
+    _HDR_FMT,
+    _HDR_PREFIX_FMT,
+    _HDR_PREFIX_SIZE,
+    _HDR_RESERVE,
+    _HDR_RESULT,
+    _HDR_SUFFIX_FMT,
+    _HDR_SUFFIX_SIZE,
+    _HDR_VERSION,
+    _SF_HDR_SIZE,
 )
 from .models import VideoFrame
 
@@ -65,7 +79,7 @@ def _playback_ssl_context() -> ssl.SSLContext:
 def _pack_frame(cmd: int, payload: bytes, sequence: Optional[int] = None) -> bytes:
     # Build one outbound wire frame: 37-byte header + payload.
     if sequence is None:
-        sequence = random.randint(-(2 ** 31), 2 ** 31 - 1)
+        sequence = random.randint(-(2**31), 2**31 - 1)
     ts = int(time.time() * 1000)
     header = struct.pack(
         _HDR_FMT,
@@ -110,10 +124,10 @@ def _parse_video_payload(data: bytes) -> List[VideoFrame]:
     frames: List[VideoFrame] = []
     offset = 0
     while len(data) - offset >= _SF_HDR_SIZE:
-        frame_type    = data[offset + 2]
-        audio_codec   = data[offset + 3]
-        (timestamp,)  = struct.unpack_from(">q", data, offset + 4)
-        enc_type      = data[offset + 12]
+        frame_type = data[offset + 2]
+        audio_codec = data[offset + 3]
+        (timestamp,) = struct.unpack_from(">q", data, offset + 4)
+        enc_type = data[offset + 12]
         (payload_len,) = struct.unpack_from(">i", data, offset + 13)
         if payload_len < 0:
             break
@@ -123,10 +137,15 @@ def _parse_video_payload(data: bytes) -> List[VideoFrame]:
         if enc_type != 0:
             frames.append(VideoFrame(frame_type, audio_codec, timestamp, True, b""))
         else:
-            frames.append(VideoFrame(
-                frame_type, audio_codec, timestamp, False,
-                data[offset + _SF_HDR_SIZE:end],
-            ))
+            frames.append(
+                VideoFrame(
+                    frame_type,
+                    audio_codec,
+                    timestamp,
+                    False,
+                    data[offset + _SF_HDR_SIZE : end],
+                )
+            )
         offset = end
     return frames
 
@@ -146,21 +165,21 @@ class CloudPlaybackSession:
         on_frame: Callable[[VideoFrame], None],
         use_tls: bool = False,
     ) -> None:
-        self._server_ip   = server_ip
+        self._server_ip = server_ip
         self._server_port = server_port
         self._hb_interval = heartbeat_interval
-        self._task_id     = task_id
-        self._client_id   = client_id
-        self._start_ts    = start_ts_s
-        self._on_frame    = on_frame
+        self._task_id = task_id
+        self._client_id = client_id
+        self._start_ts = start_ts_s
+        self._on_frame = on_frame
         # Opt-in TLS for the cloud-playback TCP stream. Default False preserves
         # the historical plaintext behavior (the cloud playback server may not
         # speak TLS on this port); pass True once verified against a live server.
-        self._use_tls     = use_tls
+        self._use_tls = use_tls
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
-        self._running  = False
-        self._paused   = False
+        self._running = False
+        self._paused = False
         self._hb_task: Optional[asyncio.Task] = None
         self._rx_task: Optional[asyncio.Task] = None
 
@@ -173,17 +192,21 @@ class CloudPlaybackSession:
         except OSError as exc:
             _LOGGER.error(
                 "Cloud playback: TCP connect to %s:%d failed: %s",
-                self._server_ip, self._server_port, exc,
+                self._server_ip,
+                self._server_port,
+                exc,
             )
             return False
 
-        login_body = json.dumps({
-            "clientId":  self._client_id,
-            "heartbeat": self._hb_interval,
-            "taskId":    self._task_id,
-        }).encode("utf-8")
+        login_body = json.dumps(
+            {
+                "clientId": self._client_id,
+                "heartbeat": self._hb_interval,
+                "taskId": self._task_id,
+            }
+        ).encode("utf-8")
 
-        seq = random.randint(-(2 ** 31), 2 ** 31 - 1)
+        seq = random.randint(-(2**31), 2**31 - 1)
         self._writer.write(_pack_frame(_CMD_LOGIN_REQ, login_body, seq))
         await self._writer.drain()
 
@@ -212,7 +235,8 @@ class CloudPlaybackSession:
             if body_obj.get("code") != 200:
                 _LOGGER.error(
                     "Cloud playback: login rejected code=%s body=%s",
-                    body_obj.get("code"), body_obj,
+                    body_obj.get("code"),
+                    body_obj,
                 )
                 await self._cleanup()
                 return False
@@ -221,19 +245,23 @@ class CloudPlaybackSession:
 
         _LOGGER.debug(
             "Cloud playback: login OK task=%d server=%s:%d",
-            self._task_id, self._server_ip, self._server_port,
+            self._task_id,
+            self._server_ip,
+            self._server_port,
         )
         return True
 
     async def _request_stream_batch(self) -> None:
         if self._writer is None:
             return
-        body = json.dumps({
-            "begin":     self._start_ts,
-            "type":      1,
-            "framenums": 10,
-            "speed":     1,
-        }).encode("utf-8")
+        body = json.dumps(
+            {
+                "begin": self._start_ts,
+                "type": 1,
+                "framenums": 10,
+                "speed": 1,
+            }
+        ).encode("utf-8")
         self._writer.write(_pack_frame(_CMD_STREAM_REQ, body))
         await self._writer.drain()
 
@@ -286,7 +314,9 @@ class CloudPlaybackSession:
                     try:
                         self._on_frame(frame)
                     except Exception:
-                        _LOGGER.exception("Cloud playback: exception in on_frame callback")
+                        _LOGGER.exception(
+                            "Cloud playback: exception in on_frame callback"
+                        )
                 if self._running and not self._paused:
                     await self._request_stream_batch()
             elif result == -15528:
@@ -312,9 +342,7 @@ class CloudPlaybackSession:
         self._hb_task = asyncio.create_task(
             self._heartbeat_loop(), name="aidot-cloud-hb"
         )
-        self._rx_task = asyncio.create_task(
-            self._receive_loop(), name="aidot-cloud-rx"
-        )
+        self._rx_task = asyncio.create_task(self._receive_loop(), name="aidot-cloud-rx")
         return True
 
     async def pause(self) -> None:
@@ -327,7 +355,7 @@ class CloudPlaybackSession:
 
     async def stop(self) -> None:
         self._running = False
-        self._paused  = False
+        self._paused = False
         for task in (self._hb_task, self._rx_task):
             if task and not task.done():
                 task.cancel()
@@ -349,13 +377,12 @@ class CloudPlaybackSession:
                 self._writer.close()
                 await self._writer.wait_closed()
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", '_cleanup', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", "_cleanup", exc_info=True)
             self._writer = None
             self._reader = None
 
 
 class LiveStreamSession:
-
     def __init__(
         self,
         server_ip: str,
@@ -366,17 +393,17 @@ class LiveStreamSession:
         use_tls: bool,
         on_frame: Callable[["VideoFrame"], None],
     ) -> None:
-        self._server_ip         = server_ip
-        self._server_port       = int(server_port)
-        self._session_id        = session_id
-        self._aes_key           = aes_key
-        self._heartbeat_secs    = max(1, int(heartbeat_interval))
-        self._use_tls           = use_tls
-        self._on_frame          = on_frame
-        self._reader: Optional[asyncio.StreamReader]  = None
-        self._writer: Optional[asyncio.StreamWriter]  = None
-        self._task:   Optional[asyncio.Task]          = None
-        self._closed  = False
+        self._server_ip = server_ip
+        self._server_port = int(server_port)
+        self._session_id = session_id
+        self._aes_key = aes_key
+        self._heartbeat_secs = max(1, int(heartbeat_interval))
+        self._use_tls = use_tls
+        self._on_frame = on_frame
+        self._reader: Optional[asyncio.StreamReader] = None
+        self._writer: Optional[asyncio.StreamWriter] = None
+        self._task: Optional[asyncio.Task] = None
+        self._closed = False
 
     # -- Public interface ---------------------------------------------------- #
 
@@ -399,16 +426,20 @@ class LiveStreamSession:
         except Exception as exc:
             _LOGGER.error(
                 "LiveStreamSession: TCP connect to %s:%d failed: %s",
-                self._server_ip, self._server_port, exc,
+                self._server_ip,
+                self._server_port,
+                exc,
             )
             return False
 
         # LOGIN -- carry sessionId as credential, AES-encrypt the JSON payload.
         try:
-            login_body_raw = json.dumps({
-                "sessionId": self._session_id,
-                "clientId":  "live-stream",
-            }).encode("utf-8")
+            login_body_raw = json.dumps(
+                {
+                    "sessionId": self._session_id,
+                    "clientId": "live-stream",
+                }
+            ).encode("utf-8")
             login_enc = aes_ecb_encrypt_str_key(login_body_raw, self._aes_key)
             self._writer.write(_pack_frame(_CMD_LOGIN_REQ, login_enc))
             await self._writer.drain()
@@ -417,7 +448,8 @@ class LiveStreamSession:
             if hdr["cmd"] != _CMD_LOGIN_RES:
                 _LOGGER.error(
                     "LiveStreamSession: expected LOGIN_RES (0x%04x), got 0x%04x",
-                    _CMD_LOGIN_RES, hdr["cmd"],
+                    _CMD_LOGIN_RES,
+                    hdr["cmd"],
                 )
                 await self._cleanup()
                 return False
@@ -437,7 +469,9 @@ class LiveStreamSession:
         # STREAM_REQ -- request the live feed.
         # No taskId needed; the sessionId from MQTT already identifies the stream.
         try:
-            stream_body_raw = json.dumps({"sessionId": self._session_id}).encode("utf-8")
+            stream_body_raw = json.dumps({"sessionId": self._session_id}).encode(
+                "utf-8"
+            )
             stream_enc = aes_ecb_encrypt_str_key(stream_body_raw, self._aes_key)
             self._writer.write(_pack_frame(_CMD_STREAM_REQ, stream_enc))
             await self._writer.drain()
@@ -468,7 +502,7 @@ class LiveStreamSession:
         assert self._writer is not None
 
         hb_interval = self._heartbeat_secs
-        last_hb     = time.monotonic()
+        last_hb = time.monotonic()
 
         try:
             while not self._closed:
@@ -537,6 +571,6 @@ class LiveStreamSession:
                 self._writer.close()
                 await self._writer.wait_closed()
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", '_cleanup', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", "_cleanup", exc_info=True)
             self._writer = None
             self._reader = None

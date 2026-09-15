@@ -87,6 +87,7 @@ non-zero.
 That run also took the record decode from 4 records over 60 bytes to 22 over
 276 (12 header + 22 x 12 body), consistent and with no trailing bytes.
 """
+
 import struct
 import time
 from typing import Optional
@@ -167,8 +168,8 @@ def _describe(reply) -> dict:
     if reply.command == LISTEVENT_RESP:
         try:
             from aidot_cameras.camera.sd_events import decode_list_event_response
-            page = decode_list_event_response(
-                payload, command=reply.command)
+
+            page = decode_list_event_response(payload, command=reply.command)
         except Exception:
             page = None
     elif reply.command == HASLISTEVENT_RESP and len(payload) > _MAP_HEADER_LEN:
@@ -177,7 +178,8 @@ def _describe(reply) -> dict:
             "hours_reported": len(hours),
             "hours_with_footage": sum(1 for h in hours if h),
             "first_hour_with_footage": next(
-                (i for i, h in enumerate(hours) if h), None),
+                (i for i, h in enumerate(hours) if h), None
+            ),
         }
     if page is not None:
         out["decoded"] = {
@@ -234,8 +236,9 @@ async def set_session_mode(session, mode: int, *, timeout: float = 2.5) -> dict:
         return {"asked": False, "why": "session already closed"}
     payload = session_mode_payload(mode)
     try:
-        reply = await ask(SESSION_MODE_REQ, payload,
-                          response_cmd=SESSION_MODE_RESP, timeout=timeout)
+        reply = await ask(
+            SESSION_MODE_REQ, payload, response_cmd=SESSION_MODE_RESP, timeout=timeout
+        )
     except Exception as exc:
         return {"asked": True, "error": f"{type(exc).__name__}: {exc}"[:120]}
     out = {"asked": True, "mode": mode, "sent_len": len(payload)}
@@ -243,8 +246,9 @@ async def set_session_mode(session, mode: int, *, timeout: float = 2.5) -> dict:
     return out
 
 
-async def probe_sd_events(session, *, days: int = 7,
-                          timeout: float = 2.5) -> Optional[dict]:
+async def probe_sd_events(
+    session, *, days: int = 7, timeout: float = 2.5
+) -> Optional[dict]:
     """Ask the event commands and return what came back. Never raises.
 
     The timeout is 2.5 s per request, not 8, and every request checks the
@@ -265,43 +269,78 @@ async def probe_sd_events(session, *, days: int = 7,
     now = time.time()
     out: dict = {}
     for label, cmd, resp, payload in (
-        ("haslistevent", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
-         haslistevent_payload(now - days * 86400, now, event=SD_EVENT_APP)),
-        ("listevent", LISTEVENT_REQ, LISTEVENT_RESP,
-         listevent_payload(now - days * 86400, now, event=SD_EVENT_APP)),
+        (
+            "haslistevent",
+            HASLISTEVENT_REQ,
+            HASLISTEVENT_RESP,
+            haslistevent_payload(now - days * 86400, now, event=SD_EVENT_APP),
+        ),
+        (
+            "listevent",
+            LISTEVENT_REQ,
+            LISTEVENT_RESP,
+            listevent_payload(now - days * 86400, now, event=SD_EVENT_APP),
+        ),
         # Same command with the selector the first attempt used, so a reply to
         # one and not the other localises the difference to the selector rather
         # than to the layout. It earned its place: on an A001064 the 0x12
         # variant was answered and this one was not.
-        ("listevent_event0", LISTEVENT_REQ, LISTEVENT_RESP,
-         listevent_payload(now - days * 86400, now, event=0)),
+        (
+            "listevent_event0",
+            LISTEVENT_REQ,
+            LISTEVENT_RESP,
+            listevent_payload(now - days * 86400, now, event=0),
+        ),
         # These predate the empty-slot finding above: they were built when the
         # A000088s answered nothing, to vary one term at a time against the
         # request that was known to work elsewhere. With a card present all
         # three answer, so they are kept as a control rather than as a probe.
-        ("haslistevent_ch1", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
-         haslistevent_payload(now - days * 86400, now, channel=1,
-                              event=SD_EVENT_APP)),
-        ("listevent_ch1", LISTEVENT_REQ, LISTEVENT_RESP,
-         listevent_payload(now - days * 86400, now, channel=1,
-                           event=SD_EVENT_APP)),
-        ("listevent_status1", LISTEVENT_REQ, LISTEVENT_RESP,
-         listevent_payload(now - days * 86400, now, status=1,
-                           event=SD_EVENT_APP)),
+        (
+            "haslistevent_ch1",
+            HASLISTEVENT_REQ,
+            HASLISTEVENT_RESP,
+            haslistevent_payload(
+                now - days * 86400, now, channel=1, event=SD_EVENT_APP
+            ),
+        ),
+        (
+            "listevent_ch1",
+            LISTEVENT_REQ,
+            LISTEVENT_RESP,
+            listevent_payload(now - days * 86400, now, channel=1, event=SD_EVENT_APP),
+        ),
+        (
+            "listevent_status1",
+            LISTEVENT_REQ,
+            LISTEVENT_RESP,
+            listevent_payload(now - days * 86400, now, status=1, event=SD_EVENT_APP),
+        ),
         # One day rather than seven: HASLISTEVENT answers one byte per hour, so
         # a 24-byte answer would also confirm the map reading on a second range.
-        ("haslistevent_1day", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
-         haslistevent_payload(now - 86400, now, event=SD_EVENT_APP)),
+        (
+            "haslistevent_1day",
+            HASLISTEVENT_REQ,
+            HASLISTEVENT_RESP,
+            haslistevent_payload(now - 86400, now, event=SD_EVENT_APP),
+        ),
         # The map is asked with the 0x12 selector, the one that returns an EMPTY
         # record page, and it used to come back all-zero on a camera whose
         # LISTEVENT answered with real records for the same window. Same
         # selector, same cause: CONFIRMED 2026-08-12, these two answer with real
         # occupancy where their 0x12 twins above answer all-zero. Kept as a pair
         # so the comparison stays runnable on the next firmware.
-        ("haslistevent_event0", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
-         haslistevent_payload(now - days * 86400, now, event=0)),
-        ("haslistevent_1day_event0", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
-         haslistevent_payload(now - 86400, now, event=0)),
+        (
+            "haslistevent_event0",
+            HASLISTEVENT_REQ,
+            HASLISTEVENT_RESP,
+            haslistevent_payload(now - days * 86400, now, event=0),
+        ),
+        (
+            "haslistevent_1day_event0",
+            HASLISTEVENT_REQ,
+            HASLISTEVENT_RESP,
+            haslistevent_payload(now - 86400, now, event=0),
+        ),
     ):
         alive = getattr(session, "is_alive", None)
         if alive is not None and not alive:
@@ -333,12 +372,21 @@ async def probe_sd_events(session, *, days: int = 7,
     # of the comparison, and a difference could no longer be attributed to
     # either.
     out["session_mode_sd"] = await set_session_mode(
-        session, SESSION_MODE_SD, timeout=timeout)
+        session, SESSION_MODE_SD, timeout=timeout
+    )
     for label, cmd, resp, payload in (
-        ("haslistevent_in_sd_mode", HASLISTEVENT_REQ, HASLISTEVENT_RESP,
-         haslistevent_payload(now - days * 86400, now, event=SD_EVENT_APP)),
-        ("listevent_in_sd_mode", LISTEVENT_REQ, LISTEVENT_RESP,
-         listevent_payload(now - days * 86400, now, event=SD_EVENT_APP)),
+        (
+            "haslistevent_in_sd_mode",
+            HASLISTEVENT_REQ,
+            HASLISTEVENT_RESP,
+            haslistevent_payload(now - days * 86400, now, event=SD_EVENT_APP),
+        ),
+        (
+            "listevent_in_sd_mode",
+            LISTEVENT_REQ,
+            LISTEVENT_RESP,
+            listevent_payload(now - days * 86400, now, event=SD_EVENT_APP),
+        ),
     ):
         alive = getattr(session, "is_alive", None)
         if alive is not None and not alive:
@@ -355,5 +403,6 @@ async def probe_sd_events(session, *, days: int = 7,
     # leaving a viewer's live view parked in SD mode to satisfy a probe would be
     # the probe breaking the thing it rode in on.
     out["session_mode_restore"] = await set_session_mode(
-        session, SESSION_MODE_LIVING, timeout=timeout)
+        session, SESSION_MODE_LIVING, timeout=timeout
+    )
     return out

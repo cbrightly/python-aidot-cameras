@@ -16,6 +16,7 @@ a passing result.
 
 Read-only. Credentials come from aidot_cameras.credentials.load_credentials.
 """
+
 import asyncio
 import time
 
@@ -32,26 +33,42 @@ async def main() -> int:
     creds = load_credentials()
     async with aiohttp.ClientSession() as http:
         client = AidotClient(
-            http, country_code=creds.get("country", "US"),
-            username=creds["username"], password=creds["password"])
+            http,
+            country_code=creds.get("country", "US"),
+            username=creds["username"],
+            password=creds["password"],
+        )
         try:
             await client.async_post_login()
             devices = (await client.async_get_all_device())[CONF_DEVICE_LIST]
-            cams = [d for d in devices
-                    if "IPC" in (getattr(getattr(client.get_device_client(d),
-                                                 "info", None), "model_id", "")
-                                 or "")]
+            cams = [
+                d
+                for d in devices
+                if "IPC"
+                in (
+                    getattr(
+                        getattr(client.get_device_client(d), "info", None),
+                        "model_id",
+                        "",
+                    )
+                    or ""
+                )
+            ]
             now = int(time.time() * 1000)
-            print(f"{'camera':30} {'ask30':>6} {'paged':>6} {'pages':>6} "
-                  f"{'total':>6}  {'verdict':<14} plan")
+            print(
+                f"{'camera':30} {'ask30':>6} {'paged':>6} {'pages':>6} "
+                f"{'total':>6}  {'verdict':<14} plan"
+            )
             for cam in cams:
                 dc = client.get_device_client(cam)
                 one = await dc.async_get_cloud_recordings(
-                    now - MS_DAY, now, page=1, page_size=30)
+                    now - MS_DAY, now, page=1, page_size=30
+                )
                 seen, page = [], 1
                 while True:
                     batch = await dc.async_get_cloud_recordings(
-                        now - MS_DAY, now, page=page, page_size=10)
+                        now - MS_DAY, now, page=page, page_size=10
+                    )
                     if not batch:
                         break
                     seen.extend(batch)
@@ -66,16 +83,23 @@ async def main() -> int:
                 try:
                     async with http.post(
                         f"{dc._aidot_v32_base}/playback/eventRecordingList",
-                        json={"deviceIds": [dc.device_id], "pageNum": 1,
-                              "pageSize": 1, "recordSta": now - MS_DAY,
-                              "recordEnd": now},
+                        json={
+                            "deviceIds": [dc.device_id],
+                            "pageNum": 1,
+                            "pageSize": 1,
+                            "recordSta": now - MS_DAY,
+                            "recordEnd": now,
+                        },
                         headers=dc._aidot_headers(),
                         timeout=aiohttp.ClientTimeout(total=30),
                     ) as resp:
                         body = await resp.json(content_type=None)
                     code = body.get("code") if isinstance(body, dict) else None
-                    total = ((body.get("data") or {}).get("total")
-                              if isinstance(body, dict) else None)
+                    total = (
+                        (body.get("data") or {}).get("total")
+                        if isinstance(body, dict)
+                        else None
+                    )
                 except Exception:
                     code, total = None, None
 
@@ -104,8 +128,10 @@ async def main() -> int:
                 else:
                     state = "none"
                 total_str = "?" if total is None else str(total)
-                print(f"{cam.get(CONF_NAME)!r:30} {len(one):>6} {len(seen):>6} "
-                      f"{page:>6} {total_str:>6}  {verdict:<14} {state}")
+                print(
+                    f"{cam.get(CONF_NAME)!r:30} {len(one):>6} {len(seen):>6} "
+                    f"{page:>6} {total_str:>6}  {verdict:<14} {state}"
+                )
         finally:
             await client.async_cleanup()
     return 0

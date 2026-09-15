@@ -9,6 +9,7 @@ pure `_retry_policy` test can't cover (the loop's counter management).
 
 Repo convention: no pytest-asyncio; drive coroutines with asyncio.run().
 """
+
 import asyncio
 import types
 

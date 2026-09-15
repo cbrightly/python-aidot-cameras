@@ -14,6 +14,7 @@ Both caps only apply when the logger's level is still NOTSET, so a level set
 explicitly by the user (e.g. to re-enable aioice INFO for debugging) is
 respected.
 """
+
 import logging
 
 import aidot_cameras  # noqa: F401 - import triggers the logger caps
@@ -49,7 +50,9 @@ def test_aidot_debug_does_not_unleash_the_aiortc_packet_firehose():
     try:
         aidot_logger.setLevel(logging.DEBUG)
         for name in INFO_CAPPED:
-            assert not logging.getLogger(name).isEnabledFor(logging.DEBUG), f"{name} still emits DEBUG"
+            assert not logging.getLogger(name).isEnabledFor(logging.DEBUG), (
+                f"{name} still emits DEBUG"
+            )
     finally:
         aidot_logger.setLevel(original_level)
 
@@ -61,7 +64,9 @@ def test_aidot_debug_does_not_unleash_the_aioice_info_flood():
     try:
         aidot_logger.setLevel(logging.DEBUG)
         for name in WARNING_CAPPED:
-            assert not logging.getLogger(name).isEnabledFor(logging.INFO), f"{name} still emits INFO"
+            assert not logging.getLogger(name).isEnabledFor(logging.INFO), (
+                f"{name} still emits INFO"
+            )
     finally:
         aidot_logger.setLevel(original_level)
 

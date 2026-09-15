@@ -13,10 +13,11 @@ from aidot_cameras.camera.protocol import _sprop_cache_path, _sprop_dir
 
 # -- models: malformed cloud attrs are skipped, not fatal ----------------------
 
+
 def test_as_int_coerces_or_none():
     assert _as_int("5") == 5
     assert _as_int(5) == 5
-    assert _as_int("on") is None       # non-numeric string must not raise
+    assert _as_int("on") is None  # non-numeric string must not raise
     assert _as_int(None) is None
     assert _as_int({}) is None
 
@@ -25,13 +26,16 @@ def test_as_bool_coerces_or_none():
     assert _as_bool("0") is False
     assert _as_bool("1") is True
     assert _as_bool(1) is True
-    assert _as_bool("yes") is None     # non-numeric must not raise
+    assert _as_bool("yes") is None  # non-numeric must not raise
     assert _as_bool(None) is None
 
 
 # -- sprop cache: devid can't escape the cache dir -----------------------------
 
-@pytest.mark.parametrize("devid", ["../../etc/passwd", "/etc/passwd", "a/b/c", "..", "x\\y"])
+
+@pytest.mark.parametrize(
+    "devid", ["../../etc/passwd", "/etc/passwd", "a/b/c", "..", "x\\y"]
+)
 def test_sprop_path_stays_in_cache_dir(devid):
     p = os.path.abspath(_sprop_cache_path(devid))
     assert os.path.dirname(p) == os.path.abspath(_sprop_dir())
@@ -44,6 +48,7 @@ def test_sprop_path_normal_devid_preserved():
 
 
 # -- LAN control: oversized frame body is rejected before allocation -----------
+
 
 def test_read_frame_rejects_oversized_body():
     async def _run():

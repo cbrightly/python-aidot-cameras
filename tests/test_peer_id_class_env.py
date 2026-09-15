@@ -48,13 +48,15 @@ def test_it_pins_only_the_first_character(monkeypatch):
     identical across opens, which is cross-session REUSE and would confound the
     class with the camera's session-dedup path."""
     from aidot_cameras.camera.client import CameraMixin
+
     monkeypatch.setenv("AIDOT_EXPT_PEERID_CLASS", "2")
     monkeypatch.delenv("AIDOT_EXPT_PEERID_FILE", raising=False)
 
     # staticmethod: no instance, and device_id left unset so only the env knob
     # can act (the file override needs a device id and must not interfere).
-    ids = {CameraMixin.generate_webrtc_peer_id(live_type=2, stream_id=0)
-           for _ in range(12)}
+    ids = {
+        CameraMixin.generate_webrtc_peer_id(live_type=2, stream_id=0) for _ in range(12)
+    }
     fields = [i.split("_") for i in ids]
     assert all(f[1][0] == "2" for f in fields), "class not pinned"
     assert len({f[1][1:] for f in fields}) > 1, "tail stopped being random"

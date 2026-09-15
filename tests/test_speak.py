@@ -6,6 +6,7 @@ returns False when no talk-capable session is available.
 
 Runs under pytest, or standalone:  python tests/test_speak.py
 """
+
 import asyncio
 import os
 import sys
@@ -31,7 +32,7 @@ class _FakeSession:
             return False
         self.started = True
         frame = provider()
-        while frame is not None:        # simulate aiortc polling the track
+        while frame is not None:  # simulate aiortc polling the track
             self.frames.append(frame)
             frame = provider()
         return True
@@ -55,7 +56,7 @@ def test_reuses_warm_session_and_drives_provider():
     it = iter(frames)
     ok = _run(dc, lambda: next(it, None), max_seconds=5)
     assert ok is True
-    assert fake.frames == frames          # every frame reached the session
+    assert fake.frames == frames  # every frame reached the session
     assert fake.started and fake.stopped  # talk started + stopped
     assert fake.session_stopped is False  # warm session is NOT closed (reused)
 
@@ -93,13 +94,14 @@ def test_skips_warm_session_without_talk_support_then_opens():
     ok = _run(dc, lambda: next(it, None), max_seconds=5)
     assert ok is True
     assert fresh.frames == [b"\x05" * 320, b"\x06" * 320]
-    assert fresh.session_stopped is True   # owned session IS closed afterwards
+    assert fresh.session_stopped is True  # owned session IS closed afterwards
     assert warm.started is False
 
 
 if __name__ == "__main__":
-    fns = [v for k, v in sorted(globals().items())
-           if k.startswith("test_") and callable(v)]
+    fns = [
+        v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)
+    ]
     for fn in fns:
         fn()
         print(f"PASS {fn.__name__}")

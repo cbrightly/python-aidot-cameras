@@ -40,16 +40,29 @@ class _Cam(_CameraControlsMixin):
         return True
 
 
-_LIVE = {"roi": [{"vehicleDetect": 0, "publicZone": 1, "packageDetect": 0,
-                  "humanDetect": 1, "petDetect": 0}]}
+_LIVE = {
+    "roi": [
+        {
+            "vehicleDetect": 0,
+            "publicZone": 1,
+            "packageDetect": 0,
+            "humanDetect": 1,
+            "petDetect": 0,
+        }
+    ]
+}
 
 
 def test_reads_every_flag_the_camera_reports():
     cam = _Cam(_LIVE)
     got = asyncio.run(cam.async_get_detection_types())
-    assert got == {"vehicleDetect": False, "publicZone": True,
-                   "packageDetect": False, "humanDetect": True,
-                   "petDetect": False}
+    assert got == {
+        "vehicleDetect": False,
+        "publicZone": True,
+        "packageDetect": False,
+        "humanDetect": True,
+        "petDetect": False,
+    }
     assert cam.queried == ["getRoiHuman"]
 
 
@@ -67,9 +80,9 @@ def test_setting_one_flag_preserves_every_other_field():
     action, payload = cam.triggered[0]
     assert action == "setRoiHuman"
     roi = payload["roi"][0]
-    assert roi["packageDetect"] == 1      # the one we changed
-    assert roi["publicZone"] == 1         # preserved, not rebuilt
-    assert roi["humanDetect"] == 1        # preserved
+    assert roi["packageDetect"] == 1  # the one we changed
+    assert roi["publicZone"] == 1  # preserved, not rebuilt
+    assert roi["humanDetect"] == 1  # preserved
     assert set(roi) == set(_LIVE["roi"][0])
 
 

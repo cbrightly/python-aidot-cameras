@@ -18,6 +18,7 @@ _bridge_should_break to make the decision - the same function the production
 loop calls - plus a source-inspection check that the production loop really
 does call it, so the mirror cannot silently drift from the real code.
 """
+
 import ast
 import inspect
 import select
@@ -30,6 +31,7 @@ from aidot_cameras.camera.sdes_open import _bridge_should_break
 # --------------------------------------------------------------------- #
 # Pure helper truth table
 # --------------------------------------------------------------------- #
+
 
 def test_break_on_clean_exit_without_teardown():
     assert _bridge_should_break(0, False) is True
@@ -57,6 +59,7 @@ def test_no_break_while_still_running():
 # reimplement (or bypass) the decision inline.
 # --------------------------------------------------------------------- #
 
+
 def _bridge_fn_node() -> ast.FunctionDef:
     """The one _bridge_fn definition in sdes_open.py, as an AST node.
 
@@ -71,8 +74,11 @@ def _bridge_fn_node() -> ast.FunctionDef:
     body exactly, and comments do not survive parsing at all.
     """
     tree = ast.parse(inspect.getsource(sdes_open))
-    nodes = [n for n in ast.walk(tree)
-             if isinstance(n, ast.FunctionDef) and n.name == "_bridge_fn"]
+    nodes = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_bridge_fn"
+    ]
     assert len(nodes) == 1, (
         f"expected exactly one _bridge_fn definition, found {len(nodes)} - "
         "this guard inspects a single, specific loop"
@@ -91,7 +97,8 @@ def test_production_loop_gates_its_break_on_the_shared_helper():
         if not isinstance(node, ast.If):
             continue
         calls_helper = any(
-            isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            isinstance(c, ast.Call)
+            and isinstance(c.func, ast.Name)
             and c.func.id == "_bridge_should_break"
             for c in ast.walk(node.test)
         )
@@ -114,7 +121,8 @@ def test_the_loop_has_no_break_that_bypasses_the_helper():
         if not isinstance(parent, ast.If):
             continue
         calls_helper = any(
-            isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            isinstance(c, ast.Call)
+            and isinstance(c.func, ast.Name)
             and c.func.id == "_bridge_should_break"
             for c in ast.walk(parent.test)
         )
@@ -137,6 +145,7 @@ def test_the_loop_has_no_break_that_bypasses_the_helper():
 # Loop-level behavior with fakes
 # --------------------------------------------------------------------- #
 
+
 class _FakeProc:
     """Minimal Popen stand-in: poll() returns the fixed rc once "exited"."""
 
@@ -147,8 +156,7 @@ class _FakeProc:
         return self._rc
 
 
-def _run_observe_loop(sock_a, sock_b, proc_holder, teardown_holder,
-                       max_ticks=100):
+def _run_observe_loop(sock_a, sock_b, proc_holder, teardown_holder, max_ticks=100):
     """Mirror of the sdes_open.py bridge observe loop's shape.
 
     Same structure as the production loop: a select()-gated wait whose

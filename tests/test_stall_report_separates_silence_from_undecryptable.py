@@ -1,4 +1,4 @@
-""""The camera sent nothing" and "we could not read what it sent" are different.
+""" "The camera sent nothing" and "we could not read what it sent" are different.
 
 Run 31448429413 produced a stall this project had written down in advance as a
 kill: `binding-success=4; trigger=sent` and no media for the full 75 s. The
@@ -18,6 +18,7 @@ Those two want opposite investigations - one starts at the camera, the other at
 our keys - so the report now carries the raw inbound media count and the
 decrypt-failure count, and says so in words when the second is non-zero.
 """
+
 import os
 import sys
 
@@ -28,9 +29,12 @@ from aidot_cameras.camera.sdes_open import _first_media_stall_report
 
 def _report(**over):
     kwargs = dict(
-        device_id="cam1", waited_s=75.0,
+        device_id="cam1",
+        waited_s=75.0,
         nominated=[("192.168.7.21", 46846)],
-        use_candidate_sent=True, binding_success=4, trigger_sent=True,
+        use_candidate_sent=True,
+        binding_success=4,
+        trigger_sent=True,
         probes=[("192.168.7.21:46846", "learned")],
     )
     kwargs.update(over)
@@ -62,7 +66,8 @@ def test_media_that_all_failed_to_decrypt_is_named_as_such():
     assert "decrypt-failed=412" in line
     assert "could not be decrypted" in line, (
         "when every inbound packet failed to decrypt the line must say so - "
-        "the counters alone leave the reader to join them")
+        "the counters alone leave the reader to join them"
+    )
 
 
 def test_a_partial_decrypt_failure_is_not_reported_as_total():
@@ -70,7 +75,8 @@ def test_a_partial_decrypt_failure_is_not_reported_as_total():
     assert "inbound-media=412" in line
     assert "decrypt-failed=9" in line
     assert "could not be decrypted" not in line, (
-        "some packets decrypted, so 'we cannot read it' is the wrong reading")
+        "some packets decrypted, so 'we cannot read it' is the wrong reading"
+    )
 
 
 def test_the_line_is_still_one_line():
@@ -80,6 +86,7 @@ def test_the_line_is_still_one_line():
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:

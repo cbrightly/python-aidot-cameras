@@ -12,6 +12,7 @@ already covers that function, and covered it while it was unreachable).  It is
 the DISPATCH: that a light which cannot log in gets the bounded behaviour, and
 that it gets it without any camera code entering its path.
 """
+
 import asyncio
 import os
 import pathlib
@@ -39,10 +40,14 @@ def _device(dev_id, model_id):
         "modelId": model_id,
         "aesKey": ["k" * 16],
         "password": "pw",
-        "product": {"serviceModules": [
-            {"identity": "control.light.cct",
-             "properties": [{"minValue": "2700", "maxValue": "6500"}]},
-        ]},
+        "product": {
+            "serviceModules": [
+                {
+                    "identity": "control.light.cct",
+                    "properties": [{"minValue": "2700", "maxValue": "6500"}],
+                },
+            ]
+        },
     }
 
 
@@ -57,6 +62,7 @@ def _dispatch(device):
     spawns a login task.  Discovery stays off because `setup_discover` returns
     early while the account has no user id, so nothing reaches the network.
     """
+
     async def _run():
         client = CameraClient(None, country_code="US")
         return client.get_device_client(device)
@@ -70,6 +76,7 @@ def test_a_light_that_cannot_log_in_is_eventually_left_alone():
     Upstream's `_schedule_reconnect` spawns a login task every time, forever.
     Counting spawns is the honest measure: it is what the 15,376 number counted.
     """
+
     async def _run():
         dc = CameraClient(None, country_code="US").get_device_client(STORMING_LIGHT)
         # No IP: upstream's async_login returns immediately, so a spawned retry
@@ -108,14 +115,19 @@ def test_every_client_the_dispatch_seam_builds_carries_the_policy():
 
     source = pathlib.Path(client_module.__file__).read_text()
     seam = next(
-        node for node in ast.walk(ast.parse(source))
+        node
+        for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.FunctionDef) and node.name == "get_device_client"
     )
-    built = sorted({
-        node.func.id for node in ast.walk(seam)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        and node.func.id.endswith("DeviceClient")
-    })
+    built = sorted(
+        {
+            node.func.id
+            for node in ast.walk(seam)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id.endswith("DeviceClient")
+        }
+    )
     assert built, "found no device-client construction in the dispatch seam"
 
     for name in built:
@@ -146,8 +158,9 @@ def test_the_retry_policy_module_never_imports_the_camera_package():
             if name.startswith((".camera", "aidot_cameras.camera")):
                 offenders.append(name)
         elif isinstance(node, ast.Import):
-            offenders += [a.name for a in node.names
-                          if a.name.startswith("aidot_cameras.camera")]
+            offenders += [
+                a.name for a in node.names if a.name.startswith("aidot_cameras.camera")
+            ]
 
     assert offenders == [], (
         f"{lan_retry.__name__} imports the camera package: {offenders}. It is "
@@ -165,7 +178,8 @@ def test_no_camera_code_runs_in_a_lights_path():
     dc = _dispatch(STORMING_LIGHT)
     assert not isinstance(dc, CameraDeviceClient)
     camera_classes = [
-        cls for cls in type(dc).__mro__
+        cls
+        for cls in type(dc).__mro__
         if cls.__module__.startswith("aidot_cameras.camera")
     ]
     assert camera_classes == [], (
@@ -182,6 +196,7 @@ def test_a_discovered_address_still_reaches_a_light():
     which resolves to the shared class dict or the per-instance one depending on
     which upstream is installed - so this holds on both shapes.
     """
+
     async def _run():
         client = CameraClient(None, country_code="US")
         client.login_info = {"id": "u1"}
@@ -204,6 +219,7 @@ def test_a_light_that_recovers_starts_its_next_failure_run_from_zero():
     The ceiling counts CONSECUTIVE failures.  A device that drops once an hour
     and recovers must never accumulate its way to being abandoned.
     """
+
     async def _run():
         dc = CameraClient(None, country_code="US").get_device_client(STORMING_LIGHT)
         dc._ip_address = "192.0.2.10"
@@ -226,6 +242,7 @@ def test_a_light_that_stops_answering_does_not_park_the_attempt():
     is parked, so the in-flight guard blocks every future login attempt and the
     socket stays open. Four of six devices ended a live run in that state.
     """
+
     async def _never_answers(self, ip_address):
         """Upstream's connect, parked exactly where the real one parks.
 

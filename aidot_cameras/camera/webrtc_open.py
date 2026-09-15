@@ -62,6 +62,7 @@ def _resolve_future_threadsafe(loop, fut, value) -> None:
     ``InvalidStateError`` inside an asyncio callback, with no camera or peerid
     context to attribute it to.
     """
+
     def _resolve() -> None:
         if not fut.done():
             fut.set_result(value)
@@ -97,8 +98,9 @@ def _answer_is_from_the_camera(*, src_addr, user_id) -> bool:
     return not str(src_addr).startswith(f"0.{user_id}")
 
 
-def _deliver_webrtc_answer(loop, answer_fut, second_answer_fut, answer,
-                           from_camera: bool = True) -> None:
+def _deliver_webrtc_answer(
+    loop, answer_fut, second_answer_fut, answer, from_camera: bool = True
+) -> None:
     """Route a webrtcResp answer to the first-answer or second-answer future.
 
     Called from the MQTT (non-loop) thread.  The first accepted answer from the
@@ -117,6 +119,7 @@ def _deliver_webrtc_answer(loop, answer_fut, second_answer_fut, answer,
     arrived.  The log is emitted from the loop thread, where what it asserts
     about ``answer_fut`` is true.
     """
+
     def _deliver() -> None:
         if not from_camera:
             _LOGGER.debug(
@@ -139,9 +142,7 @@ def _deliver_webrtc_answer(loop, answer_fut, second_answer_fut, answer,
     loop.call_soon_threadsafe(_deliver)
 
 
-def _resolve_ice_budget(
-    timeout: float, ice_wait_timeout_s: "Optional[float]"
-) -> float:
+def _resolve_ice_budget(timeout: float, ice_wait_timeout_s: "Optional[float]") -> float:
     """How long the ICE wait gets, given the caller's two budgets.
 
     The open runs two SEQUENTIAL waits - signalling then ICE - and both used to
@@ -195,14 +196,14 @@ def _verified_dtls_fingerprint(cam_cert, pinned_fp: str, cert_fp_fn) -> Optional
     real_fp = cert_fp_fn(cam_cert, "sha-256")
     if pinned_fp and not _dtls_pin_matches(real_fp, pinned_fp):
         raise ValueError(
-            f"DTLS fingerprint mismatch: camera presented {real_fp}, "
-            f"pinned {pinned_fp}"
+            f"DTLS fingerprint mismatch: camera presented {real_fp}, pinned {pinned_fp}"
         )
     return real_fp
 
 
-async def _keyframe_prompter(send_pli, first_frame, interval: float = 0.7,
-                             max_tries: int = 8) -> int:
+async def _keyframe_prompter(
+    send_pli, first_frame, interval: float = 0.7, max_tries: int = 8
+) -> int:
     """Send an RTCP PLI (keyframe request) immediately and then every `interval`
     seconds until `first_frame` is set or `max_tries` PLIs have been sent.
     Handles a lost first PLI instead of waiting for the next natural IDR.
@@ -299,8 +300,9 @@ def _is_camera_present_signal(topic, msg, device_id, *, accept_server_ack=True):
         or inner.get("devId") == device_id
         or msg.get("devId") == device_id
         or str(msg.get("srcAddr") or "").endswith(device_id)
-        or (accept_server_ack
-            and (msg.get("method") or "") == "lowPowerActiveStateResp")
+        or (
+            accept_server_ack and (msg.get("method") or "") == "lowPowerActiveStateResp"
+        )
     )
 
 
@@ -353,7 +355,6 @@ def _signal_origin(topic, msg, device_id) -> str:
     return f"dev={d[:12]} (not this camera)"
 
 
-
 async def _drain_outgoing_queue(loop, outgoing_q, publish, poll_s: float = 1.0) -> None:
     """Publish queued signalling messages until the stop sentinel (``None``).
 
@@ -375,13 +376,15 @@ async def _drain_outgoing_queue(loop, outgoing_q, publish, poll_s: float = 1.0) 
     fast path.
     """
     import queue as _q
+
     while True:
         try:
             out = await loop.run_in_executor(
-                None, lambda: outgoing_q.get(timeout=poll_s))
+                None, lambda: outgoing_q.get(timeout=poll_s)
+            )
         except _q.Empty:
-            continue                      # nothing queued; loop so we stay cancellable
-        if out is None:                   # stop sentinel from WebRTCSession.stop()
+            continue  # nothing queued; loop so we stay cancellable
+        if out is None:  # stop sentinel from WebRTCSession.stop()
             return
         await publish(out[0], out[1])
 
@@ -481,7 +484,10 @@ class _WebRTCOpenMixin:
             If the MQTT connection fails or ICE does not complete within
             ``timeout`` seconds.
         """
-        from .client import CameraMixin, _spawn_bg  # lazy: break client<->webrtc_open import cycle
+        from .client import (
+            CameraMixin,
+            _spawn_bg,
+        )  # lazy: break client<->webrtc_open import cycle
         import queue as _q_mod
 
         # Cold-start instrumentation: stamp t0 so phase markers below (and in the
@@ -525,8 +531,9 @@ class _WebRTCOpenMixin:
         # so re-enabling it for a camera that demonstrably needs it is one line.
         if self._resolve_live_stream_param():
             _lsp_ok = await self._async_fetch_live_stream_param()
-            _LOGGER.debug("camera %s: liveStreamParam provisioned ok=%s",
-                          self.device_id, _lsp_ok)
+            _LOGGER.debug(
+                "camera %s: liveStreamParam provisioned ok=%s", self.device_id, _lsp_ok
+            )
 
         # AIDOT_FAST_CONNECT (default off): LAN-direct mode.  Both transports stall
         # the offer on a TURN relay allocation to the cloud TURN server before ICE
@@ -542,8 +549,13 @@ class _WebRTCOpenMixin:
         # start_keepalive(fast_connect=...)); fall back to the env var otherwise.
         _fast_connect = getattr(self, "_fast_connect_opt", None)
         if _fast_connect is None:
-            _fast_connect = os.environ.get("AIDOT_FAST_CONNECT", "").strip().lower() in (
-                "1", "true", "yes", "on",
+            _fast_connect = os.environ.get(
+                "AIDOT_FAST_CONNECT", ""
+            ).strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
             )
         # fast_connect (skip livePlay/ICE waits + strip TURN) is validated for the
         # DTLS path only.  On SDES cameras those skips leave the SCTP handshake
@@ -573,11 +585,19 @@ class _WebRTCOpenMixin:
             try:
                 await self.async_wake_camera()
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_async_open_webrtc_stream_impl', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_async_open_webrtc_stream_impl",
+                    exc_info=True,
+                )
 
         if not use_sdes:
             try:
-                from aidot_cameras._vendor.aiortc import RTCPeerConnection, RTCSessionDescription
+                from aidot_cameras._vendor.aiortc import (
+                    RTCPeerConnection,
+                    RTCSessionDescription,
+                )
                 from aidot_cameras._vendor.aiortc.sdp import candidate_from_sdp
             except ImportError:
                 raise ImportError(
@@ -603,10 +623,16 @@ class _WebRTCOpenMixin:
             # that negotiate DTLS 1.2 still get DTLS 1.2; this only widens
             # the floor.
             try:
-                from aidot_cameras._vendor.aiortc.rtcdtlstransport import RTCCertificate as _AidotRTCCert
+                from aidot_cameras._vendor.aiortc.rtcdtlstransport import (
+                    RTCCertificate as _AidotRTCCert,
+                )
+
                 if not getattr(_AidotRTCCert, "_aidot_dtls10_patched", False):
                     _orig_create_ctx = _AidotRTCCert._create_ssl_context
-                    _DTLS1_VERSION = 0xFEFF  # not exposed in pyOpenSSL; raw OpenSSL constant
+                    _DTLS1_VERSION = (
+                        0xFEFF  # not exposed in pyOpenSSL; raw OpenSSL constant
+                    )
+
                     def _aidot_create_ssl_context(self, srtp_profiles):
                         try:
                             _ctx = _orig_create_ctx(self, srtp_profiles)
@@ -623,6 +649,7 @@ class _WebRTCOpenMixin:
                             # verify settings are preserved.  Keeps DTLS working
                             # across pyOpenSSL versions (HA addons may ship old).
                             from OpenSSL import crypto as _ossl_crypto
+
                             if not isinstance(self._cert, _ossl_crypto.X509):
                                 self._cert = _ossl_crypto.X509.from_cryptography(
                                     self._cert
@@ -643,29 +670,28 @@ class _WebRTCOpenMixin:
                             try:
                                 _ctx.set_min_proto_version(_DTLS1_VERSION)
                             except Exception as _e:
-                                _LOGGER.warning(
-                                    "DTLS 1.0 enable failed: %s", _e
-                                )
+                                _LOGGER.warning("DTLS 1.0 enable failed: %s", _e)
                         return _ctx
+
                     _AidotRTCCert._create_ssl_context = _aidot_create_ssl_context
                     _AidotRTCCert._aidot_dtls10_patched = True
                     _LOGGER.debug("aiortc DTLS min version lowered to 1.0")
             except Exception as _patch_exc:
-                _LOGGER.warning(
-                    "DTLS 1.0 patch could not be applied: %s", _patch_exc
-                )
+                _LOGGER.warning("DTLS 1.0 patch could not be applied: %s", _patch_exc)
 
         # ------------------------------------------------------------------ #
         # Credentials + MQTT setup
         # ------------------------------------------------------------------ #
         smarthome_auth = await self._async_get_smarthome_auth()
         mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-        mqtt_pwd  = (smarthome_auth or {}).get("mqttPassword") or ""
-        user_id   = str(self.user_id)
-        mqtt_cid  = (
-            self._user_info.get("mqttClientId") or
-            (self._user_info.get("_userConfigRaw") or {}).get("mqtt", {}).get("clientId") or
-            f"app-{mqtt_user}"
+        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
+        user_id = str(self.user_id)
+        mqtt_cid = (
+            self._user_info.get("mqttClientId")
+            or (self._user_info.get("_userConfigRaw") or {})
+            .get("mqtt", {})
+            .get("clientId")
+            or f"app-{mqtt_user}"
         )
         # terminalIndex is the session prefix of mqtt_cid (e.g. "1i1h3m" from "1i1h3m-{userId}").
         # The camera validates srcAddr against active MQTT sessions; "0.{userId}" matches nothing.
@@ -682,7 +708,9 @@ class _WebRTCOpenMixin:
         _fetch_http_ice = not _skip_ice_config and _ice_config is None
         if _fetch_http_ice:
             _cam_user_info, _http_ice_config = await asyncio.gather(
-                self.async_get_device_user_info(all_device_ids=self._all_device_ids or None),
+                self.async_get_device_user_info(
+                    all_device_ids=self._all_device_ids or None
+                ),
                 self.async_get_ice_config_http(),
             )
         else:
@@ -700,7 +728,9 @@ class _WebRTCOpenMixin:
                     _numeric_uid_raw,
                 )
                 _numeric_uid_raw = None
-        numeric_user_id = str(_numeric_uid_raw) if _numeric_uid_raw is not None else None
+        numeric_user_id = (
+            str(_numeric_uid_raw) if _numeric_uid_raw is not None else None
+        )
         if numeric_user_id is None:
             _LOGGER.warning(
                 "async_open_webrtc_stream: no numeric userId from batchGetDeviceUserInfo"
@@ -733,8 +763,11 @@ class _WebRTCOpenMixin:
             ((self._raw_device or {}).get("properties") or {}).get("ip"),
         ]
         _cam_local_ip: str | None = next(
-            (str(_s) for _s in _cam_ip_sources
-             if _s and not _ip_looks_ascii_garbled(str(_s))),
+            (
+                str(_s)
+                for _s in _cam_ip_sources
+                if _s and not _ip_looks_ascii_garbled(str(_s))
+            ),
             None,
         )
         if not _cam_local_ip:
@@ -752,10 +785,12 @@ class _WebRTCOpenMixin:
         # userUuid rather than the app user's UUID.  If we don't subscribe
         # to those topics, the camera's answer (with its actual ICE candidates)
         # is silently dropped and we fall into the broken echo-only path.
-        _cam_user_uuid: str | None = ((_cam_user_info or {}).get("userUuid") or None)
+        _cam_user_uuid: str | None = (_cam_user_info or {}).get("userUuid") or None
         _LOGGER.debug(
             "batchGetDeviceUserInfo: device=%s  userId=%s  userUuid=%s",
-            self.device_id, _numeric_uid_raw, _cam_user_uuid,
+            self.device_id,
+            _numeric_uid_raw,
+            _cam_user_uuid,
         )
 
         # Respect isDTLS='0': those cameras cannot do DTLS, so falling back
@@ -776,10 +811,10 @@ class _WebRTCOpenMixin:
         # the same offer within a single session. ``reuse_peer_id`` lets a caller
         # (the SDES keepalive loop) hold one peerid across retries; None keeps the
         # historical mint-per-attempt behaviour for every other caller.
-        peer_id   = reuse_peer_id or self.generate_webrtc_peer_id(
+        peer_id = reuse_peer_id or self.generate_webrtc_peer_id(
             live_type=2, stream_id=stream_id, sdes=use_sdes, device_id=device_id
         )
-        loop      = asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
 
         # Broad wildcard subscriptions - the camera's full namespace is not
         # documented, and narrowing to specific service paths (IPC/IPCAM/device)
@@ -812,34 +847,47 @@ class _WebRTCOpenMixin:
             ]
             _LOGGER.debug(
                 "webrtc: adding camera userUuid subscriptions for %s (uuid=%s)",
-                self.device_id, _cam_user_uuid,
+                self.device_id,
+                _cam_user_uuid,
             )
         # iOS app telemetry (2025-03-23) confirms ALL IPC publish topics use
         # the userId path.  The broker routes to the specific camera using the
         # ``devId`` field inside the JSON payload, NOT the MQTT topic path.
         webrtc_req_topic = f"iot/v1/s/{user_id}/IPC/webrtcReq"
-        ice_cand_topic   = f"iot/v1/s/{user_id}/IPC/iceCandidateReq"
-        live_play_topic  = f"iot/v1/s/{user_id}/IPC/livePlayReq"
+        ice_cand_topic = f"iot/v1/s/{user_id}/IPC/iceCandidateReq"
+        live_play_topic = f"iot/v1/s/{user_id}/IPC/livePlayReq"
 
         # ------------------------------------------------------------------ #
         # MQTT <-> asyncio bridge
         # ------------------------------------------------------------------ #
-        outgoing_q:       _q_mod.Queue    = _q_mod.Queue()
-        answer_fut:        asyncio.Future = loop.create_future()
-        second_answer_fut: asyncio.Future = loop.create_future()   # captures discarded broker-echo camera's real webrtcResp
-        terminal_error_fut: asyncio.Future = loop.create_future()  # set to (code, desc) on a terminal webrtcResp ack (-50002/-50015)
-        camera_offer_fut:     asyncio.Future = loop.create_future()  # set when camera sends webrtcReq (role-reversal)
-        webrtc_req_echo_fut:  asyncio.Future = loop.create_future()  # set when broker echoes our own webrtcReq back (is_echo=True)
-        ice_config_fut:    asyncio.Future = loop.create_future()  # TURN credentials from getIceConfigResp
-        ice_q:            asyncio.Queue   = asyncio.Queue()
+        outgoing_q: _q_mod.Queue = _q_mod.Queue()
+        answer_fut: asyncio.Future = loop.create_future()
+        second_answer_fut: asyncio.Future = (
+            loop.create_future()
+        )  # captures discarded broker-echo camera's real webrtcResp
+        terminal_error_fut: asyncio.Future = (
+            loop.create_future()
+        )  # set to (code, desc) on a terminal webrtcResp ack (-50002/-50015)
+        camera_offer_fut: asyncio.Future = (
+            loop.create_future()
+        )  # set when camera sends webrtcReq (role-reversal)
+        webrtc_req_echo_fut: asyncio.Future = (
+            loop.create_future()
+        )  # set when broker echoes our own webrtcReq back (is_echo=True)
+        ice_config_fut: asyncio.Future = (
+            loop.create_future()
+        )  # TURN credentials from getIceConfigResp
+        ice_q: asyncio.Queue = asyncio.Queue()
         # Non-destructive record of every candidate the camera trickles to us.
         # The SDES path needs these too (for TURN permissions and nomination) but
         # must not consume ice_q: the DTLS fallback re-reads that queue, and a
         # candidate taken by SDES would never reach aiortc.
-        ice_cands_seen:   list            = []
-        cam_ip_q:         asyncio.Queue   = asyncio.Queue()  # camera IP from setDevAttrNotif
-        camera_ready_ev:  asyncio.Event   = asyncio.Event()  # set when camera is on MQTT
-        liveplay_echo_ev: asyncio.Event   = asyncio.Event()  # set when livePlayReq echo arrives
+        ice_cands_seen: list = []
+        cam_ip_q: asyncio.Queue = asyncio.Queue()  # camera IP from setDevAttrNotif
+        camera_ready_ev: asyncio.Event = asyncio.Event()  # set when camera is on MQTT
+        liveplay_echo_ev: asyncio.Event = (
+            asyncio.Event()
+        )  # set when livePlayReq echo arrives
         liveplay_resp_fut: asyncio.Future = loop.create_future()  # set on livePlayResp
         # Per-open record of the camera's livePlayResp code, kept even when nobody
         # waits for the future.  sdes_fast_liveplay is ON by default, so the SDES
@@ -869,7 +917,9 @@ class _WebRTCOpenMixin:
         # One-shot per open: the keep-alive re-assert fired when the camera
         # first announces itself.  See the dispatcher below.
         _wake_keepalive_sent = [False]
-        camera_reconnect_ev: asyncio.Event = asyncio.Event() # set when camera sends device/connect
+        camera_reconnect_ev: asyncio.Event = (
+            asyncio.Event()
+        )  # set when camera sends device/connect
         # Mutable flag: set True when setDevAttrNotif delivers sptPreconn:1.
         # Confirmed 2026-05-02: both A000088 and A001064 PTZ report
         # sptPreconn:1.  AVIO LIVING (SESSION_MODE_REQ=5376) must be sent
@@ -878,7 +928,8 @@ class _WebRTCOpenMixin:
 
         # Gate: block asyncio until MQTT is connected + subscribed
         import threading as _threading
-        _mqtt_ready_ev     = _threading.Event()
+
+        _mqtt_ready_ev = _threading.Event()
         _mqtt_conn_status: dict = {}
 
         # _status = the lifecycle channel (INFO when nothing else routes it);
@@ -887,7 +938,9 @@ class _WebRTCOpenMixin:
         _status, _trace = _make_status_pair(status_callback, _LOGGER)
 
         if _numeric_uid_raw is not None and numeric_user_id != user_id:
-            _LOGGER.debug("webrtc: numeric userId for payload injection: %s", _numeric_uid_raw)
+            _LOGGER.debug(
+                "webrtc: numeric userId for payload injection: %s", _numeric_uid_raw
+            )
 
         # ------------------------------------------------------------------ #
         # HTTP-first ICE config pre-fetch (matches official app behaviour)
@@ -905,12 +958,20 @@ class _WebRTCOpenMixin:
             _mqtt_ready_ev.set()
 
         def _extract_cam_ip(method_name: str, inner: dict, msg: dict) -> None:
-            _cam_ip = (inner.get("ipAddress") or inner.get("ip")
-                       or inner.get("localIp") or inner.get("localIPAddress")
-                       or inner.get("wlanIp") or inner.get("wlanIPAddress")
-                       or inner.get("deviceIp") or inner.get("localAddr")
-                       or msg.get("ipAddress") or msg.get("ip")
-                       or msg.get("localIp") or msg.get("localIPAddress"))
+            _cam_ip = (
+                inner.get("ipAddress")
+                or inner.get("ip")
+                or inner.get("localIp")
+                or inner.get("localIPAddress")
+                or inner.get("wlanIp")
+                or inner.get("wlanIPAddress")
+                or inner.get("deviceIp")
+                or inner.get("localAddr")
+                or msg.get("ipAddress")
+                or msg.get("ip")
+                or msg.get("localIp")
+                or msg.get("localIPAddress")
+            )
             if _cam_ip:
                 loop.call_soon_threadsafe(cam_ip_q.put_nowait, _cam_ip)
                 loop.call_soon_threadsafe(
@@ -919,7 +980,9 @@ class _WebRTCOpenMixin:
             else:
                 _LOGGER.warning(
                     "%s: no IP address field found; inner_keys=%s  msg_keys=%s",
-                    method_name, list(inner.keys()), [k for k in msg if k != "payload"],
+                    method_name,
+                    list(inner.keys()),
+                    [k for k in msg if k != "payload"],
                 )
 
         def _on_mqtt_message(topic: str, payload_str: str) -> None:
@@ -934,7 +997,7 @@ class _WebRTCOpenMixin:
                 )
                 return
             method = msg.get("method") or ""
-            inner  = msg.get("payload") or {}
+            inner = msg.get("payload") or {}
             # Fire camera_ready_ev the moment the camera appears on MQTT.  See
             # _is_camera_present_signal for what counts as evidence and why the
             # server's wake-ACK is not enough for a battery camera.
@@ -944,8 +1007,9 @@ class _WebRTCOpenMixin:
             # The gate above is happy with the cloud's ack; the stale-offer
             # detector is not, and this is the only place that distinction is
             # visible.
-            if _is_camera_present_signal(topic, msg, device_id,
-                                         accept_server_ack=False):
+            if _is_camera_present_signal(
+                topic, msg, device_id, accept_server_ack=False
+            ):
                 self._camera_device_seen_ts = time.monotonic()
                 # App parity, and the fix for a battery camera that wakes and
                 # then sleeps again mid-handshake.  The official client's live
@@ -965,11 +1029,14 @@ class _WebRTCOpenMixin:
                 # One-shot per open (the renew loop covers the rest), battery
                 # only - a mains camera has no window to restart - and fired
                 # from the loop because this runs on the MQTT thread.
-                if (getattr(self, "is_battery_camera", False)
-                        and not _wake_keepalive_sent[0]):
+                if (
+                    getattr(self, "is_battery_camera", False)
+                    and not _wake_keepalive_sent[0]
+                ):
                     _wake_keepalive_sent[0] = True
                     loop.call_soon_threadsafe(
-                        lambda: _spawn_bg(self._async_set_keep_alive()))
+                        lambda: _spawn_bg(self._async_set_keep_alive())
+                    )
             # livePlayResp: explicit camera ack/nack for start-play command.
             # The camera echoes our peer_id (verified live); its payload has NO
             # devId, so the old devId-only match never fired and this future never
@@ -977,8 +1044,8 @@ class _WebRTCOpenMixin:
             # (per-open, precise); keep devId as a fallback for any camera that
             # does send it.  dstAddr is the account-wide userId - too loose to use.
             if method == "livePlayResp" and (
-                    inner.get("peerid") == peer_id
-                    or inner.get("devId") == device_id):
+                inner.get("peerid") == peer_id or inner.get("devId") == device_id
+            ):
                 # Record the code whether or not anyone is waiting on the future
                 # (sdes_fast_liveplay skips that wait by default).  Hopped onto the
                 # loop thread rather than assigned here - this runs on the MQTT
@@ -1006,9 +1073,13 @@ class _WebRTCOpenMixin:
                     # peerid match, or BOTH devId and dstAddr (dstAddr alone is
                     # the shared account id and matches every camera).
                     _t_pid = inner.get("peerid")
-                    if not (_t_pid == peer_id
-                            or (inner.get("devId") == device_id
-                                and inner.get("dstAddr") == user_id)):
+                    if not (
+                        _t_pid == peer_id
+                        or (
+                            inner.get("devId") == device_id
+                            and inner.get("dstAddr") == user_id
+                        )
+                    ):
                         loop.call_soon_threadsafe(
                             lambda rp=_t_pid, c=_term[0]: _status(
                                 f"terminal ack {c} IGNORED - belongs to another"
@@ -1019,13 +1090,14 @@ class _WebRTCOpenMixin:
                     _resolve_future_threadsafe(loop, terminal_error_fut, _term)
                     return
                 resp_pid = inner.get("peerid")
-                answer   = inner.get("offer") or inner.get("answer") or {}
+                answer = inner.get("offer") or inner.get("answer") or {}
                 if not answer.get("sdp"):
                     return  # empty / incomplete response - ignore
                 if resp_pid == peer_id:
                     pass  # exact peerid match - accept (fast path)
-                elif (inner.get("devId") == device_id
-                        and inner.get("dstAddr") == user_id):
+                elif (
+                    inner.get("devId") == device_id and inner.get("dstAddr") == user_id
+                ):
                     # Camera replied with its own stable session peerid rather than
                     # echoing back our peerid.  Accept only if BOTH devId and dstAddr
                     # match - dstAddr alone matches every message to our account.
@@ -1045,15 +1117,20 @@ class _WebRTCOpenMixin:
                     )
                     return
                 _from_cam = _answer_is_from_the_camera(
-                    src_addr=(inner.get("srcAddr")
-                              or msg.get("srcAddr") or ""),
-                    user_id=user_id)
-                if (self._camera_answer_ice_ready_ts is None
-                        and _from_cam
-                        and _answer_sdp_can_nominate(answer.get("sdp", ""))):
+                    src_addr=(inner.get("srcAddr") or msg.get("srcAddr") or ""),
+                    user_id=user_id,
+                )
+                if (
+                    self._camera_answer_ice_ready_ts is None
+                    and _from_cam
+                    and _answer_sdp_can_nominate(answer.get("sdp", ""))
+                ):
                     self._camera_answer_ice_ready_ts = time.monotonic()
                 _deliver_webrtc_answer(
-                    loop, answer_fut, second_answer_fut, answer,
+                    loop,
+                    answer_fut,
+                    second_answer_fut,
+                    answer,
                     from_camera=_from_cam,
                 )
             elif method == "iceCandidateReq":
@@ -1065,7 +1142,7 @@ class _WebRTCOpenMixin:
                 # cross-contamination / wrong-feed bug).  peer_id is per-stream and
                 # devId is per-camera; either is a valid isolation key.
                 if resp_pid != peer_id and inner.get("devId") != device_id:
-                    return   # candidate for a different camera/session
+                    return  # candidate for a different camera/session
                 cand = inner.get("candidate") or {}
                 if cand.get("candidate"):
                     ice_cands_seen.append(cand)
@@ -1074,11 +1151,11 @@ class _WebRTCOpenMixin:
                 # Camera acting as WebRTC offerer (role reversal observed on
                 # LK.IPC.A001064).  Set camera_offer_fut so the DTLS path can
                 # respond with a proper webrtcResp answer.
-                resp_pid   = inner.get("peerid")
-                cam_offer  = inner.get("offer") or {}
-                src_addr   = inner.get("srcAddr") or msg.get("srcAddr") or ""
+                resp_pid = inner.get("peerid")
+                cam_offer = inner.get("offer") or {}
+                src_addr = inner.get("srcAddr") or msg.get("srcAddr") or ""
                 own_prefix = f"0.{user_id}"
-                is_echo    = src_addr.startswith(own_prefix) or src_addr == own_prefix
+                is_echo = src_addr.startswith(own_prefix) or src_addr == own_prefix
                 if is_echo:
                     # Broker echoes our own webrtcReq back with our srcAddr.
                     # Signal the SDES path so it can send webrtcResp to the camera.
@@ -1086,13 +1163,14 @@ class _WebRTCOpenMixin:
                         loop.call_soon_threadsafe(
                             webrtc_req_echo_fut.set_result, cam_offer
                         )
-                elif (cam_offer.get("sdp")
-                        # Same isolation as iceCandidateReq: accept the offer only
-                        # if it's for THIS camera/stream.  dstAddr is the shared
-                        # account id, so it must not be an accept key (it would
-                        # accept every camera's offer).
-                        and (resp_pid == peer_id
-                             or inner.get("devId") == device_id)):
+                elif (
+                    cam_offer.get("sdp")
+                    # Same isolation as iceCandidateReq: accept the offer only
+                    # if it's for THIS camera/stream.  dstAddr is the shared
+                    # account id, so it must not be an accept key (it would
+                    # accept every camera's offer).
+                    and (resp_pid == peer_id or inner.get("devId") == device_id)
+                ):
                     if not camera_offer_fut.done():
                         loop.call_soon_threadsafe(
                             camera_offer_fut.set_result, cam_offer
@@ -1108,10 +1186,11 @@ class _WebRTCOpenMixin:
                             {"IceServerList": _req_ice_list},
                         )
                 loop.call_soon_threadsafe(
-                    lambda m=method, t=topic,
-                    o=_signal_origin(topic, msg, device_id): _trace(
-                        f"camera replied  method={m!r}"
-                        f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
+                    lambda m=method, t=topic, o=_signal_origin(topic, msg, device_id): (
+                        _trace(
+                            f"camera replied  method={m!r}"
+                            f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
+                        )
                     )
                 )
             elif method == "setDevAttrNotif":
@@ -1129,9 +1208,7 @@ class _WebRTCOpenMixin:
                 # here so the DC on("open") callback can send LIVING.
                 _spt = inner.get("attr", {}).get("sptPreconn", 0)
                 if _spt:
-                    loop.call_soon_threadsafe(
-                        lambda: _spt_preconn.__setitem__(0, True)
-                    )
+                    loop.call_soon_threadsafe(lambda: _spt_preconn.__setitem__(0, True))
             elif method == "getDevAttrResp":
                 # Defensive: some camera firmware pushes getDevAttrResp rather
                 # than setDevAttrNotif.  Extract the LAN IP if present.
@@ -1151,9 +1228,12 @@ class _WebRTCOpenMixin:
                 if not _ice_inner and isinstance(msg.get("data"), dict):
                     _ice_inner = msg["data"]
                 # Accept anything that looks like ICE config data.
-                _has_known_keys = ("app" in _ice_inner or "dev" in _ice_inner
-                                   or "iceServers" in _ice_inner
-                                   or "turnServers" in _ice_inner)
+                _has_known_keys = (
+                    "app" in _ice_inner
+                    or "dev" in _ice_inner
+                    or "iceServers" in _ice_inner
+                    or "turnServers" in _ice_inner
+                )
                 if not _has_known_keys and _ice_inner:
                     # Log the actual structure so we can learn the format.
                     _LOGGER.warning(
@@ -1172,7 +1252,8 @@ class _WebRTCOpenMixin:
                     # No usable payload - store the whole message as fallback.
                     _LOGGER.warning(
                         "getIceConfigResp: empty inner payload; storing full msg."
-                        " msg_keys=%s", list(msg.keys())
+                        " msg_keys=%s",
+                        list(msg.keys()),
                     )
                     if msg and not ice_config_fut.done():
                         loop.call_soon_threadsafe(ice_config_fut.set_result, msg)
@@ -1184,18 +1265,20 @@ class _WebRTCOpenMixin:
                 if inner.get("devId") == device_id:
                     loop.call_soon_threadsafe(camera_reconnect_ev.set)
                 loop.call_soon_threadsafe(
-                    lambda m=method, t=topic,
-                    o=_signal_origin(topic, msg, device_id): _trace(
-                        f"camera replied  method={m!r}"
-                        f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
+                    lambda m=method, t=topic, o=_signal_origin(topic, msg, device_id): (
+                        _trace(
+                            f"camera replied  method={m!r}"
+                            f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
+                        )
                     )
                 )
             else:
                 loop.call_soon_threadsafe(
-                    lambda m=method, t=topic,
-                    o=_signal_origin(topic, msg, device_id): _trace(
-                        f"camera replied  method={m!r}"
-                        f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
+                    lambda m=method, t=topic, o=_signal_origin(topic, msg, device_id): (
+                        _trace(
+                            f"camera replied  method={m!r}"
+                            f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
+                        )
                     )
                 )
 
@@ -1210,16 +1293,18 @@ class _WebRTCOpenMixin:
         # async_stop_streaming between them); reap it before starting a new one
         # so we don't orphan its executor thread + handler on the shared conn.
         await self._reap_stream_drain()
-        _pm_stream = (await self._get_persistent_mqtt()
-                      if self._resolve_persistent_mqtt() else None)
+        _pm_stream = (
+            await self._get_persistent_mqtt()
+            if self._resolve_persistent_mqtt()
+            else None
+        )
         if _pm_stream is not None:
             await _pm_stream.subscribe(sub_topics)
             _pm_stream.add_handler(_on_mqtt_message)
 
             async def _pm_stream_drain():
                 try:
-                    await _drain_outgoing_queue(
-                        loop, outgoing_q, _pm_stream.publish)
+                    await _drain_outgoing_queue(loop, outgoing_q, _pm_stream.publish)
                 finally:
                     _pm_stream.remove_handler(_on_mqtt_message)
 
@@ -1236,9 +1321,17 @@ class _WebRTCOpenMixin:
             mqtt_fut = loop.run_in_executor(
                 None,
                 lambda: _mqtt_session_sync(
-                    mqtt_url, mqtt_user, mqtt_pwd, mqtt_cid,
-                    sub_topics, [], 3600.0, _on_mqtt_message,
-                    "/mqtt", _on_mqtt_ready, outgoing_q,
+                    mqtt_url,
+                    mqtt_user,
+                    mqtt_pwd,
+                    mqtt_cid,
+                    sub_topics,
+                    [],
+                    3600.0,
+                    _on_mqtt_message,
+                    "/mqtt",
+                    _on_mqtt_ready,
+                    outgoing_q,
                 ),
             )
             # Register with the same backstop the persistent branch uses.  This
@@ -1259,7 +1352,7 @@ class _WebRTCOpenMixin:
             None, lambda: _mqtt_ready_ev.wait(timeout=15.0)
         )
         if not mqtt_ok or not _mqtt_conn_status.get("connected"):
-            outgoing_q.put_nowait(None)   # stop MQTT thread
+            outgoing_q.put_nowait(None)  # stop MQTT thread
             _err = (
                 _mqtt_conn_status.get("error")
                 or _mqtt_conn_status.get("rc_str")
@@ -1277,15 +1370,19 @@ class _WebRTCOpenMixin:
         # synthesise a host candidate for direct LAN probing.
         # Replaces the invented getDevAttrReq which does not exist in the APK.
         # ------------------------------------------------------------------ #
-        outgoing_q.put_nowait((
-            f"iot/v1/cb/{user_id}/user/connect",
-            json.dumps({
-                "service": "user",
-                "method":  "connect",
-                "srcAddr": f"0.{user_id}",
-                "payload": {"timestamp": _mqtt_timestamp()},
-            }),
-        ))
+        outgoing_q.put_nowait(
+            (
+                f"iot/v1/cb/{user_id}/user/connect",
+                json.dumps(
+                    {
+                        "service": "user",
+                        "method": "connect",
+                        "srcAddr": f"0.{user_id}",
+                        "payload": {"timestamp": _mqtt_timestamp()},
+                    }
+                ),
+            )
+        )
 
         # ------------------------------------------------------------------ #
         # Send getIceConfigReq first - this warms up the broker-side WebRTC
@@ -1300,20 +1397,26 @@ class _WebRTCOpenMixin:
         # ------------------------------------------------------------------ #
         # Build getIceConfigReq payload unconditionally - used in both the
         # normal wake-wait path and the DTLS-fallback no-wait path below.
-        _ice_req_payload = json.dumps({
-            "method":  "getIceConfigReq",
-            "service": "IPC",
-            "devId":   device_id,
-            "srcAddr": f"0.{user_id}",
-            "seq":     f"ap{random.randint(1000000, 9999999)}",
-            "tst":     int(time.time() * 1000),
-            **( {"userId": _numeric_uid_raw} if _numeric_uid_raw is not None else {} ),
-            "payload": {"devId": device_id, "userId": user_id},
-        })
+        _ice_req_payload = json.dumps(
+            {
+                "method": "getIceConfigReq",
+                "service": "IPC",
+                "devId": device_id,
+                "srcAddr": f"0.{user_id}",
+                "seq": f"ap{random.randint(1000000, 9999999)}",
+                "tst": int(time.time() * 1000),
+                **(
+                    {"userId": _numeric_uid_raw} if _numeric_uid_raw is not None else {}
+                ),
+                "payload": {"devId": device_id, "userId": user_id},
+            }
+        )
 
         if _skip_ice_config:
             camera_ready_ev.set()  # camera already awake; skip wake handshake
-            _status("Skipping getIceConfigReq wake wait (DTLS fallback - camera already awake)")
+            _status(
+                "Skipping getIceConfigReq wake wait (DTLS fallback - camera already awake)"
+            )
             # Still send getIceConfigReq so TURN credentials can be gathered
             # asynchronously.  The server may respond now that the camera already
             # has an active MQTT session from the preceding SDES attempt.
@@ -1337,24 +1440,29 @@ class _WebRTCOpenMixin:
             #   2. HTTP lowPowerActiveState    - cloud push for deep-sleep cameras
             # Both are fire-and-forget; getIceConfigReq below confirms wakeup.
             # Payload from n.java l() - publishes extendsObj directly (no outer wrapper).
-            _wake_mqtt_payload = json.dumps({
-                "method":  "lowPowerActiveStateReq",
-                "devId":   device_id,
-                "userId":  user_id,
-                "service": "IPC",
-                "payload": {
-                    "devId":  device_id,
-                    "status": "wakeup",
-                },
-            })
-            outgoing_q.put_nowait((
-                f"iot/v1/s/{user_id}/IPCAM/lowPowerActiveStateReq",
-                _wake_mqtt_payload,
-            ))
+            _wake_mqtt_payload = json.dumps(
+                {
+                    "method": "lowPowerActiveStateReq",
+                    "devId": device_id,
+                    "userId": user_id,
+                    "service": "IPC",
+                    "payload": {
+                        "devId": device_id,
+                        "status": "wakeup",
+                    },
+                }
+            )
+            outgoing_q.put_nowait(
+                (
+                    f"iot/v1/s/{user_id}/IPCAM/lowPowerActiveStateReq",
+                    _wake_mqtt_payload,
+                )
+            )
 
             async def _http_wake() -> None:
                 try:
                     import aiohttp as _aiohttp_w
+
                     async with _aiohttp_w.ClientSession() as _ws:
                         async with _ws.post(
                             f"{self._aidot_v32_base}/devices/{device_id}"
@@ -1365,7 +1473,8 @@ class _WebRTCOpenMixin:
                         ) as _wr:
                             _LOGGER.debug(
                                 "lowPowerActiveState HTTP %d for %s",
-                                _wr.status, device_id,
+                                _wr.status,
+                                device_id,
                             )
                 except Exception as _we:
                     _LOGGER.debug(
@@ -1394,10 +1503,12 @@ class _WebRTCOpenMixin:
                 # either wake quickly or take >24s, so the extra wait rarely
                 # catches the slow case but always costs time for the fast one.
                 _status("Camera wake timeout - retrying ...")
-                outgoing_q.put_nowait((
-                    f"iot/v1/s/{user_id}/IPCAM/lowPowerActiveStateReq",
-                    _wake_mqtt_payload,
-                ))
+                outgoing_q.put_nowait(
+                    (
+                        f"iot/v1/s/{user_id}/IPCAM/lowPowerActiveStateReq",
+                        _wake_mqtt_payload,
+                    )
+                )
                 outgoing_q.put_nowait(
                     (f"iot/v1/s/{user_id}/IPC/getIceConfigReq", _ice_req_payload)
                 )
@@ -1430,28 +1541,32 @@ class _WebRTCOpenMixin:
         # this message is always sent first to arm the camera's WebRTC
         # subsystem; the camera silently ignores webrtcReq without it.
         # ------------------------------------------------------------------ #
-        _live_req_payload = json.dumps({
-            "method":  "livePlayReq",
-            "service": "IPC",
-            "devId":   device_id,
-            "srcAddr": f"0.{user_id}",
-            "seq":     f"ap{random.randint(1000000, 9999999)}",
-            "tst":     int(time.time() * 1000),
-            **( {"userId": _numeric_uid_raw} if _numeric_uid_raw is not None else {} ),
-            "payload": {
-                "peerid":  peer_id,
-                "devId":   device_id,
-                # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
-                # to the target deviceId for livePlayReq.
-                "dstAddr": device_id,
-                # App payload compatibility fields (see LiveRequestParamsBean /
-                # LivePlayPaylodBean in decompiled app).
-                "livePlay": 1,
-                "powerType": _live_power_type,
-                "p2pCache": _live_p2p_cache,
-                "dseq": self._next_dseq(),
-            },
-        })
+        _live_req_payload = json.dumps(
+            {
+                "method": "livePlayReq",
+                "service": "IPC",
+                "devId": device_id,
+                "srcAddr": f"0.{user_id}",
+                "seq": f"ap{random.randint(1000000, 9999999)}",
+                "tst": int(time.time() * 1000),
+                **(
+                    {"userId": _numeric_uid_raw} if _numeric_uid_raw is not None else {}
+                ),
+                "payload": {
+                    "peerid": peer_id,
+                    "devId": device_id,
+                    # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
+                    # to the target deviceId for livePlayReq.
+                    "dstAddr": device_id,
+                    # App payload compatibility fields (see LiveRequestParamsBean /
+                    # LivePlayPaylodBean in decompiled app).
+                    "livePlay": 1,
+                    "powerType": _live_power_type,
+                    "p2pCache": _live_p2p_cache,
+                    "dseq": self._next_dseq(),
+                },
+            }
+        )
         if not use_sdes:
             # SDES path sends its own livePlayReq inside _open_sdes_stream;
             # only send here for the DTLS path to avoid a duplicate.
@@ -1484,7 +1599,8 @@ class _WebRTCOpenMixin:
                 _LOGGER.info(
                     "signaling-wait[%s] livePlayResp skipped (%s)",
                     self.device_id,
-                    "fast_connect" if _fast_connect else "dtls_fast_liveplay")
+                    "fast_connect" if _fast_connect else "dtls_fast_liveplay",
+                )
                 _status(
                     "skipping livePlayResp wait (~2s) - proceeding to SDP/ICE"
                     " (app-parity, no fast-fail on reject)"
@@ -1507,7 +1623,7 @@ class _WebRTCOpenMixin:
                     # transient on battery cameras and recover via ICE; abort
                     # there would spuriously kill otherwise-good streams.
                     if _lp_on == 0:
-                        outgoing_q.put_nowait(None)   # stop MQTT thread (avoid orphan)
+                        outgoing_q.put_nowait(None)  # stop MQTT thread (avoid orphan)
                         raise RuntimeError(
                             f"livePlay refused by camera (livePlay=0, code={_lp_code})"
                         )
@@ -1522,7 +1638,9 @@ class _WebRTCOpenMixin:
                 _LOGGER.info(
                     "signaling-wait[%s] livePlayResp elapsed=%dms arrived=%s",
                     self.device_id,
-                    int((time.monotonic() - _lp_t0) * 1000), _lp_arrived)
+                    int((time.monotonic() - _lp_t0) * 1000),
+                    _lp_arrived,
+                )
             # Short extra wait for getIceConfigResp - the server may only respond
             # once a live camera session is active (i.e. after livePlayReq).
             # Waiting here ensures TURN credentials arrive before RTCPeerConnection
@@ -1545,7 +1663,9 @@ class _WebRTCOpenMixin:
                 _LOGGER.info(
                     "signaling-wait[%s] getIceConfigResp elapsed=%dms arrived=%s",
                     self.device_id,
-                    int((time.monotonic() - _ic_t0) * 1000), _ic_arrived)
+                    int((time.monotonic() - _ic_t0) * 1000),
+                    _ic_arrived,
+                )
             elif _fast_connect:
                 _status(
                     "AIDOT_FAST_CONNECT: skipping getIceConfigResp wait"
@@ -1557,9 +1677,9 @@ class _WebRTCOpenMixin:
                 try:
                     _lp_resp2 = liveplay_resp_fut.result()
                     _lp_code2 = int(_lp_resp2.get("code", 200))
-                    _lp_on2   = int(_lp_resp2.get("livePlay", 1))
+                    _lp_on2 = int(_lp_resp2.get("livePlay", 1))
                     if _lp_on2 == 0:
-                        outgoing_q.put_nowait(None)   # stop MQTT thread (avoid orphan)
+                        outgoing_q.put_nowait(None)  # stop MQTT thread (avoid orphan)
                         raise RuntimeError(
                             f"livePlay refused by camera (livePlay=0, code={_lp_code2})"
                         )
@@ -1572,12 +1692,18 @@ class _WebRTCOpenMixin:
                 except RuntimeError:
                     raise
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_http_keepalive', exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_http_keepalive",
+                        exc_info=True,
+                    )
 
         # ------------------------------------------------------------------ #
         # Branch: SDES-SRTP cameras use ffmpeg; DTLS cameras use aiortc
         # ------------------------------------------------------------------ #
         if use_sdes:
+
             def _raise_if_camera_refused():
                 """Surface a terminal webrtcResp ack on the SDES path too.
 
@@ -1619,7 +1745,8 @@ class _WebRTCOpenMixin:
                     dtls_fallback_ok=_dtls_fallback_ok,
                     second_answer_fut=second_answer_fut,
                     ice_config=(
-                        ice_config_fut.result() if ice_config_fut.done()
+                        ice_config_fut.result()
+                        if ice_config_fut.done()
                         else _http_ice_config
                     ),
                     camera_reconnect_ev=camera_reconnect_ev,
@@ -1657,7 +1784,7 @@ class _WebRTCOpenMixin:
                 try:
                     await asyncio.wait_for(mqtt_fut, timeout=5.0)
                 except Exception:
-                    pass   # MQTT thread exit errors don't affect the retry
+                    pass  # MQTT thread exit errors don't affect the retry
                 # Call the UNGATED impl, not the public async_open_webrtc_stream:
                 # we are already holding the global open-gate permit (acquired in
                 # async_open_webrtc_stream), and the gate's semaphore is not
@@ -1709,6 +1836,7 @@ class _WebRTCOpenMixin:
         if ice_config_fut.done():
             try:
                 _ice_data = ice_config_fut.result()
+
                 # Normalise multiple possible response shapes:
                 #   Arnoo format:   {app: [{uris, id, token}, ...], dev: [...]}
                 #   Standard W3C:  {iceServers: [{urls, username, credential}, ...]}
@@ -1721,14 +1849,17 @@ class _WebRTCOpenMixin:
                     for _k in ("data", "payload", "result"):
                         if _k in d and isinstance(d[_k], dict):
                             inner = d[_k]
-                            if any(k in inner for k in
-                                   ("app", "dev", "iceServers", "turnServers")):
+                            if any(
+                                k in inner
+                                for k in ("app", "dev", "iceServers", "turnServers")
+                            ):
                                 return inner
                             # one more level
                             unwrapped = _unwrap(inner)
                             if unwrapped is not inner:
                                 return unwrapped
                     return d
+
                 _ice_data = _unwrap(_ice_data)
 
                 # Arnoo app/dev lists: [{uris/Uris/dnsUris, id/Username, token/Password}, ...]
@@ -1738,28 +1869,45 @@ class _WebRTCOpenMixin:
                 # Both sections must be extracted and included in the webrtcReq IceServerList
                 # so the camera receives those credentials and can initiate ICE via TURN.
                 for _sect in ("app", "dev"):
-                    for _entry in (_ice_data.get(_sect) or []):
+                    for _entry in _ice_data.get(_sect) or []:
                         _uris = _sanitize_ice_uris(
-                            _entry.get("uris") or _entry.get("Uris")
-                            or _entry.get("dnsUris") or []
+                            _entry.get("uris")
+                            or _entry.get("Uris")
+                            or _entry.get("dnsUris")
+                            or []
                         )
-                        _uid  = str(_entry.get("id") or _entry.get("Username")
-                                    or _entry.get("username") or "")
-                        _cred = str(_entry.get("token") or _entry.get("Password")
-                                    or _entry.get("credential") or "")
+                        _uid = str(
+                            _entry.get("id")
+                            or _entry.get("Username")
+                            or _entry.get("username")
+                            or ""
+                        )
+                        _cred = str(
+                            _entry.get("token")
+                            or _entry.get("Password")
+                            or _entry.get("credential")
+                            or ""
+                        )
                         if _uris:
                             _ice_servers.append(
-                                RTCIceServer(urls=_uris, username=_uid, credential=_cred)
+                                RTCIceServer(
+                                    urls=_uris, username=_uid, credential=_cred
+                                )
                             )
                 # Standard W3C / plain iceServers list
-                for _entry in (_ice_data.get("iceServers")
-                               or _ice_data.get("turnServers") or []):
-                    _uris = (_entry.get("urls") or _entry.get("uris")
-                             or _entry.get("dnsUris") or [])
+                for _entry in (
+                    _ice_data.get("iceServers") or _ice_data.get("turnServers") or []
+                ):
+                    _uris = (
+                        _entry.get("urls")
+                        or _entry.get("uris")
+                        or _entry.get("dnsUris")
+                        or []
+                    )
                     if isinstance(_uris, str):
                         _uris = [_uris]
                     _uris = _sanitize_ice_uris(_uris)
-                    _uid  = str(_entry.get("username") or _entry.get("id") or "")
+                    _uid = str(_entry.get("username") or _entry.get("id") or "")
                     _cred = str(_entry.get("credential") or _entry.get("token") or "")
                     if _uris:
                         _ice_servers.append(
@@ -1768,23 +1916,39 @@ class _WebRTCOpenMixin:
                 # Camera IceServerList format (from webrtcReq echo):
                 # [{Uris: ['stun:...', 'turn:...'], id: '...', token: '...'}]
                 # Uses capital 'Uris' key and may carry TURN credentials.
-                for _entry in (_ice_data.get("IceServerList") or []):
-                    _uris = (_entry.get("Uris") or _entry.get("uris")
-                             or _entry.get("dnsUris") or [])
+                for _entry in _ice_data.get("IceServerList") or []:
+                    _uris = (
+                        _entry.get("Uris")
+                        or _entry.get("uris")
+                        or _entry.get("dnsUris")
+                        or []
+                    )
                     if isinstance(_uris, str):
                         _uris = [_uris]
                     _uris = _sanitize_ice_uris(_uris)
-                    _uid  = str(_entry.get("id") or _entry.get("username")
-                               or _entry.get("Username") or "")
-                    _cred = str(_entry.get("token") or _entry.get("credential")
-                                or _entry.get("Password") or "")
+                    _uid = str(
+                        _entry.get("id")
+                        or _entry.get("username")
+                        or _entry.get("Username")
+                        or ""
+                    )
+                    _cred = str(
+                        _entry.get("token")
+                        or _entry.get("credential")
+                        or _entry.get("Password")
+                        or ""
+                    )
                     if _uris:
                         _ice_servers.append(
                             RTCIceServer(urls=_uris, username=_uid, credential=_cred)
                         )
                 _has_turn_in_resp = any(
-                    any(u.startswith(("turn:", "turns:"))
-                        for u in (srv.urls if isinstance(srv.urls, list) else [srv.urls]))
+                    any(
+                        u.startswith(("turn:", "turns:"))
+                        for u in (
+                            srv.urls if isinstance(srv.urls, list) else [srv.urls]
+                        )
+                    )
                     for srv in _ice_servers[1:]
                 )
                 if len(_ice_servers) > 1:
@@ -1796,7 +1960,8 @@ class _WebRTCOpenMixin:
                 else:
                     _LOGGER.warning(
                         "getIceConfigResp received but no ICE servers extracted."
-                        " ice_data keys=%s", list(_ice_data.keys())[:20]
+                        " ice_data keys=%s",
+                        list(_ice_data.keys())[:20],
                     )
             except Exception as _ice_exc:
                 _LOGGER.warning(
@@ -1816,9 +1981,9 @@ class _WebRTCOpenMixin:
         if not _has_turn_in_resp and _arnoo_fallback:
             _ice_servers.append(RTCIceServer(urls=_arnoo_fallback))
         # Log the final ICE server configuration.
-        _stun_url = (_ice_servers[0].urls[0]
-                     if _ice_servers and _ice_servers[0].urls
-                     else "none")
+        _stun_url = (
+            _ice_servers[0].urls[0] if _ice_servers and _ice_servers[0].urls else "none"
+        )
         _turn_entries = [s.urls for s in _ice_servers[1:]]
         _status(f"ICE servers: STUN={_stun_url}  relayx{len(_turn_entries)}")
         _trace(f"ICE servers: relay urls {_turn_entries}")
@@ -1835,13 +2000,15 @@ class _WebRTCOpenMixin:
             _stun_only = []
             for _srv in _ice_servers:
                 _su = [
-                    u for u in (_srv.urls if isinstance(_srv.urls, list) else [_srv.urls])
+                    u
+                    for u in (_srv.urls if isinstance(_srv.urls, list) else [_srv.urls])
                     if not str(u).startswith(("turn:", "turns:"))
                 ]
                 if _su:
                     _stun_only.append(
-                        RTCIceServer(urls=_su, username=_srv.username,
-                                     credential=_srv.credential)
+                        RTCIceServer(
+                            urls=_su, username=_srv.username, credential=_srv.credential
+                        )
                     )
             _fallback_stun = stun_server_uris()
             _ice_servers = _stun_only or (
@@ -1865,8 +2032,10 @@ class _WebRTCOpenMixin:
             _host_only = os.environ.get("AIDOT_FAST_CONNECT_HOST_ONLY") == "1"
             _pc_ice_servers = _narrow_pc_ice(_ice_servers, host_only=_host_only)
             if _host_only:
-                _status("AIDOT_FAST_CONNECT_HOST_ONLY: local pc host-only "
-                        "(camera IceServerList keeps STUN; on-subnet only)")
+                _status(
+                    "AIDOT_FAST_CONNECT_HOST_ONLY: local pc host-only "
+                    "(camera IceServerList keeps STUN; on-subnet only)"
+                )
         pc = RTCPeerConnection(
             configuration=RTCConfiguration(iceServers=_pc_ice_servers)
         )
@@ -1881,8 +2050,11 @@ class _WebRTCOpenMixin:
             ):
                 _aidot_cert._aidot_dtls10 = True
         except Exception:
-            _LOGGER.debug("camera %s: could not tag DTLS cert for 1.0 scope",
-                          getattr(self, "device_id", "?"), exc_info=True)
+            _LOGGER.debug(
+                "camera %s: could not tag DTLS cert for 1.0 scope",
+                getattr(self, "device_id", "?"),
+                exc_info=True,
+            )
         # Audio: sendrecv WITHOUT a real audio sender.  Empirical findings
         # from 2026-04-26 testing (commits aa341a1b, aeaea893):
         #
@@ -1922,16 +2094,21 @@ class _WebRTCOpenMixin:
         # mutable holder so async_start_talk()/async_stop_talk() control it on a LIVE
         # session. If talk_pcm_provider is supplied at open we attach immediately
         # (backward compatible; SPEAKERSTART then fires on DC open).
-        _audio_tcvr   = pc.addTransceiver("audio", direction="sendrecv")  # mid:0
+        _audio_tcvr = pc.addTransceiver("audio", direction="sendrecv")  # mid:0
         _audio_sender = getattr(_audio_tcvr, "sender", None)
-        _talk_holder  = {"provider": talk_pcm_provider}
-        _talk_track   = _make_talk_audio_track(
-            lambda: (_talk_holder["provider"]() if _talk_holder["provider"] else None)
+        _talk_holder = {"provider": talk_pcm_provider}
+        _talk_track = _make_talk_audio_track(
+            lambda: _talk_holder["provider"]() if _talk_holder["provider"] else None
         )
-        if talk_pcm_provider is not None and _talk_track is not None and _audio_sender is not None:
+        if (
+            talk_pcm_provider is not None
+            and _talk_track is not None
+            and _audio_sender is not None
+        ):
             _audio_sender.replaceTrack(_talk_track)
             _status("talk: attached PCMA sender track (two-way audio enabled)")
-        pc.addTransceiver("video", direction="recvonly")   # mid:1  H264 video
+        pc.addTransceiver("video", direction="recvonly")  # mid:1  H264 video
+
         # Wire capture (2026-05-02) of an official iOS Aidot session against
         # A000088 showed the camera answers with FOUR BUNDLE'd m-sections:
         #   mid:0  audio      sendrecv  PCMA/8000
@@ -1975,12 +2152,16 @@ class _WebRTCOpenMixin:
         # the channel) or pc.on("datachannel") (camera initiated DCEP).
         def _send_avio_living(_dc_ref, _label_for_log: str) -> None:
             try:
-                _seq = random.randint(0, 0x7fffffff)
+                _seq = random.randint(0, 0x7FFFFFFF)
                 _ts_ms = int(time.time() * 1000)
                 _payload = struct.pack("<IB3x", 0, 1)  # channel=0, mode=LIVING
                 _hdr = struct.pack(
                     "<IIqII4x",
-                    _seq, 5376, _ts_ms, len(_payload), 0,
+                    _seq,
+                    5376,
+                    _ts_ms,
+                    len(_payload),
+                    0,
                 )
                 _frame = _hdr + _payload
                 _dc_ref.send(_frame)
@@ -1989,9 +2170,7 @@ class _WebRTCOpenMixin:
                     f" {len(_frame)}B seq=0x{_seq:08x}"
                 )
             except Exception as _dc_send_exc:
-                _status(
-                    f"DC[{_label_for_log}] LIVING send failed: {_dc_send_exc}"
-                )
+                _status(f"DC[{_label_for_log}] LIVING send failed: {_dc_send_exc}")
 
         def _send_avio_heartbeat(_dc_ref) -> None:
             # CMD_AVIO_CTRL_HEARTHEAT_REQ = 5156 (AVIOCTRLDEFs.java:119).
@@ -1999,12 +2178,17 @@ class _WebRTCOpenMixin:
             # 10000 ms) to prevent the camera's 22-second watchdog from
             # tearing down the DTLS session.  Empty payload, header only.
             try:
-                _seq = random.randint(0, 0x7fffffff)
+                _seq = random.randint(0, 0x7FFFFFFF)
                 _ts_ms = int(time.time() * 1000)
                 _hdr = struct.pack("<IIqII4x", _seq, 5156, _ts_ms, 0, 0)
                 _dc_ref.send(_hdr)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_avio_heartbeat', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_send_avio_heartbeat",
+                    exc_info=True,
+                )
 
         def _send_avio_audiostart(_dc_ref) -> None:
             # IOTYPE_USER_IPCAM_AUDIOSTART = 768 (AVIOCTRLDEFs.java:154).
@@ -2017,13 +2201,18 @@ class _WebRTCOpenMixin:
             # streaming regardless of our send state.  8-byte payload of zeros
             # matches the TUTK IOTC path usage in a.java:1126.
             try:
-                _seq = random.randint(0, 0x7fffffff)
+                _seq = random.randint(0, 0x7FFFFFFF)
                 _ts_ms = int(time.time() * 1000)
-                _payload = b'\x00' * 8
+                _payload = b"\x00" * 8
                 _hdr = struct.pack("<IIqII4x", _seq, 768, _ts_ms, len(_payload), 0)
                 _dc_ref.send(_hdr + _payload)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_avio_audiostart', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_send_avio_audiostart",
+                    exc_info=True,
+                )
 
         def _send_avio_speaker(_dc_ref, start: bool) -> None:
             # IOTYPE_USER_IPCAM_SPEAKERSTART = 848 / SPEAKERSTOP = 849
@@ -2033,16 +2222,18 @@ class _WebRTCOpenMixin:
             # SMsgAVIoctrlAVStream.parseContent(0) = 8 bytes, channel=0 LE.
             try:
                 _cmd = 848 if start else 849
-                _seq = random.randint(0, 0x7fffffff)
+                _seq = random.randint(0, 0x7FFFFFFF)
                 _ts_ms = int(time.time() * 1000)
-                _payload = b'\x00' * 8  # channel=0
+                _payload = b"\x00" * 8  # channel=0
                 _hdr = struct.pack("<IIqII4x", _seq, _cmd, _ts_ms, len(_payload), 0)
                 _dc_ref.send(_hdr + _payload)
-                _status(f"talk: sent AVIO SPEAKER{'START' if start else 'STOP'}"
-                        f" ({_cmd})")
+                _status(
+                    f"talk: sent AVIO SPEAKER{'START' if start else 'STOP'} ({_cmd})"
+                )
             except Exception as _spk_exc:
-                _status(f"talk: SPEAKER{'START' if start else 'STOP'} failed:"
-                        f" {_spk_exc}")
+                _status(
+                    f"talk: SPEAKER{'START' if start else 'STOP'} failed: {_spk_exc}"
+                )
 
         # Matches the camera's AVIO replies to the commands that asked for
         # them.  Created here rather than in the session because the message
@@ -2078,7 +2269,12 @@ class _WebRTCOpenMixin:
                     else:
                         _trace(f"DC[remote:{channel.label}] RX text {message!r}")
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_on_remote_dc_message', exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_on_remote_dc_message",
+                        exc_info=True,
+                    )
 
         track_tasks: list = []
 
@@ -2097,6 +2293,7 @@ class _WebRTCOpenMixin:
                 if not _t.done():
                     _t.cancel()
             track_tasks.clear()
+
         _kvs_dc = None
         if self._offer_should_include_datachannel:
             # Match the official client's label exactly: f0.java:2923 uses
@@ -2147,12 +2344,18 @@ class _WebRTCOpenMixin:
                     # stream 0, then send AVIO LIVING.
                     try:
                         _label_bytes = _dc_label.encode("utf-8")
-                        _dc_open_msg = struct.pack(
-                            "!BBHLHH",
-                            0x03, 0x00,          # OPEN, DATA_CHANNEL_RELIABLE
-                            0, 0,                # priority, reliability_param
-                            len(_label_bytes), 0,  # label_len, proto_len
-                        ) + _label_bytes
+                        _dc_open_msg = (
+                            struct.pack(
+                                "!BBHLHH",
+                                0x03,
+                                0x00,  # OPEN, DATA_CHANNEL_RELIABLE
+                                0,
+                                0,  # priority, reliability_param
+                                len(_label_bytes),
+                                0,  # label_len, proto_len
+                            )
+                            + _label_bytes
+                        )
                         await _kvs_dc.transport._send(0, 50, _dc_open_msg)
                         _status(
                             f"DC[{_dc_label}] sent DATA_CHANNEL_OPEN"
@@ -2163,8 +2366,7 @@ class _WebRTCOpenMixin:
                         await asyncio.sleep(0.3)
                     except Exception as _dc_open_exc:
                         _status(
-                            f"DC[{_dc_label}] DATA_CHANNEL_OPEN failed:"
-                            f" {_dc_open_exc}"
+                            f"DC[{_dc_label}] DATA_CHANNEL_OPEN failed: {_dc_open_exc}"
                         )
                     _send_avio_living(_kvs_dc, _dc_label + " (PreCon)")
                     _send_avio_audiostart(_kvs_dc)
@@ -2188,6 +2390,7 @@ class _WebRTCOpenMixin:
                                 _send_avio_audiostart(_kvs_dc)
                         except asyncio.CancelledError:
                             pass
+
                     _hb_task = asyncio.ensure_future(_heartbeat_loop())
                     track_tasks.append(_hb_task)
 
@@ -2206,7 +2409,12 @@ class _WebRTCOpenMixin:
                     else:
                         _trace(f"DC[{_dc_label}] RX text {message!r}")
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_on_kvs_dc_message', exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_on_kvs_dc_message",
+                        exc_info=True,
+                    )
 
             # Periodic readyState diagnostic - last run had no "DC OPEN"
             # log line, so we want to see whether readyState ever transitions
@@ -2233,6 +2441,7 @@ class _WebRTCOpenMixin:
         def _on_track(track) -> None:
             if track.kind == "audio":
                 _status(f"audio track: id={track.id} kind={track.kind}")
+
                 # The audio transceiver is sendrecv (no actual sender track).
                 # aiortc's RTCRtpSender fires RTCP SR every ~1 s with
                 # packet_count=0.  Camera firmware interprets 25 s of
@@ -2252,23 +2461,33 @@ class _WebRTCOpenMixin:
                     await asyncio.sleep(1.5)  # wait for sender to start
                     for _t in pc.getTransceivers():
                         if _t.kind == "audio":
+
                             async def _noop_rtcp(_pkts, **_kw):
                                 pass
+
                             _t.sender._send_rtcp = _noop_rtcp
                             _trace(
                                 "audio sender: _send_rtcp patched -> no-op"
                                 " (suppresses 0-packet SR audio watchdog)"
                             )
                             break
+
                 if talk_pcm_provider is None:
                     _spawn_bg(_suppress_audio_sender_rtcp())
+
                 # Drain decoded audio frames so the queue doesn't grow unbounded.
                 async def _drain_audio() -> None:
                     try:
                         while True:
                             await track.recv()
                     except Exception:
-                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_drain_audio', exc_info=True)
+                        _LOGGER.debug(
+                            "camera %s: swallowed exception in %s",
+                            getattr(self, "device_id", "?"),
+                            "_drain_audio",
+                            exc_info=True,
+                        )
+
                 t = asyncio.ensure_future(_drain_audio())
                 track_tasks.append(t)
             elif track.kind == "video":
@@ -2296,9 +2515,7 @@ class _WebRTCOpenMixin:
                         )
                         if _recv is None:
                             return
-                        _ssrcs = [
-                            s.source for s in _recv.getSynchronizationSources()
-                        ]
+                        _ssrcs = [s.source for s in _recv.getSynchronizationSources()]
                         if not _ssrcs:
                             return
                         for _ssrc in _ssrcs:
@@ -2310,15 +2527,21 @@ class _WebRTCOpenMixin:
                     except Exception as _pli_exc:
                         _LOGGER.debug("RTCP PLI attempt failed: %s", _pli_exc)
 
-                _spawn_bg(_keyframe_prompter(
-                    _send_pli_once, _first_video_frame,
-                    interval=0.5, max_tries=12,
-                ))
+                _spawn_bg(
+                    _keyframe_prompter(
+                        _send_pli_once,
+                        _first_video_frame,
+                        interval=0.5,
+                        max_tries=12,
+                    )
+                )
                 if on_frame is not None:
+
                     def _on_frame_signal(_f, _on_frame=on_frame):
                         # First decoded frame stops the PLI prompter.
                         _first_video_frame.set()
                         return _on_frame(_f)
+
                     t = asyncio.ensure_future(
                         _webrtc_consume_video(track, _on_frame_signal)
                     )
@@ -2328,6 +2551,7 @@ class _WebRTCOpenMixin:
         if output_path:
             try:
                 from aidot_cameras._vendor.aiortc.contrib.media import MediaRecorder
+
                 recorder = MediaRecorder(output_path)
 
                 _video_recorded = [False]
@@ -2371,11 +2595,14 @@ class _WebRTCOpenMixin:
                 _hp_conn = getattr(_hp_xport, "_connection", None)
                 if _hp_conn is not None:
                     _hp_conn._aidot_highport = True
-                    _LOGGER.debug(
-                        "highport-fix: scoped to this DTLS camera connection")
+                    _LOGGER.debug("highport-fix: scoped to this DTLS camera connection")
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_on_track', exc_info=True)
-
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_on_track",
+                    exc_info=True,
+                )
 
         _sdp = pc.localDescription.sdp
         _status(
@@ -2387,13 +2614,6 @@ class _WebRTCOpenMixin:
 
         def _seq() -> str:
             return f"ap{random.randint(1000000, 9999999)}"
-
-
-
-
-
-
-
 
         _offer_sdp = _dedup_bundle_candidates(
             _filter_sdp_candidates(
@@ -2411,8 +2631,9 @@ class _WebRTCOpenMixin:
         # sha-256 only - verified from a recorded successful session on the
         # same A001513 camera.  Keep only sha-256 to mirror that behaviour.
         import re as _fp_strip_re
+
         _offer_sdp = _fp_strip_re.sub(
-            r'(?m)^a=fingerprint:sha-(?:384|512)[^\r\n]*\r?\n', '', _offer_sdp
+            r"(?m)^a=fingerprint:sha-(?:384|512)[^\r\n]*\r?\n", "", _offer_sdp
         )
         _patched_mlines = [ln for ln in _offer_sdp.splitlines() if ln.startswith("m=")]
         _trace("Offer m-sections (patched): %s" % " | ".join(_patched_mlines))
@@ -2441,10 +2662,10 @@ class _WebRTCOpenMixin:
         # Use a CSPRNG: the PSK is media-keying material carried over signaling,
         # so it must not come from the predictable Mersenne-Twister (random).
         import secrets as _secrets_psk_dtls
+
         _psk_charset_dtls = "123456789abcdef"
         _psk_dtls = "".join(
-            _secrets_psk_dtls.choice(_psk_charset_dtls)
-            for _ in range(64)
+            _secrets_psk_dtls.choice(_psk_charset_dtls) for _ in range(64)
         )
 
         # Compress SDP for wPayload.offer.sdp.  encOffer=1 in the official
@@ -2455,61 +2676,68 @@ class _WebRTCOpenMixin:
         # broker session before processing the request.
         _compressed_offer_sdp = _compress_sdp_for_camera(_offer_sdp)
 
-        webrtc_req_payload = json.dumps({
-            "method":  "webrtcReq",
-            "service": "IPC",
-            "devId":   device_id,
-            "srcAddr": f"0.{user_id}",
-            "seq":     _seq(),
-            "tst":     int(time.time() * 1000),
-            **( {"userId": _numeric_uid_raw} if _numeric_uid_raw is not None else {} ),
-            "payload": {
-                # Browser-style nested fields - newer firmware (e.g. A001064)
-                # parses payload.wPayload.peerid / payload.wPayload.offer and
-                # requires IceServerList to activate its ICE agent.
-                # HAR captures from the official AiDot web app confirm this is
-                # the canonical format; flat fields are kept for older firmware.
-                # wPayload.offer.sdp must carry the FULL SDP (not the
-                # compressed form): the camera's compressed-answer codepath
-                # appears to skip its fingerprint-fill step when fed a
-                # compressed offer, returning a malformed
-                # `a=fingerprint:sha-256 ` line with empty value that
-                # aiortc then rejects with "not enough values to unpack".
-                # The legacy flat payload.offer.sdp gets the COMPRESSED SDP
-                # so the total request still fits under the camera's MQTT
-                # receive buffer (~10 KB threshold; we want < ~7-8 KB).
-                "wPayload": {
+        webrtc_req_payload = json.dumps(
+            {
+                "method": "webrtcReq",
+                "service": "IPC",
+                "devId": device_id,
+                "srcAddr": f"0.{user_id}",
+                "seq": _seq(),
+                "tst": int(time.time() * 1000),
+                **(
+                    {"userId": _numeric_uid_raw} if _numeric_uid_raw is not None else {}
+                ),
+                "payload": {
+                    # Browser-style nested fields - newer firmware (e.g. A001064)
+                    # parses payload.wPayload.peerid / payload.wPayload.offer and
+                    # requires IceServerList to activate its ICE agent.
+                    # HAR captures from the official AiDot web app confirm this is
+                    # the canonical format; flat fields are kept for older firmware.
+                    # wPayload.offer.sdp must carry the FULL SDP (not the
+                    # compressed form): the camera's compressed-answer codepath
+                    # appears to skip its fingerprint-fill step when fed a
+                    # compressed offer, returning a malformed
+                    # `a=fingerprint:sha-256 ` line with empty value that
+                    # aiortc then rejects with "not enough values to unpack".
+                    # The legacy flat payload.offer.sdp gets the COMPRESSED SDP
+                    # so the total request still fits under the camera's MQTT
+                    # receive buffer (~10 KB threshold; we want < ~7-8 KB).
+                    "wPayload": {
+                        "peerid": peer_id,
+                        "sts": int(time.time() * 1000),
+                        "psk": _psk_dtls,
+                        "offer": {"type": pc.localDescription.type, "sdp": _offer_sdp},
+                    },
+                    "IceServerList": _ice_server_list,
+                    # Legacy flat fields - older firmware parses payload.peerid directly.
                     "peerid": peer_id,
-                    "sts":    int(time.time() * 1000),
-                    "psk":    _psk_dtls,
-                    "offer":  {"type": pc.localDescription.type,
-                                "sdp":  _offer_sdp},
+                    "devId": device_id,
+                    "offer": {
+                        "type": pc.localDescription.type,
+                        "sdp": _compressed_offer_sdp,
+                    },
+                    "trackId": 0,
+                    # Decompiled reference app (tyrus/o.java) sets dstAddr=deviceId
+                    # for webrtcReq.
+                    "dstAddr": device_id,
+                    "liveMqtt": 1,
+                    "encOffer": 1,
+                    # powerType/p2pCache: per docs/official_camera_network_calls.md
+                    # section 5.2, both fields are present on every webrtcReq.  Defaults
+                    # used here match the fallback behaviour in the decompiled
+                    # reference app when IPC device info is unavailable.
+                    "powerType": _live_power_type,
+                    "p2pCache": _live_p2p_cache,
                 },
-                "IceServerList": _ice_server_list,
-                # Legacy flat fields - older firmware parses payload.peerid directly.
-                "peerid":  peer_id,
-                "devId":   device_id,
-                "offer":   {"type": pc.localDescription.type,
-                             "sdp":  _compressed_offer_sdp},
-                "trackId": 0,
-                # Decompiled reference app (tyrus/o.java) sets dstAddr=deviceId
-                # for webrtcReq.
-                "dstAddr": device_id,
-                "liveMqtt": 1,
-                "encOffer": 1,
-                # powerType/p2pCache: per docs/official_camera_network_calls.md
-                # section 5.2, both fields are present on every webrtcReq.  Defaults
-                # used here match the fallback behaviour in the decompiled
-                # reference app when IPC device info is unavailable.
-                "powerType": _live_power_type,
-                "p2pCache": _live_p2p_cache,
-            },
-        })
+            }
+        )
         outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
         self._cold_phase("webrtcReq")
-        _status(f"webrtcReq sent  peerid={peer_id}"
-                f"  IceServerListx{len(_ice_server_list)}"
-                f"  payload={len(webrtc_req_payload)}B")
+        _status(
+            f"webrtcReq sent  peerid={peer_id}"
+            f"  IceServerListx{len(_ice_server_list)}"
+            f"  payload={len(webrtc_req_payload)}B"
+        )
 
         # GAP B (APK parity): the official app re-publishes webrtcReq up to ~3x,
         # ~15 s apart, when no webrtcResp arrives (f0.java reconnect / offer-resend),
@@ -2520,7 +2748,7 @@ class _WebRTCOpenMixin:
         # largely downstream (broker->camera), so this is a marginal parity addition,
         # not a guaranteed fix; the connect still relies on the per-attempt retry.
         async def _resend_webrtcreq() -> None:
-            for _ in range(2):                          # up to 2 resends (3 total)
+            for _ in range(2):  # up to 2 resends (3 total)
                 await asyncio.sleep(15.0)
                 if answer_fut.done() or camera_offer_fut.done():
                     return
@@ -2532,6 +2760,7 @@ class _WebRTCOpenMixin:
                     _status("webrtcReq resent (no webrtcResp in 15 s - GAP B parity)")
                 except Exception:
                     return
+
         track_tasks.append(asyncio.ensure_future(_resend_webrtcreq()))
 
         # Re-announce user presence now that the camera is confirmed awake
@@ -2540,15 +2769,19 @@ class _WebRTCOpenMixin:
         # chance of pushing setDevAttrNotif with their LAN IP before the ICE
         # wait loop starts.  Replaces the invented getDevAttrReq.
         if not _cam_local_ip:
-            outgoing_q.put_nowait((
-                f"iot/v1/cb/{user_id}/user/connect",
-                json.dumps({
-                    "service": "user",
-                    "method":  "connect",
-                    "srcAddr": f"0.{user_id}",
-                    "payload": {"timestamp": _mqtt_timestamp()},
-                }),
-            ))
+            outgoing_q.put_nowait(
+                (
+                    f"iot/v1/cb/{user_id}/user/connect",
+                    json.dumps(
+                        {
+                            "service": "user",
+                            "method": "connect",
+                            "srcAddr": f"0.{user_id}",
+                            "payload": {"timestamp": _mqtt_timestamp()},
+                        }
+                    ),
+                )
+            )
 
         # Store ICE candidates for reconnect re-send (camera may quickConn-reset
         # during the signaling wait and need a fresh offer + candidates).
@@ -2571,12 +2804,13 @@ class _WebRTCOpenMixin:
             # and can cause ICE-lite cameras to echo them back as their own
             # candidates, polluting the remote candidate list.
             import re as _re
+
             _cand_ip = getattr(candidate, "ip", "") or ""
-            if _re.match(r'^172\.17\.', _cand_ip):
+            if _re.match(r"^172\.17\.", _cand_ip):
                 return  # Docker bridge - skip
-            if _re.match(r'^100\.', _cand_ip):
+            if _re.match(r"^100\.", _cand_ip):
                 return  # CGNAT / Tailscale - skip
-            if ':' in _cand_ip:
+            if ":" in _cand_ip:
                 return  # IPv6 - skip
             cand_str = (
                 f"candidate:{candidate.foundation} {candidate.component} "
@@ -2585,46 +2819,51 @@ class _WebRTCOpenMixin:
             )
             if getattr(candidate, "relatedAddress", None):
                 cand_str += (
-                    f" raddr {candidate.relatedAddress}"
-                    f" rport {candidate.relatedPort}"
+                    f" raddr {candidate.relatedAddress} rport {candidate.relatedPort}"
                 )
             # Include sdpMid/sdpMLineIndex so the camera can map the candidate
             # to the correct m-section.  A001064 and similar firmware needs these
             # fields; without them the camera may silently ignore the candidates.
             _cand_obj: dict = {"candidate": cand_str}
-            _c_mid     = getattr(candidate, "sdpMid",        None)
-            _c_mid_idx = getattr(candidate, "sdpMLineIndex",  None)
+            _c_mid = getattr(candidate, "sdpMid", None)
+            _c_mid_idx = getattr(candidate, "sdpMLineIndex", None)
             if _c_mid is not None:
                 _cand_obj["sdpMid"] = _c_mid
             if _c_mid_idx is not None:
                 _cand_obj["sdpMLineIndex"] = _c_mid_idx
-            payload = json.dumps({
-                "method":  "iceCandidateReq",
-                "service": "IPC",
-                "devId":   device_id,
-                "srcAddr": f"0.{user_id}",
-                "seq":     _seq(),
-                "tst":     int(time.time() * 1000),
-                **( {"userId": _numeric_uid_raw} if _numeric_uid_raw is not None else {} ),
-                "payload": {
-                    # dstAddr routes the candidate to the target device (device ID,
-                    # not user ID).  HAR captures from the official AiDot web app
-                    # confirm payload.dstAddr = deviceId on every iceCandidateReq.
-                    "dstAddr": device_id,
-                    # wPayload is the browser-style nested format required by
-                    # newer firmware (e.g. LK.IPC.A001064) that parses
-                    # payload.wPayload.candidate rather than payload.candidate.
-                    "wPayload": {
-                        "peerid":    peer_id,
+            payload = json.dumps(
+                {
+                    "method": "iceCandidateReq",
+                    "service": "IPC",
+                    "devId": device_id,
+                    "srcAddr": f"0.{user_id}",
+                    "seq": _seq(),
+                    "tst": int(time.time() * 1000),
+                    **(
+                        {"userId": _numeric_uid_raw}
+                        if _numeric_uid_raw is not None
+                        else {}
+                    ),
+                    "payload": {
+                        # dstAddr routes the candidate to the target device (device ID,
+                        # not user ID).  HAR captures from the official AiDot web app
+                        # confirm payload.dstAddr = deviceId on every iceCandidateReq.
+                        "dstAddr": device_id,
+                        # wPayload is the browser-style nested format required by
+                        # newer firmware (e.g. LK.IPC.A001064) that parses
+                        # payload.wPayload.candidate rather than payload.candidate.
+                        "wPayload": {
+                            "peerid": peer_id,
+                            "candidate": _cand_obj,
+                        },
+                        # Keep flat fields for older firmware that reads payload.peerid /
+                        # payload.candidate directly.
+                        "peerid": peer_id,
+                        "devId": device_id,
                         "candidate": _cand_obj,
                     },
-                    # Keep flat fields for older firmware that reads payload.peerid /
-                    # payload.candidate directly.
-                    "peerid":    peer_id,
-                    "devId":     device_id,
-                    "candidate": _cand_obj,
-                },
-            })
+                }
+            )
             outgoing_q.put_nowait((ice_cand_topic, payload))
             _dtls_ice_payloads.append((ice_cand_topic, payload))
 
@@ -2663,8 +2902,7 @@ class _WebRTCOpenMixin:
             )
             if _init_done:
                 break
-            if (camera_reconnect_ev.is_set()
-                    and _init_reconnect_resends < 2):
+            if camera_reconnect_ev.is_set() and _init_reconnect_resends < 2:
                 camera_reconnect_ev.clear()
                 _init_reconnect_resends += 1
                 _status(
@@ -2672,7 +2910,7 @@ class _WebRTCOpenMixin:
                     f" (resend {_init_reconnect_resends})"
                     " - re-sending DTLS webrtcReq + ICE candidates"
                 )
-                await asyncio.sleep(1.5)   # let camera re-subscribe to MQTT
+                await asyncio.sleep(1.5)  # let camera re-subscribe to MQTT
                 outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
                 for _di_p in _dtls_ice_payloads:
                     outgoing_q.put_nowait(_di_p)
@@ -2685,15 +2923,21 @@ class _WebRTCOpenMixin:
         # resets (quickConn=1) on receiving our DTLS webrtcReq, then comes back
         # clean after ~3-5 s.  Re-sending the offer after reconnect gets the
         # camera to respond with its real DTLS answer in ~242 ms.
-        _rr_echo_only = False  # True only for cameras that echo but never send a real webrtcResp
-        if (webrtc_req_echo_fut in _rr_done
-                and answer_fut not in _rr_done
-                and camera_offer_fut not in _rr_done):
+        _rr_echo_only = (
+            False  # True only for cameras that echo but never send a real webrtcResp
+        )
+        if (
+            webrtc_req_echo_fut in _rr_done
+            and answer_fut not in _rr_done
+            and camera_offer_fut not in _rr_done
+        ):
             _status("webrtcReq echo received - waiting for camera webrtcResp...")
             _rr_secondary_limit = 20.0
-            _rr_secondary_deadline = asyncio.get_running_loop().time() + _rr_secondary_limit
+            _rr_secondary_deadline = (
+                asyncio.get_running_loop().time() + _rr_secondary_limit
+            )
             _rr_done2: set = set()
-            _rr_pending2 = _rr_pending   # {answer_fut, camera_offer_fut}
+            _rr_pending2 = _rr_pending  # {answer_fut, camera_offer_fut}
             _rr_reconnect_resends = 0
             while asyncio.get_running_loop().time() < _rr_secondary_deadline:
                 _remaining = _rr_secondary_deadline - asyncio.get_running_loop().time()
@@ -2703,10 +2947,9 @@ class _WebRTCOpenMixin:
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if _rr_done2:
-                    break   # Real response arrived
+                    break  # Real response arrived
                 # Camera quickConn reset: came back clean, needs a fresh offer.
-                if (camera_reconnect_ev.is_set()
-                        and _rr_reconnect_resends < 2):
+                if camera_reconnect_ev.is_set() and _rr_reconnect_resends < 2:
                     camera_reconnect_ev.clear()
                     _rr_reconnect_resends += 1
                     _status(
@@ -2714,7 +2957,7 @@ class _WebRTCOpenMixin:
                         f" (resend {_rr_reconnect_resends})"
                         " - re-sending webrtcReq + ICE candidates"
                     )
-                    await asyncio.sleep(1.5)   # let camera re-subscribe
+                    await asyncio.sleep(1.5)  # let camera re-subscribe
                     outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
                     for _di_p in _dtls_ice_payloads:
                         outgoing_q.put_nowait(_di_p)
@@ -2735,9 +2978,9 @@ class _WebRTCOpenMixin:
                 for _di_p in _dtls_ice_payloads:
                     outgoing_q.put_nowait(_di_p)
 
-                _rr_ext_limit    = 20.0
+                _rr_ext_limit = 20.0
                 _rr_ext_deadline = asyncio.get_running_loop().time() + _rr_ext_limit
-                _rr_done3: set   = set()
+                _rr_done3: set = set()
                 _rr_reconnect_ext = 0
                 while asyncio.get_running_loop().time() < _rr_ext_deadline:
                     _ext_rem = _rr_ext_deadline - asyncio.get_running_loop().time()
@@ -2748,8 +2991,7 @@ class _WebRTCOpenMixin:
                     )
                     if _rr_done3:
                         break
-                    if (camera_reconnect_ev.is_set()
-                            and _rr_reconnect_ext < 2):
+                    if camera_reconnect_ev.is_set() and _rr_reconnect_ext < 2:
                         camera_reconnect_ev.clear()
                         _rr_reconnect_ext += 1
                         _status(
@@ -2772,7 +3014,7 @@ class _WebRTCOpenMixin:
                         " - role-reversal as last resort"
                     )
                     camera_offer_fut.set_result(webrtc_req_echo_fut.result())
-                    _rr_done    = {camera_offer_fut}
+                    _rr_done = {camera_offer_fut}
                     _rr_pending = _rr_pending2
 
         for _f in _rr_pending:
@@ -2803,9 +3045,9 @@ class _WebRTCOpenMixin:
         # Stored webrtcResp + ICE candidate payloads for reconnect re-send.
         # Set in the role-reversal block; consumed in the ICE wait loop when the
         # camera sends device/connect (quickConn reconnect) during ICE checking.
-        _rr_webrtc_resp_topic:   str  = ""
-        _rr_webrtc_resp_payload: str  = ""
-        _rr_ice_payloads:        list = []  # list of (topic, json_str) tuples
+        _rr_webrtc_resp_topic: str = ""
+        _rr_webrtc_resp_payload: str = ""
+        _rr_ice_payloads: list = []  # list of (topic, json_str) tuples
         # How many answer sections came from a mid other than the offer's. Set
         # by the normal path's rebuild below; declared here so the ICE wait can
         # read it whichever path ran.
@@ -2839,6 +3081,7 @@ class _WebRTCOpenMixin:
             # This must be applied before the DTLS handshake starts (i.e. before
             # ICE connects), but does NOT require setRemoteDescription first.
             import types as _types
+
             try:
                 from aidot_cameras._vendor.aiortc.rtcdtlstransport import (
                     RTCDtlsFingerprint as _RRFp,
@@ -2870,9 +3113,7 @@ class _WebRTCOpenMixin:
                     handshake rather than silently accepting an unverified peer.
                     """
                     try:
-                        _cam_cert = self._ssl.get_peer_certificate(
-                            as_cryptography=True
-                        )
+                        _cam_cert = self._ssl.get_peer_certificate(as_cryptography=True)
                         _real_fp = _verified_dtls_fingerprint(
                             _cam_cert, _pinned_fp, _rr_cert_fp
                         )
@@ -2887,7 +3128,8 @@ class _WebRTCOpenMixin:
                             raise  # fail closed: never accept an unverifiable cert
                         _LOGGER.debug(
                             "camera %s: DTLS cert retrieval failed; accept-any "
-                            "(unpinned)", getattr(self, "device_id", "?"),
+                            "(unpinned)",
+                            getattr(self, "device_id", "?"),
                             exc_info=True,
                         )
 
@@ -2902,9 +3144,7 @@ class _WebRTCOpenMixin:
                     f" ({len(pc.getTransceivers())} transceivers)"
                 )
             except Exception as _rr_fp_exc:
-                _status(
-                    f"role-reversal fingerprint bypass skipped: {_rr_fp_exc}"
-                )
+                _status(f"role-reversal fingerprint bypass skipped: {_rr_fp_exc}")
             # ---- Early setRemoteDescription from camera's counter-offer ---------- #
             # The camera starts STUN probing as soon as it receives our webrtcResp +
             # iceCandidateReq.  If we wait for second_answer_fut (up to 8 s) before
@@ -2916,6 +3156,7 @@ class _WebRTCOpenMixin:
             # when the camera's STUN probes arrive after iceCandidateReq, aioice
             # creates peer-reflexive candidates and ICE connects.
             import re as _rr_re
+
             # Extract camera's ICE credentials from its counter-offer.
             # Observed behaviour for LK.IPC.A001064: the camera echoes our ICE
             # credentials exactly (ufrag/pwd are identical in both the counter-offer
@@ -2926,7 +3167,7 @@ class _WebRTCOpenMixin:
             # cause every STUN probe to fail auth -> ICE stuck checking.
             _cam_counter_sdp = (camera_offer_fut.result() or {}).get("sdp", "")
             _cam_ice_ufrag: str | None = None
-            _cam_ice_pwd:   str | None = None
+            _cam_ice_pwd: str | None = None
             _rr_cm_idx = -1
             for _rr_cln in _cam_counter_sdp.splitlines():
                 if _rr_cln.startswith("a=ice-ufrag:") and _cam_ice_ufrag is None:
@@ -2937,7 +3178,7 @@ class _WebRTCOpenMixin:
                 # synthetic candidate injection (cam-IP + echoed port).
                 if _rr_cln.startswith("m="):
                     _rr_cm_idx += 1
-                    _rr_pm = _rr_re.match(r'm=\S+ (\d+)', _rr_cln)
+                    _rr_pm = _rr_re.match(r"m=\S+ (\d+)", _rr_cln)
                     if _rr_pm:
                         _rr_cp = int(_rr_pm.group(1))
                         if _rr_cp != 0 and _rr_cm_idx <= 1:
@@ -2950,30 +3191,28 @@ class _WebRTCOpenMixin:
             # Strip our own local ICE candidates - they are useless as "remote"
             # candidates for the answer.  aioice will discover peer-reflexive
             # candidates when the camera probes after iceCandidateReq.
-            _rr_synth_sdp = _rr_re.sub(
-                r'a=candidate:[^\r\n]*\r?\n', '', _rr_synth_sdp
-            )
-            _rr_synth_sdp = (
-                _rr_synth_sdp
-                .replace('a=end-of-candidates\r\n', '')
-                .replace('a=end-of-candidates\n', '')
-            )
+            _rr_synth_sdp = _rr_re.sub(r"a=candidate:[^\r\n]*\r?\n", "", _rr_synth_sdp)
+            _rr_synth_sdp = _rr_synth_sdp.replace(
+                "a=end-of-candidates\r\n", ""
+            ).replace("a=end-of-candidates\n", "")
             # Strip local SSRC lines - they belong to our own transceivers and must
             # not appear as remote sender SSRCs.  Removing them lets aiortc accept
             # incoming RTP from the camera regardless of its actual SSRC.
-            _rr_synth_sdp = _rr_re.sub(r'a=ssrc(?:-group)?:[^\r\n]*\r?\n', '', _rr_synth_sdp)
+            _rr_synth_sdp = _rr_re.sub(
+                r"a=ssrc(?:-group)?:[^\r\n]*\r?\n", "", _rr_synth_sdp
+            )
             # Replace our local ICE credentials with the camera's so aioice
             # authenticates the camera's STUN probes correctly.
             if _cam_ice_ufrag:
                 _rr_synth_sdp = _rr_re.sub(
-                    r'a=ice-ufrag:[^\r\n]*', _cam_ice_ufrag, _rr_synth_sdp
+                    r"a=ice-ufrag:[^\r\n]*", _cam_ice_ufrag, _rr_synth_sdp
                 )
             if _cam_ice_pwd:
                 _rr_synth_sdp = _rr_re.sub(
-                    r'a=ice-pwd:[^\r\n]*', _cam_ice_pwd, _rr_synth_sdp
+                    r"a=ice-pwd:[^\r\n]*", _cam_ice_pwd, _rr_synth_sdp
                 )
             # Camera sends media to us -> its answer direction is sendonly.
-            _rr_synth_sdp = _rr_synth_sdp.replace('a=recvonly\r\n', 'a=sendonly\r\n')
+            _rr_synth_sdp = _rr_synth_sdp.replace("a=recvonly\r\n", "a=sendonly\r\n")
             # DTLS setup role depends on whether the camera is echo-only or real-reversal.
             # Echo-only (e.g. LK.IPC.A001064): camera never sends its own webrtcResp, so
             # we cannot know its DTLS preference.  We declare setup:passive in our
@@ -2987,8 +3226,8 @@ class _WebRTCOpenMixin:
             # Tell aiortc the remote is passive so aiortc becomes active/client.
             # RFC 5763: remote=passive -> local=active (client).
             _rr_synth_sdp = _rr_synth_sdp.replace(
-                'a=setup:actpass\r\n',
-                'a=setup:active\r\n' if _rr_echo_only else 'a=setup:passive\r\n'
+                "a=setup:actpass\r\n",
+                "a=setup:active\r\n" if _rr_echo_only else "a=setup:passive\r\n",
             )
             try:
                 await pc.setRemoteDescription(
@@ -3000,8 +3239,7 @@ class _WebRTCOpenMixin:
                 )
             except Exception as _rr_srd_exc:
                 _status(
-                    f"role-reversal: early setRemoteDescription failed:"
-                    f" {_rr_srd_exc}"
+                    f"role-reversal: early setRemoteDescription failed: {_rr_srd_exc}"
                 )
                 outgoing_q.put_nowait(None)
                 _cancel_track_tasks()
@@ -3029,35 +3267,41 @@ class _WebRTCOpenMixin:
                     "a=setup:actpass\r\n", f"a=setup:{_rr_setup_val}\r\n"
                 )
             )
-            _webrtc_resp_topic   = f"iot/v1/s/{user_id}/IPC/webrtcResp"
-            _webrtc_resp_payload = json.dumps({
-                "method":  "webrtcResp",
-                "service": "IPC",
-                "devId":   device_id,
-                "srcAddr": f"0.{user_id}",
-                "seq":     _seq(),
-                "tst":     int(time.time() * 1000),
-                **( {"userId": _numeric_uid_raw} if _numeric_uid_raw is not None else {} ),
-                "payload": {
-                    "peerid":  peer_id,
-                    "devId":   device_id,
-                    "answer":  {"type": "answer", "sdp": _rr_answer_sdp},
-                    "trackId": 0,
-                    "dstAddr": device_id,
-                    # wPayload mirrors the webrtcReq format.  Newer firmware
-                    # (e.g. LK.IPC.A001064) parses wPayload.answer.sdp to
-                    # extract our ICE credentials and candidates; without this
-                    # the camera cannot form valid STUN binding requests and
-                    # never initiates ICE connectivity checks -> ICE closed.
-                    "wPayload": {
+            _webrtc_resp_topic = f"iot/v1/s/{user_id}/IPC/webrtcResp"
+            _webrtc_resp_payload = json.dumps(
+                {
+                    "method": "webrtcResp",
+                    "service": "IPC",
+                    "devId": device_id,
+                    "srcAddr": f"0.{user_id}",
+                    "seq": _seq(),
+                    "tst": int(time.time() * 1000),
+                    **(
+                        {"userId": _numeric_uid_raw}
+                        if _numeric_uid_raw is not None
+                        else {}
+                    ),
+                    "payload": {
                         "peerid": peer_id,
+                        "devId": device_id,
                         "answer": {"type": "answer", "sdp": _rr_answer_sdp},
+                        "trackId": 0,
+                        "dstAddr": device_id,
+                        # wPayload mirrors the webrtcReq format.  Newer firmware
+                        # (e.g. LK.IPC.A001064) parses wPayload.answer.sdp to
+                        # extract our ICE credentials and candidates; without this
+                        # the camera cannot form valid STUN binding requests and
+                        # never initiates ICE connectivity checks -> ICE closed.
+                        "wPayload": {
+                            "peerid": peer_id,
+                            "answer": {"type": "answer", "sdp": _rr_answer_sdp},
+                        },
                     },
-                },
-            })
+                }
+            )
             outgoing_q.put_nowait((_webrtc_resp_topic, _webrtc_resp_payload))
             # Save for potential reconnect re-send in the ICE wait loop.
-            _rr_webrtc_resp_topic   = _webrtc_resp_topic
+            _rr_webrtc_resp_topic = _webrtc_resp_topic
             _rr_webrtc_resp_payload = _webrtc_resp_payload
             _status(f"webrtcResp sent (role-reversal answer, setup={_rr_setup_val})")
 
@@ -3072,51 +3316,59 @@ class _WebRTCOpenMixin:
             # camera.  We now send ALL gathered candidates including server-reflexive
             # ones (e.g. 198.51.100.30 public IP) so a remote camera can reach us
             # even when NAT traversal without TURN is possible.
-            _rr_local_sdp  = pc.localDescription.sdp
-            _rr_ice_topic  = f"iot/v1/s/{user_id}/IPC/iceCandidateReq"
+            _rr_local_sdp = pc.localDescription.sdp
+            _rr_ice_topic = f"iot/v1/s/{user_id}/IPC/iceCandidateReq"
             _rr_cand_count = 0
-            _rr_cur_midx   = -1
-            for _rr_ln in _rr_re.split(r'\r?\n', _rr_local_sdp):
-                if _rr_ln.startswith('m='):
+            _rr_cur_midx = -1
+            for _rr_ln in _rr_re.split(r"\r?\n", _rr_local_sdp):
+                if _rr_ln.startswith("m="):
                     _rr_cur_midx += 1
-                    if _rr_cur_midx > 1:   # only mid:0 audio, mid:1 video (skip mid:2 datachannel)
+                    if (
+                        _rr_cur_midx > 1
+                    ):  # only mid:0 audio, mid:1 video (skip mid:2 datachannel)
                         break
-                elif _rr_ln.startswith('a=candidate:') and _rr_cur_midx >= 0:
+                elif _rr_ln.startswith("a=candidate:") and _rr_cur_midx >= 0:
                     # Skip loopback candidates (unreachable from any remote peer).
                     _rr_cip_m = _rr_re.search(
-                        r'a=candidate:\S+ \d+ \w+ \d+ (\S+)', _rr_ln
+                        r"a=candidate:\S+ \d+ \w+ \d+ (\S+)", _rr_ln
                     )
                     if _rr_cip_m:
                         _rr_cip = _rr_cip_m.group(1)
-                        if _rr_cip.startswith('127.') or _rr_cip == '::1':
+                        if _rr_cip.startswith("127.") or _rr_cip == "::1":
                             continue
                     # Convert SDP attribute form (a=candidate:...) to MQTT form
                     # (candidate:...) - the leading "a=" is an SDP-layer decoration.
-                    _rr_cand_str = 'candidate:' + _rr_ln.split('a=candidate:', 1)[-1]
+                    _rr_cand_str = "candidate:" + _rr_ln.split("a=candidate:", 1)[-1]
                     _rr_cand_obj = {
-                        "candidate":     _rr_cand_str,
-                        "sdpMid":        str(_rr_cur_midx),
+                        "candidate": _rr_cand_str,
+                        "sdpMid": str(_rr_cur_midx),
                         "sdpMLineIndex": _rr_cur_midx,
                     }
-                    _rr_ice_json = json.dumps({
-                        "method":  "iceCandidateReq",
-                        "service": "IPC",
-                        "devId":   device_id,
-                        "srcAddr": f"0.{user_id}",
-                        "seq":     _seq(),
-                        "tst":     int(time.time() * 1000),
-                        **( {"userId": _numeric_uid_raw} if _numeric_uid_raw is not None else {} ),
-                        "payload": {
-                            "dstAddr": device_id,
-                            "wPayload": {
-                                "peerid":    peer_id,
+                    _rr_ice_json = json.dumps(
+                        {
+                            "method": "iceCandidateReq",
+                            "service": "IPC",
+                            "devId": device_id,
+                            "srcAddr": f"0.{user_id}",
+                            "seq": _seq(),
+                            "tst": int(time.time() * 1000),
+                            **(
+                                {"userId": _numeric_uid_raw}
+                                if _numeric_uid_raw is not None
+                                else {}
+                            ),
+                            "payload": {
+                                "dstAddr": device_id,
+                                "wPayload": {
+                                    "peerid": peer_id,
+                                    "candidate": _rr_cand_obj,
+                                },
+                                "peerid": peer_id,
+                                "devId": device_id,
                                 "candidate": _rr_cand_obj,
                             },
-                            "peerid":    peer_id,
-                            "devId":     device_id,
-                            "candidate": _rr_cand_obj,
-                        },
-                    })
+                        }
+                    )
                     outgoing_q.put_nowait((_rr_ice_topic, _rr_ice_json))
                     _rr_ice_payloads.append((_rr_ice_topic, _rr_ice_json))
                     _rr_cand_count += 1
@@ -3127,14 +3379,17 @@ class _WebRTCOpenMixin:
 
         else:
             # ---- NORMAL path: camera sent webrtcResp ---------------------------- #
-            answer   = answer_fut.result()
+            answer = answer_fut.result()
             _ans_sdp = answer["sdp"]
             _ans_mlines = [ln for ln in _ans_sdp.splitlines() if ln.startswith("m=")]
             _status(
                 f"webrtcResp received - m=video={_sdp_transport(_ans_sdp, 'video')}"
                 f"  m=audio={_sdp_transport(_ans_sdp, 'audio')}"
             )
-            _status("Answer m-sections (%d): %s" % (len(_ans_mlines), " | ".join(_ans_mlines)))
+            _status(
+                "Answer m-sections (%d): %s"
+                % (len(_ans_mlines), " | ".join(_ans_mlines))
+            )
             # Log negotiated direction per m-section so we can see whether
             # camera renegotiated audio sendrecv->sendonly (or kept sendrecv).
             # Also expose ssrc/msid lines - useful when diagnosing why media
@@ -3147,7 +3402,12 @@ class _WebRTCOpenMixin:
                         _cur_mid = _ln.split()[0][2:]  # "audio", "video", "application"
                     elif _ln.startswith("a=mid:"):
                         _cur_mid = f"{_cur_mid}/mid={_ln[6:]}"
-                    elif _ln in ("a=sendrecv", "a=sendonly", "a=recvonly", "a=inactive"):
+                    elif _ln in (
+                        "a=sendrecv",
+                        "a=sendonly",
+                        "a=recvonly",
+                        "a=inactive",
+                    ):
                         _ans_dirs.append(f"{_cur_mid}={_ln[2:]}")
                 _status(f"Answer m-section directions: {_ans_dirs}")
             except Exception as _ans_dir_exc:
@@ -3167,10 +3427,11 @@ class _WebRTCOpenMixin:
             # the MQTT signaling channel is already authenticated; cert
             # pinning here would add no extra security.
             import re as _fp_re
+
             _ZERO_FP = ":".join(["00"] * 32)
             _ans_sdp_patched, _fp_subs = _fp_re.subn(
-                r'(?m)^(a=fingerprint:sha-256)\s*$',
-                rf'\1 {_ZERO_FP}',
+                r"(?m)^(a=fingerprint:sha-256)\s*$",
+                rf"\1 {_ZERO_FP}",
                 _ans_sdp,
             )
             if _fp_subs:
@@ -3202,9 +3463,9 @@ class _WebRTCOpenMixin:
             _cur_kind: str = ""
             for _ln in _offer_sdp.splitlines():
                 if _ln.startswith("m="):
-                    _cur_kind = _ln.split(" ", 1)[0][2:]   # audio/video/application
+                    _cur_kind = _ln.split(" ", 1)[0][2:]  # audio/video/application
                 elif _ln.startswith("a=mid:"):
-                    _mid = _ln[len("a=mid:"):].strip()
+                    _mid = _ln[len("a=mid:") :].strip()
                     _offer_mids.append(_mid)
                     _offer_kinds[_mid] = _cur_kind
 
@@ -3216,21 +3477,24 @@ class _WebRTCOpenMixin:
                     if _ln2.startswith(_attr):
                         return _ln2
                 return ""
+
             _ice_ufrag_ln = _first_attr(_ans_sdp, "a=ice-ufrag:")
-            _ice_pwd_ln   = _first_attr(_ans_sdp, "a=ice-pwd:")
-            _fp_ln        = _first_attr(_ans_sdp, "a=fingerprint:")
-            _setup_ln     = _first_attr(_ans_sdp, "a=setup:")
+            _ice_pwd_ln = _first_attr(_ans_sdp, "a=ice-pwd:")
+            _fp_ln = _first_attr(_ans_sdp, "a=fingerprint:")
+            _setup_ln = _first_attr(_ans_sdp, "a=setup:")
 
             _ans_lines = _ans_sdp.splitlines()
-            _ans_sections: dict = {}      # mid -> list[str] of section's lines
+            _ans_sections: dict = {}  # mid -> list[str] of section's lines
             _ans_header: list = []
             _cur_block: list = []
             _cur_mid: str = ""
             _cur_block_kind: str = ""
             _seen_first_m = False
+
             def _flush():
                 if _cur_block and _cur_mid:
                     _ans_sections[_cur_mid] = (_cur_block_kind, list(_cur_block))
+
             for _ln in _ans_lines:
                 if _ln.startswith("m="):
                     _flush()
@@ -3243,7 +3507,7 @@ class _WebRTCOpenMixin:
                 else:
                     _cur_block.append(_ln)
                     if _ln.startswith("a=mid:"):
-                        _cur_mid = _ln[len("a=mid:"):].strip()
+                        _cur_mid = _ln[len("a=mid:") :].strip()
             _flush()
 
             def _stub(_m: str, _kind: str) -> list:
@@ -3290,14 +3554,16 @@ class _WebRTCOpenMixin:
             # those sections so aiortc sees port=0/inactive for H265 - we
             # still benefit from the camera negotiating H265 (it proves the
             # 4-section BUNDLE is aligned) but we only decode H264 and audio.
-            _h265_offer_pts: set = set()  # H265 no longer offered; camera won't answer H265 PTs
+            _h265_offer_pts: set = (
+                set()
+            )  # H265 no longer offered; camera won't answer H265 PTs
 
             # Our offer's video payload types, used both here (to tell the
             # camera's real video answer from an H265 section it added) and
             # again by _aiortc_answer below.
             _offer_video_pts: set = set()
             for _ol in _offer_sdp.splitlines():
-                if _ol.startswith('m=video'):
+                if _ol.startswith("m=video"):
                     _offer_video_pts = set(_ol.split()[3:])
                     break
 
@@ -3306,7 +3572,9 @@ class _WebRTCOpenMixin:
             _stub_count = 0
             _dropped_mids: list = []
             _claimed_ans_mids: set = set()
-            _rejected_mids: set = set()  # mids whose stub has port=0 (excluded from BUNDLE)
+            _rejected_mids: set = (
+                set()
+            )  # mids whose stub has port=0 (excluded from BUNDLE)
             for _m in _offer_mids:
                 _expected_kind = _offer_kinds[_m]
                 # Same mid first, then kind + payload-type overlap.  This camera
@@ -3316,8 +3584,11 @@ class _WebRTCOpenMixin:
                 # every kind at once (reads as declined media).  See
                 # select_answer_section.
                 _pick = select_answer_section(
-                    _m, _expected_kind, _ans_sections,
-                    _offer_video_pts, _claimed_ans_mids,
+                    _m,
+                    _expected_kind,
+                    _ans_sections,
+                    _offer_video_pts,
+                    _claimed_ans_mids,
                 )
                 if _pick is not None:
                     _claimed_ans_mids.add(_pick[0])
@@ -3335,7 +3606,7 @@ class _WebRTCOpenMixin:
                     # carrying another slot's a=mid inside _rebuilt would make
                     # the intermediate SDP disagree with its own BUNDLE line.
                     _ans_block = [
-                        f'a=mid:{_m}' if _bl.startswith('a=mid:') else _bl
+                        f"a=mid:{_m}" if _bl.startswith("a=mid:") else _bl
                         for _bl in _ans_block
                     ]
                 # Force-stub H265 sections: detect by camera's answer m-line
@@ -3352,7 +3623,7 @@ class _WebRTCOpenMixin:
                     _s = _stub(_m, _expected_kind)
                     _rebuilt.extend(_s)
                     _stub_count += 1
-                    if _s and _s[0].split()[1] == '0':
+                    if _s and _s[0].split()[1] == "0":
                         _rejected_mids.add(_m)
                 elif _ans_block and _ans_kind == _expected_kind:
                     _rebuilt.extend(_ans_block)
@@ -3361,7 +3632,7 @@ class _WebRTCOpenMixin:
                     _s = _stub(_m, _expected_kind)
                     _rebuilt.extend(_s)
                     _stub_count += 1
-                    if _s and _s[0].split()[1] == '0':
+                    if _s and _s[0].split()[1] == "0":
                         _rejected_mids.add(_m)
             # Sections the walk never took. An INSERTED section (the camera's
             # H265 one) ends up here; a dropped-and-renumbered answer leaves
@@ -3382,7 +3653,11 @@ class _WebRTCOpenMixin:
                     f"answer SDP rebuilt: kept={_kept_count}"
                     f" stubbed={_stub_count} dropped={_dropped_mids}"
                     f" (offer mids={_offer_mids})"
-                    + (f" rejected_from_bundle={sorted(_rejected_mids)}" if _rejected_mids else "")
+                    + (
+                        f" rejected_from_bundle={sorted(_rejected_mids)}"
+                        if _rejected_mids
+                        else ""
+                    )
                 )
 
             # Fix a=group:BUNDLE: use offer mid order but exclude port=0 (rejected)
@@ -3414,6 +3689,7 @@ class _WebRTCOpenMixin:
             _np_pinned_fp = (os.environ.get("AIDOT_DTLS_PINNED_FP") or "").strip()
             if _fp_subs or _np_pinned_fp:
                 import types as _np_types
+
                 try:
                     from aidot_cameras._vendor.aiortc.rtcdtlstransport import (
                         RTCDtlsFingerprint as _NPFp,
@@ -3447,7 +3723,12 @@ class _WebRTCOpenMixin:
                         except Exception:
                             if _np_pinned_fp:
                                 raise  # fail closed: never accept an unverifiable cert
-                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_np_accept_cam_cert', exc_info=True)
+                            _LOGGER.debug(
+                                "camera %s: swallowed exception in %s",
+                                getattr(self, "device_id", "?"),
+                                "_np_accept_cam_cert",
+                                exc_info=True,
+                            )
 
                     # Diag: log PC/ICE state at patch-application time so we
                     # can see whether DTLS handshake has *already* started by
@@ -3462,9 +3743,7 @@ class _WebRTCOpenMixin:
                         _np_dtls = _np_tc.receiver.transport
                         _np_ice = _np_dtls.transport
                         _np_pre_vpi = getattr(
-                            getattr(
-                                _np_dtls, "_validate_peer_identity", None
-                            ),
+                            getattr(_np_dtls, "_validate_peer_identity", None),
                             "__qualname__",
                             "missing",
                         )
@@ -3475,13 +3754,11 @@ class _WebRTCOpenMixin:
                             f" ice.state={getattr(_np_ice, 'state', '?')}"
                             f" pre.vpi={_np_pre_vpi}"
                         )
-                        _np_dtls._validate_peer_identity = (
-                            _np_types.MethodType(_np_accept_cam_cert, _np_dtls)
+                        _np_dtls._validate_peer_identity = _np_types.MethodType(
+                            _np_accept_cam_cert, _np_dtls
                         )
                         _np_post_vpi = getattr(
-                            getattr(
-                                _np_dtls, "_validate_peer_identity", None
-                            ),
+                            getattr(_np_dtls, "_validate_peer_identity", None),
                             "__qualname__",
                             "missing",
                         )
@@ -3531,11 +3808,12 @@ class _WebRTCOpenMixin:
                 Each selected section's a=mid is rewritten to 0/1/2 and BUNDLE is
                 normalised to "0 1 2".
                 """
-                _lines2 = _re_ans.split(r'\r?\n', sdp)
+                _lines2 = _re_ans.split(r"\r?\n", sdp)
                 _secs2, _cur2 = [], []
                 for _l2 in _lines2:
-                    if _l2.startswith('m=') and _cur2:
-                        _secs2.append(_cur2); _cur2 = [_l2]
+                    if _l2.startswith("m=") and _cur2:
+                        _secs2.append(_cur2)
+                        _cur2 = [_l2]
                     else:
                         _cur2.append(_l2)
                 if _cur2:
@@ -3546,22 +3824,32 @@ class _WebRTCOpenMixin:
                 # s[0].split()[1] / [3:] accesses cannot raise IndexError on an
                 # attacker-influenced answer (an unguarded IndexError here would
                 # crash the connect coroutine -> repeatable stream DoS).
-                _audio_secs = [s for s in _secs2 if s and s[0].startswith('m=audio') and len(s[0].split()) >= 4]
-                _video_secs = [s for s in _secs2 if s and s[0].startswith('m=video') and len(s[0].split()) >= 4]
-                _app_secs   = [s for s in _secs2 if s and s[0].startswith('m=application')]
+                _audio_secs = [
+                    s
+                    for s in _secs2
+                    if s and s[0].startswith("m=audio") and len(s[0].split()) >= 4
+                ]
+                _video_secs = [
+                    s
+                    for s in _secs2
+                    if s and s[0].startswith("m=video") and len(s[0].split()) >= 4
+                ]
+                _app_secs = [
+                    s for s in _secs2 if s and s[0].startswith("m=application")
+                ]
 
                 def _set_mid(_sec: list, _mid: str) -> list:
                     _seen_mid = False
                     _res = []
                     for _l in _sec:
-                        if _l.startswith('a=mid:'):
-                            _res.append(f'a=mid:{_mid}')
+                        if _l.startswith("a=mid:"):
+                            _res.append(f"a=mid:{_mid}")
                             _seen_mid = True
                         else:
                             _res.append(_l)
                     if not _seen_mid:
                         # Insert mid right after the m= line.
-                        _res.insert(1, f'a=mid:{_mid}')
+                        _res.insert(1, f"a=mid:{_mid}")
                     return _res
 
                 _out_secs: list[list[str]] = []
@@ -3570,7 +3858,7 @@ class _WebRTCOpenMixin:
 
                 # 1. audio -> mid:0
                 if _audio_secs:
-                    if _audio_secs[0][0].split()[1] == '0':
+                    if _audio_secs[0][0].split()[1] == "0":
                         # Full datachannel-only answer: the camera also rejected
                         # audio (port 0, a=inactive).  Re-emit a port-0 stub that
                         # still carries an a=rtpmap, otherwise aiortc's
@@ -3581,40 +3869,44 @@ class _WebRTCOpenMixin:
                         # EXCLUDED from BUNDLE below (aiortc rejects a port-0
                         # section inside the BUNDLE group).  Verified offline:
                         # audio+video stubs WITH rtpmap -> SRD accepted.
-                        _astub = ['m=audio 0 UDP/TLS/RTP/SAVPF 0',
-                                  'c=IN IP4 0.0.0.0', 'a=mid:0']
+                        _astub = [
+                            "m=audio 0 UDP/TLS/RTP/SAVPF 0",
+                            "c=IN IP4 0.0.0.0",
+                            "a=mid:0",
+                        ]
                         for _xa in (_ice_ufrag_ln, _ice_pwd_ln, _fp_ln, _setup_ln):
                             if _xa:
                                 _astub.append(_xa)
-                        _astub += ['a=rtpmap:0 PCMU/8000', 'a=rtcp-mux',
-                                   'a=inactive']
+                        _astub += ["a=rtpmap:0 PCMU/8000", "a=rtcp-mux", "a=inactive"]
                         _out_secs.append(_astub)
                         _dc_only_audio = True
                     else:
-                        _out_secs.append(_set_mid(_audio_secs[0], '0'))
+                        _out_secs.append(_set_mid(_audio_secs[0], "0"))
 
                 # 2. real video -> mid:1 (pick best PT overlap with our offer)
                 _best_video = None
                 _best_overlap = -1
                 for _vs in _video_secs:
                     _pts = set(_vs[0].split()[3:])
-                    if _vs[0].split()[1] == '0':
+                    if _vs[0].split()[1] == "0":
                         continue  # port-0 stub
                     _overlap = len(_pts & _offer_video_pts)
                     # Prefer real PT overlap; tie-break on PT count (richer section).
                     _score = (_overlap, len(_pts))
-                    if _score > (_best_overlap, -1) and (_overlap > 0 or _best_video is None):
+                    if _score > (_best_overlap, -1) and (
+                        _overlap > 0 or _best_video is None
+                    ):
                         _best_video = _vs
                         _best_overlap = _overlap
                 if _best_video is None and _video_secs:
                     # No overlap at all - fall back to the richest non-stub video.
                     _best_video = max(
-                        (s for s in _video_secs if s[0].split()[1] != '0'),
+                        (s for s in _video_secs if s[0].split()[1] != "0"),
                         key=lambda s: len(s[0].split()[3:]),
                         default=None,
                     )
                 if _best_video is not None:
-                    _out_secs.append(_set_mid(_best_video, '1'))
+                    _out_secs.append(_set_mid(_best_video, "1"))
                 else:
                     # DC-only answer: the camera rejected video (port 0, no
                     # usable H264).  Keep a rejected port-0 video placeholder at
@@ -3625,54 +3917,62 @@ class _WebRTCOpenMixin:
                     # datachannel was tested and ruled out: a DC-only answer is
                     # the camera declining media and always co-fails DTLS, so the
                     # channel never opens - see docs/EXPERIMENT_DC_ONLY_HANDOFF.md.)
-                    _vstub = ['m=video 0 UDP/TLS/RTP/SAVPF 97',
-                              'c=IN IP4 0.0.0.0', 'a=mid:1']
+                    _vstub = [
+                        "m=video 0 UDP/TLS/RTP/SAVPF 97",
+                        "c=IN IP4 0.0.0.0",
+                        "a=mid:1",
+                    ]
                     for _xv in (_ice_ufrag_ln, _ice_pwd_ln, _fp_ln, _setup_ln):
                         if _xv:
                             _vstub.append(_xv)
                     # rtpmap required or aiortc rejects with "Failed to set remote
                     # video description send parameters" (find_common_codecs empty).
                     # PT 97 H264 is always in our offer.  Verified offline.
-                    _vstub += ['a=rtpmap:97 H264/90000',
-                               'a=fmtp:97 level-asymmetry-allowed=1;'
-                               'packetization-mode=1;profile-level-id=42e01f',
-                               'a=rtcp-mux', 'a=inactive']
+                    _vstub += [
+                        "a=rtpmap:97 H264/90000",
+                        "a=fmtp:97 level-asymmetry-allowed=1;"
+                        "packetization-mode=1;profile-level-id=42e01f",
+                        "a=rtcp-mux",
+                        "a=inactive",
+                    ]
                     _out_secs.append(_vstub)
                     _dc_only_video = True
 
                 # 3. datachannel -> mid:2
                 if _app_secs:
-                    _out_secs.append(_set_mid(_app_secs[0], '2'))
+                    _out_secs.append(_set_mid(_app_secs[0], "2"))
                 else:
                     _dc_stub = [
-                        'm=application 9 UDP/DTLS/SCTP webrtc-datachannel',
-                        'c=IN IP4 0.0.0.0',
-                        'a=mid:2',
+                        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
+                        "c=IN IP4 0.0.0.0",
+                        "a=mid:2",
                     ]
                     for _x2 in (_ice_ufrag_ln, _ice_pwd_ln, _fp_ln, _setup_ln):
                         if _x2:
                             _dc_stub.append(_x2)
-                    _dc_stub.extend(['a=sctp-port:5000', 'a=max-message-size:262144'])
+                    _dc_stub.extend(["a=sctp-port:5000", "a=max-message-size:262144"])
                     _out_secs.append(_dc_stub)
 
                 # Session header = everything before the first m= section.
-                _header = _secs2[0] if (_secs2 and not _secs2[0][0].startswith('m=')) else []
+                _header = (
+                    _secs2[0] if (_secs2 and not _secs2[0][0].startswith("m=")) else []
+                )
                 _out2: list[str] = list(_header)
                 for _sec in _out_secs:
                     _out2.extend(_sec)
-                sdp2 = '\r\n'.join(_out2)
+                sdp2 = "\r\n".join(_out2)
                 # Ensure BUNDLE lists only the ACTIVE mids in order.  Any port-0
                 # (rejected) section must be EXCLUDED - aiortc rejects a port-0
                 # section inside the BUNDLE group.  A full datachannel-only answer
                 # rejects both audio and video, leaving BUNDLE just "2".
                 _bundle_mids = []
                 if not _dc_only_audio:
-                    _bundle_mids.append('0')
+                    _bundle_mids.append("0")
                 if not _dc_only_video:
-                    _bundle_mids.append('1')
+                    _bundle_mids.append("1")
                 if _app_secs:
-                    _bundle_mids.append('2')
-                _bundle_str = 'a=group:BUNDLE ' + ' '.join(_bundle_mids)
+                    _bundle_mids.append("2")
+                _bundle_str = "a=group:BUNDLE " + " ".join(_bundle_mids)
                 if _dc_only_audio or _dc_only_video:
                     _media_declined[0] = True
                     _status(
@@ -3680,11 +3980,12 @@ class _WebRTCOpenMixin:
                         f" video_rejected={_dc_only_video} -> {_bundle_str}"
                         " (camera declined media; encoder not ready - fast-retry)"
                     )
-                if 'a=group:BUNDLE' in sdp2:
+                if "a=group:BUNDLE" in sdp2:
                     sdp2 = _re_ans.sub(
-                        r'a=group:BUNDLE [0-9 ]+',
+                        r"a=group:BUNDLE [0-9 ]+",
                         _bundle_str,
-                        sdp2, count=1,
+                        sdp2,
+                        count=1,
                     )
                 return sdp2
 
@@ -3695,7 +3996,7 @@ class _WebRTCOpenMixin:
                 # encoder is still cold.  Tear down and raise so the serve loop
                 # fast-retries in a bounded burst instead of letting DTLS
                 # co-fail into the full 15s-gated generic retry.
-                outgoing_q.put_nowait(None)   # stop MQTT thread (avoid orphan)
+                outgoing_q.put_nowait(None)  # stop MQTT thread (avoid orphan)
                 try:
                     _cancel_track_tasks()
                     await pc.close()
@@ -3717,15 +4018,11 @@ class _WebRTCOpenMixin:
                 # (applied above) ran before, but any handshake that
                 # already failed earlier wouldn't show that here either.
                 try:
-                    for _srd_idx, _srd_tc in enumerate(
-                        pc.getTransceivers()
-                    ):
+                    for _srd_idx, _srd_tc in enumerate(pc.getTransceivers()):
                         _srd_dtls = _srd_tc.receiver.transport
                         _srd_ice = _srd_dtls.transport
                         _srd_vpi = getattr(
-                            getattr(
-                                _srd_dtls, "_validate_peer_identity", None
-                            ),
+                            getattr(_srd_dtls, "_validate_peer_identity", None),
                             "__qualname__",
                             "missing",
                         )
@@ -3765,10 +4062,8 @@ class _WebRTCOpenMixin:
                 # parse pc.localDescription.sdp directly and publish each.
                 try:
                     import re as _re_lc
-                    _lsdp = (
-                        pc.localDescription.sdp if pc.localDescription
-                        else ""
-                    )
+
+                    _lsdp = pc.localDescription.sdp if pc.localDescription else ""
                     _cur_mid: str | None = None
                     _cur_idx: int = -1
                     _sent_n = 0
@@ -3777,50 +4072,57 @@ class _WebRTCOpenMixin:
                             _cur_idx += 1
                             _cur_mid = None
                             continue
-                        _mid_m = _re_lc.match(r'^a=mid:(\S+)', _ln)
+                        _mid_m = _re_lc.match(r"^a=mid:(\S+)", _ln)
                         if _mid_m:
                             _cur_mid = _mid_m.group(1)
                             continue
-                        _cand_m = _re_lc.match(r'^a=candidate:(.+)$', _ln)
+                        _cand_m = _re_lc.match(r"^a=candidate:(.+)$", _ln)
                         if not _cand_m or _cur_mid is None:
                             continue
                         _cand_str = "candidate:" + _cand_m.group(1).strip()
                         # Skip Docker bridge / CGNAT / IPv6 - same filters as
                         # the dead @pc.on("icecandidate") handler above.
                         _cand_ip_m = _re_lc.search(
-                            r'\s(\d+\.\d+\.\d+\.\d+|[0-9a-fA-F:]+)\s\d+\s+typ\s',
+                            r"\s(\d+\.\d+\.\d+\.\d+|[0-9a-fA-F:]+)\s\d+\s+typ\s",
                             _cand_str,
                         )
                         _cand_ip = _cand_ip_m.group(1) if _cand_ip_m else ""
-                        if (_cand_ip.startswith("172.17.")
-                                or _cand_ip.startswith("100.")
-                                or ':' in _cand_ip):
+                        if (
+                            _cand_ip.startswith("172.17.")
+                            or _cand_ip.startswith("100.")
+                            or ":" in _cand_ip
+                        ):
                             continue
                         _cand_obj = {
-                            "candidate":     _cand_str,
-                            "sdpMid":        _cur_mid,
+                            "candidate": _cand_str,
+                            "sdpMid": _cur_mid,
                             "sdpMLineIndex": _cur_idx,
                         }
-                        _ic_payload = json.dumps({
-                            "method":  "iceCandidateReq",
-                            "service": "IPC",
-                            "devId":   device_id,
-                            "srcAddr": f"0.{user_id}",
-                            "seq":     _seq(),
-                            "tst":     int(time.time() * 1000),
-                            **( {"userId": _numeric_uid_raw}
-                                if _numeric_uid_raw is not None else {} ),
-                            "payload": {
-                                "dstAddr": device_id,
-                                "wPayload": {
-                                    "peerid":    peer_id,
+                        _ic_payload = json.dumps(
+                            {
+                                "method": "iceCandidateReq",
+                                "service": "IPC",
+                                "devId": device_id,
+                                "srcAddr": f"0.{user_id}",
+                                "seq": _seq(),
+                                "tst": int(time.time() * 1000),
+                                **(
+                                    {"userId": _numeric_uid_raw}
+                                    if _numeric_uid_raw is not None
+                                    else {}
+                                ),
+                                "payload": {
+                                    "dstAddr": device_id,
+                                    "wPayload": {
+                                        "peerid": peer_id,
+                                        "candidate": _cand_obj,
+                                    },
+                                    "peerid": peer_id,
+                                    "devId": device_id,
                                     "candidate": _cand_obj,
                                 },
-                                "peerid":    peer_id,
-                                "devId":     device_id,
-                                "candidate": _cand_obj,
-                            },
-                        })
+                            }
+                        )
                         outgoing_q.put_nowait((ice_cand_topic, _ic_payload))
                         _sent_n += 1
                     _status(
@@ -3834,9 +4136,12 @@ class _WebRTCOpenMixin:
                 # is choking (the {exc} message alone - e.g. "not enough
                 # values to unpack" - does not identify the offending line).
                 import traceback as _tb_dtls
+
                 _LOGGER.warning(
                     "setRemoteDescription failed: %s\n--- camera answer SDP ---\n%s\n--- traceback ---\n%s",
-                    exc, _ans_sdp, _tb_dtls.format_exc(),
+                    exc,
+                    _ans_sdp,
+                    _tb_dtls.format_exc(),
                 )
                 _status(f"setRemoteDescription failed: {exc}")
                 outgoing_q.put_nowait(None)
@@ -3852,19 +4157,20 @@ class _WebRTCOpenMixin:
             # automatically; aiortc requires explicit addIceCandidate() calls.
             # Track m-section index / mid so we can set sdpMid+sdpMLineIndex.
             import re as _re
+
             _sdp_cand_midx = -1
             _sdp_cand_smid = "0"
-            for _sdp_ans_ln in _re.split(r'\r?\n', _ans_sdp):
-                if _sdp_ans_ln.startswith('m='):
+            for _sdp_ans_ln in _re.split(r"\r?\n", _ans_sdp):
+                if _sdp_ans_ln.startswith("m="):
                     _sdp_cand_midx += 1
                     _sdp_cand_smid = str(_sdp_cand_midx)
-                elif _sdp_ans_ln.startswith('a=mid:'):
-                    _sdp_cand_smid = _sdp_ans_ln[len('a=mid:'):].strip()
-                elif _sdp_ans_ln.startswith('a=candidate:'):
+                elif _sdp_ans_ln.startswith("a=mid:"):
+                    _sdp_cand_smid = _sdp_ans_ln[len("a=mid:") :].strip()
+                elif _sdp_ans_ln.startswith("a=candidate:"):
                     _sdp_cand_line = _re.sub(
-                        r'\s+generation\s+\d+.*$',
-                        '',
-                        _sdp_ans_ln[len('a=candidate:'):].strip(),
+                        r"\s+generation\s+\d+.*$",
+                        "",
+                        _sdp_ans_ln[len("a=candidate:") :].strip(),
                     )
                     try:
                         _sdp_ice = candidate_from_sdp(_sdp_cand_line)
@@ -3889,7 +4195,8 @@ class _WebRTCOpenMixin:
             # level.
             _conn_state = pc.connectionState
             _transport_state_channel(_conn_state, _status, _trace)(
-                f"WebRTC connectionState -> {_conn_state}")
+                f"WebRTC connectionState -> {_conn_state}"
+            )
             if _conn_state == "failed":
                 # Which transport died, on the INFO channel: aiortc fails the
                 # whole connection on the first transport to reach dtls.state
@@ -3898,13 +4205,14 @@ class _WebRTCOpenMixin:
             if pc.connectionState in ("connected", "completed"):
                 connected_ev.set()
             elif pc.connectionState in ("failed", "closed"):
-                connected_ev.set()   # unblock the wait; session will detect failure
+                connected_ev.set()  # unblock the wait; session will detect failure
 
         @pc.on("iceconnectionstatechange")
         async def _on_ice_state() -> None:
             _ice_state = pc.iceConnectionState
             _transport_state_channel(_ice_state, _status, _trace)(
-                f"ICE connectionState -> {_ice_state}")
+                f"ICE connectionState -> {_ice_state}"
+            )
 
         @pc.on("icegatheringstatechange")
         async def _on_ice_gather() -> None:
@@ -3925,9 +4233,15 @@ class _WebRTCOpenMixin:
             )
         deadline = time.monotonic() + _ice_timeout
         _last_ice_log = time.monotonic()
-        _userconnect_midloop_sent = False  # guard: re-send user/connect once at half-timeout
-        _second_ans_processed = False  # guard: process second_answer_fut candidates once
-        _reconnect_resent_count = 0   # counter: re-send webrtcResp+ICE on each reconnect (max 3)
+        _userconnect_midloop_sent = (
+            False  # guard: re-send user/connect once at half-timeout
+        )
+        _second_ans_processed = (
+            False  # guard: process second_answer_fut candidates once
+        )
+        _reconnect_resent_count = (
+            0  # counter: re-send webrtcResp+ICE on each reconnect (max 3)
+        )
         while not connected_ev.is_set() and time.monotonic() < deadline:
             # Drain incoming ICE candidates from the camera
             while True:
@@ -3937,18 +4251,20 @@ class _WebRTCOpenMixin:
                     break
                 cand_line = cand_dict.get("candidate", "")
                 if cand_line.startswith("candidate:"):
-                    cand_line = cand_line[len("candidate:"):]
+                    cand_line = cand_line[len("candidate:") :]
                 # Strip non-standard trailing extensions (generation, network-cost)
                 # that aioice's candidate_from_sdp cannot parse.
                 import re as _re
-                cand_line = _re.sub(r'\s+generation\s+\d+.*$', '', cand_line).strip()
+
+                cand_line = _re.sub(r"\s+generation\s+\d+.*$", "", cand_line).strip()
                 try:
                     ice_cand = candidate_from_sdp(cand_line)
                     _smid_val = cand_dict.get("sdpMid")
                     _smidx_val = cand_dict.get("sdpMLineIndex")
                     ice_cand.sdpMid = (
-                        str(_smid_val) if _smid_val is not None else
-                        (str(_smidx_val) if _smidx_val is not None else "0")
+                        str(_smid_val)
+                        if _smid_val is not None
+                        else (str(_smidx_val) if _smidx_val is not None else "0")
                     )
                     ice_cand.sdpMLineIndex = _smidx_val
                     await pc.addIceCandidate(ice_cand)
@@ -3984,16 +4300,17 @@ class _WebRTCOpenMixin:
                     _sa_sdp = (_sa_result or {}).get("sdp", "")
                     if _sa_sdp:
                         import re as _re3
+
                         _sa_midx = -1
                         _sa_smid = "0"
-                        for _sa_ln in _re3.split(r'\r?\n', _sa_sdp):
-                            if _sa_ln.startswith('m='):
+                        for _sa_ln in _re3.split(r"\r?\n", _sa_sdp):
+                            if _sa_ln.startswith("m="):
                                 _sa_midx += 1
                                 _sa_smid = str(_sa_midx)
-                            elif _sa_ln.startswith('a=candidate:'):
-                                _sa_cand = _sa_ln[len('a=candidate:'):]
+                            elif _sa_ln.startswith("a=candidate:"):
+                                _sa_cand = _sa_ln[len("a=candidate:") :]
                                 _sa_cand = _re3.sub(
-                                    r'\s+generation\s+\d+.*$', '', _sa_cand
+                                    r"\s+generation\s+\d+.*$", "", _sa_cand
                                 ).strip()
                                 try:
                                     _sa_ice = candidate_from_sdp(_sa_cand)
@@ -4029,19 +4346,25 @@ class _WebRTCOpenMixin:
             # timeout is already past half on its first tick, which fires the
             # one-shot re-announce at t=0 and leaves nothing for mid-loop.
             _remaining = deadline - time.monotonic()
-            if (not _userconnect_midloop_sent
-                    and cam_ip_q.empty()
-                    and _remaining > 0
-                    and _remaining <= _ice_timeout / 2.0):
-                outgoing_q.put_nowait((
-                    f"iot/v1/cb/{user_id}/user/connect",
-                    json.dumps({
-                        "service": "user",
-                        "method":  "connect",
-                        "srcAddr": f"0.{user_id}",
-                        "payload": {"timestamp": _mqtt_timestamp()},
-                    }),
-                ))
+            if (
+                not _userconnect_midloop_sent
+                and cam_ip_q.empty()
+                and _remaining > 0
+                and _remaining <= _ice_timeout / 2.0
+            ):
+                outgoing_q.put_nowait(
+                    (
+                        f"iot/v1/cb/{user_id}/user/connect",
+                        json.dumps(
+                            {
+                                "service": "user",
+                                "method": "connect",
+                                "srcAddr": f"0.{user_id}",
+                                "payload": {"timestamp": _mqtt_timestamp()},
+                            }
+                        ),
+                    )
+                )
                 _userconnect_midloop_sent = True
                 _status("user/connect re-sent (mid-loop, waiting for camera IP)")
             # Re-send webrtcResp + ICE candidates if camera reconnected during ICE.
@@ -4053,9 +4376,11 @@ class _WebRTCOpenMixin:
             # camera has no credentials to validate STUN, so it never probes us.
             # Guard: only for echo-only role-reversal cameras (_rr_ice_payloads
             # is empty for all other paths) and at most 3 times per session.
-            if (camera_reconnect_ev.is_set()
-                    and _reconnect_resent_count < 3
-                    and _rr_ice_payloads):
+            if (
+                camera_reconnect_ev.is_set()
+                and _reconnect_resent_count < 3
+                and _rr_ice_payloads
+            ):
                 _reconnect_resent_count += 1
                 camera_reconnect_ev.clear()
                 _status(
@@ -4064,7 +4389,9 @@ class _WebRTCOpenMixin:
                 )
                 await asyncio.sleep(1.5)  # let camera re-subscribe before re-send
                 if _rr_webrtc_resp_topic and _rr_webrtc_resp_payload:
-                    outgoing_q.put_nowait((_rr_webrtc_resp_topic, _rr_webrtc_resp_payload))
+                    outgoing_q.put_nowait(
+                        (_rr_webrtc_resp_topic, _rr_webrtc_resp_payload)
+                    )
                 for _rr_ice_p in _rr_ice_payloads:
                     outgoing_q.put_nowait(_rr_ice_p)
             # Interruptible 0.1s poll tick: wake the instant the connection
@@ -4093,9 +4420,7 @@ class _WebRTCOpenMixin:
         if recorder:
             await recorder.start()
 
-        _LOGGER.info(
-            "WebRTC stream open for %s (peerid=%s)", device_id, peer_id
-        )
+        _LOGGER.info("WebRTC stream open for %s (peerid=%s)", device_id, peer_id)
         # Ownership of the signaling drain passes to this session (its stop()
         # reaps outgoing_q + mqtt_fut); clear the backstop slot so a concurrent
         # open on this camera cannot reap this live session's drain.

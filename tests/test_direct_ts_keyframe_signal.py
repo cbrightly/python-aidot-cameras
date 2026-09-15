@@ -19,6 +19,7 @@ announces it, and the legacy container test survives only as a bounded fallback
 for a source that never signals - so a stream that does not use the signal can
 still be served rather than hanging forever.
 """
+
 import os
 import sys
 import threading
@@ -37,8 +38,8 @@ def _ts(pid: int, *, rai: bool = False) -> bytes:
     hdr[0] = 0x47
     hdr[1] = (pid >> 8) & 0x1F
     hdr[2] = pid & 0xFF
-    hdr[3] = 0x30 if rai else 0x10       # adaptation+payload, or payload only
-    body = bytes([1, 0x40]) if rai else b""   # adaptation_field_length=1, RAI
+    hdr[3] = 0x30 if rai else 0x10  # adaptation+payload, or payload only
+    body = bytes([1, 0x40]) if rai else b""  # adaptation_field_length=1, RAI
     pkt = bytes(hdr) + body + b"\xde\xad"
     return pkt + b"\xff" * (188 - len(pkt))
 
@@ -67,8 +68,8 @@ def _server():
 def test_audio_random_access_does_not_splice_a_signalling_source():
     """The defect: audio RAI used to start the consumer mid-video-GOP."""
     srv, sent = _server()
-    srv.mark_keyframe()                    # source signals, so it is trusted
-    srv._kf_pending = False                # ...but no keyframe pending yet
+    srv.mark_keyframe()  # source signals, so it is trusted
+    srv._kf_pending = False  # ...but no keyframe pending yet
     srv.write(_ts(AUDIO_PID, rai=True) * 20)
     assert not srv._synced
     assert bytes(sent) == b""
@@ -123,7 +124,7 @@ def test_a_signalling_source_never_falls_back():
     srv, _ = _server()
     srv.mark_keyframe()
     srv._kf_pending = False
-    srv._waiting_since = 0.0               # grace long expired
+    srv._waiting_since = 0.0  # grace long expired
     assert srv._legacy_sync_ok(_ts(AUDIO_PID, rai=True)) is False
 
 

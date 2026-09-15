@@ -9,6 +9,7 @@ so a mains camera rides the gap out with a longer window while a battery
 camera keeps the fast default (its stops are real sleeps that only a reopen
 ends).
 """
+
 import os
 import sys
 
@@ -50,8 +51,9 @@ def test_env_override_is_floored_at_one_second(monkeypatch):
 
 
 def test_builder_places_listen_timeout_before_input():
-    cmd = build(sdp_path="/x.sdp", rtsp_push_url="rtsp://127.0.0.1:8554/cam",
-                input_timeout_s=30)
+    cmd = build(
+        sdp_path="/x.sdp", rtsp_push_url="rtsp://127.0.0.1:8554/cam", input_timeout_s=30
+    )
     i = cmd.index("-listen_timeout")
     assert cmd[i + 1] == "30"
     # Input option: must precede -i, or ffmpeg reads it as an output option.

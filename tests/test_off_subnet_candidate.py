@@ -6,6 +6,7 @@ paths), the data channel never establishes, and the session spends its whole
 75 s first-media budget on a path that never had a chance. The symptom reads as
 "first media never arrived", which sends people looking at the camera.
 """
+
 from unittest import mock
 
 from aidot_cameras.camera import sdes_open
@@ -13,9 +14,10 @@ from aidot_cameras.camera import sdes_open
 
 def _on(net):
     import ipaddress
+
     return mock.patch.object(
-        sdes_open, "_local_ipv4_networks",
-        lambda: [ipaddress.ip_network(net)])
+        sdes_open, "_local_ipv4_networks", lambda: [ipaddress.ip_network(net)]
+    )
 
 
 class TestItSpotsTheUnreachableCase:
@@ -58,11 +60,13 @@ class TestItOnlyWarnsWhenEveryCandidateIsUnreachable:
         """One reachable candidate means the session can still work, so the
         warning must not fire on a mixed set."""
         import inspect
+
         src = inspect.getsource(sdes_open)
         assert "if _off and len(_off) == len(_cam_ice_cands):" in src
 
     def test_the_message_names_the_network_not_the_camera(self):
         import inspect
+
         src = inspect.getsource(sdes_open)
         assert "different network segment" in src
         assert "rather than broken" in src

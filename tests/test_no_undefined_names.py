@@ -46,7 +46,8 @@ def test_camera_module_has_no_undefined_names(src):
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "pyflakes", str(src)],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
     except FileNotFoundError:  # pragma: no cover
         pytest.skip("pyflakes not available")
@@ -54,8 +55,8 @@ def test_camera_module_has_no_undefined_names(src):
         pytest.skip("pyflakes not installed")
 
     undefined = [
-        line for line in proc.stdout.splitlines()
-        if "undefined name" in line
-        and not any(name in line for name in _ALLOWLIST)
+        line
+        for line in proc.stdout.splitlines()
+        if "undefined name" in line and not any(name in line for name in _ALLOWLIST)
     ]
     assert not undefined, "Undefined names (NameError risk):\n" + "\n".join(undefined)

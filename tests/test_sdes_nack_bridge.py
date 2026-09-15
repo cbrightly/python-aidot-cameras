@@ -9,6 +9,7 @@ Both are kept out of the bridge closure so they can be tested without a
 camera - the closure is ~2000 lines and the only other way to exercise this
 would be a live A001064 on a lossy link.
 """
+
 import os
 import struct
 import sys
@@ -56,6 +57,7 @@ class _Sess:
 
 # --- the switch ------------------------------------------------------------ #
 
+
 def test_nack_is_on_by_default(monkeypatch):
     monkeypatch.delenv("AIDOT_SDES_NACK", raising=False)
     assert _sdes_nack_enabled() is True
@@ -68,6 +70,7 @@ def test_nack_can_be_turned_off(monkeypatch):
 
 
 # --- deciding what to ask for ---------------------------------------------- #
+
 
 def test_the_first_video_packet_asks_for_nothing():
     assert _video_nack_seqs(_Holder(), 1000, now=0.0) == []
@@ -96,11 +99,11 @@ def test_nothing_is_asked_for_while_the_switch_is_off():
 
 # --- sending it ------------------------------------------------------------ #
 
+
 def test_it_sends_a_generic_nack_naming_the_media_ssrc():
     send = _Send()
-    assert _send_video_nack(send, None,
-                            0xAB12CD34, 0x11223344, [1001, 1002]) is True
-    data, = send.sent
+    assert _send_video_nack(send, None, 0xAB12CD34, 0x11223344, [1001, 1002]) is True
+    (data,) = send.sent
     b0, pt = struct.unpack("!BB", data[:2])
     assert (b0 & 0x1F, pt) == (1, 205)
     assert struct.unpack("!I", data[8:12])[0] == 0x11223344
@@ -110,7 +113,7 @@ def test_it_sends_a_generic_nack_naming_the_media_ssrc():
 def test_it_encrypts_when_there_is_an_srtcp_session():
     send = _Send()
     _send_video_nack(send, _Sess(), 0xAB12CD34, 0x11223344, [1001])
-    data, = send.sent
+    (data,) = send.sent
     assert data.startswith(b"SRTCP"), "must go out through the SRTCP session"
     assert decode_nack_seqs(data[5:]) == [1001]
 
@@ -118,8 +121,10 @@ def test_it_encrypts_when_there_is_an_srtcp_session():
 def test_a_send_failure_is_reported_not_raised():
     # This runs inside the bridge's packet loop. An exception here would take
     # the whole stream down to avoid one dropped video packet.
-    assert _send_video_nack(_Send(fail=True), None,
-                            0xAB12CD34, 0x11223344, [1001]) is False
+    assert (
+        _send_video_nack(_Send(fail=True), None, 0xAB12CD34, 0x11223344, [1001])
+        is False
+    )
 
 
 def test_it_sends_nothing_when_there_is_nothing_to_ask_for():

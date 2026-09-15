@@ -18,6 +18,7 @@ every camera whose firmware is quieter than the one we measured. What changes is
 that a camera which answers with a *refusal* is no longer reported as success -
 that is the case we were blind to.
 """
+
 import asyncio
 import struct
 from types import SimpleNamespace
@@ -40,10 +41,15 @@ def _reply(cmd, payload=b"\x00\x64"):
 def _session(dc=None):
     holder = {"provider": None}
     return WebRTCSession(
-        pc=MagicMock(), outgoing_q=MagicMock(), mqtt_fut=MagicMock(),
-        recorder=None, track_tasks=[],
+        pc=MagicMock(),
+        outgoing_q=MagicMock(),
+        mqtt_fut=MagicMock(),
+        recorder=None,
+        track_tasks=[],
         dc=dc if dc is not None else SimpleNamespace(send=lambda d: None),
-        audio_sender=MagicMock(), talk_track=MagicMock(), talk_holder=holder,
+        audio_sender=MagicMock(),
+        talk_track=MagicMock(),
+        talk_holder=holder,
     )
 
 
@@ -69,6 +75,7 @@ async def test_talk_still_succeeds_when_the_camera_says_nothing(monkeypatch):
     answers nothing is a real state, not a failure.
     """
     from aidot_cameras.camera import protocol as proto
+
     monkeypatch.setattr(proto, "SPEAKER_ACK_TIMEOUT_S", 0.05)
     session = _session()
     assert await session.async_start_talk(lambda: b"") is True
@@ -94,8 +101,11 @@ async def test_a_refused_speaker_would_not_leave_the_pump_running(monkeypatch):
 
     assert await session.async_start_talk(lambda: b"") is False
     assert session._talk_holder["provider"] is None
-    enabled = [c for c in session._audio_sender.replaceTrack.call_args_list
-               if c.args and c.args[0] is session._talk_track]
+    enabled = [
+        c
+        for c in session._audio_sender.replaceTrack.call_args_list
+        if c.args and c.args[0] is session._talk_track
+    ]
     assert not enabled
 
 
@@ -111,8 +121,11 @@ async def test_the_microphone_is_not_opened_before_the_speaker_answers():
     await asyncio.sleep(0.01)
 
     def _mic_calls():
-        return [c for c in session._audio_sender.replaceTrack.call_args_list
-                if c.args and c.args[0] is session._talk_track]
+        return [
+            c
+            for c in session._audio_sender.replaceTrack.call_args_list
+            if c.args and c.args[0] is session._talk_track
+        ]
 
     assert not _mic_calls(), "the microphone was enabled before the camera answered"
     session.dispatch_avio_frame(_reply(SPEAKERSTART_RESP))
@@ -135,8 +148,10 @@ def _sdes_session():
     proc = MagicMock()
     proc.poll.return_value = None
     return SdesSession(
-        proc=proc, sdp_path="/tmp/nonexistent.sdp",
-        outgoing_q=MagicMock(), mqtt_fut=MagicMock(),
+        proc=proc,
+        sdp_path="/tmp/nonexistent.sdp",
+        outgoing_q=MagicMock(),
+        mqtt_fut=MagicMock(),
         cmd_chan=[lambda cmd, payload: None],
         talk_state={"provider": None},
     )
@@ -244,6 +259,7 @@ def _record(seen, reply=SimpleNamespace(command=801, payload=b"\x00" * 8)):
     async def _req(cmd, payload=b"", **kwargs):
         seen.append(dict(kwargs, cmd=cmd, payload=payload))
         return reply
+
     return _req
 
 
@@ -266,10 +282,13 @@ async def test_the_sdes_budget_covers_the_bridge_delay():
     assert SDES_SPEAKER_ACK_TIMEOUT_S >= SDES_SPEAKERSTART_DELAY + SPEAKER_ACK_TIMEOUT_S
 
 
-@pytest.mark.parametrize("payload,camera", [
-    (b"\x00\x64", "A000088 DTLS and A001064 SDES"),
-    (b"\x00\xc8", "A001513 SDES"),
-])
+@pytest.mark.parametrize(
+    "payload,camera",
+    [
+        (b"\x00\x64", "A000088 DTLS and A001064 SDES"),
+        (b"\x00\xc8", "A001513 SDES"),
+    ],
+)
 async def test_every_observed_speaker_ack_is_an_acceptance(payload, camera):
     """The ack payload differs per model, and both observed values are successes.
 
@@ -284,4 +303,6 @@ async def test_every_observed_speaker_ack_is_an_acceptance(payload, camera):
     refusal can be recognised when one turns up.
     """
     session = _session()
-    assert await _start_talk(session, _reply(SPEAKERSTART_RESP, payload)) is True, camera
+    assert await _start_talk(session, _reply(SPEAKERSTART_RESP, payload)) is True, (
+        camera
+    )

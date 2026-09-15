@@ -5,6 +5,7 @@ SPEAKERSTART/STOP AVIO commands) and the PCMA talk-track frame format.
 
 Runs under pytest, or standalone:  python tests/test_talk.py
 """
+
 import asyncio
 import os
 import struct
@@ -35,8 +36,15 @@ def _make_session(track="TALK_TRACK", sender=None):
     sender = sender if sender is not None else _MockSender()
     dc = _MockDC()
     s = WebRTCSession(
-        pc=None, outgoing_q=None, mqtt_fut=None, recorder=None, track_tasks=[],
-        dc=dc, audio_sender=sender, talk_track=track, talk_holder={"provider": None},
+        pc=None,
+        outgoing_q=None,
+        mqtt_fut=None,
+        recorder=None,
+        track_tasks=[],
+        dc=dc,
+        audio_sender=sender,
+        talk_track=track,
+        talk_holder={"provider": None},
     )
     return s, dc, sender
 
@@ -50,26 +58,35 @@ def test_start_talk_enables_sender_and_sends_speakerstart():
     s, dc, sender = _make_session()
     prov = lambda: b"\x00" * 320
     assert asyncio.run(s.async_start_talk(prov)) is True
-    assert s._talk_holder["provider"] is prov            # provider wired
-    assert sender.tracks == [s._talk_track]              # replaceTrack(talk_track) = enable
+    assert s._talk_holder["provider"] is prov  # provider wired
+    assert sender.tracks == [s._talk_track]  # replaceTrack(talk_track) = enable
     assert len(dc.sent) == 1
-    assert _cmd_of(dc.sent[0]) == 848                    # SPEAKERSTART
-    assert dc.sent[0][28:] == b"\x00" * 8                # 8-byte channel=0 payload
+    assert _cmd_of(dc.sent[0]) == 848  # SPEAKERSTART
+    assert dc.sent[0][28:] == b"\x00" * 8  # 8-byte channel=0 payload
 
 
 def test_stop_talk_sends_speakerstop_and_detaches():
     s, dc, sender = _make_session()
     asyncio.run(s.async_start_talk(lambda: None))
-    dc.sent.clear(); sender.tracks.clear()
+    dc.sent.clear()
+    sender.tracks.clear()
     assert asyncio.run(s.async_stop_talk()) is True
-    assert sender.tracks == [None]                       # replaceTrack(None) = disable
+    assert sender.tracks == [None]  # replaceTrack(None) = disable
     assert s._talk_holder["provider"] is None
-    assert _cmd_of(dc.sent[0]) == 849                    # SPEAKERSTOP
+    assert _cmd_of(dc.sent[0]) == 849  # SPEAKERSTOP
 
 
 def test_talk_unsupported_without_sender_or_track():
-    s = WebRTCSession(pc=None, outgoing_q=None, mqtt_fut=None, recorder=None,
-                      track_tasks=[], dc=_MockDC(), audio_sender=None, talk_track=None)
+    s = WebRTCSession(
+        pc=None,
+        outgoing_q=None,
+        mqtt_fut=None,
+        recorder=None,
+        track_tasks=[],
+        dc=_MockDC(),
+        audio_sender=None,
+        talk_track=None,
+    )
     assert s.talk_supported is False
     assert asyncio.run(s.async_start_talk(lambda: None)) is False
 
@@ -89,7 +106,7 @@ def test_talk_track_frame_format():
         return
     # Silence when provider is None.
     f = asyncio.run(track.recv())
-    assert f.samples == 160 and f.sample_rate == 8000   # 20 ms @ 8 kHz
+    assert f.samples == 160 and f.sample_rate == 8000  # 20 ms @ 8 kHz
     # Provider PCM is consumed (320 bytes s16le = one 160-sample frame).
     holder["provider"] = lambda: b"\x34\x12" * 160
     f2 = asyncio.run(track.recv())
@@ -98,7 +115,9 @@ def test_talk_track_frame_format():
 
 
 if __name__ == "__main__":
-    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    fns = [
+        v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)
+    ]
     for fn in fns:
         fn()
         print(f"PASS {fn.__name__}")

@@ -6,6 +6,7 @@ an ESTABLISHED peer, the idle window never elapses, and every camera keeps
 streaming forever after a single view. Confirmed live: five cameras, nobody
 watching, still producing after 7 minutes against a 5 minute idle window.
 """
+
 import asyncio
 
 from aidot_cameras.camera.go2rtc import Go2rtcClient
@@ -64,8 +65,9 @@ def test_unknown_when_go2rtc_is_unreachable():
 
 def test_release_policy_treats_unknown_as_do_not_release():
     from aidot_cameras.camera.protocol import _idle_release_due
+
     now = 1000.0
-    assert _idle_release_due(None, now - 9999, now, 300) is False   # unknown
-    assert _idle_release_due(True, now - 9999, now, 300) is False   # watching
-    assert _idle_release_due(False, now - 9999, now, 300) is True   # idle, elapsed
-    assert _idle_release_due(False, now - 10, now, 300) is False    # idle, too soon
+    assert _idle_release_due(None, now - 9999, now, 300) is False  # unknown
+    assert _idle_release_due(True, now - 9999, now, 300) is False  # watching
+    assert _idle_release_due(False, now - 9999, now, 300) is True  # idle, elapsed
+    assert _idle_release_due(False, now - 10, now, 300) is False  # idle, too soon

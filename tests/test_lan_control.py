@@ -20,7 +20,12 @@ from aidot_cameras.camera.lan_control import (
     discover_subnet,
 )
 
-DEVICE = {"id": "dev1", "modelId": "LK.IPC.A000088", "aesKey": ["k" * 16], "password": "pw"}
+DEVICE = {
+    "id": "dev1",
+    "modelId": "LK.IPC.A000088",
+    "aesKey": ["k" * 16],
+    "password": "pw",
+}
 USER = {"id": "user1"}
 
 
@@ -57,13 +62,16 @@ def test_friendly_attr_map_round_trips_through_aes():
 def test_async_set_rejects_unknown_attr():
     c = CameraLanClient(DEVICE, USER, ip="192.0.2.10")
     import asyncio
+
     with pytest.raises(CameraLanError):
         asyncio.run(c.async_set("not_a_real_control", 1))
 
 
 def test_battery_gating():
     assert CameraLanClient.is_mains_powered({"Battery_remaining": None}) is True
-    assert CameraLanClient.is_mains_powered({"LedOnOff": 0}) is True  # key absent -> mains
+    assert (
+        CameraLanClient.is_mains_powered({"LedOnOff": 0}) is True
+    )  # key absent -> mains
     assert CameraLanClient.is_mains_powered({"Battery_remaining": 87}) is False
 
 
@@ -77,6 +85,7 @@ def test_network_helpers_are_callable():
     # discovery helpers are importable and have the expected shape (the test
     # sandbox blocks sockets, so we don't invoke them).
     import inspect
+
     assert callable(_local_ipv4)
     assert inspect.iscoroutinefunction(discover_subnet)
     sig = inspect.signature(discover_subnet)
@@ -117,6 +126,7 @@ def test_get_attributes_empty_replies_raises_lanerror():
 # control" (ordinary, quiet) versus "this device offered it and then refused
 # us" (a defect, and it should be able to say so).
 
+
 def test_a_refused_login_is_distinguishable_from_an_unavailable_one():
     """The caller cannot log the interesting case differently without this."""
     assert issubclass(CameraLanLoginRejected, CameraLanError)
@@ -133,8 +143,13 @@ def test_the_login_raises_the_specific_error_on_a_refusal():
     import asyncio
 
     c = CameraLanClient(DEVICE, USER, ip="192.0.2.10")
-    reply = {"service": "device", "method": "loginResp", "deviceId": "dev1",
-             "payload": {"ascNumber": 1}, "ack": {"code": 4352, "desc": "fail"}}
+    reply = {
+        "service": "device",
+        "method": "loginResp",
+        "deviceId": "dev1",
+        "payload": {"ascNumber": 1},
+        "ack": {"code": 4352, "desc": "fail"},
+    }
     body = aes_encrypt(json.dumps(reply).encode(), c._key)
 
     class _Reader:

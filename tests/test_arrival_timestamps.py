@@ -13,6 +13,7 @@ Efficacy is NOT asserted here and cannot be: "Non-monotonic DTS" is a muxer
 complaint, four local harnesses failed to reproduce it, and the measurement
 lives on the box against a 6.1-6.8 warnings-per-streaming-minute baseline.
 """
+
 import os
 import sys
 
@@ -38,8 +39,11 @@ def test_it_is_an_input_option():
 
 
 def test_it_applies_to_every_destination():
-    for kw in ({}, {"rtsp_push_url": "rtsp://127.0.0.1:8554/x"},
-               {"output_path": "/tmp/out.mp4"}):
+    for kw in (
+        {},
+        {"rtsp_push_url": "rtsp://127.0.0.1:8554/x"},
+        {"output_path": "/tmp/out.mp4"},
+    ):
         cmd = _cmd(**kw)
         assert FLAG in cmd, kw
         assert cmd.index(FLAG) < cmd.index("-i"), kw

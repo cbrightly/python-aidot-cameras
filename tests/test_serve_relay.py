@@ -5,6 +5,7 @@ The relay keeps a public serve port connectable while ffmpeg (the real
 instead of getting ECONNREFUSED and giving up.  These tests use real localhost
 sockets with ephemeral ports - no camera, no ffmpeg, fully deterministic.
 """
+
 import os
 import socket
 import sys
@@ -15,7 +16,11 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot_cameras.camera.protocol import _ServeRelay, _grab_free_port, _rewrite_serve_port
+from aidot_cameras.camera.protocol import (
+    _ServeRelay,
+    _grab_free_port,
+    _rewrite_serve_port,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -39,11 +44,15 @@ def _real_sockets():
 
 
 def test_rewrite_serve_port_swaps_only_the_port():
-    assert (_rewrite_serve_port("http://127.0.0.1:18989/abc.ts", 40001)
-            == "http://127.0.0.1:40001/abc.ts")
+    assert (
+        _rewrite_serve_port("http://127.0.0.1:18989/abc.ts", 40001)
+        == "http://127.0.0.1:40001/abc.ts"
+    )
     # Path and scheme preserved; host preserved.
-    assert (_rewrite_serve_port("http://127.0.0.1:8554/aidot_x", 9)
-            == "http://127.0.0.1:9/aidot_x")
+    assert (
+        _rewrite_serve_port("http://127.0.0.1:8554/aidot_x", 9)
+        == "http://127.0.0.1:9/aidot_x"
+    )
 
 
 def test_rewrite_serve_port_handles_missing_or_malformed():
@@ -188,6 +197,7 @@ def test_dial_timeout_closes_idle_client():
 
 if __name__ == "__main__":
     import traceback
+
     _fail = 0
     for _k, _v in sorted(globals().items()):
         if _k.startswith("test_"):

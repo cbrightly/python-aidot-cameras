@@ -19,6 +19,7 @@ So the failure mode is not a loop, it is a leak plus a device that quietly stops
 being managed.  Bounding the attempt is what turns it back into an ordinary
 failure that the retry policy can handle.
 """
+
 import asyncio
 import os
 import sys
@@ -45,7 +46,8 @@ async def test_a_connect_that_answers_is_left_alone():
         return None
 
     ok = await _await_connect_with_deadline(
-        quick(), 5.0, "dev", lambda: cleaned.append("cleanup") or _noop())
+        quick(), 5.0, "dev", lambda: cleaned.append("cleanup") or _noop()
+    )
     assert ok is True
     assert cleaned == []
 
@@ -59,7 +61,8 @@ async def test_a_connect_that_never_answers_is_abandoned_and_cleaned_up():
         await asyncio.sleep(3600)
 
     ok = await _await_connect_with_deadline(
-        hangs(), 0.05, "dev", lambda: cleaned.append("cleanup") or _noop())
+        hangs(), 0.05, "dev", lambda: cleaned.append("cleanup") or _noop()
+    )
     assert ok is False
     assert cleaned == ["cleanup"], "the socket must be closed on timeout"
 
@@ -85,6 +88,7 @@ async def test_the_hung_coroutine_is_actually_cancelled():
 async def test_a_failing_cleanup_does_not_mask_the_timeout():
     """Cleanup runs on the failure path; it must not raise into the caller and
     turn a handled timeout into an unhandled exception on the media path."""
+
     async def hangs():
         await asyncio.sleep(3600)
 
@@ -98,11 +102,13 @@ async def test_a_failing_cleanup_does_not_mask_the_timeout():
 @pytest.mark.asyncio
 async def test_cancellation_of_the_caller_is_not_swallowed():
     """Shutdown must still be able to stop this."""
+
     async def hangs():
         await asyncio.sleep(3600)
 
     task = asyncio.ensure_future(
-        _await_connect_with_deadline(hangs(), 30.0, "dev", _noop))
+        _await_connect_with_deadline(hangs(), 30.0, "dev", _noop)
+    )
     await asyncio.sleep(0.01)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

@@ -9,6 +9,7 @@ input queue backs up. The box carried 44.3 million ``RcvbufErrors`` against
 161 million datagrams received over four days, and every UDP receive error on it
 was a buffer overflow rather than a checksum or port error.
 """
+
 import socket
 
 from aidot_cameras.camera.sdes_open import (

@@ -12,6 +12,7 @@ Complements tests/test_dtls_mux_terminal_write.py, which covers the dead-pipe
 and interleave-stall regressions.  Thresholds are deliberately generous and
 directional (regression tripwires, not quality scores).
 """
+
 import io
 import queue
 import threading
@@ -43,7 +44,7 @@ def _make_pcma_packets(level_dbfs=-12.0, n_seconds=SECONDS, loss=0.0, seed=1):
     enc.format = "s16"
     pkts = []
     for i in range(0, n - PKT_SAMPLES, PKT_SAMPLES):
-        chunk = pcm[i:i + PKT_SAMPLES].reshape(1, -1)
+        chunk = pcm[i : i + PKT_SAMPLES].reshape(1, -1)
         fr = av.AudioFrame.from_ndarray(chunk, format="s16", layout="mono")
         fr.sample_rate = SR
         for p in enc.encode(fr):
@@ -51,7 +52,10 @@ def _make_pcma_packets(level_dbfs=-12.0, n_seconds=SECONDS, loss=0.0, seed=1):
     raw = b"".join(pkts)
     # (packet_bytes, rtp_ts): ts reflects the TRUE wire position so a dropped
     # packet leaves a real timestamp gap (PCMA: 1 byte == 1 sample @ 8 kHz).
-    wire = [(raw[i:i + PKT_SAMPLES], i) for i in range(0, len(raw) - PKT_SAMPLES, PKT_SAMPLES)]
+    wire = [
+        (raw[i : i + PKT_SAMPLES], i)
+        for i in range(0, len(raw) - PKT_SAMPLES, PKT_SAMPLES)
+    ]
     if loss > 0:
         wire = [(w, t) for (w, t) in wire if rng.rand() > loss]
     return wire, n
@@ -100,7 +104,7 @@ def _envelope_db(y, sr):
     w = int(0.02 * sr)  # 20 ms windows
     nfr = len(y) // w
     env = np.array(
-        [np.sqrt(np.mean(y[i * w:(i + 1) * w] ** 2)) + 1e-9 for i in range(nfr)]
+        [np.sqrt(np.mean(y[i * w : (i + 1) * w] ** 2)) + 1e-9 for i in range(nfr)]
     )
     return 20 * np.log10(env)
 

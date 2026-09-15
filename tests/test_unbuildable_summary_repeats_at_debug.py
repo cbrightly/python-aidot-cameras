@@ -36,8 +36,12 @@ class _Cloud:
 
     async def get_devices(self, house_id):
         return [
-            {"id": "cam1", "modelId": "LK.IPC.A000088",
-             "productId": "p1", "aesKey": ["k"]},
+            {
+                "id": "cam1",
+                "modelId": "LK.IPC.A000088",
+                "productId": "p1",
+                "aesKey": ["k"],
+            },
             *self.unsupported,
         ]
 
@@ -66,11 +70,14 @@ def _summary_records(caplog, level):
     The per-device line also says "no usable aesKey", and matching on that
     alone counted it too - which read as the summary having been emitted twice.
     """
-    return [r for r in caplog.records
-            if r.name == _LOGGER_NAME
-            and r.levelno == level
-            and r.getMessage().startswith("skipped ")
-            and "device(s) with no usable aesKey" in r.getMessage()]
+    return [
+        r
+        for r in caplog.records
+        if r.name == _LOGGER_NAME
+        and r.levelno == level
+        and r.getMessage().startswith("skipped ")
+        and "device(s) with no usable aesKey" in r.getMessage()
+    ]
 
 
 def test_first_summary_is_info(caplog):

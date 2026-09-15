@@ -10,6 +10,7 @@ Parsed with ast rather than a regex - the parenthesised multi-line import form
 is the common one here, and a regex that mis-handles it either misses names or
 invents them.
 """
+
 import ast
 import os
 import pathlib
@@ -26,10 +27,10 @@ def _constants_imports():
     """(imported_name, source_file) for every `from ...constants import ...`."""
     for path in sorted(_PKG.rglob("*.py")):
         if "_vendor" in path.parts:
-            continue          # vendored aiortc ships byte-identical
+            continue  # vendored aiortc ships byte-identical
         try:
             tree = ast.parse(path.read_text())
-        except SyntaxError:                                  # pragma: no cover
+        except SyntaxError:  # pragma: no cover
             continue
         for node in ast.walk(tree):
             if not isinstance(node, ast.ImportFrom):

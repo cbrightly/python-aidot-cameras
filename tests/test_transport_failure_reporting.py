@@ -31,14 +31,22 @@ from aidot_cameras.camera.protocol import (
 # Rule 1: which channel a transport state goes out on
 # --------------------------------------------------------------------------
 
+
 def test_failed_state_goes_to_the_status_channel():
     assert _transport_state_channel("failed", "STATUS", "TRACE") == "STATUS"
 
 
 @pytest.mark.parametrize(
     "state",
-    ["new", "connecting", "connected", "completed", "checking",
-     "disconnected", "closed"],
+    [
+        "new",
+        "connecting",
+        "connected",
+        "completed",
+        "checking",
+        "disconnected",
+        "closed",
+    ],
 )
 def test_every_other_state_goes_to_the_trace_channel(state):
     assert _transport_state_channel(state, "STATUS", "TRACE") == "TRACE"
@@ -47,6 +55,7 @@ def test_every_other_state_goes_to_the_trace_channel(state):
 # --------------------------------------------------------------------------
 # Rule 2: the post-failure transceiver dump
 # --------------------------------------------------------------------------
+
 
 class _Ice:
     def __init__(self, state="failed", role="controlling"):
@@ -74,7 +83,8 @@ class _Transceiver:
 def test_reports_one_line_per_transceiver():
     said = []
     _report_failed_transports(
-        lambda: [_Transceiver("video"), _Transceiver("audio")], said.append)
+        lambda: [_Transceiver("video"), _Transceiver("audio")], said.append
+    )
 
     assert len(said) == 2
     assert "transceiver[0]" in said[0] and "kind=video" in said[0]
@@ -85,8 +95,8 @@ def test_the_line_names_the_states_that_identify_the_dead_transport():
     said = []
     ice = _Ice(state="failed", role="controlled")
     _report_failed_transports(
-        lambda: [_Transceiver("video", _Dtls(state="connected", ice=ice))],
-        said.append)
+        lambda: [_Transceiver("video", _Dtls(state="connected", ice=ice))], said.append
+    )
 
     line = said[0]
     assert "dtls.state=connected" in line
@@ -97,6 +107,7 @@ def test_the_line_names_the_states_that_identify_the_dead_transport():
 def test_a_transceiver_that_cannot_be_read_does_not_hide_the_others():
     """The point of the dump is to find the broken one; losing the rest to it
     is the one failure mode that defeats the whole diagnostic."""
+
     class _Exploding:
         @property
         def receiver(self):
@@ -104,7 +115,8 @@ def test_a_transceiver_that_cannot_be_read_does_not_hide_the_others():
 
     said = []
     _report_failed_transports(
-        lambda: [_Exploding(), _Transceiver("audio")], said.append)
+        lambda: [_Exploding(), _Transceiver("audio")], said.append
+    )
 
     assert len(said) == 2
     assert "transceiver[0]" in said[0] and "transport gone" in said[0]
@@ -137,6 +149,7 @@ def test_a_report_channel_that_raises_cannot_break_the_failure_path():
     event dispatch from inside the connection-failed handler - the diagnostic
     taking down the failure path it exists to diagnose.
     """
+
     def _boom(_msg):
         raise RuntimeError("logging is broken")
 
@@ -152,8 +165,8 @@ def test_a_raising_channel_does_not_stop_the_remaining_transceivers():
             raise RuntimeError("logging is broken")
 
     _report_failed_transports(
-        lambda: [_Transceiver("video"), _Transceiver("audio")],
-        _first_one_explodes)
+        lambda: [_Transceiver("video"), _Transceiver("audio")], _first_one_explodes
+    )
 
     assert len(calls) == 2
     assert "kind=audio" in calls[1]
@@ -173,22 +186,31 @@ def test_a_raising_channel_does_not_stop_the_remaining_transceivers():
 
 
 def _handler_source(name):
-    path = (pathlib.Path(__file__).resolve().parent.parent
-            / "aidot_cameras" / "camera" / "webrtc_open.py")
+    path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "aidot_cameras"
+        / "camera"
+        / "webrtc_open.py"
+    )
     tree = ast.parse(path.read_text())
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        ):
             return node
     raise AssertionError(f"{name} not found - this test would pass on nothing")
 
 
 def _called_names(node):
-    return {n.func.id for n in ast.walk(node)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    return {
+        n.func.id
+        for n in ast.walk(node)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+    }
 
 
-@pytest.mark.parametrize(
-    "handler", ["_on_conn_state", "_on_ice_state"])
+@pytest.mark.parametrize("handler", ["_on_conn_state", "_on_ice_state"])
 def test_state_handlers_route_through_the_channel_rule(handler):
     called = _called_names(_handler_source(handler))
     assert "_transport_state_channel" in called, (

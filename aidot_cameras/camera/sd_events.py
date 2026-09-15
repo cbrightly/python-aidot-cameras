@@ -38,6 +38,7 @@ Two live replies, and a 12-byte header fits both exactly:
 means: a per-hour occupancy map rather than a list. LISTEVENT carries 12-byte
 records in the same body.
 """
+
 import struct
 import time
 from typing import List, NamedTuple, Optional
@@ -65,8 +66,10 @@ class SdEvent(NamedTuple):
     status: int
 
     def isoformat(self) -> str:
-        return (f"{self.year:04d}-{self.month:02d}-{self.day:02d}"
-                f"T{self.hour:02d}:{self.minute:02d}:{self.second:02d}Z")
+        return (
+            f"{self.year:04d}-{self.month:02d}-{self.day:02d}"
+            f"T{self.hour:02d}:{self.minute:02d}:{self.second:02d}Z"
+        )
 
 
 class SdEventPage(NamedTuple):
@@ -166,28 +169,37 @@ def stimeday(when: float) -> bytes:
         t.tm_year,
         t.tm_mon,
         t.tm_mday,
-        (t.tm_wday + 1) % 7,     # tm_wday is Mon=0; the vendor's wday is Sun=0
+        (t.tm_wday + 1) % 7,  # tm_wday is Mon=0; the vendor's wday is Sun=0
         t.tm_hour,
         t.tm_min,
         t.tm_sec,
     )
 
 
-def haslistevent_payload(start: float, end: float, channel: int = 0,
-                         event: int = SD_EVENT_ANY) -> bytes:
+def haslistevent_payload(
+    start: float, end: float, channel: int = 0, event: int = SD_EVENT_ANY
+) -> bytes:
     """22 bytes: channel, start, end, and a two-byte selector tail.
 
     The length is not a guess - ``parseConent`` allocates ``const/16 v1, 0x16``,
     which is 22, and copies the channel at offset 0 and the first STimeDay at
     offset 4.
     """
-    return (struct.pack("<I", channel)
-            + stimeday(start) + stimeday(end)
-            + struct.pack("<H", event & 0xFFFF))
+    return (
+        struct.pack("<I", channel)
+        + stimeday(start)
+        + stimeday(end)
+        + struct.pack("<H", event & 0xFFFF)
+    )
 
 
-def listevent_payload(start: float, end: float, channel: int = 0,
-                      event: int = SD_EVENT_ANY, status: int = 0) -> bytes:
+def listevent_payload(
+    start: float,
+    end: float,
+    channel: int = 0,
+    event: int = SD_EVENT_ANY,
+    status: int = 0,
+) -> bytes:
     """24 bytes, not 22 - and the difference is the whole point.
 
     ``SMsgAVIoctrlListEventReq`` has three ``parseConent`` overloads. The one
@@ -197,10 +209,13 @@ def listevent_payload(start: float, end: float, channel: int = 0,
     allocates 22. Four bytes of channel, two eight-byte STimeDays, the event and
     status selectors, then two bytes of tail.
     """
-    return (struct.pack("<I", channel)
-            + stimeday(start) + stimeday(end)
-            + bytes((event & 0xFF, status & 0xFF))
-            + b"\x00\x00")
+    return (
+        struct.pack("<I", channel)
+        + stimeday(start)
+        + stimeday(end)
+        + bytes((event & 0xFF, status & 0xFF))
+        + b"\x00\x00"
+    )
 
 
 def _consistent(count: int, body_len: int, command: Optional[int]) -> bool:
@@ -220,7 +235,8 @@ def _consistent(count: int, body_len: int, command: Optional[int]) -> bool:
 
 def _stimeday(buf: bytes, off: int) -> tuple:
     year, month, day, _wday, hour, minute, second = struct.unpack_from(
-        "<HBBBBBB", buf, off)
+        "<HBBBBBB", buf, off
+    )
     return year, month, day, hour, minute, second
 
 
@@ -228,11 +244,12 @@ def decode_event_record(buf: bytes, off: int = 0) -> SdEvent:
     """One 12-byte record: an STimeDay then channel, event, status, reserved."""
     year, month, day, hour, minute, second = _stimeday(buf, off)
     channel, event, status = struct.unpack_from("<BBB", buf, off + 8)
-    return SdEvent(year, month, day, hour, minute, second,
-                   channel, event, status)
+    return SdEvent(year, month, day, hour, minute, second, channel, event, status)
 
 
-def decode_list_event_response(payload: bytes, *, command: Optional[int] = None) -> Optional[SdEventPage]:
+def decode_list_event_response(
+    payload: bytes, *, command: Optional[int] = None
+) -> Optional[SdEventPage]:
     """Decode a 0x319 payload, or None if it cannot be one.
 
     None rather than an exception or a half-filled result: this runs against a
@@ -260,8 +277,7 @@ def decode_list_event_response(payload: bytes, *, command: Optional[int] = None)
     # number of records decoded is bounded by what the body can actually hold
     # rather than by what the header claims.
     take = usable
-    events = [decode_event_record(body, i * EVENT_RECORD_LEN)
-              for i in range(take)]
+    events = [decode_event_record(body, i * EVENT_RECORD_LEN) for i in range(take)]
     return SdEventPage(
         events=events,
         channel=channel,
@@ -286,8 +302,9 @@ def decode_list_event_response(payload: bytes, *, command: Optional[int] = None)
     )
 
 
-def decode_hour_map(payload: Optional[bytes], *,
-                    command: Optional[int] = None) -> Optional[bytes]:
+def decode_hour_map(
+    payload: Optional[bytes], *, command: Optional[int] = None
+) -> Optional[bytes]:
     """The per-hour occupancy bytes from a HASLISTEVENT reply, or None.
 
     One byte per hour of the window that was requested, starting at the request

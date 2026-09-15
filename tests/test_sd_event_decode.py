@@ -14,6 +14,7 @@ looked again. The header is 12 bytes, measured from two live replies in run
 only ones that can be wrong about the wire format, which is exactly why they
 exist.
 """
+
 import os
 import struct
 import sys
@@ -34,17 +35,17 @@ def _stimeday(y, mo, d, wd, h, mi, s):
     return struct.pack("<HBBBBBB", y, mo, d, wd, h, mi, s)
 
 
-def _record(y=2026, mo=8, d=11, h=9, mi=30, s=0, channel=0, event=0x12,
-            status=1):
+def _record(y=2026, mo=8, d=11, h=9, mi=30, s=0, channel=0, event=0x12, status=1):
     return _stimeday(y, mo, d, 2, h, mi, s) + bytes((channel, event, status, 0))
 
 
 def _page(records, *, channel=0, total=1, index=0, end_flag=1, count=None):
     body = b"".join(records)
-    return (struct.pack("<II", channel, total)
-            + bytes((index, end_flag,
-                     len(body) if count is None else count, 0))
-            + body)
+    return (
+        struct.pack("<II", channel, total)
+        + bytes((index, end_flag, len(body) if count is None else count, 0))
+        + body
+    )
 
 
 #: The two replies actually received, from run 31497241870. Tests that use
@@ -69,7 +70,9 @@ def test_a_record_decodes_to_a_time_and_the_selectors():
 def test_a_page_yields_its_records():
     page = decode_list_event_response(_page([_record(mi=0), _record(mi=30)]))
     assert [e.isoformat() for e in page.events] == [
-        "2026-08-11T09:00:00Z", "2026-08-11T09:30:00Z"]
+        "2026-08-11T09:00:00Z",
+        "2026-08-11T09:30:00Z",
+    ]
     assert page.consistent and page.trailing == 0
 
 
@@ -113,7 +116,8 @@ def test_bytes_left_over_after_the_records_are_reported():
     page = decode_list_event_response(payload)
     assert page.trailing == 3, (
         "a non-zero remainder means the record size or header length is wrong "
-        "for this firmware - the decoder has to say so")
+        "for this firmware - the decoder has to say so"
+    )
 
 
 def test_a_payload_too_short_to_be_a_reply_decodes_to_nothing():
@@ -145,8 +149,10 @@ def test_a_map_asked_for_as_records_is_refused_not_invented():
     # The real 168-byte map is 14 x 12 bytes, so the record reading "works"
     # and produces fourteen recordings that do not exist, dated year 0. A
     # caller that knows which reply it holds must not be able to get them.
-    assert decode_list_event_response(
-        REAL_HASLISTEVENT, command=HASLISTEVENT_RESP_CMD) is None
+    assert (
+        decode_list_event_response(REAL_HASLISTEVENT, command=HASLISTEVENT_RESP_CMD)
+        is None
+    )
 
 
 def test_a_map_decodes_to_one_byte_per_hour():
@@ -167,8 +173,7 @@ def test_a_map_with_footage_reports_which_hours():
 def test_a_record_page_is_not_a_map():
     # Same guard the other way round: the map decoder must not hand back the
     # record bytes as if they were hours.
-    assert decode_hour_map(
-        _page([_record()]), command=LISTEVENT_RESP_CMD) is None
+    assert decode_hour_map(_page([_record()]), command=LISTEVENT_RESP_CMD) is None
 
 
 def test_a_payload_too_short_to_be_a_map_decodes_to_nothing():
@@ -178,6 +183,7 @@ def test_a_payload_too_short_to_be_a_map_decodes_to_nothing():
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:

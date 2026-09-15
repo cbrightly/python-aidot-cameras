@@ -39,7 +39,8 @@ def _session():
     s = MagicMock()
     s._avio_cmd = MagicMock(return_value=True)
     s.async_avio_request = AsyncMock(
-        return_value=SimpleNamespace(command=801, payload=b"\x00" * 8))
+        return_value=SimpleNamespace(command=801, payload=b"\x00" * 8)
+    )
     return s
 
 
@@ -62,7 +63,7 @@ async def test_remembered_choice_is_sent_when_a_session_starts():
     cam._stream_session._avio_cmd.assert_called_once()
     cmd, payload = cam._stream_session._avio_cmd.call_args[0]
     assert cmd == SETSTREAMCTRL_CMD
-    assert payload[4] == _STREAM_QUALITY["sd"]   # AVIOCTRL_QUALITY_MIDDLE
+    assert payload[4] == _STREAM_QUALITY["sd"]  # AVIOCTRL_QUALITY_MIDDLE
 
 
 @pytest.mark.asyncio
@@ -105,4 +106,4 @@ def test_reapply_never_disturbs_a_working_stream():
     cam._desired_quality = "sd"
     cam._stream_session._avio_cmd.side_effect = RuntimeError("channel gone")
 
-    cam._apply_pending_resolution()          # must not raise
+    cam._apply_pending_resolution()  # must not raise

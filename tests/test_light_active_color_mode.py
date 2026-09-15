@@ -87,8 +87,12 @@ def test_rgbw_zero_only_does_not_set_rgbw_mode():
 # delivery: CameraClient.get_device_client attaches the carried status
 # --------------------------------------------------------------------------- #
 
+
 def _service(identity):
-    return {"identity": identity, "properties": [{"minValue": "2700", "maxValue": "6500"}]}
+    return {
+        "identity": identity,
+        "properties": [{"minValue": "2700", "maxValue": "6500"}],
+    }
 
 
 def _device(dev_id, model_id, services):
@@ -102,9 +106,14 @@ def _device(dev_id, model_id, services):
     }
 
 
-RGBW_BULB = _device("bulb-rgbw", "lk.WIFI-RGBWLight-D0006",
-                    [_service("control.light.rgbw"), _service("control.light.cct")])
-CCT_BULB = _device("bulb-cct", "lk.WIFI-CCTLight-D0001", [_service("control.light.cct")])
+RGBW_BULB = _device(
+    "bulb-rgbw",
+    "lk.WIFI-RGBWLight-D0006",
+    [_service("control.light.rgbw"), _service("control.light.cct")],
+)
+CCT_BULB = _device(
+    "bulb-cct", "lk.WIFI-CCTLight-D0001", [_service("control.light.cct")]
+)
 CAMERA = _device("cam1", "LK.IPC.A000088", [])
 
 
@@ -115,6 +124,7 @@ def _dispatch(device):
     update_ip_address, which spawns the login task; discovery stays off because
     setup_discover returns early while the account has no user id.
     """
+
     async def _run():
         client = CameraClient(None, country_code="US")
         return client, client.get_device_client(device)
@@ -130,8 +140,9 @@ def test_rgbw_bulb_gets_the_carried_status_on_a_camera_free_client():
     assert type(dc) is LightDeviceClient
     assert isinstance(dc, UpstreamDeviceClient)
     assert not isinstance(dc, CameraDeviceClient)
-    assert [c for c in type(dc).__mro__
-            if c.__module__.startswith("aidot_cameras.camera")] == []
+    assert [
+        c for c in type(dc).__mro__ if c.__module__.startswith("aidot_cameras.camera")
+    ] == []
     # ...but its status carries the fix.
     assert isinstance(dc.status, DeviceStatusData)
     dc.status.update(DeviceAttr(OnOff=1, Dimming=100, CCT=3000))

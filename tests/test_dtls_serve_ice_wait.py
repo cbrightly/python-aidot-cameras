@@ -23,6 +23,7 @@ reads that can disagree.
 
 Repo convention: no pytest-asyncio; drive coroutines with asyncio.run().
 """
+
 import asyncio
 import types
 
@@ -35,6 +36,7 @@ def test_serve_ice_wait_defaults_to_the_old_thirty_seconds(monkeypatch):
     # assertion is a statement about the developer's shell, not the code.
     monkeypatch.delenv("AIDOT_DTLS_SERVE_ICE_WAIT_S", raising=False)
     from aidot_cameras.camera.client import _parse_env_float
+
     assert _parse_env_float("AIDOT_DTLS_SERVE_ICE_WAIT_S", 30.0) == 30.0
 
 
@@ -43,9 +45,11 @@ def test_the_constant_is_wired_to_the_env_var_it_documents():
     # wiring. Pin the wiring itself: a constant reading the wrong env name is
     # exactly the bug a _parse_env_float test cannot see.
     import inspect
+
     src = inspect.getsource(camera_client)
-    assert ('_DTLS_SERVE_ICE_WAIT_S = _parse_env_float('
-            '"AIDOT_DTLS_SERVE_ICE_WAIT_S", 30.0)') in src
+    assert (
+        '_DTLS_SERVE_ICE_WAIT_S = _parse_env_float("AIDOT_DTLS_SERVE_ICE_WAIT_S", 30.0)'
+    ) in src
 
 
 def test_ice_budget_never_extends_the_callers_own_timeout():
@@ -57,9 +61,10 @@ def test_ice_budget_never_extends_the_callers_own_timeout():
     entire purpose is to fail faster.
     """
     from aidot_cameras.camera.webrtc_open import _resolve_ice_budget
-    assert _resolve_ice_budget(20.0, 30.0) == 20.0   # clamped to the caller
-    assert _resolve_ice_budget(75.0, 30.0) == 30.0   # the split still applies
-    assert _resolve_ice_budget(75.0, None) == 75.0   # unset inherits, as before
+
+    assert _resolve_ice_budget(20.0, 30.0) == 20.0  # clamped to the caller
+    assert _resolve_ice_budget(75.0, 30.0) == 30.0  # the split still applies
+    assert _resolve_ice_budget(75.0, None) == 75.0  # unset inherits, as before
 
 
 class _Ready:
@@ -92,13 +97,13 @@ def test_dtls_serve_loop_passes_both_budgets():
 
     assert calls, "async_open_webrtc_stream was never called"
     assert calls[0].get("timeout") == camera_client._DTLS_SERVE_OPEN_TIMEOUT_S
-    assert (calls[0].get("_ice_wait_timeout_s")
-            == camera_client._DTLS_SERVE_ICE_WAIT_S)
+    assert calls[0].get("_ice_wait_timeout_s") == camera_client._DTLS_SERVE_ICE_WAIT_S
 
 
 def test_other_callers_keep_inheriting_the_timeout():
     # Passing nothing must mean "behave as before": the SDES keepalive loop
     # opens with timeout=120 and its ICE budget must not silently become 30.
     import inspect
+
     sig = inspect.signature(CameraMixin._async_open_webrtc_stream_impl)
     assert sig.parameters["_ice_wait_timeout_s"].default is None

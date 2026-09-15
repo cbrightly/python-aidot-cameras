@@ -11,6 +11,7 @@ workers are finite; enough orphans and every `run_in_executor` in the process
 blocks - which a caller experiences as an open that never returns, the same
 symptom as the uncancellable drain fixed alongside this.
 """
+
 import asyncio
 import inspect
 import queue
@@ -23,7 +24,7 @@ from aidot_cameras.camera.client import CameraMixin
 def test_both_mqtt_branches_register_with_the_backstop():
     """Whichever transport runs, something must be able to reap its thread."""
     src = inspect.getsource(webrtc_open)
-    start = src.index("_pm_stream = (await self._get_persistent_mqtt()")
+    start = src.index("_pm_stream = (")
     end = src.index("# Wait for MQTT to be connected and subscribed", start)
     both = src[start:end]
     assert both.count("self._stream_mqtt_drain = ") == 2, (
@@ -38,6 +39,7 @@ def test_both_mqtt_branches_register_with_the_backstop():
 
 def test_the_backstop_releases_a_blocked_worker():
     """The reaper must free a thread parked on a blocking get, not just cancel."""
+
     class _Cam(CameraMixin):
         def __init__(self):
             self.device_id = "test"

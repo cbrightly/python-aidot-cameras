@@ -27,6 +27,7 @@ a random dSeq is not validating it. Closing the gap removes the last known
 framing difference from the app; it is not expected to change any behaviour,
 and the PTZ pan must still work afterwards.
 """
+
 import pathlib
 import re
 
@@ -35,8 +36,12 @@ _SRC = pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras" / "camera"
 
 def _client_cls():
     import aidot_cameras.camera.client as cc
-    return next(v for v in vars(cc).values()
-                if isinstance(v, type) and "_next_dseq" in v.__dict__)
+
+    return next(
+        v
+        for v in vars(cc).values()
+        if isinstance(v, type) and "_next_dseq" in v.__dict__
+    )
 
 
 def test_the_counter_starts_at_100_and_increments():
@@ -68,14 +73,16 @@ def test_the_avio_control_frame_no_longer_uses_a_random_dseq():
     body = m.group("body")
     assert "randint" not in body, (
         "the AVIO control frame still fills the dSeq slot with a random number; "
-        "the app fills it with the live-play counter")
+        "the app fills it with the live-play counter"
+    )
     assert "_next_dseq" in body, (
         "the AVIO control frame must take its dSeq from the session counter "
-        "(_next_dseq), the way livePlayReq already does")
+        "(_next_dseq), the way livePlayReq already does"
+    )
 
 
 def test_the_header_layout_is_unchanged():
     # Only the VALUE in the dSeq slot changes. The layout is verified
     # byte-for-byte against the app: 28 bytes, little-endian, dSeq/cmd/ts/len/0.
     src = (_SRC / "sdes_open.py").read_text()
-    assert "'<IIqII4x'" in src, "the 28-byte little-endian AVIO header must not change"
+    assert "<IIqII4x" in src, "the 28-byte little-endian AVIO header must not change"

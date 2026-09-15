@@ -19,9 +19,7 @@ import pathlib
 
 import pytest
 
-_SRC_DIR = (
-    pathlib.Path(__file__).resolve().parent.parent / "aidot_cameras" / "camera"
-)
+_SRC_DIR = pathlib.Path(__file__).resolve().parent.parent / "aidot_cameras" / "camera"
 _MODULES = ("sdes_open.py", "webrtc_open.py")
 
 
@@ -66,7 +64,8 @@ def test_the_guard_can_actually_fail():
     del path
     tree = ast.parse(tree_src)
     found = [
-        n.lineno for n in ast.walk(tree)
+        n.lineno
+        for n in ast.walk(tree)
         if isinstance(n, ast.Call)
         and isinstance(n.func, ast.Attribute)
         and n.func.attr == "hex"

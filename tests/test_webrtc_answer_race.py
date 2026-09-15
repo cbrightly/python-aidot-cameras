@@ -20,6 +20,7 @@ These tests drive that interleaving deterministically: both deliveries happen
 before the loop runs a single callback, which is exactly what a stalled loop
 produces.
 """
+
 import asyncio
 import contextlib
 import os

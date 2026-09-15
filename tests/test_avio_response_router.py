@@ -20,6 +20,7 @@ Two constraints shape the design and both come from the transports:
     loop. Dispatch therefore has to be callable from any thread, and must never
     block the bridge.
 """
+
 import asyncio
 import struct
 import threading

@@ -6,6 +6,7 @@ page it serves, and that total is correct even on a one-item page - measured
 `pageSize: 1` and reads only `data.total`, so a caller titling a folder with
 an event count does not have to page the whole window to get it.
 """
+
 import asyncio
 import os
 import sys
@@ -59,8 +60,7 @@ def _run(reply, raises=False):
 
     class _Resp:
         async def json(self, content_type=None):
-            return (client._queue.pop(0) if len(client._queue) > 1
-                    else client._queue[0])
+            return client._queue.pop(0) if len(client._queue) > 1 else client._queue[0]
 
         async def __aenter__(self):
             return self
@@ -83,6 +83,7 @@ def _run(reply, raises=False):
             return False
 
     import aiohttp
+
     real = aiohttp.ClientSession
     aiohttp.ClientSession = lambda *a, **k: _Session()
     try:
@@ -92,9 +93,7 @@ def _run(reply, raises=False):
 
 
 def test_a_populated_window_returns_its_true_total():
-    _, out = _run(
-        {"code": 200, "data": {"total": 1517, "list": [{"eventUuid": "x"}]}}
-    )
+    _, out = _run({"code": 200, "data": {"total": 1517, "list": [{"eventUuid": "x"}]}})
     assert out == 1517
 
 
@@ -134,8 +133,12 @@ def test_an_unexpected_shape_does_not_raise():
 def test_a_401_is_retried_once_after_a_token_refresh():
     # Delete the retry line from the method and this test must fail. Before
     # this existed, deleting it changed nothing.
-    client, out = _run([{"code": 401, "desc": "token expired"},
-                        {"code": 200, "data": {"total": 42, "list": []}}])
+    client, out = _run(
+        [
+            {"code": 401, "desc": "token expired"},
+            {"code": 200, "data": {"total": 42, "list": []}},
+        ]
+    )
     assert client.refreshed is True
     assert out == 42
 

@@ -17,25 +17,38 @@ level, so an unrelated WARNING from the same module cannot be mistaken for a
 stall - and a rename of the report text fails these tests loudly instead of
 silently collecting nothing.
 """
+
 import logging
 import os
 import sys
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"
+    ),
+)
 
 from live_validate import _StallCollector
 
 
 def _record(msg: str, level: int = logging.WARNING) -> logging.LogRecord:
     return logging.LogRecord(
-        name="aidot_cameras.camera.sdes_open", level=level,
-        pathname=__file__, lineno=1, msg="%s", args=(msg,), exc_info=None)
+        name="aidot_cameras.camera.sdes_open",
+        level=level,
+        pathname=__file__,
+        lineno=1,
+        msg="%s",
+        args=(msg,),
+        exc_info=None,
+    )
 
 
-_STALL = ("camera abc123: SDES first media never arrived (75s)."
-          " nominated=none; use-candidate=not-sent; binding-success=0;"
-          " trigger=not-sent; probes=none.")
+_STALL = (
+    "camera abc123: SDES first media never arrived (75s)."
+    " nominated=none; use-candidate=not-sent; binding-success=0;"
+    " trigger=not-sent; probes=none."
+)
 
 
 def test_a_stall_report_is_collected():
@@ -72,9 +85,14 @@ def test_a_record_that_cannot_be_formatted_is_dropped_quietly():
     # A logging handler that raises takes down the call that logged, which here
     # is inside the library's own stall path. Diagnosis must never do that.
     bad = logging.LogRecord(
-        name="aidot_cameras.camera.sdes_open", level=logging.WARNING,
-        pathname=__file__, lineno=1, msg="%s %s", args=("only-one",),
-        exc_info=None)
+        name="aidot_cameras.camera.sdes_open",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg="%s %s",
+        args=("only-one",),
+        exc_info=None,
+    )
     c = _StallCollector()
     c.emit(bad)
     assert c.drain() == []
@@ -82,6 +100,7 @@ def test_a_record_that_cannot_be_formatted_is_dropped_quietly():
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:

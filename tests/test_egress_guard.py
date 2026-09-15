@@ -1,4 +1,5 @@
 """CLI-EGRESS-001: warn when decrypted media is served on a non-loopback bind."""
+
 import logging
 
 from aidot_cameras.camera.protocol import (
@@ -23,8 +24,8 @@ def test_is_loopback_serve_host():
     assert _is_loopback_serve_host("127.5.5.5")
     assert _is_loopback_serve_host("::1")
     assert _is_loopback_serve_host("localhost")
-    assert _is_loopback_serve_host(None)            # unset -> not exposed
-    assert not _is_loopback_serve_host("0.0.0.0")   # binds all interfaces
+    assert _is_loopback_serve_host(None)  # unset -> not exposed
+    assert not _is_loopback_serve_host("0.0.0.0")  # binds all interfaces
     assert not _is_loopback_serve_host("192.0.2.5")
 
 

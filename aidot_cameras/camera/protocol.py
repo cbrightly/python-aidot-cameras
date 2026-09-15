@@ -50,6 +50,7 @@ def _make_status_pair(status_callback, logger):
     keeps intent readable at each call site without a severity argument
     threaded through 200-odd of them.
     """
+
     def _status(msg: str) -> None:
         if status_callback:
             status_callback(msg)
@@ -89,6 +90,7 @@ def _report_failed_transports(get_transceivers, report) -> None:
     a diagnostic that takes down the failure path it is diagnosing, or that
     reports only up to the first broken transport, is worse than none.
     """
+
     def _say(msg):
         # The channel fans out to a caller-supplied callback.  If that raises,
         # the exception would escape into aiortc's event dispatch from inside
@@ -106,8 +108,8 @@ def _report_failed_transports(get_transceivers, report) -> None:
         return
     for i, tc in enumerate(transceivers):
         try:
-            dtls  = tc.receiver.transport
-            ice   = dtls.transport
+            dtls = tc.receiver.transport
+            ice = dtls.transport
             track = tc.receiver.track
             _say(
                 f"  transceiver[{i}] kind={track.kind if track else '?'}"
@@ -121,7 +123,10 @@ def _report_failed_transports(get_transceivers, report) -> None:
 
 def _mqtt_timestamp() -> str:
     t = time.time()
-    return time.strftime("%Y-%m-%d %H:%M:%S.", time.localtime(t)) + f"{int(t * 1000) % 1000:03d}"
+    return (
+        time.strftime("%Y-%m-%d %H:%M:%S.", time.localtime(t))
+        + f"{int(t * 1000) % 1000:03d}"
+    )
 
 
 def _build_stun_binding_success_response(
@@ -142,25 +147,29 @@ def _build_stun_binding_success_response(
     import hashlib as _hashlib
 
     ip_parts = [int(x) for x in mapped_ip.split(".")]
-    xip = bytes(a ^ b for a, b in zip(struct.pack("!4B", *ip_parts), magic_cookie, strict=False))
+    xip = bytes(
+        a ^ b for a, b in zip(struct.pack("!4B", *ip_parts), magic_cookie, strict=False)
+    )
     xport = (mapped_port ^ 0x2112) & 0xFFFF
     xma = b"\x00\x20\x00\x08\x00\x01" + struct.pack("!H", xport) + xip
 
     mi_attr_len = 24  # type(2)+len(2)+sha1(20)
-    fp_attr_len = 8   # type(2)+len(2)+crc32(4)
+    fp_attr_len = 8  # type(2)+len(2)+crc32(4)
 
     # Per RFC 5389/8445, MESSAGE-INTEGRITY is computed with length set to end
     # of MESSAGE-INTEGRITY (excluding any attributes that follow, e.g. FINGERPRINT).
     len_for_mi = len(xma) + mi_attr_len
-    hdr_for_mi = b"\x01\x01" + struct.pack("!H", len_for_mi) + magic_cookie + transaction_id
-    mi_val = _hmac.new(
-        mi_password.encode(), hdr_for_mi + xma, _hashlib.sha1
-    ).digest()
+    hdr_for_mi = (
+        b"\x01\x01" + struct.pack("!H", len_for_mi) + magic_cookie + transaction_id
+    )
+    mi_val = _hmac.new(mi_password.encode(), hdr_for_mi + xma, _hashlib.sha1).digest()
     mi_attr = b"\x00\x08\x00\x14" + mi_val
 
     # On-wire message length includes FINGERPRINT.
     len_with_fp = len_for_mi + fp_attr_len
-    hdr_with_fp = b"\x01\x01" + struct.pack("!H", len_with_fp) + magic_cookie + transaction_id
+    hdr_with_fp = (
+        b"\x01\x01" + struct.pack("!H", len_with_fp) + magic_cookie + transaction_id
+    )
     msg_wo_fp_attr = hdr_with_fp + xma + mi_attr
     fp_val = (zlib.crc32(msg_wo_fp_attr) ^ 0x5354554E) & 0xFFFFFFFF
     fp_attr = b"\x80\x28\x00\x04" + struct.pack("!I", fp_val)
@@ -247,6 +256,7 @@ def _install_highport_nomination_patch() -> bool:
     """
     try:
         from aioice import ice as _aioice
+
         if getattr(_aioice.Connection, "_aidot_highport_patched", False):
             return True
         _orig_build_request = _aioice.Connection.build_request
@@ -258,10 +268,10 @@ def _install_highport_nomination_patch() -> bool:
             # DTLS-camera connect in async_open_webrtc_stream. SDES cameras and all
             # non-camera devices are never tagged, so this is a strict no-op there.
             try:
-                if (getattr(self, "_aidot_highport", False)
-                        and getattr(self, "ice_controlling", False)):
-                    decision = _highport_nomination_decision(
-                        self._check_list, pair)
+                if getattr(self, "_aidot_highport", False) and getattr(
+                    self, "ice_controlling", False
+                ):
+                    decision = _highport_nomination_decision(self._check_list, pair)
                     if decision is not None and decision != nominate:
                         _LOGGER.debug(
                             "highport-fix: %s USE-CANDIDATE on %s:%s "
@@ -281,8 +291,7 @@ def _install_highport_nomination_patch() -> bool:
         _LOGGER.debug("aioice nomination patched: A000088 high-port-only")
         return True
     except Exception:
-        _LOGGER.debug(
-            "highport nomination patch skipped (aioice incompatible)")
+        _LOGGER.debug("highport nomination patch skipped (aioice incompatible)")
         return False
 
 
@@ -340,8 +349,9 @@ def _section_of(lines: list) -> str:
 SHIFTED_ANSWER_ICE_TIMEOUT_S = 15.0
 
 
-def answer_inserted_a_section(*, shifted_sections: int,
-                             unclaimed_answer_mids: int) -> bool:
+def answer_inserted_a_section(
+    *, shifted_sections: int, unclaimed_answer_mids: int
+) -> bool:
     """Did the camera ADD an m-section, rather than drop or reorder one?
 
     Both shapes shift our mids, and only one of them is the behaviour the ICE
@@ -360,8 +370,13 @@ def answer_inserted_a_section(*, shifted_sections: int,
     return shifted_sections > 0 and unclaimed_answer_mids > 0
 
 
-def sdes_ice_teardown(last_media: float, last_ice_answer: float, now: float,
-                      media_gap: float = 3.0, ice_gap: float = 6.0) -> bool:
+def sdes_ice_teardown(
+    last_media: float,
+    last_ice_answer: float,
+    now: float,
+    media_gap: float = 3.0,
+    ice_gap: float = 6.0,
+) -> bool:
     """Whether the camera's ICE agent has torn the transport down.
 
     The A001064 runs Leedarson's fork of the AWS KVS WebRTC SDK C, whose ICE
@@ -441,6 +456,7 @@ def select_answer_section(
     overlap wins.  A video section with no overlap is still preferred over
     stubbing: a section aiortc may reject beats one that cannot possibly work.
     """
+
     def _pts(entry) -> set:
         for ln in entry[1]:
             if ln.startswith("m="):
@@ -460,7 +476,8 @@ def select_answer_section(
         return (offer_mid, same[1])
 
     candidates = [
-        (mid, entry) for mid, entry in ans_sections.items()
+        (mid, entry)
+        for mid, entry in ans_sections.items()
         if mid not in claimed and entry[0] == offer_kind
     ]
     if not candidates:
@@ -520,10 +537,14 @@ def _compress_sdp_for_camera(sdp: str) -> str:
             keep(ln)
             continue
         if before_m:
-            if (ln.startswith("v=") or ln.startswith("o=")
-                    or ln.startswith("s=") or ln.startswith("t=")
-                    or ln.startswith("a=group:")
-                    or ln.startswith("a=msid-semantic")):
+            if (
+                ln.startswith("v=")
+                or ln.startswith("o=")
+                or ln.startswith("s=")
+                or ln.startswith("t=")
+                or ln.startswith("a=group:")
+                or ln.startswith("a=msid-semantic")
+            ):
                 keep(ln)
             continue
         if ln.startswith("c="):
@@ -544,8 +565,14 @@ def _compress_sdp_for_camera(sdp: str) -> str:
         if any(d in ln for d in ("sendrecv", "recvonly", "sendonly")):
             keep(ln)
             continue
-        for ak in ("ice-ufrag", "ice-pwd", "fingerprint", "setup",
-                   "ice-options", "crypto"):
+        for ak in (
+            "ice-ufrag",
+            "ice-pwd",
+            "fingerprint",
+            "setup",
+            "ice-options",
+            "crypto",
+        ):
             if ak in ln:
                 if seen.get(ak) is None:
                     keep(ln, ak)
@@ -562,8 +589,9 @@ def _compress_sdp_for_camera(sdp: str) -> str:
                         try:
                             _kept_pts.add(ln.split(":")[1].split(" ")[0])
                         except Exception:
-                            _LOGGER.debug("swallowed exception in %s", 'keep',
-                                          exc_info=True)
+                            _LOGGER.debug(
+                                "swallowed exception in %s", "keep", exc_info=True
+                            )
             elif media_type == "m=video":
                 if "H264/90000" in ln and seen.get("H264/90000") is None:
                     keep(ln, "H264/90000")
@@ -571,14 +599,18 @@ def _compress_sdp_for_camera(sdp: str) -> str:
                         seen["H264/90000_pt"] = ln.split(":")[1].split(" ")[0]
                         _kept_pts.add(seen["H264/90000_pt"])
                     except Exception:
-                        _LOGGER.debug("swallowed exception in %s", 'keep', exc_info=True)
+                        _LOGGER.debug(
+                            "swallowed exception in %s", "keep", exc_info=True
+                        )
                 elif "H265/90000" in ln and seen.get("H265/90000") is None:
                     keep(ln, "H265/90000")
                     try:
                         seen["H265/90000_pt"] = ln.split(":")[1].split(" ")[0]
                         _kept_pts.add(seen["H265/90000_pt"])
                     except Exception:
-                        _LOGGER.debug("swallowed exception in %s", 'keep', exc_info=True)
+                        _LOGGER.debug(
+                            "swallowed exception in %s", "keep", exc_info=True
+                        )
                 elif "apt=" in ln:
                     try:
                         apt = ln.split("apt=")[1].strip()
@@ -599,8 +631,11 @@ def _compress_sdp_for_camera(sdp: str) -> str:
     # the offer stays well-formed. Kept only for payload types that survived
     # narrowing - see _kept_pts.
     if _fb_lines:
-        kept_fb = [(mt, ln) for mt, ln in _fb_lines
-                   if ln.split(":", 1)[1].split(" ")[0] in _kept_pts]
+        kept_fb = [
+            (mt, ln)
+            for mt, ln in _fb_lines
+            if ln.split(":", 1)[1].split(" ")[0] in _kept_pts
+        ]
         if kept_fb:
             rebuilt: list = []
             for line in out:
@@ -730,8 +765,11 @@ class ReconnectPacer:
     """
 
     def __init__(
-        self, base: float, cap: float,
-        *, rand: Optional[Callable[[], float]] = None,
+        self,
+        base: float,
+        cap: float,
+        *,
+        rand: Optional[Callable[[], float]] = None,
     ) -> None:
         self._base = base
         self._cap = cap
@@ -748,7 +786,9 @@ class ReconnectPacer:
     def fail_delay(self) -> float:
         """Delay after a failed OPEN (no session established): the current attempt's
         backoff, then escalate - so the first failure waits exactly ``base``."""
-        delay = next_backoff(self._attempt, base=self._base, cap=self._cap, rand=self._rand)
+        delay = next_backoff(
+            self._attempt, base=self._base, cap=self._cap, rand=self._rand
+        )
         self._attempt += 1
         return delay
 
@@ -756,7 +796,9 @@ class ReconnectPacer:
         """Delay after a session ENDED: reset to ``base`` if it delivered media
         (``healthy``), else escalate first, then return the delay."""
         self._attempt = 0 if healthy else self._attempt + 1
-        return next_backoff(self._attempt, base=self._base, cap=self._cap, rand=self._rand)
+        return next_backoff(
+            self._attempt, base=self._base, cap=self._cap, rand=self._rand
+        )
 
     def reset(self) -> None:
         """Clear the failure count - e.g. after a successful open in a loop that has
@@ -778,6 +820,7 @@ def _write_text_file(path: str, text: str) -> None:
 def _make_sdp_tempfile(text: str) -> str:
     """Create a temp .sdp file holding ``text`` and return its path (off-loop)."""
     import os
+
     fd, path = tempfile.mkstemp(suffix=".sdp", prefix="aidot_sdes_")
     with os.fdopen(fd, "w") as _f:
         _f.write(text)
@@ -792,11 +835,12 @@ def _terminate_proc(proc) -> None:
         if proc.returncode is None:
             proc.terminate()
     except Exception:
-        _LOGGER.debug("swallowed exception in %s", '_terminate_proc', exc_info=True)
+        _LOGGER.debug("swallowed exception in %s", "_terminate_proc", exc_info=True)
 
 
 _XDG_CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
-    os.path.expanduser("~"), ".config")
+    os.path.expanduser("~"), ".config"
+)
 
 
 def _sprop_dir() -> str:
@@ -810,7 +854,8 @@ def _sprop_dir() -> str:
     Same lesson as cloud_auth's country default: bind config at call time.
     """
     return os.environ.get("AIDOT_SPROP_DIR") or os.path.join(
-        _XDG_CONFIG_HOME, "aidot", "sprop")
+        _XDG_CONFIG_HOME, "aidot", "sprop"
+    )
 
 
 def _extract_param_sets_from_rtp(pkt: bytes) -> dict:
@@ -828,7 +873,7 @@ def _extract_param_sets_from_rtp(pkt: bytes) -> dict:
     ext = (pkt[0] >> 4) & 0x01
     off = 12 + 4 * cc
     if ext and len(pkt) >= off + 4:
-        ext_words = int.from_bytes(pkt[off + 2:off + 4], "big")
+        ext_words = int.from_bytes(pkt[off + 2 : off + 4], "big")
         off += 4 + 4 * ext_words
     payload = pkt[off:]
     if not payload:
@@ -838,14 +883,14 @@ def _extract_param_sets_from_rtp(pkt: bytes) -> dict:
     if ntype == 24:  # STAP-A: [hdr] then [ (size16)(nal) ]...
         i = 1
         while i + 2 <= len(payload):
-            size = int.from_bytes(payload[i:i + 2], "big")
+            size = int.from_bytes(payload[i : i + 2], "big")
             i += 2
             if i + size > len(payload):
                 # Truncated STAP-A: the advertised NAL size runs past the end of
                 # the packet, so the remaining bytes are garbage.  Stop rather
                 # than slice a short NAL and cache a corrupt SPS/PPS.
                 break
-            nal = payload[i:i + size]
+            nal = payload[i : i + size]
             i += size
             if nal:
                 t = nal[0] & 0x1F
@@ -859,6 +904,7 @@ def _extract_param_sets_from_rtp(pkt: bytes) -> dict:
 def _build_sprop(sps: bytes, pps: bytes) -> str:
     """``sprop-parameter-sets`` value: base64(SPS NAL),base64(PPS NAL)."""
     import base64 as _b64
+
     return _b64.b64encode(sps).decode() + "," + _b64.b64encode(pps).decode()
 
 
@@ -948,7 +994,7 @@ def _save_sprop(devid: str, sprop: str) -> bool:
     loses nothing by the injection being skipped.
     """
     if _sprop_is_unstable(devid):
-        return False    # already known unstable; nothing to cache for this camera
+        return False  # already known unstable; nothing to cache for this camera
     try:
         prev = _load_sprop(devid)
         if prev is not None and prev != sprop:
@@ -975,8 +1021,12 @@ def _save_sprop(devid: str, sprop: str) -> bool:
     except OSError as exc:
         # Surface (don't swallow): if the cache dir isn't writable the whole
         # sprop feature is silently inert.  AIDOT_SPROP_DIR can redirect it.
-        _LOGGER.warning("sprop cache write failed (%s): %s - set AIDOT_SPROP_DIR "
-                        "to a writable path", _sprop_dir(), exc)
+        _LOGGER.warning(
+            "sprop cache write failed (%s): %s - set AIDOT_SPROP_DIR "
+            "to a writable path",
+            _sprop_dir(),
+            exc,
+        )
         return False
 
 
@@ -1024,7 +1074,7 @@ def _serve_host(url: "Optional[str]") -> "Optional[str]":
     hostport = rest.split("/", 1)[0]
     if not hostport:
         return None
-    if hostport.startswith("["):                       # [ipv6]:port
+    if hostport.startswith("["):  # [ipv6]:port
         return hostport[1:].split("]", 1)[0]
     return hostport.rsplit(":", 1)[0] if ":" in hostport else hostport
 
@@ -1043,7 +1093,7 @@ def _serve_port(url: "Optional[str]") -> "Optional[int]":
     hostport = rest.split("/", 1)[0]
     if not hostport:
         return None
-    if hostport.startswith("["):                       # [ipv6]:port
+    if hostport.startswith("["):  # [ipv6]:port
         _, _, tail = hostport.partition("]")
         port = tail[1:] if tail.startswith(":") else ""
     elif ":" in hostport:
@@ -1077,13 +1127,20 @@ def _warn_lan_serve(host: "Optional[str]", *, context: str) -> None:
     ``AIDOT_ALLOW_LAN_SERVE=1`` once the exposure is understood."""
     if _is_loopback_serve_host(host):
         return
-    if os.environ.get(_ALLOW_LAN_SERVE_ENV, "").strip().lower() in ("1", "true", "yes", "on"):
+    if os.environ.get(_ALLOW_LAN_SERVE_ENV, "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
         return
     _LOGGER.warning(
         "%s: serving DECRYPTED camera media on host %r with NO authentication - "
         "anyone who can reach that address can view the stream. Bind to "
         "127.0.0.1/localhost, or set %s=1 to acknowledge and silence this.",
-        context, host, _ALLOW_LAN_SERVE_ENV,
+        context,
+        host,
+        _ALLOW_LAN_SERVE_ENV,
     )
 
 
@@ -1093,7 +1150,11 @@ def _direct_serve_enabled() -> bool:
     Set AIDOT_DTLS_DIRECT_SERVE=0 to fall back to the ffmpeg hop. The fallback
     also happens automatically if the serve port cannot be bound, so a clash
     never costs a stream."""
-    return os.environ.get("AIDOT_DTLS_DIRECT_SERVE", "1").strip() not in ("0", "false", "no")
+    return os.environ.get("AIDOT_DTLS_DIRECT_SERVE", "1").strip() not in (
+        "0",
+        "false",
+        "no",
+    )
 
 
 class _DirectTsServer:
@@ -1142,11 +1203,11 @@ class _DirectTsServer:
         self._client: "Optional[socket.socket]" = None
         self._lock = threading.Lock()
         self._closed = threading.Event()
-        self._tail = b""            # partial TS packet across write() calls
+        self._tail = b""  # partial TS packet across write() calls
         self._pat: "Optional[bytes]" = None
         self._pmt: "Optional[bytes]" = None
         self._pmt_pid: "Optional[int]" = None
-        self._synced = False        # has the current consumer been given a start
+        self._synced = False  # has the current consumer been given a start
         # Set by the mux immediately before it writes a video keyframe, so a new
         # consumer can be spliced where the picture is actually decodable.
         self._kf_pending = False
@@ -1167,7 +1228,8 @@ class _DirectTsServer:
         self._port = s.getsockname()[1]
         self._listen = s
         self._accept_thread = threading.Thread(
-            target=self._accept_loop, name="direct-ts-accept", daemon=True)
+            target=self._accept_loop, name="direct-ts-accept", daemon=True
+        )
         self._accept_thread.start()
 
     def has_consumer(self) -> bool:
@@ -1189,23 +1251,28 @@ class _DirectTsServer:
                 return
             try:
                 cli.settimeout(5.0)
-                cli.recv(4096)          # consume the request line and headers
+                cli.recv(4096)  # consume the request line and headers
                 cli.sendall(
                     b"HTTP/1.0 200 OK\r\n"
                     b"Content-Type: video/mp2t\r\n"
                     b"Cache-Control: no-cache\r\n"
-                    b"Connection: close\r\n\r\n")
+                    b"Connection: close\r\n\r\n"
+                )
                 cli.settimeout(None)
             except OSError:
-                try: cli.close()
-                except OSError: pass
+                try:
+                    cli.close()
+                except OSError:
+                    pass
                 continue
             with self._lock:
                 old, self._client = self._client, cli
-                self._synced = False        # a new consumer must resync
+                self._synced = False  # a new consumer must resync
             if old is not None:
-                try: old.close()
-                except OSError: pass
+                try:
+                    old.close()
+                except OSError:
+                    pass
 
     @staticmethod
     def _pid(pkt: bytes) -> int:
@@ -1214,11 +1281,11 @@ class _DirectTsServer:
     @staticmethod
     def _is_random_access(pkt: bytes) -> bool:
         """True when this TS packet carries a random-access point (keyframe)."""
-        if not (pkt[3] & 0x20):          # no adaptation field
+        if not (pkt[3] & 0x20):  # no adaptation field
             return False
-        if pkt[4] == 0:                  # zero-length adaptation field
+        if pkt[4] == 0:  # zero-length adaptation field
             return False
-        return bool(pkt[5] & 0x40)       # random_access_indicator
+        return bool(pkt[5] & 0x40)  # random_access_indicator
 
     def _learn_pmt_pid(self, pat: bytes) -> None:
         """Read the first program's PMT PID out of a PAT so the PMT can be
@@ -1228,8 +1295,8 @@ class _DirectTsServer:
             i = 4
             if pat[3] & 0x20:
                 i += 1 + pat[4]
-            i += 1 + pat[i]              # pointer_field
-            if pat[i] != 0x00:           # table_id must be PAT
+            i += 1 + pat[i]  # pointer_field
+            if pat[i] != 0x00:  # table_id must be PAT
                 return
             self._pmt_pid = ((pat[i + 10] & 0x1F) << 8) | pat[i + 11]
         except (IndexError, ValueError):
@@ -1271,7 +1338,7 @@ class _DirectTsServer:
         received a decodable picture.
         """
         if self._kf_ever:
-            return False        # this source signals; wait for the real thing
+            return False  # this source signals; wait for the real thing
         if not self._is_random_access(pkt):
             return False
         now = time.monotonic()
@@ -1286,14 +1353,14 @@ class _DirectTsServer:
         i = 0
         n = len(data)
         while i + 188 <= n:
-            if data[i] != 0x47:          # resync to the next sync byte
+            if data[i] != 0x47:  # resync to the next sync byte
                 j = data.find(b"\x47", i + 1)
                 if j < 0:
                     i = n
                     break
                 i = j
                 continue
-            pkt = data[i:i + 188]
+            pkt = data[i : i + 188]
             i += 188
             pid = self._pid(pkt)
             if pid == 0:
@@ -1307,7 +1374,9 @@ class _DirectTsServer:
                 _LOGGER.debug(
                     "direct-ts: spliced a consumer via=%s signals=%s pid=%s",
                     "keyframe-signal" if self._kf_pending else "legacy-rai",
-                    self._kf_ever, pid)
+                    self._kf_ever,
+                    pid,
+                )
                 # Start this consumer here: tables first, then the keyframe.
                 if self._pat is not None:
                     out += self._pat
@@ -1322,7 +1391,7 @@ class _DirectTsServer:
         with self._lock:
             cli = self._client
         if cli is None or not out:
-            return len(b)               # nobody pulling, or nothing to send yet
+            return len(b)  # nobody pulling, or nothing to send yet
         try:
             cli.sendall(bytes(out))
         except OSError:
@@ -1330,8 +1399,10 @@ class _DirectTsServer:
                 if self._client is cli:
                     self._client = None
                 self._synced = False
-            try: cli.close()
-            except OSError: pass
+            try:
+                cli.close()
+            except OSError:
+                pass
         return len(b)
 
     def flush(self) -> None:
@@ -1343,8 +1414,10 @@ class _DirectTsServer:
             cli, self._client = self._client, None
         for sock in (cli, self._listen):
             if sock is not None:
-                try: sock.close()
-                except OSError: pass
+                try:
+                    sock.close()
+                except OSError:
+                    pass
         self._listen = None
 
 
@@ -1368,8 +1441,14 @@ class _ServeRelay:
     refused connection mid-session.
     """
 
-    def __init__(self, public_port: int, *, host: str = "127.0.0.1",
-                 dial_timeout: float = 90.0, dial_interval: float = 0.1) -> None:
+    def __init__(
+        self,
+        public_port: int,
+        *,
+        host: str = "127.0.0.1",
+        dial_timeout: float = 90.0,
+        dial_interval: float = 0.1,
+    ) -> None:
         self._public_port = public_port
         self._host = host
         self._dial_timeout = dial_timeout
@@ -1437,9 +1516,7 @@ class _ServeRelay:
                 continue
             except OSError:
                 break
-            threading.Thread(
-                target=self._handle, args=(cli,), daemon=True
-            ).start()
+            threading.Thread(target=self._handle, args=(cli,), daemon=True).start()
 
     def _handle(self, cli: "socket.socket") -> None:
         with self._lock:
@@ -1467,8 +1544,7 @@ class _ServeRelay:
                 port = self._backend_port
             if port:
                 try:
-                    return socket.create_connection(
-                        (self._host, port), timeout=2.0)
+                    return socket.create_connection((self._host, port), timeout=2.0)
                 except OSError:
                     pass
             time.sleep(self._dial_interval)
@@ -1551,8 +1627,9 @@ def _tcp_table_has_established_on_port(table_text: str, port: int) -> bool:
     return False
 
 
-def _idle_release_due(present, last_consumer: float, now: float,
-                      idle_secs: float) -> bool:
+def _idle_release_due(
+    present, last_consumer: float, now: float, idle_secs: float
+) -> bool:
     """Whether a viewerless SDES keepalive should release.
 
     ``present``: True (a TCP consumer is connected to the serve port), False
@@ -1673,6 +1750,7 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
     import time as _t
     import queue as _q
     from fractions import Fraction
+
     try:
         import av
     except Exception as exc:  # pragma: no cover
@@ -1732,8 +1810,9 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
         # probe and never binds its -listen port (field failure 2026-07: all
         # DTLS cameras dark while the taps were full of frames).  100ms keeps
         # video flowing whether or not audio ever shows up.
-        out = av.open(wsink, "w", format="mpegts",
-                      options={"max_interleave_delta": "100000"})
+        out = av.open(
+            wsink, "w", format="mpegts", options={"max_interleave_delta": "100000"}
+        )
     except Exception as exc:
         _LOGGER.warning("DTLS A/V mux: av.open failed: %s", exc)
         return
@@ -1749,14 +1828,19 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
         aenc.layout = "mono"
         resampler = av.AudioResampler(format="fltp", layout="mono", rate=48000)
         fifo = av.AudioFifo()
+
         # AGC: track the audio level and adapt the gain toward a target of -15
         # dBFS - matching the official app's androidGain/iosGain = -15 - capped so
         # silent rooms aren't over-amplified.  Loud rooms read loud, quiet rooms
         # quiet, and nothing exceeds the target (a tanh limiter catches peaks).
         def _db2amp(_d):
             return 10.0 ** (_d / 20.0)
+
         try:
-            _target = _db2amp(float(os.environ.get("AIDOT_AUDIO_TARGET_DBFS", "-15"))) * 32767.0
+            _target = (
+                _db2amp(float(os.environ.get("AIDOT_AUDIO_TARGET_DBFS", "-15")))
+                * 32767.0
+            )
             _maxg = _db2amp(float(os.environ.get("AIDOT_AUDIO_MAXGAIN_DB", "30")))
             _ming = _db2amp(float(os.environ.get("AIDOT_AUDIO_MINGAIN_DB", "-12")))
             # Noise gate: below this RMS the input is (near) silence, so the AGC
@@ -1764,11 +1848,13 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
             # quantization floor into audible high-frequency clicking on a quiet
             # camera.  Gain is scaled down quadratically below the gate.  Set very
             # low (e.g. -120) to disable.
-            _gate = _db2amp(float(os.environ.get("AIDOT_AUDIO_GATE_DBFS", "-45"))) * 32767.0
+            _gate = (
+                _db2amp(float(os.environ.get("AIDOT_AUDIO_GATE_DBFS", "-45"))) * 32767.0
+            )
         except (ValueError, TypeError):
             _target, _maxg, _ming = _db2amp(-15) * 32767.0, _db2amp(30), _db2amp(-12)
             _gate = _db2amp(-45) * 32767.0
-        _agc_ms = [None]   # smoothed mean-square (level tracker)
+        _agc_ms = [None]  # smoothed mean-square (level tracker)
         try:
             import numpy as _np
         except Exception:
@@ -1781,8 +1867,8 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
     _ts_state = {}
     _slack = _reorder_slack()
     a_pts = [0]
-    a_rtp0 = [None]      # first audio RTP timestamp (8 kHz units), for gap detection
-    a_in = [0]           # 8 kHz samples emitted to the resampler so far (incl. concealed)
+    a_rtp0 = [None]  # first audio RTP timestamp (8 kHz units), for gap detection
+    a_in = [0]  # 8 kHz samples emitted to the resampler so far (incl. concealed)
     vstarted = [False]
     # A failed container write is TERMINAL for this mux: the pipe's ffmpeg is
     # gone (EPIPE) and can never come back for this cycle.  Swallowing it and
@@ -1823,7 +1909,10 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                 progress[0] = _t.monotonic()
             except Exception:
                 mux_dead[0] = True
-                _LOGGER.debug("DTLS A/V mux: video write failed - ending mux thread", exc_info=True)
+                _LOGGER.debug(
+                    "DTLS A/V mux: video write failed - ending mux thread",
+                    exc_info=True,
+                )
                 return
 
     def _flush_audio(drain=False):
@@ -1860,13 +1949,18 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                         try:
                             _sil = _np.zeros((1, int(_gap)), dtype=_np.int16)
                             _sfr = av.AudioFrame.from_ndarray(
-                                _sil, format="s16", layout="mono")
+                                _sil, format="s16", layout="mono"
+                            )
                             _sfr.sample_rate = 8000
                             for _rfr in resampler.resample(_sfr):
                                 fifo.write(_rfr)
                             a_in[0] += int(_gap)
                         except Exception:
-                            _LOGGER.debug("swallowed exception in %s", '_flush_audio', exc_info=True)
+                            _LOGGER.debug(
+                                "swallowed exception in %s",
+                                "_flush_audio",
+                                exc_info=True,
+                            )
                 for fr in adec.decode(av.Packet(data)):
                     _ndec = fr.samples
                     fr.pts = None
@@ -1891,18 +1985,23 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                             # tanh soft-limiter catches transient peaks past target.
                             _y = _np.tanh(_x * (_gain / 32767.0)) * 32767.0
                             _g = av.AudioFrame.from_ndarray(
-                                _y.astype(_np.int16), format="s16", layout="mono")
+                                _y.astype(_np.int16), format="s16", layout="mono"
+                            )
                             _g.sample_rate = 8000
                             fr = _g
                         except Exception:
-                            _LOGGER.debug("swallowed exception in %s", '_flush_audio', exc_info=True)
+                            _LOGGER.debug(
+                                "swallowed exception in %s",
+                                "_flush_audio",
+                                exc_info=True,
+                            )
                     for rfr in resampler.resample(fr):  # 8k PCMA -> 48k fltp
                         fifo.write(rfr)
                     a_in[0] += _ndec
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", '_flush_audio', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "_flush_audio", exc_info=True)
         while True:
-            fr = fifo.read(1024)   # AAC wants 1024-sample frames
+            fr = fifo.read(1024)  # AAC wants 1024-sample frames
             if fr is None:
                 # FIFO has < 1024 samples.  The audio source is continuous
                 # (measured: 100% timeline coverage, no lost packets), so the
@@ -1926,7 +2025,10 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                         pad_n = 1024 - arr.shape[1]
                         if pad_n > 0:
                             padded = _np.concatenate(
-                                [arr, _np.zeros((arr.shape[0], pad_n), dtype=arr.dtype)],
+                                [
+                                    arr,
+                                    _np.zeros((arr.shape[0], pad_n), dtype=arr.dtype),
+                                ],
                                 axis=1,
                             )
                             pfr = av.AudioFrame.from_ndarray(
@@ -1945,7 +2047,10 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                     progress[0] = _t.monotonic()
             except Exception:
                 mux_dead[0] = True
-                _LOGGER.debug("DTLS A/V mux: audio write failed - ending mux thread", exc_info=True)
+                _LOGGER.debug(
+                    "DTLS A/V mux: audio write failed - ending mux thread",
+                    exc_info=True,
+                )
                 return
 
     def _dead() -> bool:
@@ -1963,7 +2068,7 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
             for opkt in aenc.encode(None):  # flush
                 out.mux(opkt)
     except Exception:
-        _LOGGER.debug("swallowed exception in %s", '_dtls_av_mux_run', exc_info=True)
+        _LOGGER.debug("swallowed exception in %s", "_dtls_av_mux_run", exc_info=True)
     if _dead():
         # Close the raw pipe FIRST: the container's trailer flush then fails
         # fast ("closed file") instead of hanging on the dead pipe.
@@ -1975,7 +2080,7 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
     try:
         out.close()
     except Exception:
-        _LOGGER.debug("swallowed exception in %s", '_dtls_av_mux_run', exc_info=True)
+        _LOGGER.debug("swallowed exception in %s", "_dtls_av_mux_run", exc_info=True)
 
 
 def _h264_has_keyframe(data: bytes) -> bool:
@@ -2034,19 +2139,25 @@ def _mqtt_session_sync(
     import queue as _queue
     from urllib.parse import urlparse
 
-    parsed   = urlparse(mqtt_url)
+    parsed = urlparse(mqtt_url)
     hostname = parsed.hostname or mqtt_url
-    port     = parsed.port or (8443 if parsed.scheme in ("wss", "https") else 1883)
-    tls      = parsed.scheme in ("wss", "https", "mqtts")
+    port = parsed.port or (8443 if parsed.scheme in ("wss", "https") else 1883)
+    tls = parsed.scheme in ("wss", "https", "mqtts")
     # ws_path parameter takes priority; fall back to URL path then "/mqtt"
-    path     = ws_path if ws_path is not None else (parsed.path or "/mqtt")
+    path = ws_path if ws_path is not None else (parsed.path or "/mqtt")
     if path == "":
         path = "/"
 
-    msg_q   = _queue.Queue()
+    msg_q = _queue.Queue()
     conn_ev = threading.Event()
-    status  = {"connected": False, "rc": None, "rc_str": "", "error": None,
-               "log": [], "disconnected_since": None}
+    status = {
+        "connected": False,
+        "rc": None,
+        "rc_str": "",
+        "error": None,
+        "log": [],
+        "disconnected_since": None,
+    }
 
     # Build client - handle paho >=2.0 (VERSION2) and <2.0
     try:
@@ -2071,9 +2182,9 @@ def _mqtt_session_sync(
             rc = int(reason_code)
         except (TypeError, ValueError):
             rc = getattr(reason_code, "value", -1)
-        status["connected"] = (rc == 0)
-        status["rc"]        = rc
-        status["rc_str"]    = str(reason_code)
+        status["connected"] = rc == 0
+        status["rc"] = rc
+        status["rc_str"] = str(reason_code)
         if rc == 0:
             # Successful (re)connect: a prior drop (if any) has recovered, so the
             # receive loop must not fail it fast - clear the disconnect marker.
@@ -2086,13 +2197,17 @@ def _mqtt_session_sync(
                 try:
                     c.subscribe(_sub)
                 except Exception:
-                    _LOGGER.debug("_mqtt_session: resubscribe failed for %s", _sub, exc_info=True)
+                    _LOGGER.debug(
+                        "_mqtt_session: resubscribe failed for %s", _sub, exc_info=True
+                    )
         conn_ev.set()
 
     def _on_message(c, ud, msg):
-        payload = (msg.payload.decode("utf-8", errors="replace")
-                   if isinstance(msg.payload, (bytes, bytearray))
-                   else str(msg.payload))
+        payload = (
+            msg.payload.decode("utf-8", errors="replace")
+            if isinstance(msg.payload, (bytes, bytearray))
+            else str(msg.payload)
+        )
         msg_q.put((msg.topic, payload))
 
     def _on_disconnect(c, ud, *args):
@@ -2107,9 +2222,9 @@ def _mqtt_session_sync(
             # Never connected (WS upgrade failed, auth refused at TCP level, ...):
             # unblock the caller and end the receive loop - the connect failed.
             status["connected"] = False
-            status["rc_str"]    = f"disconnect-before-connect rc={reason_code}"
+            status["rc_str"] = f"disconnect-before-connect rc={reason_code}"
             conn_ev.set()
-            msg_q.put(None)   # sentinel: end the receive loop
+            msg_q.put(None)  # sentinel: end the receive loop
             return
         # Already connected once: this is (so far) a transient drop.  paho's
         # loop_start auto-reconnects and _on_connect re-subscribes AND clears
@@ -2135,10 +2250,10 @@ def _mqtt_session_sync(
         if "assword" not in buf:
             _LOGGER.debug("paho: %s", buf)
 
-    client.on_connect    = _on_connect
-    client.on_message    = _on_message
+    client.on_connect = _on_connect
+    client.on_message = _on_message
     client.on_disconnect = _on_disconnect
-    client.on_log        = _on_log
+    client.on_log = _on_log
 
     import time as _time
 
@@ -2158,22 +2273,27 @@ def _mqtt_session_sync(
         try:
             client.disconnect()
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", '_on_log', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "_on_log", exc_info=True)
         return [], status
 
     if not status["connected"]:
         _LOGGER.warning(
             "_mqtt_session: broker refused rc=%s (%s) for %s:%d",
-            status["rc"], status["rc_str"], hostname, port,
+            status["rc"],
+            status["rc_str"],
+            hostname,
+            port,
         )
         client.loop_stop()
         try:
             client.disconnect()
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", '_on_log', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "_on_log", exc_info=True)
         return [], status
 
-    _LOGGER.info("_mqtt_session: connected to %s:%d clientId=%s", hostname, port, client_id)
+    _LOGGER.info(
+        "_mqtt_session: connected to %s:%d clientId=%s", hostname, port, client_id
+    )
 
     # Subscriptions are (re)established in _on_connect so they survive a paho
     # auto-reconnect; nothing to subscribe here.
@@ -2187,10 +2307,10 @@ def _mqtt_session_sync(
         try:
             on_ready(status)
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", '_on_log', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "_on_log", exc_info=True)
 
     collected = []
-    deadline  = _time.monotonic() + duration
+    deadline = _time.monotonic() + duration
     while True:
         remaining = deadline - _time.monotonic()
         if remaining <= 0:
@@ -2204,7 +2324,8 @@ def _mqtt_session_sync(
             _LOGGER.warning(
                 "_mqtt_session: MQTT disconnected >%.0fs with no reconnect "
                 "(rc=%s) - ending session; camera signaling can no longer arrive",
-                _MQTT_RECONNECT_GRACE, status.get("rc_str"),
+                _MQTT_RECONNECT_GRACE,
+                status.get("rc_str"),
             )
             break
         try:
@@ -2217,31 +2338,33 @@ def _mqtt_session_sync(
                         out = outgoing_queue.get_nowait()
                     except _queue.Empty:
                         break
-                    if out is None:   # stop sentinel
+                    if out is None:  # stop sentinel
                         client.loop_stop()
                         try:
                             client.disconnect()
                         except Exception:
-                            _LOGGER.debug("swallowed exception in %s", '_on_log', exc_info=True)
+                            _LOGGER.debug(
+                                "swallowed exception in %s", "_on_log", exc_info=True
+                            )
                         return collected, status
                     pub_topic, pub_payload = out
                     client.publish(pub_topic, pub_payload)
                     _LOGGER.debug("_mqtt_session: published %s", pub_topic)
             continue
-        if item is None:   # disconnect sentinel
+        if item is None:  # disconnect sentinel
             break
         collected.append(item)
         if on_message:
             try:
                 on_message(*item)
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", '_on_log', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", "_on_log", exc_info=True)
 
     client.loop_stop()
     try:
         client.disconnect()
     except Exception:
-        _LOGGER.debug("swallowed exception in %s", '_mqtt_session_sync', exc_info=True)
+        _LOGGER.debug("swallowed exception in %s", "_mqtt_session_sync", exc_info=True)
     return collected, status
 
 
@@ -2266,8 +2389,15 @@ class _PersistentMqtt:
     # the owner has to fetch a fresh credential.
     _AUTH_REFUSAL_RCS = frozenset({4, 5, 134, 135})
 
-    def __init__(self, mqtt_url, mqtt_user, mqtt_pwd, client_id, ws_path="/mqtt",
-                 on_auth_failure=None):
+    def __init__(
+        self,
+        mqtt_url,
+        mqtt_user,
+        mqtt_pwd,
+        client_id,
+        ws_path="/mqtt",
+        on_auth_failure=None,
+    ):
         self._url = mqtt_url
         self._user = mqtt_user
         self._pwd = mqtt_pwd
@@ -2293,26 +2423,32 @@ class _PersistentMqtt:
         self._port = None
         self._connected = threading.Event()
         self._lock = threading.Lock()
-        self._subs = set()         # topics to (re)subscribe on connect
-        self._collectors = []      # transient queues, each receives every msg
-        self._handlers = []        # persistent on_message callbacks (e.g. a stream)
+        self._subs = set()  # topics to (re)subscribe on connect
+        self._collectors = []  # transient queues, each receives every msg
+        self._handlers = []  # persistent on_message callbacks (e.g. a stream)
         self._started = False
-        self.connects = 0          # observability: how many times we connected
+        self.connects = 0  # observability: how many times we connected
 
     def _build(self):
         import paho.mqtt.client as _paho
         import ssl as _ssl
         from urllib.parse import urlparse
+
         parsed = urlparse(self._url)
         self._host = parsed.hostname or self._url
-        self._port = parsed.port or (8443 if parsed.scheme in ("wss", "https") else 1883)
+        self._port = parsed.port or (
+            8443 if parsed.scheme in ("wss", "https") else 1883
+        )
         tls = parsed.scheme in ("wss", "https", "mqtts")
         path = self._ws_path if self._ws_path is not None else (parsed.path or "/mqtt")
         if path == "":
             path = "/"
         try:
-            c = _paho.Client(callback_api_version=_paho.CallbackAPIVersion.VERSION2,
-                             client_id=self._cid, transport="websockets")
+            c = _paho.Client(
+                callback_api_version=_paho.CallbackAPIVersion.VERSION2,
+                client_id=self._cid,
+                transport="websockets",
+            )
         except AttributeError:
             c = _paho.Client(client_id=self._cid, transport="websockets")
         c.ws_set_options(path=path)
@@ -2338,7 +2474,7 @@ class _PersistentMqtt:
             self.connects += 1
             with self._lock:
                 subs = list(self._subs)
-            for t in subs:                 # replay subscriptions after (re)connect
+            for t in subs:  # replay subscriptions after (re)connect
                 try:
                     c.subscribe(t)
                 except Exception:
@@ -2354,31 +2490,36 @@ class _PersistentMqtt:
             _LOGGER.warning(
                 "persistent mqtt: broker rejected our credentials (rc=%s) - the "
                 "MQTT password has almost certainly been rotated by another "
-                "login; requesting a fresh one", rc,
+                "login; requesting a fresh one",
+                rc,
             )
             if self._on_auth_failure and not self._auth_failed_reported:
                 self._auth_failed_reported = True
                 try:
                     self._on_auth_failure(rc)
                 except Exception:
-                    _LOGGER.debug("persistent mqtt: on_auth_failure raised",
-                                  exc_info=True)
+                    _LOGGER.debug(
+                        "persistent mqtt: on_auth_failure raised", exc_info=True
+                    )
         else:
             _LOGGER.warning("persistent mqtt: broker refused rc=%s", rc)
 
     def _on_disconnect(self, c, ud, *args, **kwargs):
-        self._connected.clear()            # paho loop auto-reconnects; subs replay on_connect
+        self._connected.clear()  # paho loop auto-reconnects; subs replay on_connect
 
     def _on_message(self, c, ud, msg):
-        payload = (msg.payload.decode("utf-8", errors="replace")
-                   if isinstance(msg.payload, (bytes, bytearray)) else str(msg.payload))
+        payload = (
+            msg.payload.decode("utf-8", errors="replace")
+            if isinstance(msg.payload, (bytes, bytearray))
+            else str(msg.payload)
+        )
         item = (msg.topic, payload)
         with self._lock:
             cols = list(self._collectors)
             handlers = list(self._handlers)
         for q in cols:
             q.put(item)
-        for h in handlers:                 # persistent subscribers (stream, etc.)
+        for h in handlers:  # persistent subscribers (stream, etc.)
             try:
                 h(msg.topic, payload)
             except Exception:
@@ -2406,6 +2547,7 @@ class _PersistentMqtt:
         # schedule, so without watching _auth_refused every caller would burn the
         # full timeout before the owner gets a chance to re-authenticate.
         import time as _time
+
         deadline = _time.monotonic() + timeout
         while True:
             if self._connected.wait(0.1):
@@ -2433,19 +2575,20 @@ class _PersistentMqtt:
     def _request_sync(self, publish_items, subscribe_topics, match, timeout):
         import queue as _queue
         import time as _time
+
         if not self._ensure_started_sync():
             return [], {"error": "persistent mqtt connect timeout"}
         self._subscribe_sync(subscribe_topics or [])
         q = _queue.Queue()
         with self._lock:
             self._collectors.append(q)
-            c = self._client   # snapshot: a concurrent close() may null self._client
+            c = self._client  # snapshot: a concurrent close() may null self._client
         collected = []
         try:
             if c is None:
                 return [], {"error": "persistent mqtt closed"}
             try:
-                for pt, pp in (publish_items or []):
+                for pt, pp in publish_items or []:
                     c.publish(pt, pp)
             except Exception as exc:
                 return [], {"error": f"persistent mqtt publish failed: {exc}"}
@@ -2468,20 +2611,29 @@ class _PersistentMqtt:
                     pass
         return collected, {"error": None}
 
-    async def request(self, publish_items, subscribe_topics=None, match=None, timeout=5.0):
+    async def request(
+        self, publish_items, subscribe_topics=None, match=None, timeout=5.0
+    ):
         """Publish ``publish_items`` and collect matching messages for ``timeout``
         on the shared persistent connection (one connect for the account, reused).
         Returns (messages, status)."""
         import functools
+
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, functools.partial(
-            self._request_sync, publish_items, subscribe_topics, match, timeout))
+        return await loop.run_in_executor(
+            None,
+            functools.partial(
+                self._request_sync, publish_items, subscribe_topics, match, timeout
+            ),
+        )
 
     async def ensure_connected(self, timeout=15.0):
         import functools
+
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, functools.partial(self._ensure_started_sync, timeout))
+            None, functools.partial(self._ensure_started_sync, timeout)
+        )
 
     # --- persistent subscriber API (for the stream signaling, Phase 2) -------- #
     def add_handler(self, callback):
@@ -2502,9 +2654,12 @@ class _PersistentMqtt:
     async def subscribe(self, topics):
         """Ensure the connection is up and subscribe ``topics`` (tracked for replay)."""
         import functools
+
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._ensure_started_sync, 15.0)
-        await loop.run_in_executor(None, functools.partial(self._subscribe_sync, topics))
+        await loop.run_in_executor(
+            None, functools.partial(self._subscribe_sync, topics)
+        )
 
     async def publish(self, topic, payload):
         """Publish on the shared connection (ensures it's up first)."""
@@ -2518,6 +2673,7 @@ class _PersistentMqtt:
                 return True
             except Exception:
                 return False
+
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, functools.partial(_pub))
 
@@ -2572,8 +2728,16 @@ async def _mqtt_session(
     Returns list of (topic, payload_str) tuples.
     """
     messages, status = await _mqtt_session_with_status(
-        mqtt_url, mqtt_user, mqtt_pwd, client_id,
-        subscribe_topics, publish_items, duration, on_message, ws_path, on_ready,
+        mqtt_url,
+        mqtt_user,
+        mqtt_pwd,
+        client_id,
+        subscribe_topics,
+        publish_items,
+        duration,
+        on_message,
+        ws_path,
+        on_ready,
     )
     if status.get("error"):
         _LOGGER.warning("_mqtt_session failed: %s", status["error"])
@@ -2594,11 +2758,20 @@ async def _mqtt_session_with_status(
 ) -> tuple:
     """Like _mqtt_session but also returns the status dict for diagnostics."""
     import functools
+
     loop = asyncio.get_running_loop()
     fn = functools.partial(
         _mqtt_session_sync,
-        mqtt_url, mqtt_user, mqtt_pwd, client_id,
-        subscribe_topics, publish_items, duration, on_message, ws_path, on_ready,
+        mqtt_url,
+        mqtt_user,
+        mqtt_pwd,
+        client_id,
+        subscribe_topics,
+        publish_items,
+        duration,
+        on_message,
+        ws_path,
+        on_ready,
     )
     return await loop.run_in_executor(None, fn)
 
@@ -2619,24 +2792,26 @@ async def _mqtt_get_playback_server_info(
     Response arrives on iot/v1/c/{userId}/PlayBack/getPlaybackServerInfoResp
     (or on the device callback topic).
     """
-    user_id   = mqtt_user or "0"
-    seq       = str(random.randint(100000, 999999))
+    user_id = mqtt_user or "0"
+    seq = str(random.randint(100000, 999999))
     pub_topic = f"iot/v1/s/{user_id}/PlayBack/getPlaybackServerInfoReq"
-    payload   = json.dumps({
-        "method":  "getPlaybackServerInfoReq",
-        "service": "PlayBack",
-        "devId":   device_id,
-        "srcAddr": f"0.{user_id}",
-        "seq":     seq,
-        "tst":     int(time.time() * 1000),
-        "payload": {},
-    })
+    payload = json.dumps(
+        {
+            "method": "getPlaybackServerInfoReq",
+            "service": "PlayBack",
+            "devId": device_id,
+            "srcAddr": f"0.{user_id}",
+            "seq": seq,
+            "tst": int(time.time() * 1000),
+            "payload": {},
+        }
+    )
 
     result_holder: list = []
 
     def _check(topic, raw):
         try:
-            body   = json.loads(raw)
+            body = json.loads(raw)
             method = body.get("method", "")
             if "PlaybackServerInfo" not in method and "getPlaybackServer" not in method:
                 return
@@ -2645,10 +2820,13 @@ async def _mqtt_get_playback_server_info(
                 pl["serverIP"] = pl.get("serverIP") or pl.get("serverIp")
                 result_holder.append(pl)
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", '_check', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "_check", exc_info=True)
 
     await _mqtt_session(
-        mqtt_url, mqtt_user, mqtt_pwd, client_id,
+        mqtt_url,
+        mqtt_user,
+        mqtt_pwd,
+        client_id,
         subscribe_topics=[
             f"iot/v1/cb/{device_id}/#",
             f"iot/v1/c/{user_id}/#",
@@ -2676,7 +2854,10 @@ async def _mqtt_listen(
     """
     user_id = mqtt_user or "0"
     return await _mqtt_session(
-        mqtt_url, mqtt_user, mqtt_pwd, client_id,
+        mqtt_url,
+        mqtt_user,
+        mqtt_pwd,
+        client_id,
         subscribe_topics=[
             f"iot/v1/cb/{device_id}/#",
             f"iot/v1/c/{user_id}/#",
@@ -2701,19 +2882,21 @@ def _ip_looks_ascii_garbled(ip_str) -> bool:
     never STUN-probe a nonexistent address.
     """
     try:
-        _parts = [int(p) for p in str(ip_str).split('.')]
+        _parts = [int(p) for p in str(ip_str).split(".")]
     except Exception:
         return False
     if len(_parts) != 4 or not all(32 <= p <= 126 for p in _parts):
         return False
-    if not all(chr(p) in '0123456789.' for p in _parts):
+    if not all(chr(p) in "0123456789." for p in _parts):
         return False
     _decoded = "".join(chr(p) for p in _parts)
-    return any(_decoded.startswith(pfx)
-               for pfx in ("192.", "10.", "172.", "169.", "127."))
+    return any(
+        _decoded.startswith(pfx) for pfx in ("192.", "10.", "172.", "169.", "127.")
+    )
 
 
 # --- SDP transform helpers (lifted from _async_open_webrtc_stream_impl) ---
+
 
 def _sdp_transport(sdp: str, kind: str) -> str:
     for line in sdp.splitlines():
@@ -2737,15 +2920,16 @@ def _upgrade_sctp(sdp: str) -> str:
         a=max-message-size:65536   <- required by RFC 8841 section 4.3.1
     """
     import re as _re
+
     out = []
-    for line in _re.split(r'\r?\n', sdp):
-        if _re.match(r'^m=application \d+ DTLS/SCTP \d+$', line):
-            out.append('m=application 9 UDP/DTLS/SCTP webrtc-datachannel')
-        elif line.startswith('a=sctpmap:'):
-            out.append('a=sctp-port:5000')
+    for line in _re.split(r"\r?\n", sdp):
+        if _re.match(r"^m=application \d+ DTLS/SCTP \d+$", line):
+            out.append("m=application 9 UDP/DTLS/SCTP webrtc-datachannel")
+        elif line.startswith("a=sctpmap:"):
+            out.append("a=sctp-port:5000")
         else:
-            out.append(line)   # includes a=max-message-size (keep as-is)
-    return '\r\n'.join(out)
+            out.append(line)  # includes a=max-message-size (keep as-is)
+    return "\r\n".join(out)
 
 
 def _normalize_bundle_ice_credentials(sdp: str) -> str:
@@ -2763,31 +2947,32 @@ def _normalize_bundle_ice_credentials(sdp: str) -> str:
     exclusively to mid:0, whose credentials remain unchanged.
     """
     import re as _re
-    lines = _re.split(r'\r?\n', sdp)
+
+    lines = _re.split(r"\r?\n", sdp)
     master_ufrag: str | None = None
-    master_pwd:   str | None = None
+    master_pwd: str | None = None
     in_msection = False
     for ln in lines:
-        if ln.startswith('m='):
+        if ln.startswith("m="):
             in_msection = True
         if in_msection:
-            if ln.startswith('a=ice-ufrag:') and master_ufrag is None:
+            if ln.startswith("a=ice-ufrag:") and master_ufrag is None:
                 master_ufrag = ln
-            if ln.startswith('a=ice-pwd:') and master_pwd is None:
+            if ln.startswith("a=ice-pwd:") and master_pwd is None:
                 master_pwd = ln
         if master_ufrag and master_pwd:
             break
     if not (master_ufrag and master_pwd):
-        return sdp   # no ICE credentials found; leave SDP unchanged
+        return sdp  # no ICE credentials found; leave SDP unchanged
     result = []
     for ln in lines:
-        if ln.startswith('a=ice-ufrag:'):
+        if ln.startswith("a=ice-ufrag:"):
             result.append(master_ufrag)
-        elif ln.startswith('a=ice-pwd:'):
+        elif ln.startswith("a=ice-pwd:"):
             result.append(master_pwd)
         else:
             result.append(ln)
-    return '\r\n'.join(result)
+    return "\r\n".join(result)
 
 
 def _reorder_m_section_ice_attrs(sdp: str) -> str:
@@ -2805,12 +2990,13 @@ def _reorder_m_section_ice_attrs(sdp: str) -> str:
     attribute ordering is preserved; no content is added or removed.
     """
     import re as _re
-    _TRANSPORT = ('a=ice-ufrag:', 'a=ice-pwd:', 'a=fingerprint:', 'a=setup:')
-    lines = _re.split(r'\r?\n', sdp)
+
+    _TRANSPORT = ("a=ice-ufrag:", "a=ice-pwd:", "a=fingerprint:", "a=setup:")
+    lines = _re.split(r"\r?\n", sdp)
     sections: list[list[str]] = []
     current: list[str] = []
     for ln in lines:
-        if ln.startswith('m=') and current:
+        if ln.startswith("m=") and current:
             sections.append(current)
             current = [ln]
         else:
@@ -2820,7 +3006,7 @@ def _reorder_m_section_ice_attrs(sdp: str) -> str:
     result: list[str] = []
     for sec in sections:
         first_cand = next(
-            (i for i, ln in enumerate(sec) if ln.startswith('a=candidate:')),
+            (i for i, ln in enumerate(sec) if ln.startswith("a=candidate:")),
             None,
         )
         if first_cand is None:
@@ -2837,7 +3023,7 @@ def _reorder_m_section_ice_attrs(sdp: str) -> str:
         result.extend(sec[:first_cand])
         result.extend(transport_after)
         result.extend(kept)
-    return '\r\n'.join(result)
+    return "\r\n".join(result)
 
 
 def _filter_sdp_candidates(sdp: str) -> str:
@@ -2854,23 +3040,24 @@ def _filter_sdp_candidates(sdp: str) -> str:
     can actually use.
     """
     import re as _re
+
     out = []
-    for line in _re.split(r'\r?\n', sdp):
-        if line.startswith('a=candidate:'):
+    for line in _re.split(r"\r?\n", sdp):
+        if line.startswith("a=candidate:"):
             # Skip Docker bridge 172.17.x
-            if _re.search(r'\b172\.17\.', line):
+            if _re.search(r"\b172\.17\.", line):
                 continue
             # Skip CGNAT / Tailscale 100.x.x.x
-            if _re.search(r'\b100\.\d+\.\d+\.\d+\b', line):
+            if _re.search(r"\b100\.\d+\.\d+\.\d+\b", line):
                 continue
             # Skip IPv6 candidates (any colon-containing IP field)
             # Format: "a=candidate:... IP6-addr port ..."
             parts = line.split()
             # parts[4] is the IP address in standard candidate line
-            if len(parts) > 4 and ':' in parts[4]:
+            if len(parts) > 4 and ":" in parts[4]:
                 continue
         out.append(line)
-    return '\r\n'.join(out)
+    return "\r\n".join(out)
 
 
 def _dedup_bundle_candidates(sdp: str) -> str:
@@ -2886,11 +3073,12 @@ def _dedup_bundle_candidates(sdp: str) -> str:
     the camera uses a single ICE transport for all BUNDLE'd media.
     """
     import re as _re_dc2
-    lines = _re_dc2.split(r'\r?\n', sdp)
+
+    lines = _re_dc2.split(r"\r?\n", sdp)
     sections: list[list[str]] = []
     current: list[str] = []
     for ln in lines:
-        if ln.startswith('m=') and current:
+        if ln.startswith("m=") and current:
             sections.append(current)
             current = [ln]
         else:
@@ -2900,10 +3088,10 @@ def _dedup_bundle_candidates(sdp: str) -> str:
     result: list[str] = []
     for i, sec in enumerate(sections):
         if i == 0:
-            result.extend(sec)   # keep all in BUNDLE master (first m-section)
+            result.extend(sec)  # keep all in BUNDLE master (first m-section)
         else:
-            result.extend(ln for ln in sec if not ln.startswith('a=candidate:'))
-    return '\r\n'.join(result)
+            result.extend(ln for ln in sec if not ln.startswith("a=candidate:"))
+    return "\r\n".join(result)
 
 
 #: Header of an AVIO control frame: seq, command, timestamp(ms), payload length,
@@ -2935,7 +3123,7 @@ def parse_avio_response(frame: bytes) -> "Optional[AvioResponse]":
     if not frame or len(frame) < _AVIO_RESP_HDR.size:
         return None
     seq, command, _ts, length, _reserved = _AVIO_RESP_HDR.unpack_from(frame, 0)
-    body = frame[_AVIO_RESP_HDR.size:]
+    body = frame[_AVIO_RESP_HDR.size :]
     if len(body) < length:
         return None
     return AvioResponse(seq=seq, command=command, payload=body[:length])
@@ -2952,9 +3140,9 @@ class _AvioWaiter:
     """
 
     def __init__(self, router: "AvioResponseRouter", command: int) -> None:
-        self._router  = router
+        self._router = router
         self._command = command
-        self._future  = _cfutures.Future()
+        self._future = _cfutures.Future()
 
     def cancel(self) -> None:
         """Withdraw the question - used when the command could not be sent."""
@@ -2978,9 +3166,7 @@ class _AvioWaiter:
             except Exception:
                 return None
         try:
-            return await asyncio.wait_for(
-                asyncio.wrap_future(self._future), timeout
-            )
+            return await asyncio.wait_for(asyncio.wrap_future(self._future), timeout)
         except TimeoutError:
             # Stop listening.  _avio_cmd runs on the keepalive path, so a
             # registration left behind on every unanswered command would grow
@@ -3102,8 +3288,10 @@ def build_remb(sender_ssrc: int, media_ssrcs: "list", bitrate_bps: int) -> bytes
     is a separate step from keeping the attribute in the offer.
     """
     if bitrate_bps <= 0:
-        raise ValueError("REMB bitrate must be positive - zero would ask the "
-                         "camera to stop sending entirely")
+        raise ValueError(
+            "REMB bitrate must be positive - zero would ask the "
+            "camera to stop sending entirely"
+        )
     if not media_ssrcs:
         raise ValueError("REMB must name at least one stream")
 
@@ -3118,18 +3306,22 @@ def build_remb(sender_ssrc: int, media_ssrcs: "list", bitrate_bps: int) -> bytes
 
     header = struct.pack(
         "!BBH",
-        0x80 | 15,          # V=2, P=0, FMT=15
-        206,                # PT: payload-specific feedback
-        0,                  # length, filled in below
+        0x80 | 15,  # V=2, P=0, FMT=15
+        206,  # PT: payload-specific feedback
+        0,  # length, filled in below
     )
-    body = (struct.pack("!II", sender_ssrc & 0xFFFFFFFF, 0)
-            + b"REMB"
-            + struct.pack("!BBBB",
-                          len(media_ssrcs) & 0xFF,
-                          ((exp << 2) | (mantissa >> 16)) & 0xFF,
-                          (mantissa >> 8) & 0xFF,
-                          mantissa & 0xFF)
-            + b"".join(struct.pack("!I", s & 0xFFFFFFFF) for s in media_ssrcs))
+    body = (
+        struct.pack("!II", sender_ssrc & 0xFFFFFFFF, 0)
+        + b"REMB"
+        + struct.pack(
+            "!BBBB",
+            len(media_ssrcs) & 0xFF,
+            ((exp << 2) | (mantissa >> 16)) & 0xFF,
+            (mantissa >> 8) & 0xFF,
+            mantissa & 0xFF,
+        )
+        + b"".join(struct.pack("!I", s & 0xFFFFFFFF) for s in media_ssrcs)
+    )
     pkt = header + body
     # RTCP length is in 32-bit words, minus one.
     return pkt[:2] + struct.pack("!H", len(pkt) // 4 - 1) + pkt[4:]
@@ -3168,8 +3360,10 @@ def build_nack(sender_ssrc: int, media_ssrc: int, lost_seqs: "list") -> bytes:
     negotiation alone changes nothing until one is actually sent.
     """
     if not lost_seqs:
-        raise ValueError("a NACK must name at least one sequence number - an "
-                         "empty one asks the camera for nothing")
+        raise ValueError(
+            "a NACK must name at least one sequence number - an "
+            "empty one asks the camera for nothing"
+        )
 
     ordered = list(dict.fromkeys(int(s) & 0xFFFF for s in lost_seqs))
     fci = []
@@ -3186,16 +3380,18 @@ def build_nack(sender_ssrc: int, media_ssrc: int, lost_seqs: "list") -> bytes:
             i += 1
         fci.append(struct.pack("!HH", pid, blp))
 
-    pkt = (struct.pack("!BBH", 0x80 | _FMT_NACK, _RTPFB_PT, 0)
-           + struct.pack("!II", sender_ssrc & 0xFFFFFFFF,
-                         media_ssrc & 0xFFFFFFFF)
-           + b"".join(fci))
+    pkt = (
+        struct.pack("!BBH", 0x80 | _FMT_NACK, _RTPFB_PT, 0)
+        + struct.pack("!II", sender_ssrc & 0xFFFFFFFF, media_ssrc & 0xFFFFFFFF)
+        + b"".join(fci)
+    )
     # RTCP length is in 32-bit words, minus one.
     return pkt[:2] + struct.pack("!H", len(pkt) // 4 - 1) + pkt[4:]
 
 
-def build_tmmbr(sender_ssrc: int, media_ssrc: int, bitrate_bps: int,
-                overhead: int = 60) -> bytes:
+def build_tmmbr(
+    sender_ssrc: int, media_ssrc: int, bitrate_bps: int, overhead: int = 60
+) -> bytes:
     """A TMMBR (RFC 5104 s4.2.1) telling ``media_ssrc`` not to exceed a rate.
 
     Distinct from REMB, which this camera was measured to ignore: REMB reports
@@ -3214,20 +3410,25 @@ def build_tmmbr(sender_ssrc: int, media_ssrc: int, bitrate_bps: int,
     if bitrate_bps <= 0:
         raise ValueError(
             f"a TMMBR must name a positive bitrate, got {bitrate_bps}; a bound "
-            f"of zero asks the camera to stop sending")
+            f"of zero asks the camera to stop sending"
+        )
     exp = 0
     mantissa = int(bitrate_bps)
     while mantissa >= (1 << 17):
         mantissa >>= 1
         exp += 1
-    fci = struct.pack("!II",
-                      media_ssrc & 0xFFFFFFFF,
-                      (exp << 26) | (mantissa << 9) | (max(0, overhead) & 0x1FF))
+    fci = struct.pack(
+        "!II",
+        media_ssrc & 0xFFFFFFFF,
+        (exp << 26) | (mantissa << 9) | (max(0, overhead) & 0x1FF),
+    )
     # The header's media-source field is unused for TMMBR and SHALL be zero
     # (RFC 5104 s4.2.1.2); the limited SSRC travels in the FCI above.
-    pkt = (struct.pack("!BBH", 0x80 | _FMT_TMMBR, _RTPFB_PT, 0)
-           + struct.pack("!II", sender_ssrc & 0xFFFFFFFF, 0)
-           + fci)
+    pkt = (
+        struct.pack("!BBH", 0x80 | _FMT_TMMBR, _RTPFB_PT, 0)
+        + struct.pack("!II", sender_ssrc & 0xFFFFFFFF, 0)
+        + fci
+    )
     return pkt[:2] + struct.pack("!H", len(pkt) // 4 - 1) + pkt[4:]
 
 
@@ -3284,10 +3485,16 @@ class NackTracker:
       sequence number, and at the measured steady-state loss it never triggers.
     """
 
-    def __init__(self, *, max_gap: int = 250, max_behind: int = 200,
-                 retry_after: float = 0.15, max_requests: int = 3,
-                 max_report: int = 17,
-                 min_report_interval: float = 0.02) -> None:
+    def __init__(
+        self,
+        *,
+        max_gap: int = 250,
+        max_behind: int = 200,
+        retry_after: float = 0.15,
+        max_requests: int = 3,
+        max_report: int = 17,
+        min_report_interval: float = 0.02,
+    ) -> None:
         self.max_gap = max_gap
         self.min_report_interval = min_report_interval
         self._last_report_ts = None
@@ -3355,7 +3562,6 @@ class NackTracker:
         state = self._pending.get(seq & 0xFFFF)
         return None if state is None else now - state[2]
 
-
     def _prune(self) -> None:
         """Forget losses too old to be worth a retransmission.
 
@@ -3372,8 +3578,10 @@ class NackTracker:
             del self._pending[s]
 
     def _due(self, now: float) -> "list":
-        if (self._last_report_ts is not None
-                and now - self._last_report_ts < self.min_report_interval):
+        if (
+            self._last_report_ts is not None
+            and now - self._last_report_ts < self.min_report_interval
+        ):
             return []
         out = []
         for s, state in list(self._pending.items()):

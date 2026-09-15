@@ -45,6 +45,7 @@ Default OFF also because an untested ceiling applied fleet-wide would risk the
 four cameras that stream fine today -- the A000088s run at 0.43 Mbps and have
 never lost a packet to load.
 """
+
 import pytest
 
 from aidot_cameras.camera.sdes_open import _offer_bandwidth_line
@@ -105,17 +106,23 @@ def test_the_line_sits_in_the_video_section_after_the_connection_line():
     import pathlib
     import re
 
-    src = (pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras"
-           / "camera" / "sdes_open.py").read_text()
+    src = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "aidot_cameras"
+        / "camera"
+        / "sdes_open.py"
+    ).read_text()
     m = re.search(
         r'\+ f"m=video \{_offer_video_port\} RTP/SAVPF \{_video_pt_list\}\\r\\n"\s*\n'
         r'\s*f"c=IN IP4 \{_offer_video_ip\}\\r\\n"\s*\n'
-        r'\s*\+ _offer_bandwidth_line\(',
-        src)
+        r"\s*\+ _offer_bandwidth_line\(",
+        src,
+    )
     assert m, (
         "the camera-facing offer must emit the bandwidth line immediately "
         "after the video c= line; RFC 4566 orders a media section m=, i=, "
-        "c=, b=, and this camera parses linearly")
+        "c=, b=, and this camera parses linearly"
+    )
 
 
 def test_applying_a_ceiling_leaves_a_receipt_in_the_log():
@@ -130,13 +137,23 @@ def test_applying_a_ceiling_leaves_a_receipt_in_the_log():
     import pathlib
     import re
 
-    src = (pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras"
-           / "camera" / "sdes_open.py").read_text()
-    m = re.search(r"if _bw_kbps and _status:\s*\n"
-                  r'\s*_status\(f"[^"]*b=AS:\{_bw_kbps\}"\)', src)
-    assert m, ("applying a receive-bandwidth ceiling must emit a status "
-               "receipt naming the value that reached the offer")
+    src = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "aidot_cameras"
+        / "camera"
+        / "sdes_open.py"
+    ).read_text()
+    m = re.search(
+        r"if _bw_kbps and _status:\s*\n"
+        r'\s*_status\(f"[^"]*b=AS:\{_bw_kbps\}"\)',
+        src,
+    )
+    assert m, (
+        "applying a receive-bandwidth ceiling must emit a status "
+        "receipt naming the value that reached the offer"
+    )
     assert src.count("_sdes_offer_bandwidth_kbps()") == 2, (
         "the knob must be read ONCE per offer (its definition plus one call "
         "site); a second read lets the receipt disagree with the SDP actually "
-        "sent, which is the false-receipt trap the receipt exists to close")
+        "sent, which is the false-receipt trap the receipt exists to close"
+    )

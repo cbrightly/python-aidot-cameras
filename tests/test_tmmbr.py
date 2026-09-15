@@ -24,6 +24,7 @@ a 17-bit mantissa scaled by a 6-bit exponent, and getting that wrong yields a
 well-formed packet asking for the wrong rate -- which would read as "the camera
 ignored it".
 """
+
 import struct
 
 import pytest
@@ -67,8 +68,9 @@ def test_the_length_field_counts_words_minus_one():
     assert _parse(pkt)["length"] == len(pkt) // 4 - 1 == 4
 
 
-@pytest.mark.parametrize("bps", [64_000, 250_000, 800_000, 1_500_000,
-                                 2_000_000, 4_000_000])
+@pytest.mark.parametrize(
+    "bps", [64_000, 250_000, 800_000, 1_500_000, 2_000_000, 4_000_000]
+)
 def test_the_requested_bitrate_survives_the_mantissa_encoding(bps):
     # The bound may be rounded DOWN by the encoding but must never come out
     # higher than asked: a TMMBR that permits more than intended is worse than

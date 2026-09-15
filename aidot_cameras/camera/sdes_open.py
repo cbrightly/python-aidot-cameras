@@ -64,8 +64,9 @@ _MEDIA_RCVBUF_BYTES = 4 * 1024 * 1024
 _SCTP_REASSEMBLY_CAP = 64 * 1024
 
 
-def _sctp_reassemble(flags: int, stream_id: int, payload: bytes,
-                     buf: dict) -> "Optional[bytes]":
+def _sctp_reassemble(
+    flags: int, stream_id: int, payload: bytes, buf: dict
+) -> "Optional[bytes]":
     """Reassemble a fragmented SCTP DATA message, or None until it is complete.
 
     RFC 4960 s3.3.1 puts two flags in the DATA chunk header: **B** (0x02) begins
@@ -110,8 +111,9 @@ def _sctp_reassemble(flags: int, stream_id: int, payload: bytes,
     return None
 
 
-async def _await_rtsp_publish_target(url: "Optional[str]", *,
-                                     timeout: float = 20.0) -> bool:
+async def _await_rtsp_publish_target(
+    url: "Optional[str]", *, timeout: float = 20.0
+) -> bool:
     """Wait until an ``rtsp://host:port`` target accepts a connection.
 
     Publishing into go2rtc is a race after a Home Assistant restart: the serve
@@ -134,20 +136,20 @@ async def _await_rtsp_publish_target(url: "Optional[str]", *,
     if not url or not url.startswith("rtsp://"):
         return True
     try:
-        rest = url[len("rtsp://"):]
+        rest = url[len("rtsp://") :]
         hostport = rest.split("/", 1)[0]
         if "@" in hostport:
             hostport = hostport.rsplit("@", 1)[1]
-        if hostport.startswith("["):            # IPv6 literal
+        if hostport.startswith("["):  # IPv6 literal
             if "]" not in hostport:
-                return True                      # malformed: do not block
+                return True  # malformed: do not block
             host, _, tail = hostport[1:].partition("]")
             port = int(tail.lstrip(":") or 554)
         else:
             host, _, port_s = hostport.partition(":")
             port = int(port_s or 554)
     except (ValueError, IndexError):
-        return True                              # unparseable: do not block
+        return True  # unparseable: do not block
 
     _deadline = time.monotonic() + timeout
     _attempt = 0
@@ -155,7 +157,8 @@ async def _await_rtsp_publish_target(url: "Optional[str]", *,
         _attempt += 1
         try:
             _r, _w = await asyncio.wait_for(
-                asyncio.open_connection(host, port), timeout=3.0)
+                asyncio.open_connection(host, port), timeout=3.0
+            )
             _w.close()
             try:
                 await _w.wait_closed()
@@ -164,13 +167,20 @@ async def _await_rtsp_publish_target(url: "Optional[str]", *,
             if _attempt > 1:
                 _LOGGER.info(
                     "publish target %s:%s accepted after %d attempts",
-                    host, port, _attempt)
+                    host,
+                    port,
+                    _attempt,
+                )
             return True
         except (OSError, TimeoutError):
             await asyncio.sleep(0.5)
     _LOGGER.warning(
         "publish target %s:%s did not accept a connection within %.0fs - "
-        "launching ffmpeg anyway so its own error surfaces", host, port, timeout)
+        "launching ffmpeg anyway so its own error surfaces",
+        host,
+        port,
+        timeout,
+    )
     return False
 
 
@@ -184,6 +194,7 @@ def _local_ipv4_networks():
     """
     import ipaddress as _ipa
     import socket as _sk
+
     nets = []
     try:
         _s = _sk.socket(_sk.AF_INET, _sk.SOCK_DGRAM)
@@ -213,6 +224,7 @@ def _candidate_is_off_subnet(ip: str) -> bool:
     are reached through the gateway by design.
     """
     import ipaddress as _ipa
+
     try:
         _a = _ipa.ip_address(ip)
     except ValueError:
@@ -221,7 +233,7 @@ def _candidate_is_off_subnet(ip: str) -> bool:
         return False
     nets = _local_ipv4_networks()
     if not nets:
-        return False                      # cannot tell - never call it off-subnet
+        return False  # cannot tell - never call it off-subnet
     return not any(_a in _n for _n in nets)
 
 
@@ -243,6 +255,7 @@ def _sctp_sack_chunk(cum_tsn: int, a_rwnd: int = 131072) -> bytes:
     we have not acknowledged.
     """
     import struct as _st_sk
+
     body = _st_sk.pack("!IIHH", cum_tsn & 0xFFFFFFFF, a_rwnd, 0, 0)
     return _st_sk.pack("!BBH", 3, 0, 4 + len(body)) + body
 
@@ -279,6 +292,7 @@ def _sctp_abort_chunk() -> bytes:
     header; the T bit is for an endpoint reflecting a tag it does not have.
     """
     import struct as _st_ab
+
     return _st_ab.pack("!BBH", 6, 0, 4)
 
 
@@ -300,11 +314,13 @@ def _key_fingerprint(key: str) -> str:
     if not key:
         return "none"
     import hashlib as _hl_kf
+
     return _hl_kf.sha256(key.encode()).hexdigest()[:8]
 
 
-def _srtp_tx_key_note(sender: str, used_key: str, offer_key: str,
-                      answer_key: str) -> str:
+def _srtp_tx_key_note(
+    sender: str, used_key: str, offer_key: str, answer_key: str
+) -> str:
     """Record which SRTP key an outbound RTCP sender encrypted with.
 
     Diagnostic only -- nothing branches on this.
@@ -339,6 +355,7 @@ def _srtp_tx_key_note(sender: str, used_key: str, offer_key: str,
     the key itself: this line is logged, so it reaches home-assistant.log and
     the public issue reports users paste it into.  See _key_fingerprint.
     """
+
     def _origin(key: str) -> str:
         if not key:
             return "none"
@@ -370,22 +387,23 @@ def _sctp_parse_init_ack(pkt: bytes, state: dict) -> Optional[bytes]:
     no State Cookie parameter, which is the caller's signal to keep waiting.
     """
     import struct as _st_sc
+
     pos = 12
     while pos + 4 <= len(pkt):
-        ctype, _, clen = _st_sc.unpack_from('!BBH', pkt, pos)
+        ctype, _, clen = _st_sc.unpack_from("!BBH", pkt, pos)
         if clen < 4:
             break
-        cdata = pkt[pos + 4:pos + clen]
+        cdata = pkt[pos + 4 : pos + clen]
         if ctype == 0x02 and len(cdata) >= 16:
-            state['peer_tag'] = _st_sc.unpack_from('!I', cdata)[0]
-            state['peer_tsn'] = _st_sc.unpack_from('!I', cdata, 12)[0]
+            state["peer_tag"] = _st_sc.unpack_from("!I", cdata)[0]
+            state["peer_tsn"] = _st_sc.unpack_from("!I", cdata, 12)[0]
             pp = 16
             while pp + 4 <= len(cdata):
-                ptype, plen = _st_sc.unpack_from('!HH', cdata, pp)
+                ptype, plen = _st_sc.unpack_from("!HH", cdata, pp)
                 if plen < 4:
                     break
                 if ptype == 7:  # State Cookie
-                    return cdata[pp + 4:pp + plen]
+                    return cdata[pp + 4 : pp + plen]
                 pp += max(4, (plen + 3) & ~3)
         pos += max(4, (clen + 3) & ~3)
     return None
@@ -419,7 +437,7 @@ def _dispatch_sctp_avio(responses, payload) -> bool:
             # payload and has been seen arriving in a 140-byte chunk.  Reading
             # only the first would lose a reply batched behind a notify, which
             # presents as the camera intermittently not answering.
-            view = view[AVIO_HDR_LEN + len(frame.payload):]
+            view = view[AVIO_HDR_LEN + len(frame.payload) :]
     except Exception:
         return answered
     return answered
@@ -442,15 +460,23 @@ def _widen_media_rcvbuf(sock, kind: str, device_id: str = "?") -> int:
     try:
         import socket as _sock_rb
 
-        sock.setsockopt(_sock_rb.SOL_SOCKET, _sock_rb.SO_RCVBUF,
-                        _MEDIA_RCVBUF_BYTES)
+        sock.setsockopt(_sock_rb.SOL_SOCKET, _sock_rb.SO_RCVBUF, _MEDIA_RCVBUF_BYTES)
         got = sock.getsockopt(_sock_rb.SOL_SOCKET, _sock_rb.SO_RCVBUF)
     except Exception:
-        _LOGGER.debug("camera %s: could not widen the %s receive buffer",
-                      device_id, kind, exc_info=True)
+        _LOGGER.debug(
+            "camera %s: could not widen the %s receive buffer",
+            device_id,
+            kind,
+            exc_info=True,
+        )
         return 0
-    _LOGGER.debug("camera %s: %s receive buffer %d bytes (asked %d)",
-                  device_id, kind, got, _MEDIA_RCVBUF_BYTES)
+    _LOGGER.debug(
+        "camera %s: %s receive buffer %d bytes (asked %d)",
+        device_id,
+        kind,
+        got,
+        _MEDIA_RCVBUF_BYTES,
+    )
     return got
 
 
@@ -482,7 +508,7 @@ def _turn_entry_ips(entries) -> set:
     """
     ips = set()
     for entry in entries or ():
-        for uri in (entry.get("Uris") or ()):
+        for uri in entry.get("Uris") or ():
             body = str(uri).split(":", 1)[-1]
             host = body.split("?", 1)[0].rsplit(":", 1)[0].strip("[]")
             if host:
@@ -491,7 +517,7 @@ def _turn_entry_ips(entries) -> set:
 
 
 def _classify_media_path(src_ip, turn_ips) -> "Optional[str]":
-    """"direct" or "relay" for a media source address, or None when unknown.
+    """ "direct" or "relay" for a media source address, or None when unknown.
 
     Media arriving FROM a TURN server address is relayed - that covers both
     shapes on this fleet: the camera's own allocation on the vendor TURN (the
@@ -504,8 +530,9 @@ def _classify_media_path(src_ip, turn_ips) -> "Optional[str]":
     return "relay" if src_ip in turn_ips else "direct"
 
 
-def _sdes_offer_media_endpoint(mode: str, default_ip: str, default_port: int,
-                               relay_addr, public_ip):
+def _sdes_offer_media_endpoint(
+    mode: str, default_ip: str, default_port: int, relay_addr, public_ip
+):
     """Where the offer's c=/m= points for one media section: (ip, port, is_relay).
 
     This fleet's firmware nominates by dialing c=/m=, not by reading candidate
@@ -526,8 +553,9 @@ def _sdes_offer_media_endpoint(mode: str, default_ip: str, default_port: int,
     return default_ip, default_port, False
 
 
-def _sdes_offer_candidate_lines(mode: str, local_ip: str, port: int,
-                                public_ip, relay_addr) -> str:
+def _sdes_offer_candidate_lines(
+    mode: str, local_ip: str, port: int, public_ip, relay_addr
+) -> str:
     """The a=candidate block for one media section, shaped by the mode.
 
     ``auto``  - host + srflx (when a public IP is known) + relay (when the
@@ -552,12 +580,18 @@ def _sdes_offer_candidate_lines(mode: str, local_ip: str, port: int,
                 stream.
     """
     host = f"a=candidate:1 1 udp 2130706431 {local_ip} {port} typ host\r\n"
-    srflx = (f"a=candidate:2 1 udp 1694498815 {public_ip} {port}"
-             f" typ srflx raddr {local_ip} rport {port}\r\n"
-             if public_ip else "")
-    relay = (f"a=candidate:3 1 udp 16777215 {relay_addr[0]} {relay_addr[1]}"
-             f" typ relay raddr {local_ip} rport {port}\r\n"
-             if relay_addr else "")
+    srflx = (
+        f"a=candidate:2 1 udp 1694498815 {public_ip} {port}"
+        f" typ srflx raddr {local_ip} rport {port}\r\n"
+        if public_ip
+        else ""
+    )
+    relay = (
+        f"a=candidate:3 1 udp 16777215 {relay_addr[0]} {relay_addr[1]}"
+        f" typ relay raddr {local_ip} rport {port}\r\n"
+        if relay_addr
+        else ""
+    )
     if mode == "relay" and relay:
         return relay
     if mode == "lan":
@@ -612,7 +646,12 @@ def _sdes_nack_enabled() -> bool:
     Read per call, not at import, so it can be flipped without a restart.
     """
     return os.environ.get("AIDOT_SDES_NACK", "1").strip().lower() not in (
-        "0", "", "false", "no", "off")
+        "0",
+        "",
+        "false",
+        "no",
+        "off",
+    )
 
 
 #: How long a retransmission has to arrive in to still be worth forwarding.
@@ -625,8 +664,9 @@ _SERVE_REORDER_BUDGET_S = min(
 )
 
 
-def _video_repeat_too_late(bridge_fn, seq: int, now: float,
-                           budget: float = _SERVE_REORDER_BUDGET_S) -> bool:
+def _video_repeat_too_late(
+    bridge_fn, seq: int, now: float, budget: float = _SERVE_REORDER_BUDGET_S
+) -> bool:
     """Is this video packet a retransmission that missed the decoder's window?
 
     A repeat that beats ffmpeg's reorder window is put back in place and
@@ -664,8 +704,9 @@ def _video_repeat_too_late(bridge_fn, seq: int, now: float,
     return age is not None and age > budget
 
 
-def _video_nack_seqs(bridge_fn, seq: int, now: float,
-                     enabled: "Optional[bool]" = None) -> "list":
+def _video_nack_seqs(
+    bridge_fn, seq: int, now: float, enabled: "Optional[bool]" = None
+) -> "list":
     """Sequence numbers to ask the camera to resend, given one forwarded packet.
 
     The tracker is cached on ``bridge_fn`` (the same place the PLI and REMB
@@ -684,8 +725,9 @@ def _video_nack_seqs(bridge_fn, seq: int, now: float,
     return tracker.observe(seq, now)
 
 
-def _send_video_nack(send, srtcp_sess, sender_ssrc: int,
-                     media_ssrc: int, lost_seqs: "list") -> bool:
+def _send_video_nack(
+    send, srtcp_sess, sender_ssrc: int, media_ssrc: int, lost_seqs: "list"
+) -> bool:
     """Put one Generic NACK on the camera's RTCP path.  True if it went out.
 
     ``send`` is the bridge's relay-aware sender (``_br_send_to_cam`` bound to
@@ -712,7 +754,8 @@ def _send_video_nack(send, srtcp_sess, sender_ssrc: int,
     if not lost_seqs:
         return False
     return _send_rtcp_fb(
-        send, srtcp_sess, build_nack(sender_ssrc, media_ssrc, lost_seqs))
+        send, srtcp_sess, build_nack(sender_ssrc, media_ssrc, lost_seqs)
+    )
 
 
 def _sdes_tmmbr_bps():
@@ -865,8 +908,9 @@ def _send_rtcp_fb(send, srtcp_sess, raw: bytes) -> bool:
         return False
 
 
-def _send_video_remb(send, srtcp_sess, sender_ssrc: int,
-                     media_ssrc: int, target_bps) -> bool:
+def _send_video_remb(
+    send, srtcp_sess, sender_ssrc: int, media_ssrc: int, target_bps
+) -> bool:
     """Put one REMB on the camera's RTCP path.  True if it went out.
 
     Same shape and same relay-aware ``send`` contract as
@@ -877,11 +921,13 @@ def _send_video_remb(send, srtcp_sess, sender_ssrc: int,
     if not target_bps or target_bps <= 0:
         return False
     return _send_rtcp_fb(
-        send, srtcp_sess, build_remb(sender_ssrc, [media_ssrc], target_bps))
+        send, srtcp_sess, build_remb(sender_ssrc, [media_ssrc], target_bps)
+    )
 
 
-def _send_video_tmmbr(send, srtcp_sess, sender_ssrc: int,
-                      media_ssrc: int, bitrate_bps) -> bool:
+def _send_video_tmmbr(
+    send, srtcp_sess, sender_ssrc: int, media_ssrc: int, bitrate_bps
+) -> bool:
     """Put one TMMBR on the camera's RTCP path.  True if it went out.
 
     ``send`` is the bridge's relay-aware sender, NOT a raw socket, for the
@@ -896,7 +942,8 @@ def _send_video_tmmbr(send, srtcp_sess, sender_ssrc: int,
     if not bitrate_bps or bitrate_bps <= 0:
         return False
     return _send_rtcp_fb(
-        send, srtcp_sess, build_tmmbr(sender_ssrc, media_ssrc, bitrate_bps))
+        send, srtcp_sess, build_tmmbr(sender_ssrc, media_ssrc, bitrate_bps)
+    )
 
 
 #: Sender SSRC on every RTCP we send the camera.  Load-bearing, not cosmetic:
@@ -919,8 +966,9 @@ _SERVE_STDERR_NOISE = (
 )
 
 
-def _start_serve_stderr_drain(proc, *, maxlines: int = 40,
-                              notable_lines: int = 20) -> None:
+def _start_serve_stderr_drain(
+    proc, *, maxlines: int = 40, notable_lines: int = 20
+) -> None:
     """Drain a serve ffmpeg's stderr continuously into a bounded tail on the proc.
 
     The serve is spawned with ``stderr=PIPE`` but the bridge loop only polls the
@@ -956,9 +1004,7 @@ def _start_serve_stderr_drain(proc, *, maxlines: int = 40,
         except Exception:
             pass
 
-    threading.Thread(
-        target=_drain, daemon=True, name="aidot-sdes-serve-stderr"
-    ).start()
+    threading.Thread(target=_drain, daemon=True, name="aidot-sdes-serve-stderr").start()
 
 
 # Strong references to detached per-session helper tasks, so the event loop
@@ -982,9 +1028,7 @@ _SDP_VIDEO_PT_BY_CODEC = {"H264": 96, "H265": 97}
 #: base64URL - `-` and `_` are not ice-chars. `secrets.token_urlsafe` emits the
 #: URL-safe alphabet, and measured over 4000 generations that put a character
 #: outside this set into 12.5% of our ufrags and 49.9% of our passwords.
-_ICE_CHARS = ("ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-              "abcdefghijklmnopqrstuvwxyz"
-              "0123456789+/")
+_ICE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
 #: What the vendor app actually sends, read out of its own signalling log:
 #: ufrag 4 chars, password 24. The RFC floor for a password is 22; 24 is what
@@ -1033,10 +1077,8 @@ def _new_ice_credentials() -> "tuple":
     for exactly that reason.
     """
     return (
-        "".join(_secrets_mod.choice(_ICE_CHARS)
-                for _ in range(_ICE_UFRAG_LEN)),
-        "".join(_secrets_mod.choice(_ICE_CHARS)
-                for _ in range(_ICE_PWD_LEN)),
+        "".join(_secrets_mod.choice(_ICE_CHARS) for _ in range(_ICE_UFRAG_LEN)),
+        "".join(_secrets_mod.choice(_ICE_CHARS) for _ in range(_ICE_PWD_LEN)),
     )
 
 
@@ -1067,6 +1109,7 @@ def describe_video_profile(pt) -> str:
     the record.
     """
     return f"pt={pt} codec={_SDP_CODEC_BY_VIDEO_PT.get(pt) or 'unknown'}"
+
 
 # How long to wait for the FIRST media of a session before launching the serve.
 # Nothing useful can happen before then: the payload types are unknown, so the SDP
@@ -1144,8 +1187,9 @@ def _battery_wake_gate_s(battery: bool, budget: float) -> float:
     return budget if (battery and budget > 0) else 0.0
 
 
-def _stale_offer_abandon_due(*, battery: bool, seen_at_start, first_seen_ts,
-                             now: float, grace_s: float) -> bool:
+def _stale_offer_abandon_due(
+    *, battery: bool, seen_at_start, first_seen_ts, now: float, grace_s: float
+) -> bool:
     """Whether this attempt's offer is stale and the wait should end now.
 
     ``seen_at_start`` is when the camera had last been heard from as the media
@@ -1173,6 +1217,7 @@ def _stale_offer_abandon_due(*, battery: bool, seen_at_start, first_seen_ts,
     if first_seen_ts is None:
         return False
     return (now - first_seen_ts) >= grace_s
+
 
 # How long to wait for the camera's webrtcResp before parsing it for the ICE
 # credentials the nomination needs.  The STUN window ahead of it closes on a
@@ -1235,16 +1280,18 @@ def _abandoned_media_grace_s() -> float:
     return _ABANDONED_MEDIA_GRACE_DEFAULT_S
 
 
-def _post_abandon_media_grace_s(*, abandoned: bool, have_video: bool,
-                                grace_s: float) -> float:
+def _post_abandon_media_grace_s(
+    *, abandoned: bool, have_video: bool, grace_s: float
+) -> float:
     """Extra seconds to wait for the first media before building the serve SDP."""
     if not abandoned or have_video or grace_s <= 0:
         return 0.0
     return grace_s
 
 
-def _should_skip_doomed_serve(*, abandoned: bool, have_video: bool,
-                              serving: bool = True) -> bool:
+def _should_skip_doomed_serve(
+    *, abandoned: bool, have_video: bool, serving: bool = True
+) -> bool:
     """Whether to abandon this attempt instead of serving nothing.
 
     What makes a serve doomed is that **no video was observed**, not which wait
@@ -1368,9 +1415,9 @@ def _parse_answer_ice(sdp):
     host: tuple = ()
     for line in (sdp or "").splitlines():
         if line.startswith("a=ice-ufrag:") and not ufrag:
-            ufrag = line[len("a=ice-ufrag:"):].strip()
+            ufrag = line[len("a=ice-ufrag:") :].strip()
         elif line.startswith("a=ice-pwd:") and not pwd:
-            pwd = line[len("a=ice-pwd:"):].strip()
+            pwd = line[len("a=ice-pwd:") :].strip()
         elif line.startswith("a=candidate:"):
             parsed = _parse_candidate_line(line)
             if parsed:
@@ -1406,8 +1453,7 @@ def _answer_ready_for_this_open(stamp, open_started_at) -> bool:
     return stamp is not None and stamp >= open_started_at
 
 
-def _stun_window_answer_exit_due(*, stun_seen: bool,
-                                 answer_ready: bool) -> bool:
+def _stun_window_answer_exit_due(*, stun_seen: bool, answer_ready: bool) -> bool:
     """Whether the STUN responder window has nothing left to wait for.
 
     Every branch of the window carries the delay, so this is not scoped to one.
@@ -1467,7 +1513,7 @@ def video_pt_from_answer_sdp(sdp_text: str) -> Optional[int]:
                 pts = line.split()[3:]
             continue
         if section == "video" and line.startswith("a=rtpmap:"):
-            body = line[len("a=rtpmap:"):]
+            body = line[len("a=rtpmap:") :]
             pt, _, enc = body.partition(" ")
             if pt and enc:
                 rtpmap[pt.strip()] = enc.strip().split("/", 1)[0].upper()
@@ -1706,10 +1752,7 @@ _SDES_OFFER_VIDEO_CODECS = {
         "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
         "profile-level-id=42e01f\r\n"
     ),
-    97: (
-        "a=rtpmap:97 H265/90000\r\n"
-        "a=fmtp:97 level-id=93\r\n"
-    ),
+    97: ("a=rtpmap:97 H265/90000\r\na=fmtp:97 level-id=93\r\n"),
 }
 
 #: The order those codecs go on the wire today: H264 first, H265 second.  This
@@ -1785,7 +1828,8 @@ def _sdes_offer_video_codec_lines(order=None) -> tuple:
     send, which is the one outcome worse than an unpinned choice.
     """
     pts = tuple(
-        pt for pt in (order if order is not None else _SDES_OFFER_VIDEO_PT_ORDER)
+        pt
+        for pt in (order if order is not None else _SDES_OFFER_VIDEO_PT_ORDER)
         if pt in _SDES_OFFER_VIDEO_CODECS
     )
     if not pts:
@@ -1836,9 +1880,11 @@ def narrow_sdp_payload_types(sdp_text: str, keep_video=None, keep_audio=None) ->
             listed = pt_list.split()
             if str(keep) in listed:
                 drop.update(p for p in listed if p != str(keep))
-                line = (line[: len(line) - len(stripped)]
-                        + f"{head} RTP/{proto} {keep}"
-                        + ("\r\n" if line.endswith("\r\n") else "\n"))
+                line = (
+                    line[: len(line) - len(stripped)]
+                    + f"{head} RTP/{proto} {keep}"
+                    + ("\r\n" if line.endswith("\r\n") else "\n")
+                )
         elif any(
             stripped.startswith(f"a={attr}:{pt}{sep}")
             for pt in drop
@@ -1888,8 +1934,7 @@ def _build_restart_sdp(
     def _crypto(key: str) -> str:
         if use_plain_rtp:
             return ""
-        return (f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 "
-                f"inline:{key}\r\n")
+        return f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{key}\r\n"
 
     sdp = (
         "v=0\r\n"
@@ -1918,9 +1963,9 @@ def _build_restart_sdp(
         # rebuilds the dual-codec template, so without it a session that never
         # saw a video packet reproduces the unnarrowed SDP on every watchdog
         # cycle.
-        keep_video=(first_video_pt
-                    if first_video_pt in _SDP_VIDEO_PTS
-                    else answer_video_pt),
+        keep_video=(
+            first_video_pt if first_video_pt in _SDP_VIDEO_PTS else answer_video_pt
+        ),
         keep_audio=(first_audio_pt if first_audio_pt in (0, 8) else None),
     )
 
@@ -1999,8 +2044,7 @@ _SDES_ECHO_WAIT_S = 0.25
 _SDES_ECHO_WAIT_LEGACY_S = 2.0
 
 
-def _sdes_echo_wait_timeout(skip_liveplay: bool,
-                            echo_seen: bool = False) -> float:
+def _sdes_echo_wait_timeout(skip_liveplay: bool, echo_seen: bool = False) -> float:
     """Seconds to block on the camera's webrtcReq echo. Never negative.
 
     ``echo_seen`` is this device's own history: once an echo has been observed
@@ -2088,8 +2132,7 @@ def _classify_ffmpeg_exit(rc: int, teardown_requested: bool) -> int:
 #: ``AIDOT_SDES_STALL_NUDGE=0`` turns it off and
 #: ``AIDOT_SDES_STALL_NUDGE_AFTER_S`` moves the trigger point.
 _STALL_NUDGE_ENABLED = os.environ.get("AIDOT_SDES_STALL_NUDGE", "1") != "0"
-_STALL_NUDGE_AFTER_S = float(
-    os.environ.get("AIDOT_SDES_STALL_NUDGE_AFTER_S", "2.5"))
+_STALL_NUDGE_AFTER_S = float(os.environ.get("AIDOT_SDES_STALL_NUDGE_AFTER_S", "2.5"))
 
 
 def _stall_nudge_due(
@@ -2220,8 +2263,9 @@ def _record_peer_reflexive(known, discovered, observed, is_self=None):
 _MAX_PROBE_SOURCES = 6
 
 
-def _probe_source_verdict(src, turn_peer_ip, turn_peer_port, *,
-                          cam_peer, observed, known, learned):
+def _probe_source_verdict(
+    src, turn_peer_ip, turn_peer_port, *, cam_peer, observed, known, learned
+):
     """Say why one inbound STUN probe's source was, or was not, learned.
 
     Nomination can only aim at an address, and when the camera's answer lists
@@ -2348,12 +2392,22 @@ def _stall_answer_has_creds(pre_launch_sdp, answer_fut):
     return bool(_ufrag and _pwd)
 
 
-def _first_media_stall_report(device_id, waited_s, nominated,
-                              use_candidate_sent, binding_success,
-                              trigger_sent, probes, probes_dropped=0,
-                              cancelled=False, media_pkts=0, decrypt_fails=0,
-                              answer_cands=-1, answer_has_creds=None,
-                              trigger_acked=None):
+def _first_media_stall_report(
+    device_id,
+    waited_s,
+    nominated,
+    use_candidate_sent,
+    binding_success,
+    trigger_sent,
+    probes,
+    probes_dropped=0,
+    cancelled=False,
+    media_pkts=0,
+    decrypt_fails=0,
+    answer_cands=-1,
+    answer_has_creds=None,
+    trigger_acked=None,
+):
     """Build the one line a first-media stall emits.
 
     A session that never delivers a byte looks, in a log, exactly like one that
@@ -2414,8 +2468,10 @@ def _first_media_stall_report(device_id, waited_s, nominated,
     _answer = ""
     if answer_cands is None:
         _answer = " answer=none;"
-        _why += ("  The camera never answered, so there was nothing to"
-                 " nominate - this is signaling, not ICE.")
+        _why += (
+            "  The camera never answered, so there was nothing to"
+            " nominate - this is signaling, not ICE."
+        )
     elif answer_cands >= 0:
         # The count says how many candidates; whether ICE credentials came with
         # them is the other half of "what the answer carried", and the two
@@ -2601,7 +2657,13 @@ class _SdesOpenMixin:
         # object, not the open, so a marker older than this belongs to a
         # previous open and must not fire this one's early exit.
         _open_started_at = time.monotonic()
-        from .client import CameraMixin, _build_sdes_serve_cmd, _ffmpeg_path, _resolve_serve_input_timeout_s, _spawn_bg  # lazy: break client<->sdes_open cycle
+        from .client import (
+            CameraMixin,
+            _build_sdes_serve_cmd,
+            _ffmpeg_path,
+            _resolve_serve_input_timeout_s,
+            _spawn_bg,
+        )  # lazy: break client<->sdes_open cycle
         import base64
         import subprocess
 
@@ -2618,12 +2680,17 @@ class _SdesOpenMixin:
         # session, so a live session is unaffected.  A duplicate sentinel on the
         # paths that already send one is harmless - the reader exits on the first.
         if outgoing_q is not None:
+
             def _stop_mqtt_thread() -> None:
                 try:
                     outgoing_q.put_nowait(None)
                 except Exception:
-                    _LOGGER.debug("camera %s: could not signal MQTT thread to exit",
-                                  getattr(self, "device_id", "?"), exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: could not signal MQTT thread to exit",
+                        getattr(self, "device_id", "?"),
+                        exc_info=True,
+                    )
+
             _cleanup.callback(_stop_mqtt_thread)
 
         # SDES path: fast_connect's wait-skips / TURN-strip destabilise the SCTP
@@ -2672,14 +2739,17 @@ class _SdesOpenMixin:
         def _cl(fn, *a):
             if _cleanup is None:
                 return
+
             def _run():
                 try:
                     fn(*a)
                 except Exception:
                     _LOGGER.debug(
                         "camera %s: swallowed sdes-open cleanup step",
-                        getattr(self, "device_id", "?"), exc_info=True,
+                        getattr(self, "device_id", "?"),
+                        exc_info=True,
                     )
+
             _cleanup.callback(_run)
 
         def _reap(p):
@@ -2698,7 +2768,7 @@ class _SdesOpenMixin:
             except Exception:
                 pass
             try:
-                p.poll()   # reap the killed child so it does not linger as a zombie
+                p.poll()  # reap the killed child so it does not linger as a zombie
             except Exception:
                 pass
 
@@ -2709,7 +2779,7 @@ class _SdesOpenMixin:
         _widen_media_rcvbuf(_audio_sock, "audio", getattr(self, "device_id", "?"))
         _audio_sock.bind(("0.0.0.0", 0))
         audio_port = _audio_sock.getsockname()[1]
-        _cl(_audio_sock.close)   # also unblocks the bridge thread's recv on cleanup
+        _cl(_audio_sock.close)  # also unblocks the bridge thread's recv on cleanup
 
         _video_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
         _widen_media_rcvbuf(_video_sock, "video", getattr(self, "device_id", "?"))
@@ -2739,7 +2809,12 @@ class _SdesOpenMixin:
                 if len(_p) == 4 and all(x.isdigit() and 0 <= int(x) <= 255 for x in _p):
                     _public_ip = _cand_pub
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_open_sdes_stream', exc_info=True)
+            _LOGGER.debug(
+                "camera %s: swallowed exception in %s",
+                getattr(self, "device_id", "?"),
+                "_open_sdes_stream",
+                exc_info=True,
+            )
 
         # Build TURN server list for _sdes_ice_server_list from ice_config if
         # available.  The camera's ICE agent uses these to gather its own relay
@@ -2751,36 +2826,57 @@ class _SdesOpenMixin:
                 # Unwrap common envelope shapes (mirrors DTLS path normalisation).
                 _ic = ice_config
                 for _k in ("data", "payload", "result"):
-                    if isinstance(_ic, dict) and _k in _ic and isinstance(_ic[_k], dict):
+                    if (
+                        isinstance(_ic, dict)
+                        and _k in _ic
+                        and isinstance(_ic[_k], dict)
+                    ):
                         _ic = _ic[_k]
                         break
                 # Arnoo format: {app: [{uris, id, token}], dev: [...]}
                 for _sect in ("app", "dev"):
-                    for _entry in (_ic.get(_sect) or []):
+                    for _entry in _ic.get(_sect) or []:
                         _uris = _entry.get("uris") or _entry.get("Uris") or []
-                        _user = (_entry.get("id") or _entry.get("Username")
-                                 or _entry.get("username") or "")
-                        _cred = (_entry.get("token") or _entry.get("Password")
-                                 or _entry.get("password") or "")
+                        _user = (
+                            _entry.get("id")
+                            or _entry.get("Username")
+                            or _entry.get("username")
+                            or ""
+                        )
+                        _cred = (
+                            _entry.get("token")
+                            or _entry.get("Password")
+                            or _entry.get("password")
+                            or ""
+                        )
                         if any("turn:" in str(u) for u in _uris):
-                            _sdes_turn_entries.append({
-                                "Uris":     _uris,
-                                "Username": _user,
-                                "Password": str(_cred),
-                            })
+                            _sdes_turn_entries.append(
+                                {
+                                    "Uris": _uris,
+                                    "Username": _user,
+                                    "Password": str(_cred),
+                                }
+                            )
                 # W3C format: {iceServers: [{urls, username, credential}]}
-                for _entry in (_ic.get("iceServers") or []):
+                for _entry in _ic.get("iceServers") or []:
                     _uris = _entry.get("urls") or _entry.get("uris") or []
                     if isinstance(_uris, str):
                         _uris = [_uris]
                     if any("turn:" in str(u) for u in _uris):
-                        _sdes_turn_entries.append({
-                            "Uris":     _uris,
-                            "Username": _entry.get("username") or "",
-                            "Password": _entry.get("credential") or "",
-                        })
+                        _sdes_turn_entries.append(
+                            {
+                                "Uris": _uris,
+                                "Username": _entry.get("username") or "",
+                                "Password": _entry.get("credential") or "",
+                            }
+                        )
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_open_sdes_stream', exc_info=True)
+            _LOGGER.debug(
+                "camera %s: swallowed exception in %s",
+                getattr(self, "device_id", "?"),
+                "_open_sdes_stream",
+                exc_info=True,
+            )
 
         # --- TURN relay allocation helper ------------------------------------ #
         # Defined BEFORE the offer so relay IP/port can be embedded in the
@@ -2802,21 +2898,23 @@ class _SdesOpenMixin:
             import select as _sl_ta
             import time as _tm_ta
 
-            _MAGIC_TA = b'\x21\x12\xa4\x42'
+            _MAGIC_TA = b"\x21\x12\xa4\x42"
 
             def _a(_t, _v):
                 _p = (-len(_v)) % 4
-                return _st_ta.pack('!HH', _t, len(_v)) + _v + b'\x00' * _p
+                return _st_ta.pack("!HH", _t, len(_v)) + _v + b"\x00" * _p
 
             def _stun_message_integrity(_k, _m):
                 # Patch Length to include the MI attribute (4 hdr + 20 digest = 24)
-                _patched = _m[:2] + _st_ta.pack('!H', len(_m) - 20 + 24) + _m[4:]
+                _patched = _m[:2] + _st_ta.pack("!H", len(_m) - 20 + 24) + _m[4:]
                 return _hm.new(_k, _patched, _ha.sha1).digest()
 
             # Step 1: unauthenticated Allocate -> get REALM and NONCE from 401
             _tid1 = os.urandom(12)
-            _b1 = _a(0x0019, b'\x11\x00\x00\x00')  # REQUESTED-TRANSPORT = UDP(17), RFC 5766 section 14.7 protocol in MSB
-            _r1 = b'\x00\x03' + _st_ta.pack('!H', len(_b1)) + _MAGIC_TA + _tid1 + _b1
+            _b1 = _a(
+                0x0019, b"\x11\x00\x00\x00"
+            )  # REQUESTED-TRANSPORT = UDP(17), RFC 5766 section 14.7 protocol in MSB
+            _r1 = b"\x00\x03" + _st_ta.pack("!H", len(_b1)) + _MAGIC_TA + _tid1 + _b1
             try:
                 _ta_sock.sendto(_r1, (_ta_host, _ta_port))
             except Exception:
@@ -2839,35 +2937,44 @@ class _SdesOpenMixin:
                     break
             if _rsp1 is None:
                 return None
-            _realm_ta = _nonce_ta = b''
+            _realm_ta = _nonce_ta = b""
             _o = 20
             while _o + 4 <= len(_rsp1):
-                _at, _al = _st_ta.unpack_from('!HH', _rsp1, _o)
-                _av = _rsp1[_o + 4:_o + 4 + _al]
+                _at, _al = _st_ta.unpack_from("!HH", _rsp1, _o)
+                _av = _rsp1[_o + 4 : _o + 4 + _al]
                 _o += 4 + _al + (-_al % 4)
                 if _at == 0x0014:
                     _realm_ta = _av
                 elif _at == 0x0015:
                     _nonce_ta = _av
             if not _realm_ta or not _nonce_ta:
-                _LOGGER.debug("TURN alloc step1: no realm/nonce in response type=%s",
-                              _rsp1[:2].hex())
+                _LOGGER.debug(
+                    "TURN alloc step1: no realm/nonce in response type=%s",
+                    _rsp1[:2].hex(),
+                )
                 return None
-            _LOGGER.debug("TURN alloc step1 challenge: realm=%r nonce_len=%d",
-                          _realm_ta.decode(errors='replace'), len(_nonce_ta))
+            _LOGGER.debug(
+                "TURN alloc step1 challenge: realm=%r nonce_len=%d",
+                _realm_ta.decode(errors="replace"),
+                len(_nonce_ta),
+            )
 
             # Step 2: authenticated Allocate
             _tid2 = os.urandom(12)
-            _key_ta = _ha.md5(_ta_user + b':' + _realm_ta + b':' + _ta_pass).digest()
+            _key_ta = _ha.md5(_ta_user + b":" + _realm_ta + b":" + _ta_pass).digest()
             _b2 = (
-                _a(0x0006, _ta_user)                  # USERNAME
-                + _a(0x0014, _realm_ta)               # REALM
-                + _a(0x0015, _nonce_ta)               # NONCE
-                + _a(0x0019, b'\x11\x00\x00\x00')     # REQUESTED-TRANSPORT = UDP, RFC 5766 section 14.7 protocol in MSB
+                _a(0x0006, _ta_user)  # USERNAME
+                + _a(0x0014, _realm_ta)  # REALM
+                + _a(0x0015, _nonce_ta)  # NONCE
+                + _a(
+                    0x0019, b"\x11\x00\x00\x00"
+                )  # REQUESTED-TRANSPORT = UDP, RFC 5766 section 14.7 protocol in MSB
             )
-            _h2 = b'\x00\x03' + _st_ta.pack('!H', len(_b2) + 24) + _MAGIC_TA + _tid2
-            _b2 += _a(0x0008, _stun_message_integrity(_key_ta, _h2 + _b2))  # MESSAGE-INTEGRITY
-            _r2 = b'\x00\x03' + _st_ta.pack('!H', len(_b2)) + _MAGIC_TA + _tid2 + _b2
+            _h2 = b"\x00\x03" + _st_ta.pack("!H", len(_b2) + 24) + _MAGIC_TA + _tid2
+            _b2 += _a(
+                0x0008, _stun_message_integrity(_key_ta, _h2 + _b2)
+            )  # MESSAGE-INTEGRITY
+            _r2 = b"\x00\x03" + _st_ta.pack("!H", len(_b2)) + _MAGIC_TA + _tid2 + _b2
             try:
                 _ta_sock.sendto(_r2, (_ta_host, _ta_port))
             except Exception:
@@ -2890,32 +2997,36 @@ class _SdesOpenMixin:
                     break
             if _rsp2 is None:
                 return None
-            if _rsp2[:2] != b'\x01\x03':  # Allocate Success = 0x0103
+            if _rsp2[:2] != b"\x01\x03":  # Allocate Success = 0x0103
                 # Parse ERROR-CODE (0x0009) for diagnostics
                 _ec2 = 0
                 _o_ec = 20
                 while _o_ec + 4 <= len(_rsp2):
-                    _at_ec, _al_ec = _st_ta.unpack_from('!HH', _rsp2, _o_ec)
-                    _av_ec = _rsp2[_o_ec + 4:_o_ec + 4 + _al_ec]
+                    _at_ec, _al_ec = _st_ta.unpack_from("!HH", _rsp2, _o_ec)
+                    _av_ec = _rsp2[_o_ec + 4 : _o_ec + 4 + _al_ec]
                     _o_ec += 4 + _al_ec + (-_al_ec % 4)
                     if _at_ec == 0x0009 and _al_ec >= 4:
                         _ec2 = (_av_ec[2] & 0x07) * 100 + _av_ec[3]
                 _LOGGER.debug(
                     "TURN alloc step2 error_code=%d realm=%r response_type=%s",
-                    _ec2, _realm_ta.decode(errors='replace'), _rsp2[:2].hex(),
+                    _ec2,
+                    _realm_ta.decode(errors="replace"),
+                    _rsp2[:2].hex(),
                 )
                 return None
 
             # Parse XOR-RELAYED-ADDRESS (0x0016)
             _o = 20
             while _o + 4 <= len(_rsp2):
-                _at, _al = _st_ta.unpack_from('!HH', _rsp2, _o)
-                _av = _rsp2[_o + 4:_o + 4 + _al]
+                _at, _al = _st_ta.unpack_from("!HH", _rsp2, _o)
+                _av = _rsp2[_o + 4 : _o + 4 + _al]
                 _o += 4 + _al + (-_al % 4)
                 if _at == 0x0016 and _al >= 8:  # XOR-RELAYED-ADDRESS
-                    _xp = _st_ta.unpack_from('!H', _av, 2)[0] ^ 0x2112
-                    _xb = bytes(a ^ b for a, b in zip(_av[4:8], _MAGIC_TA, strict=False))
-                    _r_ip_ta = '.'.join(str(b) for b in _xb)
+                    _xp = _st_ta.unpack_from("!H", _av, 2)[0] ^ 0x2112
+                    _xb = bytes(
+                        a ^ b for a, b in zip(_av[4:8], _MAGIC_TA, strict=False)
+                    )
+                    _r_ip_ta = ".".join(str(b) for b in _xb)
                     # Do NOT pre-create permissions for our own srflx IP or
                     # TURN server IP. That can cause TURN self-loop Data
                     # Indications and massive STUN echo storms.
@@ -2948,32 +3059,52 @@ class _SdesOpenMixin:
             try:
                 import re as _re_pre
                 import hashlib as _hlk_pre
+
                 _our_te_pre = next(
                     (e for e in _sdes_turn_entries if e.get("Username") == user_id),
                     _sdes_turn_entries[0],
                 )
                 _t_uri_pre = next(
-                    (str(u) for u in (_our_te_pre.get("Uris") or []) if "turn:" in str(u)),
-                    ""
+                    (
+                        str(u)
+                        for u in (_our_te_pre.get("Uris") or [])
+                        if "turn:" in str(u)
+                    ),
+                    "",
                 )
-                _tm_pre = _re_pre.search(r'turns?:([^:?]+)(?::(\d+))?', _t_uri_pre)
+                _tm_pre = _re_pre.search(r"turns?:([^:?]+)(?::(\d+))?", _t_uri_pre)
                 if _tm_pre:
                     _t_host_pre = _tm_pre.group(1)
                     _t_port_pre = int(_tm_pre.group(2) or 5349)
                     _t_user_pre = (_our_te_pre.get("Username") or "").encode()
                     _t_pass_pre = str(_our_te_pre.get("Password") or "").encode()
-                    for _pre_sock, _pre_name in ((_audio_sock, "audio"), (_video_sock, "video")):
+                    for _pre_sock, _pre_name in (
+                        (_audio_sock, "audio"),
+                        (_video_sock, "video"),
+                    ):
                         _pre_res = _turn_allocate_udp(
-                            _pre_sock, _t_host_pre, _t_port_pre, _t_user_pre, _t_pass_pre,
+                            _pre_sock,
+                            _t_host_pre,
+                            _t_port_pre,
+                            _t_user_pre,
+                            _t_pass_pre,
                         )
                         if _pre_res:
-                            _r_ip_pre, _r_port_pre, _r_realm_pre, _r_nonce_pre = _pre_res
+                            _r_ip_pre, _r_port_pre, _r_realm_pre, _r_nonce_pre = (
+                                _pre_res
+                            )
                             _r_key_pre = _hlk_pre.md5(
-                                _t_user_pre + b':' + _r_realm_pre + b':' + _t_pass_pre
+                                _t_user_pre + b":" + _r_realm_pre + b":" + _t_pass_pre
                             ).digest()
                             _relay_addrs[_pre_sock] = (
-                                _r_ip_pre, _r_port_pre, _r_realm_pre, _r_nonce_pre,
-                                _t_host_pre, _t_port_pre, _r_key_pre, _t_user_pre,
+                                _r_ip_pre,
+                                _r_port_pre,
+                                _r_realm_pre,
+                                _r_nonce_pre,
+                                _t_host_pre,
+                                _t_port_pre,
+                                _r_key_pre,
+                                _t_user_pre,
                             )
                             _status(
                                 f"TURN relay pre-allocated (offer): {_pre_name}"
@@ -2990,7 +3121,9 @@ class _SdesOpenMixin:
             "signaling-wait[%s] sdes-turn-prealloc elapsed=%dms allocated=%d skipped=%s",
             self.device_id,
             int((time.monotonic() - _turn_t0) * 1000),
-            len(_relay_addrs), bool(_skip_turn_prealloc))
+            len(_relay_addrs),
+            bool(_skip_turn_prealloc),
+        )
 
         # --- DTLS certificate for m=application probe ----------------------- #
         # PreCon cameras (sptPreconn=1) need SESSION_MODE_REQ via SCTP datachannel.
@@ -3000,16 +3133,23 @@ class _SdesOpenMixin:
         try:
             from cryptography import x509 as _cx509
             from cryptography.x509.oid import NameOID as _CNOID
-            from cryptography.hazmat.primitives import hashes as _ch, serialization as _cser
+            from cryptography.hazmat.primitives import (
+                hashes as _ch,
+                serialization as _cser,
+            )
             from cryptography.hazmat.primitives.asymmetric import ec as _cec
             from cryptography.hazmat.backends import default_backend as _cbd
             import datetime as _dt_dc
             import hashlib as _hs_dc
+
             _dc_key = _cec.generate_private_key(_cec.SECP256R1(), _cbd())
-            _dc_name = _cx509.Name([_cx509.NameAttribute(_CNOID.COMMON_NAME, "aidot-dc")])
+            _dc_name = _cx509.Name(
+                [_cx509.NameAttribute(_CNOID.COMMON_NAME, "aidot-dc")]
+            )
             _dc_cert = (
                 _cx509.CertificateBuilder()
-                .subject_name(_dc_name).issuer_name(_dc_name)
+                .subject_name(_dc_name)
+                .issuer_name(_dc_name)
                 .public_key(_dc_key.public_key())
                 .serial_number(_cx509.random_serial_number())
                 .not_valid_before(_dt_dc.datetime.utcnow())
@@ -3019,7 +3159,7 @@ class _SdesOpenMixin:
             _dc_der = _dc_cert.public_bytes(_cser.Encoding.DER)
             _dc_hex = _hs_dc.sha256(_dc_der).hexdigest().upper()
             _dc_probe_fp = "sha-256 " + ":".join(
-                _dc_hex[i:i+2] for i in range(0, len(_dc_hex), 2)
+                _dc_hex[i : i + 2] for i in range(0, len(_dc_hex), 2)
             )
         except Exception as _cert_exc:
             _LOGGER.debug("DC probe: cert generation failed: %s", _cert_exc)
@@ -3029,10 +3169,10 @@ class _SdesOpenMixin:
         # Use a CSPRNG: the PSK is media-keying material carried over signaling,
         # so it must not come from the predictable Mersenne-Twister (random).
         import secrets as _secrets_psk_early
+
         _psk_charset_req = "123456789abcdef"
         _psk_value_req = "".join(
-            _secrets_psk_early.choice(_psk_charset_req)
-            for _ in range(64)
+            _secrets_psk_early.choice(_psk_charset_req) for _ in range(64)
         )
 
         # --- Build SDES SDP offer ------------------------------------------ #
@@ -3061,6 +3201,7 @@ class _SdesOpenMixin:
         # _new_ice_credentials for why, and note _compress_sdp_req below keeps
         # only the first of each attribute anyway.
         import secrets as _secrets
+
         # One pair for the whole offer - see _new_ice_credentials. The video
         # names are kept as aliases rather than removed: they are threaded
         # through the STUN responder, the nomination and the bridge, and
@@ -3075,15 +3216,25 @@ class _SdesOpenMixin:
         # drop every camera packet.  Relay is still in a=candidate: for ICE.
         # For LAN cameras (_public_ip is None) fall back to local_ip directly.
         _offer_audio_ip, _offer_audio_port, _relay_in_c_a = _sdes_offer_media_endpoint(
-            _conn_mode, _public_ip or local_ip, audio_port,
-            _relay_addrs.get(_audio_sock), _public_ip)
+            _conn_mode,
+            _public_ip or local_ip,
+            audio_port,
+            _relay_addrs.get(_audio_sock),
+            _public_ip,
+        )
         _offer_video_ip, _offer_video_port, _relay_in_c_v = _sdes_offer_media_endpoint(
-            _conn_mode, _public_ip or local_ip, video_port,
-            _relay_addrs.get(_video_sock), _public_ip)
+            _conn_mode,
+            _public_ip or local_ip,
+            video_port,
+            _relay_addrs.get(_video_sock),
+            _public_ip,
+        )
         _relay_in_c = _relay_in_c_a or _relay_in_c_v
         if _conn_mode == "relay" and not _relay_in_c and _status:
-            _status("SDES: relay mode fell back to the direct endpoint"
-                    " (no allocation or no public ip)")
+            _status(
+                "SDES: relay mode fell back to the direct endpoint"
+                " (no allocation or no public ip)"
+            )
         elif _relay_in_c and _status:
             _status("SDES: c=/m= at the relay allocation (relay mode)")
         _bundle_hdr_line = (
@@ -3096,10 +3247,11 @@ class _SdesOpenMixin:
         _talk_offer = talk
         _offer_audio_ssrc = int.from_bytes(os.urandom(4), "big") or 1
         _offer_audio_cname = _secrets.token_urlsafe(12)[:12]
-        _audio_dir_line  = "a=sendrecv\r\n" if _talk_offer else "a=recvonly\r\n"
+        _audio_dir_line = "a=sendrecv\r\n" if _talk_offer else "a=recvonly\r\n"
         _audio_ssrc_line = (
             f"a=ssrc:{_offer_audio_ssrc} cname:{_offer_audio_cname}\r\n"
-            if _talk_offer else ""
+            if _talk_offer
+            else ""
         )
         # Shared talk state (only for talk-capable opens).  The bridge fills
         # src/sock on first inbound audio; SdesSession.async_start_talk sets
@@ -3107,17 +3259,21 @@ class _SdesOpenMixin:
         # emit outbound PCMA as SRTP at our offer SSRC.  srtp_key_audio here is
         # our offer key (captured before it is reassigned to the camera key after
         # the answer); the immutable str is safe to hold.
-        _talk_state = {
-            "provider": None,       # set by async_start_talk; cleared on stop/clip-end
-            "src": None,            # camera media addr (bridge sets on first media)
-            "sock": None,           # media socket (bridge)
-            "ssrc": _offer_audio_ssrc,
-            "key": srtp_key_audio,  # our offer key (immutable str; safe to hold)
-            "want_speaker": False,    # async_start/stop_talk flips this
-            "speaker_on": False,      # bridge sets after it sends SPEAKERSTART
-            "spk_eligible_ts": None,  # bridge: first time SPEAKERSTART is eligible
-            "stop": False,
-        } if _talk_offer else None
+        _talk_state = (
+            {
+                "provider": None,  # set by async_start_talk; cleared on stop/clip-end
+                "src": None,  # camera media addr (bridge sets on first media)
+                "sock": None,  # media socket (bridge)
+                "ssrc": _offer_audio_ssrc,
+                "key": srtp_key_audio,  # our offer key (immutable str; safe to hold)
+                "want_speaker": False,  # async_start/stop_talk flips this
+                "speaker_on": False,  # bridge sets after it sends SPEAKERSTART
+                "spk_eligible_ts": None,  # bridge: first time SPEAKERSTART is eligible
+                "stop": False,
+            }
+            if _talk_offer
+            else None
+        )
         # Video codec preference, expressed by m-line order (RFC 3264 5.1).
         # Default is today's 96 97 and the bytes are identical to the literal
         # this replaced; AIDOT_SDES_VIDEO_PT_ORDER reorders it without ever
@@ -3129,7 +3285,8 @@ class _SdesOpenMixin:
         # exists to close.
         _bw_kbps = _sdes_offer_bandwidth_kbps()
         _video_pt_list, _video_codec_attrs = _sdes_offer_video_codec_lines(
-            _video_pt_order)
+            _video_pt_order
+        )
         sdes_offer_sdp = (
             "v=0\r\n"
             f"o=- {ts} {ts} IN IP4 {local_ip}\r\n"
@@ -3140,9 +3297,7 @@ class _SdesOpenMixin:
             # linear-parsing camera firmware recognises this as an SDES offer
             # rather than a pure-ICE offer and does not discard the key.
             f"m=audio {_offer_audio_port} RTP/SAVPF 0 8\r\n"
-            f"c=IN IP4 {_offer_audio_ip}\r\n"
-            + _audio_dir_line
-            + "a=mid:0\r\n"
+            f"c=IN IP4 {_offer_audio_ip}\r\n" + _audio_dir_line + "a=mid:0\r\n"
             f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
             "a=rtpmap:0 PCMU/8000\r\n"
             "a=rtpmap:8 PCMA/8000\r\n"
@@ -3156,8 +3311,12 @@ class _SdesOpenMixin:
             + f"a=ice-ufrag:{_ufrag_a}\r\n"
             f"a=ice-pwd:{_pwd_a}\r\n"
             + _sdes_offer_candidate_lines(
-                _conn_mode, local_ip, audio_port, _public_ip,
-                _relay_addrs.get(_audio_sock))
+                _conn_mode,
+                local_ip,
+                audio_port,
+                _public_ip,
+                _relay_addrs.get(_audio_sock),
+            )
             # video m-section
             + f"m=video {_offer_video_port} RTP/SAVPF {_video_pt_list}\r\n"
             f"c=IN IP4 {_offer_video_ip}\r\n"
@@ -3170,8 +3329,12 @@ class _SdesOpenMixin:
             f"a=ice-ufrag:{_ufrag_v}\r\n"
             f"a=ice-pwd:{_pwd_v}\r\n"
             + _sdes_offer_candidate_lines(
-                _conn_mode, local_ip, video_port, _public_ip,
-                _relay_addrs.get(_video_sock))
+                _conn_mode,
+                local_ip,
+                video_port,
+                _public_ip,
+                _relay_addrs.get(_video_sock),
+            )
             # m=application SCTP DataChannel section for SDES cameras.
             # Ground truth from real Leedarson app logcat (2026-05-22):
             #   m=application 9 SCTP webrtc-datachannel
@@ -3186,7 +3349,8 @@ class _SdesOpenMixin:
                 "c=IN IP4 0.0.0.0\r\n"
                 "a=mid:2\r\n"
                 f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
-                if _dc_probe_fp else ""
+                if _dc_probe_fp
+                else ""
             )
         )
 
@@ -3224,13 +3388,15 @@ class _SdesOpenMixin:
         _pin_video_pt = _resolve_sdes_video_pt()
         if _pin_video_pt is not None:
             sdes_offer_sdp = narrow_sdp_payload_types(
-                sdes_offer_sdp, keep_video=_pin_video_pt)
+                sdes_offer_sdp, keep_video=_pin_video_pt
+            )
             if _status:
                 _status(f"SDES: offer pinned to video pt={_pin_video_pt}")
 
         _relay_str = (
             f"  relay-audio={_relay_addrs[_audio_sock][0]}:{_relay_addrs[_audio_sock][1]}"
-            if _audio_sock in _relay_addrs else ""
+            if _audio_sock in _relay_addrs
+            else ""
         )
         _status(
             f"SDP offer (SDES)  local={local_ip}"
@@ -3241,31 +3407,35 @@ class _SdesOpenMixin:
 
         # Send livePlayReq before the SDP offer to arm the camera's stream.
         import random as _random
-        _live_req_sdes = json.dumps({
-            "method":  "livePlayReq",
-            "service": "IPC",
-            "devId":   device_id,
-            "srcAddr": f"0.{user_id}",
-            "seq":     f"ap{_random.randint(1000000, 9999999)}",
-            "tst":     int(time.time() * 1000),
-            **( {"userId": numeric_uid_raw} if numeric_uid_raw is not None else {} ),
-            "payload": {
-                "peerid":  peer_id,
-                "devId":   device_id,
-                # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
-                # to the target deviceId for livePlayReq.
-                "dstAddr": device_id,
-                # App payload compatibility fields (decompiled live-play model).
-                "livePlay": 1,
-                "powerType": _live_power_type,
-                "p2pCache": _live_p2p_cache,
-                "dseq": self._next_dseq(),
-            },
-        })
+
+        _live_req_sdes = json.dumps(
+            {
+                "method": "livePlayReq",
+                "service": "IPC",
+                "devId": device_id,
+                "srcAddr": f"0.{user_id}",
+                "seq": f"ap{_random.randint(1000000, 9999999)}",
+                "tst": int(time.time() * 1000),
+                **({"userId": numeric_uid_raw} if numeric_uid_raw is not None else {}),
+                "payload": {
+                    "peerid": peer_id,
+                    "devId": device_id,
+                    # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
+                    # to the target deviceId for livePlayReq.
+                    "dstAddr": device_id,
+                    # App payload compatibility fields (decompiled live-play model).
+                    "livePlay": 1,
+                    "powerType": _live_power_type,
+                    "p2pCache": _live_p2p_cache,
+                    "dseq": self._next_dseq(),
+                },
+            }
+        )
         _live_play_topic_sdes = f"iot/v1/s/{user_id}/IPC/livePlayReq"
         outgoing_q.put_nowait((_live_play_topic_sdes, _live_req_sdes))
         _status(f"livePlayReq sent (SDES)  peerid={peer_id}")
         import asyncio as _asyncio
+
         # Wait for the livePlayReq echo from the broker/camera before sending
         # webrtcReq.  The echo confirms the MQTT pipeline to this device is live
         # and the broker session is registered.  Fall through after 5 s if it
@@ -3287,42 +3457,56 @@ class _SdesOpenMixin:
         _echo_t0 = time.monotonic()
         try:
             await _asyncio.wait_for(liveplay_echo_ev.wait(), timeout=_echo_timeout)
-            _status("livePlayReq echo received - sending webrtcReq, ICE, then launching ffmpeg")
+            _status(
+                "livePlayReq echo received - sending webrtcReq, ICE, then launching ffmpeg"
+            )
         except TimeoutError:
-            _status(f"no livePlayReq echo in {_echo_timeout:.1f}s - sending webrtcReq,"
-                    " ICE, then launching ffmpeg anyway")
+            _status(
+                f"no livePlayReq echo in {_echo_timeout:.1f}s - sending webrtcReq,"
+                " ICE, then launching ffmpeg anyway"
+            )
         _LOGGER.info(
             "signaling-wait[%s] livePlayReq-echo elapsed=%dms (timeout=%.1fs)",
-            self.device_id, int((time.monotonic() - _echo_t0) * 1000), _echo_timeout)
+            self.device_id,
+            int((time.monotonic() - _echo_t0) * 1000),
+            _echo_timeout,
+        )
         # App parity: do not offer to a battery camera until the camera itself
         # has said something.  See _battery_wake_gate_s.  Mains cameras skip
         # this entirely, so the PTZ's role-reversal timing is untouched.
         _wake_gate_s = _battery_wake_gate_s(
-            bool(getattr(self, "is_battery_camera", False)),
-            _BATTERY_WAKE_GATE_S)
+            bool(getattr(self, "is_battery_camera", False)), _BATTERY_WAKE_GATE_S
+        )
         if _wake_gate_s > 0:
             _wg_t0 = time.monotonic()
-            while (getattr(self, "_camera_device_seen_ts", None) is None
-                    and time.monotonic() - _wg_t0 < _wake_gate_s):
+            while (
+                getattr(self, "_camera_device_seen_ts", None) is None
+                and time.monotonic() - _wg_t0 < _wake_gate_s
+            ):
                 await _asyncio.sleep(0.05)
             _wg_seen = getattr(self, "_camera_device_seen_ts", None) is not None
             _LOGGER.info(
                 "signaling-wait[%s] battery-wake-gate elapsed=%dms answered=%s"
                 " (budget=%.0fs)",
-                self.device_id, int((time.monotonic() - _wg_t0) * 1000),
-                _wg_seen, _wake_gate_s)
+                self.device_id,
+                int((time.monotonic() - _wg_t0) * 1000),
+                _wg_seen,
+                _wake_gate_s,
+            )
             if _wg_seen:
-                _status("camera answered after %.1fs - offering now"
-                        % (time.monotonic() - _wg_t0))
+                _status(
+                    "camera answered after %.1fs - offering now"
+                    % (time.monotonic() - _wg_t0)
+                )
             else:
-                _status("camera said nothing in %.0fs - offering anyway"
-                        % _wake_gate_s)
+                _status("camera said nothing in %.0fs - offering anyway" % _wake_gate_s)
 
         # livePlayResp: explicit camera accept/reject before SDP/ICE.
         if _skip_lp:
             _LOGGER.info(
                 "signaling-wait[%s] livePlayResp skipped (sdes_fast_liveplay)",
-                self.device_id)
+                self.device_id,
+            )
         else:
             _lp_t0 = time.monotonic()
             _lp_arrived = False
@@ -3346,19 +3530,30 @@ class _SdesOpenMixin:
                         try:
                             _rsock.close()
                         except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
-                    outgoing_q.put_nowait(None)   # stop MQTT thread
+                            _LOGGER.debug(
+                                "camera %s: swallowed exception in %s",
+                                getattr(self, "device_id", "?"),
+                                "_bridge_fn",
+                                exc_info=True,
+                            )
+                    outgoing_q.put_nowait(None)  # stop MQTT thread
                     raise RuntimeError(
-                        f"livePlay refused by camera (livePlay=0, code={_lp_code_sdes})")
+                        f"livePlay refused by camera (livePlay=0, code={_lp_code_sdes})"
+                    )
                 elif _lp_code_sdes not in (0, 200):
-                    _status(f"livePlayResp: non-OK code {_lp_code_sdes}"
-                            f"{' (not ready, transient)' if _lp_code_sdes == _LIVE_PLAY_NOT_READY else ''}"
-                            " - proceeding")
+                    _status(
+                        f"livePlayResp: non-OK code {_lp_code_sdes}"
+                        f"{' (not ready, transient)' if _lp_code_sdes == _LIVE_PLAY_NOT_READY else ''}"
+                        " - proceeding"
+                    )
             except TimeoutError:
                 pass
             _LOGGER.info(
                 "signaling-wait[%s] livePlayResp elapsed=%dms arrived=%s",
-                self.device_id, int((time.monotonic() - _lp_t0) * 1000), _lp_arrived)
+                self.device_id,
+                int((time.monotonic() - _lp_t0) * 1000),
+                _lp_arrived,
+            )
 
         # --- Build local-receiver SDP for ffmpeg ----------------------------- #
         # Built BEFORE sending webrtcReq so ffmpeg is already listening on the
@@ -3402,8 +3597,10 @@ class _SdesOpenMixin:
             # _inject_sprop reads the sprop cache from disk; keep it inside the
             # executor (not as an eagerly-evaluated arg) so the blocking open()
             # does not run on the event loop.
-            None, lambda: _make_sdp_tempfile(_inject_sprop(ffmpeg_sdp, self.device_id)))
-        _cl(os.unlink, sdp_path)   # released with the sockets on a cancelled open
+            None,
+            lambda: _make_sdp_tempfile(_inject_sprop(ffmpeg_sdp, self.device_id)),
+        )
+        _cl(os.unlink, sdp_path)  # released with the sockets on a cancelled open
 
         # --- Send webrtcReq BEFORE releasing reservation sockets ------------- #
         # ICE cameras (e.g. LK.IPC.A001064) send STUN binding requests to our
@@ -3423,6 +3620,7 @@ class _SdesOpenMixin:
         _sdes_stun_uris = stun_server_uris()
         _sdes_ice_server_list = [{"Uris": _sdes_stun_uris}] if _sdes_stun_uris else []
         _sdes_ice_server_list.extend(_sdes_turn_entries)
+
         # _psk_value_req was generated before the SDP offer (see above).
         # Reused here in webrtcReq and webrtcResp for consistency.
         def _compress_sdp_req(_sdp: str) -> str:
@@ -3453,8 +3651,15 @@ class _SdesOpenMixin:
                 if any(_d in _ln for _d in ("sendrecv", "recvonly", "sendonly")):
                     _k(_ln)
                     continue
-                for _ak in ("ice-ufrag", "ice-pwd", "fingerprint", "setup",
-                            "ice-options", "crypto", "psk"):
+                for _ak in (
+                    "ice-ufrag",
+                    "ice-pwd",
+                    "fingerprint",
+                    "setup",
+                    "ice-options",
+                    "crypto",
+                    "psk",
+                ):
                     if _ak in _ln:
                         if _seen.get(_ak) is None:
                             _k(_ln, _ak)
@@ -3472,13 +3677,23 @@ class _SdesOpenMixin:
                             try:
                                 _seen["H264/90000_pt"] = _ln.split(":")[1].split(" ")[0]
                             except Exception:
-                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_k', exc_info=True)
+                                _LOGGER.debug(
+                                    "camera %s: swallowed exception in %s",
+                                    getattr(self, "device_id", "?"),
+                                    "_k",
+                                    exc_info=True,
+                                )
                         elif "H265/90000" in _ln and _seen.get("H265/90000") is None:
                             _k(_ln, "H265/90000")
                             try:
                                 _seen["H265/90000_pt"] = _ln.split(":")[1].split(" ")[0]
                             except Exception:
-                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_k', exc_info=True)
+                                _LOGGER.debug(
+                                    "camera %s: swallowed exception in %s",
+                                    getattr(self, "device_id", "?"),
+                                    "_k",
+                                    exc_info=True,
+                                )
                         elif "apt=" in _ln:
                             try:
                                 _apt = _ln.split("apt=")[1].strip()
@@ -3498,48 +3713,50 @@ class _SdesOpenMixin:
             return "".join(_out)
 
         _compressed_sdp_req = _compress_sdp_req(sdes_offer_sdp)
-        _webrtc_req_sdes_payload = json.dumps({
-            "method":  "webrtcReq",
-            "service": "IPC",
-            "devId":   device_id,
-            "srcAddr": f"0.{user_id}",
-            "seq":     _seq(),
-            "tst":     int(time.time() * 1000),
-            **( {"userId": numeric_uid_raw} if numeric_uid_raw is not None else {} ),
-            "payload": {
-                # Legacy flat fields - older firmware parses payload.peerid directly.
-                "peerid":  peer_id,
-                "devId":   device_id,
-                "offer":   {"type": "offer", "sdp": sdes_offer_sdp},
-                "trackId": 0,
-                # Decompiled reference app (tyrus/o.java) sets dstAddr=deviceId
-                # for webrtcReq.
-                "dstAddr": device_id,
-                "encOffer": 1,
-                "liveMqtt": 1,
-                # powerType / p2pCache ride on the webrtcReq payload, alongside
-                # encOffer and liveMqtt - the same object the reference client
-                # puts them on (LDSMQTTClient.sendSdpOffer, smali :2967-2969,
-                # put at :3017/:3022).  They are STRINGS on the wire there: the
-                # app stringifies the ints it reads from the IPC device info,
-                # and its no-device-info fallback puts the literals "1" / "0".
-                # The DTLS webrtcReq has carried both for a long time
-                # (webrtc_open.py, per docs/official_camera_network_calls.md
-                # section 5.2) and sends them as ints; that path is fleet-proven,
-                # so it is deliberately left alone rather than churned to match.
-                "powerType": str(_live_power_type),
-                "p2pCache": str(_live_p2p_cache),
-                # wPayload: newer firmware parses wPayload for ICE credentials
-                # and PSK.  Fields match reference app o.java (signaling/tyrus).
-                "wPayload": {
+        _webrtc_req_sdes_payload = json.dumps(
+            {
+                "method": "webrtcReq",
+                "service": "IPC",
+                "devId": device_id,
+                "srcAddr": f"0.{user_id}",
+                "seq": _seq(),
+                "tst": int(time.time() * 1000),
+                **({"userId": numeric_uid_raw} if numeric_uid_raw is not None else {}),
+                "payload": {
+                    # Legacy flat fields - older firmware parses payload.peerid directly.
                     "peerid": peer_id,
-                    "sts":    int(time.time() * 1000),
-                    "psk":    _psk_value_req,
-                    "offer":  {"type": "offer", "sdp": _compressed_sdp_req},
+                    "devId": device_id,
+                    "offer": {"type": "offer", "sdp": sdes_offer_sdp},
+                    "trackId": 0,
+                    # Decompiled reference app (tyrus/o.java) sets dstAddr=deviceId
+                    # for webrtcReq.
+                    "dstAddr": device_id,
+                    "encOffer": 1,
+                    "liveMqtt": 1,
+                    # powerType / p2pCache ride on the webrtcReq payload, alongside
+                    # encOffer and liveMqtt - the same object the reference client
+                    # puts them on (LDSMQTTClient.sendSdpOffer, smali :2967-2969,
+                    # put at :3017/:3022).  They are STRINGS on the wire there: the
+                    # app stringifies the ints it reads from the IPC device info,
+                    # and its no-device-info fallback puts the literals "1" / "0".
+                    # The DTLS webrtcReq has carried both for a long time
+                    # (webrtc_open.py, per docs/official_camera_network_calls.md
+                    # section 5.2) and sends them as ints; that path is fleet-proven,
+                    # so it is deliberately left alone rather than churned to match.
+                    "powerType": str(_live_power_type),
+                    "p2pCache": str(_live_p2p_cache),
+                    # wPayload: newer firmware parses wPayload for ICE credentials
+                    # and PSK.  Fields match reference app o.java (signaling/tyrus).
+                    "wPayload": {
+                        "peerid": peer_id,
+                        "sts": int(time.time() * 1000),
+                        "psk": _psk_value_req,
+                        "offer": {"type": "offer", "sdp": _compressed_sdp_req},
+                    },
+                    "IceServerList": _sdes_ice_server_list,
                 },
-                "IceServerList": _sdes_ice_server_list,
-            },
-        })
+            }
+        )
         outgoing_q.put_nowait((webrtc_req_topic, _webrtc_req_sdes_payload))
         self._cold_phase("webrtcReq (sdes)")
         _status(f"webrtcReq sent (SDES)  peerid={peer_id}")
@@ -3554,16 +3771,21 @@ class _SdesOpenMixin:
         # here.  camera_offer_fut is only set for non-echo (role-reversal) messages
         # where is_echo=False.  The broker echo carries our own srcAddr prefix so
         # is_echo=True, which is exactly what webrtc_req_echo_fut signals.
-        _echo_fut = webrtc_req_echo_fut if webrtc_req_echo_fut is not None else camera_offer_fut
+        _echo_fut = (
+            webrtc_req_echo_fut if webrtc_req_echo_fut is not None else camera_offer_fut
+        )
         _cam_echo_received = False
         _webrtc_resp_sdes_topic: "Optional[str]" = None
         _webrtc_resp_sdes: "Optional[str]" = None
-        _sdes_webrtcresp_sent = False   # True once we actually publish the SDES webrtcResp
+        _sdes_webrtcresp_sent = (
+            False  # True once we actually publish the SDES webrtcResp
+        )
         # Only role-reversal models (A001064, _skip_lp False) echo our webrtcReq
         # and need the webrtcResp built below; for A001513-class (_skip_lp True,
         # default) the echo never arrives, so don't block ~2s on it.
         _echo_wait_s = _sdes_echo_wait_timeout(
-            _skip_lp, echo_seen=bool(getattr(self, "_sdes_echo_seen", False)))
+            _skip_lp, echo_seen=bool(getattr(self, "_sdes_echo_seen", False))
+        )
         _echo_wait_t0 = time.monotonic()
         try:
             await _asyncio.wait_for(
@@ -3579,17 +3801,28 @@ class _SdesOpenMixin:
             # any future relay allocation use the correct server/port.
             if not _sdes_turn_entries:
                 try:
-                    _echo_payload = _echo_fut.result() if (_echo_fut is not None and _echo_fut.done()) else {}
-                    for _e in (_echo_payload.get("IceServerList") or []):
+                    _echo_payload = (
+                        _echo_fut.result()
+                        if (_echo_fut is not None and _echo_fut.done())
+                        else {}
+                    )
+                    for _e in _echo_payload.get("IceServerList") or []:
                         _e_uris = _e.get("Uris") or []
                         if any("turn:" in str(u) for u in _e_uris):
-                            _sdes_turn_entries.append({
-                                "Uris":     _e_uris,
-                                "Username": _e.get("Username") or "",
-                                "Password": str(_e.get("Password") or ""),
-                            })
+                            _sdes_turn_entries.append(
+                                {
+                                    "Uris": _e_uris,
+                                    "Username": _e.get("Username") or "",
+                                    "Password": str(_e.get("Password") or ""),
+                                }
+                            )
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_k', exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_k",
+                        exc_info=True,
+                    )
             # Allocate TURN relay if not already done before offer build.
             # When ice_config provided TURN entries, pre-allocation already ran
             # and _relay_addrs is populated - skip to avoid double-allocation.
@@ -3597,17 +3830,22 @@ class _SdesOpenMixin:
                 try:
                     import re as _re_relay_e
                     import hashlib as _hlk_e
+
                     _our_te = next(
                         (e for e in _sdes_turn_entries if e.get("Username") == user_id),
                         _sdes_turn_entries[0] if _sdes_turn_entries else None,
                     )
                     if _our_te:
                         _t_uri_e = next(
-                            (str(u) for u in (_our_te.get("Uris") or [])
-                             if "turn:" in str(u)), ""
+                            (
+                                str(u)
+                                for u in (_our_te.get("Uris") or [])
+                                if "turn:" in str(u)
+                            ),
+                            "",
                         )
                         _tm_e = _re_relay_e.search(
-                            r'turns?:([^:?]+)(?::(\d+))?', _t_uri_e
+                            r"turns?:([^:?]+)(?::(\d+))?", _t_uri_e
                         )
                         if _tm_e:
                             _t_host_e = _tm_e.group(1)
@@ -3616,17 +3854,28 @@ class _SdesOpenMixin:
                             _t_pass_e = str(_our_te.get("Password") or "").encode()
                             for _alloc_sock_e in (_audio_sock, _video_sock):
                                 _alloc_res_e = _turn_allocate_udp(
-                                    _alloc_sock_e, _t_host_e, _t_port_e,
-                                    _t_user_e, _t_pass_e,
+                                    _alloc_sock_e,
+                                    _t_host_e,
+                                    _t_port_e,
+                                    _t_user_e,
+                                    _t_pass_e,
                                 )
                                 if _alloc_res_e:
-                                    _r_ip_e, _r_port_e, _r_realm_e, _r_nonce_e = _alloc_res_e
+                                    _r_ip_e, _r_port_e, _r_realm_e, _r_nonce_e = (
+                                        _alloc_res_e
+                                    )
                                     _r_key_e = _hlk_e.md5(
-                                        _t_user_e + b':' + _r_realm_e + b':' + _t_pass_e
+                                        _t_user_e + b":" + _r_realm_e + b":" + _t_pass_e
                                     ).digest()
                                     _relay_addrs[_alloc_sock_e] = (
-                                        _r_ip_e, _r_port_e, _r_realm_e, _r_nonce_e,
-                                        _t_host_e, _t_port_e, _r_key_e, _t_user_e,
+                                        _r_ip_e,
+                                        _r_port_e,
+                                        _r_realm_e,
+                                        _r_nonce_e,
+                                        _t_host_e,
+                                        _t_port_e,
+                                        _r_key_e,
+                                        _t_user_e,
                                     )
                                     _status(
                                         f"TURN relay allocated (echo fallback): "
@@ -3634,9 +3883,7 @@ class _SdesOpenMixin:
                                         f" -> {_r_ip_e}:{_r_port_e}"
                                     )
                 except Exception as _relay_early_exc:
-                    _LOGGER.warning(
-                        "TURN relay allocation error: %s", _relay_early_exc
-                    )
+                    _LOGGER.warning("TURN relay allocation error: %s", _relay_early_exc)
             # Answer SDP c= and m= use the TURN relay address when available so
             # the camera sends SRTP to our relay port.  The TURN server then
             # wraps each SRTP packet in a Data Indication and delivers it to
@@ -3646,9 +3893,13 @@ class _SdesOpenMixin:
             # back to the srflx (public) or local IP.
             _audio_relay = _relay_addrs.get(_audio_sock)
             _video_relay = _relay_addrs.get(_video_sock)
-            _ans_audio_ip   = _audio_relay[0] if _audio_relay else (_public_ip or local_ip)
+            _ans_audio_ip = (
+                _audio_relay[0] if _audio_relay else (_public_ip or local_ip)
+            )
             _ans_audio_port = _audio_relay[1] if _audio_relay else audio_port
-            _ans_video_ip   = _video_relay[0] if _video_relay else (_public_ip or local_ip)
+            _ans_video_ip = (
+                _video_relay[0] if _video_relay else (_public_ip or local_ip)
+            )
             _ans_video_port = _video_relay[1] if _video_relay else video_port
             _relay_answer_sdp = (
                 "v=0\r\n"
@@ -3666,8 +3917,12 @@ class _SdesOpenMixin:
                 f"a=ice-ufrag:{_ufrag_a}\r\n"
                 f"a=ice-pwd:{_pwd_a}\r\n"
                 + _sdes_offer_candidate_lines(
-                    _conn_mode, local_ip, audio_port, _public_ip,
-                    _relay_addrs.get(_audio_sock))
+                    _conn_mode,
+                    local_ip,
+                    audio_port,
+                    _public_ip,
+                    _relay_addrs.get(_audio_sock),
+                )
                 + f"m=video {_ans_video_port} RTP/SAVPF 96 97\r\n"
                 f"c=IN IP4 {_ans_video_ip}\r\n"
                 "a=sendonly\r\n"
@@ -3682,39 +3937,49 @@ class _SdesOpenMixin:
                 f"a=ice-ufrag:{_ufrag_v}\r\n"
                 f"a=ice-pwd:{_pwd_v}\r\n"
                 + _sdes_offer_candidate_lines(
-                    _conn_mode, local_ip, video_port, _public_ip,
-                    _relay_addrs.get(_video_sock))
+                    _conn_mode,
+                    local_ip,
+                    video_port,
+                    _public_ip,
+                    _relay_addrs.get(_video_sock),
+                )
             )
             _compressed_sdp_ans = _compress_sdp_req(_relay_answer_sdp)
 
             _webrtc_resp_sdes_topic = f"iot/v1/s/{user_id}/IPC/webrtcResp"
-            _webrtc_resp_sdes = json.dumps({
-                "method":  "webrtcResp",
-                "service": "IPC",
-                "devId":   device_id,
-                "srcAddr": f"0.{user_id}",
-                "seq":     _seq(),
-                "tst":     int(time.time() * 1000),
-                **( {"userId": numeric_uid_raw} if numeric_uid_raw is not None else {} ),
-                "payload": {
-                    "peerid":  peer_id,
-                    "devId":   device_id,
-                    "answer":  {"type": "answer", "sdp": _relay_answer_sdp},
-                    "trackId": 0,
-                    "dstAddr": device_id,
-                    "encOffer": 1,
-                    "liveMqtt": 1,
-                    # wPayload: newer firmware (e.g. LK.IPC.A001064) parses
-                    # wPayload to extract ICE credentials and PSK.  Fields match
-                    # reference app o.java (signaling/tyrus).
-                    "wPayload": {
+            _webrtc_resp_sdes = json.dumps(
+                {
+                    "method": "webrtcResp",
+                    "service": "IPC",
+                    "devId": device_id,
+                    "srcAddr": f"0.{user_id}",
+                    "seq": _seq(),
+                    "tst": int(time.time() * 1000),
+                    **(
+                        {"userId": numeric_uid_raw}
+                        if numeric_uid_raw is not None
+                        else {}
+                    ),
+                    "payload": {
                         "peerid": peer_id,
-                        "sts":    int(time.time() * 1000),
-                        "psk":    _psk_value_req,
-                        "answer": {"type": "answer", "sdp": _compressed_sdp_ans},
+                        "devId": device_id,
+                        "answer": {"type": "answer", "sdp": _relay_answer_sdp},
+                        "trackId": 0,
+                        "dstAddr": device_id,
+                        "encOffer": 1,
+                        "liveMqtt": 1,
+                        # wPayload: newer firmware (e.g. LK.IPC.A001064) parses
+                        # wPayload to extract ICE credentials and PSK.  Fields match
+                        # reference app o.java (signaling/tyrus).
+                        "wPayload": {
+                            "peerid": peer_id,
+                            "sts": int(time.time() * 1000),
+                            "psk": _psk_value_req,
+                            "answer": {"type": "answer", "sdp": _compressed_sdp_ans},
+                        },
                     },
-                },
-            })
+                }
+            )
             # Send SDES webrtcResp: camera will send SRTP to our public IP/port
             # (srflx), which routes through NAT directly to our socket.
             outgoing_q.put_nowait((_webrtc_resp_sdes_topic, _webrtc_resp_sdes))
@@ -3731,8 +3996,7 @@ class _SdesOpenMixin:
             # 2.0 s of dead time here stayed invisible, and the elapsed line is
             # what will show it if this wait ever starts being used.
             _LOGGER.info(
-                "signaling-wait[%s] webrtcReq-echo elapsed=%dms"
-                " (timeout=%.2fs)",
+                "signaling-wait[%s] webrtcReq-echo elapsed=%dms (timeout=%.2fs)",
                 getattr(self, "device_id", "?"),
                 int((time.monotonic() - _echo_wait_t0) * 1000),
                 _echo_wait_s,
@@ -3752,36 +4016,42 @@ class _SdesOpenMixin:
         def _send_sdes_ice_cand(cand_str: str, mid: str) -> None:
             """Publish a single trickle-ICE candidate via MQTT."""
             _cand_obj = {
-                "candidate":     cand_str,
-                "sdpMid":        mid,
+                "candidate": cand_str,
+                "sdpMid": mid,
                 "sdpMLineIndex": int(mid),
             }
-            _msg = json.dumps({
-                "method":  "iceCandidateReq",
-                "service": "IPC",
-                "devId":   device_id,
-                "srcAddr": f"0.{user_id}",
-                "seq":     _seq(),
-                "tst":     int(time.time() * 1000),
-                **( {"userId": numeric_uid_raw} if numeric_uid_raw is not None else {} ),
-                "payload": {
-                    # dstAddr routes to the camera device, not the user account.
-                    # HAR captures confirm payload.dstAddr = deviceId on every
-                    # iceCandidateReq; using user_id causes silent drops by firmware.
-                    "dstAddr": device_id,
-                    # wPayload is the nested format required by newer firmware
-                    # (e.g. LK.IPC.A001064) that parses wPayload.candidate instead
-                    # of the flat payload.candidate field.
-                    "wPayload": {
-                        "peerid":    peer_id,
+            _msg = json.dumps(
+                {
+                    "method": "iceCandidateReq",
+                    "service": "IPC",
+                    "devId": device_id,
+                    "srcAddr": f"0.{user_id}",
+                    "seq": _seq(),
+                    "tst": int(time.time() * 1000),
+                    **(
+                        {"userId": numeric_uid_raw}
+                        if numeric_uid_raw is not None
+                        else {}
+                    ),
+                    "payload": {
+                        # dstAddr routes to the camera device, not the user account.
+                        # HAR captures confirm payload.dstAddr = deviceId on every
+                        # iceCandidateReq; using user_id causes silent drops by firmware.
+                        "dstAddr": device_id,
+                        # wPayload is the nested format required by newer firmware
+                        # (e.g. LK.IPC.A001064) that parses wPayload.candidate instead
+                        # of the flat payload.candidate field.
+                        "wPayload": {
+                            "peerid": peer_id,
+                            "candidate": _cand_obj,
+                        },
+                        # Flat legacy fields retained for older firmware compatibility.
+                        "peerid": peer_id,
+                        "devId": device_id,
                         "candidate": _cand_obj,
                     },
-                    # Flat legacy fields retained for older firmware compatibility.
-                    "peerid":    peer_id,
-                    "devId":     device_id,
-                    "candidate": _cand_obj,
-                },
-            })
+                }
+            )
             outgoing_q.put_nowait((_ice_cand_topic_sdes, _msg))
 
         # --- TURN relay allocation: fallback for cameras that skip the echo path #
@@ -3795,6 +4065,7 @@ class _SdesOpenMixin:
             try:
                 import re as _re_relay
                 import hashlib as _hlk
+
                 _our_turn_entry = None
                 for _te in _sdes_turn_entries:
                     if _te.get("Username") == user_id:
@@ -3804,11 +4075,14 @@ class _SdesOpenMixin:
                     _our_turn_entry = _sdes_turn_entries[0]
                 if _our_turn_entry:
                     _t_uri_r = next(
-                        (str(u) for u in (_our_turn_entry.get("Uris") or [])
-                         if "turn:" in str(u)),
-                        ""
+                        (
+                            str(u)
+                            for u in (_our_turn_entry.get("Uris") or [])
+                            if "turn:" in str(u)
+                        ),
+                        "",
                     )
-                    _tm_r = _re_relay.search(r'turns?:([^:?]+)(?::(\d+))?', _t_uri_r)
+                    _tm_r = _re_relay.search(r"turns?:([^:?]+)(?::(\d+))?", _t_uri_r)
                     if _tm_r:
                         _t_host_r = _tm_r.group(1)
                         _t_port_r = int(_tm_r.group(2) or 5349)
@@ -3816,17 +4090,26 @@ class _SdesOpenMixin:
                         _t_pass_r = str(_our_turn_entry.get("Password") or "").encode()
                         for _alloc_sock in (_audio_sock, _video_sock):
                             _alloc_res = _turn_allocate_udp(
-                                _alloc_sock, _t_host_r, _t_port_r,
-                                _t_user_r, _t_pass_r,
+                                _alloc_sock,
+                                _t_host_r,
+                                _t_port_r,
+                                _t_user_r,
+                                _t_pass_r,
                             )
                             if _alloc_res:
                                 _r_ip, _r_port, _r_realm, _r_nonce = _alloc_res
                                 _r_key = _hlk.md5(
-                                    _t_user_r + b':' + _r_realm + b':' + _t_pass_r
+                                    _t_user_r + b":" + _r_realm + b":" + _t_pass_r
                                 ).digest()
                                 _relay_addrs[_alloc_sock] = (
-                                    _r_ip, _r_port, _r_realm, _r_nonce,
-                                    _t_host_r, _t_port_r, _r_key, _t_user_r,
+                                    _r_ip,
+                                    _r_port,
+                                    _r_realm,
+                                    _r_nonce,
+                                    _t_host_r,
+                                    _t_port_r,
+                                    _r_key,
+                                    _t_user_r,
                                 )
                                 _status(
                                     f"TURN relay allocated: "
@@ -3869,8 +4152,11 @@ class _SdesOpenMixin:
         _status(
             f"iceCandidateReq sent  audio={audio_port}  video={video_port}"
             + (f"  srflx={_public_ip}" if _public_ip else "")
-            + (f"  relay={_relay_addrs[_audio_sock][0]}"
-               if _audio_sock in _relay_addrs else "")
+            + (
+                f"  relay={_relay_addrs[_audio_sock][0]}"
+                if _audio_sock in _relay_addrs
+                else ""
+            )
         )
 
         # --- NAT hole-punch: create outbound UDP mapping before STUN window --- #
@@ -3884,19 +4170,28 @@ class _SdesOpenMixin:
         try:
             if _sdes_turn_entries:
                 import re as _re_hp
+
                 # Find the first TURN URI in the entry (not just Uris[0], which
                 # may be a stun: URI that the regex won't match).
                 _hp_uri = next(
-                    (str(u) for u in (_sdes_turn_entries[0].get("Uris") or [])
-                     if "turn:" in str(u)),
-                    ""
+                    (
+                        str(u)
+                        for u in (_sdes_turn_entries[0].get("Uris") or [])
+                        if "turn:" in str(u)
+                    ),
+                    "",
                 )
-                _m_hp = _re_hp.search(r'turns?:([^:?]+)(?::(\d+))?', _hp_uri)
+                _m_hp = _re_hp.search(r"turns?:([^:?]+)(?::(\d+))?", _hp_uri)
                 if _m_hp:
                     _hp_host = _m_hp.group(1)
                     _hp_port = int(_m_hp.group(2) or 3478)
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_open_sdes_stream', exc_info=True)
+            _LOGGER.debug(
+                "camera %s: swallowed exception in %s",
+                getattr(self, "device_id", "?"),
+                "_open_sdes_stream",
+                exc_info=True,
+            )
         # When the cloud supplied no TURN entry, fall back to the vendor's TURN
         # server only to open a NAT mapping.  This sends a STUN packet to a
         # hardcoded third-party host; AIDOT_SDES_HOLEPUNCH_HOST overrides it
@@ -3906,14 +4201,15 @@ class _SdesOpenMixin:
             if _hp_env is not None:
                 _hp_host = _hp_env.strip() or None
             else:
-                _hp_host = "3.230.182.123"   # fallback: Arnoo TURN server
+                _hp_host = "3.230.182.123"  # fallback: Arnoo TURN server
                 _LOGGER.warning(
                     "camera %s: no TURN entry from cloud; NAT hole-punch will send "
                     "a STUN packet to the hardcoded vendor host %s. Set "
                     "AIDOT_SDES_HOLEPUNCH_HOST to override (empty to disable).",
-                    getattr(self, "device_id", "?"), _hp_host,
+                    getattr(self, "device_id", "?"),
+                    _hp_host,
                 )
-        _hp_stun = b'\x00\x01\x00\x00\x21\x12\xa4\x42' + os.urandom(12)
+        _hp_stun = b"\x00\x01\x00\x00\x21\x12\xa4\x42" + os.urandom(12)
         _hp_port2 = 5349
         if not _hp_host:
             _status("NAT hole-punch: skipped (no TURN host)")
@@ -3922,7 +4218,12 @@ class _SdesOpenMixin:
                 try:
                     _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port))
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_sdes_ice_cand', exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_send_sdes_ice_cand",
+                        exc_info=True,
+                    )
             # Punch to TURN allocation port (5349) as well so port-restricted NAT
             # allows traffic from either TURN port (3478 STUN or 5349 allocation).
             if _hp_port != _hp_port2:
@@ -3930,7 +4231,12 @@ class _SdesOpenMixin:
                     try:
                         _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port2))
                     except Exception:
-                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_sdes_ice_cand', exc_info=True)
+                        _LOGGER.debug(
+                            "camera %s: swallowed exception in %s",
+                            getattr(self, "device_id", "?"),
+                            "_send_sdes_ice_cand",
+                            exc_info=True,
+                        )
             _status(
                 f"NAT hole-punch: sent from audio={audio_port}"
                 f" video={video_port} -> {_hp_host}:{_hp_port}"
@@ -3942,11 +4248,14 @@ class _SdesOpenMixin:
         # device behind the same NAT, which for this fleet means the camera.
         _own_srflx_ports = (audio_port, video_port)
 
-        def _is_self_peer_ip(_ip: "Optional[str]", _port: "Optional[int]" = None
-                             ) -> bool:
+        def _is_self_peer_ip(
+            _ip: "Optional[str]", _port: "Optional[int]" = None
+        ) -> bool:
             return _is_self_transport_address(
-                _ip, _port,
-                local_ip=local_ip, public_ip=_public_ip,
+                _ip,
+                _port,
+                local_ip=local_ip,
+                public_ip=_public_ip,
                 own_ports=_own_srflx_ports,
             )
 
@@ -3965,7 +4274,8 @@ class _SdesOpenMixin:
         #     close sockets immediately so ffmpeg can bind.
         import struct as _struct
         import select as _select
-        _STUN_MAGIC = b'\x21\x12\xa4\x42'
+
+        _STUN_MAGIC = b"\x21\x12\xa4\x42"
         _stun_count = 0
         _stun_seen = False
         _srtp_detected = False
@@ -3975,11 +4285,11 @@ class _SdesOpenMixin:
         if not _cam_echo_received:
             _stun_max = 2.5
         elif _sdes_webrtcresp_sent:
-            _stun_max = 20.0   # webrtcResp sent - camera may do ICE; give it time
+            _stun_max = 20.0  # webrtcResp sent - camera may do ICE; give it time
         else:
-            _stun_max = 5.0    # webrtcResp suppressed - no STUN expected; exit fast
-        _idle_limit = 1.5      # exit after ICE silence once first STUN seen
-        _pre_stun_idle = 0.5   # exit early if no packet at all (non-ICE camera)
+            _stun_max = 5.0  # webrtcResp suppressed - no STUN expected; exit fast
+        _idle_limit = 1.5  # exit after ICE silence once first STUN seen
+        _pre_stun_idle = 0.5  # exit early if no packet at all (non-ICE camera)
         _stun_deadline = time.monotonic() + _stun_max
         _last_pkt_t = time.monotonic()
         _stun_window_t0 = time.monotonic()
@@ -3987,7 +4297,12 @@ class _SdesOpenMixin:
             try:
                 _rsock.setblocking(False)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_is_self_peer_ip', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_is_self_peer_ip",
+                    exc_info=True,
+                )
         while time.monotonic() < _stun_deadline:
             # Answer-exit: the only reason to sit here is that the credentials
             # the nomination needs have not arrived yet.  Once they have - and
@@ -3997,10 +4312,11 @@ class _SdesOpenMixin:
             # idle test because the answer usually lands while the camera is
             # still probing hard, so no idle threshold would ever be crossed.
             if _stun_window_answer_exit_due(
-                    stun_seen=_stun_seen,
-                    answer_ready=_answer_ready_for_this_open(
-                        getattr(self, "_camera_answer_ice_ready_ts", None),
-                        _open_started_at)):
+                stun_seen=_stun_seen,
+                answer_ready=_answer_ready_for_this_open(
+                    getattr(self, "_camera_answer_ice_ready_ts", None), _open_started_at
+                ),
+            ):
                 _status(
                     "STUN window: leaving early after %.2fs - answer ICE"
                     " credentials in hand and camera probing; nominating now"
@@ -4012,13 +4328,11 @@ class _SdesOpenMixin:
             idle = time.monotonic() - _last_pkt_t
             if _stun_seen:
                 if idle > _idle_limit:
-                    break   # ICE done (silence after STUN) - ffmpeg will pick up SRTP
+                    break  # ICE done (silence after STUN) - ffmpeg will pick up SRTP
             elif not _cam_echo_received and idle > _pre_stun_idle:
-                break       # no STUN at all - non-ICE camera, skip window
+                break  # no STUN at all - non-ICE camera, skip window
             try:
-                _rlist, _, _ = _select.select(
-                    [_audio_sock, _video_sock], [], [], 0.1
-                )
+                _rlist, _, _ = _select.select([_audio_sock, _video_sock], [], [], 0.1)
             except Exception:
                 break
             for _sock in _rlist:
@@ -4031,7 +4345,10 @@ class _SdesOpenMixin:
                 if _stun_window_pkt_count <= 3 or _stun_window_pkt_count % 50 == 0:
                     _LOGGER.debug(
                         "STUN window: %d bytes from %s:%d, first4=%s (pkt#%d)",
-                        len(_pkt), _src[0], _src[1], _pkt[:4].hex(),
+                        len(_pkt),
+                        _src[0],
+                        _src[1],
+                        _pkt[:4].hex(),
                         _stun_window_pkt_count,
                     )
                 # Track packets that are only TURN server control responses
@@ -4048,21 +4365,24 @@ class _SdesOpenMixin:
                 # we can respond correctly via a TURN Send Indication.
                 _turn_peer_ip_sw: "Optional[str]" = None
                 _turn_peer_port_sw: "Optional[int]" = None
-                if (len(_pkt) >= 20
-                        and _pkt[:2] == b'\x00\x17'
-                        and _pkt[4:8] == _STUN_MAGIC):
+                if (
+                    len(_pkt) >= 20
+                    and _pkt[:2] == b"\x00\x17"
+                    and _pkt[4:8] == _STUN_MAGIC
+                ):
                     _sw_off = 20
                     _sw_inner = None
                     while _sw_off + 4 <= len(_pkt):
-                        _sw_at, _sw_al = _struct.unpack_from('!HH', _pkt, _sw_off)
-                        _sw_av = _pkt[_sw_off + 4:_sw_off + 4 + _sw_al]
+                        _sw_at, _sw_al = _struct.unpack_from("!HH", _pkt, _sw_off)
+                        _sw_av = _pkt[_sw_off + 4 : _sw_off + 4 + _sw_al]
                         _sw_off += 4 + _sw_al + (-_sw_al % 4)
                         if _sw_at == 0x0012 and _sw_al >= 8:  # XOR-PEER-ADDRESS
-                            _sw_xp = _struct.unpack_from('!H', _sw_av, 2)[0] ^ 0x2112
+                            _sw_xp = _struct.unpack_from("!H", _sw_av, 2)[0] ^ 0x2112
                             _sw_xb = bytes(
-                                a ^ b for a, b in zip(_sw_av[4:8], _STUN_MAGIC, strict=False)
+                                a ^ b
+                                for a, b in zip(_sw_av[4:8], _STUN_MAGIC, strict=False)
                             )
-                            _turn_peer_ip_sw = '.'.join(str(b) for b in _sw_xb)
+                            _turn_peer_ip_sw = ".".join(str(b) for b in _sw_xb)
                             _turn_peer_port_sw = _sw_xp
                         elif _sw_at == 0x0013:  # DATA
                             _sw_inner = _sw_av
@@ -4073,12 +4393,12 @@ class _SdesOpenMixin:
                     if _turn_peer_ip_sw:
                         _camera_side_pkt_count += 1
 
-                if (len(_pkt) >= 20 and _pkt[4:8] == _STUN_MAGIC):
+                if len(_pkt) >= 20 and _pkt[4:8] == _STUN_MAGIC:
                     # STUN packet - only Binding Requests (0x0001) indicate that
                     # ICE is active.  Error/Success responses (e.g. hole-punch
                     # replies) must NOT set _stun_seen or they'd trigger the 1.5s
                     # idle-exit prematurely, before camera probes arrive.
-                    if _pkt[:2] == b'\x00\x01':
+                    if _pkt[:2] == b"\x00\x01":
                         # Binding Request - reply with Binding Success Response.
                         # _stun_seen is NOT set here.  A self-loop Data
                         # Indication - our own address echoed back through the
@@ -4105,49 +4425,71 @@ class _SdesOpenMixin:
                                 ),
                                 magic_cookie=_STUN_MAGIC,
                             )
-                            if _turn_peer_ip_sw and _prefer_direct_stun.get(_sock, False):
+                            if _turn_peer_ip_sw and _prefer_direct_stun.get(
+                                _sock, False
+                            ):
                                 pass
-                            elif (_turn_peer_ip_sw and _sock in _relay_addrs
-                                    and not _is_self_peer_ip(_turn_peer_ip_sw,
-                                                             _turn_peer_port_sw)):
+                            elif (
+                                _turn_peer_ip_sw
+                                and _sock in _relay_addrs
+                                and not _is_self_peer_ip(
+                                    _turn_peer_ip_sw, _turn_peer_port_sw
+                                )
+                            ):
                                 # Arrived via TURN - respond via Send Indication
                                 _ri_sw = _relay_addrs[_sock]
                                 _t_host_sw, _t_port_sw = _ri_sw[4], _ri_sw[5]
                                 _si_pip = bytes(
-                                    int(x) for x in _turn_peer_ip_sw.split('.')
+                                    int(x) for x in _turn_peer_ip_sw.split(".")
                                 )
                                 _si_xip = bytes(
-                                    a ^ b for a, b in zip(_si_pip, _STUN_MAGIC, strict=False)
+                                    a ^ b
+                                    for a, b in zip(_si_pip, _STUN_MAGIC, strict=False)
                                 )
                                 _si_xport = (_turn_peer_port_sw ^ 0x2112) & 0xFFFF
-                                _si_xpa = (b'\x00\x01'
-                                           + _struct.pack('!H', _si_xport)
-                                           + _si_xip)
+                                _si_xpa = (
+                                    b"\x00\x01"
+                                    + _struct.pack("!H", _si_xport)
+                                    + _si_xip
+                                )
 
                                 def _build_stun_attr(_t, _v):
                                     _p = (-len(_v)) % 4
-                                    return (_struct.pack('!HH', _t, len(_v))
-                                            + _v + b'\x00' * _p)
+                                    return (
+                                        _struct.pack("!HH", _t, len(_v))
+                                        + _v
+                                        + b"\x00" * _p
+                                    )
 
-                                _si_body = _build_stun_attr(0x0012, _si_xpa) + _build_stun_attr(0x0013, _resp)
-                                _send_ind = (b'\x00\x16'
-                                             + _struct.pack('!H', len(_si_body))
-                                             + _STUN_MAGIC + os.urandom(12)
-                                             + _si_body)
+                                _si_body = _build_stun_attr(
+                                    0x0012, _si_xpa
+                                ) + _build_stun_attr(0x0013, _resp)
+                                _send_ind = (
+                                    b"\x00\x16"
+                                    + _struct.pack("!H", len(_si_body))
+                                    + _STUN_MAGIC
+                                    + os.urandom(12)
+                                    + _si_body
+                                )
                                 _sock.sendto(_send_ind, (_t_host_sw, _t_port_sw))
                                 _stun_seen = True
                             elif _turn_peer_ip_sw and _is_self_peer_ip(
-                                    _turn_peer_ip_sw, _turn_peer_port_sw):
+                                _turn_peer_ip_sw, _turn_peer_port_sw
+                            ):
                                 # Self-loop Data Indication (peer == our own
                                 # local/srflx address). Responding via TURN
                                 # creates an endless STUN echo loop and no media.
                                 # Drop it and wait for real camera checks.
                                 _selfloop_drop_count += 1
-                                if _selfloop_drop_count <= 5 or _selfloop_drop_count % 50 == 0:
+                                if (
+                                    _selfloop_drop_count <= 5
+                                    or _selfloop_drop_count % 50 == 0
+                                ):
                                     _LOGGER.debug(
                                         "STUN window: drop TURN self-loop peer %s:%s"
                                         " (count=%d)",
-                                        _turn_peer_ip_sw, _turn_peer_port_sw,
+                                        _turn_peer_ip_sw,
+                                        _turn_peer_port_sw,
                                         _selfloop_drop_count,
                                     )
                             else:
@@ -4155,13 +4497,18 @@ class _SdesOpenMixin:
                                 _stun_seen = True
                             _stun_count += 1
                         except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_is_self_peer_ip', exc_info=True)
+                            _LOGGER.debug(
+                                "camera %s: swallowed exception in %s",
+                                getattr(self, "device_id", "?"),
+                                "_is_self_peer_ip",
+                                exc_info=True,
+                            )
                 else:
                     # Non-STUN packet = SRTP arriving - ICE is done, hand off to ffmpeg now
                     _srtp_detected = True
-                    break   # inner per-socket loop
+                    break  # inner per-socket loop
             if _srtp_detected:
-                break       # outer while loop
+                break  # outer while loop
         # An echo that missed the shortened wait but turned up anyway.  Recorded,
         # not acted on: the webrtcResp this would have built has to be sent
         # BEFORE the relay allocation and the ICE window, so building it now
@@ -4169,8 +4516,11 @@ class _SdesOpenMixin:
         # does do is make the NEXT open on this device wait the full legacy
         # window - so a fleet whose echo band is not empty pays the miss once
         # and says so, instead of losing the branch silently forever.
-        if (not _cam_echo_received and _echo_fut is not None
-                and not getattr(self, "_sdes_echo_seen", False)):
+        if (
+            not _cam_echo_received
+            and _echo_fut is not None
+            and not getattr(self, "_sdes_echo_seen", False)
+        ):
             try:
                 _late_echo = _echo_fut.done() and not _echo_fut.cancelled()
             except Exception:
@@ -4183,18 +4533,28 @@ class _SdesOpenMixin:
                     " Later opens on this camera will wait %.1fs again. Set"
                     " AIDOT_SDES_ECHO_WAIT_S=%.1f to make that permanent.",
                     getattr(self, "device_id", "?"),
-                    time.monotonic() - _echo_wait_t0, _echo_wait_s,
-                    _SDES_ECHO_WAIT_LEGACY_S, _SDES_ECHO_WAIT_LEGACY_S,
+                    time.monotonic() - _echo_wait_t0,
+                    _echo_wait_s,
+                    _SDES_ECHO_WAIT_LEGACY_S,
+                    _SDES_ECHO_WAIT_LEGACY_S,
                 )
         for _rsock in (_audio_sock, _video_sock):
             try:
                 _rsock.setblocking(True)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_is_self_peer_ip', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_is_self_peer_ip",
+                    exc_info=True,
+                )
         if _stun_count:
             _status(f"ICE: responded to {_stun_count} STUN binding request(s)")
         elif not _srtp_detected:
-            if _stun_window_pkt_count and _turn_only_pkt_count == _stun_window_pkt_count:
+            if (
+                _stun_window_pkt_count
+                and _turn_only_pkt_count == _stun_window_pkt_count
+            ):
                 _status(
                     "ICE: no camera probes seen in STUN window"
                     f" (received {_stun_window_pkt_count} TURN-server control packet(s) only)"
@@ -4215,12 +4575,14 @@ class _SdesOpenMixin:
         # for the reconnect and re-send webrtcResp + ICE candidates so the camera
         # can restart its ICE agent.  Allow up to 2 retries.
         _sdes_retries = 0
-        while (_cam_echo_received
-               and _stun_count == 0
-               and not _srtp_detected
-               and camera_reconnect_ev is not None
-               and _sdes_retries < 2):
-            await asyncio.sleep(0)   # flush queued callbacks (reconnect_ev.set())
+        while (
+            _cam_echo_received
+            and _stun_count == 0
+            and not _srtp_detected
+            and camera_reconnect_ev is not None
+            and _sdes_retries < 2
+        ):
+            await asyncio.sleep(0)  # flush queued callbacks (reconnect_ev.set())
             if not camera_reconnect_ev.is_set():
                 break
             camera_reconnect_ev.clear()
@@ -4229,7 +4591,7 @@ class _SdesOpenMixin:
                 f"camera reconnected during SDES ICE window (retry {_sdes_retries})"
                 " - re-sending webrtcResp + ICE candidates"
             )
-            await asyncio.sleep(0.3)   # let camera re-subscribe before re-send
+            await asyncio.sleep(0.3)  # let camera re-subscribe before re-send
             if _webrtc_resp_sdes is not None and _sdes_webrtcresp_sent:
                 # Only re-send webrtcResp if we sent it originally (isDTLS='0').
                 # For dtls_fallback_ok cameras the SDES session was intentionally
@@ -4237,8 +4599,7 @@ class _SdesOpenMixin:
                 outgoing_q.put_nowait((_webrtc_resp_sdes_topic, _webrtc_resp_sdes))
             for _ice_mid_r, _ice_port_r in (("0", audio_port), ("1", video_port)):
                 _send_sdes_ice_cand(
-                    f"candidate:1 1 udp 2130706431 {local_ip} {_ice_port_r}"
-                    " typ host",
+                    f"candidate:1 1 udp 2130706431 {local_ip} {_ice_port_r} typ host",
                     _ice_mid_r,
                 )
                 if _public_ip:
@@ -4260,7 +4621,12 @@ class _SdesOpenMixin:
                 try:
                     _hp_sock_r.sendto(_hp_stun, (_hp_host, _hp_port))
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_is_self_peer_ip', exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_is_self_peer_ip",
+                        exc_info=True,
+                    )
             # Retry STUN window (8 s)
             _stun_deadline = time.monotonic() + 8.0
             _last_pkt_t = time.monotonic()
@@ -4271,15 +4637,17 @@ class _SdesOpenMixin:
                 # 8 s on credentials it already had - the same delay the first
                 # window was fixed for, in the window the fix had not reached.
                 if _stun_window_answer_exit_due(
-                        stun_seen=_stun_seen,
-                        answer_ready=_answer_ready_for_this_open(
-                            getattr(self, "_camera_answer_ice_ready_ts", None),
-                            _open_started_at)):
+                    stun_seen=_stun_seen,
+                    answer_ready=_answer_ready_for_this_open(
+                        getattr(self, "_camera_answer_ice_ready_ts", None),
+                        _open_started_at,
+                    ),
+                ):
                     _status(
                         "STUN window (retry %d): leaving early after %.2fs -"
                         " answer ICE credentials in hand and camera probing"
-                        % (_sdes_retries,
-                           time.monotonic() - (_stun_deadline - 8.0)))
+                        % (_sdes_retries, time.monotonic() - (_stun_deadline - 8.0))
+                    )
                     break
                 if _stun_seen and time.monotonic() - _last_pkt_t > _idle_limit:
                     break
@@ -4295,10 +4663,9 @@ class _SdesOpenMixin:
                         _pkt_r, _src_r = _sk_r.recvfrom(2048)
                     except OSError:
                         continue
-                    if (len(_pkt_r) >= 20
-                            and _pkt_r[4:8] == _STUN_MAGIC):
-                        if _pkt_r[:2] != b'\x00\x01':
-                            continue   # not a Binding Request; don't trigger idle-exit
+                    if len(_pkt_r) >= 20 and _pkt_r[4:8] == _STUN_MAGIC:
+                        if _pkt_r[:2] != b"\x00\x01":
+                            continue  # not a Binding Request; don't trigger idle-exit
                         _tid_r = _pkt_r[8:20]
                         try:
                             _resp_r = _build_stun_binding_success_response(
@@ -4314,7 +4681,12 @@ class _SdesOpenMixin:
                             _stun_seen = True
                             _stun_count += 1
                         except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_is_self_peer_ip', exc_info=True)
+                            _LOGGER.debug(
+                                "camera %s: swallowed exception in %s",
+                                getattr(self, "device_id", "?"),
+                                "_is_self_peer_ip",
+                                exc_info=True,
+                            )
                     else:
                         _srtp_detected = True
                         break
@@ -4371,12 +4743,16 @@ class _SdesOpenMixin:
                     _h.cancel()
                 if terminal_error_fut is not None and terminal_error_fut.done():
                     _code, _desc = terminal_error_fut.result()
-                    _status(f"camera refused: ack {_code} {_desc}"
-                            " - terminal, not launching the bridge")
+                    _status(
+                        f"camera refused: ack {_code} {_desc}"
+                        " - terminal, not launching the bridge"
+                    )
                     raise AidotCameraBusy(_code, _desc)
                 if answer_fut.done():
-                    _status("webrtcResp answer harvested after %.2fs"
-                            % (time.monotonic() - _ans_wait_t0))
+                    _status(
+                        "webrtcResp answer harvested after %.2fs"
+                        % (time.monotonic() - _ans_wait_t0)
+                    )
                 else:
                     _status(
                         "no webrtcResp answer within %.0fs - proceeding without ICE"
@@ -4386,23 +4762,39 @@ class _SdesOpenMixin:
             except AidotCameraBusy:
                 raise
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception awaiting answer",
-                              getattr(self, "device_id", "?"), exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception awaiting answer",
+                    getattr(self, "device_id", "?"),
+                    exc_info=True,
+                )
         _pre_launch_answer_sdp: str = ""
-        _our_tx_srtp_key_audio = srtp_key_audio  # our TX key; set early in case answer absent
-        _cam_key_audio: str = ""   # camera's answer key; set in SDP parse block below
-        _cam_key_video: str = ""   # camera's video SRTP key; set in SDP parse block below
+        _our_tx_srtp_key_audio = (
+            srtp_key_audio  # our TX key; set early in case answer absent
+        )
+        _cam_key_audio: str = ""  # camera's answer key; set in SDP parse block below
+        _cam_key_video: str = (
+            ""  # camera's video SRTP key; set in SDP parse block below
+        )
         _dc_answer_has_app: bool = False  # set True if camera echoes m=application; init here so bridge closure never sees NameError on late-wake path
-        _sctp: dict = {              # initialized here for the same reason - bridge closure
-            'state': 'CLOSED', 'local_tag': 0, 'peer_tag': 0,
-            'local_tsn': 0, 'peer_tsn': 0, 'stream_seq': 0,
+        _sctp: dict = {  # initialized here for the same reason - bridge closure
+            "state": "CLOSED",
+            "local_tag": 0,
+            "peer_tag": 0,
+            "local_tsn": 0,
+            "peer_tsn": 0,
+            "stream_seq": 0,
         }
         if answer_fut.done():
             try:
                 _pre_ans = answer_fut.result()
                 _pre_launch_answer_sdp = (_pre_ans or {}).get("sdp", "")
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_is_self_peer_ip', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_is_self_peer_ip",
+                    exc_info=True,
+                )
         if _pre_launch_answer_sdp:
             _LOGGER.debug(
                 "_open_sdes_stream: camera webrtcResp answer SDP (len=%d)",
@@ -4437,8 +4829,7 @@ class _SdesOpenMixin:
                 if _dc_ans_lines:
                     _status(
                         "DC probe ACCEPTED: camera answered m=application"
-                        f" ({len(_dc_ans_lines)} lines):\n"
-                        + "\n".join(_dc_ans_lines)
+                        f" ({len(_dc_ans_lines)} lines):\n" + "\n".join(_dc_ans_lines)
                     )
                 else:
                     _status(
@@ -4453,12 +4844,12 @@ class _SdesOpenMixin:
             # We are the SCTP client (proactive INIT), camera is server.
             _dc_answer_has_app = "m=application" in _pre_launch_answer_sdp
             _sctp = {
-                'state': 'CLOSED',    # INIT_SENT -> COOKIE_ECHOED -> ESTABLISHED -> DONE
-                'local_tag': 0,       # our verification tag (sent in INIT)
-                'peer_tag': 0,        # camera's verification tag (from INIT-ACK)
-                'local_tsn': 0,       # our TSN counter
-                'peer_tsn': 0,        # camera's Initial TSN (from its INIT/INIT-ACK)
-                'stream_seq': 0,      # stream sequence number
+                "state": "CLOSED",  # INIT_SENT -> COOKIE_ECHOED -> ESTABLISHED -> DONE
+                "local_tag": 0,  # our verification tag (sent in INIT)
+                "peer_tag": 0,  # camera's verification tag (from INIT-ACK)
+                "local_tsn": 0,  # our TSN counter
+                "peer_tsn": 0,  # camera's Initial TSN (from its INIT/INIT-ACK)
+                "stream_seq": 0,  # stream sequence number
             }
 
             _cam_key_audio = _sdes_key_from_sdp(_pre_launch_answer_sdp, "audio")
@@ -4524,9 +4915,15 @@ class _SdesOpenMixin:
                 )
             try:
                 await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: _write_text_file(sdp_path, _inject_sprop(_updated_sdp, self.device_id)))
+                    None,
+                    lambda: _write_text_file(
+                        sdp_path, _inject_sprop(_updated_sdp, self.device_id)
+                    ),
+                )
             except Exception as _sdp_exc:
-                _LOGGER.warning("_open_sdes_stream: could not rewrite SDP: %s", _sdp_exc)
+                _LOGGER.warning(
+                    "_open_sdes_stream: could not rewrite SDP: %s", _sdp_exc
+                )
 
         # --- SCTP helper functions (always defined - even when answer arrives late) --- #
         def _crc32c_fn(data):
@@ -4539,39 +4936,46 @@ class _SdesOpenMixin:
 
         def _sctp_pkt(vtag, *chunks):
             import struct as _st_sc
-            base = _st_sc.pack('!HHII', 5000, 5000, vtag, 0) + b''.join(chunks)
+
+            base = _st_sc.pack("!HHII", 5000, 5000, vtag, 0) + b"".join(chunks)
             crc = _crc32c_fn(base)
-            return base[:8] + _st_sc.pack('<I', crc) + base[12:]  # camera usrsctp uses LE CRC32c
+            return (
+                base[:8] + _st_sc.pack("<I", crc) + base[12:]
+            )  # camera usrsctp uses LE CRC32c
 
         def _sctp_chunk(ctype, flags, data):
             import struct as _st_sc
+
             n = 4 + len(data)
-            raw = _st_sc.pack('!BBH', ctype, flags, n) + data
-            return raw + b'\x00' * ((-len(raw)) % 4)
+            raw = _st_sc.pack("!BBH", ctype, flags, n) + data
+            return raw + b"\x00" * ((-len(raw)) % 4)
 
         def _sctp_init():
             import struct as _st_sc
             import random as _r_sc
-            if _sctp['local_tag'] == 0:
-                _sctp['local_tag'] = _r_sc.randint(1, 0xFFFFFFFF)
-                _sctp['local_tsn'] = _r_sc.randint(1, 0xFFFFFFFF)
-            body = _st_sc.pack('!IIHHI', _sctp['local_tag'],
-                               131072, 1024, 2048, _sctp['local_tsn'])
+
+            if _sctp["local_tag"] == 0:
+                _sctp["local_tag"] = _r_sc.randint(1, 0xFFFFFFFF)
+                _sctp["local_tsn"] = _r_sc.randint(1, 0xFFFFFFFF)
+            body = _st_sc.pack(
+                "!IIHHI", _sctp["local_tag"], 131072, 1024, 2048, _sctp["local_tsn"]
+            )
             return _sctp_pkt(0, _sctp_chunk(0x01, 0, body))
 
         def _sctp_parse_init(pkt):
             import struct as _st_sc
+
             pos = 12
             while pos + 4 <= len(pkt):
-                ctype, _, clen = _st_sc.unpack_from('!BBH', pkt, pos)
+                ctype, _, clen = _st_sc.unpack_from("!BBH", pkt, pos)
                 if clen < 4:
                     break
-                cdata = pkt[pos + 4:pos + clen]
+                cdata = pkt[pos + 4 : pos + clen]
                 if ctype == 0x01 and len(cdata) >= 16:
-                    peer_tag = _st_sc.unpack_from('!I', cdata)[0]
-                    peer_tsn = _st_sc.unpack_from('!I', cdata, 12)[0]
-                    _sctp['peer_tag'] = peer_tag
-                    _sctp['peer_tsn'] = peer_tsn
+                    peer_tag = _st_sc.unpack_from("!I", cdata)[0]
+                    peer_tsn = _st_sc.unpack_from("!I", cdata, 12)[0]
+                    _sctp["peer_tag"] = peer_tag
+                    _sctp["peer_tsn"] = peer_tsn
                     return peer_tag
                 pos += max(4, (clen + 3) & ~3)
             return None
@@ -4579,50 +4983,57 @@ class _SdesOpenMixin:
         def _sctp_init_ack_pkt():
             import struct as _st_sc
             import random as _r_sc
+
             # RFC 4960 section 5.2.1: reuse local_tag/tsn from our INIT in simultaneous open
-            if _sctp['local_tag'] == 0:
-                _sctp['local_tag'] = _r_sc.randint(1, 0xFFFFFFFF)
-                _sctp['local_tsn'] = _r_sc.randint(1, 0xFFFFFFFF)
-            cookie = _st_sc.pack('!II', _sctp['local_tag'], _sctp['peer_tag'])
-            cookie_param = _st_sc.pack('!HH', 7, 4 + len(cookie)) + cookie
-            body = (_st_sc.pack('!IIHHI', _sctp['local_tag'],
-                                131072, 1024, 2048, _sctp['local_tsn'])
-                    + cookie_param)
-            return _sctp_pkt(_sctp['peer_tag'], _sctp_chunk(0x02, 0, body))
+            if _sctp["local_tag"] == 0:
+                _sctp["local_tag"] = _r_sc.randint(1, 0xFFFFFFFF)
+                _sctp["local_tsn"] = _r_sc.randint(1, 0xFFFFFFFF)
+            cookie = _st_sc.pack("!II", _sctp["local_tag"], _sctp["peer_tag"])
+            cookie_param = _st_sc.pack("!HH", 7, 4 + len(cookie)) + cookie
+            body = (
+                _st_sc.pack(
+                    "!IIHHI", _sctp["local_tag"], 131072, 1024, 2048, _sctp["local_tsn"]
+                )
+                + cookie_param
+            )
+            return _sctp_pkt(_sctp["peer_tag"], _sctp_chunk(0x02, 0, body))
 
         def _sctp_cookie_echo(cookie):
-            return _sctp_pkt(_sctp['peer_tag'], _sctp_chunk(0x0A, 0, cookie))
+            return _sctp_pkt(_sctp["peer_tag"], _sctp_chunk(0x0A, 0, cookie))
 
         def _sctp_data(ppid, payload):
             import struct as _st_sc
-            tsn = _sctp['local_tsn']
-            _sctp['local_tsn'] = (tsn + 1) & 0xFFFFFFFF
-            seq = _sctp['stream_seq']
-            _sctp['stream_seq'] = (seq + 1) & 0xFFFF
-            body = _st_sc.pack('!IHHI', tsn, 0, seq, ppid) + payload
+
+            tsn = _sctp["local_tsn"]
+            _sctp["local_tsn"] = (tsn + 1) & 0xFFFFFFFF
+            seq = _sctp["stream_seq"]
+            _sctp["stream_seq"] = (seq + 1) & 0xFFFF
+            body = _st_sc.pack("!IHHI", tsn, 0, seq, ppid) + payload
             return _sctp_chunk(0x00, 0x03, body)
 
         def _dcep_open_msg():
             import struct as _st_sc
-            label = b'data'
-            return (_st_sc.pack('!BBHIHH', 0x03, 0x00, 256, 0, len(label), 0)
-                    + label)
+
+            label = b"data"
+            return _st_sc.pack("!BBHIHH", 0x03, 0x00, 256, 0, len(label), 0) + label
 
         def _session_mode_req_msg():
             import struct as _st_sc
             import random as _r_sc
             import time as _t_sc
+
             seq = _r_sc.randint(0, 0x7FFFFFFF)
-            ts  = int(_t_sc.time() * 1000)
-            return (_st_sc.pack('<IIqII4x', seq, 5376, ts, 8, 0)
-                    + _st_sc.pack('<IB3x', 0, 1))
+            ts = int(_t_sc.time() * 1000)
+            return _st_sc.pack("<IIqII4x", seq, 5376, ts, 8, 0) + _st_sc.pack(
+                "<IB3x", 0, 1
+            )
 
         def _sctp_send_living(sock, addr):
-            dcep   = _sctp_data(50, _dcep_open_msg())
+            dcep = _sctp_data(50, _dcep_open_msg())
             living = _sctp_data(53, _session_mode_req_msg())
-            sock.sendto(_sctp_pkt(_sctp['peer_tag'], dcep), addr)
-            sock.sendto(_sctp_pkt(_sctp['peer_tag'], living), addr)
-            _sctp['state'] = 'DONE'
+            sock.sendto(_sctp_pkt(_sctp["peer_tag"], dcep), addr)
+            sock.sendto(_sctp_pkt(_sctp["peer_tag"], living), addr)
+            _sctp["state"] = "DONE"
             _status("SDES DC: sent DATA_CHANNEL_OPEN + SESSION_MODE_REQ(5376) via SCTP")
 
         # --- ICE controlling: send STUN Binding Requests with USE-CANDIDATE --- #
@@ -4637,14 +5048,15 @@ class _SdesOpenMixin:
         # Credentials and candidates from the camera's answer.  _cam_ice_host is
         # the typ host candidate, which is what SCTP is addressed to.
         _cam_ice_ufrag: str
-        _cam_ice_pwd:   str
-        _cam_ice_cands: list        # list of (ip, port) tuples
-        _cam_ice_host:  tuple
+        _cam_ice_pwd: str
+        _cam_ice_cands: list  # list of (ip, port) tuples
+        _cam_ice_host: tuple
         # Through the shared parser, not a second copy: the STUN window's early
         # exit above means "the nomination below will succeed", and it only
         # means that while both read the same SDP the same way.
-        (_cam_ice_ufrag, _cam_ice_pwd, _cam_ice_cands,
-         _cam_ice_host) = _parse_answer_ice(_pre_launch_answer_sdp)
+        (_cam_ice_ufrag, _cam_ice_pwd, _cam_ice_cands, _cam_ice_host) = (
+            _parse_answer_ice(_pre_launch_answer_sdp)
+        )
 
         def _send_use_candidate(sock, our_ufrag, our_pwd, cam_ufrag, cam_pwd, cam_addr):
             """Send a STUN Binding Request with ICE-CONTROLLING + USE-CANDIDATE."""
@@ -4652,41 +5064,52 @@ class _SdesOpenMixin:
             import os as _os_uc
             import hmac as _hm_uc
             import hashlib as _hs_uc
-            _MAGIC_UC = b'\x21\x12\xa4\x42'
+
+            _MAGIC_UC = b"\x21\x12\xa4\x42"
             _tid_uc = _os_uc.urandom(12)
             _user = f"{cam_ufrag}:{our_ufrag}".encode()
             _user_a = (
-                _st_uc.pack('!HH', 0x0006, len(_user))
-                + _user + b'\x00' * ((-len(_user)) % 4)
+                _st_uc.pack("!HH", 0x0006, len(_user))
+                + _user
+                + b"\x00" * ((-len(_user)) % 4)
             )
-            _tiebreaker = int.from_bytes(_os_uc.urandom(8), 'big')
-            _ctrl_a = _st_uc.pack('!HHQ', 0x802a, 8, _tiebreaker)  # ICE-CONTROLLING
-            _prio_a = _st_uc.pack('!HHI', 0x0024, 4, 1845493759)   # PRIORITY (prflx)
-            _uc_a   = _st_uc.pack('!HH',  0x0025, 0)               # USE-CANDIDATE
-            _attrs  = _user_a + _ctrl_a + _prio_a + _uc_a
+            _tiebreaker = int.from_bytes(_os_uc.urandom(8), "big")
+            _ctrl_a = _st_uc.pack("!HHQ", 0x802A, 8, _tiebreaker)  # ICE-CONTROLLING
+            _prio_a = _st_uc.pack("!HHI", 0x0024, 4, 1845493759)  # PRIORITY (prflx)
+            _uc_a = _st_uc.pack("!HH", 0x0025, 0)  # USE-CANDIDATE
+            _attrs = _user_a + _ctrl_a + _prio_a + _uc_a
             _mi_len = len(_attrs) + 24
-            _mi_in  = _st_uc.pack('!HH', 0x0001, _mi_len) + _MAGIC_UC + _tid_uc + _attrs
-            _mi     = _hm_uc.new(cam_pwd.encode(), _mi_in, _hs_uc.sha1).digest()
-            _mi_a   = _st_uc.pack('!HH', 0x0008, 20) + _mi
-            _total  = len(_attrs) + len(_mi_a)
+            _mi_in = _st_uc.pack("!HH", 0x0001, _mi_len) + _MAGIC_UC + _tid_uc + _attrs
+            _mi = _hm_uc.new(cam_pwd.encode(), _mi_in, _hs_uc.sha1).digest()
+            _mi_a = _st_uc.pack("!HH", 0x0008, 20) + _mi
+            _total = len(_attrs) + len(_mi_a)
             # FINGERPRINT (RFC 5389 section 15.5): CRC32 XOR 0x5354554E, after MI.
             # KVS SDK silently drops binding requests without a valid FINGERPRINT.
             # MI is computed with length=_total (end-of-MI); FINGERPRINT uses
             # length=_total+8.  The camera strips FINGERPRINT before verifying MI,
             # so the MI value is unchanged.
             import zlib as _zl_uc
+
             _fp_total = _total + 8
             _req_for_fp = (
-                _st_uc.pack('!HH', 0x0001, _fp_total)
-                + _MAGIC_UC + _tid_uc + _attrs + _mi_a
+                _st_uc.pack("!HH", 0x0001, _fp_total)
+                + _MAGIC_UC
+                + _tid_uc
+                + _attrs
+                + _mi_a
             )
             _fp_val = (_zl_uc.crc32(_req_for_fp) & 0xFFFFFFFF) ^ 0x5354554E
-            _fp_a   = _st_uc.pack('!HHI', 0x8028, 4, _fp_val)
-            _req    = _req_for_fp + _fp_a
+            _fp_a = _st_uc.pack("!HHI", 0x8028, 4, _fp_val)
+            _req = _req_for_fp + _fp_a
             try:
                 sock.sendto(_req, cam_addr)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_send_use_candidate', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_send_use_candidate",
+                    exc_info=True,
+                )
             # Probe the same peer a second time, out of our relay allocation.
             # These are two different candidate pairs (host->peer and
             # relay->peer) and ICE validates pairs, not addresses: without the
@@ -4736,9 +5159,11 @@ class _SdesOpenMixin:
             _turn_install_permissions(_cands, "answer")
             for _c_ip, _c_port in _cands:
                 _send_use_candidate(
-                    _audio_sock, _ufrag_a, _pwd_a, _u, _p, (_c_ip, _c_port))
+                    _audio_sock, _ufrag_a, _pwd_a, _u, _p, (_c_ip, _c_port)
+                )
                 _send_use_candidate(
-                    _video_sock, _ufrag_v, _pwd_v, _u, _p, (_c_ip, _c_port))
+                    _video_sock, _ufrag_v, _pwd_v, _u, _p, (_c_ip, _c_port)
+                )
                 if (_c_ip, _c_port) not in _nominated_seen:
                     _nominated_seen.append((_c_ip, _c_port))
             return len(_cands)
@@ -4771,31 +5196,47 @@ class _SdesOpenMixin:
             _cp = _relay_addrs.get(_cp_sock)
             if not _cp or len(_cp) < 8:
                 return False
-            (_, _, _cp_realm, _cp_nonce, _cp_thost, _cp_tport,
-             _cp_key, _cp_user) = _cp[:8]
+            (_, _, _cp_realm, _cp_nonce, _cp_thost, _cp_tport, _cp_key, _cp_user) = _cp[
+                :8
+            ]
 
             def _cp_attr(_t, _v):
-                return (_cp_struct.pack('!HH', _t, len(_v))
-                        + _v + b'\x00' * ((-len(_v)) % 4))
+                return (
+                    _cp_struct.pack("!HH", _t, len(_v))
+                    + _v
+                    + b"\x00" * ((-len(_v)) % 4)
+                )
 
             # XOR-PEER-ADDRESS: family, port ^ magic[:2], addr ^ magic
             _cp_ip_b = _cp_socket.inet_aton(_cp_peer_ip)
             _cp_xport = (_cp_peer_port ^ 0x2112) & 0xFFFF
             _cp_xaddr = bytes(a ^ b for a, b in zip(_cp_ip_b, _STUN_MAGIC, strict=True))
-            _cp_xpa = b'\x00\x01' + _cp_struct.pack('!H', _cp_xport) + _cp_xaddr
+            _cp_xpa = b"\x00\x01" + _cp_struct.pack("!H", _cp_xport) + _cp_xaddr
 
             _cp_tid = os.urandom(12)
-            _cp_body = (_cp_attr(0x0012, _cp_xpa)          # XOR-PEER-ADDRESS
-                        + _cp_attr(0x0006, _cp_user)       # USERNAME
-                        + _cp_attr(0x0014, _cp_realm)      # REALM
-                        + _cp_attr(0x0015, _cp_nonce))     # NONCE
-            _cp_hdr = (b'\x00\x08'                        # CreatePermission request
-                       + _cp_struct.pack('!H', len(_cp_body) + 24)
-                       + _STUN_MAGIC + _cp_tid)
-            _cp_mi = _cp_hmac.new(_cp_key, _cp_hdr + _cp_body, _cp_hashlib.sha1).digest()
-            _cp_body += _cp_attr(0x0008, _cp_mi)           # MESSAGE-INTEGRITY
-            _cp_msg = (b'\x00\x08' + _cp_struct.pack('!H', len(_cp_body))
-                       + _STUN_MAGIC + _cp_tid + _cp_body)
+            _cp_body = (
+                _cp_attr(0x0012, _cp_xpa)  # XOR-PEER-ADDRESS
+                + _cp_attr(0x0006, _cp_user)  # USERNAME
+                + _cp_attr(0x0014, _cp_realm)  # REALM
+                + _cp_attr(0x0015, _cp_nonce)
+            )  # NONCE
+            _cp_hdr = (
+                b"\x00\x08"  # CreatePermission request
+                + _cp_struct.pack("!H", len(_cp_body) + 24)
+                + _STUN_MAGIC
+                + _cp_tid
+            )
+            _cp_mi = _cp_hmac.new(
+                _cp_key, _cp_hdr + _cp_body, _cp_hashlib.sha1
+            ).digest()
+            _cp_body += _cp_attr(0x0008, _cp_mi)  # MESSAGE-INTEGRITY
+            _cp_msg = (
+                b"\x00\x08"
+                + _cp_struct.pack("!H", len(_cp_body))
+                + _STUN_MAGIC
+                + _cp_tid
+                + _cp_body
+            )
             try:
                 _cp_sock.sendto(_cp_msg, (_cp_thost, _cp_tport))
                 return True
@@ -4820,26 +5261,41 @@ class _SdesOpenMixin:
             _rf = _relay_addrs.get(_rf_sock)
             if not _rf or len(_rf) < 8:
                 return False
-            (_, _, _rf_realm, _rf_nonce, _rf_thost, _rf_tport,
-             _rf_key, _rf_user) = _rf[:8]
+            (_, _, _rf_realm, _rf_nonce, _rf_thost, _rf_tport, _rf_key, _rf_user) = _rf[
+                :8
+            ]
 
             def _rf_attr(_t, _v):
-                return (_rf_struct.pack('!HH', _t, len(_v))
-                        + _v + b'\x00' * ((-len(_v)) % 4))
+                return (
+                    _rf_struct.pack("!HH", _t, len(_v))
+                    + _v
+                    + b"\x00" * ((-len(_v)) % 4)
+                )
 
             _rf_tid = os.urandom(12)
-            _rf_body = (_rf_attr(0x000D, _rf_struct.pack('!I', _rf_lifetime))
-                        + _rf_attr(0x0006, _rf_user)      # USERNAME
-                        + _rf_attr(0x0014, _rf_realm)     # REALM
-                        + _rf_attr(0x0015, _rf_nonce))    # NONCE
-            _rf_hdr = (b'\x00\x04'                       # Refresh request
-                       + _rf_struct.pack('!H', len(_rf_body) + 24)
-                       + _STUN_MAGIC + _rf_tid)
+            _rf_body = (
+                _rf_attr(0x000D, _rf_struct.pack("!I", _rf_lifetime))
+                + _rf_attr(0x0006, _rf_user)  # USERNAME
+                + _rf_attr(0x0014, _rf_realm)  # REALM
+                + _rf_attr(0x0015, _rf_nonce)
+            )  # NONCE
+            _rf_hdr = (
+                b"\x00\x04"  # Refresh request
+                + _rf_struct.pack("!H", len(_rf_body) + 24)
+                + _STUN_MAGIC
+                + _rf_tid
+            )
             _rf_mi = _rf_hmac.new(
-                _rf_key, _rf_hdr + _rf_body, _rf_hashlib.sha1).digest()
-            _rf_body += _rf_attr(0x0008, _rf_mi)          # MESSAGE-INTEGRITY
-            _rf_msg = (b'\x00\x04' + _rf_struct.pack('!H', len(_rf_body))
-                       + _STUN_MAGIC + _rf_tid + _rf_body)
+                _rf_key, _rf_hdr + _rf_body, _rf_hashlib.sha1
+            ).digest()
+            _rf_body += _rf_attr(0x0008, _rf_mi)  # MESSAGE-INTEGRITY
+            _rf_msg = (
+                b"\x00\x04"
+                + _rf_struct.pack("!H", len(_rf_body))
+                + _STUN_MAGIC
+                + _rf_tid
+                + _rf_body
+            )
             try:
                 _rf_sock.sendto(_rf_msg, (_rf_thost, _rf_tport))
                 return True
@@ -4867,24 +5323,30 @@ class _SdesOpenMixin:
             _si_thost, _si_tport = _si[4], _si[5]
 
             def _si_attr(_t, _v):
-                return (_si_struct.pack('!HH', _t, len(_v))
-                        + _v + b'\x00' * ((-len(_v)) % 4))
+                return (
+                    _si_struct.pack("!HH", _t, len(_v))
+                    + _v
+                    + b"\x00" * ((-len(_v)) % 4)
+                )
 
             try:
-                _si_ip_b = bytes(int(_o) for _o in _si_peer_ip.split('.'))
+                _si_ip_b = bytes(int(_o) for _o in _si_peer_ip.split("."))
             except Exception:
                 return False
             if len(_si_ip_b) != 4:
                 return False
             _si_xport = (_si_peer_port ^ 0x2112) & 0xFFFF
-            _si_xaddr = bytes(
-                a ^ b for a, b in zip(_si_ip_b, _STUN_MAGIC, strict=True))
-            _si_xpa = b'\x00\x01' + _si_struct.pack('!H', _si_xport) + _si_xaddr
+            _si_xaddr = bytes(a ^ b for a, b in zip(_si_ip_b, _STUN_MAGIC, strict=True))
+            _si_xpa = b"\x00\x01" + _si_struct.pack("!H", _si_xport) + _si_xaddr
 
             _si_body = _si_attr(0x0012, _si_xpa) + _si_attr(0x0013, _si_data)
-            _si_msg = (b'\x00\x16'                     # Send indication
-                       + _si_struct.pack('!H', len(_si_body))
-                       + _STUN_MAGIC + os.urandom(12) + _si_body)
+            _si_msg = (
+                b"\x00\x16"  # Send indication
+                + _si_struct.pack("!H", len(_si_body))
+                + _STUN_MAGIC
+                + os.urandom(12)
+                + _si_body
+            )
             try:
                 _si_sock.sendto(_si_msg, (_si_thost, _si_tport))
                 return True
@@ -4942,8 +5404,9 @@ class _SdesOpenMixin:
             # that -- the packets leave by the default gateway and are dropped
             # -- and the symptom otherwise reads as "first media never
             # arrived", which sends people looking at the camera.
-            _off = [(_i, _p_) for _i, _p_ in _cam_ice_cands
-                    if _candidate_is_off_subnet(_i)]
+            _off = [
+                (_i, _p_) for _i, _p_ in _cam_ice_cands if _candidate_is_off_subnet(_i)
+            ]
             if _off and len(_off) == len(_cam_ice_cands):
                 _LOGGER.warning(
                     "camera %s: every candidate it offered is on a subnet this"
@@ -4952,17 +5415,26 @@ class _SdesOpenMixin:
                     " it is on a different network segment (a mesh node,"
                     " extender or guest SSID) rather than broken.",
                     self.device_id,
-                    ", ".join(f"{_i}:{_p_}" for _i, _p_ in _off))
+                    ", ".join(f"{_i}:{_p_}" for _i, _p_ in _off),
+                )
             _turn_install_permissions(_cam_ice_cands, "setup")
 
             for _c_ip, _c_port in _cam_ice_cands:
                 _send_use_candidate(
-                    _audio_sock, _ufrag_a, _pwd_a,
-                    _cam_ice_ufrag, _cam_ice_pwd, (_c_ip, _c_port),
+                    _audio_sock,
+                    _ufrag_a,
+                    _pwd_a,
+                    _cam_ice_ufrag,
+                    _cam_ice_pwd,
+                    (_c_ip, _c_port),
                 )
                 _send_use_candidate(
-                    _video_sock, _ufrag_v, _pwd_v,
-                    _cam_ice_ufrag, _cam_ice_pwd, (_c_ip, _c_port),
+                    _video_sock,
+                    _ufrag_v,
+                    _pwd_v,
+                    _cam_ice_ufrag,
+                    _cam_ice_pwd,
+                    (_c_ip, _c_port),
                 )
             _status(
                 f"ICE controlling: sent USE-CANDIDATE to"
@@ -4995,7 +5467,7 @@ class _SdesOpenMixin:
         def _alloc_lo_port():
             _s = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
             try:
-                _s.bind(('127.0.0.1', 0))
+                _s.bind(("127.0.0.1", 0))
                 return _s.getsockname()[1]
             finally:
                 _s.close()
@@ -5052,7 +5524,11 @@ class _SdesOpenMixin:
             )
         try:
             await asyncio.get_running_loop().run_in_executor(
-                None, lambda: _write_text_file(sdp_path, _inject_sprop(_br_sdp, self.device_id)))
+                None,
+                lambda: _write_text_file(
+                    sdp_path, _inject_sprop(_br_sdp, self.device_id)
+                ),
+            )
         except Exception as _br_sdp_exc:
             _LOGGER.warning("bridge: could not rewrite SDP: %s", _br_sdp_exc)
 
@@ -5088,8 +5564,9 @@ class _SdesOpenMixin:
         # Every TURN server address this session could be relayed through:
         # our allocations plus the ICE entries themselves - the camera can
         # arrive via its OWN vendor allocation even when ours was skipped.
-        _bridge_turn_ips = ({a[0] for a in _relay_addrs.values()}
-                            | _turn_entry_ips(_sdes_turn_entries))
+        _bridge_turn_ips = {a[0] for a in _relay_addrs.values()} | _turn_entry_ips(
+            _sdes_turn_entries
+        )
         # Fallback for the above, filled from the camera's negotiated answer SDP
         # when the wait below expires without a single video packet. Kept in a
         # list for the same reason as _first_video_pt: the serve-restart path
@@ -5123,6 +5600,7 @@ class _SdesOpenMixin:
             import base64 as _b64_srx
 
             import pylibsrtp as _plsrtp_rx
+
             _rx_pol = _plsrtp_rx.Policy(
                 key=_b64_srx.b64decode(_rx_key),
                 ssrc_type=_plsrtp_rx.Policy.SSRC_ANY_INBOUND,
@@ -5141,7 +5619,7 @@ class _SdesOpenMixin:
         def _on_srtp_rx_error(_exc):
             # Capped: a build that keeps failing is retried per packet by
             # design, and the log must not follow it at frame rate.
-            _n = getattr(_bridge_fn, '_srtp_rx_err_n', 0)
+            _n = getattr(_bridge_fn, "_srtp_rx_err_n", 0)
             if _n < 8:
                 _bridge_fn._srtp_rx_err_n = _n + 1
                 _status(f"bridge: SRTP RX init failed: {_exc}")
@@ -5150,14 +5628,15 @@ class _SdesOpenMixin:
             nonlocal _br_first_di_logged, _br_first_srtp_logged, _br_first_req_dumped
             nonlocal _br_first_audio_logged, _br_first_video_logged, _avio_living_sent
             nonlocal _bridge_selfloop_drop_count  # incremented below; needs nonlocal
-            _STUN_MAGIC_BR = b'\x21\x12\xa4\x42'
+            _STUN_MAGIC_BR = b"\x21\x12\xa4\x42"
             import struct as _st_br
             import select as _sel_br
             import time as _time_br
+
             _br_prefer_direct_stun = {_audio_sock: False, _video_sock: False}
             _br_last_uc = 0.0
-            _br_last_perm = 0.0     # last CreatePermission install (monotonic)
-            _br_perm_cands = ()     # candidate set those permissions covered
+            _br_last_perm = 0.0  # last CreatePermission install (monotonic)
+            _br_perm_cands = ()  # candidate set those permissions covered
             # Seeded to now, not 0: the allocation was just created, so the
             # first refresh belongs one interval out, not on the first tick.
             _br_last_alloc_refresh = _time_br.monotonic()
@@ -5173,6 +5652,7 @@ class _SdesOpenMixin:
                 if _peer and _turn_send_indication(_s, _peer[0], _peer[1], _data):
                     return
                 _s.sendto(_data, _addr)
+
             _br_stun_resp_count = 0
             _tutk_trigger_sent = False
             # Instrumentation for the first-media stall report.  These four are
@@ -5180,8 +5660,8 @@ class _SdesOpenMixin:
             # read when the wait expires, so each is mirrored onto _bridge_fn at
             # its write site - the same publication _sprop_done uses.  Nothing
             # here is read by the bridge itself; they only ever describe.
-            _br_binding_success_count = 0   # inbound STUN Binding Success (0x0101)
-            _br_probe_verdicts: dict = {}   # probe source -> why it was/wasn't learned
+            _br_binding_success_count = 0  # inbound STUN Binding Success (0x0101)
+            _br_probe_verdicts: dict = {}  # probe source -> why it was/wasn't learned
             # A SET, not a counter: one unrecorded source probing fifty times
             # is one source, and a per-packet count would put a wrong number in
             # the report for someone to reason from.
@@ -5191,15 +5671,15 @@ class _SdesOpenMixin:
             _bridge_fn._br_binding_success_count = 0
             _bridge_fn._br_probe_verdicts = {}
             _bridge_fn._br_probe_overflow = 0
-            _last_trigger_ts    = 0.0     # time of last AVIO LIVING send
-            _trigger_bs         = None    # socket used for trigger
-            _trigger_bsrc       = None    # camera addr for trigger
-            _trigger_peer       = None    # camera's real addr when relayed
+            _last_trigger_ts = 0.0  # time of last AVIO LIVING send
+            _trigger_bs = None  # socket used for trigger
+            _trigger_bsrc = None  # camera addr for trigger
+            _trigger_peer = None  # camera's real addr when relayed
             _sdes_probe_received = False  # True after first 0xC8 probe from camera
-            _last_hb_ts         = 0.0     # time of last AVIO HEARTBEAT send
-            _stall_nudges_sent  = 0       # LIVING re-sends for the CURRENT stall
-            _stall_last_nudge   = 0.0     # wall time of the last stall nudge
-            _stall_active       = False   # media had started, then went silent
+            _last_hb_ts = 0.0  # time of last AVIO HEARTBEAT send
+            _stall_nudges_sent = 0  # LIVING re-sends for the CURRENT stall
+            _stall_last_nudge = 0.0  # wall time of the last stall nudge
+            _stall_active = False  # media had started, then went silent
             # One-shot guard for the "ffmpeg exited" log below: while the held
             # proc keeps reporting the same stale exit code across a
             # teardown-window skip (see _bridge_should_break), only the first
@@ -5233,6 +5713,7 @@ class _SdesOpenMixin:
                             if _br_rc != 0 and not _br_exit_logged:
                                 _br_exit_logged = True
                                 import logging as _log_br
+
                                 _br_level = _classify_ffmpeg_exit(
                                     _br_rc, _br_teardown_requested
                                 )
@@ -5246,8 +5727,8 @@ class _SdesOpenMixin:
                                 _br_msg = (
                                     "camera %s: SDES bridge: ffmpeg exited with"
                                     " code %d - stopped by teardown"
-                                    if _br_level < _log_br.WARNING else
-                                    "camera %s: SDES bridge: ffmpeg exited with"
+                                    if _br_level < _log_br.WARNING
+                                    else "camera %s: SDES bridge: ffmpeg exited with"
                                     " code %d - stream ended"
                                 )
                                 _log_br.getLogger(__name__).log(
@@ -5255,40 +5736,38 @@ class _SdesOpenMixin:
                                 )
                                 if _br_level >= _log_br.WARNING:
                                     _serr_tail = getattr(
-                                        _br_proc, "_aidot_stderr_tail", None)
+                                        _br_proc, "_aidot_stderr_tail", None
+                                    )
                                     # The reason first, then the raw tail. On a
                                     # lossy camera the raw tail is all
                                     # Non-monotonic DTS and says nothing about
                                     # why ffmpeg stopped.
                                     _serr_why = getattr(
-                                        _br_proc, "_aidot_stderr_notable", None)
+                                        _br_proc, "_aidot_stderr_notable", None
+                                    )
                                     if _serr_why:
                                         _log_br.getLogger(__name__).warning(
                                             "camera %s: SDES serve ffmpeg exit"
                                             " reason (last %d non-repetitive"
                                             " lines; %d NACK(s) sent for %d"
                                             " packet(s), %d late repeat(s) dropped this session):\n%s",
-                                            _br_dev, len(_serr_why),
-                                            getattr(_br_proc,
-                                                    "_aidot_nack_sent", 0)
-                                            or getattr(_bridge_fn,
-                                                       "_nack_sent", 0),
-                                            getattr(_bridge_fn,
-                                                    "_nack_seqs", 0),
-                                            getattr(_bridge_fn,
-                                                    "_nack_late_drops", 0),
+                                            _br_dev,
+                                            len(_serr_why),
+                                            getattr(_br_proc, "_aidot_nack_sent", 0)
+                                            or getattr(_bridge_fn, "_nack_sent", 0),
+                                            getattr(_bridge_fn, "_nack_seqs", 0),
+                                            getattr(_bridge_fn, "_nack_late_drops", 0),
                                             "\n".join(_serr_why),
                                         )
                                     if _serr_tail:
                                         _log_br.getLogger(__name__).warning(
                                             "camera %s: SDES serve ffmpeg stderr"
-                                            " (last %d lines):\n%s", _br_dev,
+                                            " (last %d lines):\n%s",
+                                            _br_dev,
                                             len(_serr_tail),
                                             "\n".join(_serr_tail),
                                         )
-                            if _bridge_should_break(
-                                _br_rc, _br_teardown_requested
-                            ):
+                            if _bridge_should_break(_br_rc, _br_teardown_requested):
                                 break
                         else:
                             _br_exit_logged = False
@@ -5311,27 +5790,31 @@ class _SdesOpenMixin:
                     # by the time SCTP reaches DONE - same closure pattern as the LIVING
                     # send at the DCEP_WAIT branch).  Mains plain-RTP cams never sleep
                     # and leave dcep_sock None, so they simply skip the heartbeat.
-                    _hb_sock = _sctp.get('dcep_sock')
-                    _hb_src  = _sctp.get('dcep_src')
-                    if (_sdes_probe_received
-                            and _hb_sock is not None and _hb_src is not None
-                            and _time_br.time() - _last_hb_ts >= 10.0):
+                    _hb_sock = _sctp.get("dcep_sock")
+                    _hb_src = _sctp.get("dcep_src")
+                    if (
+                        _sdes_probe_received
+                        and _hb_sock is not None
+                        and _hb_src is not None
+                        and _time_br.time() - _last_hb_ts >= 10.0
+                    ):
                         import struct as _st_hb
                         import random as _r_hb
+
                         _hb_seq = _r_hb.randint(0, 0x7FFFFFFF)
-                        _hb_ts  = int(_time_br.time() * 1000)
+                        _hb_ts = int(_time_br.time() * 1000)
                         # 28-byte AVIO header, cmd=5156 (HEARTHEAT_REQ), empty payload.
-                        _hb_avio = _st_hb.pack('<IIqII4x', _hb_seq, 5156, _hb_ts, 0, 0)
+                        _hb_avio = _st_hb.pack("<IIqII4x", _hb_seq, 5156, _hb_ts, 0, 0)
                         try:
                             _hb_chunk = _sctp_data(53, _hb_avio)
                             _hb_sock.sendto(
-                                _enc_c8_sctp(_sctp_pkt(_sctp['peer_tag'], _hb_chunk)),  # noqa: F821
+                                _enc_c8_sctp(_sctp_pkt(_sctp["peer_tag"], _hb_chunk)),  # noqa: F821
                                 _hb_src,
                             )
                             _last_hb_ts = _time_br.time()
                             _trace(
                                 f"SDES: sent AVIO HEARTBEAT(5156) via SCTP"
-                                f" TSN={(_sctp['local_tsn']-1) & 0xFFFFFFFF}"
+                                f" TSN={(_sctp['local_tsn'] - 1) & 0xFFFFFFFF}"
                                 f" -> {_hb_src[0]}:{_hb_src[1]}"
                             )
                         except Exception as _hb_e:
@@ -5345,7 +5828,9 @@ class _SdesOpenMixin:
                     # want_speaker flag; the actual command is sent from here once the
                     # command channel (_cmd_chan[0], set after LIVING) is up.
                     if _talk_state is not None and _cmd_chan[0] is not None:
-                        if _talk_state.get("want_speaker") and not _talk_state.get("speaker_on"):
+                        if _talk_state.get("want_speaker") and not _talk_state.get(
+                            "speaker_on"
+                        ):
                             # Defer SPEAKERSTART ~0.6 s after the command channel comes
                             # up.  The camera ignores it if sent immediately after LIVING
                             # (validated: the working spike sent it on first-audio,
@@ -5354,20 +5839,39 @@ class _SdesOpenMixin:
                             _now_spk = _time_br.time()
                             if _talk_state.get("spk_eligible_ts") is None:
                                 _talk_state["spk_eligible_ts"] = _now_spk
-                            elif _now_spk - _talk_state["spk_eligible_ts"] >= SDES_SPEAKERSTART_DELAY:
+                            elif (
+                                _now_spk - _talk_state["spk_eligible_ts"]
+                                >= SDES_SPEAKERSTART_DELAY
+                            ):
                                 try:
-                                    _cmd_chan[0](848, b'\x00' * 8)  # SPEAKERSTART
+                                    _cmd_chan[0](848, b"\x00" * 8)  # SPEAKERSTART
                                     _talk_state["speaker_on"] = True
-                                    _status("SDES talk: sent SPEAKERSTART(848) (bridge thread)")
+                                    _status(
+                                        "SDES talk: sent SPEAKERSTART(848) (bridge thread)"
+                                    )
                                 except Exception:
-                                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
-                        elif _talk_state.get("speaker_on") and not _talk_state.get("want_speaker"):
+                                    _LOGGER.debug(
+                                        "camera %s: swallowed exception in %s",
+                                        getattr(self, "device_id", "?"),
+                                        "_bridge_fn",
+                                        exc_info=True,
+                                    )
+                        elif _talk_state.get("speaker_on") and not _talk_state.get(
+                            "want_speaker"
+                        ):
                             try:
-                                _cmd_chan[0](849, b'\x00' * 8)  # SPEAKERSTOP
+                                _cmd_chan[0](849, b"\x00" * 8)  # SPEAKERSTOP
                                 _talk_state["speaker_on"] = False
-                                _status("SDES talk: sent SPEAKERSTOP(849) (bridge thread)")
+                                _status(
+                                    "SDES talk: sent SPEAKERSTOP(849) (bridge thread)"
+                                )
                             except Exception:
-                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                                _LOGGER.debug(
+                                    "camera %s: swallowed exception in %s",
+                                    getattr(self, "device_id", "?"),
+                                    "_bridge_fn",
+                                    exc_info=True,
+                                )
 
                     # RTCP PLI (Picture Loss Indication) - forces camera to
                     # resend IDR + VPS/SPS/PPS so ffmpeg gets codec params.
@@ -5385,12 +5889,14 @@ class _SdesOpenMixin:
                     # up to ~10 s); now a denser early ramp, then the same 30 s
                     # safety PLI.  AIDOT_SDES_PLI_GAPS overrides the early gaps
                     # (comma-sep seconds; e.g. "5,5,5" restores the old cadence).
-                    _pli_gaps = getattr(_bridge_fn, '_pli_gaps', None)
+                    _pli_gaps = getattr(_bridge_fn, "_pli_gaps", None)
                     if _pli_gaps is None:
                         try:
                             _pli_gaps = tuple(
-                                float(_x) for _x in os.environ.get(
-                                    "AIDOT_SDES_PLI_GAPS", "0,1.5,2,3").split(",")
+                                float(_x)
+                                for _x in os.environ.get(
+                                    "AIDOT_SDES_PLI_GAPS", "0,1.5,2,3"
+                                ).split(",")
                                 if _x.strip()
                             ) or (0.0, 1.5, 2.0, 3.0)
                         except ValueError:
@@ -5419,25 +5925,28 @@ class _SdesOpenMixin:
                     # so the default REMB-off config pays nothing per packet
                     # (the sender lookup used to sit above this line and ran
                     # ~300x/s for a feature that ships disabled).
-                    if (REMB_TARGET_BPS > 0
-                            and hasattr(_bridge_fn, '_cam_video_ssrc')
-                            and (_remb_send := getattr(
-                                _bridge_fn, '_send_to_cam', None)) is not None
-                            and _time_br.time() - getattr(
-                                _bridge_fn, '_last_remb_ts', 0.0) >= 1.0):
+                    if (
+                        REMB_TARGET_BPS > 0
+                        and hasattr(_bridge_fn, "_cam_video_ssrc")
+                        and (_remb_send := getattr(_bridge_fn, "_send_to_cam", None))
+                        is not None
+                        and _time_br.time() - getattr(_bridge_fn, "_last_remb_ts", 0.0)
+                        >= 1.0
+                    ):
                         _bridge_fn._last_remb_ts = _time_br.time()
                         if _send_video_remb(
-                                _remb_send,
-                                getattr(_bridge_fn, '_pli_tx_sess', None),
-                                _CAM_RTCP_SENDER_SSRC,
-                                _bridge_fn._cam_video_ssrc,
-                                REMB_TARGET_BPS,
-                        ) and not getattr(_bridge_fn, '_remb_logged', False):
+                            _remb_send,
+                            getattr(_bridge_fn, "_pli_tx_sess", None),
+                            _CAM_RTCP_SENDER_SSRC,
+                            _bridge_fn._cam_video_ssrc,
+                            REMB_TARGET_BPS,
+                        ) and not getattr(_bridge_fn, "_remb_logged", False):
                             _bridge_fn._remb_logged = True
                             _status(
                                 f"SDES: sent REMB {REMB_TARGET_BPS // 1000} kbps"
                                 f" for video SSRC"
-                                f" 0x{_bridge_fn._cam_video_ssrc:08x}")
+                                f" 0x{_bridge_fn._cam_video_ssrc:08x}"
+                            )
 
                     # TMMBR: a BOUND, where REMB above is an ESTIMATE.  Two
                     # different RFC 5104 / 4585 messages, and this firmware can
@@ -5453,44 +5962,55 @@ class _SdesOpenMixin:
                     # runs before _tmmbr_ready so the readiness math and the
                     # sender lookup happen at most once a second, not per
                     # packet, and one time.time() serves both checks.
-                    _tmmbr_bps = getattr(_bridge_fn, '_tmmbr_bps', None)
-                    if (_tmmbr_bps
-                            and hasattr(_bridge_fn, '_cam_video_ssrc')
-                            and (_tmmbr_now := _time_br.time()) - getattr(
-                                _bridge_fn, '_last_tmmbr_ts', 0.0) >= 1.0
-                            and _tmmbr_ready(
-                                getattr(_bridge_fn, '_first_video_ts', None),
-                                _tmmbr_now,
-                                getattr(_bridge_fn, '_tmmbr_after_s', 0.0))
-                            and (_tmmbr_send := getattr(
-                                _bridge_fn, '_send_to_cam', None)) is not None):
+                    _tmmbr_bps = getattr(_bridge_fn, "_tmmbr_bps", None)
+                    if (
+                        _tmmbr_bps
+                        and hasattr(_bridge_fn, "_cam_video_ssrc")
+                        and (_tmmbr_now := _time_br.time())
+                        - getattr(_bridge_fn, "_last_tmmbr_ts", 0.0)
+                        >= 1.0
+                        and _tmmbr_ready(
+                            getattr(_bridge_fn, "_first_video_ts", None),
+                            _tmmbr_now,
+                            getattr(_bridge_fn, "_tmmbr_after_s", 0.0),
+                        )
+                        and (_tmmbr_send := getattr(_bridge_fn, "_send_to_cam", None))
+                        is not None
+                    ):
                         _bridge_fn._last_tmmbr_ts = _tmmbr_now
                         if _send_video_tmmbr(
-                                _tmmbr_send,
-                                getattr(_bridge_fn, '_pli_tx_sess', None),
-                                _CAM_RTCP_SENDER_SSRC,
-                                _bridge_fn._cam_video_ssrc,
-                                _tmmbr_bps,
-                        ) and not getattr(_bridge_fn, '_tmmbr_logged', False):
+                            _tmmbr_send,
+                            getattr(_bridge_fn, "_pli_tx_sess", None),
+                            _CAM_RTCP_SENDER_SSRC,
+                            _bridge_fn._cam_video_ssrc,
+                            _tmmbr_bps,
+                        ) and not getattr(_bridge_fn, "_tmmbr_logged", False):
                             _bridge_fn._tmmbr_logged = True
                             _status(
                                 f"SDES: sent TMMBR {_tmmbr_bps // 1000} kbps"
                                 f" for video SSRC"
-                                f" 0x{_bridge_fn._cam_video_ssrc:08x}")
+                                f" 0x{_bridge_fn._cam_video_ssrc:08x}"
+                            )
 
-                    _pli_done       = getattr(_bridge_fn, '_pli_count', 0)
-                    _pli_interval   = (_pli_gaps[_pli_done]
-                                       if _pli_done < len(_pli_gaps) else 30.0)
-                    if (hasattr(_bridge_fn, '_cam_video_ssrc')
-                            and hasattr(_bridge_fn, '_cam_srtp_sock')
-                            and _time_br.time() - getattr(
-                                _bridge_fn, '_last_pli_ts', 0.0) >= _pli_interval):
+                    _pli_done = getattr(_bridge_fn, "_pli_count", 0)
+                    _pli_interval = (
+                        _pli_gaps[_pli_done] if _pli_done < len(_pli_gaps) else 30.0
+                    )
+                    if (
+                        hasattr(_bridge_fn, "_cam_video_ssrc")
+                        and hasattr(_bridge_fn, "_cam_srtp_sock")
+                        and _time_br.time() - getattr(_bridge_fn, "_last_pli_ts", 0.0)
+                        >= _pli_interval
+                    ):
                         import base64 as _b64_pli
+
                         _pli_sender_ssrc = 0xAB12CD34
-                        _pli_media_ssrc  = _bridge_fn._cam_video_ssrc
+                        _pli_media_ssrc = _bridge_fn._cam_video_ssrc
                         _pli_raw = _st_br.pack(
-                            '!BBHII',
-                            0x81, 206, 2,
+                            "!BBHII",
+                            0x81,
+                            206,
+                            2,
                             _pli_sender_ssrc,
                             _pli_media_ssrc,
                         )
@@ -5499,39 +6019,49 @@ class _SdesOpenMixin:
                         # SRTP-TX-KEY note can report the key that actually went
                         # out rather than re-deriving it.  Same expression, same
                         # result - no behavior change.
-                        _pli_key_b64 = (
-                            _our_tx_srtp_key_audio
-                            or srtp_key_audio
-                        )
+                        _pli_key_b64 = _our_tx_srtp_key_audio or srtp_key_audio
                         try:
                             import pylibsrtp as _plsrtp_pli
-                            if not hasattr(_bridge_fn, '_pli_tx_sess'):
+
+                            if not hasattr(_bridge_fn, "_pli_tx_sess"):
                                 _pli_pol = _plsrtp_pli.Policy(
                                     key=_b64_pli.b64decode(_pli_key_b64),
                                     ssrc_type=_plsrtp_pli.Policy.SSRC_SPECIFIC,
                                     ssrc_value=_pli_sender_ssrc,
                                     srtp_profile=(
-                                        _plsrtp_pli.Policy
-                                        .SRTP_PROFILE_AES128_CM_SHA1_80),
+                                        _plsrtp_pli.Policy.SRTP_PROFILE_AES128_CM_SHA1_80
+                                    ),
                                 )
                                 _pli_pol.allow_repeat_tx = True
                                 _bridge_fn._pli_tx_sess = _plsrtp_pli.Session(
-                                    policy=_pli_pol)
+                                    policy=_pli_pol
+                                )
                             _bridge_fn._cam_srtp_sock.sendto(
                                 _bridge_fn._pli_tx_sess.protect_rtcp(_pli_raw),
                                 _bridge_fn._cam_srtp_src,
                             )
                             _pli_sent = True
                         except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                            _LOGGER.debug(
+                                "camera %s: swallowed exception in %s",
+                                getattr(self, "device_id", "?"),
+                                "_bridge_fn",
+                                exc_info=True,
+                            )
                         if not _pli_sent:
                             try:
                                 _bridge_fn._cam_srtp_sock.sendto(
-                                    _pli_raw, _bridge_fn._cam_srtp_src)
+                                    _pli_raw, _bridge_fn._cam_srtp_src
+                                )
                             except Exception:
-                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                                _LOGGER.debug(
+                                    "camera %s: swallowed exception in %s",
+                                    getattr(self, "device_id", "?"),
+                                    "_bridge_fn",
+                                    exc_info=True,
+                                )
                         _bridge_fn._last_pli_ts = _time_br.time()
-                        _pli_n = getattr(_bridge_fn, '_pli_count', 0) + 1
+                        _pli_n = getattr(_bridge_fn, "_pli_count", 0) + 1
                         _bridge_fn._pli_count = _pli_n
                         if _pli_n <= len(_pli_gaps):
                             _trace(
@@ -5544,26 +6074,36 @@ class _SdesOpenMixin:
                         # so the key the first PLI went out with is the key
                         # every later PLI goes out with.
                         if _pli_n == 1 and _pli_sent:
-                            _status(_srtp_tx_key_note(
-                                "PLI", _pli_key_b64,
-                                _our_tx_srtp_key_audio, _cam_key_audio))
+                            _status(
+                                _srtp_tx_key_note(
+                                    "PLI",
+                                    _pli_key_b64,
+                                    _our_tx_srtp_key_audio,
+                                    _cam_key_audio,
+                                )
+                            )
 
                     # DCEP_WAIT -> send LIVING 300ms after DCEP_OPEN.
                     # Camera needs time to register stream 0 before LIVING arrives.
-                    if (_sctp.get('state') == 'DCEP_WAIT'
-                            and _time_br.time() - _sctp.get('dcep_sent_ts', 0.0) >= 0.3):
-                        _dw_sock = _sctp.get('dcep_sock')
-                        _dw_src  = _sctp.get('dcep_src')
+                    if (
+                        _sctp.get("state") == "DCEP_WAIT"
+                        and _time_br.time() - _sctp.get("dcep_sent_ts", 0.0) >= 0.3
+                    ):
+                        _dw_sock = _sctp.get("dcep_sock")
+                        _dw_src = _sctp.get("dcep_src")
                         if _dw_sock and _dw_src:
                             try:
                                 _lv_dw = _sctp_data(53, _session_mode_req_msg())
-                                _dw_sock.sendto(_enc_c8_sctp(_sctp_pkt(_sctp['peer_tag'], _lv_dw)), _dw_src)  # noqa: F821
-                                _sctp['state'] = 'DONE'
+                                _dw_sock.sendto(
+                                    _enc_c8_sctp(_sctp_pkt(_sctp["peer_tag"], _lv_dw)),  # noqa: F821
+                                    _dw_src,
+                                )
+                                _sctp["state"] = "DONE"
                                 _sdes_probe_received = True
                                 _last_hb_ts = _time_br.time()
                                 _status(
                                     f"SDES DC: DCEP_WAIT -> LIVING(5376)"
-                                    f" TSN={_sctp['local_tsn']-1}"
+                                    f" TSN={_sctp['local_tsn'] - 1}"
                                     f" (300ms after DCEP_OPEN)"
                                 )
                                 # Build persistent command sender for PTZ/IOCtrl/talk.
@@ -5582,7 +6122,7 @@ class _SdesOpenMixin:
                                 # socket+addr the SCTP handshake (and LIVING) used.
                                 import struct as _st_pcmd
 
-                                def _persistent_sdes_cmd(_cmd, _extra=b''):
+                                def _persistent_sdes_cmd(_cmd, _extra=b""):
                                     # dSeq, not a random number.  The app's
                                     # sendCtrl() takes this from a per-client
                                     # counter that starts at 100 and increments
@@ -5595,21 +6135,32 @@ class _SdesOpenMixin:
                                     # builder with a random dSeq, so the camera
                                     # is not validating it.
                                     _seq = self._next_dseq()
-                                    _ts  = int(_time_br.time() * 1000)
-                                    _avio = _st_pcmd.pack('<IIqII4x', _seq, _cmd, _ts,
-                                                          len(_extra), 0) + _extra
-                                    _csock = _sctp.get('dcep_sock')
-                                    _csrc  = _sctp.get('dcep_src')
+                                    _ts = int(_time_br.time() * 1000)
+                                    _avio = (
+                                        _st_pcmd.pack(
+                                            "<IIqII4x", _seq, _cmd, _ts, len(_extra), 0
+                                        )
+                                        + _extra
+                                    )
+                                    _csock = _sctp.get("dcep_sock")
+                                    _csrc = _sctp.get("dcep_src")
                                     if _csock is None or _csrc is None:
                                         return
                                     try:
                                         _chunk = _sctp_data(53, _avio)
                                         _csock.sendto(
-                                            _enc_c8_sctp(_sctp_pkt(_sctp['peer_tag'], _chunk)),
+                                            _enc_c8_sctp(
+                                                _sctp_pkt(_sctp["peer_tag"], _chunk)
+                                            ),
                                             _csrc,
                                         )
                                     except Exception:
-                                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_persistent_sdes_cmd', exc_info=True)
+                                        _LOGGER.debug(
+                                            "camera %s: swallowed exception in %s",
+                                            getattr(self, "device_id", "?"),
+                                            "_persistent_sdes_cmd",
+                                            exc_info=True,
+                                        )
 
                                 def _persistent_sdes_abort():
                                     """ABORT the association from the same socket the commands use.
@@ -5622,13 +6173,16 @@ class _SdesOpenMixin:
                                     loop referenced none of them and would not
                                     have compiled.
                                     """
-                                    _csock = _sctp.get('dcep_sock')
-                                    _csrc  = _sctp.get('dcep_src')
+                                    _csock = _sctp.get("dcep_sock")
+                                    _csrc = _sctp.get("dcep_src")
                                     if _csock is None or _csrc is None:
                                         return False
                                     _csock.sendto(
-                                        _enc_c8_sctp(_sctp_pkt(_sctp['peer_tag'],
-                                                               _sctp_abort_chunk())),
+                                        _enc_c8_sctp(
+                                            _sctp_pkt(
+                                                _sctp["peer_tag"], _sctp_abort_chunk()
+                                            )
+                                        ),
                                         _csrc,
                                     )
                                     return True
@@ -5646,28 +6200,35 @@ class _SdesOpenMixin:
                     # tick, so the CURRENT trigger socket/addrs are bound at
                     # definition time and B023 cannot bite.
                     def _resend_avio_living(
-                            _tb=_trigger_bs,
-                            _tsrc=_trigger_bsrc,
-                            _tpeer=_trigger_peer) -> None:
+                        _tb=_trigger_bs, _tsrc=_trigger_bsrc, _tpeer=_trigger_peer
+                    ) -> None:
                         import struct as _st_re2
                         import random as _r_re2
-                        _re_ts  = int(_time_br.time() * 1000)
-                        _re_seq  = _r_re2.randint(0, 0x7FFFFFFF)
-                        _re_plain = (
-                            _st_re2.pack('<IIqII4x', _re_seq, 5376, _re_ts, 28, 0)
-                            + _st_re2.pack('<IIIIIII', 0, 0, 1, 0, 0, 0, 0)
-                        )  # 56B
+
+                        _re_ts = int(_time_br.time() * 1000)
+                        _re_seq = _r_re2.randint(0, 0x7FFFFFFF)
+                        _re_plain = _st_re2.pack(
+                            "<IIqII4x", _re_seq, 5376, _re_ts, 28, 0
+                        ) + _st_re2.pack("<IIIIIII", 0, 0, 1, 0, 0, 0, 0)  # 56B
                         _re_enc = None
                         try:
                             from Crypto.Cipher import AES as _AES_re2
                             from Crypto.Util.Padding import pad as _pad_re2
-                            _re_key = _our_tx_srtp_key_audio[:16].encode('ascii')
-                            _re_iv  = (_cam_key_audio or _our_tx_srtp_key_audio)[:16].encode('ascii')
+
+                            _re_key = _our_tx_srtp_key_audio[:16].encode("ascii")
+                            _re_iv = (_cam_key_audio or _our_tx_srtp_key_audio)[
+                                :16
+                            ].encode("ascii")
                             _re_enc = _AES_re2.new(
                                 _re_key, _AES_re2.MODE_CBC, _re_iv
                             ).encrypt(_pad_re2(_re_plain, 16))
                         except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                            _LOGGER.debug(
+                                "camera %s: swallowed exception in %s",
+                                getattr(self, "device_id", "?"),
+                                "_bridge_fn",
+                                exc_info=True,
+                            )
                         for _rp in [_re_enc, _re_plain]:
                             if _rp is None:
                                 continue
@@ -5680,14 +6241,21 @@ class _SdesOpenMixin:
                                     _tpeer,
                                 )
                             except Exception:
-                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                                _LOGGER.debug(
+                                    "camera %s: swallowed exception in %s",
+                                    getattr(self, "device_id", "?"),
+                                    "_bridge_fn",
+                                    exc_info=True,
+                                )
 
                     # Periodic retrigger: resend AVIO LIVING every 2s until probe
                     # received (camera acknowledged our trigger).
-                    if (_avio_living_sent
-                            and not _sdes_probe_received
-                            and _trigger_bs is not None
-                            and _time_br.time() - _last_trigger_ts >= 2.0):
+                    if (
+                        _avio_living_sent
+                        and not _sdes_probe_received
+                        and _trigger_bs is not None
+                        and _time_br.time() - _last_trigger_ts >= 2.0
+                    ):
                         _resend_avio_living()
                         _last_trigger_ts = _time_br.time()
 
@@ -5701,12 +6269,13 @@ class _SdesOpenMixin:
                     # measured stalls while the media stayed silent.  Bounded by
                     # _stall_nudge_due; the input timeout and the keepalive
                     # reopen remain the unchanged fallback.
-                    if (_STALL_NUDGE_ENABLED
-                            and _sdes_probe_received
-                            and _trigger_bs is not None
-                            and _media_progress[0] > 0.0):
-                        _stall_silence = (
-                            _time_br.monotonic() - _media_progress[0])
+                    if (
+                        _STALL_NUDGE_ENABLED
+                        and _sdes_probe_received
+                        and _trigger_bs is not None
+                        and _media_progress[0] > 0.0
+                    ):
+                        _stall_silence = _time_br.monotonic() - _media_progress[0]
                         if _stall_silence <= _STALL_NUDGE_AFTER_S:
                             if _stall_active:
                                 _stall_active = False
@@ -5715,20 +6284,21 @@ class _SdesOpenMixin:
                                 # hostage to the 30s PLI cadence.
                                 _bridge_fn._last_pli_ts = 0.0
                                 _status(
-                                    "SDES: media resumed after stall"
-                                    " - PLI re-armed")
+                                    "SDES: media resumed after stall - PLI re-armed"
+                                )
                         elif _stall_nudge_due(
-                                silence_s=_stall_silence,
-                                nudges_sent=_stall_nudges_sent,
-                                since_last_nudge_s=(
-                                    _time_br.time() - _stall_last_nudge),
-                                stall_after_s=_STALL_NUDGE_AFTER_S):
+                            silence_s=_stall_silence,
+                            nudges_sent=_stall_nudges_sent,
+                            since_last_nudge_s=(_time_br.time() - _stall_last_nudge),
+                            stall_after_s=_STALL_NUDGE_AFTER_S,
+                        ):
                             _stall_active = True
                             _stall_nudges_sent += 1
                             _stall_last_nudge = _time_br.time()
                             _status(
                                 f"SDES: no media for {_stall_silence:.1f}s"
-                                f" - LIVING nudge {_stall_nudges_sent}/3")
+                                f" - LIVING nudge {_stall_nudges_sent}/3"
+                            )
                             _resend_avio_living()
 
                     for _bs in _rl:
@@ -5743,9 +6313,11 @@ class _SdesOpenMixin:
                         # payload, record the peer address for response routing.
                         _br_turn_peer_ip = None
                         _br_turn_peer_port = None
-                        if (len(_bpkt) >= 20
-                                and _bpkt[:2] == b'\x00\x17'
-                                and _bpkt[4:8] == _STUN_MAGIC_BR):
+                        if (
+                            len(_bpkt) >= 20
+                            and _bpkt[:2] == b"\x00\x17"
+                            and _bpkt[4:8] == _STUN_MAGIC_BR
+                        ):
                             if not _br_first_di_logged:
                                 _br_first_di_logged = True
                                 _status(
@@ -5756,18 +6328,21 @@ class _SdesOpenMixin:
                             _br_inner = None
                             while _br_off + 4 <= len(_bpkt):
                                 _br_at, _br_al = _st_br.unpack_from(
-                                    '!HH', _bpkt, _br_off)
-                                _br_av = _bpkt[_br_off + 4:_br_off + 4 + _br_al]
+                                    "!HH", _bpkt, _br_off
+                                )
+                                _br_av = _bpkt[_br_off + 4 : _br_off + 4 + _br_al]
                                 _br_off += 4 + _br_al + (-_br_al % 4)
                                 if _br_at == 0x0012 and _br_al >= 8:  # XOR-PEER-ADDRESS
-                                    _br_xp = (_st_br.unpack_from(
-                                        '!H', _br_av, 2)[0] ^ 0x2112)
-                                    _br_xb = bytes(
-                                        a ^ b for a, b in zip(
-                                            _br_av[4:8], _STUN_MAGIC_BR, strict=False)
+                                    _br_xp = (
+                                        _st_br.unpack_from("!H", _br_av, 2)[0] ^ 0x2112
                                     )
-                                    _br_turn_peer_ip = '.'.join(
-                                        str(b) for b in _br_xb)
+                                    _br_xb = bytes(
+                                        a ^ b
+                                        for a, b in zip(
+                                            _br_av[4:8], _STUN_MAGIC_BR, strict=False
+                                        )
+                                    )
+                                    _br_turn_peer_ip = ".".join(str(b) for b in _br_xb)
                                     _br_turn_peer_port = _br_xp
                                 elif _br_at == 0x0013:  # DATA
                                     _br_inner = _br_av
@@ -5784,22 +6359,26 @@ class _SdesOpenMixin:
                         # which keeps the direct path byte-for-byte unchanged.
                         _br_cam_peer = (
                             (_br_turn_peer_ip, _br_turn_peer_port)
-                            if _br_turn_peer_ip and _br_turn_peer_port
-                            and not _is_self_peer_ip(_br_turn_peer_ip,
-                                                     _br_turn_peer_port)
+                            if _br_turn_peer_ip
+                            and _br_turn_peer_port
+                            and not _is_self_peer_ip(
+                                _br_turn_peer_ip, _br_turn_peer_port
+                            )
                             else None
                         )
 
-                        if (len(_bpkt) >= 20
-                                and _bpkt[4:8] == _STUN_MAGIC_BR
-                                and _bpkt[:2] == b'\x00\x01'):
+                        if (
+                            len(_bpkt) >= 20
+                            and _bpkt[4:8] == _STUN_MAGIC_BR
+                            and _bpkt[:2] == b"\x00\x01"
+                        ):
                             # STUN Binding Request - send Binding Success Response
                             if not _br_first_req_dumped:
                                 _br_first_req_dumped = True
                                 _attrs = []
                                 _o = 20
                                 while _o + 4 <= len(_bpkt):
-                                    _at, _al = _st_br.unpack_from('!HH', _bpkt, _o)
+                                    _at, _al = _st_br.unpack_from("!HH", _bpkt, _o)
                                     _attrs.append(f"0x{_at:04x}/{_al}")
                                     _o += 4 + _al + (-_al % 4)
                                 _status(
@@ -5814,13 +6393,16 @@ class _SdesOpenMixin:
                             # address in XOR-PEER-ADDRESS; _bsrc is the TURN
                             # server and would be useless to nominate.
                             _br_obs = (
-                                _br_cam_peer if _br_cam_peer
+                                _br_cam_peer
+                                if _br_cam_peer
                                 else (None if _bsrc[0] == _hp_host else _bsrc)
                             )
                             _br_prflx_was = _bridge_uc_info["prflx"]
                             _br_prflx_now = _record_peer_reflexive(
-                                _bridge_uc_info["cands"], _br_prflx_was,
-                                _br_obs, _is_self_peer_ip,
+                                _bridge_uc_info["cands"],
+                                _br_prflx_was,
+                                _br_obs,
+                                _is_self_peer_ip,
                             )
                             if _br_prflx_now is not _br_prflx_was:
                                 # Rebind, never append: the nomination tick
@@ -5841,15 +6423,15 @@ class _SdesOpenMixin:
                                 _br_pv_where = f"{_bsrc[0]}:{_bsrc[1]}"
                                 if _br_turn_peer_ip:
                                     _br_pv_where += (
-                                        f" via {_br_turn_peer_ip}"
-                                        f":{_br_turn_peer_port}"
+                                        f" via {_br_turn_peer_ip}:{_br_turn_peer_port}"
                                     )
                                 if _br_pv_where in _br_probe_verdicts:
                                     pass
                                 elif len(_br_probe_verdicts) >= _MAX_PROBE_SOURCES:
                                     _br_probe_overflow.add(_br_pv_where)
                                     _bridge_fn._br_probe_overflow = len(
-                                        _br_probe_overflow)
+                                        _br_probe_overflow
+                                    )
                                 else:
                                     _br_probe_verdicts[_br_pv_where] = (
                                         _probe_source_verdict(
@@ -5860,9 +6442,11 @@ class _SdesOpenMixin:
                                             observed=_br_obs,
                                             known=bool(
                                                 _br_obs is not None
-                                                and (_br_obs in _br_prflx_was
-                                                     or _br_obs in
-                                                     _bridge_uc_info["cands"])
+                                                and (
+                                                    _br_obs in _br_prflx_was
+                                                    or _br_obs
+                                                    in _bridge_uc_info["cands"]
+                                                )
                                             ),
                                             learned=(
                                                 _br_prflx_now is not _br_prflx_was
@@ -5872,9 +6456,15 @@ class _SdesOpenMixin:
                                     # Rebind, never mutate: the reader is the
                                     # main coroutine on another thread.
                                     _bridge_fn._br_probe_verdicts = dict(
-                                        _br_probe_verdicts)
+                                        _br_probe_verdicts
+                                    )
                             except Exception:
-                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_probe_source_verdict', exc_info=True)
+                                _LOGGER.debug(
+                                    "camera %s: swallowed exception in %s",
+                                    getattr(self, "device_id", "?"),
+                                    "_probe_source_verdict",
+                                    exc_info=True,
+                                )
                             try:
                                 if _br_turn_peer_ip is None and _bsrc[0] != _hp_host:
                                     _br_prefer_direct_stun[_bs] = True
@@ -5891,63 +6481,80 @@ class _SdesOpenMixin:
                                     ),
                                     magic_cookie=_STUN_MAGIC_BR,
                                 )
-                                if _br_turn_peer_ip and _br_prefer_direct_stun.get(_bs, False):
+                                if _br_turn_peer_ip and _br_prefer_direct_stun.get(
+                                    _bs, False
+                                ):
                                     pass
-                                elif (_br_turn_peer_ip and _bs in _relay_addrs
-                                        and not _is_self_peer_ip(
-                                            _br_turn_peer_ip,
-                                            _br_turn_peer_port)):
+                                elif (
+                                    _br_turn_peer_ip
+                                    and _bs in _relay_addrs
+                                    and not _is_self_peer_ip(
+                                        _br_turn_peer_ip, _br_turn_peer_port
+                                    )
+                                ):
                                     # Arrived via TURN - respond via Send Indication
                                     _bri = _relay_addrs[_bs]
                                     _br_t_host, _br_t_port = _bri[4], _bri[5]
                                     _br_pip = bytes(
-                                        int(x) for x in _br_turn_peer_ip.split('.')
+                                        int(x) for x in _br_turn_peer_ip.split(".")
                                     )
                                     _br_xip2 = bytes(
-                                        a ^ b for a, b in zip(
-                                            _br_pip, _STUN_MAGIC_BR, strict=False)
+                                        a ^ b
+                                        for a, b in zip(
+                                            _br_pip, _STUN_MAGIC_BR, strict=False
+                                        )
                                     )
-                                    _br_xport2 = (
-                                        _br_turn_peer_port ^ 0x2112) & 0xFFFF
-                                    _br_xpa = (b'\x00\x01'
-                                               + _st_br.pack('!H', _br_xport2)
-                                               + _br_xip2)
+                                    _br_xport2 = (_br_turn_peer_port ^ 0x2112) & 0xFFFF
+                                    _br_xpa = (
+                                        b"\x00\x01"
+                                        + _st_br.pack("!H", _br_xport2)
+                                        + _br_xip2
+                                    )
 
                                     def _build_stun_attr(_t, _v):
                                         _p = (-len(_v)) % 4
-                                        return (_st_br.pack('!HH', _t, len(_v))
-                                                + _v + b'\x00' * _p)
+                                        return (
+                                            _st_br.pack("!HH", _t, len(_v))
+                                            + _v
+                                            + b"\x00" * _p
+                                        )
 
-                                    _br_si_body = (
-                                        _build_stun_attr(0x0012, _br_xpa)
-                                        + _build_stun_attr(0x0013, _bresp)
-                                    )
+                                    _br_si_body = _build_stun_attr(
+                                        0x0012, _br_xpa
+                                    ) + _build_stun_attr(0x0013, _bresp)
                                     _br_send_ind = (
-                                        b'\x00\x16'
-                                        + _st_br.pack('!H', len(_br_si_body))
-                                        + _STUN_MAGIC_BR + os.urandom(12)
+                                        b"\x00\x16"
+                                        + _st_br.pack("!H", len(_br_si_body))
+                                        + _STUN_MAGIC_BR
+                                        + os.urandom(12)
                                         + _br_si_body
                                     )
                                     _bs.sendto(_br_send_ind, (_br_t_host, _br_t_port))
                                 elif _br_turn_peer_ip and _is_self_peer_ip(
-                                        _br_turn_peer_ip, _br_turn_peer_port):
+                                    _br_turn_peer_ip, _br_turn_peer_port
+                                ):
                                     _bridge_selfloop_drop_count += 1
-                                    if (_bridge_selfloop_drop_count <= 5
-                                            or _bridge_selfloop_drop_count % 50 == 0):
+                                    if (
+                                        _bridge_selfloop_drop_count <= 5
+                                        or _bridge_selfloop_drop_count % 50 == 0
+                                    ):
                                         _LOGGER.debug(
                                             "bridge: drop TURN self-loop STUN peer %s:%d"
                                             " (count=%d)",
-                                            _br_turn_peer_ip, _br_turn_peer_port,
+                                            _br_turn_peer_ip,
+                                            _br_turn_peer_port,
                                             _bridge_selfloop_drop_count,
                                         )
                                 else:
                                     _bs.sendto(_bresp, _bsrc)
                                     _br_stun_resp_count += 1
-                                    _bridge_fn._br_stun_resp_count = (
-                                        _br_stun_resp_count)
+                                    _bridge_fn._br_stun_resp_count = _br_stun_resp_count
                                 # Late USE-CANDIDATE: send when answer arrived
                                 # after bridge started (empty at setup time).
-                                if not _bridge_uc_info["sent"] and _bridge_uc_info["ufrag"]:
+                                if (
+                                    not _bridge_uc_info["sent"]
+                                    and _bridge_uc_info["ufrag"]
+                                ):
                                     _bridge_uc_info["sent"] = True
                                     # Nominate BOTH the audio and video sockets, not
                                     # just the one that happened to receive this probe.
@@ -5964,20 +6571,32 @@ class _SdesOpenMixin:
                                         ):
                                             try:
                                                 _send_use_candidate(
-                                                    _uc_sock, _uc_ufrag, _uc_pwd,
+                                                    _uc_sock,
+                                                    _uc_ufrag,
+                                                    _uc_pwd,
                                                     _bridge_uc_info["ufrag"],
                                                     _bridge_uc_info["pwd"],
                                                     (_br_ci, _br_cp),
                                                 )
                                             except Exception:
-                                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                                                _LOGGER.debug(
+                                                    "camera %s: swallowed exception in %s",
+                                                    getattr(self, "device_id", "?"),
+                                                    "_bridge_fn",
+                                                    exc_info=True,
+                                                )
                                     _status(
                                         f"bridge: late USE-CANDIDATE sent (audio+video) to"
                                         f" {len(_bridge_uc_info['cands'])} camera candidate(s)"
                                         " (answer arrived after bridge started)"
                                     )
                             except Exception:
-                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                                _LOGGER.debug(
+                                    "camera %s: swallowed exception in %s",
+                                    getattr(self, "device_id", "?"),
+                                    "_bridge_fn",
+                                    exc_info=True,
+                                )
                         elif len(_bpkt) >= 20 and _bpkt[4:8] == _STUN_MAGIC_BR:
                             # CreatePermission response from the TURN server.
                             # 0x0108 = success (the relay door is open for that
@@ -5986,27 +6605,35 @@ class _SdesOpenMixin:
                             # NONCE, so adopt it and retry once.  401 means the
                             # credentials themselves are wrong, which is worth a
                             # warning because the relay stays shut.
-                            if _bpkt[:2] in (b'\x01\x08', b'\x01\x18',
-                                             b'\x01\x04', b'\x01\x14'):
+                            if _bpkt[:2] in (
+                                b"\x01\x08",
+                                b"\x01\x18",
+                                b"\x01\x04",
+                                b"\x01\x14",
+                            ):
                                 _cp_err = 0
-                                _cp_new_nonce = b''
+                                _cp_new_nonce = b""
                                 _cp_i = 20
                                 _cp_end = min(
-                                    20 + _st_br.unpack('!H', _bpkt[2:4])[0],
+                                    20 + _st_br.unpack("!H", _bpkt[2:4])[0],
                                     len(_bpkt),
                                 )
                                 while _cp_i + 4 <= _cp_end:
                                     _cp_at, _cp_al = _st_br.unpack_from(
-                                        '!HH', _bpkt, _cp_i)
-                                    _cp_v = _bpkt[_cp_i + 4:_cp_i + 4 + _cp_al]
+                                        "!HH", _bpkt, _cp_i
+                                    )
+                                    _cp_v = _bpkt[_cp_i + 4 : _cp_i + 4 + _cp_al]
                                     if _cp_at == 0x0009 and len(_cp_v) >= 4:
                                         _cp_err = _cp_v[2] * 100 + _cp_v[3]
                                     elif _cp_at == 0x0015:
                                         _cp_new_nonce = _cp_v
                                     _cp_i += 4 + _cp_al + ((-_cp_al) % 4)
-                                _cp_what = ("CreatePermission"
-                                            if _bpkt[1] == 0x08 else "Refresh")
-                                if _bpkt[:2] in (b'\x01\x08', b'\x01\x04'):
+                                _cp_what = (
+                                    "CreatePermission"
+                                    if _bpkt[1] == 0x08
+                                    else "Refresh"
+                                )
+                                if _bpkt[:2] in (b"\x01\x08", b"\x01\x04"):
                                     _cp_seen = f"_cp_ok_logged_{_cp_what}"
                                     if not getattr(_bridge_fn, _cp_seen, False):
                                         setattr(_bridge_fn, _cp_seen, True)
@@ -6018,7 +6645,8 @@ class _SdesOpenMixin:
                                     _cp_old = _relay_addrs.get(_bs)
                                     if _cp_old and len(_cp_old) >= 8:
                                         _relay_addrs[_bs] = (
-                                            *_cp_old[:3], _cp_new_nonce,
+                                            *_cp_old[:3],
+                                            _cp_new_nonce,
                                             *_cp_old[4:],
                                         )
                                         _trace(
@@ -6048,12 +6676,13 @@ class _SdesOpenMixin:
                             # successes and keepalive indications both stop the
                             # instant its ICE agent tears down, which is what
                             # tells a teardown apart from a media pause.
-                            if _bpkt[:2] in (b'\x01\x01', b'\x00\x11'):
+                            if _bpkt[:2] in (b"\x01\x01", b"\x00\x11"):
                                 _ice_progress[0] = _time_br.monotonic()
-                            if _bpkt[:2] == b'\x01\x01':
+                            if _bpkt[:2] == b"\x01\x01":
                                 _br_binding_success_count += 1
                                 _bridge_fn._br_binding_success_count = (
-                                    _br_binding_success_count)
+                                    _br_binding_success_count
+                                )
                             # STUN BindingSuccess (0x0101) from camera: ICE complete.
                             # Send AES-128-CBC encrypted SESSION_MODE_REQ (AVIO LIVING).
                             #
@@ -6064,17 +6693,22 @@ class _SdesOpenMixin:
                             #   - IV:   base64_decode(our_sdes_inline_key)[16:30] + \x00\x00
                             #   - Packet: [0xC8][0x00][len_hi][len_lo][ciphertext]
                             #     (4-byte header, NOT the 12-byte TUTK SFrame with ts/SSRC)
-                            if (_use_plain_rtp and not _tutk_trigger_sent
-                                    and _bpkt[:2] == b'\x01\x01'):
+                            if (
+                                _use_plain_rtp
+                                and not _tutk_trigger_sent
+                                and _bpkt[:2] == b"\x01\x01"
+                            ):
                                 _tutk_trigger_sent = True
                                 _bridge_fn._tutk_trigger_sent = True
                                 import struct as _st_tk
                                 import random as _rand_tk
+
                                 _ts_ms = int(_time_br.time() * 1000)
                                 _tk_seq = _rand_tk.randint(0, 0x7FFFFFFF)
-                                _avio_plain = (
-                                    _st_tk.pack('<IIqII4x', _tk_seq, 5376, _ts_ms, 28, 0)
-                                    + _st_tk.pack('<IIIIIII', 0, 0, 1, 0, 0, 0, 0)
+                                _avio_plain = _st_tk.pack(
+                                    "<IIqII4x", _tk_seq, 5376, _ts_ms, 28, 0
+                                ) + _st_tk.pack(
+                                    "<IIIIIII", 0, 0, 1, 0, 0, 0, 0
                                 )  # 28B AVIO header + 28B AVStream = 56B
 
                                 # AES-128-CBC: key=our_inline[:16] ASCII, IV=cam_inline[:16] ASCII.
@@ -6084,9 +6718,14 @@ class _SdesOpenMixin:
                                 try:
                                     from Crypto.Cipher import AES as _AES_tk
                                     from Crypto.Util.Padding import pad as _pad_tk
-                                    _aes_key = _our_tx_srtp_key_audio[:16].encode('ascii')
-                                    _aes_iv  = (_cam_key_audio or _our_tx_srtp_key_audio)[:16].encode('ascii')
-                                    _padded  = _pad_tk(_avio_plain, 16)  # PKCS#7 -> 64B
+
+                                    _aes_key = _our_tx_srtp_key_audio[:16].encode(
+                                        "ascii"
+                                    )
+                                    _aes_iv = (
+                                        _cam_key_audio or _our_tx_srtp_key_audio
+                                    )[:16].encode("ascii")
+                                    _padded = _pad_tk(_avio_plain, 16)  # PKCS#7 -> 64B
                                     _trigger_enc = _AES_tk.new(
                                         _aes_key, _AES_tk.MODE_CBC, _aes_iv
                                     ).encrypt(_padded)
@@ -6096,12 +6735,15 @@ class _SdesOpenMixin:
                                 # Packet: [0xC8][0x00][ciphertext_len_BE_2B][ciphertext]
                                 for _payload, _label in [
                                     (_trigger_enc, "AES-128-CBC"),
-                                    (_avio_plain,  "plaintext"),
+                                    (_avio_plain, "plaintext"),
                                 ]:
                                     if _payload is None:
                                         continue
                                     _sz = len(_payload)
-                                    _pkt = bytes([0xC8, 0x00, _sz >> 8, _sz & 0xFF]) + _payload
+                                    _pkt = (
+                                        bytes([0xC8, 0x00, _sz >> 8, _sz & 0xFF])
+                                        + _payload
+                                    )
                                     try:
                                         _br_send_to_cam(_bs, _pkt, _bsrc, _br_cam_peer)
                                         _status(
@@ -6110,10 +6752,15 @@ class _SdesOpenMixin:
                                             f" -> {_bsrc[0]}:{_bsrc[1]}"
                                         )
                                     except Exception:
-                                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_persistent_sdes_cmd', exc_info=True)
+                                        _LOGGER.debug(
+                                            "camera %s: swallowed exception in %s",
+                                            getattr(self, "device_id", "?"),
+                                            "_persistent_sdes_cmd",
+                                            exc_info=True,
+                                        )
                                 _avio_living_sent = True
                                 _last_trigger_ts = _time_br.time()
-                                _trigger_bs   = _bs
+                                _trigger_bs = _bs
                                 _trigger_bsrc = _bsrc
                                 _trigger_peer = _br_cam_peer
 
@@ -6130,18 +6777,16 @@ class _SdesOpenMixin:
                         else:
                             # Non-STUN packet - demux by first byte.
                             if _avio_living_sent and len(_bpkt) >= 4:
-                                _nsl_cnt = getattr(
-                                    _bridge_fn, '_non_stun_logged', 0)
+                                _nsl_cnt = getattr(_bridge_fn, "_non_stun_logged", 0)
                                 if _nsl_cnt < 5:
                                     _LOGGER.debug(
-                                        "bridge non-STUN %dB from %s:%d"
-                                        " first4=%s",
+                                        "bridge non-STUN %dB from %s:%d first4=%s",
                                         len(_bpkt),
-                                        _bsrc[0], _bsrc[1],
+                                        _bsrc[0],
+                                        _bsrc[1],
                                         _bpkt[:4].hex(),
                                     )
-                                    _bridge_fn._non_stun_logged = (
-                                        _nsl_cnt + 1)
+                                    _bridge_fn._non_stun_logged = _nsl_cnt + 1
                             # Plain SCTP over UDP: srcPort=dstPort=5000 (0x1388).
                             # Camera is a=setup:active (SCTP client - initiates INIT).
                             # We are SCTP server: wait for camera's INIT, reply INIT-ACK,
@@ -6152,16 +6797,20 @@ class _SdesOpenMixin:
                             # Standard SCTP uses port 5000 (0x1388) but log ALL
                             # candidates to catch non-standard port usage.
                             _possible_sctp = (
-                                len(_bpkt) >= 12
-                                and _bpkt[4:8] == b'\x00\x00\x00\x00'  # vtag=0 means INIT
-                                and _bpkt[12] in (0x01, 0x02, 0x0A, 0x0B, 0x06)
-                            ) or (
-                                len(_bpkt) >= 12
-                                and _bpkt[:2] == b'\x13\x88'
-                                and _bpkt[2:4] == b'\x13\x88'
+                                (
+                                    len(_bpkt) >= 12
+                                    and _bpkt[4:8]
+                                    == b"\x00\x00\x00\x00"  # vtag=0 means INIT
+                                    and _bpkt[12] in (0x01, 0x02, 0x0A, 0x0B, 0x06)
+                                )
+                                or (
+                                    len(_bpkt) >= 12
+                                    and _bpkt[:2] == b"\x13\x88"
+                                    and _bpkt[2:4] == b"\x13\x88"
+                                )
                             )
                             if _possible_sctp:
-                                st = _sctp['state']
+                                st = _sctp["state"]
                                 _chunk_type = _bpkt[12] if len(_bpkt) > 12 else 0xFF
                                 _status(
                                     f"SDES DC: plain SCTP {len(_bpkt)}B"
@@ -6173,13 +6822,15 @@ class _SdesOpenMixin:
                                 # Secondary C: camera may be SCTP client (a=setup:active
                                 # means camera initiates). If state is CLOSED and we see
                                 # an INIT chunk (type=0x01), respond with INIT-ACK.
-                                if st == 'CLOSED' and _chunk_type == 0x01:
+                                if st == "CLOSED" and _chunk_type == 0x01:
                                     peer_tag = _sctp_parse_init(_bpkt)
                                     if peer_tag:
-                                        _sctp['state'] = 'COOKIE_ECHOED'
+                                        _sctp["state"] = "COOKIE_ECHOED"
                                         try:
                                             _ack_pkt = _sctp_init_ack_pkt()
-                                            _br_send_to_cam(_bs, _ack_pkt, _bsrc, _br_cam_peer)
+                                            _br_send_to_cam(
+                                                _bs, _ack_pkt, _bsrc, _br_cam_peer
+                                            )
                                             _status(
                                                 f"SDES DC: camera sent SCTP INIT"
                                                 f" (peer_tag=0x{peer_tag:08x})"
@@ -6187,12 +6838,17 @@ class _SdesOpenMixin:
                                             )
                                         except Exception as _iae:
                                             _status(f"SCTP INIT-ACK failed: {_iae}")
-                                elif st in ('INIT_SENT', 'COOKIE_WAIT'):
+                                elif st in ("INIT_SENT", "COOKIE_WAIT"):
                                     cookie = _sctp_parse_init_ack(_bpkt, _sctp)
                                     if cookie:
-                                        _sctp['state'] = 'COOKIE_ECHOED'
+                                        _sctp["state"] = "COOKIE_ECHOED"
                                         try:
-                                            _br_send_to_cam(_bs, _sctp_cookie_echo(cookie), _bsrc, _br_cam_peer)
+                                            _br_send_to_cam(
+                                                _bs,
+                                                _sctp_cookie_echo(cookie),
+                                                _bsrc,
+                                                _br_cam_peer,
+                                            )
                                             _status(
                                                 f"SDES DC: plain INIT-ACK"
                                                 f" (cookie {len(cookie)}B)"
@@ -6201,19 +6857,24 @@ class _SdesOpenMixin:
                                         except Exception as _sce:
                                             _status(f"SCTP COOKIE-ECHO failed: {_sce}")
                                     else:
-                                        _status("SDES DC: plain SCTP pkt in INIT_SENT/COOKIE_WAIT"
-                                                " - parse_init_ack found no cookie")
-                                elif st == 'COOKIE_ECHOED':
+                                        _status(
+                                            "SDES DC: plain SCTP pkt in INIT_SENT/COOKIE_WAIT"
+                                            " - parse_init_ack found no cookie"
+                                        )
+                                elif st == "COOKIE_ECHOED":
                                     # Any SCTP packet (COOKIE-ACK = type 0x0B) signals
                                     # SCTP is established.
-                                    _sctp['state'] = 'ESTABLISHED'
-                                    _status("SDES DC: SCTP COOKIE-ACK - DataChannel OPEN")
+                                    _sctp["state"] = "ESTABLISHED"
+                                    _status(
+                                        "SDES DC: SCTP COOKIE-ACK - DataChannel OPEN"
+                                    )
                                     try:
                                         _sctp_send_living(_bs, _bsrc)
                                     except Exception as _sle:
-                                        _LOGGER.warning("SDES DC: send living failed: %s",
-                                                        _sle)
-                                elif st == 'DONE':
+                                        _LOGGER.warning(
+                                            "SDES DC: send living failed: %s", _sle
+                                        )
+                                elif st == "DONE":
                                     pass  # ignore further SCTP (SACKs etc.)
                                 continue
                             # Log DTLS packets (first byte 0x14-0x17) if they arrive.
@@ -6229,11 +6890,13 @@ class _SdesOpenMixin:
                             #
                             # Raw hex dump of all 0xC8/0xC9 packets (first 10) to verify
                             # packet format and AES key/IV derivation.
-                            if (len(_bpkt) >= 1
-                                    and _bpkt[0] not in (0xC8, 0xC9)
-                                    and not (len(_bpkt) >= 4 and 0x14 <= _bpkt[0] <= 0x17)
-                                    and _sctp.get('state') == 'DONE'):
-                                if not hasattr(_bridge_fn, '_non_c8_after_done'):
+                            if (
+                                len(_bpkt) >= 1
+                                and _bpkt[0] not in (0xC8, 0xC9)
+                                and not (len(_bpkt) >= 4 and 0x14 <= _bpkt[0] <= 0x17)
+                                and _sctp.get("state") == "DONE"
+                            ):
+                                if not hasattr(_bridge_fn, "_non_c8_after_done"):
                                     _bridge_fn._non_c8_after_done = 0
                                 _bridge_fn._non_c8_after_done += 1
                                 if _bridge_fn._non_c8_after_done <= 5:
@@ -6243,13 +6906,16 @@ class _SdesOpenMixin:
                                         f" {_bpkt[:24].hex()}"
                                     )
                             if len(_bpkt) >= 1 and _bpkt[0] in (0xC8, 0xC9):
-                                if not hasattr(_bridge_fn, '_c8_raw_count'):
+                                if not hasattr(_bridge_fn, "_c8_raw_count"):
                                     _bridge_fn._c8_raw_count = 0
                                 _bridge_fn._c8_raw_count += 1
                                 if _bridge_fn._c8_raw_count <= 10:
-                                    _sdes_k_fp = _key_fingerprint(_our_tx_srtp_key_audio)
+                                    _sdes_k_fp = _key_fingerprint(
+                                        _our_tx_srtp_key_audio
+                                    )
                                     _sdes_v_fp = _key_fingerprint(
-                                        _cam_key_audio or _our_tx_srtp_key_audio)
+                                        _cam_key_audio or _our_tx_srtp_key_audio
+                                    )
                                     _trace(
                                         f"bridge: RAW 0x{_bpkt[0]:02x} {len(_bpkt)}B"
                                         f" #{_bridge_fn._c8_raw_count}"
@@ -6270,12 +6936,16 @@ class _SdesOpenMixin:
                             #   [8-11] SSRC (big-endian; confirmed matches actual pkt ssrc)
                             # Strip TUTK header and synthesize a standard RTP/2 packet
                             # so ffmpeg (configured with RTP/AVP, no SRTP) can decode.
-                            if _use_plain_rtp and len(_bpkt) >= 12 and _bpkt[0] in (0xC8, 0xC9):
-                                _tk_type  = _bpkt[0]
-                                _tk_ts    = int.from_bytes(_bpkt[4:8],  'big')
-                                _tk_ssrc  = int.from_bytes(_bpkt[8:12], 'big')
-                                _tk_audio = (_tk_type == 0xC8)
-                                _tk_pt    = 8 if _tk_audio else 96   # PCMA or H264
+                            if (
+                                _use_plain_rtp
+                                and len(_bpkt) >= 12
+                                and _bpkt[0] in (0xC8, 0xC9)
+                            ):
+                                _tk_type = _bpkt[0]
+                                _tk_ts = int.from_bytes(_bpkt[4:8], "big")
+                                _tk_ssrc = int.from_bytes(_bpkt[8:12], "big")
+                                _tk_audio = _tk_type == 0xC8
+                                _tk_pt = 8 if _tk_audio else 96  # PCMA or H264
                                 _tk_payload = _bpkt[12:]
                                 # Mark probe received; start heartbeat timer
                                 if not _sdes_probe_received:
@@ -6290,27 +6960,40 @@ class _SdesOpenMixin:
                                 # sequence as a stream of discontinuities and
                                 # reports `RTP: missed N packets` for loss that
                                 # never happened.
-                                if not hasattr(_bridge_fn, '_tutk_seq_v'):
+                                if not hasattr(_bridge_fn, "_tutk_seq_v"):
                                     _bridge_fn._tutk_seq_a = 0
                                     _bridge_fn._tutk_seq_v = 0
                                 if _tk_audio:
-                                    _bridge_fn._tutk_seq_a = (_bridge_fn._tutk_seq_a + 1) & 0xFFFF
+                                    _bridge_fn._tutk_seq_a = (
+                                        _bridge_fn._tutk_seq_a + 1
+                                    ) & 0xFFFF
                                     _tk_seq = _bridge_fn._tutk_seq_a
-                                    _btgt, _lo_target, _kind = _lo_audio_port, _lo_a, "audio"
+                                    _btgt, _lo_target, _kind = (
+                                        _lo_audio_port,
+                                        _lo_a,
+                                        "audio",
+                                    )
                                 else:
-                                    _bridge_fn._tutk_seq_v = (_bridge_fn._tutk_seq_v + 1) & 0xFFFF
+                                    _bridge_fn._tutk_seq_v = (
+                                        _bridge_fn._tutk_seq_v + 1
+                                    ) & 0xFFFF
                                     _tk_seq = _bridge_fn._tutk_seq_v
-                                    _btgt, _lo_target, _kind = _lo_video_port, _lo_v, "video"
+                                    _btgt, _lo_target, _kind = (
+                                        _lo_video_port,
+                                        _lo_v,
+                                        "video",
+                                    )
                                 # Synthesize 12-byte RTP header (V=2, no padding/ext/csrc)
-                                _rtp_hdr = _st_br.pack('!BBHII',
-                                    0x80,       # V=2 P=0 X=0 CC=0
-                                    _tk_pt,     # M=0 PT
+                                _rtp_hdr = _st_br.pack(
+                                    "!BBHII",
+                                    0x80,  # V=2 P=0 X=0 CC=0
+                                    _tk_pt,  # M=0 PT
                                     _tk_seq,
                                     _tk_ts,
                                     _tk_ssrc,
                                 )
                                 _bpkt = _rtp_hdr + _tk_payload
-                                if not hasattr(_bridge_fn, '_tutk_count'):
+                                if not hasattr(_bridge_fn, "_tutk_count"):
                                     _bridge_fn._tutk_count = 0
                                     _bridge_fn._tutk_first_ts = _time_br.time()
                                 _bridge_fn._tutk_count += 1
@@ -6325,20 +7008,33 @@ class _SdesOpenMixin:
                                 if _tk_audio and _cam_key_audio:
                                     try:
                                         from Crypto.Cipher import AES as _AES_pd
-                                        from Crypto.Util.Padding import unpad as _unpad_pd
-                                        _pd_key = _our_tx_srtp_key_audio[:16].encode('ascii')
-                                        _pd_iv  = _cam_key_audio[:16].encode('ascii')
-                                        _pd_ct  = _bpkt[4:]  # full ciphertext after 4B header
+                                        from Crypto.Util.Padding import (
+                                            unpad as _unpad_pd,
+                                        )
+
+                                        _pd_key = _our_tx_srtp_key_audio[:16].encode(
+                                            "ascii"
+                                        )
+                                        _pd_iv = _cam_key_audio[:16].encode("ascii")
+                                        _pd_ct = _bpkt[
+                                            4:
+                                        ]  # full ciphertext after 4B header
                                         if len(_pd_ct) % 16 == 0 and len(_pd_ct) >= 16:
                                             _pd_plain = _unpad_pd(
-                                                _AES_pd.new(_pd_key, _AES_pd.MODE_CBC, _pd_iv
-                                                            ).decrypt(_pd_ct), 16)
+                                                _AES_pd.new(
+                                                    _pd_key, _AES_pd.MODE_CBC, _pd_iv
+                                                ).decrypt(_pd_ct),
+                                                16,
+                                            )
                                     except ImportError:
                                         pass
                                     except Exception as _pde:
                                         _status(f"bridge: SDES decrypt error: {_pde}")
                                 # Log for first 5 and every 10th frame
-                                if _bridge_fn._tutk_count <= 5 or _bridge_fn._tutk_count % 10 == 0:
+                                if (
+                                    _bridge_fn._tutk_count <= 5
+                                    or _bridge_fn._tutk_count % 10 == 0
+                                ):
                                     _trace(
                                         f"bridge: TUTK {_kind} SFrame"
                                         f" type=0x{_tk_type:02x} ssrc={_tk_ssrc}"
@@ -6363,21 +7059,42 @@ class _SdesOpenMixin:
                                 # Camera sends SCTP handshake (INIT, COOKIE-ECHO, DATA)
                                 # wrapped in 0xC8 AES-128-CBC frames. Handle before
                                 # forwarding to ffmpeg.
-                                if (_pd_plain is not None
-                                        and len(_pd_plain) >= 16
-                                        and _pd_plain[:4] == b'\x13\x88\x13\x88'):
-                                    _pd_ct8 = _pd_plain[12] if len(_pd_plain) > 12 else 0xFF
+                                if (
+                                    _pd_plain is not None
+                                    and len(_pd_plain) >= 16
+                                    and _pd_plain[:4] == b"\x13\x88\x13\x88"
+                                ):
+                                    _pd_ct8 = (
+                                        _pd_plain[12] if len(_pd_plain) > 12 else 0xFF
+                                    )
 
                                     def _enc_c8_sctp(_raw):
                                         from Crypto.Cipher import AES as _ae
                                         from Crypto.Util.Padding import pad as _pa
-                                        _k = _our_tx_srtp_key_audio[:16].encode('ascii')
-                                        _v = _cam_key_audio[:16].encode('ascii')
-                                        _e = _ae.new(_k, _ae.MODE_CBC, _v).encrypt(_pa(_raw, 16))
-                                        return bytes([0xC8, 0x00, len(_e) >> 8, len(_e) & 0xFF]) + _e
 
-                                    _sct = _sctp['state']
-                                    if _pd_ct8 == 0x01 and _sct in ('CLOSED', 'INIT_SENT', 'COOKIE_WAIT'):
+                                        _k = _our_tx_srtp_key_audio[:16].encode("ascii")
+                                        _v = _cam_key_audio[:16].encode("ascii")
+                                        _e = _ae.new(_k, _ae.MODE_CBC, _v).encrypt(
+                                            _pa(_raw, 16)
+                                        )
+                                        return (
+                                            bytes(
+                                                [
+                                                    0xC8,
+                                                    0x00,
+                                                    len(_e) >> 8,
+                                                    len(_e) & 0xFF,
+                                                ]
+                                            )
+                                            + _e
+                                        )
+
+                                    _sct = _sctp["state"]
+                                    if _pd_ct8 == 0x01 and _sct in (
+                                        "CLOSED",
+                                        "INIT_SENT",
+                                        "COOKIE_WAIT",
+                                    ):
                                         # Camera SCTP INIT (or retransmit) -> send encrypted INIT-ACK.
                                         # Handle retransmits in COOKIE_WAIT: re-send INIT-ACK
                                         # (our first may have been lost).
@@ -6386,8 +7103,10 @@ class _SdesOpenMixin:
                                             try:
                                                 _iak_plain = _sctp_init_ack_pkt()
                                                 _iak_bytes = _enc_c8_sctp(_iak_plain)
-                                                _br_send_to_cam(_bs, _iak_bytes, _bsrc, _br_cam_peer)
-                                                _sctp['state'] = 'COOKIE_WAIT'
+                                                _br_send_to_cam(
+                                                    _bs, _iak_bytes, _bsrc, _br_cam_peer
+                                                )
+                                                _sctp["state"] = "COOKIE_WAIT"
                                                 _status(
                                                     f"SDES DC: INIT(peer=0x{_sc_p:08x})"
                                                     f" -> INIT-ACK {len(_iak_bytes)}B"
@@ -6396,22 +7115,39 @@ class _SdesOpenMixin:
                                                     f"{_iak_plain[:32].hex()}"
                                                 )
                                             except Exception as _sce8:
-                                                _status(f"SDES DC: enc INIT-ACK err: {_sce8}")
-                                    elif _pd_ct8 == 0x02 and _sct in ('INIT_SENT', 'COOKIE_WAIT'):
+                                                _status(
+                                                    f"SDES DC: enc INIT-ACK err: {_sce8}"
+                                                )
+                                    elif _pd_ct8 == 0x02 and _sct in (
+                                        "INIT_SENT",
+                                        "COOKIE_WAIT",
+                                    ):
                                         # Camera SCTP INIT-ACK -> send encrypted COOKIE-ECHO
                                         _sc_ck = _sctp_parse_init_ack(_pd_plain, _sctp)
                                         if _sc_ck:
                                             try:
-                                                _br_send_to_cam(_bs, _enc_c8_sctp(_sctp_cookie_echo(_sc_ck)), _bsrc, _br_cam_peer)
-                                                _sctp['state'] = 'COOKIE_ECHOED'
+                                                _br_send_to_cam(
+                                                    _bs,
+                                                    _enc_c8_sctp(
+                                                        _sctp_cookie_echo(_sc_ck)
+                                                    ),
+                                                    _bsrc,
+                                                    _br_cam_peer,
+                                                )
+                                                _sctp["state"] = "COOKIE_ECHOED"
                                                 _status(
                                                     f"SDES DC: enc INIT-ACK"
                                                     f" (cookie {len(_sc_ck)}B)"
                                                     f" -> sent enc COOKIE-ECHO"
                                                 )
                                             except Exception as _sce8:
-                                                _status(f"SDES DC: enc COOKIE-ECHO err: {_sce8}")
-                                    elif _pd_ct8 == 0x0A and _sct in ('COOKIE_WAIT', 'COOKIE_ECHOED'):
+                                                _status(
+                                                    f"SDES DC: enc COOKIE-ECHO err: {_sce8}"
+                                                )
+                                    elif _pd_ct8 == 0x0A and _sct in (
+                                        "COOKIE_WAIT",
+                                        "COOKIE_ECHOED",
+                                    ):
                                         # Camera COOKIE-ECHO -> send COOKIE-ACK + DCEP_OPEN,
                                         # then wait 300ms before sending LIVING (PPID=53).
                                         # Without DCEP_OPEN (PPID=50), LIVING arrives on an
@@ -6421,33 +7157,61 @@ class _SdesOpenMixin:
                                         # client.py (the COOKIE-ECHO/COOKIE-ACK + DCEP_OPEN handler)
                                         # does exactly this sleep - required.
                                         try:
-                                            _cak8 = _sctp_pkt(_sctp['peer_tag'], _sctp_chunk(0x0B, 0, b''))
-                                            _br_send_to_cam(_bs, _enc_c8_sctp(_cak8), _bsrc, _br_cam_peer)
+                                            _cak8 = _sctp_pkt(
+                                                _sctp["peer_tag"],
+                                                _sctp_chunk(0x0B, 0, b""),
+                                            )
+                                            _br_send_to_cam(
+                                                _bs,
+                                                _enc_c8_sctp(_cak8),
+                                                _bsrc,
+                                                _br_cam_peer,
+                                            )
                                             _dc8 = _sctp_data(50, _dcep_open_msg())
-                                            _br_send_to_cam(_bs, _enc_c8_sctp(_sctp_pkt(_sctp['peer_tag'], _dc8)), _bsrc, _br_cam_peer)
-                                            _sctp['state'] = 'DCEP_WAIT'
-                                            _sctp['dcep_sent_ts'] = _time_br.time()
-                                            _sctp['dcep_sock'] = _bs
-                                            _sctp['dcep_src'] = _bsrc
+                                            _br_send_to_cam(
+                                                _bs,
+                                                _enc_c8_sctp(
+                                                    _sctp_pkt(_sctp["peer_tag"], _dc8)
+                                                ),
+                                                _bsrc,
+                                                _br_cam_peer,
+                                            )
+                                            _sctp["state"] = "DCEP_WAIT"
+                                            _sctp["dcep_sent_ts"] = _time_br.time()
+                                            _sctp["dcep_sock"] = _bs
+                                            _sctp["dcep_src"] = _bsrc
                                             _status(
                                                 "SDES DC: COOKIE-ECHO"
                                                 " -> COOKIE-ACK + DCEP_OPEN(50),"
                                                 " waiting 300ms before LIVING"
                                             )
                                         except Exception as _sce8:
-                                            _status(f"SDES DC: enc COOKIE-ACK err: {_sce8}")
-                                    elif _pd_ct8 == 0x0B and _sct == 'COOKIE_ECHOED':
+                                            _status(
+                                                f"SDES DC: enc COOKIE-ACK err: {_sce8}"
+                                            )
+                                    elif _pd_ct8 == 0x0B and _sct == "COOKIE_ECHOED":
                                         # Camera COOKIE-ACK -> send encrypted LIVING only
                                         try:
-                                            _lv8 = _sctp_data(53, _session_mode_req_msg())
-                                            _br_send_to_cam(_bs, _enc_c8_sctp(_sctp_pkt(_sctp['peer_tag'], _lv8)), _bsrc, _br_cam_peer)
-                                            _sctp['state'] = 'DONE'
+                                            _lv8 = _sctp_data(
+                                                53, _session_mode_req_msg()
+                                            )
+                                            _br_send_to_cam(
+                                                _bs,
+                                                _enc_c8_sctp(
+                                                    _sctp_pkt(_sctp["peer_tag"], _lv8)
+                                                ),
+                                                _bsrc,
+                                                _br_cam_peer,
+                                            )
+                                            _sctp["state"] = "DONE"
                                             _sdes_probe_received = True
                                             _last_hb_ts = _time_br.time()
-                                            _status("SDES DC: enc COOKIE-ACK -> sent enc LIVING")
+                                            _status(
+                                                "SDES DC: enc COOKIE-ACK -> sent enc LIVING"
+                                            )
                                         except Exception as _sce8:
                                             _status(f"SDES DC: enc LIVING err: {_sce8}")
-                                    elif _pd_ct8 == 0x00 and _sct == 'DONE':
+                                    elif _pd_ct8 == 0x00 and _sct == "DONE":
                                         # SCTP DATA from camera.  ACKNOWLEDGE IT
                                         # FIRST: SCTP puts acknowledgement on the
                                         # receiver, and sending nothing let the
@@ -6458,10 +7222,17 @@ class _SdesOpenMixin:
                                         # into every session.  Ack before dispatch so
                                         # a handler that raises cannot cost us the ack.
                                         if len(_pd_plain) >= 20:
-                                            _sc_tsn = int.from_bytes(_pd_plain[16:20], 'big')
-                                            _sc_first_sack = _sctp.get('peer_cum_tsn') is None
-                                            _sctp['peer_cum_tsn'] = _sctp_advance_cum_tsn(
-                                                _sctp.get('peer_cum_tsn'), _sc_tsn)
+                                            _sc_tsn = int.from_bytes(
+                                                _pd_plain[16:20], "big"
+                                            )
+                                            _sc_first_sack = (
+                                                _sctp.get("peer_cum_tsn") is None
+                                            )
+                                            _sctp["peer_cum_tsn"] = (
+                                                _sctp_advance_cum_tsn(
+                                                    _sctp.get("peer_cum_tsn"), _sc_tsn
+                                                )
+                                            )
                                             if _sc_first_sack:
                                                 # One line per session: the build tag for the
                                                 # SACK fix, and the thing to look for if the
@@ -6474,12 +7245,21 @@ class _SdesOpenMixin:
                                             try:
                                                 _br_send_to_cam(
                                                     _bs,
-                                                    _enc_c8_sctp(_sctp_pkt(
-                                                        _sctp['peer_tag'],
-                                                        _sctp_sack_chunk(_sctp['peer_cum_tsn']))),
-                                                    _bsrc, _br_cam_peer)
+                                                    _enc_c8_sctp(
+                                                        _sctp_pkt(
+                                                            _sctp["peer_tag"],
+                                                            _sctp_sack_chunk(
+                                                                _sctp["peer_cum_tsn"]
+                                                            ),
+                                                        )
+                                                    ),
+                                                    _bsrc,
+                                                    _br_cam_peer,
+                                                )
                                             except Exception as _sackerr:
-                                                _status(f"SDES DC: SACK send failed: {_sackerr}")
+                                                _status(
+                                                    f"SDES DC: SACK send failed: {_sackerr}"
+                                                )
                                         # Reassemble before parsing.  A DATA chunk
                                         # carries B/E flags (RFC 4960 s3.3.1) and a
                                         # large reply - the ~2.8 KB SD listing page -
@@ -6491,19 +7271,41 @@ class _SdesOpenMixin:
                                         # not answer".  Use the chunk's own length
                                         # rather than the rest of the packet: the
                                         # declared length is what bounds this chunk.
-                                        _sc_flags = _pd_plain[13] if len(_pd_plain) > 13 else 0x03
-                                        _sc_clen = (int.from_bytes(_pd_plain[14:16], 'big')
-                                                    if len(_pd_plain) >= 16 else 0)
-                                        _sc_sid = (int.from_bytes(_pd_plain[20:22], 'big')
-                                                   if len(_pd_plain) >= 22 else 0)
-                                        _sc_frag = (_pd_plain[28:28 + (_sc_clen - 16)]
-                                                    if _sc_clen >= 16 and len(_pd_plain) > 28
-                                                    else (_pd_plain[28:] if len(_pd_plain) > 28 else b''))
-                                        _sc_ppid = (int.from_bytes(_pd_plain[24:28], 'big')
-                                                    if len(_pd_plain) >= 28 else 0)
+                                        _sc_flags = (
+                                            _pd_plain[13]
+                                            if len(_pd_plain) > 13
+                                            else 0x03
+                                        )
+                                        _sc_clen = (
+                                            int.from_bytes(_pd_plain[14:16], "big")
+                                            if len(_pd_plain) >= 16
+                                            else 0
+                                        )
+                                        _sc_sid = (
+                                            int.from_bytes(_pd_plain[20:22], "big")
+                                            if len(_pd_plain) >= 22
+                                            else 0
+                                        )
+                                        _sc_frag = (
+                                            _pd_plain[28 : 28 + (_sc_clen - 16)]
+                                            if _sc_clen >= 16 and len(_pd_plain) > 28
+                                            else (
+                                                _pd_plain[28:]
+                                                if len(_pd_plain) > 28
+                                                else b""
+                                            )
+                                        )
+                                        _sc_ppid = (
+                                            int.from_bytes(_pd_plain[24:28], "big")
+                                            if len(_pd_plain) >= 28
+                                            else 0
+                                        )
                                         _sc_pay = _sctp_reassemble(
-                                            _sc_flags, _sc_sid, _sc_frag,
-                                            _sctp.setdefault('rx_frag', {}))
+                                            _sc_flags,
+                                            _sc_sid,
+                                            _sc_frag,
+                                            _sctp.setdefault("rx_frag", {}),
+                                        )
                                         # A mid-message fragment: nothing to parse yet.
                                         # Its TSN is acknowledged above, so the camera
                                         # will not retransmit it.  Guarded rather than
@@ -6511,8 +7313,11 @@ class _SdesOpenMixin:
                                         # per-socket one, and skipping it would drop the
                                         # rest of this socket's turn.
                                         if _sc_pay is not None:
-                                            _sc_cmd = (int.from_bytes(_sc_pay[4:8], 'little')
-                                                       if len(_sc_pay) >= 8 else 0)
+                                            _sc_cmd = (
+                                                int.from_bytes(_sc_pay[4:8], "little")
+                                                if len(_sc_pay) >= 8
+                                                else 0
+                                            )
                                             # This is where the camera's answers
                                             # come back on SDES.  They were parsed
                                             # and logged here long before anything
@@ -6529,9 +7334,14 @@ class _SdesOpenMixin:
                                                 _bridge_fn._br_session_mode_resp = (
                                                     getattr(
                                                         _bridge_fn,
-                                                        '_br_session_mode_resp', 0) + 1)
+                                                        "_br_session_mode_resp",
+                                                        0,
+                                                    )
+                                                    + 1
+                                                )
                                             _sc_answered = _dispatch_sctp_avio(
-                                                _avio_responses, _sc_pay)
+                                                _avio_responses, _sc_pay
+                                            )
                                             _trace(
                                                 f"SDES DC: enc DATA ppid={_sc_ppid}"
                                                 f" cmd={_sc_cmd} {len(_sc_pay)}B"
@@ -6541,7 +7351,9 @@ class _SdesOpenMixin:
                                     else:
                                         # Log SACK (0x03) with cumulative TSN ack for diagnostics
                                         if _pd_ct8 == 0x03 and len(_pd_plain) >= 20:
-                                            _cum_tsn = int.from_bytes(_pd_plain[16:20], 'big')
+                                            _cum_tsn = int.from_bytes(
+                                                _pd_plain[16:20], "big"
+                                            )
                                             _trace(
                                                 f"SDES DC: SACK cum_tsn={_cum_tsn:#010x}"
                                                 f" state={_sct}"
@@ -6556,23 +7368,29 @@ class _SdesOpenMixin:
                                 if _tk_audio:
                                     _rr_our_ssrc = 0xAB12CD34
                                     _rr_pkt = _st_br.pack(
-                                        '!BBHIIIIIII',
-                                        0x81, 201, 7,
+                                        "!BBHIIIIIII",
+                                        0x81,
+                                        201,
+                                        7,
                                         _rr_our_ssrc,
                                         _tk_ssrc,
                                         0,
                                         _bridge_fn._tutk_count,
-                                        0, 0, 0,
+                                        0,
+                                        0,
+                                        0,
                                     )
                                     _rtcp_sent = False
                                     # Hoisted purely so the SRTP-TX-KEY note can
                                     # report the key that actually went out.
                                     # Same expression - no behavior change.
                                     _rr_key_b64 = (
-                                        _cam_key_audio or _our_tx_srtp_key_audio)
+                                        _cam_key_audio or _our_tx_srtp_key_audio
+                                    )
                                     try:
                                         import pylibsrtp as _plsrtp_rr
                                         import base64 as _b64_rr
+
                                         _rr_key = _b64_rr.b64decode(_rr_key_b64)
                                         _rr_pol = _plsrtp_rr.Policy(
                                             key=_rr_key,
@@ -6582,15 +7400,32 @@ class _SdesOpenMixin:
                                         )
                                         _rr_pol.allow_repeat_tx = True
                                         _rr_sess = _plsrtp_rr.Session(policy=_rr_pol)
-                                        _br_send_to_cam(_bs, _rr_sess.protect_rtcp(_rr_pkt), _bsrc, _br_cam_peer)
+                                        _br_send_to_cam(
+                                            _bs,
+                                            _rr_sess.protect_rtcp(_rr_pkt),
+                                            _bsrc,
+                                            _br_cam_peer,
+                                        )
                                         _rtcp_sent = True
                                     except Exception:
-                                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_persistent_sdes_cmd', exc_info=True)
+                                        _LOGGER.debug(
+                                            "camera %s: swallowed exception in %s",
+                                            getattr(self, "device_id", "?"),
+                                            "_persistent_sdes_cmd",
+                                            exc_info=True,
+                                        )
                                     if not _rtcp_sent:
                                         try:
-                                            _br_send_to_cam(_bs, _rr_pkt, _bsrc, _br_cam_peer)
+                                            _br_send_to_cam(
+                                                _bs, _rr_pkt, _bsrc, _br_cam_peer
+                                            )
                                         except Exception:
-                                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_enc_c8_sctp', exc_info=True)
+                                            _LOGGER.debug(
+                                                "camera %s: swallowed exception in %s",
+                                                getattr(self, "device_id", "?"),
+                                                "_enc_c8_sctp",
+                                                exc_info=True,
+                                            )
                                     if _bridge_fn._tutk_count == 1:
                                         _status(
                                             f"SDES: sent RTCP RR to camera"
@@ -6607,26 +7442,44 @@ class _SdesOpenMixin:
                                     # would have recorded "answer=none differ=no"
                                     # for exactly that session.  Bounded: the
                                     # answer key is only ever set once.
-                                    if (_rtcp_sent and getattr(
-                                            _bridge_fn, '_rr_key_noted', None)
-                                            != _rr_key_b64):
+                                    if (
+                                        _rtcp_sent
+                                        and getattr(_bridge_fn, "_rr_key_noted", None)
+                                        != _rr_key_b64
+                                    ):
                                         _bridge_fn._rr_key_noted = _rr_key_b64
-                                        _status(_srtp_tx_key_note(
-                                            "RR", _rr_key_b64,
-                                            _our_tx_srtp_key_audio,
-                                            _cam_key_audio))
+                                        _status(
+                                            _srtp_tx_key_note(
+                                                "RR",
+                                                _rr_key_b64,
+                                                _our_tx_srtp_key_audio,
+                                                _cam_key_audio,
+                                            )
+                                        )
                                 # Forward decrypted PCMA audio to ffmpeg loopback.
                                 # AVIO control frames (SESSION_MODE_RESP=5377, etc.) are
                                 # identified by cmd field and skipped; raw PCMA bytes are sent.
                                 if _tk_audio and _pd_plain is not None:
-                                    _fwd_cmd = (int.from_bytes(_pd_plain[4:8], 'little')
-                                                if len(_pd_plain) >= 8 else 0)
+                                    _fwd_cmd = (
+                                        int.from_bytes(_pd_plain[4:8], "little")
+                                        if len(_pd_plain) >= 8
+                                        else 0
+                                    )
                                     # AVIO control frames identified by cmd field - never
                                     # forward these to ffmpeg's audio port.  804 =
                                     # LdsTrackSwitchNotify (device->client track-id change,
                                     # f0.java:3224): the camera can send it unsolicited, and
                                     # without it here an 804 frame is misrouted as PCMA noise.
-                                    _avio_cmds = {5376, 5377, 5156, 5157, 768, 769, 511, 804}
+                                    _avio_cmds = {
+                                        5376,
+                                        5377,
+                                        5156,
+                                        5157,
+                                        768,
+                                        769,
+                                        511,
+                                        804,
+                                    }
                                     # No response dispatch here.  Measured
                                     # 2026-08-07: the camera's replies come back
                                     # as encrypted SCTP DATA (see
@@ -6639,7 +7492,7 @@ class _SdesOpenMixin:
                                         try:
                                             _lo_a.sendto(
                                                 _rtp_hdr + _pd_plain,
-                                                ('127.0.0.1', _lo_audio_port),
+                                                ("127.0.0.1", _lo_audio_port),
                                             )
                                             # Count it: media_stats() documents
                                             # itself as "media actually forwarded
@@ -6652,7 +7505,9 @@ class _SdesOpenMixin:
                                             # to fail an otherwise healthy release.
                                             _media_progress[0] = _time_br.monotonic()
                                             _media_counts[0] += 1
-                                            _media_counts[1] += len(_rtp_hdr) + len(_pd_plain)
+                                            _media_counts[1] += len(_rtp_hdr) + len(
+                                                _pd_plain
+                                            )
                                             if not _br_first_audio_logged:
                                                 _br_first_audio_logged = True
                                                 # Record the payload type this path
@@ -6672,7 +7527,12 @@ class _SdesOpenMixin:
                                                     f" pt={_tk_pt}"
                                                 )
                                         except Exception:
-                                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_enc_c8_sctp', exc_info=True)
+                                            _LOGGER.debug(
+                                                "camera %s: swallowed exception in %s",
+                                                getattr(self, "device_id", "?"),
+                                                "_enc_c8_sctp",
+                                                exc_info=True,
+                                            )
                                 continue
 
                             # Standard SRTP/SRTCP demux by RTP payload type.
@@ -6684,12 +7544,14 @@ class _SdesOpenMixin:
                             # SRTP/SRTCP keeps the header in clear, so we can read PT
                             # before decryption.  Audio PTs: 0 (PCMU), 8 (PCMA).
                             # Video PTs: 96 (H264), 97 (H265).
-                            if not hasattr(_bridge_fn, '_srtp_switch_logged'):
+                            if not hasattr(_bridge_fn, "_srtp_switch_logged"):
                                 _bridge_fn._srtp_switch_logged = True
                                 _LOGGER.info(
                                     "bridge: SRTP/non-TUTK pkt %dB from %s:%d"
                                     " first4=%s (PT=%d) - camera switched to SRTP",
-                                    len(_bpkt), _bsrc[0], _bsrc[1],
+                                    len(_bpkt),
+                                    _bsrc[0],
+                                    _bsrc[1],
                                     _bpkt[:4].hex(),
                                     (_bpkt[1] & 0x7F) if len(_bpkt) > 1 else -1,
                                 )
@@ -6703,8 +7565,9 @@ class _SdesOpenMixin:
                                 # until here, been indistinguishable from one
                                 # where it sent nothing. Read only by the stall
                                 # report, on a path a healthy open never takes.
-                                _bridge_fn._br_media_pkts = getattr(
-                                    _bridge_fn, '_br_media_pkts', 0) + 1
+                                _bridge_fn._br_media_pkts = (
+                                    getattr(_bridge_fn, "_br_media_pkts", 0) + 1
+                                )
                             if 200 <= _pt_byte <= 204:
                                 # SRTCP from camera.  For _use_plain_rtp cameras
                                 # the ffmpeg SDP uses RTP/AVP (no crypto).  If we
@@ -6719,13 +7582,23 @@ class _SdesOpenMixin:
                                 # For SDES cameras (non-plain-rtp) ffmpeg uses
                                 # SAVP and handles SRTCP itself - forward as-is.
                                 try:
-                                    _lo_a.sendto(_bpkt, ('127.0.0.1', _lo_audio_port))
+                                    _lo_a.sendto(_bpkt, ("127.0.0.1", _lo_audio_port))
                                 except Exception:
-                                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                                    _LOGGER.debug(
+                                        "camera %s: swallowed exception in %s",
+                                        getattr(self, "device_id", "?"),
+                                        "_bridge_fn",
+                                        exc_info=True,
+                                    )
                                 try:
-                                    _lo_v.sendto(_bpkt, ('127.0.0.1', _lo_video_port))
+                                    _lo_v.sendto(_bpkt, ("127.0.0.1", _lo_video_port))
                                 except Exception:
-                                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                                    _LOGGER.debug(
+                                        "camera %s: swallowed exception in %s",
+                                        getattr(self, "device_id", "?"),
+                                        "_bridge_fn",
+                                        exc_info=True,
+                                    )
                                 continue
                             _pt = _pt_byte & 0x7F
                             # The ANSWER decides which payload type is which
@@ -6739,7 +7612,9 @@ class _SdesOpenMixin:
                             _pt_out = _pt
                             if _kind_answered == "video":
                                 _btgt, _lo_target, _kind = (
-                                    _lo_video_port, _lo_v, "video"
+                                    _lo_video_port,
+                                    _lo_v,
+                                    "video",
                                 )
                                 # The bridge starts before the answer lands, so
                                 # a video packet on an unexpected PT can beat the
@@ -6756,7 +7631,8 @@ class _SdesOpenMixin:
                                     _status(
                                         "bridge: pt=%d re-classified as video"
                                         " from the answer - clearing the audio"
-                                        " latch it took first" % _pt)
+                                        " latch it took first" % _pt
+                                    )
                                 # Our serve SDP describes video as 96=H264 /
                                 # 97=H265 only, so a camera-numbered payload
                                 # type we do not advertise must be translated
@@ -6768,31 +7644,43 @@ class _SdesOpenMixin:
                                 # the bridge the decryptor and the packet
                                 # reaching ffmpeg plaintext; rewriting a byte
                                 # ffmpeg will itself authenticate breaks SRTP.
-                                if (_pt not in _SDP_VIDEO_PTS
-                                        and _use_plain_rtp
-                                        and _answer_video_pt[0] is not None):
+                                if (
+                                    _pt not in _SDP_VIDEO_PTS
+                                    and _use_plain_rtp
+                                    and _answer_video_pt[0] is not None
+                                ):
                                     _pt_out = int(_answer_video_pt[0])
                             elif _kind_answered == "audio":
                                 _btgt, _lo_target, _kind = (
-                                    _lo_audio_port, _lo_a, "audio"
+                                    _lo_audio_port,
+                                    _lo_a,
+                                    "audio",
                                 )
                             elif _pt in (96, 97, 98):
                                 _btgt, _lo_target, _kind = (
-                                    _lo_video_port, _lo_v, "video"
+                                    _lo_video_port,
+                                    _lo_v,
+                                    "video",
                                 )
                             elif _pt in (0, 8):
                                 _btgt, _lo_target, _kind = (
-                                    _lo_audio_port, _lo_a, "audio"
+                                    _lo_audio_port,
+                                    _lo_a,
+                                    "audio",
                                 )
                             else:
                                 # Unknown PT - fall back to source-socket routing.
                                 if _bs is _audio_sock:
                                     _btgt, _lo_target, _kind = (
-                                        _lo_audio_port, _lo_a, "audio"
+                                        _lo_audio_port,
+                                        _lo_a,
+                                        "audio",
                                     )
                                 else:
                                     _btgt, _lo_target, _kind = (
-                                        _lo_video_port, _lo_v, "video"
+                                        _lo_video_port,
+                                        _lo_v,
+                                        "video",
                                     )
                             if not _br_first_srtp_logged:
                                 _br_first_srtp_logged = True
@@ -6804,7 +7692,7 @@ class _SdesOpenMixin:
                                 _b0 = _bpkt[0] if len(_bpkt) > 0 else 0
                                 if len(_bpkt) >= 12:
                                     _seq16, _ts32, _ssrc32 = _st_br.unpack_from(
-                                        '!HII', _bpkt, 2
+                                        "!HII", _bpkt, 2
                                     )
                                 else:
                                     _seq16 = _ts32 = _ssrc32 = 0
@@ -6827,8 +7715,11 @@ class _SdesOpenMixin:
                                 # PCMA there.  Only meaningful on a talk-capable open
                                 # (offer advertised sendrecv + a=ssrc); harmless otherwise.
                                 # Guarded so a video-first capture (BUNDLE) is not lost.
-                                if _talk_state is not None and _talk_state.get("src") is None:
-                                    _talk_state["src"]  = _bsrc
+                                if (
+                                    _talk_state is not None
+                                    and _talk_state.get("src") is None
+                                ):
+                                    _talk_state["src"] = _bsrc
                                     _talk_state["sock"] = _bs
                                     _status(
                                         f"SDES talk: camera audio addr captured"
@@ -6843,8 +7734,12 @@ class _SdesOpenMixin:
                                 _first_video_pt[0] = _pt_out
                                 _status(
                                     f"bridge: first video RTP pt={_pt_out}"
-                                    + (f" (camera numbered it {_pt})"
-                                       if _pt_out != _pt else ""))
+                                    + (
+                                        f" (camera numbered it {_pt})"
+                                        if _pt_out != _pt
+                                        else ""
+                                    )
+                                )
                                 # At INFO, not DEBUG: this is the one line that
                                 # makes a bitrate figure comparable to another
                                 # one, and it is emitted once per session.
@@ -6858,8 +7753,11 @@ class _SdesOpenMixin:
                                 # video.  Capture it here too - the camera may send
                                 # video first (or send no inbound audio at all), so
                                 # gating talk on first-audio alone is unreliable.
-                                if _talk_state is not None and _talk_state.get("src") is None:
-                                    _talk_state["src"]  = _bsrc
+                                if (
+                                    _talk_state is not None
+                                    and _talk_state.get("src") is None
+                                ):
+                                    _talk_state["src"] = _bsrc
                                     _talk_state["sock"] = _bs
                                     _status(
                                         f"SDES talk: camera media addr captured"
@@ -6868,14 +7766,15 @@ class _SdesOpenMixin:
                                 # Capture camera video SSRC for RTCP PLI.
                                 if len(_bpkt) >= 12:
                                     _bridge_fn._cam_video_ssrc = _st_br.unpack_from(
-                                        '!I', _bpkt, 8)[0]
+                                        "!I", _bpkt, 8
+                                    )[0]
                                 if _media_path[0] is None:
                                     _media_path[0] = _classify_media_path(
-                                        _bsrc[0], _bridge_turn_ips)
-                                _bridge_fn._cam_srtp_src  = _bsrc
+                                        _bsrc[0], _bridge_turn_ips
+                                    )
+                                _bridge_fn._cam_srtp_src = _bsrc
                                 _bridge_fn._cam_srtp_sock = _bs
-                                if getattr(_bridge_fn, '_first_video_ts',
-                                           None) is None:
+                                if getattr(_bridge_fn, "_first_video_ts", None) is None:
                                     _bridge_fn._first_video_ts = _time_br.time()
                                 # Publish the relay-aware sender so the RTCP
                                 # cadence blocks (which have no socket/peer in
@@ -6889,9 +7788,10 @@ class _SdesOpenMixin:
                                 # change just drops; the NACK path keeps its
                                 # own per-event binding for exactly that case.
                                 _bridge_fn._send_to_cam = (
-                                    lambda _d, _s=_bs, _a=_bsrc,
-                                    _p=_br_cam_peer: _br_send_to_cam(
-                                        _s, _d, _a, _p))
+                                    lambda _d, _s=_bs, _a=_bsrc, _p=_br_cam_peer: (
+                                        _br_send_to_cam(_s, _d, _a, _p)
+                                    )
+                                )
                                 # Schedule immediate PLI so IDR+SPS arrives in
                                 # the analyzeduration window.
                                 _bridge_fn._last_pli_ts = 0.0
@@ -6928,7 +7828,9 @@ class _SdesOpenMixin:
                                 # bridge - the only decryptor on this path - to a
                                 # key the camera had stopped using.
                                 _rx_sess = _ensure_srtp_rx_session(
-                                    _bridge_fn, srtp_key_audio, _build_srtp_rx,
+                                    _bridge_fn,
+                                    srtp_key_audio,
+                                    _build_srtp_rx,
                                     on_built=_on_srtp_rx_built,
                                     on_error=_on_srtp_rx_error,
                                 )
@@ -6942,18 +7844,23 @@ class _SdesOpenMixin:
                                         # readable. The stall report needs the
                                         # real total: "8 failures" and "every
                                         # packet failed" are different findings.
-                                        _bridge_fn._br_decrypt_fails = getattr(
-                                            _bridge_fn, '_br_decrypt_fails', 0) + 1
-                                        _ec = getattr(
-                                            _bridge_fn, '_decrypt_err_n', 0)
+                                        _bridge_fn._br_decrypt_fails = (
+                                            getattr(_bridge_fn, "_br_decrypt_fails", 0)
+                                            + 1
+                                        )
+                                        _ec = getattr(_bridge_fn, "_decrypt_err_n", 0)
                                         if _ec < 8:
                                             _bridge_fn._decrypt_err_n = _ec + 1
-                                            _seq_d = (int.from_bytes(
-                                                _bpkt[2:4], 'big')
-                                                if len(_bpkt) >= 4 else -1)
-                                            _ssrc_d = (int.from_bytes(
-                                                _bpkt[8:12], 'big')
-                                                if len(_bpkt) >= 12 else 0)
+                                            _seq_d = (
+                                                int.from_bytes(_bpkt[2:4], "big")
+                                                if len(_bpkt) >= 4
+                                                else -1
+                                            )
+                                            _ssrc_d = (
+                                                int.from_bytes(_bpkt[8:12], "big")
+                                                if len(_bpkt) >= 12
+                                                else 0
+                                            )
                                             _trace(
                                                 f"bridge: SRTP decrypt err:"
                                                 f" {_srx_dec_e}"
@@ -6966,8 +7873,10 @@ class _SdesOpenMixin:
                             # init, robust to in-band SPS loss).  Parses only until
                             # both are seen; then _sprop_done short-circuits.
                             if _should_capture_sprop(
-                                    _kind, _decrypted,
-                                    getattr(_bridge_fn, "_sprop_done", False)):
+                                _kind,
+                                _decrypted,
+                                getattr(_bridge_fn, "_sprop_done", False),
+                            ):
                                 _ps = _extract_param_sets_from_rtp(_fwd_pkt)
                                 if _ps:
                                     _psc = getattr(_bridge_fn, "_ps_cache", None)
@@ -6982,11 +7891,11 @@ class _SdesOpenMixin:
                                             # _save_sprop's three outcomes write
                                             # nothing, and this is the only line
                                             # the sprop path ever emits.
-                                            if _save_sprop(self.device_id,
-                                                           _sprop_new):
+                                            if _save_sprop(self.device_id, _sprop_new):
                                                 _status(
                                                     "bridge: cached sprop-parameter"
-                                                    f"-sets for {self.device_id}")
+                                                    f"-sets for {self.device_id}"
+                                                )
                                             else:
                                                 _status(
                                                     "bridge: parameter sets NOT "
@@ -6994,7 +7903,8 @@ class _SdesOpenMixin:
                                                     "(camera marked unstable, or "
                                                     "the cache is unwritable) - "
                                                     "out-of-band injection stays "
-                                                    "off for it")
+                                                    "off for it"
+                                                )
                                         _bridge_fn._sprop_done = True
                             # Rebase RTP timestamps to start near 0.  Camera picks a
                             # random starting timestamp (RFC 3550 section 5.1); the 90 kHz
@@ -7002,53 +7912,64 @@ class _SdesOpenMixin:
                             # or negative DTS values that the MPEG-TS muxer drops.
                             # Subtracting the first-seen timestamp per-stream gives
                             # ffmpeg a monotonically increasing sequence from 0.
-                            if (_use_plain_rtp
-                                    and len(_fwd_pkt) >= 8
-                                    and _fwd_pkt[0] == 0x80):
-                                _rtp_raw_ts = _st_br.unpack_from('!I', _fwd_pkt, 4)[0]
+                            if (
+                                _use_plain_rtp
+                                and len(_fwd_pkt) >= 8
+                                and _fwd_pkt[0] == 0x80
+                            ):
+                                _rtp_raw_ts = _st_br.unpack_from("!I", _fwd_pkt, 4)[0]
                                 _ts_base_attr = (
-                                    '_rtp_ts_base_video' if _kind == 'video'
-                                    else '_rtp_ts_base_audio'
+                                    "_rtp_ts_base_video"
+                                    if _kind == "video"
+                                    else "_rtp_ts_base_audio"
                                 )
                                 if not hasattr(_bridge_fn, _ts_base_attr):
                                     setattr(_bridge_fn, _ts_base_attr, _rtp_raw_ts)
                                 _rtp_base = getattr(_bridge_fn, _ts_base_attr)
                                 _rtp_norm = (_rtp_raw_ts - _rtp_base) & 0xFFFFFFFF
-                                _fwd_pkt = (_fwd_pkt[:4]
-                                            + _st_br.pack('!I', _rtp_norm)
-                                            + _fwd_pkt[8:])
+                                _fwd_pkt = (
+                                    _fwd_pkt[:4]
+                                    + _st_br.pack("!I", _rtp_norm)
+                                    + _fwd_pkt[8:]
+                                )
                             # Ask the camera to resend anything the air lost.
                             # The sequence number is in the clear even under
                             # SRTP, so this reads _bpkt and does not depend on
                             # the decrypt above having succeeded.
-                            if (_kind == "video"
-                                    and len(_bpkt) >= 12
-                                    and hasattr(_bridge_fn, '_cam_video_ssrc')
-                                    and hasattr(_bridge_fn, '_cam_srtp_sock')):
-                                _nk_seq, _nk_ssrc = _st_br.unpack_from(
-                                    '!H', _bpkt, 2)[0], _st_br.unpack_from(
-                                    '!I', _bpkt, 8)[0]
+                            if (
+                                _kind == "video"
+                                and len(_bpkt) >= 12
+                                and hasattr(_bridge_fn, "_cam_video_ssrc")
+                                and hasattr(_bridge_fn, "_cam_srtp_sock")
+                            ):
+                                _nk_seq, _nk_ssrc = (
+                                    _st_br.unpack_from("!H", _bpkt, 2)[0],
+                                    _st_br.unpack_from("!I", _bpkt, 8)[0],
+                                )
                                 if _nk_ssrc == _bridge_fn._cam_video_ssrc:
                                     _nk_lost = _video_nack_seqs(
-                                        _bridge_fn, _nk_seq, _time_br.time(),
-                                        enabled=getattr(_bridge_fn,
-                                                        '_nack_on', True))
+                                        _bridge_fn,
+                                        _nk_seq,
+                                        _time_br.time(),
+                                        enabled=getattr(_bridge_fn, "_nack_on", True),
+                                    )
                                     if _nk_lost and _send_video_nack(
-                                            # bound now: called synchronously
-                                            # inside the helper, but the loop
-                                            # vars must not be late-bound.
-                                            lambda _d, _s=_bs, _a=_bsrc,
-                                            _p=_br_cam_peer: _br_send_to_cam(
-                                                _s, _d, _a, _p),
-                                            getattr(_bridge_fn,
-                                                    '_pli_tx_sess', None),
-                                            _CAM_RTCP_SENDER_SSRC,
-                                            _bridge_fn._cam_video_ssrc,
-                                            _nk_lost):
-                                        _bridge_fn._nack_sent = getattr(
-                                            _bridge_fn, '_nack_sent', 0) + 1
+                                        # bound now: called synchronously
+                                        # inside the helper, but the loop
+                                        # vars must not be late-bound.
+                                        lambda _d, _s=_bs, _a=_bsrc, _p=_br_cam_peer: (
+                                            _br_send_to_cam(_s, _d, _a, _p)
+                                        ),
+                                        getattr(_bridge_fn, "_pli_tx_sess", None),
+                                        _CAM_RTCP_SENDER_SSRC,
+                                        _bridge_fn._cam_video_ssrc,
+                                        _nk_lost,
+                                    ):
+                                        _bridge_fn._nack_sent = (
+                                            getattr(_bridge_fn, "_nack_sent", 0) + 1
+                                        )
                                         _bridge_fn._nack_seqs = getattr(
-                                            _bridge_fn, '_nack_seqs', 0
+                                            _bridge_fn, "_nack_seqs", 0
                                         ) + len(_nk_lost)
                                         if _bridge_fn._nack_sent == 1:
                                             _status(
@@ -7070,20 +7991,19 @@ class _SdesOpenMixin:
                                 and len(_bpkt) >= 4
                                 and _video_repeat_too_late(
                                     _bridge_fn,
-                                    _st_br.unpack_from('!H', _bpkt, 2)[0],
-                                    _time_br.time())
+                                    _st_br.unpack_from("!H", _bpkt, 2)[0],
+                                    _time_br.time(),
+                                )
                             )
                             if _nk_late:
-                                _bridge_fn._nack_late_drops = getattr(
-                                    _bridge_fn, '_nack_late_drops', 0) + 1
+                                _bridge_fn._nack_late_drops = (
+                                    getattr(_bridge_fn, "_nack_late_drops", 0) + 1
+                                )
                             if _pt_out != _pt and _decrypted:
-                                _fwd_pkt = rewrite_rtp_payload_type(
-                                    _fwd_pkt, _pt_out)
+                                _fwd_pkt = rewrite_rtp_payload_type(_fwd_pkt, _pt_out)
                             try:
                                 if not _nk_late:
-                                    _lo_target.sendto(
-                                        _fwd_pkt, ('127.0.0.1', _btgt)
-                                    )
+                                    _lo_target.sendto(_fwd_pkt, ("127.0.0.1", _btgt))
                                 # Forward unconditionally - ciphertext ffmpeg
                                 # discards is inert, and a `continue` here would
                                 # change loop control flow for the whole SDES
@@ -7094,12 +8014,18 @@ class _SdesOpenMixin:
                                 # session reports healthy while the viewer sees
                                 # black.  See _should_count_media.
                                 if not _nk_late and _should_count_media(
-                                        _decrypted, _use_plain_rtp):
+                                    _decrypted, _use_plain_rtp
+                                ):
                                     _media_progress[0] = _time_br.monotonic()
                                     _media_counts[0] += 1
                                     _media_counts[1] += len(_fwd_pkt)
                             except Exception:
-                                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                                _LOGGER.debug(
+                                    "camera %s: swallowed exception in %s",
+                                    getattr(self, "device_id", "?"),
+                                    "_bridge_fn",
+                                    exc_info=True,
+                                )
                     # Periodic ICE controlling check: re-send USE-CANDIDATE every 2.5 s.
                     # Keeps the camera in ICE "Completed" state and satisfies consent
                     # refresh (RFC 7675).  Also handles the case where the initial
@@ -7123,7 +8049,12 @@ class _SdesOpenMixin:
                         ]
                     _uc_cufrag = _cam_ice_ufrag or _bridge_uc_info.get("ufrag")
                     _uc_cpwd = _cam_ice_pwd or _bridge_uc_info.get("pwd")
-                    if _uc_cands and _uc_cufrag and _uc_cpwd and (_br_now - _br_last_uc) >= 2.5:
+                    if (
+                        _uc_cands
+                        and _uc_cufrag
+                        and _uc_cpwd
+                        and (_br_now - _br_last_uc) >= 2.5
+                    ):
                         _br_last_uc = _br_now
                         # Same RFC 5766 s9 door as the setup path, but this is
                         # the only place it can be opened for a relay-only
@@ -7134,44 +8065,61 @@ class _SdesOpenMixin:
                         # 120 s thereafter - a TURN permission expires 300 s
                         # after it is installed (RFC 5766 s8).
                         _perm_key = tuple(sorted(_uc_cands))
-                        if (_perm_key != _br_perm_cands
-                                or (_br_now - _br_last_perm) >= 120.0):
+                        if (
+                            _perm_key != _br_perm_cands
+                            or (_br_now - _br_last_perm) >= 120.0
+                        ):
                             _br_perm_cands = _perm_key
                             _br_last_perm = _br_now
                             _turn_install_permissions(_uc_cands, "bridge", _trace)
                         # Keep the allocation itself alive.  The server grants
                         # it for a LIFETIME (600 s here) and drops it silently
                         # when that lapses, so refresh well inside the window.
-                        if (_relay_addrs
-                                and (_br_now - _br_last_alloc_refresh) >= 240.0):
+                        if _relay_addrs and (_br_now - _br_last_alloc_refresh) >= 240.0:
                             _br_last_alloc_refresh = _br_now
                             _rf_ok = sum(
-                                1 for _rf_s in (_audio_sock, _video_sock)
+                                1
+                                for _rf_s in (_audio_sock, _video_sock)
                                 if _turn_refresh_allocation(_rf_s)
                             )
                             if _rf_ok:
-                                _trace(
-                                    f"TURN: refreshed {_rf_ok} relay"
-                                    f" allocation(s)"
-                                )
+                                _trace(f"TURN: refreshed {_rf_ok} relay allocation(s)")
                         for _c_ip, _c_port in _uc_cands:
                             _send_use_candidate(
-                                _audio_sock, _ufrag_a, _pwd_a,
-                                _uc_cufrag, _uc_cpwd, (_c_ip, _c_port),
+                                _audio_sock,
+                                _ufrag_a,
+                                _pwd_a,
+                                _uc_cufrag,
+                                _uc_cpwd,
+                                (_c_ip, _c_port),
                             )
                             _send_use_candidate(
-                                _video_sock, _ufrag_v, _pwd_v,
-                                _uc_cufrag, _uc_cpwd, (_c_ip, _c_port),
+                                _video_sock,
+                                _ufrag_v,
+                                _pwd_v,
+                                _uc_cufrag,
+                                _uc_cpwd,
+                                (_c_ip, _c_port),
                             )
             finally:
                 try:
                     _lo_a.close()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_bridge_fn",
+                        exc_info=True,
+                    )
                 try:
                     _lo_v.close()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_bridge_fn",
+                        exc_info=True,
+                    )
 
         _br_first_di_logged = False
         _br_first_srtp_logged = False
@@ -7187,14 +8135,14 @@ class _SdesOpenMixin:
         # CPython: dict key assignment and simple attribute writes are atomic
         # under the GIL.
         _bridge_uc_info: dict = {
-            "ufrag":   _cam_ice_ufrag,
-            "pwd":     _cam_ice_pwd,
-            "cands":   list(_cam_ice_cands),
-            "sent":    bool(_cam_ice_cands),  # True if already sent at setup
+            "ufrag": _cam_ice_ufrag,
+            "pwd": _cam_ice_pwd,
+            "cands": list(_cam_ice_cands),
+            "sent": bool(_cam_ice_cands),  # True if already sent at setup
             # Addresses the camera's own probes arrived from, which may differ
             # from anything it advertised.  Written by the bridge thread only;
             # read there too, so no cross-thread ordering to reason about.
-            "prflx":   [],
+            "prflx": [],
         }
 
         _bridge_thread = _threading_br.Thread(
@@ -7229,7 +8177,7 @@ class _SdesOpenMixin:
             _tk_seen: set = set()
             while time.monotonic() < _tk_deadline:
                 while _tk_next < len(ice_cands_seen):
-                    _tk_line = (ice_cands_seen[_tk_next].get("candidate") or "")
+                    _tk_line = ice_cands_seen[_tk_next].get("candidate") or ""
                     _tk_next += 1
                     # The shared parser, so a candidate the answer path
                     # nominates cannot be one this path silently skips.
@@ -7243,13 +8191,13 @@ class _SdesOpenMixin:
                         continue
                     _tk_seen.add((_tk_ip, _tk_port))
                     _turn_install_permissions(
-                        [(_tk_ip, _tk_port)], f"trickle {_tk_typ}")
+                        [(_tk_ip, _tk_port)], f"trickle {_tk_typ}"
+                    )
                     _tk_cur = _bridge_uc_info["cands"]
                     if (_tk_ip, _tk_port) not in _tk_cur:
                         # Rebind to a NEW list rather than appending: the bridge
                         # thread iterates this and must never see it mutate.
-                        _bridge_uc_info["cands"] = [
-                            *_tk_cur, (_tk_ip, _tk_port)]
+                        _bridge_uc_info["cands"] = [*_tk_cur, (_tk_ip, _tk_port)]
                 await asyncio.sleep(0.25)
 
         if ice_cands_seen is not None:
@@ -7273,11 +8221,13 @@ class _SdesOpenMixin:
         # cannot do DTLS - webrtc_internals_dump confirms LK.IPC.A001064 uses
         # DTLS (UDP/TLS/RTP/SAVPF) when given a proper DTLS offer.  The
         # property means SDES is available, not that DTLS is absent.
-        if (_cam_echo_received
-                and _stun_count == 0
-                and _camera_side_pkt_count == 0
-                and not _srtp_detected
-                and dtls_fallback_ok):
+        if (
+            _cam_echo_received
+            and _stun_count == 0
+            and _camera_side_pkt_count == 0
+            and not _srtp_detected
+            and dtls_fallback_ok
+        ):
             _status(
                 "echo-reversal camera: no STUN or SRTP received in ICE window"
                 " - camera likely requires DTLS; falling back"
@@ -7287,18 +8237,30 @@ class _SdesOpenMixin:
                 try:
                     _rsock.close()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_bridge_fn",
+                        exc_info=True,
+                    )
             try:
                 os.unlink(sdp_path)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
-            outgoing_q.put_nowait(None)   # stop MQTT thread
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_bridge_fn",
+                    exc_info=True,
+                )
+            outgoing_q.put_nowait(None)  # stop MQTT thread
             raise CameraMixin._SdesNoAnswerError()
-        elif (_cam_echo_received
-              and _stun_count == 0
-              and _camera_side_pkt_count == 0
-              and not _srtp_detected
-              and not dtls_fallback_ok):
+        elif (
+            _cam_echo_received
+            and _stun_count == 0
+            and _camera_side_pkt_count == 0
+            and not _srtp_detected
+            and not dtls_fallback_ok
+        ):
             _status(
                 "echo-reversal camera: no STUN or SRTP received in ICE window"
                 " - DTLS fallback disabled by camera flags; continuing SDES path"
@@ -7389,12 +8351,14 @@ class _SdesOpenMixin:
                 # +1.3 s - and the future is the only place that shape's SDP
                 # ever appears.
                 _stall_answer = _stall_answer_candidates(
-                    _pre_launch_answer_sdp, answer_fut)
+                    _pre_launch_answer_sdp, answer_fut
+                )
                 # Same two sources, same arrival rule: whether that answer also
                 # carried ICE credentials, so a 0-candidate answer says which
                 # degenerate shape it was.
                 _stall_answer_creds = _stall_answer_has_creds(
-                    _pre_launch_answer_sdp, answer_fut)
+                    _pre_launch_answer_sdp, answer_fut
+                )
                 _stall_probes = list(
                     (getattr(_bridge_fn, "_br_probe_verdicts", None) or {}).items()
                 )
@@ -7404,48 +8368,61 @@ class _SdesOpenMixin:
                 # bridge's peer-reflexive learning into ["prflx"].  Any one of
                 # them alone under-reports on some shape.
                 _stall_nominated: list = []
-                for _sn in (*_nominated_seen, *_bridge_uc_info["cands"],
-                            *_bridge_uc_info["prflx"]):
+                for _sn in (
+                    *_nominated_seen,
+                    *_bridge_uc_info["cands"],
+                    *_bridge_uc_info["prflx"],
+                ):
                     if _sn not in _stall_nominated:
                         _stall_nominated.append(_sn)
-                _LOGGER.warning("%s", _first_media_stall_report(
-                    device_id=getattr(self, "device_id", "?"),
-                    waited_s=_waited_s,
-                    nominated=_stall_nominated,
-                    use_candidate_sent=bool(
-                        _bridge_uc_info["sent"] or _nominated_seen),
-                    binding_success=int(
-                        getattr(_bridge_fn, "_br_binding_success_count", 0)),
-                    trigger_sent=bool(
-                        getattr(_bridge_fn, "_tutk_trigger_sent", False)),
-                    probes=_stall_probes,
-                    probes_dropped=int(
-                        getattr(_bridge_fn, "_br_probe_overflow", 0)),
-                    cancelled=_cancelled,
-                    media_pkts=int(getattr(_bridge_fn, "_br_media_pkts", 0)),
-                    decrypt_fails=int(
-                        getattr(_bridge_fn, "_br_decrypt_fails", 0)),
-                    answer_cands=_stall_answer,
-                    answer_has_creds=_stall_answer_creds,
-                    trigger_acked=bool(getattr(
-                        _bridge_fn, "_br_session_mode_resp", 0)),
-                ))
+                _LOGGER.warning(
+                    "%s",
+                    _first_media_stall_report(
+                        device_id=getattr(self, "device_id", "?"),
+                        waited_s=_waited_s,
+                        nominated=_stall_nominated,
+                        use_candidate_sent=bool(
+                            _bridge_uc_info["sent"] or _nominated_seen
+                        ),
+                        binding_success=int(
+                            getattr(_bridge_fn, "_br_binding_success_count", 0)
+                        ),
+                        trigger_sent=bool(
+                            getattr(_bridge_fn, "_tutk_trigger_sent", False)
+                        ),
+                        probes=_stall_probes,
+                        probes_dropped=int(
+                            getattr(_bridge_fn, "_br_probe_overflow", 0)
+                        ),
+                        cancelled=_cancelled,
+                        media_pkts=int(getattr(_bridge_fn, "_br_media_pkts", 0)),
+                        decrypt_fails=int(getattr(_bridge_fn, "_br_decrypt_fails", 0)),
+                        answer_cands=_stall_answer,
+                        answer_has_creds=_stall_answer_creds,
+                        trigger_acked=bool(
+                            getattr(_bridge_fn, "_br_session_mode_resp", 0)
+                        ),
+                    ),
+                )
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s",
-                              getattr(self, "device_id", "?"),
-                              '_first_media_stall_report', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_first_media_stall_report",
+                    exc_info=True,
+                )
 
         try:
             while _first_video_pt[0] is None and time.monotonic() < _media_deadline:
                 if _first_seen_ts is None and _seen_at_start is None:
-                    _first_seen_ts = getattr(
-                        self, "_camera_device_seen_ts", None)
+                    _first_seen_ts = getattr(self, "_camera_device_seen_ts", None)
                 if _stale_offer_abandon_due(
-                        battery=bool(getattr(self, "is_battery_camera", False)),
-                        seen_at_start=_seen_at_start,
-                        first_seen_ts=_first_seen_ts,
-                        now=time.monotonic(),
-                        grace_s=_BATTERY_STALE_OFFER_GRACE_S):
+                    battery=bool(getattr(self, "is_battery_camera", False)),
+                    seen_at_start=_seen_at_start,
+                    first_seen_ts=_first_seen_ts,
+                    now=time.monotonic(),
+                    grace_s=_BATTERY_STALE_OFFER_GRACE_S,
+                ):
                     # The camera was silent when this wait began and has since
                     # woken, answered, and sent no media for the whole grace.
                     # Our offer reached it while it was still asleep and it is
@@ -7456,45 +8433,60 @@ class _SdesOpenMixin:
                         "camera turned up %.0fs into the wait and sent no media"
                         " for the %.0fs since - abandoning this attempt to the"
                         " retry, while the camera is still awake"
-                        % (_first_seen_ts - _media_wait_started,
-                           _BATTERY_STALE_OFFER_GRACE_S)
+                        % (
+                            _first_seen_ts - _media_wait_started,
+                            _BATTERY_STALE_OFFER_GRACE_S,
+                        )
                     )
                     break
                 if terminal_error_fut is not None and terminal_error_fut.done():
                     _code, _desc = terminal_error_fut.result()
-                    _status(f"camera refused: ack {_code} {_desc}"
-                            " - terminal, abandoning the first-media wait")
+                    _status(
+                        f"camera refused: ack {_code} {_desc}"
+                        " - terminal, abandoning the first-media wait"
+                    )
                     raise AidotCameraBusy(_code, _desc)
-                if (not _pt_kinds_read and answer_fut is not None
-                        and answer_fut.done() and not answer_fut.cancelled()):
+                if (
+                    not _pt_kinds_read
+                    and answer_fut is not None
+                    and answer_fut.done()
+                    and not answer_fut.cancelled()
+                ):
                     # One-shot, here rather than in the answer-logging block
                     # further down: that block runs AFTER this wait, which is
                     # 75 s too late for the demux that the map exists to fix.
                     _pt_kinds_read = True
                     try:
                         if answer_fut.exception() is None:
-                            _pk_sdp = (
-                                answer_fut.result() or {}).get("sdp", "") or ""
+                            _pk_sdp = (answer_fut.result() or {}).get("sdp", "") or ""
                             if _pk_sdp:
                                 _answer_pt_kinds.update(answer_pt_kinds(_pk_sdp))
-                                _answer_video_pt[0] = video_pt_from_answer_sdp(
-                                    _pk_sdp)
+                                _answer_video_pt[0] = video_pt_from_answer_sdp(_pk_sdp)
                                 _vpts = sorted(
-                                    pt for pt, k in _answer_pt_kinds.items()
-                                    if k == "video")
+                                    pt
+                                    for pt, k in _answer_pt_kinds.items()
+                                    if k == "video"
+                                )
                                 if any(pt not in _SDP_VIDEO_PTS for pt in _vpts):
                                     _status(
                                         "answer numbers video on payload"
                                         " type(s) %s - demuxing by the answer,"
                                         " serving as our pt=%s"
-                                        % (_vpts, _answer_video_pt[0]))
+                                        % (_vpts, _answer_video_pt[0])
+                                    )
                     except Exception:
                         _LOGGER.debug(
                             "camera %s: swallowed exception in %s",
                             getattr(self, "device_id", "?"),
-                            'answer_pt_kinds', exc_info=True)
-                if (not _early_nominated and answer_fut is not None
-                        and answer_fut.done() and not answer_fut.cancelled()):
+                            "answer_pt_kinds",
+                            exc_info=True,
+                        )
+                if (
+                    not _early_nominated
+                    and answer_fut is not None
+                    and answer_fut.done()
+                    and not answer_fut.cancelled()
+                ):
                     # Read-only peek: the real await below still consumes this
                     # future and drives the answer/fallback paths unchanged.
                     # ``cancelled()`` is checked explicitly because the answer-wait
@@ -7525,7 +8517,8 @@ class _SdesOpenMixin:
             # second one.
             if _first_video_pt[0] is None:
                 _report_first_media_stall(
-                    time.monotonic() - _media_wait_started, _cancelled=True)
+                    time.monotonic() - _media_wait_started, _cancelled=True
+                )
             raise
         # The serve SDP below is built from what has actually been observed, so
         # ending the wait a moment before the first packets arrive costs this
@@ -7539,23 +8532,26 @@ class _SdesOpenMixin:
         _ab_grace = _post_abandon_media_grace_s(
             abandoned=_stale_offer_abandoned,
             have_video=_first_video_pt[0] is not None,
-            grace_s=_abandoned_media_grace_s())
+            grace_s=_abandoned_media_grace_s(),
+        )
         if _ab_grace > 0:
             _ab_t0 = time.monotonic()
             try:
-                while (_first_video_pt[0] is None
-                        and time.monotonic() - _ab_t0 < _ab_grace):
+                while (
+                    _first_video_pt[0] is None and time.monotonic() - _ab_t0 < _ab_grace
+                ):
                     # A terminal refusal can land inside the grace exactly as it
                     # can inside the main wait. Without this it falls through and
                     # is reported as AidotCameraNoMedia - whose own docstring
                     # calls it "the opposite of AidotCameraBusy" - and the loop
                     # retries at once on a camera that just said it has no free
                     # session.
-                    if (terminal_error_fut is not None
-                            and terminal_error_fut.done()):
+                    if terminal_error_fut is not None and terminal_error_fut.done():
                         _code, _desc = terminal_error_fut.result()
-                        _status(f"camera refused: ack {_code} {_desc}"
-                                " - terminal, abandoning the grace")
+                        _status(
+                            f"camera refused: ack {_code} {_desc}"
+                            " - terminal, abandoning the grace"
+                        )
                         raise AidotCameraBusy(_code, _desc)
                     await asyncio.sleep(0.1)
             except asyncio.CancelledError:
@@ -7563,15 +8559,19 @@ class _SdesOpenMixin:
                 # its own budget, and without this the evidence is discarded.
                 if _first_video_pt[0] is None:
                     _report_first_media_stall(
-                        time.monotonic() - _media_wait_started, _cancelled=True)
+                        time.monotonic() - _media_wait_started, _cancelled=True
+                    )
                 raise
             if _first_video_pt[0] is not None:
-                _status("media arrived %.1fs after the wait was abandoned"
-                        " - mapping it rather than serving video only"
-                        % (time.monotonic() - _ab_t0))
+                _status(
+                    "media arrived %.1fs after the wait was abandoned"
+                    " - mapping it rather than serving video only"
+                    % (time.monotonic() - _ab_t0)
+                )
             else:
-                _status("no media in the %.0fs after the wait was abandoned"
-                        % _ab_grace)
+                _status(
+                    "no media in the %.0fs after the wait was abandoned" % _ab_grace
+                )
         if _first_video_pt[0] is None:
             # The wait expired with nothing received. Everything needed to
             # say why is in hand at exactly this moment and was, until the
@@ -7582,24 +8582,30 @@ class _SdesOpenMixin:
             # path only: an open that delivers media reaches none of it.
             _report_first_media_stall(
                 time.monotonic() - _media_wait_started
-                if _stale_offer_abandoned else _FIRST_MEDIA_WAIT_S)
+                if _stale_offer_abandoned
+                else _FIRST_MEDIA_WAIT_S
+            )
         if _should_skip_doomed_serve(
-                abandoned=_stale_offer_abandoned,
-                have_video=_first_video_pt[0] is not None,
-                serving=bool(rtsp_push_url or output_path)):
+            abandoned=_stale_offer_abandoned,
+            have_video=_first_video_pt[0] is not None,
+            serving=bool(rtsp_push_url or output_path),
+        ):
             # Serving now would build the SDP from nothing observed, produce a
             # video-only stream, and receive no media on it - measured as ~14 s
             # of delay and a dropped audio track ahead of the retry that worked.
             # Go straight to the retry instead.  The cleanup stack closes the
             # reserved sockets and stops the signalling thread on the way out.
             _waited = time.monotonic() - _media_wait_started
-            _status("abandoning the attempt rather than serving a stream the"
-                    " camera is not feeding - retrying")
+            _status(
+                "abandoning the attempt rather than serving a stream the"
+                " camera is not feeding - retrying"
+            )
             _LOGGER.info(
                 "camera %s: no media %.0fs after the camera answered;"
                 " abandoning this attempt to the retry rather than launching a"
                 " serve with nothing to serve",
-                getattr(self, "device_id", "?"), _waited,
+                getattr(self, "device_id", "?"),
+                _waited,
             )
             raise AidotCameraNoMedia(waited_s=_waited)
         if _serve_audio and _first_audio_pt[0] is None:
@@ -7616,8 +8622,12 @@ class _SdesOpenMixin:
         # set by this point. What is left is an OBSERVED but unadvertised
         # payload type, which is why the messages below no longer claim that
         # no video was seen.
-        if (_vpt not in _SDP_VIDEO_PTS and answer_fut is not None
-                and answer_fut.done() and not answer_fut.cancelled()):
+        if (
+            _vpt not in _SDP_VIDEO_PTS
+            and answer_fut is not None
+            and answer_fut.done()
+            and not answer_fut.cancelled()
+        ):
             # No video packet arrived inside the window, but the camera's answer
             # still names the codec it agreed to send. Narrowing on that beats
             # leaving both codecs advertised: an unnarrowed video line makes
@@ -7627,18 +8637,23 @@ class _SdesOpenMixin:
             try:
                 if answer_fut.exception() is None:
                     _answer_video_pt[0] = video_pt_from_answer_sdp(
-                        (answer_fut.result() or {}).get("sdp", "") or "")
+                        (answer_fut.result() or {}).get("sdp", "") or ""
+                    )
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s",
-                              getattr(self, "device_id", "?"),
-                              'video_pt_from_answer_sdp', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "video_pt_from_answer_sdp",
+                    exc_info=True,
+                )
             _pin_pt = _resolve_sdes_video_pt()
             if _pin_pt is not None:
                 _LOGGER.info(
                     "camera %s: the observed payload type is not one this SDP "
                     "advertises; narrowing to the PINNED payload type %d rather "
                     "than the camera's answer (%s).",
-                    getattr(self, "device_id", "?"), _pin_pt,
+                    getattr(self, "device_id", "?"),
+                    _pin_pt,
                     _answer_video_pt[0],
                 )
             elif _answer_video_pt[0] is not None:
@@ -7646,13 +8661,13 @@ class _SdesOpenMixin:
                     "camera %s: the observed payload type is not one this SDP "
                     "advertises; narrowing to payload type %d from the "
                     "camera's negotiated answer instead of advertising both.",
-                    getattr(self, "device_id", "?"), _answer_video_pt[0],
+                    getattr(self, "device_id", "?"),
+                    _answer_video_pt[0],
                 )
         # observed beats pinned beats answer -- see _serve_video_pt.  The pin
         # matters here: this camera answers H.265 and sends H.264, so trusting
         # the answer built an hevc-only SDP and killed the serve at startup.
-        _keep_v = _serve_video_pt(_vpt, _answer_video_pt[0],
-                                  _resolve_sdes_video_pt())
+        _keep_v = _serve_video_pt(_vpt, _answer_video_pt[0], _resolve_sdes_video_pt())
         _keep_a = int(_apt) if _apt in _SDP_AUDIO_PTS else None
         if _serve_audio and _keep_a is None:
             # No audio observed in the window, so the line cannot be narrowed and
@@ -7678,9 +8693,11 @@ class _SdesOpenMixin:
         # event loop for every camera; None just means "let ffmpeg choose", as
         # before, and an empty list is a real "software decoding" answer.
         from .hwaccel import cached_decoder  # lazy: keep import cost off setup
+
         _video_decoder = (
             cached_decoder("h264" if _keep_v == 96 else "hevc")
-            if _keep_v is not None else None
+            if _keep_v is not None
+            else None
         )
         cmd = _build_sdes_serve_cmd(
             sdp_path=sdp_path,
@@ -7692,7 +8709,8 @@ class _SdesOpenMixin:
             push_video_only=_push_video_only,
             video_decoder=_video_decoder,
             input_timeout_s=_resolve_serve_input_timeout_s(
-                bool(getattr(self, "is_battery_camera", False))),
+                bool(getattr(self, "is_battery_camera", False))
+            ),
         )
         # Audio matters even more than video here.  A multi-PT m-line makes ffmpeg
         # bind the depacketizer to the FIRST payload type and silently discard the
@@ -7702,25 +8720,41 @@ class _SdesOpenMixin:
         # receives zero bytes.  That takes the video down with it, which is why
         # enabling serve audio appeared to break streaming outright.
         if _keep_v is not None or _keep_a is not None:
+
             def _read_sdp_file() -> str:
                 with open(sdp_path, encoding="utf-8") as _f_sdp:
                     return _f_sdp.read()
+
             try:
                 _cur_sdp = await asyncio.get_running_loop().run_in_executor(
-                    None, _read_sdp_file)
+                    None, _read_sdp_file
+                )
                 await asyncio.get_running_loop().run_in_executor(
-                    None, _write_text_file, sdp_path,
-                    narrow_sdp_payload_types(_cur_sdp, _keep_v, _keep_a))
+                    None,
+                    _write_text_file,
+                    sdp_path,
+                    narrow_sdp_payload_types(_cur_sdp, _keep_v, _keep_a),
+                )
                 _status(
                     "SDES: narrowed ffmpeg SDP to"
-                    + (f" video pt={_keep_v}"
-                       f" ({'H264' if _keep_v == 96 else 'H265'})"
-                       if _keep_v is not None else "")
-                    + (f" audio pt={_keep_a}"
-                       f" ({'PCMA' if _keep_a == 8 else 'PCMU'})"
-                       if _keep_a is not None else ""))
+                    + (
+                        f" video pt={_keep_v} ({'H264' if _keep_v == 96 else 'H265'})"
+                        if _keep_v is not None
+                        else ""
+                    )
+                    + (
+                        f" audio pt={_keep_a} ({'PCMA' if _keep_a == 8 else 'PCMU'})"
+                        if _keep_a is not None
+                        else ""
+                    )
+                )
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_open_sdes_stream', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_open_sdes_stream",
+                    exc_info=True,
+                )
         # Do not launch the publisher into a listener that is not up yet.
         await _await_rtsp_publish_target(rtsp_push_url)
         _LOGGER.info("SDES ffmpeg cmd: %s", " ".join(cmd))
@@ -7731,12 +8765,22 @@ class _SdesOpenMixin:
                 try:
                     _rsock.close()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_bridge_fn",
+                        exc_info=True,
+                    )
             try:
                 os.unlink(sdp_path)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
-            outgoing_q.put_nowait(None)   # stop MQTT thread
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_bridge_fn",
+                    exc_info=True,
+                )
+            outgoing_q.put_nowait(None)  # stop MQTT thread
             raise RuntimeError(
                 "ffmpeg not found - install ffmpeg to stream SDES-SRTP cameras.\n"
                 "  Ubuntu/Debian:  sudo apt install ffmpeg\n"
@@ -7751,19 +8795,29 @@ class _SdesOpenMixin:
             )
             _start_serve_stderr_drain(proc)
             _proc_holder[0] = proc
-            _cl(_reap, proc)   # kill ffmpeg if the open is cancelled before hand-off
+            _cl(_reap, proc)  # kill ffmpeg if the open is cancelled before hand-off
         except FileNotFoundError:
             # ffmpeg is not installed - clean up and surface a clear error.
             for _rsock in (_audio_sock, _video_sock):
                 try:
                     _rsock.close()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_bridge_fn",
+                        exc_info=True,
+                    )
             try:
                 os.unlink(sdp_path)
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_bridge_fn', exc_info=True)
-            outgoing_q.put_nowait(None)   # stop MQTT thread
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_bridge_fn",
+                    exc_info=True,
+                )
+            outgoing_q.put_nowait(None)  # stop MQTT thread
             raise RuntimeError(
                 "ffmpeg not found - install ffmpeg to stream SDES-SRTP cameras.\n"
                 "  Ubuntu/Debian:  sudo apt install ffmpeg\n"
@@ -7785,13 +8839,12 @@ class _SdesOpenMixin:
             without /proc/net/udp.
             """
             try:
-                _s_pb = _socket_br.socket(
-                    _socket_br.AF_INET, _socket_br.SOCK_DGRAM)
+                _s_pb = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
                 try:
-                    _s_pb.bind(('127.0.0.1', port))
-                    return False   # bound cleanly -> port was free
+                    _s_pb.bind(("127.0.0.1", port))
+                    return False  # bound cleanly -> port was free
                 except OSError:
-                    return True    # EADDRINUSE -> ffmpeg is listening
+                    return True  # EADDRINUSE -> ffmpeg is listening
                 finally:
                     _s_pb.close()
             except Exception:
@@ -7832,7 +8885,8 @@ class _SdesOpenMixin:
         # deep sleep - they answer webrtcReq well after the bridge starts.
         # Cameras with DTLS fallback keep 8s so the fallback fires quickly.
         _sdes_answer_timeout = (
-            sdes_answer_timeout if sdes_answer_timeout is not None
+            sdes_answer_timeout
+            if sdes_answer_timeout is not None
             else min(timeout, 8.0 if dtls_fallback_ok else 20.0)
         )
         try:
@@ -7844,7 +8898,10 @@ class _SdesOpenMixin:
             # report a refusal that arrived in about one second - and two of the
             # three validated models (A001513, A001064) take this path.
             answer = await _sdes_await_answer_or_terminal(
-                answer_fut, terminal_error_fut, _sdes_answer_timeout, _status,
+                answer_fut,
+                terminal_error_fut,
+                _sdes_answer_timeout,
+                _status,
             )
             _ans_sdp = answer.get("sdp", "")
             _ans_mlines = [ln for ln in _ans_sdp.splitlines() if ln.startswith("m=")]
@@ -7855,19 +8912,23 @@ class _SdesOpenMixin:
             # If the answer arrived late (after bridge started without ICE creds),
             # parse the camera's ICE credentials now and populate _bridge_uc_info
             # so the bridge can send USE-CANDIDATE on the next camera BindingReq.
-            if not _bridge_uc_info["sent"] and not _bridge_uc_info["ufrag"] and _ans_sdp:
-                _late_ufrag, _late_pwd, _late_cands, _ = _parse_answer_ice(
-                    _ans_sdp)
+            if (
+                not _bridge_uc_info["sent"]
+                and not _bridge_uc_info["ufrag"]
+                and _ans_sdp
+            ):
+                _late_ufrag, _late_pwd, _late_cands, _ = _parse_answer_ice(_ans_sdp)
                 if _late_ufrag and _late_pwd and _late_cands:
-                    _bridge_uc_info["ufrag"]  = _late_ufrag
-                    _bridge_uc_info["pwd"]    = _late_pwd
-                    _bridge_uc_info["cands"]  = _late_cands
+                    _bridge_uc_info["ufrag"] = _late_ufrag
+                    _bridge_uc_info["pwd"] = _late_pwd
+                    _bridge_uc_info["cands"] = _late_cands
                     # Update _dc_answer_has_app and _cam_key_audio so the bridge's
                     # SCTP path activates for late-wake cameras.
                     if "m=application" in _ans_sdp:
                         _dc_answer_has_app = True
                     if not _cam_key_audio and _ans_sdp:
                         import re as _re_lk
+
                         _lk_in = False
                         for _lk_ln in _ans_sdp.splitlines():
                             if _lk_ln.startswith("m=audio"):
@@ -7875,7 +8936,9 @@ class _SdesOpenMixin:
                             elif _lk_ln.startswith("m=") and _lk_in:
                                 break
                             elif _lk_in and _lk_ln.startswith("a=crypto:"):
-                                _lk_m = _re_lk.search(r"inline:([A-Za-z0-9+/=]+)", _lk_ln)
+                                _lk_m = _re_lk.search(
+                                    r"inline:([A-Za-z0-9+/=]+)", _lk_ln
+                                )
                                 if _lk_m:
                                     _cam_key_audio = _lk_m.group(1)
                                     # Adopt it the same way the pre-launch answer
@@ -7900,12 +8963,20 @@ class _SdesOpenMixin:
                         f"late ICE creds parsed - bridge will send USE-CANDIDATE"
                         f" to {len(_late_cands)} candidate(s)"
                         + (" [m=application present]" if _dc_answer_has_app else "")
-                        + (f" [cam_key set: {_key_fingerprint(_cam_key_audio)}]" if _cam_key_audio else "")
+                        + (
+                            f" [cam_key set: {_key_fingerprint(_cam_key_audio)}]"
+                            if _cam_key_audio
+                            else ""
+                        )
                     )
             # For echo-reversal cameras (A001064) the first answer_fut was set by
             # the broker echo of our own webrtcResp.  Wait briefly for the camera's
             # real second webrtcResp, which may carry a different SRTP key.
-            if second_answer_fut is not None and _cam_echo_received and not second_answer_fut.done():
+            if (
+                second_answer_fut is not None
+                and _cam_echo_received
+                and not second_answer_fut.done()
+            ):
                 try:
                     _second_ans = await asyncio.wait_for(
                         asyncio.shield(second_answer_fut), timeout=5.0
@@ -7943,11 +9014,15 @@ class _SdesOpenMixin:
                     _real_key_video = _extract_key(_second_sdp, "video")
                     _keys_changed = False
                     if _real_key_audio and _real_key_audio != srtp_key_audio:
-                        _status("camera audio SRTP key differs from offer - restarting ffmpeg")
+                        _status(
+                            "camera audio SRTP key differs from offer - restarting ffmpeg"
+                        )
                         srtp_key_audio = _real_key_audio
                         _keys_changed = True
                     if _real_key_video and _real_key_video != srtp_key_video:
-                        _status("camera video SRTP key differs from offer - restarting ffmpeg")
+                        _status(
+                            "camera video SRTP key differs from offer - restarting ffmpeg"
+                        )
                         srtp_key_video = _real_key_video
                         _keys_changed = True
                     if _keys_changed:
@@ -7987,7 +9062,9 @@ class _SdesOpenMixin:
                             with open(sdp_path, "w") as _f2:
                                 _f2.write(_inject_sprop(_new_sdp, self.device_id))
                         except Exception as _sdp_exc2:
-                            _LOGGER.warning("could not rewrite SDP for restart: %s", _sdp_exc2)
+                            _LOGGER.warning(
+                                "could not rewrite SDP for restart: %s", _sdp_exc2
+                            )
                         proc = subprocess.Popen(
                             cmd,
                             stdout=subprocess.DEVNULL,
@@ -8034,12 +9111,22 @@ class _SdesOpenMixin:
                     try:
                         _rsock.close()
                     except Exception:
-                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_udp_port_bound', exc_info=True)
+                        _LOGGER.debug(
+                            "camera %s: swallowed exception in %s",
+                            getattr(self, "device_id", "?"),
+                            "_udp_port_bound",
+                            exc_info=True,
+                        )
                 try:
                     os.unlink(sdp_path)
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_udp_port_bound', exc_info=True)
-                outgoing_q.put_nowait(None)   # signal MQTT thread to exit
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_udp_port_bound",
+                        exc_info=True,
+                    )
+                outgoing_q.put_nowait(None)  # signal MQTT thread to exit
                 raise CameraMixin._SdesNoAnswerError()
             else:
                 # isDTLS='0': DTLS fallback is disabled by camera flags (NOT that
@@ -8060,6 +9147,7 @@ class _SdesOpenMixin:
                 # Spawn a background task to pick it up and inject ICE credentials
                 # into _bridge_uc_info so the bridge can send USE-CANDIDATE.
                 if second_answer_fut is not None:
+
                     async def _late_second_answer_task():
                         nonlocal _dc_answer_has_app
                         try:
@@ -8067,15 +9155,18 @@ class _SdesOpenMixin:
                                 asyncio.shield(second_answer_fut), timeout=30.0
                             )
                             _la_sdp = (_la or {}).get("sdp", "") if _la else ""
-                            if (_la_sdp
-                                    and not _bridge_uc_info["sent"]
-                                    and not _bridge_uc_info["ufrag"]):
-                                (_la_ufrag, _la_pwd, _la_cands,
-                                 _) = _parse_answer_ice(_la_sdp)
+                            if (
+                                _la_sdp
+                                and not _bridge_uc_info["sent"]
+                                and not _bridge_uc_info["ufrag"]
+                            ):
+                                (_la_ufrag, _la_pwd, _la_cands, _) = _parse_answer_ice(
+                                    _la_sdp
+                                )
                                 if _la_ufrag and _la_pwd and _la_cands:
-                                    _bridge_uc_info["ufrag"]  = _la_ufrag
-                                    _bridge_uc_info["pwd"]    = _la_pwd
-                                    _bridge_uc_info["cands"]  = _la_cands
+                                    _bridge_uc_info["ufrag"] = _la_ufrag
+                                    _bridge_uc_info["pwd"] = _la_pwd
+                                    _bridge_uc_info["cands"] = _la_cands
                                     if "m=application" in _la_sdp:
                                         _dc_answer_has_app = True
                                     _status(
@@ -8084,7 +9175,13 @@ class _SdesOpenMixin:
                                         + (" [m=app]" if _dc_answer_has_app else "")
                                     )
                         except Exception:
-                            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_late_second_answer_task', exc_info=True)
+                            _LOGGER.debug(
+                                "camera %s: swallowed exception in %s",
+                                getattr(self, "device_id", "?"),
+                                "_late_second_answer_task",
+                                exc_info=True,
+                            )
+
                     _spawn_bg(_late_second_answer_task())
 
         return SdesSession(
@@ -8092,7 +9189,7 @@ class _SdesOpenMixin:
             sdp_path=sdp_path,
             outgoing_q=outgoing_q,
             mqtt_fut=mqtt_fut,
-            audio_sock=_audio_sock,   # bridge thread keeps these open; stop() closes them
+            audio_sock=_audio_sock,  # bridge thread keeps these open; stop() closes them
             video_sock=_video_sock,
             cmd_chan=_cmd_chan,
             talk_state=_talk_state,

@@ -4,6 +4,7 @@ Locks down the auth-error detector and the refresh-then-retry hook that lets the
 smarthome calls (motion events, MQTT URL) recover from a stale access token
 instead of failing silently. No network / camera needed.
 """
+
 import asyncio
 import os
 import sys
@@ -146,6 +147,7 @@ def test_refreshed_token_reaches_camera_clients():
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:

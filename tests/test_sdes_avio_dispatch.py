@@ -24,6 +24,7 @@ listened to.
 
 The bytes below are the real ones off the wire.
 """
+
 import struct
 
 import pytest
@@ -32,14 +33,9 @@ from aidot_cameras.camera.protocol import AvioResponseRouter
 from aidot_cameras.camera.sdes_open import _dispatch_sctp_avio
 
 #: An actual SPEAKERSTART ack captured from an A001064 (payload 0x0064).
-REAL_851 = bytes.fromhex(
-    "f8199c28" "53030000" "13c6756a00000000" "02000000" "00000000" "00000000"
-    "0064"
-)
+REAL_851 = bytes.fromhex("f8199c285303000013c6756a000000000200000000000000000000000064")
 #: The heartbeat ack, which arrives unprompted all session long.
-REAL_5157 = bytes.fromhex(
-    "d1c50942" "25140000" "e8a40ddc9f010000" "00000000" "00000000" "00000000"
-)
+REAL_5157 = bytes.fromhex("d1c5094225140000e8a40ddc9f010000000000000000000000000000")
 
 
 def test_a_reply_on_the_sctp_channel_reaches_the_waiter():

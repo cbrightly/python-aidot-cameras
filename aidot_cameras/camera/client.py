@@ -49,7 +49,9 @@ from .playback import (  # re-exported (split into playback.py)
     LiveStreamSession,  # noqa: F401 - back-compat re-export (unused in-module)
 )
 from .webrtc import WebRTCSession  # re-exported (split into webrtc.py)
-from .sdes import SdesSession  # re-exported (split into sdes.py); also the SDES return type
+from .sdes import (
+    SdesSession,
+)  # re-exported (split into sdes.py); also the SDES return type
 from .controls import _CameraControlsMixin
 from .sd_listing import _CameraSdMixin
 from .webrtc_open import _WebRTCOpenMixin
@@ -131,7 +133,9 @@ _OFFLINE_PROBE_S = float(os.environ.get("AIDOT_OFFLINE_PROBE_S", "600"))
 # loop already calls on success (attempt -> 0, so _in_slow_probe is false again
 # with no separate state to clear).
 _SLOW_PROBE_THRESHOLD = int(os.environ.get("AIDOT_DTLS_SLOW_PROBE_THRESHOLD", "5"))
-_SLOW_PROBE_INTERVAL_S = float(os.environ.get("AIDOT_DTLS_SLOW_PROBE_INTERVAL_S", "600"))
+_SLOW_PROBE_INTERVAL_S = float(
+    os.environ.get("AIDOT_DTLS_SLOW_PROBE_INTERVAL_S", "600")
+)
 _SLOW_PROBE_LOG_EVERY = int(os.environ.get("AIDOT_DTLS_SLOW_PROBE_LOG_EVERY", "6"))
 # Sleep increment for the slow-probe wait: never one blocking
 # asyncio.sleep(interval) call, so stop() is not delayed by up to 10 minutes.
@@ -231,9 +235,14 @@ def _mqtt_publish_delivered(status) -> bool:
     return status.get("connected", True) is not False
 
 
-def _retry_policy(failure_kind: str, burst_attempt: int, *,
-                  burst_delay: float = 3.0, burst_max: int = 4,
-                  base_gate: float = 15.0) -> "tuple[float, bool]":
+def _retry_policy(
+    failure_kind: str,
+    burst_attempt: int,
+    *,
+    burst_delay: float = 3.0,
+    burst_max: int = 4,
+    base_gate: float = 15.0,
+) -> "tuple[float, bool]":
     """Return (delay_seconds, bypass_open_gate) for the DTLS serve retry.
 
     A clean 'not_ready' decline (camera awake but encoder still cold - a DC-only
@@ -270,11 +279,11 @@ def _in_slow_probe(attempt: int, threshold: int) -> bool:
 
 
 #: RTP timestamps are 32 bits wide.
-_TS_MODULO = 2 ** 32
+_TS_MODULO = 2**32
 
 #: A forward step larger than this is not a frame interval. Half the counter is
 #: about 13 hours of a 90 kHz clock, so nothing legitimate comes near it.
-_TS_BOGUS_UNWRAP = 2 ** 31
+_TS_BOGUS_UNWRAP = 2**31
 
 
 def _unwrap_state() -> dict:
@@ -320,8 +329,12 @@ def _log_serve_canary(device_id: Optional[str], canary: dict) -> None:
     _LOGGER.debug(
         "camera %s: serve h264 canary: frames=%d keyframes=%d"
         " max_keyframe_gap=%d cur_gap=%d unwrap_fixed=%d",
-        device_id or "?", canary["frames"], canary["keyframes"],
-        canary["max_gap"], canary["gap"], canary.get("unwrapped", 0),
+        device_id or "?",
+        canary["frames"],
+        canary["keyframes"],
+        canary["max_gap"],
+        canary["gap"],
+        canary.get("unwrapped", 0),
     )
 
 
@@ -354,9 +367,7 @@ def _live_video_canary(pc, stored):
                 continue
             _qd = getattr(_r, "_RTCRtpReceiver__decoder_queue", None)
             _c = getattr(_qd, "_aidot_serve_canary", None)
-            if _c and _c.get("frames", 0) > (
-                _best.get("frames", 0) if _best else 0
-            ):
+            if _c and _c.get("frames", 0) > (_best.get("frames", 0) if _best else 0):
                 _best = _c
     except Exception:
         _LOGGER.debug("swallowed exception in _live_video_canary", exc_info=True)
@@ -425,8 +436,9 @@ def _futile_video_limit(env: Optional[dict] = None) -> int:
         return 5
 
 
-def _probe_interval(attempt: int, threshold: int, normal_delay: float,
-                     slow_interval: float) -> float:
+def _probe_interval(
+    attempt: int, threshold: int, normal_delay: float, slow_interval: float
+) -> float:
     """Effective DTLS-open retry interval for a failed open.
 
     Below `threshold` consecutive failures this is just the pacer's own
@@ -462,6 +474,7 @@ _FFMPEG_MISSING_MSG = (
 def _ffmpeg_path(binary: str = "ffmpeg") -> Optional[str]:
     """Return the resolved path to the ffmpeg binary, or None if not on PATH."""
     import shutil
+
     return shutil.which(binary)
 
 
@@ -479,19 +492,15 @@ except ImportError as _exc:  # pragma: no cover - ordering contract violation
     ) from _exc
 
 
-
-
-
-
 # --------------------------------------------------------------------------- #
 # Camera / Leedarson smarthome API constants
 # --------------------------------------------------------------------------- #
 
 
-
 # --------------------------------------------------------------------------- #
 # JPEG snapshot helper
 # --------------------------------------------------------------------------- #
+
 
 def _save_frame_as_jpeg(image_data: Any, output_path: str) -> bool:
     """Write a PIL Image or RGB numpy array to a JPEG file.
@@ -500,6 +509,7 @@ def _save_frame_as_jpeg(image_data: Any, output_path: str) -> bool:
     is called (PIL Image and ndarray are both independent copies).
     """
     import os
+
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
 
     # PIL Image path (fastest, no subprocess)
@@ -514,25 +524,37 @@ def _save_frame_as_jpeg(image_data: Any, output_path: str) -> bool:
     # numpy ndarray path - try PIL then ffmpeg
     try:
         import numpy as _np
+
         if isinstance(image_data, _np.ndarray):
             try:
                 from PIL import Image as _PILImage
+
                 _PILImage.fromarray(image_data).save(output_path, "JPEG")
                 return True
             except ImportError:
                 pass
             # Pillow not available - pipe raw RGB to ffmpeg
             import subprocess as _sp
+
             if _ffmpeg_path() is None:
                 _LOGGER.warning("async_snapshot: %s", _FFMPEG_MISSING_MSG)
                 return False
             h, w = image_data.shape[:2]
             r = _sp.run(
                 [
-                    "ffmpeg", "-y",
-                    "-f", "rawvideo", "-pix_fmt", "rgb24",
-                    "-s", f"{w}x{h}", "-i", "pipe:0",
-                    "-vframes", "1", output_path,
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "rawvideo",
+                    "-pix_fmt",
+                    "rgb24",
+                    "-s",
+                    f"{w}x{h}",
+                    "-i",
+                    "pipe:0",
+                    "-vframes",
+                    "1",
+                    output_path,
                 ],
                 input=image_data.tobytes(),
                 capture_output=True,
@@ -598,8 +620,9 @@ def _resolve_serve_input_timeout_s(is_battery: bool) -> int:
             return max(1, int(_env))
         except ValueError:
             pass
-    return (_SERVE_INPUT_TIMEOUT_BATTERY_S if is_battery
-            else _SERVE_INPUT_TIMEOUT_MAINS_S)
+    return (
+        _SERVE_INPUT_TIMEOUT_BATTERY_S if is_battery else _SERVE_INPUT_TIMEOUT_MAINS_S
+    )
 
 
 #: How long to wait after a camera answers -50002 / -50015 ("no free session").
@@ -639,8 +662,9 @@ def _next_no_media_streak(no_media_streak: int, healthy: bool) -> int:
     return no_media_streak + 1
 
 
-def _should_abandon_keepalive(no_media_streak: int, *, is_battery: bool,
-                              limit: int = _FUTILE_KEEPALIVE_LIMIT) -> bool:
+def _should_abandon_keepalive(
+    no_media_streak: int, *, is_battery: bool, limit: int = _FUTILE_KEEPALIVE_LIMIT
+) -> bool:
     """Should the background keepalive stop reopening this camera?
 
     Only for battery cameras. A mains camera has no charge to protect, and the
@@ -660,7 +684,8 @@ def _should_abandon_keepalive(no_media_streak: int, *, is_battery: bool,
 #: The A001513 measurably sends backward timestamps; see the builder comment.
 #: AIDOT_SERVE_ARRIVAL_TS=0 trusts the camera again.
 _SERVE_ARRIVAL_TS = os.environ.get(
-    "AIDOT_SERVE_ARRIVAL_TS", "1").strip().lower() not in ("0", "false", "no", "off")
+    "AIDOT_SERVE_ARRIVAL_TS", "1"
+).strip().lower() not in ("0", "false", "no", "off")
 
 
 def _build_sdes_serve_cmd(
@@ -705,9 +730,7 @@ def _build_sdes_serve_cmd(
     # `int()` here truncated every sub-second bound to `-t 0`, which asks ffmpeg
     # for no output at all. Keep whole seconds whole so the common case stays
     # readable, and let a fractional bound through as itself.
-    time_args = (
-        ["-t", "%g" % float(max_seconds)] if max_seconds else []
-    )
+    time_args = ["-t", "%g" % float(max_seconds)] if max_seconds else []
 
     if rtsp_push_url:
         _warn_lan_serve(_serve_host(rtsp_push_url), context="sdes-serve")
@@ -719,22 +742,45 @@ def _build_sdes_serve_cmd(
                 # encoder fed from t=0 so the mpegts PMT writes promptly on sparse
                 # battery PCMA; real audio mixes over the 0-valued silence
                 # (normalize=0 -> no-op when audio is present).
-                "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=8000:cl=mono",
                 "-filter_complex",
-                ("[0:a]aresample=async=1[a0];"
-                 "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
-                 f"volume={audio_gain_db}dB[aout]"),
-                "-map", "0:v:0", "-map", "[aout]",
-                "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
+                (
+                    "[0:a]aresample=async=1[a0];"
+                    "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
+                    f"volume={audio_gain_db}dB[aout]"
+                ),
+                "-map",
+                "0:v:0",
+                "-map",
+                "[aout]",
+                "-c:v",
+                "copy",
+                "-c:a",
+                "aac",
+                "-ar",
+                "48000",
+                "-b:a",
+                "128k",
                 *time_args,
-                "-f", "mpegts", "-listen", "1",
+                "-f",
+                "mpegts",
+                "-listen",
+                "1",
                 rtsp_push_url,
             ]
         else:
             dest_args = [
-                "-c:v", "copy", "-an",
+                "-c:v",
+                "copy",
+                "-an",
                 *time_args,
-                "-f", "mpegts", "-listen", "1",
+                "-f",
+                "mpegts",
+                "-listen",
+                "1",
                 rtsp_push_url,
             ]
     elif rtsp_push_url and sdes_audio and not push_video_only:
@@ -754,15 +800,33 @@ def _build_sdes_serve_cmd(
         # amix(normalize=0) feeds the encoder from t=0 and is a no-op wherever
         # real audio is present, so sparse audio cannot stall the publish.
         dest_args = [
-            "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=8000:cl=mono",
             "-filter_complex",
-            ("[0:a]aresample=async=1[a0];"
-             "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
-             f"volume={audio_gain_db}dB[aout]"),
-            "-map", "0:v:0", "-map", "[aout]",
-            "-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-b:a", "128k",
+            (
+                "[0:a]aresample=async=1[a0];"
+                "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
+                f"volume={audio_gain_db}dB[aout]"
+            ),
+            "-map",
+            "0:v:0",
+            "-map",
+            "[aout]",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-ar",
+            "48000",
+            "-b:a",
+            "128k",
             *time_args,
-            "-f", "rtsp", "-rtsp_transport", "tcp",
+            "-f",
+            "rtsp",
+            "-rtsp_transport",
+            "tcp",
             rtsp_push_url,
         ]
     elif rtsp_push_url:
@@ -773,10 +837,12 @@ def _build_sdes_serve_cmd(
         # video only and announce clean. That guard outranks a request for
         # audio - a silent picture beats no picture.
         dest_args = [
-            *(["-map", "0:v:0", "-c:v", "copy"] if push_video_only
-              else ["-c", "copy"]),
+            *(["-map", "0:v:0", "-c:v", "copy"] if push_video_only else ["-c", "copy"]),
             *time_args,
-            "-f", "rtsp", "-rtsp_transport", "tcp",
+            "-f",
+            "rtsp",
+            "-rtsp_transport",
+            "tcp",
             rtsp_push_url,
         ]
     elif output_path:
@@ -800,9 +866,12 @@ def _build_sdes_serve_cmd(
         else []
     )
     return [
-        "ffmpeg", "-y",
-        "-loglevel", "warning",
-        "-protocol_whitelist", "file,rtp,udp,srtp",
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "warning",
+        "-protocol_whitelist",
+        "file,rtp,udp,srtp",
         *decode_args,
         # 2 s analyzeduration: the camera sends SPS+PPS+IDR in the first burst;
         # 15 s consumed nearly all packets during analysis.  PLI re-arms an IDR
@@ -847,26 +916,38 @@ def _build_sdes_serve_cmd(
         # instead. Moving `-t` to the input side does not help - both placements
         # fail. Only a bounded run gives this up, and a bounded run is a
         # snapshot or the `-f null` drain, never the live stream.
-        *(["-use_wallclock_as_timestamps", "1"]
-          if _SERVE_ARRIVAL_TS and not max_seconds else []),
-        "-fflags", "+nobuffer+genpts+discardcorrupt",
-        "-analyzeduration", "2000000",
-        "-probesize", "500000",
+        *(
+            ["-use_wallclock_as_timestamps", "1"]
+            if _SERVE_ARRIVAL_TS and not max_seconds
+            else []
+        ),
+        "-fflags",
+        "+nobuffer+genpts+discardcorrupt",
+        "-analyzeduration",
+        "2000000",
+        "-probesize",
+        "500000",
         # Reordering headroom.  The default (-1) leaves the demuxer with almost
         # none, so a burst that arrives out of order reads as loss.  A keyframe
         # here is 146-190 KB - about 130 packets - so the queue has to be able to
         # hold more than one of them, and max_delay bounds how long it will wait
         # before giving up on a gap rather than stalling the pipeline.
-        "-reorder_queue_size", str(_SERVE_REORDER_QUEUE),
-        "-max_delay", str(_SERVE_MAX_DELAY_US),
+        "-reorder_queue_size",
+        str(_SERVE_REORDER_QUEUE),
+        "-max_delay",
+        str(_SERVE_MAX_DELAY_US),
         # Input silence tolerance: the sdp demuxer's ``listen_timeout`` doubles
         # as its packet-read timeout (READ_PACKET_TIMEOUT_S, ffmpeg default
         # 10 s).  See _resolve_serve_input_timeout_s for the mains/battery
         # policy.  Input option, so it must sit before -i; None keeps ffmpeg's
         # default (no behavior change for callers that do not opt in).
-        *(["-listen_timeout", str(int(input_timeout_s))]
-          if input_timeout_s is not None else []),
-        "-i", sdp_path,
+        *(
+            ["-listen_timeout", str(int(input_timeout_s))]
+            if input_timeout_s is not None
+            else []
+        ),
+        "-i",
+        sdp_path,
         *dest_args,
     ]
 
@@ -876,15 +957,6 @@ def _build_sdes_serve_cmd(
 # --------------------------------------------------------------------------- #
 
 
-
-
-
-
-
-
-
-
-
 # Terminal webrtcResp ack codes - the camera/cloud refused the stream and retrying
 # is futile. Source: decompiled AckBean.java; the official app treats both as terminal
 # (LiveCameraView.java:765 - shows an error, does NOT retry).
@@ -892,21 +964,11 @@ def _build_sdes_serve_cmd(
 #   -50015 = LIVE_SD_MAX_CONNECT_ERROR (SD-card / connection cap)
 
 
-
-
-
-
-
-
 # Real-time camera alarm types - carried as a TRANSIENT `alarmType` field inside the
 # setDevAttrNotif MQTT push (iot/v1/c/{userId}/#), NOT a separate event message.
 # Source: decompiled NewLiveFragment.java:6934-6938 / props.alarmType parse :3654.
 #   65 = motion, 66 = person. (Historical events with picUrl/videoUrl are a separate
 #   cloud-REST poll - async_get_cloud_recordings.)
-
-
-
-
 
 
 # --------------------------------------------------------------------------- #
@@ -931,7 +993,6 @@ def _build_sdes_serve_cmd(
 # --------------------------------------------------------------------------- #
 
 
-
 # --------------------------------------------------------------------------- #
 # LiveStreamSession
 #
@@ -949,16 +1010,12 @@ def _build_sdes_serve_cmd(
 # --------------------------------------------------------------------------- #
 
 
-
 # --------------------------------------------------------------------------- #
 # WebRTCSession
 #
 # Manages a live WebRTC stream opened by DeviceClient.async_open_webrtc_stream.
 # Call await session.stop() to tear down the peer connection and MQTT session.
 # --------------------------------------------------------------------------- #
-
-
-
 
 
 # Two-way-audio (talk) PCM format: signed-16-bit little-endian, 8 kHz mono, in
@@ -970,12 +1027,6 @@ def _build_sdes_serve_cmd(
 # (no 851 ACK) but accepts it once its media pipeline is ready (~0.58 s observed).
 
 
-
-
-
-
-
-
 # --------------------------------------------------------------------------- #
 # MQTT helpers (playback provisioning + live-stream discovery)
 #
@@ -985,11 +1036,6 @@ def _build_sdes_serve_cmd(
 # asyncio Future/call_soon_threadsafe bridge that had VERSION2 ReasonCode
 # compatibility issues.
 # --------------------------------------------------------------------------- #
-
-
-
-
-
 
 
 _WEBRTC_OPEN_GATE: "Optional[asyncio.Semaphore]" = None
@@ -1046,16 +1092,17 @@ def configure_stream_limits(max_streams: int) -> int:
     """
     global _STREAM_SLOTS, _STREAM_SLOTS_CAP
     if os.environ.get("AIDOT_MAX_CONCURRENT_STREAMS"):
-        _get_stream_slots()          # ensure it exists so the cap is populated
+        _get_stream_slots()  # ensure it exists so the cap is populated
         return _STREAM_SLOTS_CAP
     target = max(1, int(max_streams))
     slots = _get_stream_slots()
     if target > _STREAM_SLOTS_CAP:
         for _ in range(target - _STREAM_SLOTS_CAP):
-            slots.release()          # grows the semaphore's permit count
+            slots.release()  # grows the semaphore's permit count
         _LOGGER.info(
             "concurrent-serve cap raised from %d to %d to fit the camera fleet",
-            _STREAM_SLOTS_CAP, target,
+            _STREAM_SLOTS_CAP,
+            target,
         )
         _STREAM_SLOTS_CAP = target
     return _STREAM_SLOTS_CAP
@@ -1089,44 +1136,9 @@ def _get_stream_slots() -> "asyncio.Semaphore":
 # user's configured config home rather than a hard-coded ~/.config.
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # --------------------------------------------------------------------------- #
 # DeviceClient
 # --------------------------------------------------------------------------- #
-
-
-
 
 
 # Battery cameras re-sleep on their own low-power timer ~25 s after the last
@@ -1195,9 +1207,11 @@ def _stable_terminal_id(seed: "Optional[str]" = None, width: int = 6) -> str:
     global _TERMINAL_ID
     if seed is not None:
         import hashlib
+
         return hashlib.sha256(seed.encode()).hexdigest()[:width]
     if _TERMINAL_ID is None:
         import os
+
         _TERMINAL_ID = os.urandom(16).hex()
     return _TERMINAL_ID[:width]
 
@@ -1301,7 +1315,9 @@ def _expt_peer_id_fields(device_id=None, path=None):
         # One hex character (pin the class, keep the tail random) or exactly six
         # (pin all of field 2). Any other width would change the peer id's shape,
         # and the camera rejects a malformed peer id outright.
-        if len(terminal) not in (1, 6) or any(c not in "0123456789abcdef" for c in terminal):
+        if len(terminal) not in (1, 6) or any(
+            c not in "0123456789abcdef" for c in terminal
+        ):
             return None
     elif len(parts) != 3:
         return None
@@ -1335,8 +1351,9 @@ class _WakePlan(NamedTuple):
     settle: float
 
 
-def _wake_plan(*, is_battery: bool, now: float,
-               last_wake: "Optional[float]") -> _WakePlan:
+def _wake_plan(
+    *, is_battery: bool, now: float, last_wake: "Optional[float]"
+) -> _WakePlan:
     """Decide the wake for one command. Pure, so the decision is testable.
 
     A mains camera is always up and is never woken. A battery camera is woken
@@ -1362,7 +1379,9 @@ def _cb_takes_force_login(cb: Any) -> bool:
         return False
 
 
-class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesOpenMixin):
+class CameraMixin(
+    _CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesOpenMixin
+):
     """All camera/streaming methods, mixed into DeviceClient via inheritance."""
 
     # Devices without an aesKey never get this set by the core constructor;
@@ -1459,10 +1478,14 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # batchGetDeviceUserInfo response returns no IP and whose firmware
         # does not push setDevAttrNotif promptly after user/connect.
         _dev_ip_init = (
-            device.get("localIp") or device.get("ipAddress")
-            or device.get("ip") or device.get("localIPAddress")
-            or device.get("wlanIp") or device.get("wifiIp")
-            or device.get("lanIp") or device.get("addr")
+            device.get("localIp")
+            or device.get("ipAddress")
+            or device.get("ip")
+            or device.get("localIPAddress")
+            or device.get("wlanIp")
+            or device.get("wifiIp")
+            or device.get("lanIp")
+            or device.get("addr")
             or (device.get("properties") or {}).get("ipAddress")
             or (device.get("properties") or {}).get("ip")
         )
@@ -1477,7 +1500,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 _LOGGER.debug(
                     "DeviceClient %s: ignoring ASCII-encoded IP %r from device dict "
                     "(cloud stored IP bytes as ASCII chars; real IP unknown)",
-                    device.get("id") or device.get("devId"), _ip_str,
+                    device.get("id") or device.get("devId"),
+                    _ip_str,
                 )
             else:
                 self._ip_address = _ip_str
@@ -1491,12 +1515,12 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         self._stream_mqtt_drain: Optional["asyncio.Future"] = None
         self._last_frame_time: float = 0.0
         self._keepalive_rtsp_url: Optional[str] = None  # local serve URL (go2rtc pulls)
-        self._go2rtc_url: Optional[str] = None           # go2rtc API base (prefer-go2rtc)
+        self._go2rtc_url: Optional[str] = None  # go2rtc API base (prefer-go2rtc)
         # Whether WE own this camera's go2rtc stream registration.  False when the
         # consumer registers the stream itself and passes the URL for viewer
         # queries only - in which case we must neither add nor REMOVE it.
         self._go2rtc_manages_stream: bool = True
-        self._go2rtc_pull_url: Optional[str] = None      # go2rtc pull URL once registered
+        self._go2rtc_pull_url: Optional[str] = None  # go2rtc pull URL once registered
         self._go2rtc_task: "Optional[asyncio.Task[None]]" = None
         # Set by the DTLS serve loop once ffmpeg is bound + serving, so
         # camera.stream_source() can wait and hand HA a ready URL (avoids HA's
@@ -1614,11 +1638,15 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # names its level differently is still caught by the flag plus any one
         # battery-only field.
         _BATTERY_TELEMETRY = (
-            "Battery_remaining", "batteryRemaining", "batteryLevel",
-            "lowPowerStatus", "charging",
+            "Battery_remaining",
+            "batteryRemaining",
+            "batteryLevel",
+            "lowPowerStatus",
+            "charging",
         )
-        if (_as_int(_props.get("batteryMode")) == 2
-                and any(_props.get(k) is not None for k in _BATTERY_TELEMETRY)):
+        if _as_int(_props.get("batteryMode")) == 2 and any(
+            _props.get(k) is not None for k in _BATTERY_TELEMETRY
+        ):
             return True
         # Already-parsed status, for a camera refreshed from an attribute push
         # rather than from a device-list dict.
@@ -1672,8 +1700,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         try:
             self._last_live_play_code = _as_int(payload.get("code"))
         except (AttributeError, TypeError):
-            _LOGGER.debug("camera %s: unparseable livePlayResp payload",
-                          getattr(self, "device_id", "?"), exc_info=True)
+            _LOGGER.debug(
+                "camera %s: unparseable livePlayResp payload",
+                getattr(self, "device_id", "?"),
+                exc_info=True,
+            )
 
     def _live_play_not_ready(self) -> bool:
         """Did this open's livePlayResp say the camera is not ready to stream?
@@ -1693,7 +1724,6 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         d = self._live_dseq
         self._live_dseq += 1
         return d
-
 
     def update_status_from_device(self, device: dict) -> "DeviceStatusData":
         """Refresh camera/diagnostic status from a cloud device dict.
@@ -1727,7 +1757,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         already throttled to ~probe cadence by _backoff_or_offline_pause, so its
         expected open failures should not drip WARNINGs into the log every probe.
         """
-        _offline = (not self.status.online) and getattr(self, "_cloud_online_explicit", False)
+        _offline = (not self.status.online) and getattr(
+            self, "_cloud_online_explicit", False
+        )
         return _LOGGER.debug if _offline else _LOGGER.warning
 
     async def _backoff_or_offline_pause(self, delay: float) -> None:
@@ -1753,7 +1785,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         _LOGGER.info(
             "keepalive[%s]: device is cloud-offline - pausing open retries "
             "(recheck %.0fs, probe %.0fs)",
-            self.device_id, _OFFLINE_RECHECK_S, _OFFLINE_PROBE_S,
+            self.device_id,
+            _OFFLINE_RECHECK_S,
+            _OFFLINE_PROBE_S,
         )
         _t0 = time.monotonic()
         while (_elapsed := time.monotonic() - _t0) < _OFFLINE_PROBE_S:
@@ -1835,7 +1869,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         if self._mqtt_refused_at and since < _MQTT_CREDENTIAL_REFETCH_FLOOR:
             _LOGGER.debug(
                 "skipping MQTT credential refetch: only %.1fs since the last "
-                "refusal (floor %ss)", since, _MQTT_CREDENTIAL_REFETCH_FLOOR,
+                "refusal (floor %ss)",
+                since,
+                _MQTT_CREDENTIAL_REFETCH_FLOOR,
             )
             return
         try:
@@ -1911,11 +1947,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             or ""
         )
         return {
-            "terminal":        "app",
-            "token":           token,
-            "appId":           _LEEDARSON_APP_ID,
+            "terminal": "app",
+            "token": token,
+            "appId": _LEEDARSON_APP_ID,
             "active-language": "en_US",
-            "Content-Type":    "application/json",
+            "Content-Type": "application/json",
         }
 
     def _owner_id(self) -> str:
@@ -1932,7 +1968,12 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         )
 
     async def _async_post_ok(
-        self, url: str, headers: dict, body: str, *, timeout: float = 10.0,
+        self,
+        url: str,
+        headers: dict,
+        body: str,
+        *,
+        timeout: float = 10.0,
         label: str = "ipc post",
     ) -> bool:
         """POST a JSON ``body`` string to a Leedarson IPC endpoint; True on success.
@@ -1946,15 +1987,23 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    url, headers=headers, data=body,
+                    url,
+                    headers=headers,
+                    data=body,
                     timeout=aiohttp.ClientTimeout(total=timeout),
                 ) as resp:
                     status = resp.status
                     data = await resp.json(content_type=None)
             code = data.get("code") if isinstance(data, dict) else None
             ok = status == 200 and (code in (None, 0, 200, "0", "200"))
-            _LOGGER.debug("%s %s: status=%s code=%s ok=%s",
-                          label, self.device_id, status, code, ok)
+            _LOGGER.debug(
+                "%s %s: status=%s code=%s ok=%s",
+                label,
+                self.device_id,
+                status,
+                code,
+                ok,
+            )
             return bool(ok)
         except Exception as exc:
             _LOGGER.debug("%s failed for %s: %s", label, self.device_id, exc)
@@ -1974,8 +2023,10 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # The wake endpoint (unlike recording/playback) DOES require owner (n.java:71).
         headers = self._leedarson_headers()
         headers["owner"] = self._owner_id()
-        url = (f"{self._smarthome_base}/api/ipc/devices/"
-               f"{self.device_id}/lowPowerActiveState")
+        url = (
+            f"{self._smarthome_base}/api/ipc/devices/"
+            f"{self.device_id}/lowPowerActiveState"
+        )
         body = json.dumps({"deviceId": self.device_id, "status": "wakeup"})
         return await self._async_post_ok(url, headers, body, label="http wake")
 
@@ -2048,8 +2099,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         import aiohttp
 
         async def _fetch():
-            _hdrs = {k: v for k, v in self._leedarson_headers().items()
-                     if k != "Content-Type"}
+            _hdrs = {
+                k: v
+                for k, v in self._leedarson_headers().items()
+                if k != "Content-Type"
+            }
             async with aiohttp.ClientSession() as session:
                 async with session.get(
                     f"{self._smarthome_base}/commonController/getServerUrlConfig",
@@ -2065,7 +2119,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 body = await _fetch()  # retry once with the refreshed token
 
             data = body.get("data") or {}
-            _LOGGER.debug("getServerUrlConfig: mqtt=%s ip=%s", data.get("mqttServerUrl"), data.get("ip"))
+            _LOGGER.debug(
+                "getServerUrlConfig: mqtt=%s ip=%s",
+                data.get("mqttServerUrl"),
+                data.get("ip"),
+            )
 
             mqtt_host = data.get("mqttServerUrl") or ""
             if not mqtt_host:
@@ -2076,7 +2134,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 # redaction of the debug log below.
                 _LOGGER.warning(
                     "getServerUrlConfig returned no mqttServerUrl; "
-                    "using regional fallback. keys=%s", sorted(data)
+                    "using regional fallback. keys=%s",
+                    sorted(data),
                 )
                 mqtt_host = f"wss://{self._region}-mqtt.arnoo.com:8443/mqtt"
 
@@ -2090,12 +2149,14 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             # iOS SDK binary strings confirm these fields cluster with mqttServerUrl.
             if not self._smarthome_auth:
                 self._smarthome_auth = {
-                    "mqttUrl":      self._mqtt_url,
-                    "mqttUser":     (data.get("mqttUser") or data.get("userId")
-                                     or str(self.user_id)),
-                    "mqttPassword": (data.get("mqttPassword") or data.get("mqqtPwd")
-                                     or ""),
-                    "raw":          data,
+                    "mqttUrl": self._mqtt_url,
+                    "mqttUser": (
+                        data.get("mqttUser") or data.get("userId") or str(self.user_id)
+                    ),
+                    "mqttPassword": (
+                        data.get("mqttPassword") or data.get("mqqtPwd") or ""
+                    ),
+                    "raw": data,
                 }
                 _LOGGER.debug(
                     "getServerUrlConfig cached: url=%s user=%s hasPwd=%s",
@@ -2147,7 +2208,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # one from /user/getUser or the accessToken fallback is per client and has
         # no shared counterpart to compare against.  Strategy 1 stamps its source
         # precisely so the two can be told apart.
-        _cached_src = ((self._smarthome_auth or {}).get("raw") or {}).get("source") or ""
+        _cached_src = ((self._smarthome_auth or {}).get("raw") or {}).get(
+            "source"
+        ) or ""
         _from_shared = _cached_src.startswith("login_info.")
         if _cached_pwd and self._shared_mqtt_password() is None and not _from_shared:
             return self._smarthome_auth
@@ -2175,10 +2238,10 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             val = self._user_info.get(key)
             if val:
                 self._smarthome_auth = {
-                    "mqttUser":     _mqtt_id,
+                    "mqttUser": _mqtt_id,
                     "mqttPassword": val,
-                    "userId":       _mqtt_id,
-                    "raw":          {"source": f"login_info.{key}"},
+                    "userId": _mqtt_id,
+                    "raw": {"source": f"login_info.{key}"},
                 }
                 return self._smarthome_auth
 
@@ -2208,7 +2271,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 data = body.get("data") or {}
                 _LOGGER.debug(
                     "_async_get_smarthome_auth /user/getUser -> code=%s  data_keys=%s",
-                    code, list(data.keys()) if isinstance(data, dict) else data,
+                    code,
+                    list(data.keys()) if isinstance(data, dict) else data,
                 )
                 if isinstance(data, dict):
                     auth = data.get("authInfo") or data
@@ -2226,10 +2290,10 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     )
                     if mqtt_pwd:
                         self._smarthome_auth = {
-                            "mqttUser":     mqtt_user,
+                            "mqttUser": mqtt_user,
                             "mqttPassword": mqtt_pwd,
-                            "userId":       auth.get("userId") or mqtt_user,
-                            "raw":          auth,
+                            "userId": auth.get("userId") or mqtt_user,
+                            "raw": auth,
                         }
                         _LOGGER.debug(
                             "_async_get_smarthome_auth OK via /user/getUser: mqttUser=%s",
@@ -2243,7 +2307,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         if not self._mqtt_url:
             await self._async_get_mqtt_url()
         if self._smarthome_auth and self._smarthome_auth.get("mqttPassword"):
-            _LOGGER.warning("_async_get_smarthome_auth: mqttPassword from getServerUrlConfig")
+            _LOGGER.warning(
+                "_async_get_smarthome_auth: mqttPassword from getServerUrlConfig"
+            )
             return self._smarthome_auth
 
         # --- Strategy 4: accessToken as MQTT password (common Arnoo pattern) ---
@@ -2260,10 +2326,10 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 "falling back to userId+accessToken for MQTT."
             )
             self._smarthome_auth = {
-                "mqttUser":     _mqtt_id,
+                "mqttUser": _mqtt_id,
                 "mqttPassword": access_token,
-                "userId":       _mqtt_id,
-                "raw":          {"source": "accessToken_fallback"},
+                "userId": _mqtt_id,
+                "raw": {"source": "accessToken_fallback"},
             }
             return self._smarthome_auth
 
@@ -2287,12 +2353,15 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # Auth headers for the AiDot platform API (prod-{region}-api.arnoo.com).
         # Matches AidotClient.async_session_get(): CONF_APP_ID="Appid", APP_ID,
         # CONF_TOKEN="Token", CONF_TERMINAL="Terminal" (see login_const.py/const.py).
-        token = (self._user_info.get("accessToken")
-                 or self._user_info.get("access_token") or "")
+        token = (
+            self._user_info.get("accessToken")
+            or self._user_info.get("access_token")
+            or ""
+        )
         return {
-            "Appid":        _AIDOT_APP_ID,
-            "Token":        token,
-            "Terminal":     "app",
+            "Appid": _AIDOT_APP_ID,
+            "Token": token,
+            "Terminal": "app",
             "Content-Type": "application/json",
         }
 
@@ -2328,12 +2397,17 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 an empty result. Pass the full list from the account's device
                 listing if available.
         """
-        if (self._cached_device_user_info is not None
-                and time.time() < self._device_user_info_expiry):
-            _LOGGER.debug("device_user_info: cache hit (%.0fs left)",
-                          self._device_user_info_expiry - time.time())
+        if (
+            self._cached_device_user_info is not None
+            and time.time() < self._device_user_info_expiry
+        ):
+            _LOGGER.debug(
+                "device_user_info: cache hit (%.0fs left)",
+                self._device_user_info_expiry - time.time(),
+            )
             return self._cached_device_user_info
         import aiohttp
+
         ids = all_device_ids or [self.device_id]
         try:
             async with aiohttp.ClientSession() as session:
@@ -2349,8 +2423,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             # Server may return a bare JSON array OR {"data": [...]} / {"data": {}}
             if isinstance(body, list):
                 data = body
-                _LOGGER.debug("batchGetDeviceUserInfo bare-list response for %s: %d items",
-                              self.device_id, len(data))
+                _LOGGER.debug(
+                    "batchGetDeviceUserInfo bare-list response for %s: %d items",
+                    self.device_id,
+                    len(data),
+                )
             elif isinstance(body, dict):
                 data = body.get("data") or {}
                 # Keys, never values: this response can carry the per-device
@@ -2363,12 +2440,17 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     _LOGGER.debug(
                         "batchGetDeviceUserInfo response for %s (status=%d):"
                         " keys=%s, %d item(s)",
-                        self.device_id, status, sorted(body.keys()), len(data),
+                        self.device_id,
+                        status,
+                        sorted(body.keys()),
+                        len(data),
                     )
                 else:
                     _LOGGER.warning(
                         "batchGetDeviceUserInfo no data for %s (status=%d): keys=%s",
-                        self.device_id, status, sorted(body.keys()),
+                        self.device_id,
+                        status,
+                        sorted(body.keys()),
                     )
             else:
                 data = {}
@@ -2392,7 +2474,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     ):
                         _LOGGER.debug(
                             "batchGetDeviceUserInfo matched device %s: keys=%s",
-                            self.device_id, sorted(item.keys()),
+                            self.device_id,
+                            sorted(item.keys()),
                         )
                         return self._store_device_user_info(item)
                 # No exact match found - log which device IDs were present so
@@ -2402,19 +2485,22 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 # getIceConfigResp (TURN credentials) from being received.
                 _found_ids = [
                     item.get("deviceId") or item.get("devId") or item.get("id")
-                    for item in data[:10] if isinstance(item, dict)
+                    for item in data[:10]
+                    if isinstance(item, dict)
                 ]
                 _LOGGER.warning(
                     "batchGetDeviceUserInfo: no item matched device_id=%r"
                     " - falling back to data[0].  Device IDs in response: %s"
                     "  (wrong userId will cause broken MQTT topics and missing"
                     " TURN credentials)",
-                    self.device_id, _found_ids,
+                    self.device_id,
+                    _found_ids,
                 )
                 return self._store_device_user_info(data[0] if data else None)
         except Exception as exc:
-            _LOGGER.error("async_get_device_user_info failed for %s: %s",
-                          self.device_id, exc)
+            _LOGGER.error(
+                "async_get_device_user_info failed for %s: %s", self.device_id, exc
+            )
         return None
 
     async def async_get_p2p_uid(self) -> Optional[str]:
@@ -2431,12 +2517,17 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         try:
             dev_info = await self.async_get_device_user_info()
             if isinstance(dev_info, dict):
-                uid = (dev_info.get("p2pId")
-                       or dev_info.get("uid")
-                       or dev_info.get("tutk_uid")
-                       or dev_info.get("tutkUid"))
+                uid = (
+                    dev_info.get("p2pId")
+                    or dev_info.get("uid")
+                    or dev_info.get("tutk_uid")
+                    or dev_info.get("tutkUid")
+                )
                 if uid:
-                    _LOGGER.debug("async_get_p2p_uid: got UID from batchGetDeviceUserInfo: %s", uid)
+                    _LOGGER.debug(
+                        "async_get_p2p_uid: got UID from batchGetDeviceUserInfo: %s",
+                        uid,
+                    )
                     return str(uid)
         except Exception as exc:
             _LOGGER.debug("async_get_p2p_uid: batchGetDeviceUserInfo failed: %s", exc)
@@ -2450,8 +2541,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # return code=200 data=null when the camera is idle - the cloud appears
         # to only hand out the p2pId in some session/provisioning state we have
         # not yet reproduced; left as a best-effort source.
-        headers = {k: v for k, v in self._leedarson_headers().items()
-                   if k != "Content-Type"}
+        headers = {
+            k: v for k, v in self._leedarson_headers().items() if k != "Content-Type"
+        }
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -2471,11 +2563,17 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             if uid:
                 _LOGGER.debug("async_get_p2p_uid: got UID from getP2pId: %s", uid)
                 return str(uid)
-            _LOGGER.debug("async_get_p2p_uid: getP2pId returned no UID for %s. body=%s",
-                          self.device_id, body)
+            _LOGGER.debug(
+                "async_get_p2p_uid: getP2pId returned no UID for %s. body=%s",
+                self.device_id,
+                body,
+            )
         except Exception as exc:
-            _LOGGER.debug("async_get_p2p_uid: smarthome call failed for %s: %s",
-                          self.device_id, exc)
+            _LOGGER.debug(
+                "async_get_p2p_uid: smarthome call failed for %s: %s",
+                self.device_id,
+                exc,
+            )
 
         # --- Source 3: AiDot v32 IPC device detail ---
         # Android app's NewLiveFragment.w5() parses a JSON string from the device
@@ -2496,19 +2594,34 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                         body = await resp.json(content_type=None)
 
                 data = body.get("data") or body if isinstance(body, dict) else {}
-                uid = (data.get("p2pId") or data.get("tutkUid")
-                       or data.get("tutk_uid") or data.get("uid")
-                       or data.get("iotcUid") or data.get("p2pUID"))
+                uid = (
+                    data.get("p2pId")
+                    or data.get("tutkUid")
+                    or data.get("tutk_uid")
+                    or data.get("uid")
+                    or data.get("iotcUid")
+                    or data.get("p2pUID")
+                )
                 if uid:
-                    _LOGGER.debug("async_get_p2p_uid: got UID from v32%s: %s", path, uid)
+                    _LOGGER.debug(
+                        "async_get_p2p_uid: got UID from v32%s: %s", path, uid
+                    )
                     return str(uid)
-                _LOGGER.debug("async_get_p2p_uid: v32%s returned no UID for %s. body=%s",
-                              path, self.device_id, body)
+                _LOGGER.debug(
+                    "async_get_p2p_uid: v32%s returned no UID for %s. body=%s",
+                    path,
+                    self.device_id,
+                    body,
+                )
                 # If we got a 200-level response (not 404/405), don't try other paths
                 break
             except Exception as exc:
-                _LOGGER.debug("async_get_p2p_uid: v32%s failed for %s: %s",
-                              path, self.device_id, exc)
+                _LOGGER.debug(
+                    "async_get_p2p_uid: v32%s failed for %s: %s",
+                    path,
+                    self.device_id,
+                    exc,
+                )
 
         _LOGGER.warning(
             "async_get_p2p_uid: all three sources returned empty UID for %s",
@@ -2546,9 +2659,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
         smarthome_auth = await self._async_get_smarthome_auth()
         mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-        mqtt_pwd  = (smarthome_auth or {}).get("mqttPassword") or ""
-        client_id = (self._user_info.get("mqttClientId") or f"app-{mqtt_user}")
-        user_id   = self.user_id
+        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
+        client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
+        user_id = self.user_id
 
         mqtt_url = await self._async_get_mqtt_url()
         if not mqtt_url:
@@ -2580,13 +2693,15 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         publish_items: list = []
         _wake_items: list = []
         if self.is_battery_camera:
-            _wake_payload = _json.dumps({
-                "method":  "lowPowerActiveStateReq",
-                "service": "IPC",
-                "devId":   device_id,
-                "userId":  str(user_id),
-                "payload": {"devId": device_id, "status": "wakeup"},
-            })
+            _wake_payload = _json.dumps(
+                {
+                    "method": "lowPowerActiveStateReq",
+                    "service": "IPC",
+                    "devId": device_id,
+                    "userId": str(user_id),
+                    "payload": {"devId": device_id, "status": "wakeup"},
+                }
+            )
             _wake_topic = f"iot/v1/s/{user_id}/IPCAM/lowPowerActiveStateReq"
             # Still carried with the command too: it is what reaches a camera
             # that has kept its MQTT session, and it costs one small publish.
@@ -2609,8 +2724,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         if _plan.wake and _wake_items:
             try:
                 if pm is not None:
-                    await pm.request(publish_items=_wake_items,
-                                     subscribe_topics=[], timeout=2.0)
+                    await pm.request(
+                        publish_items=_wake_items, subscribe_topics=[], timeout=2.0
+                    )
                 else:
                     # The SAME registered client id, never a variant: the broker
                     # allows one session per account, so a second id evicts the
@@ -2618,15 +2734,21 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     # completion before the command session opens - they never
                     # overlap.
                     await _mqtt_session_with_status(
-                        mqtt_url, mqtt_user, mqtt_pwd, client_id,
-                        subscribe_topics=[], publish_items=_wake_items,
-                        duration=2.0)
+                        mqtt_url,
+                        mqtt_user,
+                        mqtt_pwd,
+                        client_id,
+                        subscribe_topics=[],
+                        publish_items=_wake_items,
+                        duration=2.0,
+                    )
                 self._last_wake_mono = _time.monotonic()
             except Exception:
                 # A failed wake must not stop the command: on a camera that is
                 # already up the command works without it.
-                _LOGGER.debug("camera %s: wake publish failed", device_id,
-                              exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: wake publish failed", device_id, exc_info=True
+                )
             await asyncio.sleep(_plan.settle)
         if pm is not None:
             messages, _st = await pm.request(
@@ -2640,17 +2762,25 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 # reported as sent on the empty result the persistent path returns).
                 _LOGGER.debug(
                     "_mqtt_device_cmd: persistent MQTT failed (%s); falling back "
-                    "to a per-op session for %s", _st.get("error"), device_id,
+                    "to a per-op session for %s",
+                    _st.get("error"),
+                    device_id,
                 )
                 messages, _st = await _mqtt_session_with_status(
-                    mqtt_url, mqtt_user, mqtt_pwd, client_id,
+                    mqtt_url,
+                    mqtt_user,
+                    mqtt_pwd,
+                    client_id,
                     subscribe_topics=sub_topics,
                     publish_items=publish_items,
                     duration=timeout,
                 )
         else:
             messages, _st = await _mqtt_session_with_status(
-                mqtt_url, mqtt_user, mqtt_pwd, client_id,
+                mqtt_url,
+                mqtt_user,
+                mqtt_pwd,
+                client_id,
                 subscribe_topics=sub_topics,
                 publish_items=publish_items,
                 duration=timeout,
@@ -2664,7 +2794,10 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             _published = not (_st and _st.get("error"))
             _LOGGER.info(
                 "_mqtt_device_cmd: published without waiting for an ack "
-                "(topic=%s published=%s)", pub_topic, _published)
+                "(topic=%s published=%s)",
+                pub_topic,
+                _published,
+            )
             return _published
 
         # Two passes, because being sure is worth more than being quick. A
@@ -2694,7 +2827,10 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     "device cmd for %s answered with code %s (seq=%s, topic=%s) "
                     "- reporting the command as sent anyway; please report this "
                     "log line, it is the evidence needed to handle it properly",
-                    device_id, mine, seq, topic,
+                    device_id,
+                    mine,
+                    seq,
+                    topic,
                 )
 
         for topic, raw in messages:
@@ -2714,7 +2850,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             inner = msg.get("payload") or {}
             if isinstance(inner, dict) and inner.get("code") == 200:
                 _LOGGER.debug(
-                    "device cmd ack 200 (inner, unattributed): topic=%s", topic)
+                    "device cmd ack 200 (inner, unattributed): topic=%s", topic
+                )
                 return True
 
         # Fire-and-forget fallback: the official app uses a delivery callback,
@@ -2727,7 +2864,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             _LOGGER.debug(
                 "device cmd: sent (no explicit 200-ack on %s, %d msgs total) "
                 "- treating as sent-ok (official app is fire-and-forget)",
-                device_id, len(messages),
+                device_id,
+                len(messages),
             )
             return True
 
@@ -2767,12 +2905,14 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 if await lan.async_set_attributes({attr: value}):
                     return True
             except Exception as _exc:
-                _LOGGER.debug("LAN set %s failed (%s); falling back to cloud", attr, _exc)
+                _LOGGER.debug(
+                    "LAN set %s failed (%s); falling back to cloud", attr, _exc
+                )
 
         device_id = self.device_id
-        user_id   = self.user_id
+        user_id = self.user_id
         # camera's local password (from device API dict 'password' field)
-        cam_pwd   = getattr(getattr(self, "info", None), "device_password", "") or ""
+        cam_pwd = getattr(getattr(self, "info", None), "device_password", "") or ""
         seq = f"ap{_random.randint(1000000, 9999999)}"
         # Web app JS (app-beautified.js:26551) includes userId + password in payload;
         # b6.java does not - camera accepts both, but web format is more complete.
@@ -2786,19 +2926,21 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # this path is proven and reads back within one poll -- so this is
         # parity rather than a fix; it costs nothing and removes one more way
         # our traffic differs from the vendor's.
-        payload = _json.dumps({
-            "id":      device_id,
-            "method":  "setDevAttrReq",
-            "service": "device",
-            "seq":     seq,
-            "tst":     int(_time.time() * 1000),
-            "payload": inner,
-        })
+        payload = _json.dumps(
+            {
+                "id": device_id,
+                "method": "setDevAttrReq",
+                "service": "device",
+                "seq": seq,
+                "tst": int(_time.time() * 1000),
+                "payload": inner,
+            }
+        )
         pub_topic = f"iot/v1/c/{device_id}/device/setDevAttrReq"
         _LOGGER.info("setDevAttrReq: %s=%s -> %s  seq=%s", attr, value, device_id, seq)
         ok = await self._mqtt_device_cmd(
-            pub_topic, payload, timeout=timeout, ack_keyword="setDevAttr",
-            seq=seq)
+            pub_topic, payload, timeout=timeout, ack_keyword="setDevAttr", seq=seq
+        )
         if ok:
             # Reflect the change in local status right away (optimistic), so HA
             # control entities show the new value immediately instead of waiting
@@ -2809,7 +2951,12 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             try:
                 self.status.update_from_camera_attributes({attr: value})
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_set_device_attribute', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "async_set_device_attribute",
+                    exc_info=True,
+                )
         return ok
 
     async def async_query_device_action(
@@ -2841,7 +2988,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         import random as _random
         import time as _time
 
-        user_id   = self.user_id
+        user_id = self.user_id
         device_id = self.device_id
         smarthome_auth = await self._async_get_smarthome_auth()
         mqtt_url = await self._async_get_mqtt_url()
@@ -2849,25 +2996,31 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             _LOGGER.debug("async_query_device_action: no MQTT URL for %s", device_id)
             return None
         mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(user_id)
-        mqtt_pwd  = (smarthome_auth or {}).get("mqttPassword") or ""
-        client_id = (self._user_info.get("mqttClientId") or f"app-{mqtt_user}")
+        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
+        client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
 
         _dev = self._camera_properties() or {}
-        parent_id = (getattr(getattr(self, "info", None), "direct_id", None)
-                     or _dev.get("directId") or _dev.get("parentId") or device_id)
+        parent_id = (
+            getattr(getattr(self, "info", None), "direct_id", None)
+            or _dev.get("directId")
+            or _dev.get("parentId")
+            or device_id
+        )
         seq = f"ap{_random.randint(1000000, 9999999)}"
-        payload = _json.dumps({
-            "method":  "devActionReq",
-            "service": "device",
-            "seq":     seq,
-            "tst":     int(_time.time() * 1000),
-            "payload": {
-                "devId":    device_id,
-                "parentId": parent_id,
-                "action":   action,
-                "in":       params if params is not None else [],
-            },
-        })
+        payload = _json.dumps(
+            {
+                "method": "devActionReq",
+                "service": "device",
+                "seq": seq,
+                "tst": int(_time.time() * 1000),
+                "payload": {
+                    "devId": device_id,
+                    "parentId": parent_id,
+                    "action": action,
+                    "in": params if params is not None else [],
+                },
+            }
+        )
         publish_items = [
             (f"iot/v1/s/{user_id}/device/devActionReq", payload),
         ]
@@ -2883,7 +3036,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # returns nothing. It only "worked" when tested with the integration
         # stopped, which is the one condition that hides the conflict.
         messages = []
-        pm = await self._get_persistent_mqtt() if self._resolve_persistent_mqtt() else None
+        pm = (
+            await self._get_persistent_mqtt()
+            if self._resolve_persistent_mqtt()
+            else None
+        )
         if pm is not None:
             messages, _st = await pm.request(
                 publish_items=publish_items,
@@ -2893,11 +3050,17 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             if _st and _st.get("error"):
                 _LOGGER.debug(
                     "async_query_device_action: persistent MQTT failed (%s); "
-                    "falling back for %s", _st.get("error"), device_id)
+                    "falling back for %s",
+                    _st.get("error"),
+                    device_id,
+                )
                 pm = None
         if pm is None:
             messages, _st = await _mqtt_session_with_status(
-                mqtt_url, mqtt_user, mqtt_pwd, client_id,
+                mqtt_url,
+                mqtt_user,
+                mqtt_pwd,
+                client_id,
                 subscribe_topics=sub_topics,
                 publish_items=publish_items,
                 duration=timeout,
@@ -2955,17 +3118,24 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         if good is not None:
             _LOGGER.debug(
                 "devActionReq %s: accepted a reply for %s without a seq match",
-                action, device_id)
+                action,
+                device_id,
+            )
             return good
         if _empty_seen:
-            _LOGGER.debug("devActionReq %s: only empty replies from %s",
-                          action, device_id)
+            _LOGGER.debug(
+                "devActionReq %s: only empty replies from %s", action, device_id
+            )
             return None
         # Never return None silently: a caller cannot tell "unsupported" from
         # "the reply never came back", and a silent None is what made this
         # failure invisible for an entire debugging session.
-        _LOGGER.info("devActionReq %s: no reply from %s (%d messages seen)",
-                     action, device_id, len(messages))
+        _LOGGER.info(
+            "devActionReq %s: no reply from %s (%d messages seen)",
+            action,
+            device_id,
+            len(messages),
+        )
         return None
 
     async def async_trigger_device_action(
@@ -2987,7 +3157,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         import random as _random
         import time as _time
 
-        user_id   = self.user_id
+        user_id = self.user_id
         device_id = self.device_id
 
         # The app's own builder (main chunk, DeviceControl) sends five things we
@@ -3000,38 +3170,39 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # but the wrapper does not put it on the wire, and a read-only
         # `WifiBaseInfo` acks without it.
         _dev = self._camera_properties() or {}
-        parent_id = (getattr(getattr(self, "info", None), "direct_id", None)
-                     or _dev.get("directId") or _dev.get("parentId") or device_id)
+        parent_id = (
+            getattr(getattr(self, "info", None), "direct_id", None)
+            or _dev.get("directId")
+            or _dev.get("parentId")
+            or device_id
+        )
         seq = f"ap{_random.randint(1000000, 9999999)}"
-        payload = _json.dumps({
-            "method":  "devActionReq",
-            "service": "device",
-            "seq":     seq,
-            "tst":     int(_time.time() * 1000),
-            "payload": {
-                "devId":    device_id,
-                "parentId": parent_id,
-                "action":   action,
-                "in":       params,
-            },
-        })
+        payload = _json.dumps(
+            {
+                "method": "devActionReq",
+                "service": "device",
+                "seq": seq,
+                "tst": int(_time.time() * 1000),
+                "payload": {
+                    "devId": device_id,
+                    "parentId": parent_id,
+                    "action": action,
+                    "in": params,
+                },
+            }
+        )
         pub_topic = f"iot/v1/s/{user_id}/device/devActionReq"
         _LOGGER.info("devActionReq: %s %s -> %s", action, params, device_id)
         return await self._mqtt_device_cmd(
-            pub_topic, payload, timeout=timeout, ack_keyword="devAction",
-            seq=seq, expect_ack=expect_ack)
+            pub_topic,
+            payload,
+            timeout=timeout,
+            ack_keyword="devAction",
+            seq=seq,
+            expect_ack=expect_ack,
+        )
 
     # Convenience wrappers - confirmed attribute names/types from APK source
-
-
-
-
-
-
-
-
-
-
 
     def _camera_properties(self) -> "Optional[dict]":
         """This camera's `properties` dict from the cloud device list.
@@ -3115,12 +3286,17 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             try:
                 await self.async_wake_camera()
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_get_camera_attributes', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "async_get_camera_attributes",
+                    exc_info=True,
+                )
 
         smarthome_auth = await self._async_get_smarthome_auth()
         mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-        mqtt_pwd  = (smarthome_auth or {}).get("mqttPassword") or ""
-        _base_cid = (self._user_info.get("mqttClientId") or f"app-{mqtt_user}")
+        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
+        _base_cid = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
         # The broker binds the credential to the EXACT registered mqttClientId.
         # A suffixed connect is refused outright with CONNACK rc=4, "Bad user
         # name or password" - so the "-cmd" id this used to build could never
@@ -3135,7 +3311,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # same identity, no second connect - which is why it is now preferred
         # unconditionally rather than only under AIDOT_PERSISTENT_MQTT.
         client_id = _base_cid
-        user_id   = self.user_id
+        user_id = self.user_id
         device_id = self.device_id
 
         mqtt_url = await self._async_get_mqtt_url()
@@ -3155,14 +3331,19 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         #   topic:   iot/v1/cb/{userId}/user/connect
         #   payload: {service:"user", method:"connect", srcAddr:"0.{userId}",
         #             payload:{timestamp:"yyyy-MM-dd HH:mm:ss.SSS"}}
-        _ts = _time.strftime("%Y-%m-%d %H:%M:%S.") + f"{int(_time.time() * 1000) % 1000:03d}"
-        _connect_topic   = f"iot/v1/cb/{user_id}/user/connect"
-        _connect_payload = _json.dumps({
-            "service": "user",
-            "method":  "connect",
-            "srcAddr": f"0.{user_id}",
-            "payload": {"timestamp": _ts},
-        })
+        _ts = (
+            _time.strftime("%Y-%m-%d %H:%M:%S.")
+            + f"{int(_time.time() * 1000) % 1000:03d}"
+        )
+        _connect_topic = f"iot/v1/cb/{user_id}/user/connect"
+        _connect_payload = _json.dumps(
+            {
+                "service": "user",
+                "method": "connect",
+                "srcAddr": f"0.{user_id}",
+                "payload": {"timestamp": _ts},
+            }
+        )
 
         publish_items = [(_connect_topic, _connect_payload)]
 
@@ -3170,25 +3351,30 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # exits deep sleep and responds.  Payload from DeviceWakeUpRepos.java -
         # keys are method/devId/userId/service/payload; no srcAddr/seq/tst.
         if self.is_battery_camera:
-            _wake_topic   = f"iot/v1/s/{user_id}/IPCAM/lowPowerActiveStateReq"
-            _wake_payload = _json.dumps({
-                "method":  "lowPowerActiveStateReq",
-                "service": "IPC",
-                "devId":   device_id,
-                "userId":  str(user_id),
-                "payload": {"devId": device_id, "status": "wakeup"},
-            })
+            _wake_topic = f"iot/v1/s/{user_id}/IPCAM/lowPowerActiveStateReq"
+            _wake_payload = _json.dumps(
+                {
+                    "method": "lowPowerActiveStateReq",
+                    "service": "IPC",
+                    "devId": device_id,
+                    "userId": str(user_id),
+                    "payload": {"devId": device_id, "status": "wakeup"},
+                }
+            )
             publish_items.append((_wake_topic, _wake_payload))
 
-        _sess_st = None          # transport status, when a per-op session ran
+        _sess_st = None  # transport status, when a per-op session ran
         # Prefer the shared connection whatever the env var says: it already
         # holds the only client id this broker accepts, so riding it avoids
         # both the refused connect and the eviction the fallback risks.
         try:
             pm = await self._get_persistent_mqtt()
         except Exception:
-            _LOGGER.debug("camera %s: persistent MQTT unavailable for attribute read",
-                          getattr(self, "device_id", "?"), exc_info=True)
+            _LOGGER.debug(
+                "camera %s: persistent MQTT unavailable for attribute read",
+                getattr(self, "device_id", "?"),
+                exc_info=True,
+            )
             pm = None
         if pm is not None:
             messages, _st = await pm.request(
@@ -3202,7 +3388,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 _LOGGER.debug(
                     "async_get_camera_attributes: persistent MQTT failed (%s); "
                     "falling back to a per-op session for %s",
-                    _st.get("error"), device_id,
+                    _st.get("error"),
+                    device_id,
                 )
                 if getattr(self, "_streaming_active", False):
                     # The fallback connects with the id a live stream is using,
@@ -3216,7 +3403,10 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     )
                     return None
                 messages, _sess_st = await _mqtt_session_with_status(
-                    mqtt_url, mqtt_user, mqtt_pwd, client_id,
+                    mqtt_url,
+                    mqtt_user,
+                    mqtt_pwd,
+                    client_id,
                     subscribe_topics=sub_topics,
                     publish_items=publish_items,
                     duration=timeout,
@@ -3228,7 +3418,10 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             # ambiguity is what let a client id the broker rejects outright go
             # unnoticed through three investigations.
             messages, _sess_st = await _mqtt_session_with_status(
-                mqtt_url, mqtt_user, mqtt_pwd, client_id,
+                mqtt_url,
+                mqtt_user,
+                mqtt_pwd,
+                client_id,
                 subscribe_topics=sub_topics,
                 publish_items=publish_items,
                 duration=timeout,
@@ -3237,7 +3430,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             _LOGGER.warning(
                 "async_get_camera_attributes: no MQTT session for %s (rc=%s %s) - "
                 "this is a transport failure, not the camera staying quiet.",
-                device_id, _sess_st.get("rc"), _sess_st.get("rc_str"),
+                device_id,
+                _sess_st.get("rc"),
+                _sess_st.get("rc_str"),
             )
 
         for topic, raw in messages:
@@ -3250,9 +3445,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             inner = msg.get("payload") or msg
             attr = inner.get("attr") if isinstance(inner, dict) else None
             if attr and isinstance(attr, dict):
-                _LOGGER.debug(
-                    "async_get_camera_attributes %s: %s", device_id, attr
-                )
+                _LOGGER.debug("async_get_camera_attributes %s: %s", device_id, attr)
                 return attr
 
         # No push. Mains cameras never answer the announce - measured on an
@@ -3265,16 +3458,21 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             _props = self._camera_properties()
         except Exception:
             _props = None
-            _LOGGER.debug("camera %s: property fallback failed", device_id, exc_info=True)
+            _LOGGER.debug(
+                "camera %s: property fallback failed", device_id, exc_info=True
+            )
         if _props:
             _LOGGER.debug(
                 "async_get_camera_attributes: %s pushed nothing; returning %d "
-                "attributes from the device list instead.", device_id, len(_props),
+                "attributes from the device list instead.",
+                device_id,
+                len(_props),
             )
             return _props
         _LOGGER.info(
             "async_get_camera_attributes: %s pushed no setDevAttrNotif and the "
-            "device list carried no properties either.", device_id,
+            "device list carried no properties either.",
+            device_id,
         )
         return None
 
@@ -3334,30 +3532,37 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             data = await _fetch()
             # The auth check reads a dict; a list is already a success here.
             if isinstance(data, dict):
-                if self._is_auth_error(data) and await self._async_refresh_auth_token(data):
+                if self._is_auth_error(data) and await self._async_refresh_auth_token(
+                    data
+                ):
                     data = await _fetch()
             if isinstance(data, dict):
                 # An envelope means an error, since success is a bare array.
                 _LOGGER.warning(
                     "getRecentEventRecordingList code=%s msg=%s for %s",
-                    data.get("code"), data.get("desc") or data.get("msg"),
+                    data.get("code"),
+                    data.get("desc") or data.get("msg"),
                     self.device_id,
                 )
                 return []
             if not isinstance(data, list):
                 return []
-            mine = [e for e in data
-                    if isinstance(e, dict)
-                    and e.get("deviceId") in (None, self.device_id)]
+            mine = [
+                e
+                for e in data
+                if isinstance(e, dict) and e.get("deviceId") in (None, self.device_id)
+            ]
             _LOGGER.info(
                 "getRecentEventRecordingList for %s: %d of %d event(s)",
-                self.device_id, len(mine), len(data),
+                self.device_id,
+                len(mine),
+                len(data),
             )
             return mine
         except Exception as exc:
             _LOGGER.warning(
-                "getRecentEventRecordingList failed for %s: %s",
-                self.device_id, exc)
+                "getRecentEventRecordingList failed for %s: %s", self.device_id, exc
+            )
             return []
 
     async def async_get_cloud_recordings(
@@ -3390,12 +3595,13 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
         _body = {
             "deviceIds": [self.device_id],
-            "pageNum":   page,
-            "pageSize":  page_size,
+            "pageNum": page,
+            "pageSize": page_size,
             "recordSta": start_ts,
             "recordEnd": end_ts,
         }
         _LOGGER.debug("eventRecordingList request for %s: %s", self.device_id, _body)
+
         async def _fetch():
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -3411,11 +3617,15 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
                 body = await _fetch()  # retry once with the refreshed token
 
-            _LOGGER.debug("eventRecordingList raw response for %s: %s", self.device_id, body)
+            _LOGGER.debug(
+                "eventRecordingList raw response for %s: %s", self.device_id, body
+            )
             if body.get("code") != 200:
                 _LOGGER.warning(
                     "eventRecordingList code=%s msg=%s for %s",
-                    body.get("code"), body.get("desc") or body.get("msg"), self.device_id,
+                    body.get("code"),
+                    body.get("desc") or body.get("msg"),
+                    self.device_id,
                 )
                 return []
 
@@ -3428,7 +3638,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             # severity was wrong.
             _LOGGER.debug(
                 "eventRecordingList for %s: total=%s returned=%d",
-                self.device_id, data.get("total"), len(items),
+                self.device_id,
+                data.get("total"),
+                len(items),
             )
             return items
 
@@ -3459,8 +3671,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
         _body = {
             "deviceIds": [self.device_id],
-            "pageNum":   1,
-            "pageSize":  1,
+            "pageNum": 1,
+            "pageSize": 1,
             "recordSta": start_ts,
             "recordEnd": end_ts,
         }
@@ -3481,13 +3693,15 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 body = await _fetch()
             if not isinstance(body, dict) or body.get("code") != 200:
                 _LOGGER.debug(
-                    "eventRecordingList count for %s: %s", self.device_id, body)
+                    "eventRecordingList count for %s: %s", self.device_id, body
+                )
                 return None
             total = (body.get("data") or {}).get("total")
             return int(total) if isinstance(total, int) else None
         except Exception as exc:
             _LOGGER.debug(
-                "eventRecordingList count failed for %s: %s", self.device_id, exc)
+                "eventRecordingList count failed for %s: %s", self.device_id, exc
+            )
             return None
 
     async def async_get_cloud_plan(self) -> Optional[dict]:
@@ -3528,14 +3742,14 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
                 body = await _fetch()
             if not isinstance(body, dict) or body.get("code") != 200:
-                _LOGGER.debug(
-                    "getPackageInfoByDevId for %s: %s", self.device_id, body)
+                _LOGGER.debug("getPackageInfoByDevId for %s: %s", self.device_id, body)
                 return None
             data = body.get("data")
             return data if isinstance(data, dict) and data else None
         except Exception as exc:
             _LOGGER.debug(
-                "getPackageInfoByDevId failed for %s: %s", self.device_id, exc)
+                "getPackageInfoByDevId failed for %s: %s", self.device_id, exc
+            )
             return None
 
     async def async_get_event_video_media(
@@ -3570,7 +3784,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 async with session.post(
                     f"{self._aidot_v32_base}/playback/getEventVideoUrl",
                     json={
-                        "deviceId":  self.device_id,
+                        "deviceId": self.device_id,
                         "eventList": [{"eventUuid": event_uuid}],
                     },
                     headers=self._aidot_headers(),
@@ -3583,16 +3797,24 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
                 body = await _fetch()  # retry once with the refreshed token
 
-            _LOGGER.debug("getEventVideoUrl raw for %s uuid=%s: %s", self.device_id, event_uuid, body)
+            _LOGGER.debug(
+                "getEventVideoUrl raw for %s uuid=%s: %s",
+                self.device_id,
+                event_uuid,
+                body,
+            )
 
             if body.get("code") != 200:
                 _LOGGER.warning(
                     "getEventVideoUrl code=%s for %s uuid=%s: %s",
-                    body.get("code"), self.device_id, event_uuid, body,
+                    body.get("code"),
+                    self.device_id,
+                    event_uuid,
+                    body,
                 )
                 return None
 
-            event_url_list = ((body.get("data") or {}).get("eventUrlList") or [])
+            event_url_list = (body.get("data") or {}).get("eventUrlList") or []
             if not event_url_list:
                 return None
             video_url_list = (event_url_list[0] or {}).get("videoUrlList") or []
@@ -3608,14 +3830,19 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             mime = _MIME.get(entry.get("type"), "video/mp4")
             _LOGGER.debug(
                 "getEventVideoUrl resolved for %s: type=%s mime=%s url=%.100s",
-                self.device_id, entry.get("type"), mime, url,
+                self.device_id,
+                entry.get("type"),
+                mime,
+                url,
             )
             return url, mime
 
         except Exception as exc:
             _LOGGER.error(
                 "async_get_event_video_media failed for %s uuid=%s: %s",
-                self.device_id, event_uuid, exc,
+                self.device_id,
+                event_uuid,
+                exc,
             )
             return None
 
@@ -3648,8 +3875,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     f"{self._aidot_v32_base}/playback/eventRecordingList",
                     json={
                         "deviceIds": [self.device_id],
-                        "pageNum":   1,
-                        "pageSize":  1,
+                        "pageNum": 1,
+                        "pageSize": 1,
                         "recordSta": start_ts,
                         "recordEnd": end_ts,
                     },
@@ -3663,15 +3890,18 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
                 body = await _fetch()  # retry once with the refreshed token
 
-            _LOGGER.debug("thumbnail eventRecordingList for %s: %s", self.device_id, body)
+            _LOGGER.debug(
+                "thumbnail eventRecordingList for %s: %s", self.device_id, body
+            )
             if body.get("code") != 200:
                 _LOGGER.debug(
                     "async_get_latest_thumbnail: code=%s for %s (no cloud plan or no events)",
-                    body.get("code"), self.device_id,
+                    body.get("code"),
+                    self.device_id,
                 )
                 return None
 
-            items = ((body.get("data") or {}).get("list") or [])
+            items = (body.get("data") or {}).get("list") or []
             if not items:
                 _LOGGER.debug("No event photos available for %s", self.device_id)
                 return None
@@ -3762,8 +3992,15 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 # here blocks the whole event loop - every camera, keepalive and
                 # MQTT drain - for up to the timeout.
                 _snap_proc = await _asyncio.create_subprocess_exec(
-                    "ffmpeg", "-y", "-i", _tmp_ts,
-                    "-frames:v", "1", "-f", "image2", output_path,
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    _tmp_ts,
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "image2",
+                    output_path,
                     stdout=_asyncio.subprocess.DEVNULL,
                     stderr=_asyncio.subprocess.PIPE,
                 )
@@ -3789,13 +4026,19 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 return False
             except Exception as _snap_exc:
                 _LOGGER.error(
-                    "async_snapshot SDES failed for %s: %s", self.device_id, _snap_exc)
+                    "async_snapshot SDES failed for %s: %s", self.device_id, _snap_exc
+                )
                 return False
             finally:
                 try:
                     _os.unlink(_tmp_ts)
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_snapshot', exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "async_snapshot",
+                        exc_info=True,
+                    )
 
         # -- DTLS path: on_frame callback delivers frames from aiortc ------- #
         frame_event = _asyncio.Event()
@@ -3809,7 +4052,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 return
             # Decode the frame NOW while PyAV's decoder buffer is still valid.
             try:
-                captured[0] = frame.to_image()          # PIL Image
+                captured[0] = frame.to_image()  # PIL Image
             except Exception:
                 try:
                     captured[0] = frame.to_ndarray(format="rgb24")  # numpy
@@ -3825,7 +4068,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             )
         except Exception as _snap_exc:
             _LOGGER.error(
-                "async_snapshot DTLS failed for %s: %s", self.device_id, _snap_exc)
+                "async_snapshot DTLS failed for %s: %s", self.device_id, _snap_exc
+            )
             return False
         try:
             try:
@@ -3833,7 +4077,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             except TimeoutError:
                 _LOGGER.warning(
                     "async_snapshot: no keyframe received within %.0fs for %s",
-                    timeout, self.device_id,
+                    timeout,
+                    self.device_id,
                 )
                 return False
         finally:
@@ -3865,7 +4110,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         if self._stream_task is not None and not self._stream_task.done():
             return
         self._streaming_active = True
-        self._start_keepalive_renew()   # battery: renew keep-alive on this path too
+        self._start_keepalive_renew()  # battery: renew keep-alive on this path too
         self._stream_task = asyncio.ensure_future(self._streaming_loop())
 
     async def async_stop_streaming(self) -> None:
@@ -3878,28 +4123,48 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             try:
                 await g_task
             except (asyncio.CancelledError, Exception):
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_stop_streaming', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "async_stop_streaming",
+                    exc_info=True,
+                )
         await self._deregister_go2rtc()
         session, self._stream_session = self._stream_session, None
         if session is not None:
             try:
                 await session.stop()
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_stop_streaming', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "async_stop_streaming",
+                    exc_info=True,
+                )
         task, self._stream_task = self._stream_task, None
         if task is not None and not task.done():
             task.cancel()
             try:
                 await task
             except (asyncio.CancelledError, Exception):
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_stop_streaming', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "async_stop_streaming",
+                    exc_info=True,
+                )
         ka_task, self._keepalive_task = getattr(self, "_keepalive_task", None), None
         if ka_task is not None and not ka_task.done():
             ka_task.cancel()
             try:
                 await ka_task
             except (asyncio.CancelledError, Exception):
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_stop_streaming', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "async_stop_streaming",
+                    exc_info=True,
+                )
         # Reap a persistent-MQTT stream drain that no session stopped (e.g. an
         # open cancelled mid-handshake) so its handler is removed from the shared
         # connection and its blocked executor thread is released.
@@ -3922,15 +4187,25 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             return
         if outq is not None:
             try:
-                outq.put_nowait(None)   # release the executor thread in outgoing_q.get
+                outq.put_nowait(None)  # release the executor thread in outgoing_q.get
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_reap_stream_drain', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_reap_stream_drain",
+                    exc_info=True,
+                )
         if not drain.done():
             drain.cancel()
         try:
             await drain
         except (asyncio.CancelledError, Exception):
-            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_reap_stream_drain', exc_info=True)
+            _LOGGER.debug(
+                "camera %s: swallowed exception in %s",
+                getattr(self, "device_id", "?"),
+                "_reap_stream_drain",
+                exc_info=True,
+            )
 
     def _release_stream_drain_to_session(self):
         """Hand ownership of the persistent-MQTT signaling drain to the session
@@ -3947,7 +4222,10 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         self._stream_mqtt_outq = None
 
     async def async_start_motion_polling(
-        self, callback: Callable, interval: float = 30.0, lookback_s: int = 600,
+        self,
+        callback: Callable,
+        interval: float = 30.0,
+        lookback_s: int = 600,
     ) -> None:
         """Start polling the cloud event list and invoke ``callback(event)`` for each NEW
         motion/event clip the camera records.
@@ -3984,11 +4262,17 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             try:
                 await task
             except (asyncio.CancelledError, Exception):
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), 'async_stop_motion_polling', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "async_stop_motion_polling",
+                    exc_info=True,
+                )
 
     async def _motion_poll_loop(self, lookback_s: int) -> None:
         """Background: poll the cloud event list; fire callback on newly-recorded events."""
         import time as _time
+
         primed = False
         while self._motion_active:
             try:
@@ -4025,12 +4309,15 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             except asyncio.CancelledError:
                 return
 
-    async def _async_set_keep_alive(self, keep_alive_s: int = _KEEPALIVE_WINDOW_S) -> None:
+    async def _async_set_keep_alive(
+        self, keep_alive_s: int = _KEEPALIVE_WINDOW_S
+    ) -> None:
         """POST setKeepAliveTime so a battery camera stays awake for keep_alive_s
         seconds. Best-effort (errors swallowed). Wire format matches the app
         (n.java: keepAliveTime=25)."""
         try:
             import aiohttp as _aiohttp
+
             async with _aiohttp.ClientSession() as _s:
                 async with _s.post(
                     f"{self._aidot_v32_base}/devices/{self.device_id}/setKeepAliveTime",
@@ -4189,9 +4476,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         self._start_keepalive_renew()
         if self.is_sdes_camera:
             self._stream_task = asyncio.ensure_future(self._sdes_keepalive_loop())
-        elif rtsp_push_url and (rtsp_push_url.startswith("http")
-                                or rtsp_push_url.startswith("rtsp")
-                                or rtsp_push_url == "-"):
+        elif rtsp_push_url and (
+            rtsp_push_url.startswith("http")
+            or rtsp_push_url.startswith("rtsp")
+            or rtsp_push_url == "-"
+        ):
             # "-" is the stdout producer (go2rtc exec: source).  It belongs to
             # the serve loop exactly as an http listen URL does; leaving it out
             # of this gate sent it to the JPEG keepalive loop instead, which
@@ -4244,11 +4533,19 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         """
         import aiohttp
         from .go2rtc import prefer_go2rtc
+
         try:
             await self.async_wait_serve_ready(timeout=40.0)
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_register_with_go2rtc', exc_info=True)
-        if not (self._streaming_active and self._go2rtc_url and self._keepalive_rtsp_url):
+            _LOGGER.debug(
+                "camera %s: swallowed exception in %s",
+                getattr(self, "device_id", "?"),
+                "_register_with_go2rtc",
+                exc_info=True,
+            )
+        if not (
+            self._streaming_active and self._go2rtc_url and self._keepalive_rtsp_url
+        ):
             return
         name = self._go2rtc_stream_name()
         if _is_self_referential_source(self._keepalive_rtsp_url, name):
@@ -4260,19 +4557,28 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             # nothing to register.
             _LOGGER.debug(
                 "camera %s: not registering %s with go2rtc - the push URL is that "
-                "stream's own address", self.device_id, name,
+                "stream's own address",
+                self.device_id,
+                name,
             )
             return
         try:
             async with aiohttp.ClientSession() as _s2:
                 url = await prefer_go2rtc(
-                    _s2, name, self._keepalive_rtsp_url, base_url=self._go2rtc_url)
+                    _s2, name, self._keepalive_rtsp_url, base_url=self._go2rtc_url
+                )
             if url:
                 self._go2rtc_pull_url = url
                 _LOGGER.info(
-                    "camera %s: preferring go2rtc stream -> %s", self.device_id, url)
+                    "camera %s: preferring go2rtc stream -> %s", self.device_id, url
+                )
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_register_with_go2rtc', exc_info=True)
+            _LOGGER.debug(
+                "camera %s: swallowed exception in %s",
+                getattr(self, "device_id", "?"),
+                "_register_with_go2rtc",
+                exc_info=True,
+            )
 
     async def _deregister_go2rtc(self) -> None:
         """Remove this camera's stream from go2rtc (best-effort).
@@ -4296,12 +4602,18 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             return
         import aiohttp
         from .go2rtc import Go2rtcClient
+
         name = self._go2rtc_stream_name()
         try:
             async with aiohttp.ClientSession() as _s2:
                 await Go2rtcClient(_s2, base).remove_stream(name)
         except Exception:
-            _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_deregister_go2rtc', exc_info=True)
+            _LOGGER.debug(
+                "camera %s: swallowed exception in %s",
+                getattr(self, "device_id", "?"),
+                "_deregister_go2rtc",
+                exc_info=True,
+            )
 
     async def async_wait_serve_ready(self, timeout: float = 20.0) -> bool:
         """Wait until the DTLS serve is bound + serving (or ``timeout``).
@@ -4352,13 +4664,16 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     # the camera builds a receive path for our audio (no-op for the
                     # DTLS path, which already negotiates a sendrecv audio sender).
                     session = await self.async_open_webrtc_stream(
-                        timeout=open_timeout, talk=True)
+                        timeout=open_timeout, talk=True
+                    )
                     own_session = True
                     break
                 except Exception as exc:
                     _LOGGER.debug(
                         "async_speak: connect attempt %d/%d failed: %s",
-                        attempt + 1, retries, exc,
+                        attempt + 1,
+                        retries,
+                        exc,
                     )
                     session = None
                     await asyncio.sleep(3)
@@ -4456,7 +4771,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # Tracked separately from `base` because it must gate the fallback even
         # when go2rtc IS configured but the query fails.
         push_mode = bool(self._keepalive_rtsp_url) and not str(
-            self._keepalive_rtsp_url).startswith("http")
+            self._keepalive_rtsp_url
+        ).startswith("http")
 
         # Ask go2rtc when we can. This is the only viewer signal that works in
         # push mode, which is why a consumer that registers its own stream
@@ -4468,6 +4784,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 import aiohttp
 
                 from .go2rtc import Go2rtcClient
+
                 async with aiohttp.ClientSession() as _s:
                     viewers = await Go2rtcClient(_s, base).viewer_count(name)
                 if viewers is not None:
@@ -4546,9 +4863,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # one number.  Safe HERE and not in the DTLS serve loop because this
         # loop re-offers within one open attempt on one peer connection, so a
         # late answer still belongs to the offer in flight.
-        _loop_peer_id = self.generate_webrtc_peer_id(live_type=2, stream_id=0,
-                                                     sdes=True,
-                                                     device_id=self.device_id)
+        _loop_peer_id = self.generate_webrtc_peer_id(
+            live_type=2, stream_id=0, sdes=True, device_id=self.device_id
+        )
         _peer_reuses = 0
 
         # Wake-readiness retries.  A battery camera that answers livePlayResp with
@@ -4571,8 +4888,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 self._serve_relay.set_backend(None)
             if _peer_reuses >= _PEERID_MAX_REUSE:
                 _loop_peer_id = self.generate_webrtc_peer_id(
-                    live_type=2, stream_id=0, sdes=True,
-                    device_id=self.device_id)
+                    live_type=2, stream_id=0, sdes=True, device_id=self.device_id
+                )
                 _peer_reuses = 0
             _peer_reuses += 1
             _use_fast = self._adaptive_next_fast(_adaptive, _fast_failed)
@@ -4619,7 +4936,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 _LOGGER.warning(
                     "SDES keepalive: camera %s refused the stream (%s) - "
                     "backing off %.0fs so its sessions can be released",
-                    self.device_id, busy, _BUSY_BACKOFF_S,
+                    self.device_id,
+                    busy,
+                    _BUSY_BACKOFF_S,
                 )
                 try:
                     await asyncio.sleep(_BUSY_BACKOFF_S)
@@ -4648,22 +4967,26 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 self._fast_attempt_override = None
                 _no_media_streak = _next_no_media_streak(_no_media_streak, False)
                 if _should_abandon_keepalive(
-                        _no_media_streak, is_battery=self.is_battery_camera):
+                    _no_media_streak, is_battery=self.is_battery_camera
+                ):
                     _LOGGER.warning(
                         "camera %s: %d consecutive keepalive attempts delivered "
                         "no media - stopping the background keepalive to stop "
                         "waking it. A live view will still open a session; set "
                         "AIDOT_FUTILE_KEEPALIVE_LIMIT=0 to keep retrying.",
-                        self.device_id, _no_media_streak,
+                        self.device_id,
+                        _no_media_streak,
                     )
                     self._streaming_active = False
                     self._cancel_keepalive_renew()
                     try:
                         await self._deregister_go2rtc()
                     except Exception:
-                        _LOGGER.debug("camera %s: go2rtc deregister after "
-                                      "abandon failed", self.device_id,
-                                      exc_info=True)
+                        _LOGGER.debug(
+                            "camera %s: go2rtc deregister after abandon failed",
+                            self.device_id,
+                            exc_info=True,
+                        )
                     return
                 # An adaptive fast attempt that reaches here delivered no media,
                 # so it must latch the fallback exactly as the bottom of the
@@ -4674,18 +4997,21 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     self._fast_path_unavailable = True
                     _LOGGER.info(
                         "SDES adaptive[%s]: fast attempt delivered no media - "
-                        "falling back to the full relay path", self.device_id)
-                _not_ready_burst = self._next_not_ready_burst(
-                    False, _not_ready_burst)
+                        "falling back to the full relay path",
+                        self.device_id,
+                    )
+                _not_ready_burst = self._next_not_ready_burst(False, _not_ready_burst)
                 _delay, _fast_retry = self._not_ready_retry_delay(
-                    _not_ready_burst, burst_max=_PEERID_MAX_REUSE)
+                    _not_ready_burst, burst_max=_PEERID_MAX_REUSE
+                )
                 if not _fast_retry:
                     _delay = _pacer.session_end_delay(healthy=False)
                 _LOGGER.info(
                     "SDES %s: %s - retrying in %.0fs%s",
-                    self.device_id, _nomedia, _delay,
-                    f" [{_not_ready_burst}/{_PEERID_MAX_REUSE}]"
-                    if _fast_retry else "",
+                    self.device_id,
+                    _nomedia,
+                    _delay,
+                    f" [{_not_ready_burst}/{_PEERID_MAX_REUSE}]" if _fast_retry else "",
                 )
                 try:
                     await self._backoff_or_offline_pause(_delay)
@@ -4695,16 +5021,22 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             except Exception as exc:
                 self._fast_attempt_override = None
                 if _use_fast:
-                    _fast_failed = self._adaptive_after_attempt(True, False, _fast_failed)
+                    _fast_failed = self._adaptive_after_attempt(
+                        True, False, _fast_failed
+                    )
                     self._fast_path_unavailable = True  # cache across views
                     _LOGGER.info(
                         "SDES adaptive[%s]: fast open failed (%.0fs) - "
-                        "falling back to full relay path", self.device_id,
-                        _FAST_OPEN_TIMEOUT)
+                        "falling back to full relay path",
+                        self.device_id,
+                        _FAST_OPEN_TIMEOUT,
+                    )
                 _delay = _pacer.fail_delay()
                 self._open_fail_logger()(
                     "SDES keepalive: stream open failed for %s (retry in %.0fs): %s",
-                    self.device_id, _delay, exc,
+                    self.device_id,
+                    _delay,
+                    exc,
                 )
                 try:
                     await self._backoff_or_offline_pause(_delay)
@@ -4744,8 +5076,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             # AIDOT_SDES_IDLE_RELEASE=0.
             # stream_idle_s / AIDOT_STREAM_IDLE_S override; <= 0 = never release.
             _idle_secs = self._resolve_idle_secs()
-            _idle_on = (os.environ.get("AIDOT_SDES_IDLE_RELEASE", "1") != "0"
-                        and _idle_secs > 0)
+            _idle_on = (
+                os.environ.get("AIDOT_SDES_IDLE_RELEASE", "1") != "0" and _idle_secs > 0
+            )
             _serve_port = _sdes_serve_port(self._keepalive_rtsp_url)
             _last_consumer = _started_at  # grace: count idle from session open
             try:
@@ -4764,8 +5097,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     if _cap_s:
                         if _first_media_at is None:
                             _first_media_at = session.last_media_monotonic
-                        if _session_cap_reached(_first_media_at,
-                                                time.monotonic(), _cap_s):
+                        if _session_cap_reached(
+                            _first_media_at, time.monotonic(), _cap_s
+                        ):
                             _capped = True
                             _stalled = True
                             break
@@ -4785,8 +5119,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                         _present = await self._viewer_present(_serve_port)
                         if _present:  # True -> a viewer is pulling; stay alive
                             _last_consumer = time.monotonic()
-                        elif _idle_release_due(_present, _last_consumer,
-                                               time.monotonic(), _idle_secs):
+                        elif _idle_release_due(
+                            _present, _last_consumer, time.monotonic(), _idle_secs
+                        ):
                             _idle_release = True
                             break
                         # _present is None (unreadable table) -> don't release
@@ -4807,7 +5142,12 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 try:
                     await session.stop()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_sdes_keepalive_loop', exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_sdes_keepalive_loop",
+                        exc_info=True,
+                    )
                 self._streaming_active = False
                 self._cancel_keepalive_renew()
                 self._keepalive_rtsp_url = None
@@ -4822,9 +5162,12 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 try:
                     await self._deregister_go2rtc()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s",
-                                  getattr(self, "device_id", "?"),
-                                  "_deregister_go2rtc", exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_deregister_go2rtc",
+                        exc_info=True,
+                    )
                 _LOGGER.debug(
                     "SDES serve: %s idle (no viewer) - released until next view",
                     self.device_id,
@@ -4835,12 +5178,17 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 _LOGGER.info(
                     "SDES %s: session cap %.0fs reached - ending session"
                     " (measurement scaffolding; this session PASSED the"
-                    " 80.2s gate)", self.device_id, _cap_s)
+                    " 80.2s gate)",
+                    self.device_id,
+                    _cap_s,
+                )
             if _ice_dead:
                 _LOGGER.info(
                     "SDES %s: camera ICE transport gone (media and STUN answers"
                     " both stopped) - reopening now rather than waiting out the"
-                    " media watchdog", self.device_id)
+                    " media watchdog",
+                    self.device_id,
+                )
             if _stalled:
                 # Say whether this will repeat forever.  With idle-release off
                 # (<=0 idle window) the loop never asks whether a viewer is
@@ -4854,8 +5202,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 _LOGGER.info(
                     "SDES %s: no media in watchdog window - restarting stream%s",
                     self.device_id,
-                    "" if _idle_on else
-                    " (idle-release is OFF for this camera, so this will repeat"
+                    ""
+                    if _idle_on
+                    else " (idle-release is OFF for this camera, so this will repeat"
                     " indefinitely; a camera that stops sending when unwatched"
                     " cannot be held warm - set a positive idle window to let"
                     " it go dormant between views)",
@@ -4865,7 +5214,12 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             try:
                 await session.stop()
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_sdes_keepalive_loop', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_sdes_keepalive_loop",
+                    exc_info=True,
+                )
 
             # Adaptive bookkeeping: a fast attempt that never delivered media
             # latches the loop onto the full relay path for its remaining opens.
@@ -4876,12 +5230,13 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 # the next open should be a fresh one rather than re-offering on a
                 # peerid the camera has already finished with.
                 _loop_peer_id = self.generate_webrtc_peer_id(
-                    live_type=2, stream_id=0, sdes=True,
-                    device_id=self.device_id)
+                    live_type=2, stream_id=0, sdes=True, device_id=self.device_id
+                )
                 _peer_reuses = 0
             else:
                 if _should_abandon_keepalive(
-                        _no_media_streak, is_battery=self.is_battery_camera):
+                    _no_media_streak, is_battery=self.is_battery_camera
+                ):
                     # Every open so far has cost the camera a wake and returned
                     # nothing. Continuing spends charge to learn the same thing
                     # again; a view will still open a session on demand.
@@ -4890,7 +5245,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                         "media - stopping the background keepalive to stop waking "
                         "it. A live view will still open a session; set "
                         "AIDOT_FUTILE_KEEPALIVE_LIMIT=0 to keep retrying.",
-                        self.device_id, _no_media_streak,
+                        self.device_id,
+                        _no_media_streak,
                     )
                     self._streaming_active = False
                     # Same teardown the idle-release exit does. Leaving the
@@ -4902,15 +5258,21 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     try:
                         await self._deregister_go2rtc()
                     except Exception:
-                        _LOGGER.debug("camera %s: go2rtc deregister after "
-                                      "abandon failed", self.device_id,
-                                      exc_info=True)
+                        _LOGGER.debug(
+                            "camera %s: go2rtc deregister after abandon failed",
+                            self.device_id,
+                            exc_info=True,
+                        )
                     return
             if _use_fast and not _healthy and not _fast_failed:
                 _LOGGER.info(
                     "SDES adaptive[%s]: fast attempt delivered no media - "
-                    "falling back to full relay path", self.device_id)
-            _fast_failed = self._adaptive_after_attempt(_use_fast, _healthy, _fast_failed)
+                    "falling back to full relay path",
+                    self.device_id,
+                )
+            _fast_failed = self._adaptive_after_attempt(
+                _use_fast, _healthy, _fast_failed
+            )
             if _use_fast and not _healthy:
                 self._fast_path_unavailable = True  # cache across views
 
@@ -4922,15 +5284,20 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 # Exception: a battery camera that answered -50019 and then sent
                 # nothing was still waking, not degraded - retry it fast instead.
                 _not_ready_burst = self._next_not_ready_burst(
-                    _healthy, _not_ready_burst)
+                    _healthy, _not_ready_burst
+                )
                 _delay, _fast_retry = self._not_ready_retry_delay(
-                    _not_ready_burst, burst_max=_PEERID_MAX_REUSE)
+                    _not_ready_burst, burst_max=_PEERID_MAX_REUSE
+                )
                 if _fast_retry:
                     _LOGGER.info(
                         "SDES %s: camera not ready (waking, livePlayResp %d) and "
                         "sent no media - fast retry in %.0fs [%d/%d]",
-                        self.device_id, _LIVE_PLAY_NOT_READY, _delay,
-                        _not_ready_burst, _PEERID_MAX_REUSE,
+                        self.device_id,
+                        _LIVE_PLAY_NOT_READY,
+                        _delay,
+                        _not_ready_burst,
+                        _PEERID_MAX_REUSE,
                     )
                 else:
                     _delay = _pacer.session_end_delay(healthy=_healthy)
@@ -4964,6 +5331,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             except Exception:
                 try:
                     from PIL import Image as _PILImage
+
                     pil_img = _PILImage.fromarray(frame.to_ndarray(format="rgb24"))
                 except Exception:
                     return
@@ -4973,7 +5341,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 self.latest_jpeg = buf.getvalue()
                 self._last_frame_time = asyncio.get_running_loop().time()
             except Exception as enc_exc:
-                _LOGGER.debug("Streaming encode failed for %s: %s", self.device_id, enc_exc)
+                _LOGGER.debug(
+                    "Streaming encode failed for %s: %s", self.device_id, enc_exc
+                )
 
         while self._streaming_active:
             _open_time = asyncio.get_running_loop().time()
@@ -4987,7 +5357,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 # before trying again rather than hammering it.
                 _LOGGER.warning(
                     "Stream refused for %s (%s) - backing off %.0fs before retry",
-                    self.device_id, busy, _BUSY_BACKOFF_S,
+                    self.device_id,
+                    busy,
+                    _BUSY_BACKOFF_S,
                 )
                 try:
                     await asyncio.sleep(_BUSY_BACKOFF_S)
@@ -4998,7 +5370,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 _delay = _pacer.fail_delay()
                 self._open_fail_logger()(
                     "Stream open failed for %s (retry in %.0fs): %s",
-                    self.device_id, _delay, exc,
+                    self.device_id,
+                    _delay,
+                    exc,
                 )
                 try:
                     await self._backoff_or_offline_pause(_delay)
@@ -5015,7 +5389,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     if self._last_frame_time > 0 and elapsed > _WATCHDOG:
                         _LOGGER.warning(
                             "No frames from %s in %.0fs - restarting stream",
-                            self.device_id, elapsed,
+                            self.device_id,
+                            elapsed,
                         )
                         break
             except asyncio.CancelledError:
@@ -5028,7 +5403,12 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             try:
                 await session.stop()
             except Exception:
-                _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_on_frame', exc_info=True)
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_on_frame",
+                    exc_info=True,
+                )
 
             if self._streaming_active:
                 # Reset backoff if this session produced frames (a normal drop
@@ -5056,7 +5436,10 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
     @staticmethod
     def _install_encoded_tap(
-        receiver, out_q, is_video: bool, serve: bool = False,
+        receiver,
+        out_q,
+        is_video: bool,
+        serve: bool = False,
         device_id: Optional[str] = None,
     ) -> bool:
         """Tee aiortc's depacketized encoded frames (+ RTP timestamp) into a
@@ -5090,8 +5473,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         _orig_put = _qd.put
         _skip_decode = bool(serve and is_video)
         # Served-stream health canary (video-only): observed without decoding.
-        _canary = ({"frames": 0, "keyframes": 0, "gap": 0, "max_gap": 0,
-                    "unwrapped": 0} if _skip_decode else None)
+        _canary = (
+            {"frames": 0, "keyframes": 0, "gap": 0, "max_gap": 0, "unwrapped": 0}
+            if _skip_decode
+            else None
+        )
         if _canary is not None:
             _qd._aidot_serve_canary = _canary
         # Serve path only: this is the stream we timestamp by hand. The
@@ -5115,8 +5501,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                             _before = _unwrap["offset"]
                             _ts = _correct_ts(_unwrap, int(_ts))
                             if _canary is not None and _unwrap["offset"] != _before:
-                                _canary["unwrapped"] = (
-                                    _canary.get("unwrapped", 0) + 1)
+                                _canary["unwrapped"] = _canary.get("unwrapped", 0) + 1
                         _b = bytes(_d)
                         _kf = _h264_has_keyframe(_b) if is_video else False
                         _item = (_b, int(_ts), _kf) if is_video else (_b, int(_ts))
@@ -5141,7 +5526,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                         # is None) still falls through to _orig_put below.
                         return None
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", '_tap_put', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", "_tap_put", exc_info=True)
             return _orig_put(task, *a, **k)
 
         _qd.put = _tap_put
@@ -5204,7 +5589,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 return
             _LOGGER.info(
                 "cold-start[%s] %s +%dms",
-                self.device_id, label, int((time.monotonic() - t0) * 1000),
+                self.device_id,
+                label,
+                int((time.monotonic() - t0) * 1000),
             )
         except Exception:
             pass
@@ -5247,7 +5634,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         if ov is not None:
             return bool(ov)
         return os.environ.get("AIDOT_SDES_FAST_LIVEPLAY", "").strip().lower() not in (
-            "0", "false", "no", "off")
+            "0",
+            "false",
+            "no",
+            "off",
+        )
 
     def _resolve_dtls_fast_liveplay(self) -> bool:
         """Whether to skip the DTLS path's livePlayReq-echo + livePlayResp waits.
@@ -5269,7 +5660,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         if opt is not None:
             return bool(opt)
         return os.environ.get("AIDOT_DTLS_FAST_LIVEPLAY", "").strip().lower() not in (
-            "0", "false", "no", "off")
+            "0",
+            "false",
+            "no",
+            "off",
+        )
 
     def _skip_dtls_signaling_wait(self, fast_connect: bool) -> bool:
         """Whether the DTLS open skips its livePlayReq-echo AND livePlayResp waits.
@@ -5304,7 +5699,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         if opt is not None:
             return bool(opt)
         return os.environ.get("AIDOT_SDES_SERVE_AUDIO", "").strip().lower() not in (
-            "0", "false", "no", "off")
+            "0",
+            "false",
+            "no",
+            "off",
+        )
 
     def _resolve_sdes_audio_gain_db(self) -> float:
         """Gain (dB) applied to the served SDES audio (the camera mic runs hot).
@@ -5313,7 +5712,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         ``AIDOT_SDES_AUDIO_GAIN_DB`` env; else ``-8``.  A bad value falls back to
         the default rather than raising."""
         opt = getattr(self, "_sdes_audio_gain_opt", None)
-        src = opt if opt is not None else os.environ.get("AIDOT_SDES_AUDIO_GAIN_DB", "-8")
+        src = (
+            opt if opt is not None else os.environ.get("AIDOT_SDES_AUDIO_GAIN_DB", "-8")
+        )
         try:
             return float(src)
         except (ValueError, TypeError):
@@ -5382,8 +5783,10 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         else auto.  Anything unrecognised is auto - this is read while opening
         a stream, and a typo must not stop video.
         """
-        for raw in (getattr(self, "_sdes_connection_mode_opt", None),
-                    os.environ.get("AIDOT_SDES_CONNECTION_MODE")):
+        for raw in (
+            getattr(self, "_sdes_connection_mode_opt", None),
+            os.environ.get("AIDOT_SDES_CONNECTION_MODE"),
+        ):
             if raw is None:
                 continue
             mode = str(raw).strip().lower()
@@ -5391,7 +5794,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 return mode
             _LOGGER.warning(
                 "camera %s: unknown sdes_connection_mode %r; using auto",
-                getattr(self, "device_id", "?"), raw)
+                getattr(self, "device_id", "?"),
+                raw,
+            )
         return "auto"
 
     def _resolve_sdes_skip_turn(self) -> bool:
@@ -5439,7 +5844,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         if ov is not None:
             return bool(ov)
         return os.environ.get("AIDOT_SDES_SKIP_TURN_PREALLOC", "").strip().lower() in (
-            "1", "true", "yes", "on")
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
 
     def _resolve_sdes_adaptive(self) -> bool:
         """Whether the SDES keepalive loop drives the fast path adaptively
@@ -5477,7 +5886,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         if opt is not None:
             return bool(opt)
         return os.environ.get("AIDOT_SDES_ADAPTIVE", "").strip().lower() in (
-            "1", "true", "yes", "on")
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
 
     def _resolve_persistent_mqtt(self) -> bool:
         """Whether commands, attribute fetches, AND stream-open signaling reuse ONE
@@ -5494,7 +5907,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         if opt is not None:
             return bool(opt)
         return os.environ.get("AIDOT_PERSISTENT_MQTT", "").strip().lower() not in (
-            "0", "false", "no", "off")
+            "0",
+            "false",
+            "no",
+            "off",
+        )
 
     async def _get_persistent_mqtt(self):
         """Get-or-create the account-shared ``_PersistentMqtt`` (one per account,
@@ -5504,7 +5921,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # _user_info is the shared account dict (same object across the account's
         # DeviceClients, and the same object as AidotClient.login_info) - the right
         # place to cache one connection per account.
-        li = self._user_info if isinstance(getattr(self, "_user_info", None), dict) else None
+        li = (
+            self._user_info
+            if isinstance(getattr(self, "_user_info", None), dict)
+            else None
+        )
         if li is None:
             return None
         # These two keys are deliberately live runtime objects (a connection,
@@ -5528,8 +5949,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 return pm
             smarthome_auth = await self._async_get_smarthome_auth()
             mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-            mqtt_pwd  = (smarthome_auth or {}).get("mqttPassword") or ""
-            client_id = (self._user_info.get("mqttClientId") or f"app-{mqtt_user}")
+            mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
+            client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
             mqtt_url = await self._async_get_mqtt_url()
             if not mqtt_url:
                 return None
@@ -5566,7 +5987,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     if li.pop(key, None) is not None:
                         _LOGGER.warning(
                             "cleared the cached MQTT password after the broker "
-                            "rejected it (rc=%s); it will be re-fetched", rc,
+                            "rejected it (rc=%s); it will be re-fetched",
+                            rc,
                         )
                 self._smarthome_auth = None
                 # The URL response is the one that can carry a server-issued
@@ -5585,8 +6007,13 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 # Outside the lock: retire() blocks briefly joining paho's thread.
                 await _loop.run_in_executor(None, pm.retire)
 
-            pm = _PersistentMqtt(mqtt_url, mqtt_user, mqtt_pwd, client_id,
-                                 on_auth_failure=_invalidate_mqtt_credentials)
+            pm = _PersistentMqtt(
+                mqtt_url,
+                mqtt_user,
+                mqtt_pwd,
+                client_id,
+                on_auth_failure=_invalidate_mqtt_credentials,
+            )
             li[LOGIN_INFO_PERSISTENT_MQTT_KEY] = pm
             return pm
 
@@ -5610,8 +6037,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         return burst + 1 if self._live_play_not_ready() else 0
 
     @staticmethod
-    def _not_ready_retry_delay(burst: int, *,
-                               burst_max: int = 3) -> "tuple[float, bool]":
+    def _not_ready_retry_delay(
+        burst: int, *, burst_max: int = 3
+    ) -> "tuple[float, bool]":
         """``(delay, is_fast_retry)`` for a wake-readiness retry.
 
         Shares [[_retry_policy]] with the DTLS serve loop so both paths agree on
@@ -5626,13 +6054,17 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         return (delay, bool(fast))
 
     @staticmethod
-    def _adaptive_after_attempt(use_fast: bool, healthy: bool, fast_failed: bool) -> bool:
+    def _adaptive_after_attempt(
+        use_fast: bool, healthy: bool, fast_failed: bool
+    ) -> bool:
         """Updated ``fast_failed`` after an attempt: latch it once a fast attempt
         delivers no media, so the loop stays on the full relay path (no
         oscillation) until it restarts fresh on the next view."""
         return bool(fast_failed) or (bool(use_fast) and not bool(healthy))
 
-    def _maybe_start_serve_relay(self, serve_url: Optional[str]) -> "Optional[_ServeRelay]":
+    def _maybe_start_serve_relay(
+        self, serve_url: Optional[str]
+    ) -> "Optional[_ServeRelay]":
         """Hold the public serve port via a _ServeRelay so an eager go2rtc pull
         connects-and-waits instead of hitting ECONNREFUSED during the ~16-25s
         cold handshake (ffmpeg only binds its -listen socket after input frames).
@@ -5657,11 +6089,13 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         except OSError as exc:
             _LOGGER.warning(
                 "serve relay: bind :%s failed (%s) - serving ffmpeg directly",
-                port, exc,
+                port,
+                exc,
             )
             return None
         _LOGGER.debug(
-            "serve relay: holding public port :%s for %s", port, self.device_id)
+            "serve relay: holding public port :%s for %s", port, self.device_id
+        )
         return relay
 
     async def _dtls_serve_loop(self) -> None:
@@ -5684,8 +6118,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             # threads, and escaping here would skip slots.release() and burn a
             # permit for the life of the process - the cap would silently shrink
             # until nothing could stream at all.
-            self._serve_relay = self._maybe_start_serve_relay(
-                self._keepalive_rtsp_url)
+            self._serve_relay = self._maybe_start_serve_relay(self._keepalive_rtsp_url)
             await self._dtls_serve_loop_inner()
         finally:
             _relay = self._serve_relay
@@ -5708,6 +6141,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         """
         import threading as _threading
         import queue as _queue
+
         serve_url = self._keepalive_rtsp_url
         # APK parity: the official app gates re-connects to ~15 s (f0.java I1=15000)
         # and never hammers.  We previously floored at 5 s and a partial-success ->
@@ -5745,7 +6179,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             _last_open_at = loop.time()
             try:
                 session = await self.async_open_webrtc_stream(
-                    on_frame=lambda _f: None, timeout=_DTLS_SERVE_OPEN_TIMEOUT_S,
+                    on_frame=lambda _f: None,
+                    timeout=_DTLS_SERVE_OPEN_TIMEOUT_S,
                     _ice_wait_timeout_s=_DTLS_SERVE_ICE_WAIT_S,
                 )
             except asyncio.CancelledError:
@@ -5757,7 +6192,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 busy_retry = float(os.environ.get("AIDOT_BUSY_RETRY_S", "45"))
                 _LOGGER.warning(
                     "DTLS serve: camera %s busy (%s) - retrying in %.0fs",
-                    self.device_id, busy, busy_retry,
+                    self.device_id,
+                    busy,
+                    busy_retry,
                 )
                 try:
                     await asyncio.sleep(busy_retry)
@@ -5776,9 +6213,10 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 if _bypass:
                     _last_open_at = 0.0  # clear the gate for the fast burst
                 _LOGGER.info(
-                    "DTLS serve: camera %s not ready (encoder cold) -"
-                    " retry %.0fs [%s]",
-                    self.device_id, _delay, "burst" if _bypass else "gate",
+                    "DTLS serve: camera %s not ready (encoder cold) - retry %.0fs [%s]",
+                    self.device_id,
+                    _delay,
+                    "burst" if _bypass else "gate",
                 )
                 try:
                     await asyncio.sleep(_delay)
@@ -5788,9 +6226,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             except Exception as exc:
                 _delay = _pacer.fail_delay()
                 _attempt = _pacer.attempt
-                _cloud_offline = (
-                    (not self.status.online)
-                    and getattr(self, "_cloud_online_explicit", False)
+                _cloud_offline = (not self.status.online) and getattr(
+                    self, "_cloud_online_explicit", False
                 )
                 # Slow-probe throttle: an idle-but-cloud-online camera never
                 # sets _cloud_offline (the cloud keeps reporting it reachable),
@@ -5800,16 +6237,23 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 # comparable slow cadence (with early-resume) from
                 # _backoff_or_offline_pause below, so this only engages the
                 # part of the space that pause doesn't already cover.
-                if _in_slow_probe(_attempt, _SLOW_PROBE_THRESHOLD) and not _cloud_offline:
+                if (
+                    _in_slow_probe(_attempt, _SLOW_PROBE_THRESHOLD)
+                    and not _cloud_offline
+                ):
                     _delay = _probe_interval(
-                        _attempt, _SLOW_PROBE_THRESHOLD, _delay, _SLOW_PROBE_INTERVAL_S)
+                        _attempt, _SLOW_PROBE_THRESHOLD, _delay, _SLOW_PROBE_INTERVAL_S
+                    )
                     if _should_log_slow_probe(
                         _attempt, _SLOW_PROBE_THRESHOLD, _SLOW_PROBE_LOG_EVERY
                     ):
                         _LOGGER.info(
                             "DTLS serve: %s still failing to open after %d"
                             " attempts - slow-probing every %.0fs (last error: %s)",
-                            self.device_id, _attempt, _delay, exc,
+                            self.device_id,
+                            _attempt,
+                            _delay,
+                            exc,
                         )
                     try:
                         await self._slow_probe_sleep(_delay)
@@ -5818,7 +6262,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     continue
                 self._open_fail_logger()(
                     "DTLS serve: open failed for %s (retry %.0fs): %s",
-                    self.device_id, _delay, exc,
+                    self.device_id,
+                    _delay,
+                    exc,
                 )
                 try:
                     await self._backoff_or_offline_pause(_delay)
@@ -5843,7 +6289,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             _disc_since = [None]
             _DISC_DEBOUNCE = float(os.environ.get("AIDOT_ICE_DISCONNECT_S", "8"))
 
-            def _pc_dead(pc=pc, _disc_since=_disc_since, _DISC_DEBOUNCE=_DISC_DEBOUNCE) -> bool:
+            def _pc_dead(
+                pc=pc, _disc_since=_disc_since, _DISC_DEBOUNCE=_DISC_DEBOUNCE
+            ) -> bool:
                 _st = getattr(pc, "connectionState", "closed")
                 if _st in ("closed", "failed"):
                     return True
@@ -5925,7 +6373,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                             _LOGGER.warning(
                                 "camera %s: direct serve could not bind (%s)"
                                 " - falling back to the ffmpeg hop",
-                                getattr(self, "device_id", "?"), _exc)
+                                getattr(self, "device_id", "?"),
+                                _exc,
+                            )
                             _direct = None
                     if _direct is not None:
                         proc = None
@@ -5933,9 +6383,10 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                         if _relay is not None:
                             _relay.set_backend(_direct.port)
                         _LOGGER.info(
-                            "camera %s: serving TS directly on port %d"
-                            " (no ffmpeg hop)",
-                            getattr(self, "device_id", "?"), _direct.port)
+                            "camera %s: serving TS directly on port %d (no ffmpeg hop)",
+                            getattr(self, "device_id", "?"),
+                            _direct.port,
+                        )
                     else:
                         rfd, wfd = os.pipe()
                         proc = await self._spawn_dtls_serve_ffmpeg(_ff_url, rfd)
@@ -5995,9 +6446,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     # _pc_dead(), which reads the ICE/PC state - and a session
                     # receiving audio and no video passes it forever (measured
                     # 2026-08-17: hours of it, while HA retried every 10-40s).
-                    _vid_grace = float(
-                        os.environ.get("AIDOT_DTLS_VIDEO_GRACE_S", "30")
-                    )
+                    _vid_grace = float(os.environ.get("AIDOT_DTLS_VIDEO_GRACE_S", "30"))
                     _connected_at = loop.time()
                     _first_video_at = None
                     _no_video = False
@@ -6009,23 +6458,28 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     # which made two live trials of the direct serve look like a
                     # go2rtc DESCRIBE failure when the serve cycle had simply
                     # died on its first iteration.
-                    while (self._streaming_active
-                           and (proc is None or proc.returncode is None)):
+                    while self._streaming_active and (
+                        proc is None or proc.returncode is None
+                    ):
                         await asyncio.sleep(0.5)
                         if _pc_dead():
                             break
                         _now = loop.time()
                         if _first_video_at is None:
                             _canary_v = _live_video_canary(
-                                pc, getattr(self, "_serve_video_canary", None))
+                                pc, getattr(self, "_serve_video_canary", None)
+                            )
                             if _canary_v and _canary_v.get("frames", 0) > 0:
                                 _first_video_at = _now
                                 # Keep the one that is actually filling, so the
                                 # canary log line describes the live session.
                                 self._serve_video_canary = _canary_v
-                        if _video_presence_verdict(
-                            _first_video_at, _connected_at, _now, _vid_grace
-                        ) == "give-up":
+                        if (
+                            _video_presence_verdict(
+                                _first_video_at, _connected_at, _now, _vid_grace
+                            )
+                            == "give-up"
+                        ):
                             _no_video = True
                             self._futile_video_runs = (
                                 getattr(self, "_futile_video_runs", 0) + 1
@@ -6034,21 +6488,25 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                                 "camera %s: DTLS session connected but delivered "
                                 "no video in %.0fs (audio may be flowing) - "
                                 "re-opening [%d consecutive]",
-                                self.device_id, _vid_grace,
+                                self.device_id,
+                                _vid_grace,
                                 self._futile_video_runs,
                             )
                             break
                         _stall = _now - progress[0]
                         if _stall < 0.5:
-                            _stall_pli_armed = True       # frames flowing; re-arm
+                            _stall_pli_armed = True  # frames flowing; re-arm
                         if _gop_pli_s > 0 and _now - _last_gop_pli >= _gop_pli_s:
                             await self._send_video_pli(pc)
                             _last_gop_pli = _now
-                        elif (_stall_pli_s > 0 and _stall_pli_armed
-                              and _stall >= _stall_pli_s):
+                        elif (
+                            _stall_pli_s > 0
+                            and _stall_pli_armed
+                            and _stall >= _stall_pli_s
+                        ):
                             await self._send_video_pli(pc)
-                            _last_gop_pli = _now           # also satisfies cadence
-                            _stall_pli_armed = False       # one shot per stall
+                            _last_gop_pli = _now  # also satisfies cadence
+                            _stall_pli_armed = False  # one shot per stall
                         # Whether anyone is WATCHING.  Pipe-progress staleness
                         # cannot answer that: the pipe only backs up when nothing
                         # drains the serve socket, and go2rtc drains it forever as
@@ -6083,7 +6541,12 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     try:
                         wfile.close()
                     except Exception:
-                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_pc_dead', exc_info=True)
+                        _LOGGER.debug(
+                            "camera %s: swallowed exception in %s",
+                            getattr(self, "device_id", "?"),
+                            "_pc_dead",
+                            exc_info=True,
+                        )
                     wfile = None
                     mux_thread.join(timeout=2.0)
                     mux_thread = stop_flag = None
@@ -6117,7 +6580,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                                 "still open a session; set "
                                 "AIDOT_DTLS_FUTILE_VIDEO_LIMIT=0 to keep "
                                 "retrying.",
-                                self.device_id, self._futile_video_runs,
+                                self.device_id,
+                                self._futile_video_runs,
                             )
                             # Same teardown the SDES abandon does. Leaving the
                             # keepalive marked active and the go2rtc stream
@@ -6133,7 +6597,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                             except Exception:
                                 _LOGGER.debug(
                                     "camera %s: go2rtc deregister after video "
-                                    "abandon failed", self.device_id,
+                                    "abandon failed",
+                                    self.device_id,
                                     exc_info=True,
                                 )
                             return
@@ -6149,7 +6614,12 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     try:
                         wfile.close()
                     except Exception:
-                        _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_pc_dead', exc_info=True)
+                        _LOGGER.debug(
+                            "camera %s: swallowed exception in %s",
+                            getattr(self, "device_id", "?"),
+                            "_pc_dead",
+                            exc_info=True,
+                        )
                 if mux_thread is not None and mux_thread.is_alive():
                     # is_alive() guards the never-started case: if Thread.start()
                     # itself raised, join() raises "cannot join thread before it
@@ -6162,7 +6632,12 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 try:
                     await session.stop()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s", getattr(self, "device_id", "?"), '_pc_dead', exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_pc_dead",
+                        exc_info=True,
+                    )
 
             if cancelled:
                 return
@@ -6178,9 +6653,12 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                 try:
                     await self._deregister_go2rtc()
                 except Exception:
-                    _LOGGER.debug("camera %s: swallowed exception in %s",
-                                  getattr(self, "device_id", "?"),
-                                  "_deregister_go2rtc", exc_info=True)
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_deregister_go2rtc",
+                        exc_info=True,
+                    )
                 _LOGGER.debug(
                     "DTLS serve: %s idle (no viewer) - released until next view",
                     self.device_id,
@@ -6227,7 +6705,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         codec_args = ["-c", "copy"]
         if serve_url == "-":
             out_args = ["-f", "mpegts", "pipe:1"]
-            out_target = 1               # this process's real stdout
+            out_target = 1  # this process's real stdout
         elif serve_url.startswith("rtsp"):
             # Audio cannot be copied here, and that is not a preference.  The
             # mux upstream writes AAC into MPEG-TS, which carries it as ADTS
@@ -6246,16 +6724,22 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             out_args = ["-f", "mpegts", "-listen", "1", serve_url]
             out_target = asyncio.subprocess.DEVNULL
         cmd = [
-            "ffmpeg", "-y", "-loglevel", "warning",
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "warning",
             # Suppress input-side buffering: the PyAV mux already writes
             # correctly-interleaved, timestamped MPEG-TS to the pipe every
             # ~20ms.  Without +nobuffer ffmpeg's mpegts demuxer accumulates a
             # read-ahead window (and the output mpegts muxer defaults to 700ms
             # of A/V interleave delay) before flushing to go2rtc - exactly the
             # bursty/choppy audio pattern.  Matches the SDES serve's approach.
-            "-fflags", "+nobuffer",
-            "-i", "pipe:0",
-            *codec_args, *out_args,
+            "-fflags",
+            "+nobuffer",
+            "-i",
+            "pipe:0",
+            *codec_args,
+            *out_args,
         ]
         try:
             return await asyncio.create_subprocess_exec(
@@ -6275,9 +6759,6 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
     # Uses IOCtrl cmd=4097 (IOTYPE_USER_IPCAM_PTZ_COMMAND) - NOT MQTT.
     # DTLS path: sent via WebRTC DataChannel. SDES path: sent via encrypted
     # SCTP cmd_chan. Requires an active stream session (_stream_session).
-
-
-
 
     async def async_open_cloud_playback(
         self,
@@ -6349,8 +6830,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # The AiDot platform login does NOT return mqttUser/mqttPassword.
         smarthome_auth = await self._async_get_smarthome_auth()
         mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-        mqtt_pwd  = (smarthome_auth or {}).get("mqttPassword") or ""
-        client_id = (self._user_info.get("mqttClientId") or f"app-{mqtt_user}")
+        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
+        client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
 
         # Step 1 - MQTT
         mqtt_url = await self._async_get_mqtt_url()
@@ -6363,7 +6844,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
         _LOGGER.debug("Cloud playback step 1: MQTT for %s", self.device_id)
         srv_info = await _mqtt_get_playback_server_info(
-            mqtt_url, mqtt_user, mqtt_pwd, self.device_id, client_id,
+            mqtt_url,
+            mqtt_user,
+            mqtt_pwd,
+            self.device_id,
+            client_id,
         )
         if not srv_info:
             _LOGGER.error(
@@ -6372,14 +6857,15 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             )
             return None
 
-        server_ip   = srv_info.get("serverIP")
+        server_ip = srv_info.get("serverIP")
         server_port = srv_info.get("serverPort")
-        heartbeat   = int(srv_info.get("heartbeat") or 15)
+        heartbeat = int(srv_info.get("heartbeat") or 15)
 
         if not server_ip or not server_port:
             _LOGGER.error(
                 "async_open_cloud_playback: incomplete server info for %s: %s",
-                self.device_id, srv_info,
+                self.device_id,
+                srv_info,
             )
             return None
 
@@ -6388,10 +6874,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{self._smarthome_base}"
-                    "/api/ipc/playbackController/playRecord",
+                    f"{self._smarthome_base}/api/ipc/playbackController/playRecord",
                     json={
-                        "deviceId":      self.device_id,
+                        "deviceId": self.device_id,
                         "recordStaTime": start_ts,
                         "recordEndTime": end_ts,
                     },
@@ -6403,7 +6888,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             if play_body.get("code") != 200:
                 _LOGGER.error(
                     "playRecord returned code=%s for %s: %s",
-                    play_body.get("code"), self.device_id, play_body,
+                    play_body.get("code"),
+                    self.device_id,
+                    play_body,
                 )
                 return None
 
@@ -6411,21 +6898,26 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             if task_id is None:
                 _LOGGER.error(
                     "playRecord: no taskId in response for %s: %s",
-                    self.device_id, play_body,
+                    self.device_id,
+                    play_body,
                 )
                 return None
 
         except Exception as exc:
             _LOGGER.error(
                 "async_open_cloud_playback: playRecord failed for %s: %s",
-                self.device_id, exc,
+                self.device_id,
+                exc,
             )
             return None
 
         # Step 3 - TCP
         _LOGGER.debug(
             "Cloud playback step 3: TCP to %s:%d task=%d heartbeat=%ds",
-            server_ip, server_port, task_id, heartbeat,
+            server_ip,
+            server_port,
+            task_id,
+            heartbeat,
         )
         pb_session = CloudPlaybackSession(
             server_ip=server_ip,
@@ -6441,7 +6933,9 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
         _LOGGER.info(
             "Cloud playback session open for %s task=%d start=%d",
-            self.device_id, task_id, start_ts // 1000,
+            self.device_id,
+            task_id,
+            start_ts // 1000,
         )
         return pb_session
 
@@ -6477,8 +6971,10 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         uid = await self.async_get_p2p_uid()
         if not uid:
             props = getattr(self, "_raw_device", {}).get("properties") or {}
-            is_webrtc = (str(props.get("enableSdes", "0")) == "1"
-                         or str(props.get("liveType", "0")) == "2")
+            is_webrtc = (
+                str(props.get("enableSdes", "0")) == "1"
+                or str(props.get("liveType", "0")) == "2"
+            )
             if is_webrtc:
                 _LOGGER.error(
                     "async_open_live_stream: p2pId not available for %s - "
@@ -6498,14 +6994,16 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             return None
 
         _LOGGER.debug(
-            "async_open_live_stream: TUTK P2P uid=%s for %s", uid, self.device_id)
+            "async_open_live_stream: TUTK P2P uid=%s for %s", uid, self.device_id
+        )
         session = TutkStreamSession(uid=uid, on_frame=on_frame)
         try:
             ok = await asyncio.wait_for(session.start(), timeout=timeout)
         except TimeoutError:
             _LOGGER.error(
                 "async_open_live_stream: TUTK connect timed out after %.0fs for %s",
-                timeout, self.device_id,
+                timeout,
+                self.device_id,
             )
             return None
         if not ok:
@@ -6513,7 +7011,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
         _LOGGER.info(
             "TUTK live stream session open for %s (uid=%s)",
-            self.device_id, uid,
+            self.device_id,
+            uid,
         )
         return session
 
@@ -6537,30 +7036,29 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         """
         smarthome_auth = await self._async_get_smarthome_auth()
         mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-        mqtt_pwd  = (smarthome_auth or {}).get("mqttPassword") or ""
-        user_id   = str(self.user_id)
+        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
+        user_id = str(self.user_id)
         # Use the server-assigned authorised clientId - the broker rejects
         # random or made-up prefixes with rc=4.
-        diag_cid  = (
-            self._user_info.get("mqttClientId") or
-            f"app-{mqtt_user}"
-        )
-        mqtt_url  = await self._async_get_mqtt_url()
+        diag_cid = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
+        mqtt_url = await self._async_get_mqtt_url()
         if not mqtt_url:
             _LOGGER.warning("async_get_ice_config: no MQTT URL available")
             return None
 
-        seq     = f"ap{random.randint(1000000, 9999999)}"
+        seq = f"ap{random.randint(1000000, 9999999)}"
         result: dict = {}
 
-        payload = json.dumps({
-            "method":  "getIceConfigReq",
-            "service": "IPC",
-            "srcAddr": f"0.{user_id}",
-            "seq":     seq,
-            "tst":     int(time.time() * 1000),
-            "payload": {"deviceId": device_id, "userId": user_id},
-        })
+        payload = json.dumps(
+            {
+                "method": "getIceConfigReq",
+                "service": "IPC",
+                "srcAddr": f"0.{user_id}",
+                "seq": seq,
+                "tst": int(time.time() * 1000),
+                "payload": {"deviceId": device_id, "userId": user_id},
+            }
+        )
 
         def _capture(topic: str, raw: str) -> None:
             # Accept any message on the user callback topic that looks like
@@ -6568,14 +7066,19 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
             if "iceconfig" in topic.lower() or "getice" in topic.lower():
                 try:
                     msg = json.loads(raw)
-                    inner = (msg.get("payload") or msg.get("data") or msg)
-                    if (isinstance(inner, dict) and ("app" in inner or "dev" in inner)) or (isinstance(inner, dict) and "data" not in result):
+                    inner = msg.get("payload") or msg.get("data") or msg
+                    if (
+                        isinstance(inner, dict) and ("app" in inner or "dev" in inner)
+                    ) or (isinstance(inner, dict) and "data" not in result):
                         result["data"] = inner
                 except Exception:
                     result["data"] = raw
 
         await _mqtt_session(
-            mqtt_url, mqtt_user, mqtt_pwd, diag_cid,
+            mqtt_url,
+            mqtt_user,
+            mqtt_pwd,
+            diag_cid,
             subscribe_topics=[f"iot/v1/c/{user_id}/#"],
             publish_items=[(f"iot/v1/s/{user_id}/IPC/getIceConfigReq", payload)],
             duration=5.0,
@@ -6602,27 +7105,25 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         """
         import aiohttp
 
-        if self._cached_ice_config is not None and time.time() < self._ice_config_expiry:
+        if (
+            self._cached_ice_config is not None
+            and time.time() < self._ice_config_expiry
+        ):
             _LOGGER.debug(
                 "async_get_ice_config_http: cached config (%.0fs left)",
-                self._ice_config_expiry - time.time())
+                self._ice_config_expiry - time.time(),
+            )
             return self._cached_ice_config
 
-        token = (
-            self._user_info.get("accessToken")
-            or self._user_info.get("access_token")
+        token = self._user_info.get("accessToken") or self._user_info.get(
+            "access_token"
         )
 
         if not self._region or not token:
-            _LOGGER.warning(
-                "async_get_ice_config_http: missing region or access token"
-            )
+            _LOGGER.warning("async_get_ice_config_http: missing region or access token")
             return None
 
-        url = (
-            f"{aidot_api_base(self._region)}"
-            f"/v29/api/webrtc/iceConfig?forceRefresh=0"
-        )
+        url = f"{aidot_api_base(self._region)}/v29/api/webrtc/iceConfig?forceRefresh=0"
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -6634,7 +7135,8 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
                     if resp.status != 200:
                         _LOGGER.warning(
                             "async_get_ice_config_http: HTTP %s from %s",
-                            resp.status, url,
+                            resp.status,
+                            url,
                         )
                         return None
                     cfg = await resp.json(content_type=None)
@@ -6656,7 +7158,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         def _walk(o: "Any") -> None:
             if isinstance(o, dict):
                 v = o.get("ttl")
-                if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 1_000_000_000:
+                if (
+                    isinstance(v, (int, float))
+                    and not isinstance(v, bool)
+                    and v > 1_000_000_000
+                ):
                     ttls.append(float(v))
                 for x in o.values():
                     _walk(x)
@@ -6677,8 +7183,11 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
 
     @staticmethod
     def generate_webrtc_peer_id(
-        live_type: int = 2, stream_id: int = 0, *, sdes: bool = False,
-        device_id: "Optional[str]" = None
+        live_type: int = 2,
+        stream_id: int = 0,
+        *,
+        sdes: bool = False,
+        device_id: "Optional[str]" = None,
     ) -> str:
         """Generate a peerId for a WebRTC connection.
 
@@ -6702,6 +7211,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         stream stops working.
         """
         import os
+
         # Field 1 is the install identity - the vendor app puts
         # DeviceIdUtils.getDeviceId(app) here and it is stable for the life of
         # the install. Field 2 is per-open random ("0" + 5 random chars in the
@@ -6767,7 +7277,7 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         # is '2' and never '0'. The tail stays random: pinning all six would
         # make every peer id identical across opens, which is the cross-session
         # reuse the camera dedups on.
-        rand6   = "2" + os.urandom(3).hex()[1:]
+        rand6 = "2" + os.urandom(3).hex()[1:]
         version = 1 if sdes else 2
         # Experiment override (off by default, fails closed, scoped to one
         # device): the camera reads its client class from field 2's first
@@ -6867,5 +7377,3 @@ class CameraMixin(_CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesO
         Cameras with ``isDTLS: '0'`` are excluded from this path; they
         instead continue with ffmpeg and collect the SRTP stream directly.
         """
-
-

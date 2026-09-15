@@ -91,8 +91,7 @@ def test_a_session_with_no_video_receiver_drops_the_previous_canary():
     from aidot_cameras.camera.client import CameraMixin
 
     obj = CameraMixin.__new__(CameraMixin)
-    obj._serve_video_canary = {"frames": 12345, "keyframes": 40,
-                               "max_gap": 9, "gap": 1}
+    obj._serve_video_canary = {"frames": 12345, "keyframes": 40, "max_gap": 9, "gap": 1}
     obj.device_id = "dev"
 
     assert CameraMixin._install_av_taps(obj, _FakePC(["audio"]), None, None) is False

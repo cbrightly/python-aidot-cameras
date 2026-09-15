@@ -28,6 +28,7 @@ teardown in flight is still worth shouting about -- something outside us
 signalled the process -- and that distinction is the whole point of the
 function, so it has to be kept.
 """
+
 import logging
 
 from aidot_cameras.camera.sdes_open import _classify_ffmpeg_exit
@@ -59,5 +60,5 @@ def test_a_real_ffmpeg_error_during_teardown_still_warns():
 
 
 def test_a_clean_exit_and_the_broken_pipe_are_unchanged():
-    assert _classify_ffmpeg_exit(224, False) == logging.DEBUG   # EPIPE
+    assert _classify_ffmpeg_exit(224, False) == logging.DEBUG  # EPIPE
     assert _classify_ffmpeg_exit(-9, False) == logging.WARNING  # killed by nobody

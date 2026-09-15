@@ -12,6 +12,7 @@ only the lower port and leaks USE-CANDIDATE onto it (measured: ~10% connect vs ~
 
 Runs under pytest, or standalone:  python tests/test_highport_nomination.py
 """
+
 import os
 import sys
 import types
@@ -37,7 +38,7 @@ def _pair(host, port, component=1):
 def test_two_ports_force_highest_suppress_lower():
     cl = [_pair("10.0.0.5", 60500), _pair("10.0.0.5", 60501)]
     assert _highport_nomination_decision(cl, cl[0]) is False  # lower -> suppress
-    assert _highport_nomination_decision(cl, cl[1]) is True   # higher -> force
+    assert _highport_nomination_decision(cl, cl[1]) is True  # higher -> force
 
 
 def test_single_port_no_override():
@@ -56,13 +57,12 @@ def test_decision_is_over_all_ports_not_host_filtered():
     # A lower-numbered relay/other-host candidate must NOT mask the camera's port:
     # the camera host port (60500) is the global max here, so it is forced.
     cl = [_pair("10.0.0.5", 60500), _pair("3.230.182.123", 41180)]
-    assert _highport_nomination_decision(cl, cl[0]) is True    # global highest
-    assert _highport_nomination_decision(cl, cl[1]) is False   # relay suppressed
+    assert _highport_nomination_decision(cl, cl[0]) is True  # global highest
+    assert _highport_nomination_decision(cl, cl[1]) is False  # relay suppressed
 
 
 def test_three_ports_only_top_forced():
-    cl = [_pair("10.0.0.5", 60500), _pair("10.0.0.5", 60501),
-          _pair("10.0.0.5", 60502)]
+    cl = [_pair("10.0.0.5", 60500), _pair("10.0.0.5", 60501), _pair("10.0.0.5", 60502)]
     assert _highport_nomination_decision(cl, cl[0]) is False
     assert _highport_nomination_decision(cl, cl[1]) is False
     assert _highport_nomination_decision(cl, cl[2]) is True
@@ -100,6 +100,7 @@ def _use_candidate(ice, conn, pair, nominate):
 def test_install_idempotent_and_active():
     assert _install_highport_nomination_patch() is True
     from aioice import ice
+
     assert getattr(ice.Connection, "_aidot_highport_patched", False) is True
     assert _install_highport_nomination_patch() is True  # idempotent
 
@@ -109,16 +110,18 @@ def test_lite_remote_forces_use_candidate_on_highest_only():
     # FORCE USE-CANDIDATE onto the highest port and keep it off the lower.
     _install_highport_nomination_patch()
     from aioice import ice
+
     cl = [_pair("10.0.0.5", 60500), _pair("10.0.0.5", 60501)]
     conn = _fake_conn(cl)
     assert _use_candidate(ice, conn, cl[0], nominate=False) is False  # low stays off
-    assert _use_candidate(ice, conn, cl[1], nominate=False) is True   # HIGH forced on
+    assert _use_candidate(ice, conn, cl[1], nominate=False) is True  # HIGH forced on
 
 
 def test_aggressive_remote_suppresses_lower_keeps_highest():
     # Non-lite case: aioice passes nominate=True on both -> suppress the lower.
     _install_highport_nomination_patch()
     from aioice import ice
+
     cl = [_pair("10.0.0.5", 60500), _pair("10.0.0.5", 60501)]
     conn = _fake_conn(cl)
     assert _use_candidate(ice, conn, cl[0], nominate=True) is False
@@ -129,6 +132,7 @@ def test_single_candidate_passthrough():
     # <2 ports -> never override aioice's own decision (both values).
     _install_highport_nomination_patch()
     from aioice import ice
+
     cl = [_pair("10.0.0.5", 60500)]
     conn = _fake_conn(cl)
     assert _use_candidate(ice, conn, cl[0], nominate=True) is True
@@ -140,6 +144,7 @@ def test_noop_when_controlled():
     # our wrapper does not change that.
     _install_highport_nomination_patch()
     from aioice import ice
+
     cl = [_pair("10.0.0.5", 60500), _pair("10.0.0.5", 60501)]
     conn = _fake_conn(cl, controlling=False)
     assert _use_candidate(ice, conn, cl[1], nominate=True) is False
@@ -151,16 +156,18 @@ def test_untagged_connection_is_a_strict_noop():
     # the override never fires on it, even with a forceable consecutive pair.
     _install_highport_nomination_patch()
     from aioice import ice
+
     cl = [_pair("10.0.0.5", 60500), _pair("10.0.0.5", 60501)]
     conn = _fake_conn(cl, tagged=False)
     # Untagged -> USE-CANDIDATE follows aioice's own `nominate`, not our decision.
-    assert _use_candidate(ice, conn, cl[0], nominate=True) is True   # not suppressed
+    assert _use_candidate(ice, conn, cl[0], nominate=True) is True  # not suppressed
     assert _use_candidate(ice, conn, cl[1], nominate=False) is False  # not forced
 
 
 if __name__ == "__main__":
-    fns = [v for k, v in sorted(globals().items())
-           if k.startswith("test_") and callable(v)]
+    fns = [
+        v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)
+    ]
     for fn in fns:
         fn()
         print(f"PASS {fn.__name__}")

@@ -22,6 +22,7 @@ ffmpeg had exited - a stall, a camera drop, the abandon ceiling - therefore
 accepted talk, dispatched nothing, and returned True to the ``aidot.talk``
 service. The user got silence and a success.
 """
+
 import asyncio
 import os
 import sys
@@ -70,10 +71,15 @@ class _FakeQ:
 
 def _fresh_talk_state():
     return {
-        "provider": None, "src": None, "sock": None,
-        "ssrc": 0x0000ABCD, "key": "x" * 40,
-        "want_speaker": False, "speaker_on": False,
-        "spk_eligible_ts": None, "stop": False,
+        "provider": None,
+        "src": None,
+        "sock": None,
+        "ssrc": 0x0000ABCD,
+        "key": "x" * 40,
+        "want_speaker": False,
+        "speaker_on": False,
+        "spk_eligible_ts": None,
+        "stop": False,
     }
 
 
@@ -106,6 +112,7 @@ def _fake_bridge(ts, delay: float = 0.05):
     SDES_SPEAKERSTART_DELAY, sends 848 and sets ``speaker_on``. Only the
     observable effect matters here.
     """
+
     def _run():
         for _ in range(400):
             if ts.get("want_speaker"):
@@ -113,6 +120,7 @@ def _fake_bridge(ts, delay: float = 0.05):
                 ts["speaker_on"] = True
                 return
             time.sleep(0.005)
+
     threading.Thread(target=_run, daemon=True).start()
 
 
@@ -157,6 +165,7 @@ def test_talk_is_not_supported_on_a_session_whose_ffmpeg_has_exited():
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:

@@ -8,15 +8,17 @@ for NEGATIVE DTS and found none - but a PES carrying no timestamps at all has no
 DTS to be negative, so that check could never have seen it. go2rtc renders such a
 PES as RTP timestamp 0, and Home Assistant then computes dts = -base_timestamp.
 """
+
 import collections
 import sys
+
 
 def scan(path):
     pids = collections.Counter()
     flags = collections.Counter()
     zero_examples = []
     pes_total = 0
-    with open(path, 'rb') as fh:
+    with open(path, "rb") as fh:
         data = fh.read()
     # find sync
     off = 0
@@ -24,11 +26,11 @@ def scan(path):
         off += 1
     n = 0
     while off + 188 <= len(data):
-        pkt = data[off:off+188]
+        pkt = data[off : off + 188]
         off += 188
         if pkt[0] != 0x47:
             # resync
-            k = pkt.find(b'\x47')
+            k = pkt.find(b"\x47")
             if k < 0:
                 continue
             off = off - 188 + k
@@ -44,18 +46,19 @@ def scan(path):
             i += 1 + pkt[4]
         if i + 9 > 188:
             continue
-        if pkt[i:i+3] != b'\x00\x00\x01':
+        if pkt[i : i + 3] != b"\x00\x00\x01":
             continue
-        sid = pkt[i+3]
-        if not (0xE0 <= sid <= 0xEF):      # video stream ids only
+        sid = pkt[i + 3]
+        if not (0xE0 <= sid <= 0xEF):  # video stream ids only
             continue
         pes_total += 1
         pids[pid] += 1
-        fl = (pkt[i+7] >> 6) & 0x3          # PTS_DTS_flags
+        fl = (pkt[i + 7] >> 6) & 0x3  # PTS_DTS_flags
         flags[fl] += 1
         if fl == 0 and len(zero_examples) < 5:
-            zero_examples.append((n, pid, pkt[i+4] << 8 | pkt[i+5]))
+            zero_examples.append((n, pid, pkt[i + 4] << 8 | pkt[i + 5]))
     return pes_total, pids, flags, zero_examples, n
+
 
 for p in sys.argv[1:]:
     try:

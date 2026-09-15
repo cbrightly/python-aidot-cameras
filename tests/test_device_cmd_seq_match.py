@@ -20,6 +20,7 @@ ack for our own seq is logged rather than acted on, because whether this
 firmware ever sends one is not yet known, and a return value should not be
 changed on a guess.
 """
+
 import json
 
 import pytest
@@ -30,10 +31,14 @@ SEQ = "ap1234567"
 
 
 def _resp(seq=SEQ, code=200, method="setDevAttrResp"):
-    return json.dumps({
-        "id": "cam1", "method": method, "seq": seq,
-        "ack": {"code": code, "desc": "ok" if code == 200 else "nope"},
-    })
+    return json.dumps(
+        {
+            "id": "cam1",
+            "method": method,
+            "seq": seq,
+            "ack": {"code": code, "desc": "ok" if code == 200 else "nope"},
+        }
+    )
 
 
 def test_our_own_ack_is_accepted():
@@ -50,8 +55,7 @@ def test_the_battery_wake_ack_is_not_ours():
 
     Its ack arrives first and lands on the same wildcard subscription.
     """
-    wake = json.dumps({"method": "lowPowerActiveStateResp",
-                       "ack": {"code": 200}})
+    wake = json.dumps({"method": "lowPowerActiveStateResp", "ack": {"code": 200}})
     assert _ack_matches_seq(json.loads(wake), SEQ) is False
 
 

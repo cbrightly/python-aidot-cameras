@@ -12,6 +12,7 @@ packet, so an audio stream whose packets are all discarded leaves the consumer
 with zero bytes, video included, while signaling looks perfectly healthy. That is
 what made enabling serve audio look like it broke streaming outright.
 """
+
 from aidot_cameras.camera.sdes_open import narrow_sdp_payload_types
 
 _SDP = (
@@ -53,7 +54,7 @@ def test_h265_video_narrowing_still_works():
     assert "m=video 38738 RTP/AVP 97\r\n" in out
     assert "a=rtpmap:97 H265/90000" in out
     assert "a=rtpmap:96 H264/90000" not in out
-    assert "a=fmtp:96 " not in out          # the dropped codec's fmtp goes too
+    assert "a=fmtp:96 " not in out  # the dropped codec's fmtp goes too
 
 
 def test_h264_keeps_its_fmtp():
@@ -80,7 +81,7 @@ def test_line_endings_and_ordering_survive():
     out = narrow_sdp_payload_types(_SDP, keep_video=96, keep_audio=8)
     assert out.endswith("\r\n")
     assert "\n\n" not in out
-    assert out.index("m=audio") < out.index("m=video")   # stream order preserved
+    assert out.index("m=audio") < out.index("m=video")  # stream order preserved
 
 
 # --- the three-payload template (96 H264, 97+98 H265) ------------------------
@@ -141,11 +142,15 @@ def test_unlisted_keep_leaves_the_sdp_alone():
 
 def test_push_video_only_maps_video_and_keeps_passthrough_otherwise():
     from aidot_cameras.camera.client import _build_sdes_serve_cmd
+
     push = _build_sdes_serve_cmd(
-        sdp_path="/tmp/x.sdp", rtsp_push_url="rtsp://127.0.0.1:8554/x")
+        sdp_path="/tmp/x.sdp", rtsp_push_url="rtsp://127.0.0.1:8554/x"
+    )
     assert "-c" in push and "copy" in push and "-map" not in push
     vonly = _build_sdes_serve_cmd(
-        sdp_path="/tmp/x.sdp", rtsp_push_url="rtsp://127.0.0.1:8554/x",
-        push_video_only=True)
+        sdp_path="/tmp/x.sdp",
+        rtsp_push_url="rtsp://127.0.0.1:8554/x",
+        push_video_only=True,
+    )
     i = vonly.index("-map")
     assert vonly[i + 1] == "0:v:0" and "-c:v" in vonly

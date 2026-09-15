@@ -22,6 +22,7 @@ several-hundred-line async method that cannot be invoked standalone, so a test
 that only exercised a copy of the template would pass with the production change
 deleted.
 """
+
 import ast
 import inspect
 import re
@@ -73,15 +74,14 @@ def _offer(pt_list: str, attrs: str) -> str:
         "c=IN IP4 10.0.0.1\r\n"
         "a=recvonly\r\n"
         "a=mid:1\r\n"
-        "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:BBBB\r\n"
-        + attrs
-        + "a=rtcp-mux\r\n"
+        "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:BBBB\r\n" + attrs + "a=rtcp-mux\r\n"
     )
 
 
 # --------------------------------------------------------------------- #
 # Default: off changes nothing
 # --------------------------------------------------------------------- #
+
 
 def test_unset_is_todays_order(monkeypatch):
     monkeypatch.delenv(_ENV, raising=False)
@@ -100,13 +100,16 @@ def test_default_output_is_byte_identical_to_the_literal_it_replaced():
 
 def test_default_output_matches_the_resolver_with_the_env_unset(monkeypatch):
     monkeypatch.delenv(_ENV, raising=False)
-    assert (_sdes_offer_video_codec_lines(_resolve_sdes_video_pt_order())
-            == _sdes_offer_video_codec_lines())
+    assert (
+        _sdes_offer_video_codec_lines(_resolve_sdes_video_pt_order())
+        == _sdes_offer_video_codec_lines()
+    )
 
 
 # --------------------------------------------------------------------- #
 # The order the env asks for is the order that comes out
 # --------------------------------------------------------------------- #
+
 
 @pytest.mark.parametrize("raw", ["97,96", "97 96", " 97 , 96 ", "97"])
 def test_h265_first_puts_97_first_in_the_m_line(monkeypatch, raw):
@@ -143,10 +146,26 @@ def test_naming_todays_order_explicitly_is_a_no_op(monkeypatch):
 # It can reorder and it can never narrow
 # --------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("raw", [
-    "", "   ", "h265", "hevc,h264", "-1", "0", "9.5", "999", "98",
-    "97,97,97", "96,96", ",,,", "97,abc,96", "97,999",
-])
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "   ",
+        "h265",
+        "hevc,h264",
+        "-1",
+        "0",
+        "9.5",
+        "999",
+        "98",
+        "97,97,97",
+        "96,96",
+        ",,,",
+        "97,abc,96",
+        "97,999",
+    ],
+)
 def test_no_value_can_narrow_or_empty_the_offer(monkeypatch, raw):
     """A payload type dropped from the m-line is a codec the camera may not
     send; drop both and it has nothing to send at all.  Narrowing has its own
@@ -179,6 +198,7 @@ def test_an_empty_order_from_a_caller_falls_back_rather_than_emptying_the_line()
 # Composition with the pin, which narrows
 # --------------------------------------------------------------------- #
 
+
 def test_the_pin_wins_over_the_order(monkeypatch):
     """Production orders first, then narrows.  With both set the pin decides
     and the order is moot -- asserted rather than assumed, because the two
@@ -201,6 +221,7 @@ def test_ordering_alone_leaves_the_pin_unset(monkeypatch):
 # --------------------------------------------------------------------- #
 # The order has to survive to the wire
 # --------------------------------------------------------------------- #
+
 
 def test_the_order_survives_sdp_compression(monkeypatch):
     """The offer travels twice: in full as ``offer.sdp`` and compressed into
@@ -225,15 +246,16 @@ def test_the_order_survives_sdp_compression(monkeypatch):
 # The production builder really uses it
 # --------------------------------------------------------------------- #
 
+
 def _offer_assignment_source() -> str:
     """The source of the ``sdes_offer_sdp = (...)`` assignment, and only it."""
     tree = ast.parse(inspect.getsource(sdes_open))
     src = inspect.getsource(sdes_open)
     found = [
-        n for n in ast.walk(tree)
+        n
+        for n in ast.walk(tree)
         if isinstance(n, ast.Assign)
-        and any(isinstance(t, ast.Name) and t.id == "sdes_offer_sdp"
-                for t in n.targets)
+        and any(isinstance(t, ast.Name) and t.id == "sdes_offer_sdp" for t in n.targets)
         and isinstance(n.value, ast.BinOp)
     ]
     assert len(found) == 1, (
@@ -259,5 +281,5 @@ def test_the_offer_builder_takes_its_video_codec_list_from_the_helper():
 
 def test_the_offer_builder_asks_the_environment_for_the_order():
     src = inspect.getsource(sdes_open)
-    head = src[:src.index("sdes_offer_sdp = (")]
+    head = src[: src.index("sdes_offer_sdp = (")]
     assert "_resolve_sdes_video_pt_order()" in head.rsplit("_talk_state", 1)[-1]

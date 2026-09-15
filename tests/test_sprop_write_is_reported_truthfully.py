@@ -14,6 +14,7 @@ an investigation looking for a cache that was never going to be there.
 
 So `_save_sprop` reports whether it wrote, and the caller is gated on the answer.
 """
+
 import os
 import sys
 
@@ -59,6 +60,7 @@ def test_the_call_that_marks_a_camera_unstable_also_reports_false(sprop_dir):
 
 def test_an_unwritable_cache_directory_reports_false(sprop_dir, monkeypatch):
     """The feature is inert if the directory is not writable; do not claim a write."""
+
     def _boom(*_a, **_k):
         raise OSError("read-only file system")
 
@@ -80,8 +82,10 @@ def test_the_bridge_only_announces_a_cache_write_when_one_happened():
 
     src = pathlib.Path(sdes_open.__file__).read_text()
     calls = [
-        n for n in ast.walk(ast.parse(src))
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        n
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
         and n.func.id == "_save_sprop"
     ]
     assert calls, "no _save_sprop call found in the bridge - has it moved?"

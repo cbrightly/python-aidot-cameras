@@ -9,6 +9,7 @@ policy; no camera/network/host needed.
   - _tcp_table_has_established_on_port: is a consumer ESTABLISHED on that port?
     (A LISTEN socket - ffmpeg waiting - must NOT count as a consumer.)
 """
+
 import os
 import sys
 
@@ -20,8 +21,8 @@ from aidot_cameras.device_client import (
     _idle_release_due,
 )
 
-_PORT = 18981          # 0x4A25
-_HEX = f"{_PORT:04X}"   # "4A25"
+_PORT = 18981  # 0x4A25
+_HEX = f"{_PORT:04X}"  # "4A25"
 
 _HEADER = (
     "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when "
@@ -38,6 +39,7 @@ def _row(local_port_hex, st, remote="0100007F:9C40"):
 
 # ---- _sdes_serve_port ------------------------------------------------------
 
+
 def test_serve_port_parsed():
     assert _sdes_serve_port("http://127.0.0.1:18981/abc.ts") == 18981
 
@@ -52,6 +54,7 @@ def test_serve_port_malformed():
 
 
 # ---- _tcp_table_has_established_on_port ------------------------------------
+
 
 def test_established_consumer_present():
     table = _HEADER + "\n" + _row(_HEX, "01")  # 01 == ESTABLISHED
@@ -86,12 +89,14 @@ def test_tcp6_long_local_address_parses():
 
 
 def test_mixed_rows_finds_the_established_one():
-    table = "\n".join([
-        _HEADER,
-        _row(_HEX, "0A"),          # our port, LISTEN (not a consumer)
-        _row("0050", "01"),        # other port, ESTABLISHED
-        _row(_HEX, "01"),          # our port, ESTABLISHED  <-- the viewer
-    ])
+    table = "\n".join(
+        [
+            _HEADER,
+            _row(_HEX, "0A"),  # our port, LISTEN (not a consumer)
+            _row("0050", "01"),  # other port, ESTABLISHED
+            _row(_HEX, "01"),  # our port, ESTABLISHED  <-- the viewer
+        ]
+    )
     assert _tcp_table_has_established_on_port(table, _PORT) is True
 
 
@@ -102,26 +107,34 @@ _IDLE = 120.0
 
 def test_consumer_present_never_releases():
     # present=True -> a viewer is pulling, even long past the idle window
-    assert _idle_release_due(True, last_consumer=0.0, now=10_000.0,
-                             idle_secs=_IDLE) is False
+    assert (
+        _idle_release_due(True, last_consumer=0.0, now=10_000.0, idle_secs=_IDLE)
+        is False
+    )
 
 
 def test_unknown_table_never_releases():
     # present=None -> /proc unreadable (non-Linux) -> fail-safe, never release
-    assert _idle_release_due(None, last_consumer=0.0, now=10_000.0,
-                             idle_secs=_IDLE) is False
+    assert (
+        _idle_release_due(None, last_consumer=0.0, now=10_000.0, idle_secs=_IDLE)
+        is False
+    )
 
 
 def test_no_consumer_within_window_holds():
     # no consumer but still inside the idle window -> keep trying
-    assert _idle_release_due(False, last_consumer=1000.0, now=1090.0,
-                             idle_secs=_IDLE) is False
+    assert (
+        _idle_release_due(False, last_consumer=1000.0, now=1090.0, idle_secs=_IDLE)
+        is False
+    )
 
 
 def test_no_consumer_past_window_releases():
     # no consumer for longer than the idle window -> release the orphan
-    assert _idle_release_due(False, last_consumer=1000.0, now=1121.0,
-                             idle_secs=_IDLE) is True
+    assert (
+        _idle_release_due(False, last_consumer=1000.0, now=1121.0, idle_secs=_IDLE)
+        is True
+    )
 
 
 def test_release_boundary_is_strictly_greater():
@@ -130,6 +143,7 @@ def test_release_boundary_is_strictly_greater():
 
 if __name__ == "__main__":
     import traceback
+
     _fail = 0
     for _k, _v in sorted(globals().items()):
         if _k.startswith("test_"):

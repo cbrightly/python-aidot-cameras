@@ -6,13 +6,15 @@ uncached HTTP round-trip (~0.2-0.5s). The extracted numeric userId/uuid are
 account-static; the LAN-IP field is vestigial. So a short fixed-TTL cache is
 safe. These lock the cache-store + short-circuit without a network. No network.
 """
+
 import asyncio
 import os
 import sys
 import time
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 
 import aidot_cameras.camera.client as cc
 

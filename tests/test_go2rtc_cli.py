@@ -4,6 +4,7 @@ No network: only the pure helpers and the argparse validation paths that
 fail before any asyncio.run()/cloud call are exercised. The streaming paths
 (cmd_list/cmd_stream) are integration-tested live, not here.
 """
+
 import os
 import stat
 import sys
@@ -27,8 +28,11 @@ from aidot_cameras.__main__ import (
 # stub the rest of the suite uses (tests/test_sdes_serve_audio.py). It reads
 # os.environ at call time and `_sdes_audio_opt` is absent on __new__, so
 # monkeypatch applies.
-_CAM = next(v for v in vars(_cc).values()
-            if isinstance(v, type) and "_resolve_sdes_serve_audio" in v.__dict__)
+_CAM = next(
+    v
+    for v in vars(_cc).values()
+    if isinstance(v, type) and "_resolve_sdes_serve_audio" in v.__dict__
+)
 
 
 def _cam():

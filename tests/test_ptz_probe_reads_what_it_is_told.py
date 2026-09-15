@@ -15,12 +15,17 @@ Home Assistant actually goes through - and not by a bare
 been exercised on real hardware at all; both of the runs that reported PASS for
 it were reporting the probe's own blindness.
 """
+
 import asyncio
 import os
 import sys
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"
+    ),
+)
 
 from feature_probe import FAIL, PASS, _probe_ptz
 
@@ -75,6 +80,7 @@ def test_a_camera_that_accepts_every_command_passes():
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:

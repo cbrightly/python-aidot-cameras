@@ -15,6 +15,7 @@ Also locked here: the model-id matches that used to be re-typed inline per call
 site (powerType) or compared for exact equality (the plain-RTP framing set), both
 of which broke on a revision suffix.
 """
+
 import os
 import sys
 
@@ -22,8 +23,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import aidot_cameras.camera.client as cc
 
-_CAM = next(v for v in vars(cc).values()
-            if isinstance(v, type) and "_battery_evidence" in v.__dict__)
+_CAM = next(
+    v
+    for v in vars(cc).values()
+    if isinstance(v, type) and "_battery_evidence" in v.__dict__
+)
 
 
 class _Info:
@@ -50,6 +54,7 @@ def _cam(model_id="LK.IPC.A000088", props=None, status=None, **attrs):
 
 # --- the known-model list ---------------------------------------------------- #
 
+
 def test_listed_battery_models_are_battery():
     for _m in ("LK.IPC.A001513", "LK.IPC.A001108", "LK.IPC.A001360"):
         assert _cam(_m).is_battery_camera is True, _m
@@ -73,6 +78,7 @@ def test_unknown_model_with_no_evidence_is_not_battery():
 
 
 # --- evidence from the camera's own cloud data -------------------------------- #
+
 
 def test_reported_battery_level_makes_an_unlisted_model_battery():
     # The rule lan_control.is_mains_powered inverts: a camera that reports a
@@ -107,8 +113,10 @@ def test_battery_mode_two_alone_is_not_evidence():
     ``powerType``/``p2pCache``, which also read 2 on every camera.
     """
     for value in (2, "2"):
-        assert _cam("LK.IPC.A009999",
-                    props={"batteryMode": value}).is_battery_camera is False
+        assert (
+            _cam("LK.IPC.A009999", props={"batteryMode": value}).is_battery_camera
+            is False
+        )
 
 
 def test_battery_mode_two_counts_when_corroborated():
@@ -117,10 +125,17 @@ def test_battery_mode_two_counts_when_corroborated():
     Kept (rather than dropping the flag) so a battery model whose level field we
     have not seen is still caught, provided it reports any battery-only field.
     """
-    for extra in ({"charging": "0"}, {"lowPowerStatus": "0"},
-                  {"Battery_remaining": "100"}):
-        assert _cam("LK.IPC.A009999",
-                    props={"batteryMode": "2", **extra}).is_battery_camera is True
+    for extra in (
+        {"charging": "0"},
+        {"lowPowerStatus": "0"},
+        {"Battery_remaining": "100"},
+    ):
+        assert (
+            _cam(
+                "LK.IPC.A009999", props={"batteryMode": "2", **extra}
+            ).is_battery_camera
+            is True
+        )
 
 
 def test_battery_mode_one_is_not_evidence():
@@ -144,7 +159,10 @@ def test_parsed_status_battery_level_counts():
 
 def test_non_numeric_battery_value_is_not_evidence():
     # A malformed cloud value must not classify the camera either way.
-    assert _cam("LK.IPC.A009999", props={"Battery_remaining": "n/a"}).is_battery_camera is False
+    assert (
+        _cam("LK.IPC.A009999", props={"Battery_remaining": "n/a"}).is_battery_camera
+        is False
+    )
 
 
 def test_evidence_never_takes_a_listed_model_out():
@@ -169,6 +187,7 @@ def test_detection_survives_a_malformed_raw_device():
 
 # --- powerType on the wire --------------------------------------------------- #
 
+
 def test_power_type_follows_battery_detection():
     # IpcServiceImpl.java B(): 2 for battery, 1 for wired. One derivation, so the
     # value the camera is told can't disagree with the guards we apply.
@@ -179,6 +198,7 @@ def test_power_type_follows_battery_detection():
 
 
 # --- the plain-RTP (TUTK-framed) model set ----------------------------------- #
+
 
 def test_plain_rtp_models_match_by_substring():
     # Was an equality check against the bare ids, so a revision suffix read as a
@@ -194,6 +214,7 @@ def test_plain_rtp_models_match_by_substring():
 
 # --- adaptive mode is refused for battery cameras ---------------------------- #
 
+
 def test_adaptive_never_on_for_a_battery_camera(monkeypatch):
     # Adaptive chases the TURN pre-allocation saving, which is force-kept for a
     # battery camera - so the "fast" attempt runs the same handshake and differs
@@ -202,7 +223,10 @@ def test_adaptive_never_on_for_a_battery_camera(monkeypatch):
     # scored as a fast-path failure.
     monkeypatch.setenv("AIDOT_SDES_ADAPTIVE", "1")
     assert _cam("LK.IPC.A001513")._resolve_sdes_adaptive() is False
-    assert _cam("LK.IPC.A001513", _sdes_adaptive_opt=True)._resolve_sdes_adaptive() is False
+    assert (
+        _cam("LK.IPC.A001513", _sdes_adaptive_opt=True)._resolve_sdes_adaptive()
+        is False
+    )
     # Detected-by-evidence battery cameras get the same guard.
     c = _cam("LK.IPC.A009999", props={"Battery_remaining": 60}, _sdes_adaptive_opt=True)
     assert c._resolve_sdes_adaptive() is False
@@ -210,7 +234,9 @@ def test_adaptive_never_on_for_a_battery_camera(monkeypatch):
 
 def test_adaptive_still_available_for_mains(monkeypatch):
     monkeypatch.delenv("AIDOT_SDES_ADAPTIVE", raising=False)
-    assert _cam("LK.IPC.A001064", _sdes_adaptive_opt=True)._resolve_sdes_adaptive() is True
+    assert (
+        _cam("LK.IPC.A001064", _sdes_adaptive_opt=True)._resolve_sdes_adaptive() is True
+    )
     assert _cam("LK.IPC.A001064")._resolve_sdes_adaptive() is False
     monkeypatch.setenv("AIDOT_SDES_ADAPTIVE", "1")
     assert _cam("LK.IPC.A001064")._resolve_sdes_adaptive() is True
@@ -218,12 +244,14 @@ def test_adaptive_still_available_for_mains(monkeypatch):
 
 # --- the guards an evidence-detected battery camera now gets ----------------- #
 
+
 def test_evidence_detected_battery_keeps_the_turn_relay(monkeypatch):
     # The headline consequence: HA's LAN-direct mode can no longer strip the only
     # return path to a battery camera it hadn't been taught to recognize.
     monkeypatch.setenv("AIDOT_SDES_SKIP_TURN_PREALLOC", "1")
-    c = _cam("LK.IPC.A009999", props={"Battery_remaining": 41},
-             _sdes_skip_turn_opt=True)
+    c = _cam(
+        "LK.IPC.A009999", props={"Battery_remaining": 41}, _sdes_skip_turn_opt=True
+    )
     assert c._resolve_sdes_skip_turn() is False
 
 

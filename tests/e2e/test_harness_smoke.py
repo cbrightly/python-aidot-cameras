@@ -3,6 +3,7 @@
 If these fail, every other e2e result is meaningless - so they run first and
 say plainly which leg of the harness broke.
 """
+
 import asyncio
 
 import pytest
@@ -43,7 +44,9 @@ async def test_broker_accepts_the_library_paho_config(fake_broker):
         except (TypeError, ValueError):
             rcs.append(getattr(rc, "value", -1))
         c.subscribe("iot/v1/s/user-1/IPC/#")
-        c.publish("iot/v1/s/user-1/IPC/livePlayReq", json.dumps({"method": "livePlayReq"}))
+        c.publish(
+            "iot/v1/s/user-1/IPC/livePlayReq", json.dumps({"method": "livePlayReq"})
+        )
 
     def on_message(_c, _u, msg):
         got.append((msg.topic, msg.payload))
@@ -55,7 +58,7 @@ async def test_broker_accepts_the_library_paho_config(fake_broker):
     client.connect_async(parsed.hostname, parsed.port, keepalive=30)
     client.loop_start()
     try:
-        for _ in range(300):          # yield to the loop so the broker can run
+        for _ in range(300):  # yield to the loop so the broker can run
             if done.is_set():
                 break
             await asyncio.sleep(0.05)
@@ -113,7 +116,8 @@ async def test_fake_camera_answers_liveplay_on_peerid(fake_broker):
 
         app = paho.Client(
             callback_api_version=paho.CallbackAPIVersion.VERSION2,
-            client_id="harness-app", transport="websockets",
+            client_id="harness-app",
+            transport="websockets",
         )
         app.ws_set_options(path=parsed.path)
 
@@ -129,10 +133,16 @@ async def test_fake_camera_answers_liveplay_on_peerid(fake_broker):
         app.loop_start()
         try:
             await asyncio.sleep(0.5)  # let the subscription land
-            app.publish("iot/v1/s/user-1/IPC/livePlayReq", json.dumps({
-                "method": "livePlayReq", "devId": "dev-1",
-                "payload": {"peerid": "abc_123_2_0_1", "devId": "dev-1"},
-            }))
+            app.publish(
+                "iot/v1/s/user-1/IPC/livePlayReq",
+                json.dumps(
+                    {
+                        "method": "livePlayReq",
+                        "devId": "dev-1",
+                        "payload": {"peerid": "abc_123_2_0_1", "devId": "dev-1"},
+                    }
+                ),
+            )
             for _ in range(300):
                 if got.is_set():
                     break

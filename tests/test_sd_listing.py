@@ -4,6 +4,7 @@ The distinction this file exists to protect: "I could not ask" and "the card is
 empty" are different answers, and a browser that collapses them shows a user an
 empty folder for two opposite reasons.
 """
+
 import struct
 
 import pytest
@@ -21,21 +22,23 @@ class _Reply:
         self.payload = payload
 
 
-def _record(year=2026, mon=8, day=11, hour=20, mi=41, sec=42,
-            channel=0, event=1, status=0):
-    return struct.pack("<HBBBBBBBBBB", year, mon, day, 2, hour, mi, sec,
-                       channel, event, status, 0)
+def _record(
+    year=2026, mon=8, day=11, hour=20, mi=41, sec=42, channel=0, event=1, status=0
+):
+    return struct.pack(
+        "<HBBBBBBBBBB", year, mon, day, 2, hour, mi, sec, channel, event, status, 0
+    )
 
 
 def _page(records, *, end_flag=1, total=1, index=0):
     body = b"".join(records)
-    return (struct.pack("<II", 0, total)
-            + bytes((index, end_flag, len(records), 0)) + body)
+    return (
+        struct.pack("<II", 0, total) + bytes((index, end_flag, len(records), 0)) + body
+    )
 
 
 def _map(hours: bytes, *, total=1):
-    return (struct.pack("<II", 0, total)
-            + bytes((0, 1, len(hours) & 0xFF, 0)) + hours)
+    return struct.pack("<II", 0, total) + bytes((0, 1, len(hours) & 0xFF, 0)) + hours
 
 
 class _Session:
@@ -46,8 +49,7 @@ class _Session:
         self.is_alive = alive
         self.asked = []
 
-    async def async_avio_request(self, cmd, payload, *, response_cmd,
-                                 timeout=8.0):
+    async def async_avio_request(self, cmd, payload, *, response_cmd, timeout=8.0):
         self.asked.append((cmd, payload, response_cmd))
         return self._answers.get(response_cmd)
 
@@ -105,13 +107,18 @@ async def test_a_dead_session_is_also_not_an_empty_card():
 
 @pytest.mark.asyncio
 async def test_the_records_come_back_decoded():
-    session = _Session({
-        LISTEVENT_RESP_CMD: _Reply(LISTEVENT_RESP_CMD,
-                                   _page([_record(), _record(mi=55)])),
-    })
+    session = _Session(
+        {
+            LISTEVENT_RESP_CMD: _Reply(
+                LISTEVENT_RESP_CMD, _page([_record(), _record(mi=55)])
+            ),
+        }
+    )
     out = await _Camera(session).async_get_sd_recordings()
     assert [r.isoformat() for r in out.records] == [
-        "2026-08-11T20:41:42Z", "2026-08-11T20:55:42Z"]
+        "2026-08-11T20:41:42Z",
+        "2026-08-11T20:55:42Z",
+    ]
     assert out.complete is True
 
 
@@ -140,9 +147,13 @@ async def test_silence_and_an_empty_card_are_not_the_same_answer():
     # lose: both of these carry an empty record list, and a browser that reads
     # only `records` tells a silent camera's owner that their card is empty.
     silent = await _Camera(_Session({})).async_get_sd_recordings()
-    answered = await _Camera(_Session({
-        LISTEVENT_RESP_CMD: _Reply(LISTEVENT_RESP_CMD, _page([])),
-    })).async_get_sd_recordings()
+    answered = await _Camera(
+        _Session(
+            {
+                LISTEVENT_RESP_CMD: _Reply(LISTEVENT_RESP_CMD, _page([])),
+            }
+        )
+    ).async_get_sd_recordings()
 
     assert silent.records == answered.records == []
     assert silent.answered is False
@@ -153,9 +164,11 @@ async def test_silence_and_an_empty_card_are_not_the_same_answer():
 async def test_the_map_alone_is_enough_to_prove_the_camera_is_listening():
     # Only one of the two requests has to come back. A firmware that answers
     # HASLISTEVENT and ignores LISTEVENT is still a camera that is talking.
-    session = _Session({
-        HASLISTEVENT_RESP_CMD: _Reply(HASLISTEVENT_RESP_CMD, _map(bytes(24))),
-    })
+    session = _Session(
+        {
+            HASLISTEVENT_RESP_CMD: _Reply(HASLISTEVENT_RESP_CMD, _map(bytes(24))),
+        }
+    )
     out = await _Camera(session).async_get_sd_recordings()
     assert out.answered is True and out.records == []
 
@@ -175,10 +188,13 @@ async def test_a_dead_channel_does_not_come_back_as_an_empty_card():
 
 @pytest.mark.asyncio
 async def test_a_page_that_never_ends_is_reported_incomplete():
-    session = _Session({
-        LISTEVENT_RESP_CMD: _Reply(LISTEVENT_RESP_CMD,
-                                   _page([_record()], end_flag=0)),
-    })
+    session = _Session(
+        {
+            LISTEVENT_RESP_CMD: _Reply(
+                LISTEVENT_RESP_CMD, _page([_record()], end_flag=0)
+            ),
+        }
+    )
     out = await _Camera(session).async_get_sd_recordings()
     assert out.records and out.complete is False
 
@@ -186,9 +202,11 @@ async def test_a_page_that_never_ends_is_reported_incomplete():
 @pytest.mark.asyncio
 async def test_the_occupancy_map_comes_back_as_hours_not_as_records():
     hours = bytes(168)
-    session = _Session({
-        HASLISTEVENT_RESP_CMD: _Reply(HASLISTEVENT_RESP_CMD, _map(hours)),
-    })
+    session = _Session(
+        {
+            HASLISTEVENT_RESP_CMD: _Reply(HASLISTEVENT_RESP_CMD, _map(hours)),
+        }
+    )
     out = await _Camera(session).async_get_sd_recordings()
     assert out.hours == hours
     assert out.records == [], "fourteen 12-byte 'records' fit in 168 bytes"
@@ -203,9 +221,11 @@ async def test_the_window_is_carried_so_an_hour_byte_can_be_placed():
 
 @pytest.mark.asyncio
 async def test_an_undecodable_reply_is_an_empty_list_with_the_session_intact():
-    session = _Session({
-        LISTEVENT_RESP_CMD: _Reply(LISTEVENT_RESP_CMD, b"\x01\x02\x03"),
-    })
+    session = _Session(
+        {
+            LISTEVENT_RESP_CMD: _Reply(LISTEVENT_RESP_CMD, b"\x01\x02\x03"),
+        }
+    )
     out = await _Camera(session).async_get_sd_recordings()
     assert out is not None and out.records == []
     # Something came back and could not be read, so the camera IS listening

@@ -17,7 +17,6 @@ whether the caller must wait, and a warm window stops a burst of attribute
 writes from waking the camera once per attribute.
 """
 
-
 from aidot_cameras.camera.client import WAKE_SETTLE_S, WAKE_WARM_S, _wake_plan
 
 
@@ -36,15 +35,13 @@ def test_a_sleeping_battery_camera_is_woken_and_the_caller_waits():
 
 def test_a_second_write_inside_the_warm_window_does_not_wake_again():
     """Home Assistant writes attributes in bursts; one wake should cover them."""
-    plan = _wake_plan(is_battery=True, now=1000.0 + WAKE_WARM_S - 1,
-                      last_wake=1000.0)
+    plan = _wake_plan(is_battery=True, now=1000.0 + WAKE_WARM_S - 1, last_wake=1000.0)
     assert plan.wake is False
     assert plan.settle == 0.0
 
 
 def test_the_warm_window_expires():
-    plan = _wake_plan(is_battery=True, now=1000.0 + WAKE_WARM_S + 1,
-                      last_wake=1000.0)
+    plan = _wake_plan(is_battery=True, now=1000.0 + WAKE_WARM_S + 1, last_wake=1000.0)
     assert plan.wake is True
     assert plan.settle == WAKE_SETTLE_S
 

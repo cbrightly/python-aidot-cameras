@@ -36,8 +36,9 @@ from aidot_cameras.camera.protocol import (
     video_pts_dts,
 )
 
-FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       "fixtures", "tap_timestamps_a000088.txt")
+FIXTURE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "fixtures", "tap_timestamps_a000088.txt"
+)
 
 
 def _raw():
@@ -70,8 +71,8 @@ def test_a_fresh_stream_reports_nothing_as_resent():
 def test_a_timestamp_already_served_is_resent():
     state = {}
     assert is_resent_video_frame(state, 6000) is False
-    assert is_resent_video_frame(state, 6000) is True   # exact repeat
-    assert is_resent_video_frame(state, 3000) is True   # behind the mark
+    assert is_resent_video_frame(state, 6000) is True  # exact repeat
+    assert is_resent_video_frame(state, 3000) is True  # behind the mark
     assert is_resent_video_frame(state, 12000) is False  # genuinely new
 
 

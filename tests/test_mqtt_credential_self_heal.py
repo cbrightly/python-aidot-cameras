@@ -3,12 +3,16 @@ connection at a time, so a cached password goes stale whenever anything else
 logs in (the phone app is enough).  paho would retry the dead password forever,
 so a credential refusal has to invalidate the cache instead.
 """
+
 import aidot_cameras.camera.protocol as proto
 
 
 def _pm(on_auth_failure=None):
     return proto._PersistentMqtt(
-        "wss://broker.example:8443/mqtt", "user", "stale-pwd", "app-user",
+        "wss://broker.example:8443/mqtt",
+        "user",
+        "stale-pwd",
+        "app-user",
         on_auth_failure=on_auth_failure,
     )
 
@@ -24,7 +28,7 @@ def test_credential_refusal_invokes_the_callback_once():
     seen = []
     pm = _pm(on_auth_failure=seen.append)
     pm._on_connect(None, None, {}, 134)
-    pm._on_connect(None, None, {}, 134)   # repeated refusal must not re-notify
+    pm._on_connect(None, None, {}, 134)  # repeated refusal must not re-notify
     assert seen == [134]
 
 
@@ -49,4 +53,4 @@ def test_callback_exception_is_contained():
         raise RuntimeError("callback exploded")
 
     pm = _pm(on_auth_failure=boom)
-    pm._on_connect(None, None, {}, 134)   # must not propagate into paho's loop
+    pm._on_connect(None, None, {}, 134)  # must not propagate into paho's loop

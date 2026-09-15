@@ -5,6 +5,7 @@ per-camera ``stream_idle_s`` (from start_keepalive) overrides AIDOT_STREAM_IDLE_
 (default 120 s); <= 0 means never release (keep mains cameras warm for instant
 re-views). No network/camera: drives a bare instance.
 """
+
 import os
 import sys
 
@@ -12,8 +13,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import aidot_cameras.camera.client as cc
 
-_CAM = next(v for v in vars(cc).values()
-            if isinstance(v, type) and "_resolve_idle_secs" in v.__dict__)
+_CAM = next(
+    v
+    for v in vars(cc).values()
+    if isinstance(v, type) and "_resolve_idle_secs" in v.__dict__
+)
 
 
 def _cam():
@@ -53,8 +57,11 @@ if __name__ == "__main__":
     import traceback
 
     class _MP:  # minimal monkeypatch stand-in for direct `python` runs
-        def setenv(self, k, v): os.environ[k] = v
-        def delenv(self, k, raising=False): os.environ.pop(k, None)
+        def setenv(self, k, v):
+            os.environ[k] = v
+
+        def delenv(self, k, raising=False):
+            os.environ.pop(k, None)
 
     _fail = 0
     for _k, _v in sorted(globals().items()):

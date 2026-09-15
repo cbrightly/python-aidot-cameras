@@ -43,12 +43,12 @@ class WebRTCSession(AvioRequestMixin):
         talk_holder: Any = None,
         responses: Any = None,
     ) -> None:
-        self._pc          = pc
-        self._outgoing_q  = outgoing_q
-        self._mqtt_fut    = mqtt_fut
-        self._recorder    = recorder
+        self._pc = pc
+        self._outgoing_q = outgoing_q
+        self._mqtt_fut = mqtt_fut
+        self._recorder = recorder
         self._track_tasks = track_tasks
-        self._dc          = dc  # RTCDataChannel for AVIO IOCtrl commands
+        self._dc = dc  # RTCDataChannel for AVIO IOCtrl commands
         # Matches inbound AVIO replies to the commands that asked for them.
         # Created here, not lazily: the DataChannel message handler can
         # dispatch from outside this constructor's thread.
@@ -58,8 +58,10 @@ class WebRTCSession(AvioRequestMixin):
         # Two-way audio (talk): the sendrecv audio RTCRtpSender, an idle PCMA talk
         # track, and a mutable {"provider": callable|None} holder the track reads from.
         self._audio_sender = audio_sender
-        self._talk_track   = talk_track
-        self._talk_holder  = talk_holder if talk_holder is not None else {"provider": None}
+        self._talk_track = talk_track
+        self._talk_holder = (
+            talk_holder if talk_holder is not None else {"provider": None}
+        )
 
     def _avio_cmd(self, cmd: int, payload: bytes = b"") -> bool:
         """Send an AVIO IOCtrl command via the DTLS SCTP DataChannel.
@@ -129,7 +131,7 @@ class WebRTCSession(AvioRequestMixin):
             if self._audio_sender is not None:
                 self._audio_sender.replaceTrack(None)
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", 'async_stop_talk', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "async_stop_talk", exc_info=True)
         self._talk_holder["provider"] = None
         return True
 
@@ -143,20 +145,27 @@ class WebRTCSession(AvioRequestMixin):
         (host/srflx/relay/prflx) - the key signal for relay-vs-direct routing.
         """
         pc = self._pc
-        transports = (getattr(pc, "_RTCPeerConnection__iceTransports", None)
-                      or getattr(pc, "_iceTransports", None) or [])
+        transports = (
+            getattr(pc, "_RTCPeerConnection__iceTransports", None)
+            or getattr(pc, "_iceTransports", None)
+            or []
+        )
         pairs = []
         for it in transports:
             conn = getattr(it, "_connection", None) or getattr(it, "connection", None)
             nominated = getattr(conn, "_nominated", None) or {}
             for comp, pair in sorted(nominated.items()):
                 lc, rc = pair.local_candidate, pair.remote_candidate
-                pairs.append({
-                    "component": comp,
-                    "local_type": lc.type, "local": f"{lc.host}:{lc.port}",
-                    "remote_type": rc.type, "remote": f"{rc.host}:{rc.port}",
-                    "transport": lc.transport,
-                })
+                pairs.append(
+                    {
+                        "component": comp,
+                        "local_type": lc.type,
+                        "local": f"{lc.host}:{lc.port}",
+                        "remote_type": rc.type,
+                        "remote": f"{rc.host}:{rc.port}",
+                        "transport": lc.transport,
+                    }
+                )
         return pairs or None
 
     async def get_stats(self) -> "dict[str, Any]":
@@ -180,13 +189,15 @@ class WebRTCSession(AvioRequestMixin):
                 recv = getattr(stat, "packetsReceived", 0) or 0
                 lost = getattr(stat, "packetsLost", 0) or 0
                 total = recv + max(lost, 0)
-                out["inbound"].append({
-                    "kind": getattr(stat, "kind", "?"),
-                    "packets_received": recv,
-                    "packets_lost": lost,
-                    "loss_pct": round(100.0 * lost / total, 2) if total else 0.0,
-                    "jitter": getattr(stat, "jitter", None),
-                })
+                out["inbound"].append(
+                    {
+                        "kind": getattr(stat, "kind", "?"),
+                        "packets_received": recv,
+                        "packets_lost": lost,
+                        "loss_pct": round(100.0 * lost / total, 2) if total else 0.0,
+                        "jitter": getattr(stat, "jitter", None),
+                    }
+                )
         except Exception as exc:
             out["error"] = str(exc)
         return out
@@ -206,20 +217,20 @@ class WebRTCSession(AvioRequestMixin):
                     self._audio_sender.replaceTrack(None)
                 self._talk_holder["provider"] = None
                 self._talk_holder["was_active"] = False
-                await asyncio.sleep(0.4)   # let the DataChannel deliver SPEAKERSTOP
+                await asyncio.sleep(0.4)  # let the DataChannel deliver SPEAKERSTOP
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
         for task in self._track_tasks:
             task.cancel()
         if self._recorder is not None:
             try:
                 await self._recorder.stop()
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
         # Send None sentinel to stop the MQTT session in its thread
         self._outgoing_q.put_nowait(None)
         await self._pc.close()
         try:
             await asyncio.wait_for(self._mqtt_fut, timeout=5.0)
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", 'stop', exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)

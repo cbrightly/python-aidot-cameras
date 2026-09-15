@@ -7,6 +7,7 @@ fleet that was enough to stop go2rtc answering at all, which presents as no vide
 anywhere. Idle release is measured in minutes, so a few seconds of staleness in
 the answer costs nothing.
 """
+
 import asyncio
 
 import aidot_cameras.camera.client as cc
@@ -33,8 +34,9 @@ def test_repeated_calls_hit_the_backend_once():
     c, calls = _client(True)
 
     async def go():
-        for _ in range(40):          # 40 watchdog ticks
+        for _ in range(40):  # 40 watchdog ticks
             await c._viewer_present(18931)
+
     asyncio.run(go())
     assert len(calls) == 1, f"backend hit {len(calls)} times, expected 1"
 
@@ -47,6 +49,7 @@ def test_the_cached_answer_is_returned_verbatim():
             first = await c._viewer_present(18931)
             second = await c._viewer_present(18931)
             return first, second
+
         first, second = asyncio.run(go())
         assert first == answer and second == answer
 
@@ -60,6 +63,7 @@ def test_the_cache_expires_so_the_answer_can_change():
         stamp, cached = c._viewer_cache
         c._viewer_cache = (stamp - cc._VIEWER_CHECK_INTERVAL_S - 1, cached)
         await c._viewer_present(18931)
+
     asyncio.run(go())
     assert len(calls) == 2
 

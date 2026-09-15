@@ -14,12 +14,17 @@ third. These tests hold the line at the probe, independently of live_validate
 sizing the session correctly - a harness that depends on two things being right
 at once should still tell the truth when one of them is wrong.
 """
+
 import asyncio
 import os
 import sys
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"
+    ),
+)
 
 from feature_probe import NOT_RUN, PASS, probe_features, session_alive
 
@@ -85,7 +90,7 @@ def test_the_snapshot_reports_how_long_it_took():
     # the elapsed time makes the next runs answer it.
     class _Snapper(_DeviceClient):
         async def async_snapshot(self, path, timeout=10.0):
-            return False        # verdict is irrelevant here; the timing is not
+            return False  # verdict is irrelevant here; the timing is not
 
     out = asyncio.run(probe_features(_Snapper(), {}, _Session(alive=True)))
     assert "snapshot_s" in out
@@ -101,7 +106,8 @@ def test_the_snapshot_budget_clears_the_slowest_measured_snapshot():
     slowest_sdes_seen = 23.6
     sdes = _snapshot_budget({"modelId": "LK.IPC.A001064"}, 10.0)
     assert sdes >= slowest_sdes_seen * 1.5, (
-        "an SDES budget without real headroom is how this failed twice")
+        "an SDES budget without real headroom is how this failed twice"
+    )
     # DTLS is a different path and an order of magnitude faster; widening it
     # would only slow down reporting a camera that is genuinely broken.
     assert _snapshot_budget({"modelId": "LK.IPC.A000088"}, 10.0) == 10.0
@@ -119,6 +125,7 @@ def test_a_session_that_does_not_publish_liveness_counts_as_live():
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:

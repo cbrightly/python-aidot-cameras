@@ -19,6 +19,7 @@ Cancellation must still propagate. This package has already shipped one bug
 where a handler caught CancelledError and returned normally, so the re-raise is
 the property that matters most here and is asserted directly.
 """
+
 import ast
 import inspect
 import os
@@ -33,8 +34,12 @@ from aidot_cameras.camera.sdes_open import _first_media_stall_report
 
 def _report(**kw):
     args = dict(
-        device_id="cam", waited_s=75.0, nominated=[("10.0.0.1", 5000)],
-        use_candidate_sent=True, binding_success=0, trigger_sent=False,
+        device_id="cam",
+        waited_s=75.0,
+        nominated=[("10.0.0.1", 5000)],
+        use_candidate_sent=True,
+        binding_success=0,
+        trigger_sent=False,
         probes=[],
     )
     args.update(kw)
@@ -75,7 +80,8 @@ def _first_media_wait_handler():
             if "_report_first_media_stall" in names:
                 return handler
     raise AssertionError(
-        "no CancelledError handler around the first-media wait reports the stall")
+        "no CancelledError handler around the first-media wait reports the stall"
+    )
 
 
 def test_the_cancelled_path_reports_before_it_re_raises():
@@ -83,25 +89,28 @@ def test_the_cancelled_path_reports_before_it_re_raises():
     # Ordering, not mere presence: a handler that re-raises first would never
     # reach the report, and a test that only checked both existed would pass.
     report_line = min(
-        n.lineno for n in ast.walk(handler)
-        if isinstance(n, ast.Name) and n.id == "_report_first_media_stall")
+        n.lineno
+        for n in ast.walk(handler)
+        if isinstance(n, ast.Name) and n.id == "_report_first_media_stall"
+    )
     raises = [n.lineno for n in ast.walk(handler) if isinstance(n, ast.Raise)]
     assert raises, "cancellation must propagate - see async_snapshot's own history"
     assert max(raises) > report_line, (
-        "the re-raise must come after the report, or the report never runs")
+        "the re-raise must come after the report, or the report never runs"
+    )
 
 
 def test_the_cancelled_path_re_raises_bare():
     # `raise` with no argument preserves the CancelledError. Raising something
     # else would turn a cancellation into a failure the caller cannot recognise.
     handler = _first_media_wait_handler()
-    bare = [n for n in ast.walk(handler)
-            if isinstance(n, ast.Raise) and n.exc is None]
+    bare = [n for n in ast.walk(handler) if isinstance(n, ast.Raise) and n.exc is None]
     assert bare, "re-raise the CancelledError itself, unwrapped"
 
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:

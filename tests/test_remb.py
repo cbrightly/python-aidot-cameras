@@ -23,6 +23,7 @@ The bitrate is exponent-and-mantissa, not a plain integer, which is the part
 worth testing: a mis-packed exponent asks the camera for a wildly wrong rate,
 and the failure mode is a stream that looks fine until you measure it.
 """
+
 import struct
 
 import pytest
@@ -31,8 +32,9 @@ from aidot_cameras.camera.protocol import build_remb, decode_remb_bitrate
 
 
 def test_it_is_a_payload_specific_feedback_packet():
-    pkt = build_remb(sender_ssrc=0xAB12CD34, media_ssrcs=[0x11223344],
-                     bitrate_bps=400_000)
+    pkt = build_remb(
+        sender_ssrc=0xAB12CD34, media_ssrcs=[0x11223344], bitrate_bps=400_000
+    )
     b0, pt, length = struct.unpack("!BBH", pkt[:4])
     assert b0 >> 6 == 2, "version must be 2"
     assert b0 & 0x1F == 15, "FMT 15 identifies REMB"
@@ -65,8 +67,9 @@ def test_every_ssrc_is_listed():
     assert struct.unpack("!I", pkt[24:28])[0] == 0xBBB
 
 
-@pytest.mark.parametrize("bps", [50_000, 225_000, 400_000, 500_000,
-                                 1_000_000, 3_500_000])
+@pytest.mark.parametrize(
+    "bps", [50_000, 225_000, 400_000, 500_000, 1_000_000, 3_500_000]
+)
 def test_the_bitrate_round_trips_within_the_formats_precision(bps):
     """The mantissa is 18 bits, so large values lose a little precision.
 

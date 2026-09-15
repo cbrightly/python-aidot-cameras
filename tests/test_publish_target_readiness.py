@@ -6,6 +6,7 @@ that reads as "stream ended" -- the camera's view is down until something
 retries. Every observed occurrence on a live box sat within a minute of a
 restart.
 """
+
 import asyncio
 import socket
 
@@ -27,8 +28,11 @@ class TestItWaitsForTheTarget:
         srv.listen(1)
         port = srv.getsockname()[1]
         try:
-            ok = asyncio.run(_await_rtsp_publish_target(
-                f"rtsp://127.0.0.1:{port}/aidot_x", timeout=5.0))
+            ok = asyncio.run(
+                _await_rtsp_publish_target(
+                    f"rtsp://127.0.0.1:{port}/aidot_x", timeout=5.0
+                )
+            )
             assert ok is True
         finally:
             srv.close()
@@ -36,22 +40,31 @@ class TestItWaitsForTheTarget:
     def test_a_closed_port_times_out_but_does_not_raise(self):
         """False, not an exception: the caller still launches ffmpeg so a target
         that never opens surfaces as ffmpeg's own error, not a silent refusal."""
-        ok = asyncio.run(_await_rtsp_publish_target(
-            f"rtsp://127.0.0.1:{_free_port()}/aidot_x", timeout=1.0))
+        ok = asyncio.run(
+            _await_rtsp_publish_target(
+                f"rtsp://127.0.0.1:{_free_port()}/aidot_x", timeout=1.0
+            )
+        )
         assert ok is False
 
 
 class TestItNeverBlocksTheWrongThing:
     def test_a_non_rtsp_url_is_not_probed(self):
-        assert asyncio.run(_await_rtsp_publish_target(
-            "http://127.0.0.1:1/x.ts", timeout=0.1)) is True
+        assert (
+            asyncio.run(
+                _await_rtsp_publish_target("http://127.0.0.1:1/x.ts", timeout=0.1)
+            )
+            is True
+        )
 
     def test_none_is_not_probed(self):
         assert asyncio.run(_await_rtsp_publish_target(None, timeout=0.1)) is True
 
     def test_an_unparseable_url_does_not_block(self):
-        assert asyncio.run(_await_rtsp_publish_target(
-            "rtsp://[unclosed", timeout=0.1)) is True
+        assert (
+            asyncio.run(_await_rtsp_publish_target("rtsp://[unclosed", timeout=0.1))
+            is True
+        )
 
 
 class TestUrlForms:
@@ -61,8 +74,11 @@ class TestUrlForms:
         srv.listen(1)
         port = srv.getsockname()[1]
         try:
-            ok = asyncio.run(_await_rtsp_publish_target(
-                f"rtsp://user:pw@127.0.0.1:{port}/aidot_x", timeout=5.0))
+            ok = asyncio.run(
+                _await_rtsp_publish_target(
+                    f"rtsp://user:pw@127.0.0.1:{port}/aidot_x", timeout=5.0
+                )
+            )
             assert ok is True
         finally:
             srv.close()
@@ -70,5 +86,6 @@ class TestUrlForms:
     def test_a_missing_port_defaults_to_554(self):
         # 554 is almost certainly closed here; the point is it parses and
         # returns rather than raising.
-        assert asyncio.run(_await_rtsp_publish_target(
-            "rtsp://127.0.0.1/aidot_x", timeout=0.5)) in (True, False)
+        assert asyncio.run(
+            _await_rtsp_publish_target("rtsp://127.0.0.1/aidot_x", timeout=0.5)
+        ) in (True, False)

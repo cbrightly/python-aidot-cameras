@@ -46,6 +46,7 @@ class _Cam(_CameraControlsMixin):
 
 # --- reading -----------------------------------------------------------------
 
+
 def test_light_behavior_reads_as_a_name_not_a_number():
     s = CameraStatusData()
     s.update_from_camera_attributes({"lightBehavior": "1"})
@@ -95,13 +96,18 @@ def test_a_camera_that_never_reported_them_is_unknown_not_defaulted():
 def test_a_partial_push_does_not_clear_what_a_full_poll_established():
     s = CameraStatusData()
     s.update_from_camera_attributes(
-        {"lightBehavior": "1", "LingerDuration": "50", "Dimming": "60"})
+        {"lightBehavior": "1", "LingerDuration": "50", "Dimming": "60"}
+    )
     s.update_from_camera_attributes({"Occupancy": "1"})
     assert (s.light_behavior, s.light_linger_duration, s.light_brightness) == (
-        "flash", 50, 60)
+        "flash",
+        50,
+        60,
+    )
 
 
 # --- writing -----------------------------------------------------------------
+
 
 def test_setting_the_behavior_sends_the_camera_its_own_number():
     cam = _Cam()

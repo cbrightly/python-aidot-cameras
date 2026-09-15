@@ -4,6 +4,7 @@ A stream-open failure logs at WARNING normally, but at DEBUG when the cloud has
 explicitly reported the device offline - a dead/unpowered camera is throttled to
 probe cadence by the offline pause and should not drip WARNINGs every probe.
 """
+
 import types
 
 from aidot_cameras.camera import client as camclient

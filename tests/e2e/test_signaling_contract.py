@@ -6,6 +6,7 @@ They cover the failure classes that shipped repeatedly and are invisible to
 in-process unit tests: wake/keepalive ordering, terminal busy handling, and
 the peerid-vs-devId matching the livePlayResp wait depends on.
 """
+
 import asyncio
 
 import pytest
@@ -94,7 +95,7 @@ async def test_battery_camera_gets_the_smarthome_wake(
     cam = FakeCameraSignaling(
         fake_broker.url, device_id=dc.device_id, user_id=dc.user_id
     )
-    cam.require_wake = True          # stays silent until woken
+    cam.require_wake = True  # stays silent until woken
     await cam.start()
     try:
         await _open_expecting_failure(dc, timeout=20.0)
@@ -223,8 +224,7 @@ async def test_sdes_webrtc_req_carries_power_type_and_p2p_cache(
             f"got {inner.get('powerType')!r}"
         )
         assert inner.get("p2pCache") == "2", (
-            f"webrtcReq must carry p2pCache as a string; "
-            f"got {inner.get('p2pCache')!r}"
+            f"webrtcReq must carry p2pCache as a string; got {inner.get('p2pCache')!r}"
         )
     finally:
         cam.stop()
@@ -248,7 +248,7 @@ async def test_concurrent_opens_do_not_deadlock(e2e_device_client, fake_broker):
                 _open_expecting_failure(dc, timeout=10.0),
                 return_exceptions=True,
             ),
-            timeout=90.0,   # generous: the assertion is "settles", not "fast"
+            timeout=90.0,  # generous: the assertion is "settles", not "fast"
         )
         assert len(results) == 2
     finally:

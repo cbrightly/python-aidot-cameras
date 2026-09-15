@@ -20,6 +20,7 @@ uses, and both are what these tests exist to hold:
     caller that returns it unfiltered attributes other cameras' events to this
     one.
 """
+
 import asyncio
 import os
 import sys
@@ -95,6 +96,7 @@ def _run(reply, **kw):
             return False
 
     import aiohttp
+
     real = aiohttp.ClientSession
     aiohttp.ClientSession = lambda *a, **k: _Session()
     try:
@@ -145,6 +147,7 @@ def test_a_malformed_reply_does_not_raise():
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:

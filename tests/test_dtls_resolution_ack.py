@@ -29,6 +29,7 @@ the encode (see `test_no_resolution_select.py` in the integration): quality 1
 and quality 5 both produce 1280x720 at the same bytes per frame. This is about
 the ack read only.
 """
+
 import asyncio
 import logging
 import struct
@@ -117,7 +118,7 @@ async def test_the_setter_puts_a_decodable_setstreamctrl_frame_on_the_wire(
     frame = parse_avio_response(sent[0])
     assert frame is not None, "the camera could not decode what we sent it"
     assert frame.command == SETSTREAMCTRL_CMD
-    assert len(frame.payload) == 8          # channel(0) + quality + 3 reserved
+    assert len(frame.payload) == 8  # channel(0) + quality + 3 reserved
     assert frame.payload[4] == _STREAM_QUALITY[quality]
 
 
@@ -137,7 +138,8 @@ async def test_the_cameras_ack_is_read_and_reported(caplog):
         assert await task is True
 
     reported = [
-        line for line in _read_lines(caplog)
+        line
+        for line in _read_lines(caplog)
         if str(SETSTREAMCTRL_RESP_CMD) in line and ACK_BODY.hex() in line
     ]
     assert reported, f"the ack was never reported: {_read_lines(caplog)}"
@@ -150,9 +152,7 @@ async def test_a_camera_that_answers_inside_the_send_is_still_heard(caplog):
     made from, so "the camera answered already" is not exotic here - and a wait
     registered after the send would report silence from a camera that answered.
     """
-    session, _sent = _dtls_session(
-        on_send=lambda s: s.dispatch_avio_frame(_frame())
-    )
+    session, _sent = _dtls_session(on_send=lambda s: s.dispatch_avio_frame(_frame()))
 
     with caplog.at_level(logging.DEBUG, logger=_CONTROLS_LOGGER):
         assert await _Cam(session).async_set_resolution("hd") is True
@@ -163,9 +163,7 @@ async def test_a_camera_that_answers_inside_the_send_is_still_heard(caplog):
     ), f"an answer that beat the send was lost: {_read_lines(caplog)}"
 
 
-async def test_a_silent_camera_is_not_reported_as_having_acked(
-    caplog, monkeypatch
-):
+async def test_a_silent_camera_is_not_reported_as_having_acked(caplog, monkeypatch):
     """Silence is a real answer on this firmware - it must not be dressed up.
 
     And the wait has to stop waiting: `_avio_cmd` is on the keepalive path, so a
@@ -180,8 +178,7 @@ async def test_a_silent_camera_is_not_reported_as_having_acked(
 
     assert len(sent) == 1
     assert not [
-        line for line in _read_lines(caplog)
-        if str(SETSTREAMCTRL_RESP_CMD) in line
+        line for line in _read_lines(caplog) if str(SETSTREAMCTRL_RESP_CMD) in line
     ], "a camera that said nothing was reported as answering"
     # The router is asked directly rather than through a late reply: a stale
     # registration is skipped on dispatch anyway (its future is cancelled), so
@@ -206,8 +203,12 @@ async def test_unprompted_traffic_is_not_read_as_the_ack(caplog):
     with caplog.at_level(logging.DEBUG, logger=_CONTROLS_LOGGER):
         task = asyncio.create_task(cam.async_set_resolution("sd"))
         await asyncio.sleep(0.01)
-        assert session.dispatch_avio_frame(
-            _frame(cmd=TRACK_SWITCH_NOTIFY, payload=b"\x01\x02")) is False
+        assert (
+            session.dispatch_avio_frame(
+                _frame(cmd=TRACK_SWITCH_NOTIFY, payload=b"\x01\x02")
+            )
+            is False
+        )
         assert not _read_lines(caplog), "answered before the camera replied"
 
         assert session.dispatch_avio_frame(_frame()) is True

@@ -6,6 +6,7 @@ A successful open hands ownership to the session (which reaps the drain on stop)
 and clears the slot - so a *concurrent* open on the same camera (e.g. a snapshot
 during a live view) no longer reaps, and kills, the live session's drain.
 """
+
 import asyncio
 import types
 
@@ -53,12 +54,12 @@ def test_handoff_makes_a_concurrent_reap_a_noop():
     obj = _client_with_drain()
     fut, q = obj._stream_mqtt_drain, obj._stream_mqtt_outq
 
-    obj._release_stream_drain_to_session()          # session took ownership
+    obj._release_stream_drain_to_session()  # session took ownership
     assert obj._stream_mqtt_drain is None
 
-    asyncio.run(obj._reap_stream_drain())           # a concurrent open reaps
-    assert q.puts == []                             # live drain NOT sentinel-killed
-    assert not fut.cancelled_flag                   # live drain NOT cancelled
+    asyncio.run(obj._reap_stream_drain())  # a concurrent open reaps
+    assert q.puts == []  # live drain NOT sentinel-killed
+    assert not fut.cancelled_flag  # live drain NOT cancelled
 
 
 def test_backstop_still_reaps_an_orphaned_drain():
@@ -68,6 +69,6 @@ def test_backstop_still_reaps_an_orphaned_drain():
     fut, q = obj._stream_mqtt_drain, obj._stream_mqtt_outq
 
     asyncio.run(obj._reap_stream_drain())
-    assert q.puts == [None]                          # orphan drain released
+    assert q.puts == [None]  # orphan drain released
     assert fut.cancelled_flag
-    assert obj._stream_mqtt_drain is None            # slot cleared
+    assert obj._stream_mqtt_drain is None  # slot cleared

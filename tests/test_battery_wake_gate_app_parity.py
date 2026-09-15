@@ -40,6 +40,7 @@ enabled, the wait:
 own - it waits on messages that were already arriving, inside an open that had
 already woken the camera because somebody asked to watch it.
 """
+
 import os
 import sys
 

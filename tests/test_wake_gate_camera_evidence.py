@@ -29,6 +29,7 @@ and "wakeupStatus" appears nowhere in the app.  So these tests pin the additive
 recognition only; the ack's sufficiency is app parity and must not be narrowed
 without evidence that the app diverges.
 """
+
 import os
 import sys
 
@@ -66,8 +67,7 @@ EVENT = {
     "method": "devEventNotif",
     "seq": "123456",
     "srcAddr": f"2.{DEV}",
-    "payload": {"devId": DEV, "event": "sleep_status_changed",
-                "arguments": ["wakeup"]},
+    "payload": {"devId": DEV, "event": "sleep_status_changed", "arguments": ["wakeup"]},
 }
 
 
@@ -116,5 +116,9 @@ def test_server_ack_releases_the_gate_for_any_camera():
 def test_unrelated_user_channel_traffic_is_not_evidence():
     # Guards the ack clause against widening to any user-channel response.
     other_resp = dict(SERVER_ACK, method="getIceConfigResp")
-    assert _is_camera_present_signal(
-        f"iot/v1/c/{UID}/IPC/getIceConfigResp", other_resp, DEV) is False
+    assert (
+        _is_camera_present_signal(
+            f"iot/v1/c/{UID}/IPC/getIceConfigResp", other_resp, DEV
+        )
+        is False
+    )

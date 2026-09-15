@@ -20,6 +20,7 @@ records which key it used rather than proving that key right.
 
 Deliberately no behavior change here -- see the module docstring of the fix.
 """
+
 from aidot_cameras.camera.sdes_open import _srtp_tx_key_note
 
 OFFER = "b3VyLW93bi1vZmZlci1rZXktMDAwMDAwMDA="
@@ -71,7 +72,7 @@ def test_it_leaks_no_fragment_of_any_key():
 
     for name, key in (("offer", OFFER), ("answer", ANSWER)):
         for start in range(len(key) - 5):
-            run = key[start:start + 6]
+            run = key[start : start + 6]
             assert run not in note, f"{name} key fragment {run!r} leaked: {note}"
 
 
@@ -97,5 +98,7 @@ def test_the_same_key_gets_the_same_fingerprint_every_time():
     first = _srtp_tx_key_note("PLI", OFFER, OFFER, ANSWER)
     second = _srtp_tx_key_note("RR", OFFER, OFFER, ANSWER)
 
-    assert first.split("used=offer(")[1].split(")")[0] == (
-        second.split("used=offer(")[1].split(")")[0])
+    assert (
+        first.split("used=offer(")[1].split(")")[0]
+        == (second.split("used=offer(")[1].split(")")[0])
+    )

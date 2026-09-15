@@ -22,14 +22,19 @@ Four ways that measurement can quietly produce the answer it is looking for:
 
 These lock all four.
 """
+
 import asyncio
 import logging
 import os
 import sys
 import types
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"
+    ),
+)
 
 import live_validate as lv
 
@@ -196,13 +201,14 @@ def test_every_block_still_contains_every_arm():
     for seed in range(10):
         out = lv._interleave_arms(["sd", "hd", ""], 4, seed=seed)
         for i in range(0, len(out), 3):
-            assert Counter(out[i:i + 3]) == Counter({"sd": 1, "hd": 1, "": 1})
+            assert Counter(out[i : i + 3]) == Counter({"sd": 1, "hd": 1, "": 1})
 
 
 def test_a_seed_makes_a_campaign_reproducible():
     """A run that finds something has to be re-runnable in the same order."""
-    assert (lv._interleave_arms(["sd", "hd", ""], 5, seed=7)
-            == lv._interleave_arms(["sd", "hd", ""], 5, seed=7))
+    assert lv._interleave_arms(["sd", "hd", ""], 5, seed=7) == lv._interleave_arms(
+        ["sd", "hd", ""], 5, seed=7
+    )
 
 
 def test_the_control_arm_survives_the_shuffle():
@@ -218,10 +224,15 @@ def test_no_arms_means_no_campaign():
 
 def test_a_void_is_named_so_it_can_be_re_run_instead_of_averaged_in():
     assert lv._void_reason({"verdict": "PASS", "quality": {"verdict": "OK"}}) is None
-    assert lv._void_reason(
-        {"verdict": "PASS",
-         "quality": {"verdict": "VOID", "void_reason": "no media in window B"}}
-    ) == "no media in window B"
+    assert (
+        lv._void_reason(
+            {
+                "verdict": "PASS",
+                "quality": {"verdict": "VOID", "void_reason": "no media in window B"},
+            }
+        )
+        == "no media in window B"
+    )
     # A session that never streamed is void for the campaign too, whatever the
     # quality probe managed to say about it.
     assert lv._void_reason({"verdict": "NO_MEDIA"}) == "NO_MEDIA"
@@ -232,20 +243,33 @@ def test_the_ack_collector_takes_the_setters_debug_line():
     # this harness before, and these lines are DEBUG - one level below the INFO
     # receipt lines that already shipped collecting nothing.
     c = lv._AckCollector()
-    c.handle(logging.LogRecord(
-        name="aidot_cameras.camera.controls", level=logging.DEBUG,
-        pathname=__file__, lineno=1,
-        msg="set resolution sd (quality=2): camera acked 801 payload=",
-        args=(), exc_info=None))
+    c.handle(
+        logging.LogRecord(
+            name="aidot_cameras.camera.controls",
+            level=logging.DEBUG,
+            pathname=__file__,
+            lineno=1,
+            msg="set resolution sd (quality=2): camera acked 801 payload=",
+            args=(),
+            exc_info=None,
+        )
+    )
     assert len(c.drain()) == 1
 
 
 def test_the_ack_collector_ignores_unrelated_lines():
     c = lv._AckCollector()
-    c.handle(logging.LogRecord(
-        name="aidot_cameras.camera.controls", level=logging.DEBUG,
-        pathname=__file__, lineno=1, msg="PTZ up (code=1) -> sent",
-        args=(), exc_info=None))
+    c.handle(
+        logging.LogRecord(
+            name="aidot_cameras.camera.controls",
+            level=logging.DEBUG,
+            pathname=__file__,
+            lineno=1,
+            msg="PTZ up (code=1) -> sent",
+            args=(),
+            exc_info=None,
+        )
+    )
     assert c.drain() == []
 
 
@@ -258,13 +282,34 @@ def test_the_summary_keeps_every_session_not_just_a_mean():
     # Three control ratios scattering 0.6-1.4 is a finding - the windows are
     # too short - and a mean alone would hide it.
     attempts = [
-        {"attempt": 1, "quality": {"arm": "sd", "verdict": "OK", "kbps_a": 1800,
-                                   "kbps_b": 900, "ratio_b_over_a": 0.5}},
-        {"attempt": 2, "quality": {"arm": "control", "verdict": "OK",
-                                   "kbps_a": 1700, "kbps_b": 1690,
-                                   "ratio_b_over_a": 0.994}},
-        {"attempt": 3, "quality": {"arm": "sd", "verdict": "VOID",
-                                   "void_reason": "no media in window B"}},
+        {
+            "attempt": 1,
+            "quality": {
+                "arm": "sd",
+                "verdict": "OK",
+                "kbps_a": 1800,
+                "kbps_b": 900,
+                "ratio_b_over_a": 0.5,
+            },
+        },
+        {
+            "attempt": 2,
+            "quality": {
+                "arm": "control",
+                "verdict": "OK",
+                "kbps_a": 1700,
+                "kbps_b": 1690,
+                "ratio_b_over_a": 0.994,
+            },
+        },
+        {
+            "attempt": 3,
+            "quality": {
+                "arm": "sd",
+                "verdict": "VOID",
+                "void_reason": "no media in window B",
+            },
+        },
     ]
     summary = lv._quality_summary(attempts)
     assert summary["sd"]["n"] == 1 and summary["sd"]["void"] == 1
@@ -274,6 +319,7 @@ def test_the_summary_keeps_every_session_not_just_a_mean():
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:
@@ -298,43 +344,59 @@ if __name__ == "__main__":
 # sessions had the command acked - which is the null this whole campaign exists
 # to avoid drawing.
 
+
 def _att(n, arm, ratio, acked):
-    return {"attempt": n,
-            "quality": {"arm": arm, "verdict": "OK", "kbps_a": 1000,
-                        "kbps_b": int(1000 * ratio),
-                        "ratio_b_over_a": ratio,
-                        "ack_log": ["801"] if acked else []}}
+    return {
+        "attempt": n,
+        "quality": {
+            "arm": arm,
+            "verdict": "OK",
+            "kbps_a": 1000,
+            "kbps_b": int(1000 * ratio),
+            "ratio_b_over_a": ratio,
+            "ack_log": ["801"] if acked else [],
+        },
+    }
 
 
 def test_the_arm_reports_how_many_of_its_sessions_were_acked():
-    out = lv._quality_summary([
-        _att(1, "sd", 1.0, True),
-        _att(2, "sd", 1.0, False),
-        _att(3, "sd", 1.0, False),
-    ])
+    out = lv._quality_summary(
+        [
+            _att(1, "sd", 1.0, True),
+            _att(2, "sd", 1.0, False),
+            _att(3, "sd", 1.0, False),
+        ]
+    )
     assert out["sd"]["n"] == 3
     assert out["sd"]["acked_n"] == 1, (
-        "without this an arm of unacked sessions reads as a measured null")
+        "without this an arm of unacked sessions reads as a measured null"
+    )
 
 
 def test_an_arm_whose_commands_all_landed_says_so():
-    out = lv._quality_summary([_att(1, "hd", 0.5, True),
-                               _att(2, "hd", 0.5, True)])
+    out = lv._quality_summary([_att(1, "hd", 0.5, True), _att(2, "hd", 0.5, True)])
     assert out["hd"]["acked_n"] == out["hd"]["n"] == 2
 
 
 def test_the_control_arm_is_not_penalised_for_sending_nothing():
     """The control deliberately sends no command, so it has no ack and must not
     look like a delivery failure."""
-    out = lv._quality_summary([_att(1, "control", 1.0, False),
-                               _att(2, "control", 1.0, False)])
+    out = lv._quality_summary(
+        [_att(1, "control", 1.0, False), _att(2, "control", 1.0, False)]
+    )
     assert out["control"]["n"] == 2
     assert out["control"]["acked_n"] == 0
 
 
 def test_voids_still_do_not_enter_the_ack_count():
-    void = {"attempt": 9, "quality": {"arm": "sd", "verdict": "VOID",
-                                      "void_reason": "no media in window B"}}
+    void = {
+        "attempt": 9,
+        "quality": {
+            "arm": "sd",
+            "verdict": "VOID",
+            "void_reason": "no media in window B",
+        },
+    }
     out = lv._quality_summary([_att(1, "sd", 1.0, True), void])
     assert out["sd"]["n"] == 1
     assert out["sd"]["void"] == 1

@@ -11,6 +11,7 @@ Assistant told the user "the camera did not answer when asked what it holds".
 aiortc reassembles for the DTLS path, which is why SD listing worked there and
 never on SDES.
 """
+
 from aidot_cameras.camera.sdes_open import (
     _SCTP_REASSEMBLY_CAP,
     _sctp_reassemble,
@@ -90,13 +91,17 @@ class TestItIsWiredIntoTheReceivePath:
         import inspect
         import re
         from aidot_cameras.camera import sdes_open
+
         src = inspect.getsource(sdes_open)
-        m = re.search(r"elif _pd_ct8 == 0x00 and _sct == 'DONE':(.*?)_sc_answered",
-                      src, re.S)
+        m = re.search(
+            r'elif _pd_ct8 == 0x00 and _sct == "DONE":(.*?)_sc_answered', src, re.S
+        )
         assert m, "the inbound SCTP DATA branch has moved or gone"
         branch = m.group(1)
         assert "_sctp_reassemble" in branch, (
             "fragments are parsed individually again - a large SD listing reply "
-            "will be dropped and reported as 'the camera did not answer'")
+            "will be dropped and reported as 'the camera did not answer'"
+        )
         assert branch.index("_sctp_reassemble") < branch.index("_sc_cmd"), (
-            "reassembly must happen before the command id is read")
+            "reassembly must happen before the command id is read"
+        )

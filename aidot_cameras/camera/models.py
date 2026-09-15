@@ -114,22 +114,22 @@ class CameraStatusData(DeviceStatusData):
     #: HDR (HDRStatus).
     hdr: Optional[bool] = None
     microphone: Optional[bool] = None
-    night_vision_mode: Optional[str] = None   # "auto" | "on" | "off"
-    ir_light: Optional[bool] = None           # nightVisionIRLight 0/1
+    night_vision_mode: Optional[str] = None  # "auto" | "on" | "off"
+    ir_light: Optional[bool] = None  # nightVisionIRLight 0/1
     floodlight: Optional[bool] = None
     ptz_tracking: Optional[bool] = None
     siren: bool = False
     speaker_volume: Optional[int] = None  # SoundLevel 0-100
     # Diagnostic / read-only camera fields
     battery_remaining: Optional[int] = None  # Battery_remaining 0-100 (%)
-    occupancy: Optional[bool] = None          # Occupancy live presence
-    sd_card_status: Optional[str] = None      # SDcardStatus
+    occupancy: Optional[bool] = None  # Occupancy live presence
+    sd_card_status: Optional[str] = None  # SDcardStatus
     # Tri-state: True in the slot, False slot empty, None nobody said. Reads
     # INVERTED on A000088 relative to sd_card_status ("0" with a card, "1"
     # without, 3/3) - which is why sd_card_status is not used for this and the
     # two are kept apart. That inversion has no corroboration off A000088.
-    sd_card_present: Optional[bool] = None    # SDcardExistFlag/SDcardBaseInfo[0]
-    wifi_rssi: Optional[int] = None           # networkRssi (dBm), cloud property
+    sd_card_present: Optional[bool] = None  # SDcardExistFlag/SDcardBaseInfo[0]
+    wifi_rssi: Optional[int] = None  # networkRssi (dBm), cloud property
 
     def update(self, attr) -> None:
         if attr is None:
@@ -170,7 +170,9 @@ class CameraStatusData(DeviceStatusData):
             # cannot be reported as one of the two we do know.
             self.light_behavior = (
                 {0: "constant", 1: "flash"}.get(lb, str(lb))
-                if lb is not None else str(v))
+                if lb is not None
+                else str(v)
+            )
         if (i := _as_int(attr.get("LingerDuration"))) is not None:
             self.light_linger_duration = i
         if (b := _as_bool(attr.get("voiceEnable"))) is not None:
@@ -228,10 +230,9 @@ class CameraStatusData(DeviceStatusData):
         # it here into its own field rather than letting the filter lose it.
         if (i := _as_int(attrs.get(CONF_DIMMING))) is not None:
             self.light_brightness = i
-        self.update({
-            k: v for k, v in attrs.items()
-            if k not in self._LIGHT_ONLY_ATTR_KEYS
-        })
+        self.update(
+            {k: v for k, v in attrs.items() if k not in self._LIGHT_ONLY_ATTR_KEYS}
+        )
 
 
 class CameraDeviceInformation(DeviceInformation):
@@ -278,7 +279,9 @@ class CameraDeviceInformation(DeviceInformation):
         out = set()
         try:
             product = device.get(CONF_PRODUCT)
-            modules = product.get(CONF_SERVICE_MODULES) if isinstance(product, dict) else None
+            modules = (
+                product.get(CONF_SERVICE_MODULES) if isinstance(product, dict) else None
+            )
             if not isinstance(modules, list):
                 return frozenset()
             for service in modules:
@@ -301,8 +304,9 @@ class CameraDeviceInformation(DeviceInformation):
         super().__init__(device)
         # aesKey is a list in the API response; take first entry
         _aes = device.get("aesKey") or []
-        self.aes_key = _aes[0] if isinstance(_aes, list) and _aes else (
-            str(_aes) if _aes else "")
+        self.aes_key = (
+            _aes[0] if isinstance(_aes, list) and _aes else (str(_aes) if _aes else "")
+        )
         self.device_password = device.get("password") or ""
         self.ptz_directions = []
         self.declared_properties = self._collect_declared_properties(device)
@@ -316,7 +320,9 @@ class CameraDeviceInformation(DeviceInformation):
                             if isinstance(codes, list):
                                 self.ptz_directions = [int(c) for c in codes]
                         except Exception:
-                            _LOGGER.debug("swallowed exception in %s", '__init__', exc_info=True)
+                            _LOGGER.debug(
+                                "swallowed exception in %s", "__init__", exc_info=True
+                            )
 
 
 @dataclass
@@ -326,17 +332,19 @@ class VideoFrame:
     # timestamp: server-side PTS in milliseconds
     # is_encrypted: True when sub-frame encryption byte was non-zero
     # data: raw H.264 NAL bytes (video) or G.711A bytes (audio)
-    frame_type:   int
-    audio_codec:  int
-    timestamp:    int
+    frame_type: int
+    audio_codec: int
+    timestamp: int
     is_encrypted: bool
-    data:         bytes
+    data: bytes
 
     @property
     def is_video(self) -> bool:
-        return self.frame_type in (_FRAME_TYPE_P_FRAME,
-                                   _FRAME_TYPE_B_FRAME,
-                                   _FRAME_TYPE_I_FRAME)
+        return self.frame_type in (
+            _FRAME_TYPE_P_FRAME,
+            _FRAME_TYPE_B_FRAME,
+            _FRAME_TYPE_I_FRAME,
+        )
 
     @property
     def is_keyframe(self) -> bool:

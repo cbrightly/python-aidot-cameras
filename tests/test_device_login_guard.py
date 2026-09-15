@@ -6,6 +6,7 @@ camera reaching async_login would hammer a refusing port and spam
 "login read status error". These tests lock the camera exclusion - and the fact
 that a non-camera still reaches upstream's login - without a real socket.
 """
+
 import asyncio
 import os
 import sys
@@ -44,9 +45,9 @@ def _client(model_id):
 
 
 def test_camera_never_does_base_login(_record_base_login):
-    cam = _client("LK.IPC.A001513")          # battery SDES camera
+    cam = _client("LK.IPC.A001513")  # battery SDES camera
     asyncio.run(cam.async_login())
-    assert _record_base_login == []           # camera excluded - no TCP:10000 login
+    assert _record_base_login == []  # camera excluded - no TCP:10000 login
 
 
 def test_ptz_camera_excluded(_record_base_login):
@@ -58,7 +59,7 @@ def test_ptz_camera_excluded(_record_base_login):
 def test_light_still_logs_in(_record_base_login):
     light = _client("lk.WIFI-RGBWLight-D0006")
     asyncio.run(light.async_login())
-    assert _record_base_login == ["192.0.2.50"]   # lights keep the base login
+    assert _record_base_login == ["192.0.2.50"]  # lights keep the base login
 
 
 def test_unknown_model_logs_in(_record_base_login):

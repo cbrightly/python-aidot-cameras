@@ -39,7 +39,9 @@ def test_matching_pin_returns_fingerprint():
 
 def test_pin_format_differences_still_match():
     # Operator supplies the pin without colons / lowercased.
-    assert _verified_dtls_fingerprint(REAL, REAL.lower().replace(":", ""), _fp_fn) == REAL
+    assert (
+        _verified_dtls_fingerprint(REAL, REAL.lower().replace(":", ""), _fp_fn) == REAL
+    )
 
 
 def test_mismatching_pin_raises():

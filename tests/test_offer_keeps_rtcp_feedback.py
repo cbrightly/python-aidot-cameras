@@ -27,56 +27,62 @@ So: keep `rtcp-fb`, but only for payload types that survived the narrowing.
 Feedback for a codec we dropped is bytes describing something that will never be
 sent.
 """
+
 import pytest
 
 from aidot_cameras.camera.protocol import _compress_sdp_for_camera
 
 # Shaped like a browser offer: H264 kept, VP9 and its rtx dropped.
-OFFER = "\r\n".join([
-    "v=0",
-    "o=- 5733354595989457600 2 IN IP4 127.0.0.1",
-    "s=-",
-    "t=0 0",
-    "a=group:BUNDLE 0 1",
-    "m=audio 9 UDP/TLS/RTP/SAVPF 8 111",
-    "c=IN IP4 0.0.0.0",
-    "a=mid:0",
-    "a=sendrecv",
-    "a=rtpmap:8 PCMA/8000",
-    "a=rtcp-fb:8 nack",
-    "a=rtcp-fb:8 goog-remb",
-    "a=rtcp-fb:8 transport-cc",
-    "a=rtpmap:111 opus/48000/2",
-    "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level",
-    "m=video 9 UDP/TLS/RTP/SAVPF 103 104 100",
-    "c=IN IP4 0.0.0.0",
-    "a=mid:1",
-    "a=recvonly",
-    "a=rtpmap:103 H264/90000",
-    "a=rtcp-fb:103 nack",
-    "a=rtcp-fb:103 goog-remb",
-    "a=rtcp-fb:103 transport-cc",
-    "a=fmtp:103 profile-level-id=42001f",
-    "a=rtpmap:104 rtx/90000",
-    "a=fmtp:104 apt=103",
-    "a=rtpmap:100 VP9/90000",
-    "a=rtcp-fb:100 goog-remb",
-    "a=rtcp-fb:100 transport-cc",
-    "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
-    "a=msid:stream track",
-    "",
-])
+OFFER = "\r\n".join(
+    [
+        "v=0",
+        "o=- 5733354595989457600 2 IN IP4 127.0.0.1",
+        "s=-",
+        "t=0 0",
+        "a=group:BUNDLE 0 1",
+        "m=audio 9 UDP/TLS/RTP/SAVPF 8 111",
+        "c=IN IP4 0.0.0.0",
+        "a=mid:0",
+        "a=sendrecv",
+        "a=rtpmap:8 PCMA/8000",
+        "a=rtcp-fb:8 nack",
+        "a=rtcp-fb:8 goog-remb",
+        "a=rtcp-fb:8 transport-cc",
+        "a=rtpmap:111 opus/48000/2",
+        "a=extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level",
+        "m=video 9 UDP/TLS/RTP/SAVPF 103 104 100",
+        "c=IN IP4 0.0.0.0",
+        "a=mid:1",
+        "a=recvonly",
+        "a=rtpmap:103 H264/90000",
+        "a=rtcp-fb:103 nack",
+        "a=rtcp-fb:103 goog-remb",
+        "a=rtcp-fb:103 transport-cc",
+        "a=fmtp:103 profile-level-id=42001f",
+        "a=rtpmap:104 rtx/90000",
+        "a=fmtp:104 apt=103",
+        "a=rtpmap:100 VP9/90000",
+        "a=rtcp-fb:100 goog-remb",
+        "a=rtcp-fb:100 transport-cc",
+        "a=extmap:2 http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time",
+        "a=msid:stream track",
+        "",
+    ]
+)
 
 
 def _fb(sdp):
     return [l for l in sdp.splitlines() if l.startswith("a=rtcp-fb:")]
 
 
-@pytest.mark.parametrize("want", [
-    "a=rtcp-fb:103 nack",
-    "a=rtcp-fb:103 goog-remb",
-    "a=rtcp-fb:103 transport-cc",
-])
+@pytest.mark.parametrize(
+    "want",
+    [
+        "a=rtcp-fb:103 nack",
+        "a=rtcp-fb:103 goog-remb",
+        "a=rtcp-fb:103 transport-cc",
+    ],
+)
 def test_feedback_for_the_kept_video_codec_survives(want):
     assert want in _fb(_compress_sdp_for_camera(OFFER))
 
@@ -131,7 +137,11 @@ def test_the_size_cost_is_small():
     feedback is cheap has stopped holding and that deserves to fail loudly.
     """
     with_fb = len(_compress_sdp_for_camera(OFFER))
-    without = len("".join(
-        l + "\r\n" for l in _compress_sdp_for_camera(OFFER).splitlines()
-        if not l.startswith("a=rtcp-fb:")))
+    without = len(
+        "".join(
+            l + "\r\n"
+            for l in _compress_sdp_for_camera(OFFER).splitlines()
+            if not l.startswith("a=rtcp-fb:")
+        )
+    )
     assert with_fb - without <= 400, f"rtcp-fb cost {with_fb - without} bytes"
