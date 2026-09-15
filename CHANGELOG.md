@@ -8,6 +8,17 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ### Changed
 
+- **The BLE-mesh hub relay (`aidot_cameras.ble_gateway`) is removed.** It
+  shipped in 0.14.0 as control for mesh bulbs behind a `BleMesh_Hub`, relaying
+  over the hub's TCP:10000 channel. It never gained a consumer: no module in
+  this package imported it, the Home Assistant integration never wired it, and
+  the branch that would have was closed unlanded because there is no mesh hub
+  on the reference fleet to validate against - the 0.14.0 note that the account
+  "has a mesh hub but no mesh children" no longer holds either. 564 lines with
+  green tests and zero callers is dead weight in every wheel. It was never on
+  the API-stability table, so this is a removal rather than a deprecation; a
+  consumer that needs it can take the module from the 0.14.0-1.0.0rc20 history.
+
 - **A first-media stall now records whether the camera's answer carried ICE
   credentials**, beside the candidate count it already reported. A
   `nominated=none` stall with a zero-candidate answer had two causes the count
