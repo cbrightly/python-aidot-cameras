@@ -1230,6 +1230,43 @@ targets `answer=none` and not the present-but-degenerate `answer=0-candidates`
 shape, which would need its own trigger. Either way it cannot be validated
 without a camera, which is why the report comes first.
 
+#### 2026-09-15 (later): the kitchen stall is an on-subnet dead address, and the wait now gives it up
+
+The 13-A (kitchen) stalls recurred four times in three minutes,
+`nominated=192.168.0.159` each time. Two measurements on the box settle which
+mode it is:
+
+- `ip -4 addr` puts Home Assistant on `192.168.0.114/24`, so `192.168.0.159`
+  is on this host's own subnet. `_candidate_is_off_subnet` returns False for it
+  - this is NOT the off-subnet mode, and the "every candidate ... cannot reach"
+  warning never fires.
+- `ping 192.168.0.159` gets no reply. The camera advertises an address on our
+  /24 that nothing answers at - a stale DHCP lease, or AP client isolation, now
+  that the camera is off the IoT SSID.
+
+So we nominate a dead address, no STUN Binding Success ever comes back, the
+trigger never arms, and the attempt spends its whole 75 s budget before the
+retry - the shape `_stale_offer_abandon_due`'s own docstring explicitly left on
+the full window ("a camera that never speaks at all ... unreachable").
+
+The wait now gives it up: `_no_answer_abandon_due` abandons the attempt to the
+retry once a candidate has been nominated and a grace (default 20 s, env
+`AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S`) passes with zero Binding Success and
+no peer-reflexive candidate learned. Timed from nomination, not the open, so a
+battery camera still waking is never clipped; any Binding Success or a learned
+relay peer keeps the wait alive, so the relay-observed-peer recovery above is
+untouched. Pinned by unit tests, with the wiring guarded at the source.
+
+**What this does and does not fix.** It stops the library wasting 75 s on an
+address that cannot answer - the retry's fresh offer follows in about 20 s
+instead. It does not make 13-A stream: that needs the camera to hold a
+reachable address, which is network-side. Confirmed on hardware only that the
+address is dead; the abandon itself has not yet been observed live, and like
+every change on this path it waits on fleet validation. The box will show the
+new line ("nothing answered the nominated candidate(s) in 20s ... abandoning
+this attempt to the retry") in place of the 75 s stall once it runs a build
+that carries it.
+
 ### 4. Coverage holes - closed 2026-08-08
 
 The bar was: **tested, or explicitly out of scope for 1.0** and said so here.

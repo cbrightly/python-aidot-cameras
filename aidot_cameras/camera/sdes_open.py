@@ -1151,6 +1151,24 @@ _BATTERY_STALE_OFFER_GRACE_S = float(
 )
 
 
+# How long a nominated candidate has to produce ANY inbound STUN Binding Success
+# before its attempt is abandoned to the retry.  Guards the on-subnet-but-dead
+# case _candidate_is_off_subnet cannot see: a camera whose answer advertises a
+# host address on this host's own /24 that is nonetheless unreachable (a stale
+# DHCP lease, or AP client isolation).  Measured on 2026-09-15 on an A001513
+# advertising 192.168.0.159 to a host at 192.168.0.114 that ping could not
+# reach -- nothing we nominate there ever answers, so the attempt otherwise
+# burns its whole 75 s budget on a dead address before the retry.  Timed from
+# nomination, not from the open, so a slow battery wake is never clipped; and a
+# learned relay peer or any Binding Success keeps the wait alive, so the
+# relay-observed-peer recovery is preserved.
+#
+# Set AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S=0 to restore the previous behaviour.
+_UNREACHABLE_NOMINEE_GRACE_S = float(
+    os.environ.get("AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S", "20")
+)
+
+
 # How long a BATTERY camera's offer waits for the camera to answer first.
 #
 # **Measured on hardware and shipped OFF.** This is the app's own shape - its
@@ -1217,6 +1235,45 @@ def _stale_offer_abandon_due(
     if first_seen_ts is None:
         return False
     return (now - first_seen_ts) >= grace_s
+
+
+def _no_answer_abandon_due(
+    *, nominated_since_s, grace_s: float, binding_success: int, prflx_learned: bool
+) -> bool:
+    """Whether a nominated candidate that never answered should be abandoned.
+
+    The companion to :func:`_stale_offer_abandon_due`, whose own docstring notes
+    it leaves "a camera that never speaks at all ... unreachable" on the full
+    window.  This is that case, and it is narrower: we DID nominate -- the answer
+    arrived and carried a candidate -- but nothing came back.  Measured on
+    2026-09-15, an A001513 advertised a single host candidate on this host's own
+    /24 that ping could not reach (a stale lease or AP client isolation);
+    :func:`_candidate_is_off_subnet` cannot flag it because the address is on our
+    subnet, so the attempt spent its whole 75 s budget on a dead address before
+    the retry.
+
+    Fires only when ALL of these hold:
+
+      * ``nominated_since_s`` is not None -- we have nominated a candidate.  It
+        is the seconds since NOMINATION, not since the open, so a battery camera
+        still waking (nothing nominated yet) is never clipped; and
+      * that has lasted at least ``grace_s``; and
+      * ``binding_success`` is 0 -- nothing we nominated answered a connectivity
+        check; and
+      * ``prflx_learned`` is False -- no peer-reflexive candidate has been
+        learned from a relay-carried probe, so the relay-observed-peer recovery
+        is not in progress.
+
+    Any Binding Success, or a learned relay peer, keeps the wait alive.
+    ``grace_s`` <= 0 disables the check.
+
+    Pure, so the policy is testable without a camera.
+    """
+    if grace_s <= 0 or nominated_since_s is None:
+        return False
+    if nominated_since_s < grace_s:
+        return False
+    return binding_success == 0 and not prflx_learned
 
 
 # How long to wait for the camera's webrtcResp before parsing it for the ICE
@@ -8333,6 +8390,12 @@ class _SdesOpenMixin:
         _seen_at_start = getattr(self, "_camera_device_seen_ts", None)
         _first_seen_ts = None
         _stale_offer_abandoned = False
+        # When we first nominated a candidate, for the unreachable-nominee
+        # abandon (_no_answer_abandon_due). Set now if the pre-launch answer
+        # already nominated at setup; otherwise stamped in the loop when a late
+        # answer nominates. Measured from nomination, not the open, so a battery
+        # camera still waking is never clipped.
+        _nominated_at = _media_wait_started if _early_nominated else None
 
         def _report_first_media_stall(_waited_s, _cancelled=False):
             """Emit the one line that says why nothing arrived.
@@ -8437,6 +8500,39 @@ class _SdesOpenMixin:
                             _first_seen_ts - _media_wait_started,
                             _BATTERY_STALE_OFFER_GRACE_S,
                         )
+                    )
+                    break
+                # Stamp nomination the first time it happens on a late answer;
+                # the pre-launch case is stamped at setup above.
+                if _nominated_at is None and (
+                    _bridge_uc_info["sent"] or _nominated_seen
+                ):
+                    _nominated_at = time.monotonic()
+                if _no_answer_abandon_due(
+                    nominated_since_s=(
+                        time.monotonic() - _nominated_at
+                        if _nominated_at is not None
+                        else None
+                    ),
+                    grace_s=_UNREACHABLE_NOMINEE_GRACE_S,
+                    binding_success=int(
+                        getattr(_bridge_fn, "_br_binding_success_count", 0)
+                    ),
+                    prflx_learned=bool(_bridge_uc_info.get("prflx")),
+                ):
+                    # We nominated a candidate and, for the whole grace since,
+                    # nothing answered: no STUN Binding Success and no relay-
+                    # learned peer. The address is not reachable (an on-subnet
+                    # host candidate that ping cannot reach - a stale lease or
+                    # AP client isolation - which _candidate_is_off_subnet cannot
+                    # flag). Nothing recovers this attempt; the retry's fresh
+                    # offer is served in seconds. Stop paying for the window.
+                    _stale_offer_abandoned = True
+                    _status(
+                        "nothing answered the nominated candidate(s) in %.0fs"
+                        " - no STUN binding success and no relay-learned peer,"
+                        " so the address is not reachable; abandoning this"
+                        " attempt to the retry" % _UNREACHABLE_NOMINEE_GRACE_S
                     )
                     break
                 if terminal_error_fut is not None and terminal_error_fut.done():
