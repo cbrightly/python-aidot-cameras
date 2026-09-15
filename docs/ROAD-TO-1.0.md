@@ -1179,6 +1179,57 @@ it is a different defect that was always in the corpus, now the only one left
 visible, and it needs its own investigation starting at the answer rather than
 at ICE.
 
+#### 2026-09-15: the empty-answer mode recurred, and the report now says what the answer carried
+
+The soak fired two first-media stalls in one window, and they are the two shipped
+modes this item closed on rather than anything new:
+
+- `338603...` (unit 13-B = L2_181, the driveway A001513) stalled `nominated=none`
+  after 75 s. This unit is normally reachable and streamed 5 of 5 in this item's
+  own sweep (the 13-B row, 4.7-6.3 s), so `nominated=none` on it reads as a
+  transient - the answer was absent or degenerate for this one open - not the
+  persistent state the A001064 sat in. The device id is checked against this
+  file's own unit-name embedding (`unit 13-B0fce`), not the unit the earlier
+  reports describe: the persistent staller is 13-A, a different camera.
+- `b5284...` (unit 13-A = L2_F8A3, the kitchen A001513, the one on the IoT SSID)
+  stalled after 68 s having nominated a single host address it cannot route to.
+  That is the host-only shape this item already describes, on 13-A the unit it
+  describes, unchanged.
+
+Neither is the self-veto mode: that was fixed and confirmed by what it learns
+(above). What both need is what the item said the empty-shape stall needs - the
+investigation starting at the answer rather than at ICE - and the report was one
+field short of starting it. `nominated=none` with a 0-candidate answer had two
+causes the count alone could not separate, and the item named the confusion
+itself: the corpus holds a `(no ICE creds in answer)` row that nothing since
+could tell from a routable answer that simply failed later.
+
+So the stall line now reports whether the answer carried ICE credentials, beside
+the candidate count it already carried:
+
+    answer=0-candidates (no creds)        -> a malformed or empty answer
+    answer=0-candidates (creds present)   -> the camera ran ICE and gathered no
+                                             candidate; its own gathering, not ours
+    answer=3-candidates (no creds)        -> candidates that still cannot be
+                                             nominated, which the count alone hid
+
+The classification is a pure helper (`_stall_answer_has_creds`), reads the same
+answer the count reads, and is unit-tested against a camera it never needs. The
+credential value never reaches the line - `(creds present)` is a boolean fact,
+and this line lands in `home-assistant.log`.
+
+**This is diagnostics, not a fix, and it changes no streaming behaviour** - the
+default path with no credential information renders exactly as before. The root
+cause of the empty answer stays camera-side or signaling-side and unconfirmed;
+the next occurrence now classifies itself, and only then is a behaviour change
+decidable. The candidate one - re-requesting the answer with a fresh `webrtcReq`
+- is not shipped here. The WebRTC path already resends `webrtcReq`
+(`_resend_webrtcreq`, up to 3x ~15 s apart), but only while no answer has
+arrived at all - it is gated off the instant `answer_fut` resolves - so it
+targets `answer=none` and not the present-but-degenerate `answer=0-candidates`
+shape, which would need its own trigger. Either way it cannot be validated
+without a camera, which is why the report comes first.
+
 ### 4. Coverage holes - closed 2026-08-08
 
 The bar was: **tested, or explicitly out of scope for 1.0** and said so here.
