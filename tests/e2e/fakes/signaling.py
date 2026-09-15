@@ -15,6 +15,7 @@ field-level details the client actually keys on:
 
 Subclasses (sdes_camera / dtls_camera) add the media plane.
 """
+
 import json
 import random
 import threading
@@ -33,8 +34,14 @@ class FakeCameraSignaling:
     #: require a wake call before answering livePlayReq (battery models)
     require_wake: bool = False
 
-    def __init__(self, broker_url: str, *, device_id: str, user_id: str,
-                 client_id: str | None = None) -> None:
+    def __init__(
+        self,
+        broker_url: str,
+        *,
+        device_id: str,
+        user_id: str,
+        client_id: str | None = None,
+    ) -> None:
         self.broker_url = broker_url
         self.device_id = device_id
         self.user_id = user_id
@@ -107,8 +114,14 @@ class FakeCameraSignaling:
         client.subscribe(f"iot/v1/s/{self.device_id}/#")
         self._connected.set()
 
-    def _publish(self, method: str, payload: dict, *, topic: str | None = None,
-                 ack: dict | None = None) -> None:
+    def _publish(
+        self,
+        method: str,
+        payload: dict,
+        *,
+        topic: str | None = None,
+        ack: dict | None = None,
+    ) -> None:
         body = {
             "method": method,
             "service": "IPC",
@@ -137,13 +150,15 @@ class FakeCameraSignaling:
         method = body.get("method") or ""
         inner = body.get("payload") or {}
         # Only react to traffic aimed at this camera.
-        if inner.get("devId") not in (None, self.device_id) and \
-                body.get("devId") not in (None, self.device_id):
+        if inner.get("devId") not in (None, self.device_id) and body.get(
+            "devId"
+        ) not in (None, self.device_id):
             return
         try:
             self.handle(method, inner, body)
         except Exception:  # a fake that throws must not wedge the paho thread
             import traceback
+
             traceback.print_exc()
 
     def methods_received(self) -> list[str]:
@@ -197,17 +212,23 @@ class FakeCameraSignaling:
         if self.role_reversal:
             # A001064: the camera re-offers by echoing a webrtcReq of its own;
             # the client must reply with a webrtcResp before ICE proceeds.
-            self._publish("webrtcReq", {
-                "peerid": inner.get("peerid"),
-                "offer": {"type": "offer", "sdp": answer_sdp},
-                "trackId": 0,
-            })
+            self._publish(
+                "webrtcReq",
+                {
+                    "peerid": inner.get("peerid"),
+                    "offer": {"type": "offer", "sdp": answer_sdp},
+                    "trackId": 0,
+                },
+            )
             return
-        self._publish("webrtcResp", {
-            "peerid": inner.get("peerid"),
-            "offer": {"type": "answer", "sdp": answer_sdp},
-            "trackId": 0,
-        })
+        self._publish(
+            "webrtcResp",
+            {
+                "peerid": inner.get("peerid"),
+                "offer": {"type": "answer", "sdp": answer_sdp},
+                "trackId": 0,
+            },
+        )
 
     def build_answer(self, inner: dict) -> str | None:
         """Return the answer SDP for the app's offer (None = stay silent)."""

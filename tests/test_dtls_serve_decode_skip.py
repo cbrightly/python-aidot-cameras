@@ -13,6 +13,7 @@ before.
 
 Repo convention: no pytest-asyncio; these are plain synchronous unit tests.
 """
+
 import logging
 
 from aidot_cameras.camera.client import CameraMixin
@@ -21,8 +22,8 @@ from aidot_cameras.camera.client import CameraMixin
 # Annex-B H.264 fragments (start code + NAL header byte).  NAL type is low 5
 # bits of the byte after 00 00 01: 5 = IDR (keyframe), 7 = SPS (keyframe), 1 =
 # non-IDR slice (delta).  Pad so _h264_has_keyframe's `i < n - 4` loop runs.
-_KEYFRAME = b"\x00\x00\x01\x65\x88\x84\x00\x10"   # 0x65 & 0x1F == 5 (IDR)
-_DELTA = b"\x00\x00\x01\x41\x9a\x00\x00\x10"       # 0x41 & 0x1F == 1 (non-IDR)
+_KEYFRAME = b"\x00\x00\x01\x65\x88\x84\x00\x10"  # 0x65 & 0x1F == 5 (IDR)
+_DELTA = b"\x00\x00\x01\x41\x9a\x00\x00\x10"  # 0x41 & 0x1F == 1 (non-IDR)
 
 
 class _Enc:
@@ -90,8 +91,8 @@ def test_serve_video_still_forwards_none_terminator():
 
     assert CameraMixin._install_encoded_tap(rcv, out_q, True, serve=True)
 
-    qd.put(_task(_KEYFRAME))     # data frame: skipped
-    qd.put(None)                 # terminator: MUST be forwarded
+    qd.put(_task(_KEYFRAME))  # data frame: skipped
+    qd.put(None)  # terminator: MUST be forwarded
 
     assert qd.puts == [None]
 
@@ -155,7 +156,7 @@ def test_non_serve_video_still_feeds_decoder():
     # Live-view path is unchanged: every task reaches the decoder queue, and no
     # canary is installed.
     assert len(qd.puts) == 2
-    assert qd.puts[0][1].data == _KEYFRAME   # data frame forwarded to decoder
+    assert qd.puts[0][1].data == _KEYFRAME  # data frame forwarded to decoder
     assert qd.puts[1] is None
     assert not hasattr(qd, "_aidot_serve_canary")
     # Still teed to the mux queue.

@@ -24,6 +24,7 @@ is exactly the one where media is plausibly imminent: the backstop only fires
 after the camera itself has been heard from. On the plain timeout path the
 camera never spoke at all, media is not imminent, and no grace is given.
 """
+
 import os
 import sys
 
@@ -87,5 +88,7 @@ def test_the_grace_still_leaves_the_backstop_worth_having(monkeypatch):
 
     monkeypatch.delenv("AIDOT_ABANDONED_MEDIA_GRACE_S", raising=False)
     monkeypatch.delenv("AIDOT_BATTERY_STALE_OFFER_GRACE_S", raising=False)
-    assert (_BATTERY_STALE_OFFER_GRACE_S + _abandoned_media_grace_s()
-            < _FIRST_MEDIA_WAIT_S / 2)
+    assert (
+        _BATTERY_STALE_OFFER_GRACE_S + _abandoned_media_grace_s()
+        < _FIRST_MEDIA_WAIT_S / 2
+    )

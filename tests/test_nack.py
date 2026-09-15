@@ -20,6 +20,7 @@ rather than like a bug. And the tracker has to tell a real gap apart from
 reordering, a 16-bit wrap, and a stream restart; getting that wrong either
 floods a congested link or silently asks for nothing.
 """
+
 import struct
 
 import pytest
@@ -35,9 +36,9 @@ from aidot_cameras.camera.protocol import (
 # build_nack: the wire format
 # --------------------------------------------------------------------------
 
+
 def test_it_is_a_transport_layer_feedback_packet():
-    pkt = build_nack(sender_ssrc=0xAB12CD34, media_ssrc=0x11223344,
-                     lost_seqs=[100])
+    pkt = build_nack(sender_ssrc=0xAB12CD34, media_ssrc=0x11223344, lost_seqs=[100])
     b0, pt, length = struct.unpack("!BBH", pkt[:4])
     assert b0 >> 6 == 2, "version must be 2"
     assert b0 & 0x1F == 1, "FMT 1 identifies Generic NACK"
@@ -46,8 +47,7 @@ def test_it_is_a_transport_layer_feedback_packet():
 
 
 def test_it_names_both_ssrcs():
-    pkt = build_nack(sender_ssrc=0xAB12CD34, media_ssrc=0x11223344,
-                     lost_seqs=[100])
+    pkt = build_nack(sender_ssrc=0xAB12CD34, media_ssrc=0x11223344, lost_seqs=[100])
     sender, media = struct.unpack("!II", pkt[4:12])
     assert sender == 0xAB12CD34
     assert media == 0x11223344
@@ -74,10 +74,10 @@ def test_the_bitmask_counts_from_the_packet_after_the_pid():
 
 
 def test_seventeen_losses_fit_in_one_fci_and_the_eighteenth_starts_another():
-    seqs = list(range(100, 117))          # 100..116 inclusive: 17 numbers
+    seqs = list(range(100, 117))  # 100..116 inclusive: 17 numbers
     assert len(build_nack(0xAB12CD34, 1, seqs)) == 12 + 4
 
-    seqs = list(range(100, 118))          # 18 numbers
+    seqs = list(range(100, 118))  # 18 numbers
     assert len(build_nack(0xAB12CD34, 1, seqs)) == 12 + 8
 
 
@@ -103,6 +103,7 @@ def test_it_refuses_to_ask_for_nothing():
 # --------------------------------------------------------------------------
 # NackTracker: which sequence numbers to ask for
 # --------------------------------------------------------------------------
+
 
 def test_the_first_packet_is_never_a_loss():
     assert NackTracker().observe(1000, now=0.0) == []
@@ -132,8 +133,8 @@ def test_it_does_not_re_ask_on_the_very_next_packet():
 def test_a_packet_that_turns_up_late_is_not_asked_for_again():
     t = NackTracker()
     t.observe(1000, now=0.0)
-    t.observe(1004, now=0.01)           # asks for 1001..1003
-    t.observe(1002, now=0.02)           # 1002 arrives after all
+    t.observe(1004, now=0.01)  # asks for 1001..1003
+    t.observe(1002, now=0.02)  # 1002 arrives after all
     assert t.observe(1005, now=1.0) == [1001, 1003], "1002 is no longer missing"
 
 
@@ -158,7 +159,7 @@ def test_it_forgets_a_loss_that_is_too_old_to_be_useful():
     # than useless on a congested link: it costs bandwidth and fixes nothing.
     t = NackTracker(max_behind=50, retry_after=0.0)
     t.observe(1000, now=0.0)
-    t.observe(1002, now=0.0)            # 1001 is missing
+    t.observe(1002, now=0.0)  # 1001 is missing
     assert t.observe(1060, now=0.1) != [], "the 1060 gap itself is fresh"
     assert 1001 not in t.observe(1061, now=0.2), "1001 is now 60 behind"
 
@@ -199,7 +200,8 @@ def test_a_stream_restart_resets_instead_of_asking_for_thousands():
     assert t.observe(41000, now=0.01) == []
     assert t.observe(41001, now=0.02) == []
     assert t.observe(41005, now=0.03) == [41002, 41003, 41004], (
-        "and it carries on from the new base")
+        "and it carries on from the new base"
+    )
 
 
 def test_it_does_not_re_ask_before_a_repeat_could_have_arrived():
@@ -232,15 +234,18 @@ def test_it_does_not_re_ask_before_a_repeat_could_have_arrived():
     gaps = [round(b - a, 3) for a, b in zip(attempts, attempts[1:])]
     assert all(g >= 0.15 for g in gaps), (
         f"retries {gaps}s apart: anything under the 162 ms p90 recovery "
-        f"re-asks for packets already on their way back")
+        f"re-asks for packets already on their way back"
+    )
     assert attempts[-1] <= 0.35, (
         f"last attempt at {attempts[-1]}s leaves too little room for the "
-        f"repeat to beat -max_delay 500000")
+        f"repeat to beat -max_delay 500000"
+    )
 
 
 # --------------------------------------------------------------------------
 # Interop: an independent RTCP implementation has to agree
 # --------------------------------------------------------------------------
+
 
 def test_an_independent_rtcp_parser_reads_it_as_a_generic_nack():
     # decode_nack_seqs is our own decoder, so a round trip through it would
@@ -249,7 +254,7 @@ def test_an_independent_rtcp_parser_reads_it_as_a_generic_nack():
     from aidot_cameras._vendor.aiortc.rtp import RtcpPacket
 
     seqs = [100, 101, 105, 116, 200]
-    parsed, = RtcpPacket.parse(build_nack(0xAB12CD34, 0x11223344, seqs))
+    (parsed,) = RtcpPacket.parse(build_nack(0xAB12CD34, 0x11223344, seqs))
     assert parsed.fmt == 1
     assert parsed.ssrc == 0xAB12CD34
     assert parsed.media_ssrc == 0x11223344
@@ -271,4 +276,5 @@ def test_one_report_is_capped_so_a_burst_cannot_flood_the_link():
     asked = t.observe(1100, now=0.01)
     assert len(asked) == 8
     assert asked == [1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008], (
-        "the oldest missing packets are the ones the decoder needs first")
+        "the oldest missing packets are the ones the decoder needs first"
+    )

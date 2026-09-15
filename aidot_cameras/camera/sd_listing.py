@@ -71,15 +71,21 @@ class _CameraSdMixin:
         """
         return _session_is_live(getattr(self, "_stream_session", None))
 
-    async def _sd_ask(self, session: Any, cmd: int, payload: bytes,
-                      response_cmd: int, timeout: float) -> Optional[Any]:
+    async def _sd_ask(
+        self, session: Any, cmd: int, payload: bytes, response_cmd: int, timeout: float
+    ) -> Optional[Any]:
         """One request, with every failure flattened to None."""
         try:
             return await session.async_avio_request(
-                cmd, payload, response_cmd=response_cmd, timeout=timeout)
+                cmd, payload, response_cmd=response_cmd, timeout=timeout
+            )
         except Exception as exc:
-            _LOGGER.debug("SD request %#x failed for %s: %s",
-                          cmd, getattr(self, "device_id", "?"), exc)
+            _LOGGER.debug(
+                "SD request %#x failed for %s: %s",
+                cmd,
+                getattr(self, "device_id", "?"),
+                exc,
+            )
             return None
 
     async def async_get_sd_recordings(
@@ -115,8 +121,9 @@ class _CameraSdMixin:
         whose end flag is not set comes back with ``complete=False`` rather than
         with a second request this code would have to invent.
         """
-        session = session if session is not None else getattr(
-            self, "_stream_session", None)
+        session = (
+            session if session is not None else getattr(self, "_stream_session", None)
+        )
         # No session is "could not ask", and so is a session already known to
         # be torn down: there is no point spending two timeouts on one. Shared
         # with `has_live_session` so a caller waiting for a session to exist and
@@ -130,12 +137,16 @@ class _CameraSdMixin:
         records = []
         complete = True
         list_reply = await self._sd_ask(
-            session, LISTEVENT_REQ_CMD,
+            session,
+            LISTEVENT_REQ_CMD,
             listevent_payload(start_ts, end_ts, channel=channel),
-            LISTEVENT_RESP_CMD, timeout)
+            LISTEVENT_RESP_CMD,
+            timeout,
+        )
         if list_reply is not None:
             page = decode_list_event_response(
-                bytes(list_reply.payload or b""), command=LISTEVENT_RESP_CMD)
+                bytes(list_reply.payload or b""), command=LISTEVENT_RESP_CMD
+            )
             if page is None:
                 # The decode is measured from a handful of live replies and a
                 # reply with a different shape is entirely possible. It is an
@@ -146,19 +157,24 @@ class _CameraSdMixin:
                 _LOGGER.debug(
                     "SD list reply for %s did not decode (%d bytes)",
                     getattr(self, "device_id", "?"),
-                    len(bytes(list_reply.payload or b"")))
+                    len(bytes(list_reply.payload or b"")),
+                )
             else:
                 records = page.events
                 complete = page.end_flag == 1
 
         hours = None
         map_reply = await self._sd_ask(
-            session, HASLISTEVENT_REQ_CMD,
+            session,
+            HASLISTEVENT_REQ_CMD,
             haslistevent_payload(start_ts, end_ts, channel=channel),
-            HASLISTEVENT_RESP_CMD, timeout)
+            HASLISTEVENT_RESP_CMD,
+            timeout,
+        )
         if map_reply is not None:
             hours = decode_hour_map(
-                bytes(map_reply.payload or b""), command=HASLISTEVENT_RESP_CMD)
+                bytes(map_reply.payload or b""), command=HASLISTEVENT_RESP_CMD
+            )
 
         return SdRecordingList(
             records=records,

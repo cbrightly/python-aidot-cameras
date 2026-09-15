@@ -37,6 +37,7 @@ trip at the grace deadline on a stream that is working, and
 ``_should_abandon_keepalive`` would eventually stop the keepalive for a healthy
 camera.  Hence the two-term predicate.
 """
+
 import inspect
 import re
 
@@ -49,6 +50,7 @@ _SRC = inspect.getsource(sdes_open)
 # --------------------------------------------------------------------- #
 # Pure helper truth table
 # --------------------------------------------------------------------- #
+
 
 def test_decrypted_plain_rtp_packet_counts():
     """The bridge unprotected it; ffmpeg gets plaintext on an RTP/AVP SDP."""
@@ -147,7 +149,7 @@ def test_the_tutk_counter_site_is_deliberately_left_ungated():
     camera whose audio arrives over TUTK, which is a bug this repo has already
     fixed once.
     """
-    assert "_media_counts[1] += len(_rtp_hdr) + len(_pd_plain)" in _SRC, (
+    assert "_media_counts[1]+=len(_rtp_hdr)+len(_pd_plain)" in "".join(_SRC.split()), (
         "the TUTK audio counter site moved or was gated - it forwards "
         "plaintext and must keep counting"
     )
@@ -156,6 +158,7 @@ def test_the_tutk_counter_site_is_deliberately_left_ungated():
 # --------------------------------------------------------------------- #
 # Behavioural mirror: the consequence, driven through the real helper.
 # --------------------------------------------------------------------- #
+
 
 class _FakeSession:
     """The slice of SdesSession the watchdog reads, over shared bridge state."""
@@ -203,8 +206,12 @@ def test_a_stream_that_never_decrypts_is_reported_stalled():
     _, session = _forward([(b"x" * 200, False)] * 500, plain_rtp=True)
     assert session.last_media_monotonic == 0.0
     assert session.media_stats()["packets"] == 0
-    assert sdes_open.SdesSession.is_stalled(
-        session.last_media_monotonic, started_at=0.0, now=61.0) is True
+    assert (
+        sdes_open.SdesSession.is_stalled(
+            session.last_media_monotonic, started_at=0.0, now=61.0
+        )
+        is True
+    )
     assert (session.last_media_monotonic > 0.0) is False  # _healthy
 
 
@@ -219,9 +226,16 @@ def test_undecryptable_packets_are_still_forwarded():
 def test_a_decrypting_stream_stays_healthy():
     _, session = _forward([(b"x" * 200, True)] * 10, plain_rtp=True)
     assert session.media_stats() == {
-        "packets": 10, "bytes": 2000, "last_media_monotonic": 100.0}
-    assert sdes_open.SdesSession.is_stalled(
-        session.last_media_monotonic, started_at=0.0, now=101.0) is False
+        "packets": 10,
+        "bytes": 2000,
+        "last_media_monotonic": 100.0,
+    }
+    assert (
+        sdes_open.SdesSession.is_stalled(
+            session.last_media_monotonic, started_at=0.0, now=101.0
+        )
+        is False
+    )
 
 
 def test_a_savp_stream_stays_healthy_without_the_bridge_decrypting():
@@ -229,8 +243,12 @@ def test_a_savp_stream_stays_healthy_without_the_bridge_decrypting():
     _, session = _forward([(b"x" * 200, False)] * 10, plain_rtp=False)
     assert session.media_stats()["packets"] == 10
     assert session.last_media_monotonic == 100.0
-    assert sdes_open.SdesSession.is_stalled(
-        session.last_media_monotonic, started_at=0.0, now=101.0) is False
+    assert (
+        sdes_open.SdesSession.is_stalled(
+            session.last_media_monotonic, started_at=0.0, now=101.0
+        )
+        is False
+    )
 
 
 def test_a_partly_decrypting_stream_counts_only_what_decrypted():

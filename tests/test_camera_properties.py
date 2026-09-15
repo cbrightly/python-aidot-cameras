@@ -4,6 +4,7 @@ The camera answers these `get` actions with real data. The behaviour worth
 pinning is what happens when it does NOT: a camera that cannot answer must read
 as unknown, never as a set of switched-off features.
 """
+
 import asyncio
 
 from aidot_cameras.camera.controls import _CameraControlsMixin
@@ -21,8 +22,9 @@ class _Cam:
         self.queries.append(action)
         return self._out
 
-    async def async_trigger_device_action(self, action, params, *,
-                                          timeout=4.0, expect_ack=True):
+    async def async_trigger_device_action(
+        self, action, params, *, timeout=4.0, expect_ack=True
+    ):
         self.actions.append((action, params))
         return self._set_ok
 
@@ -39,7 +41,10 @@ class TestSoundDetection:
     def test_it_flattens_the_camera_s_list_of_single_key_dicts(self):
         cam = _Cam(_SOUND)
         assert asyncio.run(cam.async_get_sound_detection()) == {
-            "sound_enable": False, "glass_Break": True, "smoke_T3": False}
+            "sound_enable": False,
+            "glass_Break": True,
+            "smoke_T3": False,
+        }
 
     def test_no_reply_is_unknown_not_all_off(self):
         """A null `out` must not be reported as a set of disabled detectors."""
@@ -56,7 +61,10 @@ class TestSoundDetection:
         cam = _Cam(_SOUND)
         asyncio.run(cam.async_set_sound_detection("sound_enable", True))
         assert cam.actions[0][1] == [
-            {"sound_enable": 1}, {"glass_Break": 1}, {"smoke_T3": 0}]
+            {"sound_enable": 1},
+            {"glass_Break": 1},
+            {"smoke_T3": 0},
+        ]
 
     def test_it_refuses_to_write_a_key_the_camera_does_not_report(self):
         cam = _Cam(_SOUND)
@@ -75,7 +83,9 @@ class TestWifiInfo:
     def test_it_names_only_the_confirmed_fields(self):
         cam = _Cam(["Brightly", 63, 1984564238])
         assert asyncio.run(cam.async_get_wifi_info()) == {
-            "ssid": "Brightly", "rssi": 63}
+            "ssid": "Brightly",
+            "rssi": 63,
+        }
 
     def test_no_reply_is_none(self):
         assert asyncio.run(_Cam(None).async_get_wifi_info()) is None
@@ -119,25 +129,30 @@ class TestItDoesNotFightTheIntegrationsConnection:
     def test_the_query_prefers_the_persistent_connection(self):
         import inspect
         from aidot_cameras.camera import client as client_mod
+
         src = inspect.getsource(client_mod.CameraMixin.async_query_device_action)
         assert "_get_persistent_mqtt" in src, (
             "the query opens its own MQTT session again - that duplicates the "
-            "client id and the reply is lost inside Home Assistant")
+            "client id and the reply is lost inside Home Assistant"
+        )
         assert "_resolve_persistent_mqtt" in src
 
     def test_a_missing_reply_is_logged_not_silent(self):
         import inspect
         from aidot_cameras.camera import client as client_mod
+
         src = inspect.getsource(client_mod.CameraMixin.async_query_device_action)
         assert "no reply from" in src
         # INFO, not debug: a silent None is what hid this failure. Find the
         # logging call that owns the message rather than guessing at a
         # character window near it.
         import re
+
         call = re.search(r'_LOGGER\.(\w+)\(\s*\n?\s*"[^"]*no reply from', src)
         assert call is not None, "the no-reply message is not a logging call"
         assert call.group(1) == "info", (
-            f"the no-reply message logs at {call.group(1)}, not info")
+            f"the no-reply message logs at {call.group(1)}, not info"
+        )
 
 
 class TestRepliesAreMatchedToTheRightCamera:
@@ -151,6 +166,7 @@ class TestRepliesAreMatchedToTheRightCamera:
     def test_it_filters_on_the_device_id(self):
         import inspect
         from aidot_cameras.camera import client as client_mod
+
         src = inspect.getsource(client_mod.CameraMixin.async_query_device_action)
         assert 'body.get("devId")' in src
         assert "!= device_id" in src
@@ -161,6 +177,7 @@ class TestRepliesAreMatchedToTheRightCamera:
         had in fact answered four times."""
         import inspect
         from aidot_cameras.camera import client as client_mod
+
         src = inspect.getsource(client_mod.CameraMixin.async_query_device_action)
         assert 'msg.get("seq") == seq' in src, "seq should still be preferred"
         # The rejecting form must be gone.

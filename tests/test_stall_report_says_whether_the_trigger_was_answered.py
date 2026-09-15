@@ -16,6 +16,7 @@ and `0x1501` is `..._RESP`, so the camera is expected to answer it, and its
 answers already arrive on the channel this package parses. Recording whether
 that answer came back separates the two without another hypothesis.
 """
+
 import os
 import sys
 
@@ -26,8 +27,12 @@ from aidot_cameras.camera.sdes_open import _first_media_stall_report
 
 def _report(**over):
     kwargs = dict(
-        device_id="cam1", waited_s=75.0, nominated=[("10.0.0.1", 5000)],
-        use_candidate_sent=True, binding_success=6, trigger_sent=True,
+        device_id="cam1",
+        waited_s=75.0,
+        nominated=[("10.0.0.1", 5000)],
+        use_candidate_sent=True,
+        binding_success=6,
+        trigger_sent=True,
         probes=[],
     )
     kwargs.update(over)
@@ -66,6 +71,7 @@ def test_the_line_is_still_one_line():
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:

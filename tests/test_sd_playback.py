@@ -4,6 +4,7 @@ The request shape is not guesswork: it is
 AVIOCTRLDEFs$SMsgAVIoctrlPlayRecord.parseContent(III[B) from the vendor app -
 24 bytes, little-endian, with an 8-byte STimeDay at offset 12.
 """
+
 import struct
 
 import pytest
@@ -18,8 +19,17 @@ from aidot_cameras.camera.sd_playback import (
 
 
 def _rec(**kw):
-    base = dict(year=2026, month=8, day=11, hour=20, minute=41, second=42,
-                channel=0, event=1, status=0)
+    base = dict(
+        year=2026,
+        month=8,
+        day=11,
+        hour=20,
+        minute=41,
+        second=42,
+        channel=0,
+        event=1,
+        status=0,
+    )
     base.update(kw)
     return SdEvent(**base)
 
@@ -46,8 +56,9 @@ def test_the_command_param_and_channel_land_where_the_struct_says():
 
 
 def test_the_timestamp_is_the_records_own():
-    out = playcontrol_payload(PLAY_START, _rec(year=2025, month=1, day=2,
-                                               hour=3, minute=4, second=5))
+    out = playcontrol_payload(
+        PLAY_START, _rec(year=2025, month=1, day=2, hour=3, minute=4, second=5)
+    )
     y, mo, d, _wd, h, mi, s = struct.unpack("<HBBBBBB", out[12:20])
     assert (y, mo, d, h, mi, s) == (2025, 1, 2, 3, 4, 5)
 
@@ -55,7 +66,8 @@ def test_the_timestamp_is_the_records_own():
 def test_a_real_reply_decodes():
     # The exact 20 bytes an A000088 returned, 2026-08-13.
     reply = decode_playcontrol_reply(
-        bytes.fromhex("10000000010000003c000000ea07080b0014292a"))
+        bytes.fromhex("10000000010000003c000000ea07080b0014292a")
+    )
     assert reply.command == PLAY_START
     assert reply.field1 == 1
     assert reply.field2 == 60

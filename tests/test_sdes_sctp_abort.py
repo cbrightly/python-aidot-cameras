@@ -18,6 +18,7 @@ heartbeat loss regardless of what the transport says. Closing the association we
 opened is correct either way, which is why it is worth doing even if the window
 does not move.
 """
+
 import struct
 
 from aidot_cameras.camera.sdes_open import _sctp_abort_chunk
@@ -38,7 +39,11 @@ def test_the_t_bit_is_clear():
     Setting it would tell the camera we are reflecting a tag we do not hold, and
     an endpoint that has the association must not claim that.
     """
-    _, flags, _, = struct.unpack("!BBH", _sctp_abort_chunk()[:4])
+    (
+        _,
+        flags,
+        _,
+    ) = struct.unpack("!BBH", _sctp_abort_chunk()[:4])
     assert flags & 0x01 == 0
 
 
@@ -49,8 +54,10 @@ from aidot_cameras.camera.sdes import SdesSession
 
 def _session(abort=None):
     s = SdesSession(
-        proc=MagicMock(), sdp_path="/tmp/nonexistent.sdp",
-        outgoing_q=MagicMock(), mqtt_fut=MagicMock(),
+        proc=MagicMock(),
+        sdp_path="/tmp/nonexistent.sdp",
+        outgoing_q=MagicMock(),
+        mqtt_fut=MagicMock(),
         abort_chan=[abort],
     )
     s._proc.poll.return_value = 0
@@ -76,6 +83,7 @@ async def test_stop_aborts_before_killing_ffmpeg():
 
 async def test_a_failing_abort_never_blocks_the_close():
     """Closing politely must not stop us closing at all."""
+
     def _boom():
         raise OSError("socket gone")
 
@@ -94,8 +102,12 @@ async def test_a_session_with_no_abort_sender_still_stops():
 
 async def test_a_session_without_the_holder_at_all_still_stops():
     """Older call sites pass no holder."""
-    s = SdesSession(proc=MagicMock(), sdp_path="/tmp/nonexistent.sdp",
-                    outgoing_q=MagicMock(), mqtt_fut=MagicMock())
+    s = SdesSession(
+        proc=MagicMock(),
+        sdp_path="/tmp/nonexistent.sdp",
+        outgoing_q=MagicMock(),
+        mqtt_fut=MagicMock(),
+    )
     s._proc.poll.return_value = 0
     s._proc.stderr.read.return_value = b""
     await s.stop()

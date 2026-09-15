@@ -84,6 +84,7 @@ def _install_token_cache(client: AidotClient, path: str) -> None:
     config entry - so a standalone run never loses auth to a rotation and never
     fights HA over a shared refresh token.
     """
+
     def _cb() -> None:
         try:
             _write_token_file(path, client.serializable_login_info())

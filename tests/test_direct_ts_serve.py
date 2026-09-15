@@ -47,6 +47,7 @@ spliced a late joiner onto audio with video mid-GOP. It survives only as a
 bounded fallback for a writer that never signals - covered in
 test_direct_ts_keyframe_signal.py.
 """
+
 import os
 import socket
 import sys
@@ -65,23 +66,26 @@ def _ts(pid, *, pusi=0, rai=0, payload=b"\x00"):
     b[1] = ((pusi and 0x40) or 0) | ((pid >> 8) & 0x1F)
     b[2] = pid & 0xFF
     if rai:
-        b[3] = 0x30                      # adaptation field + payload
-        b[4] = 1                         # AF length
-        b[5] = 0x40                      # random_access_indicator
-        b[6:6+len(payload)] = payload
+        b[3] = 0x30  # adaptation field + payload
+        b[4] = 1  # AF length
+        b[5] = 0x40  # random_access_indicator
+        b[6 : 6 + len(payload)] = payload
     else:
-        b[3] = 0x10                      # payload only
-        b[4:4+len(payload)] = payload
+        b[3] = 0x10  # payload only
+        b[4 : 4 + len(payload)] = payload
     return bytes(b)
 
 
 def _pat(pmt_pid=0x1000):
     """Minimal PAT naming one program whose PMT lives on pmt_pid."""
     sec = bytearray(13)
-    sec[0] = 0x00                                    # table_id
-    sec[1] = 0xB0; sec[2] = 0x0D                     # section length
-    sec[8] = 0x00; sec[9] = 0x01                     # program_number 1
-    sec[10] = 0xE0 | ((pmt_pid >> 8) & 0x1F); sec[11] = pmt_pid & 0xFF
+    sec[0] = 0x00  # table_id
+    sec[1] = 0xB0
+    sec[2] = 0x0D  # section length
+    sec[8] = 0x00
+    sec[9] = 0x01  # program_number 1
+    sec[10] = 0xE0 | ((pmt_pid >> 8) & 0x1F)
+    sec[11] = pmt_pid & 0xFF
     return _ts(0, pusi=1, payload=b"\x00" + bytes(sec))
 
 
@@ -140,8 +144,8 @@ def test_a_consumer_gets_an_http_response_then_the_media():
                 if srv.has_consumer():
                     break
                 time.sleep(0.05)
-            srv.mark_keyframe()                    # the mux announces it
-            srv.write(_ts(0x100, pusi=1, rai=1))   # keyframe: releases the join
+            srv.mark_keyframe()  # the mux announces it
+            srv.write(_ts(0x100, pusi=1, rai=1))  # keyframe: releases the join
             for _ in range(10):
                 srv.write(_ts(0x100, pusi=1))
             done.set()
@@ -151,7 +155,9 @@ def test_a_consumer_gets_an_http_response_then_the_media():
         done.wait(3)
         sock.close()
         head, _, body = buf.partition(b"\r\n\r\n")
-        assert head.startswith(b"HTTP/1.0 200") or head.startswith(b"HTTP/1.1 200"), head[:60]
+        assert head.startswith(b"HTTP/1.0 200") or head.startswith(b"HTTP/1.1 200"), (
+            head[:60]
+        )
         assert b"video/mp2t" in head.lower()
         assert body.startswith(b"\x47"), body[:8]
     finally:
@@ -184,7 +190,7 @@ def test_a_disconnect_does_not_kill_the_writer():
         sock.close()
         time.sleep(0.3)
         for _ in range(50):
-            srv.write(b"\x47" + b"\x22" * 187)   # must not raise
+            srv.write(b"\x47" + b"\x22" * 187)  # must not raise
         assert srv.port > 0
     finally:
         srv.close()
@@ -211,6 +217,7 @@ def test_it_can_be_turned_off(monkeypatch):
 
 # --- join-awareness: what the ffmpeg hop was actually contributing ---------- #
 
+
 def _drain(sock, n=8, timeout=3.0):
     sock.settimeout(timeout)
     buf = b""
@@ -227,7 +234,7 @@ def _drain(sock, n=8, timeout=3.0):
 
 
 def _packets(body):
-    return [body[i:i+188] for i in range(0, len(body) - 187, 188)]
+    return [body[i : i + 188] for i in range(0, len(body) - 187, 188)]
 
 
 def test_a_late_consumer_is_not_handed_mid_gop_bytes():
@@ -238,12 +245,12 @@ def test_a_late_consumer_is_not_handed_mid_gop_bytes():
     srv = _DirectTsServer(0)
     try:
         srv.start()
-        for _ in range(20):                       # stream already running
+        for _ in range(20):  # stream already running
             srv.write(_ts(0x100, pusi=1))
         sock, head = _get(srv.port, read_bytes=1)
         assert _wait_consumer(srv)
         body = head.partition(b"\r\n\r\n")[2]
-        for _ in range(20):                       # more non-keyframe media
+        for _ in range(20):  # more non-keyframe media
             srv.write(_ts(0x100, pusi=1))
         body += _drain(sock, n=2, timeout=0.6)
         sock.close()
@@ -257,14 +264,14 @@ def test_a_late_consumer_gets_tables_then_a_keyframe():
     try:
         srv.start()
         srv.write(_pat())
-        srv.write(_ts(0x1000, pusi=1))            # PMT
+        srv.write(_ts(0x1000, pusi=1))  # PMT
         for _ in range(10):
-            srv.write(_ts(0x100, pusi=1))         # mid-GOP media
+            srv.write(_ts(0x100, pusi=1))  # mid-GOP media
         sock, head = _get(srv.port, read_bytes=1)
         assert _wait_consumer(srv)
         body = head.partition(b"\r\n\r\n")[2]
-        srv.mark_keyframe()                       # the mux announces it
-        srv.write(_ts(0x100, pusi=1, rai=1))      # the next keyframe
+        srv.mark_keyframe()  # the mux announces it
+        srv.write(_ts(0x100, pusi=1, rai=1))  # the next keyframe
         srv.write(_ts(0x100, pusi=1))
         body += _drain(sock, n=4)
         sock.close()
@@ -273,7 +280,9 @@ def test_a_late_consumer_gets_tables_then_a_keyframe():
         pids = [((p[1] & 0x1F) << 8) | p[2] for p in pkts]
         assert pids[0] == 0, f"first packet must be the PAT, got pid {pids[0]}"
         assert pids[1] == 0x1000, f"second must be the PMT, got pid {pids[1]}"
-        assert (pkts[2][3] & 0x20) and (pkts[2][5] & 0x40), "media must start at a keyframe"
+        assert (pkts[2][3] & 0x20) and (pkts[2][5] & 0x40), (
+            "media must start at a keyframe"
+        )
     finally:
         srv.close()
 
@@ -282,7 +291,8 @@ def test_once_synced_it_keeps_forwarding():
     srv = _DirectTsServer(0)
     try:
         srv.start()
-        srv.write(_pat()); srv.write(_ts(0x1000, pusi=1))
+        srv.write(_pat())
+        srv.write(_ts(0x1000, pusi=1))
         sock, head = _get(srv.port, read_bytes=1)
         assert _wait_consumer(srv)
         srv.mark_keyframe()
@@ -302,7 +312,8 @@ def test_a_reconnecting_consumer_resyncs():
     srv = _DirectTsServer(0)
     try:
         srv.start()
-        srv.write(_pat()); srv.write(_ts(0x1000, pusi=1))
+        srv.write(_pat())
+        srv.write(_ts(0x1000, pusi=1))
         s1, _ = _get(srv.port, read_bytes=1)
         assert _wait_consumer(srv)
         srv.mark_keyframe()
@@ -323,8 +334,10 @@ def test_a_reconnecting_consumer_resyncs():
 
 # --- binding the port the consumer was actually told about ----------------- #
 
+
 def test_the_serve_port_is_read_from_the_url():
     from aidot_cameras.camera.protocol import _serve_port
+
     assert _serve_port("http://127.0.0.1:18931/abc.ts") == 18931
     assert _serve_port("http://0.0.0.0:8099/x.ts") == 8099
     assert _serve_port("http://[::1]:1234/x.ts") == 1234
@@ -332,6 +345,7 @@ def test_the_serve_port_is_read_from_the_url():
 
 def test_a_url_without_a_port_yields_none():
     from aidot_cameras.camera.protocol import _serve_port
+
     assert _serve_port("http://127.0.0.1/x.ts") is None
     assert _serve_port(None) is None
     assert _serve_port("not a url") is None
@@ -350,8 +364,11 @@ def test_the_serve_loop_binds_the_advertised_port_when_there_is_no_relay():
     import inspect
 
     import aidot_cameras.camera.client as cc
+
     src = inspect.getsource(cc.CameraMixin._dtls_serve_loop_inner)
     assert "_DirectTsServer(_ff_port or 0)" not in src, (
-        "binds a random port when no relay holds the public one")
+        "binds a random port when no relay holds the public one"
+    )
     assert "_serve_port(serve_url)" in src, (
-        "the advertised port must come from the serve URL")
+        "the advertised port must come from the serve URL"
+    )

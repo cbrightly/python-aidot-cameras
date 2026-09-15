@@ -10,6 +10,7 @@ docs/CAMERAS.md documents the observed cold-start envelope; these constants
 must clear its upper end.  If real-world numbers change, update the window
 here deliberately - do not quietly lower a constant to make something pass.
 """
+
 import os
 import sys
 

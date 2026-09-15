@@ -39,8 +39,8 @@ def _sec(kind: str, *pts: str) -> tuple:
 
 # The shapes below are transcribed from measured answers, not invented.
 _SD_SHIFTED = {
-    "0": _sec("video", "0"),                # H265 stub the camera added
-    "1": _sec("video", "101", "102"),       # the H264 answer we want
+    "0": _sec("video", "0"),  # H265 stub the camera added
+    "1": _sec("video", "101", "102"),  # the H264 answer we want
     "2": _sec("application"),
 }
 
@@ -74,8 +74,9 @@ def test_sd_offer_skips_the_h265_stub_sharing_its_mid():
 
 
 def test_sd_datachannel_finds_the_application_section_a_mid_away():
-    got = select_answer_section("1", "application", _SD_SHIFTED,
-                                _OFFER_VIDEO_PTS, {"0"})
+    got = select_answer_section(
+        "1", "application", _SD_SHIFTED, _OFFER_VIDEO_PTS, {"0"}
+    )
     assert got is not None and got[0] == "2"
 
 
@@ -84,8 +85,7 @@ def test_live_offer_survives_a_one_mid_shift():
     claimed: set = set()
     picks = {}
     for mid, kind in (("0", "audio"), ("1", "video"), ("2", "application")):
-        got = select_answer_section(mid, kind, _LIVE_SHIFTED,
-                                    _OFFER_VIDEO_PTS, claimed)
+        got = select_answer_section(mid, kind, _LIVE_SHIFTED, _OFFER_VIDEO_PTS, claimed)
         assert got is not None, f"offer mid {mid} ({kind}) found nothing"
         claimed.add(got[0])
         picks[kind] = got[0]
@@ -94,16 +94,14 @@ def test_live_offer_survives_a_one_mid_shift():
 
 def test_a_section_is_never_handed_to_two_offer_mids():
     claimed = {"1"}
-    got = select_answer_section("0", "video", _SD_SHIFTED,
-                                _OFFER_VIDEO_PTS, claimed)
+    got = select_answer_section("0", "video", _SD_SHIFTED, _OFFER_VIDEO_PTS, claimed)
     assert got is None or got[0] != "1"
 
 
 def test_missing_kind_returns_none_so_the_caller_stubs():
     """A001064 drops sections outright; the caller must still get to stub."""
     answer = {"0": _sec("video", "101", "102")}
-    assert select_answer_section("1", "audio", answer,
-                                 _OFFER_VIDEO_PTS, set()) is None
+    assert select_answer_section("1", "audio", answer, _OFFER_VIDEO_PTS, set()) is None
 
 
 def test_video_with_no_overlap_is_still_taken_when_it_is_all_there_is():
@@ -173,17 +171,14 @@ def test_a_dropped_section_is_not_an_insert():
     on the SDES->DTLS fallback path, using a cap measured on a mains A000088
     that opens in 9 s.
     """
-    assert not answer_inserted_a_section(shifted_sections=2,
-                                         unclaimed_answer_mids=0)
+    assert not answer_inserted_a_section(shifted_sections=2, unclaimed_answer_mids=0)
 
 
 def test_a_clean_answer_is_not_an_insert():
-    assert not answer_inserted_a_section(shifted_sections=0,
-                                         unclaimed_answer_mids=0)
+    assert not answer_inserted_a_section(shifted_sections=0, unclaimed_answer_mids=0)
 
 
 def test_a_spare_section_without_a_shift_is_not_an_insert():
     """An extra section nobody wanted, with our mids still lining up, is the
     camera padding the answer - not the shift the cap was measured against."""
-    assert not answer_inserted_a_section(shifted_sections=0,
-                                         unclaimed_answer_mids=1)
+    assert not answer_inserted_a_section(shifted_sections=0, unclaimed_answer_mids=1)

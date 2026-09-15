@@ -8,6 +8,7 @@ Covers three confirmed defects in the default-on persistent-MQTT path:
   * _reap_stream_drain must release the executor thread blocked on outgoing_q
     (cancellation alone cannot) and run the drain's finally (handler removal).
 """
+
 import asyncio
 import os
 import queue
@@ -19,8 +20,11 @@ import aidot_cameras.camera.protocol as proto
 import aidot_cameras.camera.client as cc
 from aidot_cameras.camera.protocol import _PersistentMqtt
 
-_CAM = next(v for v in vars(cc).values()
-            if isinstance(v, type) and "_get_persistent_mqtt" in v.__dict__)
+_CAM = next(
+    v
+    for v in vars(cc).values()
+    if isinstance(v, type) and "_get_persistent_mqtt" in v.__dict__
+)
 
 
 def _cam():
@@ -29,14 +33,15 @@ def _cam():
 
 # --- finding 3: _request_sync hardened against a concurrent close()/publish --- #
 
+
 def test_request_sync_returns_error_when_client_nulled(monkeypatch):
     pm = _PersistentMqtt("wss://h:8443/mqtt", "u", "p", "cid")
     monkeypatch.setattr(pm, "_ensure_started_sync", lambda timeout=15.0: True)
-    pm._client = None   # simulate close() nulling the client after the started-check
+    pm._client = None  # simulate close() nulling the client after the started-check
     messages, st = pm._request_sync([("t", "pp")], ["a/#"], None, 0.05)
     assert messages == []
-    assert st.get("error")            # truthy error tuple, NOT an AttributeError
-    assert pm._collectors == []       # transient collector still cleaned up
+    assert st.get("error")  # truthy error tuple, NOT an AttributeError
+    assert pm._collectors == []  # transient collector still cleaned up
 
 
 def test_request_sync_returns_error_when_publish_raises(monkeypatch):
@@ -56,6 +61,7 @@ def test_request_sync_returns_error_when_publish_raises(monkeypatch):
 
 # --- finding 4: get-or-create is single-flight under concurrency ------------- #
 
+
 def test_get_persistent_mqtt_one_instance_under_concurrency(monkeypatch):
     cam = _cam()
     cam._user_info = {"mqttClientId": "cid"}
@@ -65,7 +71,7 @@ def test_get_persistent_mqtt_one_instance_under_concurrency(monkeypatch):
         return {"mqttUser": "u", "mqttPassword": "p"}
 
     async def _url():
-        await asyncio.sleep(0)   # yield so both callers interleave past the first check
+        await asyncio.sleep(0)  # yield so both callers interleave past the first check
         return "wss://h:8443/mqtt"
 
     cam._async_get_smarthome_auth = _auth
@@ -81,15 +87,17 @@ def test_get_persistent_mqtt_one_instance_under_concurrency(monkeypatch):
     monkeypatch.setattr(proto, "_PersistentMqtt", _counting)
 
     async def _run():
-        return await asyncio.gather(cam._get_persistent_mqtt(),
-                                    cam._get_persistent_mqtt())
+        return await asyncio.gather(
+            cam._get_persistent_mqtt(), cam._get_persistent_mqtt()
+        )
 
     a, b = asyncio.run(_run())
     assert a is b is not None
-    assert len(created) == 1           # the race previously built two
+    assert len(created) == 1  # the race previously built two
 
 
 # --- finding 1: reaping releases the executor-blocked drain ------------------ #
+
 
 def test_reap_stream_drain_releases_blocked_drain():
     cam = _cam()
@@ -101,14 +109,14 @@ def test_reap_stream_drain_releases_blocked_drain():
         try:
             while True:
                 out = await loop.run_in_executor(None, outq.get)
-                if out is None:        # sentinel from _reap_stream_drain
+                if out is None:  # sentinel from _reap_stream_drain
                     return
         finally:
-            saw.append("finally")      # in prod this removes the handler
+            saw.append("finally")  # in prod this removes the handler
 
     async def _run():
         fut = asyncio.ensure_future(_drain())
-        await asyncio.sleep(0.05)      # let it block on outgoing_q.get
+        await asyncio.sleep(0.05)  # let it block on outgoing_q.get
         cam._stream_mqtt_drain = fut
         cam._stream_mqtt_outq = outq
         await cam._reap_stream_drain()
@@ -116,7 +124,7 @@ def test_reap_stream_drain_releases_blocked_drain():
 
     fut = asyncio.run(_run())
     assert fut.done()
-    assert "finally" in saw            # drain's cleanup ran (not leaked)
+    assert "finally" in saw  # drain's cleanup ran (not leaked)
     assert cam._stream_mqtt_drain is None and cam._stream_mqtt_outq is None
 
 

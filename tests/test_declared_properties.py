@@ -18,18 +18,27 @@ from aidot_cameras.camera.models import CameraDeviceInformation
 
 
 def _device(props, **extra):
-    d = {"id": "cam1", "aesKey": ["k" * 16], "password": "p",
-         "product": {"serviceModules": [{"identity": "IPC/common attr",
-                                         "properties": props}]}}
+    d = {
+        "id": "cam1",
+        "aesKey": ["k" * 16],
+        "password": "p",
+        "product": {
+            "serviceModules": [{"identity": "IPC/common attr", "properties": props}]
+        },
+    }
     d.update(extra)
     return d
 
 
 def test_declared_properties_collects_what_the_model_offers():
-    info = CameraDeviceInformation(_device([
-        {"identity": "LingerDuration", "code": "LingerDuration"},
-        {"identity": "Dimming", "code": "Dimming"},
-    ]))
+    info = CameraDeviceInformation(
+        _device(
+            [
+                {"identity": "LingerDuration", "code": "LingerDuration"},
+                {"identity": "Dimming", "code": "Dimming"},
+            ]
+        )
+    )
     assert "LingerDuration" in info.declared_properties
     assert "Dimming" in info.declared_properties
 
@@ -40,10 +49,17 @@ def test_a_placeholder_display_name_does_not_hide_a_property():
     Keying on it instead of `identity` reported "no model declares
     lightBehavior" when every model did.
     """
-    info = CameraDeviceInformation(_device([
-        {"identity": "lightBehavior", "code": "lightBehavior",
-         "name": "propertyName_lightBehavior_1679075889207132162"},
-    ]))
+    info = CameraDeviceInformation(
+        _device(
+            [
+                {
+                    "identity": "lightBehavior",
+                    "code": "lightBehavior",
+                    "name": "propertyName_lightBehavior_1679075889207132162",
+                },
+            ]
+        )
+    )
     assert "lightBehavior" in info.declared_properties
 
 
@@ -67,12 +83,14 @@ def test_a_malformed_profile_yields_nothing_rather_than_raising():
     is noted rather than widened into here.
     """
     collect = CameraDeviceInformation._collect_declared_properties
-    for bad in ({"product": {"serviceModules": "nope"}},
-                {"product": {"serviceModules": [None]}},
-                {"product": {"serviceModules": [{"properties": "nope"}]}},
-                {"product": {"serviceModules": [{"properties": ["str"]}]}},
-                {"product": "nope"},
-                {}):
+    for bad in (
+        {"product": {"serviceModules": "nope"}},
+        {"product": {"serviceModules": [None]}},
+        {"product": {"serviceModules": [{"properties": "nope"}]}},
+        {"product": {"serviceModules": [{"properties": ["str"]}]}},
+        {"product": "nope"},
+        {},
+    ):
         assert collect(bad) == frozenset()
 
 

@@ -14,6 +14,7 @@ during a requested teardown is expected -> DEBUG. Anything else (no teardown
 in flight, or a positive ffmpeg error code even during teardown) is still
 unexpected -> WARNING.
 """
+
 import asyncio
 import inspect
 import logging
@@ -76,7 +77,7 @@ def test_the_bridge_exit_log_names_the_camera():
     )
     assert "camera %s: SDES serve ffmpeg stderr" in src
     start = src.index("return SdesSession(")
-    assert "device_id=" in src[start:start + 800], (
+    assert "device_id=" in src[start : start + 800], (
         "SdesSession is constructed without a device_id, so its own stderr "
         "log cannot name the camera"
     )

@@ -25,7 +25,7 @@ import pytest
 
 from aidot_cameras.camera.protocol import _idle_release_due
 
-PUSH_URL = "rtsp://127.0.0.1:8554/aidot_cam1"     # go2rtc's shared RTSP port
+PUSH_URL = "rtsp://127.0.0.1:8554/aidot_cam1"  # go2rtc's shared RTSP port
 HTTP_SERVE = "http://127.0.0.1:18000/aidot_cam1"  # our own -listen socket
 
 
@@ -78,10 +78,12 @@ def _ask(obj, monkeypatch, port=8554):
             return False
 
     import aidot_cameras.camera.go2rtc as g2
+
     monkeypatch.setattr(g2, "Go2rtcClient", _Stub)
     monkeypatch.setattr(client_mod, "_VIEWER_CHECK_INTERVAL_S", 0, raising=False)
 
     import aiohttp
+
     monkeypatch.setattr(aiohttp, "ClientSession", lambda *a, **k: _Sess())
     return asyncio.run(obj._viewer_present(port))
 
@@ -89,6 +91,7 @@ def _ask(obj, monkeypatch, port=8554):
 # --------------------------------------------------------------------------- #
 # push mode: the socket fallback must never be consulted
 # --------------------------------------------------------------------------- #
+
 
 def test_push_mode_without_go2rtc_is_unknown_not_a_confident_lie(monkeypatch):
     """No go2rtc + push mode -> unknown.
@@ -120,6 +123,7 @@ def test_push_mode_falls_back_to_unknown_when_go2rtc_returns_none(monkeypatch):
 # push mode WITH go2rtc: real answers, which is the whole point
 # --------------------------------------------------------------------------- #
 
+
 def test_push_mode_with_go2rtc_reports_a_real_viewer(monkeypatch):
     obj = _client(go2rtc_url="http://go2rtc:1984", viewers=2)
     assert _ask(obj, monkeypatch) is True
@@ -139,6 +143,7 @@ def test_push_mode_with_go2rtc_reports_nobody_watching(monkeypatch):
 # non-push (our own HTTP -listen serve): the socket check is legitimate there
 # --------------------------------------------------------------------------- #
 
+
 def test_http_serve_still_uses_the_socket_check(monkeypatch):
     """On our own serve port the socket check is meaningful and must be kept."""
     obj = _client(go2rtc_url=None, keepalive_url=HTTP_SERVE)
@@ -149,11 +154,15 @@ def test_http_serve_still_uses_the_socket_check(monkeypatch):
 # the composition that caused the live bug
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("answer,expected_release", [
-    (True, False),    # someone watching -> hold
-    (None, False),    # unknown          -> hold (fail-safe)
-    (False, True),    # nobody watching  -> release
-])
+
+@pytest.mark.parametrize(
+    "answer,expected_release",
+    [
+        (True, False),  # someone watching -> hold
+        (None, False),  # unknown          -> hold (fail-safe)
+        (False, True),  # nobody watching  -> release
+    ],
+)
 def test_only_a_definite_no_releases(answer, expected_release):
     """`unknown` must never release - and therefore must never be the only answer.
 
@@ -163,13 +172,16 @@ def test_only_a_definite_no_releases(answer, expected_release):
     mode without go2rtc made unknown the *only reachable* answer, so "never
     release" became unconditional.
     """
-    assert _idle_release_due(answer, last_consumer=0.0, now=10_000.0,
-                             idle_secs=120.0) is expected_release
+    assert (
+        _idle_release_due(answer, last_consumer=0.0, now=10_000.0, idle_secs=120.0)
+        is expected_release
+    )
 
 
 # --------------------------------------------------------------------------- #
 # the registration seam
 # --------------------------------------------------------------------------- #
+
 
 def test_deregister_never_removes_a_stream_we_did_not_register():
     """The dangerous half of the seam.
@@ -200,6 +212,7 @@ def test_deregister_never_removes_a_stream_we_did_not_register():
 
     import aidot_cameras.camera.go2rtc as g2
     import aiohttp
+
     _orig_client, _orig_sess = g2.Go2rtcClient, aiohttp.ClientSession
     g2.Go2rtcClient = _Client
     aiohttp.ClientSession = lambda *a, **k: _Sess()

@@ -347,7 +347,9 @@ Two-way audio works on **both** camera paths through the same API. Open with
 
 ```python
 session = await device_client.async_open_webrtc_stream(..., talk=True)
-await session.async_start_talk(pcm_provider)   # provider() -> 320B s16le PCM (20ms @ 8kHz), or None
+await session.async_start_talk(
+    pcm_provider
+)  # provider() -> 320B s16le PCM (20ms @ 8kHz), or None
 # ... speak ...
 await session.async_stop_talk()
 ```
@@ -400,7 +402,7 @@ await device_client.async_stop_motion_polling()
 What the camera holds on its own card, read over a session that already exists.
 
 ```python
-if device_client.has_live_session:                       # sends nothing
+if device_client.has_live_session:  # sends nothing
     result = await device_client.async_get_sd_recordings(days=7)
 ```
 
@@ -450,7 +452,7 @@ the reference fleet currently is.
 ### Is there even a card?
 
 ```python
-device_client.status.sd_card_present   # True | False | None
+device_client.status.sd_card_present  # True | False | None
 ```
 
 Read from the cloud attributes (`SDcardExistFlag`, falling back to

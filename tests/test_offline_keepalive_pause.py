@@ -71,9 +71,7 @@ def test_offline_device_resumes_when_back_online(monkeypatch):
             stub.status.online = True
 
         t0 = time.monotonic()
-        await asyncio.gather(
-            CameraMixin._backoff_or_offline_pause(stub, 0.01), flip()
-        )
+        await asyncio.gather(CameraMixin._backoff_or_offline_pause(stub, 0.01), flip())
         return time.monotonic() - t0
 
     took = _run(scenario())
@@ -92,9 +90,7 @@ def test_offline_pause_exits_when_streaming_stops(monkeypatch):
             stub._streaming_active = False
 
         t0 = time.monotonic()
-        await asyncio.gather(
-            CameraMixin._backoff_or_offline_pause(stub, 0.01), stop()
-        )
+        await asyncio.gather(CameraMixin._backoff_or_offline_pause(stub, 0.01), stop())
         return time.monotonic() - t0
 
     took = _run(scenario())

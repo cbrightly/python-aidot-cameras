@@ -45,8 +45,8 @@ def test_only_a_candidate_that_actually_decodes_is_chosen(monkeypatch):
     monkeypatch.setattr(hwaccel, "_make_sample", lambda codec, path: True)
     # Everything hardware fails on real input; software works and is slower.
     monkeypatch.setattr(
-        hwaccel, "_try_decoder",
-        lambda cand, sample: 1.0 if not cand else None)
+        hwaccel, "_try_decoder", lambda cand, sample: 1.0 if not cand else None
+    )
     assert hwaccel.probe_decoder("h264", force=True) == []
 
 
@@ -56,7 +56,8 @@ def test_a_working_faster_decoder_wins(monkeypatch):
     monkeypatch.setattr(hwaccel, "_make_sample", lambda codec, path: True)
     times = {("-c:v", "h264_v4l2m2m"): 0.2, (): 1.0}
     monkeypatch.setattr(
-        hwaccel, "_try_decoder", lambda cand, sample: times.get(tuple(cand)))
+        hwaccel, "_try_decoder", lambda cand, sample: times.get(tuple(cand))
+    )
     assert hwaccel.probe_decoder("h264", force=True) == ["-c:v", "h264_v4l2m2m"]
 
 
@@ -70,16 +71,19 @@ def test_an_hwaccel_method_can_win(monkeypatch):
     monkeypatch.setattr(hwaccel, "_make_sample", lambda codec, path: True)
     times = {("-hwaccel", "videotoolbox"): 0.1, (): 1.0}
     monkeypatch.setattr(
-        hwaccel, "_try_decoder", lambda cand, sample: times.get(tuple(cand)))
+        hwaccel, "_try_decoder", lambda cand, sample: times.get(tuple(cand))
+    )
     assert hwaccel.probe_decoder("h264", force=True) == ["-hwaccel", "videotoolbox"]
 
 
 def test_hwaccel_methods_are_looked_up_in_the_right_list(monkeypatch):
     """-hwaccel names never appear in -decoders, and vice versa. Checking one
     against the other rejects every valid candidate."""
-    monkeypatch.setattr(hwaccel, "_list_names",
-                        lambda flag: {"h264_v4l2m2m"} if flag == "-decoders"
-                        else {"videotoolbox"})
+    monkeypatch.setattr(
+        hwaccel,
+        "_list_names",
+        lambda flag: {"h264_v4l2m2m"} if flag == "-decoders" else {"videotoolbox"},
+    )
     assert hwaccel._available(["-hwaccel", "videotoolbox"]) is True
     assert hwaccel._available(["-hwaccel", "h264_v4l2m2m"]) is False
     assert hwaccel._available(["-c:v", "h264_v4l2m2m"]) is True
@@ -103,7 +107,7 @@ def test_verdict_is_cached_and_not_reprobed(monkeypatch):
     assert n > 0
     # Second and third calls must not probe again.
     hwaccel.probe_decoder("h264")
-    monkeypatch.setattr(hwaccel, "_cache_mem", {})   # drop the memo, keep disk
+    monkeypatch.setattr(hwaccel, "_cache_mem", {})  # drop the memo, keep disk
     hwaccel.probe_decoder("h264")
     assert len(calls) == n
 
@@ -113,8 +117,9 @@ def test_upgrading_ffmpeg_invalidates_the_verdict(monkeypatch):
     monkeypatch.setattr(hwaccel, "_available", lambda cand: True)
     monkeypatch.setattr(hwaccel, "_plausible", lambda cand: True)
     monkeypatch.setattr(hwaccel, "_make_sample", lambda codec, path: True)
-    monkeypatch.setattr(hwaccel, "_try_decoder",
-                        lambda cand, sample: 1.0 if not cand else None)
+    monkeypatch.setattr(
+        hwaccel, "_try_decoder", lambda cand, sample: 1.0 if not cand else None
+    )
     monkeypatch.setattr(hwaccel, "_ffmpeg_identity", lambda: "build-A")
     assert hwaccel.probe_decoder("h264") == []
 
@@ -122,23 +127,27 @@ def test_upgrading_ffmpeg_invalidates_the_verdict(monkeypatch):
     monkeypatch.setattr(hwaccel, "_cache_mem", {})
     monkeypatch.setattr(hwaccel, "_ffmpeg_identity", lambda: "build-B")
     monkeypatch.setattr(
-        hwaccel, "_try_decoder",
-        lambda cand, sample: (seen.append(tuple(cand)), 1.0 if not cand else None)[1])
+        hwaccel,
+        "_try_decoder",
+        lambda cand, sample: (seen.append(tuple(cand)), 1.0 if not cand else None)[1],
+    )
     assert hwaccel.probe_decoder("h264") == []
     assert seen, "a different ffmpeg build must be re-probed, not trusted"
 
 
 def test_disable_switch_stays_on_software(monkeypatch):
     monkeypatch.setenv("AIDOT_DISABLE_HWACCEL", "1")
-    monkeypatch.setattr(hwaccel, "_try_decoder",
-                        lambda cand, sample: pytest.fail("must not probe"))
+    monkeypatch.setattr(
+        hwaccel, "_try_decoder", lambda cand, sample: pytest.fail("must not probe")
+    )
     assert hwaccel.probe_decoder("h264") == []
 
 
 def test_explicit_override_is_honoured(monkeypatch):
     monkeypatch.setenv("AIDOT_VIDEO_DECODER", "h264_something")
-    monkeypatch.setattr(hwaccel, "_try_decoder",
-                        lambda cand, sample: pytest.fail("must not probe"))
+    monkeypatch.setattr(
+        hwaccel, "_try_decoder", lambda cand, sample: pytest.fail("must not probe")
+    )
     assert hwaccel.probe_decoder("h264") == ["-c:v", "h264_something"]
 
 
@@ -164,7 +173,7 @@ def test_warm_cache_primes_memory_from_disk(monkeypatch):
     monkeypatch.setattr(hwaccel, "_ffmpeg_identity", lambda: "b")
     key = f"v{hwaccel._CACHE_SCHEMA}:h264:b"
     hwaccel._save_cache({key: ["-c:v", "h264_v4l2m2m"]})
-    assert hwaccel.cached_decoder("h264") is None      # not yet in memory
+    assert hwaccel.cached_decoder("h264") is None  # not yet in memory
     monkeypatch.setattr(hwaccel, "probe_decoder", lambda c: [])
     hwaccel.warm_decoder_cache(("h264",)).join(timeout=30)
     assert hwaccel.cached_decoder("h264") == ["-c:v", "h264_v4l2m2m"]
@@ -176,18 +185,19 @@ def test_software_verdict_is_not_confused_with_unprobed(monkeypatch):
     monkeypatch.setattr(hwaccel, "_available", lambda cand: True)
     monkeypatch.setattr(hwaccel, "_plausible", lambda cand: True)
     monkeypatch.setattr(hwaccel, "_make_sample", lambda codec, path: True)
-    monkeypatch.setattr(hwaccel, "_try_decoder",
-                        lambda cand, sample: 1.0 if not cand else None)
-    assert hwaccel.cached_decoder("h264") is None      # nothing probed yet
-    assert hwaccel.probe_decoder("h264") == []         # proven software
-    assert hwaccel.cached_decoder("h264") == []        # memoised, not None
+    monkeypatch.setattr(
+        hwaccel, "_try_decoder", lambda cand, sample: 1.0 if not cand else None
+    )
+    assert hwaccel.cached_decoder("h264") is None  # nothing probed yet
+    assert hwaccel.probe_decoder("h264") == []  # proven software
+    assert hwaccel.cached_decoder("h264") == []  # memoised, not None
 
 
 def test_a_stale_schema_entry_is_ignored(monkeypatch):
     """An older cache wrote a bare decoder NAME where a list now belongs.
     Reading that back as a verdict would put a string into the ffmpeg argv."""
     monkeypatch.setattr(hwaccel, "_ffmpeg_identity", lambda: "b")
-    hwaccel._save_cache({"h264:b": "h264_v4l2m2m"})    # v1-shaped entry
+    hwaccel._save_cache({"h264:b": "h264_v4l2m2m"})  # v1-shaped entry
     monkeypatch.setattr(hwaccel, "probe_decoder", lambda c: [])
     hwaccel.warm_decoder_cache(("h264",)).join(timeout=30)
     assert hwaccel.cached_decoder("h264") is None
@@ -204,7 +214,8 @@ def _before_input(argv):
 
 
 @pytest.mark.parametrize(
-    "dec", [["-c:v", "h264_v4l2m2m"], ["-hwaccel", "videotoolbox"]])
+    "dec", [["-c:v", "h264_v4l2m2m"], ["-hwaccel", "videotoolbox"]]
+)
 def test_decoder_goes_before_the_input(dec):
     """Both forms are INPUT options. After ``-i`` ffmpeg reads ``-c:v`` as an
     ENCODER, and ``-hwaccel`` has no meaning there at all."""
@@ -234,7 +245,8 @@ def test_drain_still_decodes():
 def test_copy_destinations_never_get_a_decoder(kwargs, why, monkeypatch):
     monkeypatch.setenv("AIDOT_ALLOW_LAN_SERVE", "1")
     argv = _build_sdes_serve_cmd(
-        sdp_path="/tmp/x.sdp", video_decoder=["-hwaccel", "videotoolbox"], **kwargs)
+        sdp_path="/tmp/x.sdp", video_decoder=["-hwaccel", "videotoolbox"], **kwargs
+    )
     assert "-hwaccel" not in _before_input(argv), why
 
 
@@ -242,7 +254,8 @@ def test_no_verdict_leaves_ffmpeg_to_choose():
     """A cold cache must not change behaviour - the caller passes None and the
     argv is exactly what it always was."""
     assert _build_sdes_serve_cmd(sdp_path="/tmp/x.sdp") == _build_sdes_serve_cmd(
-        sdp_path="/tmp/x.sdp", video_decoder=None)
+        sdp_path="/tmp/x.sdp", video_decoder=None
+    )
 
 
 def test_cached_decoder_touches_neither_disk_nor_subprocess(monkeypatch):
@@ -250,12 +263,15 @@ def test_cached_decoder_touches_neither_disk_nor_subprocess(monkeypatch):
     file. Home Assistant detects a blocking open() on the loop and reports it as
     a stability problem - it did, on a shipped release. The disk cache is read
     by warm_decoder_cache() on its own thread instead."""
-    monkeypatch.setattr(hwaccel, "_load_cache",
-                        lambda: pytest.fail("must not read the cache file"))
-    monkeypatch.setattr(hwaccel, "_try_decoder",
-                        lambda cand, sample: pytest.fail("must not probe"))
-    monkeypatch.setattr(hwaccel, "_make_sample",
-                        lambda codec, path: pytest.fail("must not probe"))
+    monkeypatch.setattr(
+        hwaccel, "_load_cache", lambda: pytest.fail("must not read the cache file")
+    )
+    monkeypatch.setattr(
+        hwaccel, "_try_decoder", lambda cand, sample: pytest.fail("must not probe")
+    )
+    monkeypatch.setattr(
+        hwaccel, "_make_sample", lambda codec, path: pytest.fail("must not probe")
+    )
     assert hwaccel.cached_decoder("h264") is None  # nothing memoised, no I/O
 
 
@@ -267,12 +283,16 @@ def test_no_possible_hardware_spawns_nothing(monkeypatch):
     installs - must be answered for free. Encoding a sample it would never
     decode was the single largest cost here: 14s of wall clock on a Pi 4."""
     monkeypatch.setattr(hwaccel, "_plausible", lambda cand: not cand)
-    monkeypatch.setattr(hwaccel, "_make_sample",
-                        lambda codec, path: pytest.fail("must not encode"))
-    monkeypatch.setattr(hwaccel, "_try_decoder",
-                        lambda cand, sample: pytest.fail("must not spawn ffmpeg"))
+    monkeypatch.setattr(
+        hwaccel, "_make_sample", lambda codec, path: pytest.fail("must not encode")
+    )
+    monkeypatch.setattr(
+        hwaccel,
+        "_try_decoder",
+        lambda cand, sample: pytest.fail("must not spawn ffmpeg"),
+    )
     assert hwaccel.probe_decoder("h264") == []
-    assert hwaccel.cached_decoder("h264") == []      # and it is remembered
+    assert hwaccel.cached_decoder("h264") == []  # and it is remembered
 
 
 def test_software_is_not_timed_when_no_hardware_qualifies(monkeypatch):
@@ -285,7 +305,7 @@ def test_software_is_not_timed_when_no_hardware_qualifies(monkeypatch):
 
     def _try(cand, sample):
         tried.append(tuple(cand))
-        return                           # nothing decodes here
+        return  # nothing decodes here
 
     monkeypatch.setattr(hwaccel, "_try_decoder", _try)
     assert hwaccel.probe_decoder("h264") == []
@@ -300,23 +320,25 @@ def test_software_is_timed_when_hardware_qualifies(monkeypatch):
     monkeypatch.setattr(hwaccel, "_plausible", lambda cand: True)
     monkeypatch.setattr(hwaccel, "_make_sample", lambda codec, path: True)
     times = {("-hwaccel", "videotoolbox"): 0.9, (): 0.3}
-    monkeypatch.setattr(hwaccel, "_try_decoder",
-                        lambda cand, sample: times.get(tuple(cand)))
+    monkeypatch.setattr(
+        hwaccel, "_try_decoder", lambda cand, sample: times.get(tuple(cand))
+    )
     assert hwaccel.probe_decoder("h264") == [], "slower hardware must not win"
 
 
 def test_impossible_hardware_is_ruled_out_without_spawning(monkeypatch):
     """Only the impossible is ruled out, never the merely unlikely."""
     monkeypatch.setattr(hwaccel.glob, "glob", lambda pat: [])
-    assert hwaccel._plausible(["-c:v", "h264_cuvid"]) is False   # no /dev/nvidia*
-    assert hwaccel._plausible(["-hwaccel", "vaapi"]) is False    # no /dev/dri
-    assert hwaccel._plausible([]) is True                        # software
+    assert hwaccel._plausible(["-c:v", "h264_cuvid"]) is False  # no /dev/nvidia*
+    assert hwaccel._plausible(["-hwaccel", "vaapi"]) is False  # no /dev/dri
+    assert hwaccel._plausible([]) is True  # software
     monkeypatch.setattr(hwaccel.glob, "glob", lambda pat: ["/dev/video10"])
-    assert hwaccel._plausible(["-c:v", "h264_v4l2m2m"]) is True   # device present
+    assert hwaccel._plausible(["-c:v", "h264_v4l2m2m"]) is True  # device present
 
 
 def test_only_h264_is_warmed_by_default():
     """H.265 is not ingested, and probing it doubled the cost of this module."""
     import inspect
+
     default = inspect.signature(hwaccel.warm_decoder_cache).parameters["codecs"].default
     assert default == ("h264",)

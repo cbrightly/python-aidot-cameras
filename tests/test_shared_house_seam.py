@@ -7,6 +7,7 @@ filter stays on by default and both directions are locked here: unset must be
 byte-identical to today (the shared house is never even queried), and set must
 surface its devices.
 """
+
 import asyncio
 import os
 import sys
@@ -17,7 +18,7 @@ from aidot_cameras.client import CameraClient, _include_shared_houses
 from aidot_cameras.const import CONF_DEVICE_LIST
 from upstream_shapes import stub_account_http
 
-_OWNED_EMPTY = 2082907      # the CI account's own house: real, and empty
+_OWNED_EMPTY = 2082907  # the CI account's own house: real, and empty
 _SHARED_WITH_CAMERAS = 51744
 
 
@@ -43,8 +44,12 @@ class _FakeCloudApi:
         if house_id != _SHARED_WITH_CAMERAS:
             return []
         return [
-            {"id": "cam1", "modelId": "LK.IPC.A000088",
-             "productId": "p1", "aesKey": ["k"]},
+            {
+                "id": "cam1",
+                "modelId": "LK.IPC.A000088",
+                "productId": "p1",
+                "aesKey": ["k"],
+            },
         ]
 
     async def get_products(self, product_ids):

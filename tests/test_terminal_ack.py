@@ -6,6 +6,7 @@ be retried - and the `AidotCameraBusy` exception it drives.
 
 Runs under pytest, or standalone:  python tests/test_terminal_ack.py
 """
+
 import os
 import sys
 
@@ -16,8 +17,11 @@ from aidot_cameras.exceptions import AidotCameraBusy, AidotError
 
 
 def test_detects_minus_50002_max_streams():
-    msg = {"method": "webrtcResp", "ack": {"code": -50002, "desc": "session exceed"},
-           "payload": {"peerid": "p"}}
+    msg = {
+        "method": "webrtcResp",
+        "ack": {"code": -50002, "desc": "session exceed"},
+        "payload": {"peerid": "p"},
+    }
     assert _terminal_webrtc_ack(msg) == (-50002, "session exceed")
 
 
@@ -27,8 +31,11 @@ def test_detects_minus_50015_sd_cap():
 
 
 def test_success_ack_is_not_terminal():
-    msg = {"method": "webrtcResp", "ack": {"code": 200, "desc": "success"},
-           "payload": {"offer": {"type": "answer", "sdp": "v=0..."}}}
+    msg = {
+        "method": "webrtcResp",
+        "ack": {"code": 200, "desc": "success"},
+        "payload": {"offer": {"type": "answer", "sdp": "v=0..."}},
+    }
     assert _terminal_webrtc_ack(msg) is None
 
 
@@ -38,7 +45,10 @@ def test_missing_ack_is_not_terminal():
 
 def test_terminal_code_on_other_method_is_ignored():
     # Scope is webrtcResp only - a -50002 on a different method must not trip it.
-    assert _terminal_webrtc_ack({"method": "livePlayResp", "ack": {"code": -50002}}) is None
+    assert (
+        _terminal_webrtc_ack({"method": "livePlayResp", "ack": {"code": -50002}})
+        is None
+    )
 
 
 def test_non_dict_inputs_are_safe():
@@ -47,7 +57,10 @@ def test_non_dict_inputs_are_safe():
 
 
 def test_desc_defaults_to_empty_string():
-    assert _terminal_webrtc_ack({"method": "webrtcResp", "ack": {"code": -50002}}) == (-50002, "")
+    assert _terminal_webrtc_ack({"method": "webrtcResp", "ack": {"code": -50002}}) == (
+        -50002,
+        "",
+    )
 
 
 def test_terminal_set_is_exactly_the_two_known_codes():
@@ -63,7 +76,9 @@ def test_exception_carries_code_and_is_aidot_error():
 
 
 if __name__ == "__main__":
-    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    fns = [
+        v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)
+    ]
     passed = 0
     for fn in fns:
         fn()

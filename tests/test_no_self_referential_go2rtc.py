@@ -9,12 +9,14 @@ Seen live after the integration began passing go2rtc_url: one camera's stream ha
 two producers, one of them `rtsp://127.0.0.1:8554/aidot_0a1b2c3d4e5f` - its own
 address - and go2rtc returned HTTP 200 with a zero-byte frame for it.
 """
+
 from aidot_cameras.camera.client import _is_self_referential_source as loops
 
 
 def test_push_url_for_the_same_stream_is_self_referential():
-    assert loops("rtsp://127.0.0.1:8554/aidot_0a1b2c3d4e5f",
-                 "aidot_0a1b2c3d4e5f") is True
+    assert (
+        loops("rtsp://127.0.0.1:8554/aidot_0a1b2c3d4e5f", "aidot_0a1b2c3d4e5f") is True
+    )
 
 
 def test_push_url_for_a_different_stream_is_fine():
@@ -24,8 +26,13 @@ def test_push_url_for_a_different_stream_is_fine():
 
 def test_the_http_serve_url_is_a_real_source():
     # PULL mode: go2rtc fetches from the library's own serve. Must still register.
-    assert loops("http://127.0.0.1:18931/00000000000000000000000000000001.ts",
-                 "aidot_000000000000") is False
+    assert (
+        loops(
+            "http://127.0.0.1:18931/00000000000000000000000000000001.ts",
+            "aidot_000000000000",
+        )
+        is False
+    )
 
 
 def test_rtsps_is_covered_too():

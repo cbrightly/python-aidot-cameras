@@ -26,7 +26,10 @@ _SRC = pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras" / "camera"
 def _annotation_of(path, func_name, arg_name):
     tree = ast.parse(path.read_text())
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func_name:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == func_name
+        ):
             args = node.args.args + node.args.kwonlyargs
             for a in args:
                 if a.arg == arg_name and a.annotation is not None:
@@ -59,6 +62,7 @@ def test_open_webrtc_stream_does_not_annotate_on_frame_as_the_dataclass():
     )
 
     src = path.read_text()
-    assert f"from av import VideoFrame as {inner}" in src or "from av import VideoFrame" in src, (
-        f"on_frame is annotated {inner!r} but that name is not imported from av"
-    )
+    assert (
+        f"from av import VideoFrame as {inner}" in src
+        or "from av import VideoFrame" in src
+    ), f"on_frame is annotated {inner!r} but that name is not imported from av"

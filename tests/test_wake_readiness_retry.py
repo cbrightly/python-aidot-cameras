@@ -18,6 +18,7 @@ Two things are deliberately NOT done and are locked in below:
   peerid. A fresh peerid registers another camera-side session, which is what
   wedged the L2 into a wake-then-sleep loop before 0.12.16.
 """
+
 import os
 import sys
 
@@ -26,8 +27,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import aidot_cameras.camera.client as cc
 from aidot_cameras.camera.constants import _LIVE_PLAY_NOT_READY
 
-_CAM = next(v for v in vars(cc).values()
-            if isinstance(v, type) and "_live_play_not_ready" in v.__dict__)
+_CAM = next(
+    v
+    for v in vars(cc).values()
+    if isinstance(v, type) and "_live_play_not_ready" in v.__dict__
+)
 
 
 class _Info:
@@ -45,6 +49,7 @@ def _cam(model_id="LK.IPC.A001513", code=None):
 
 
 # --- recording the code ------------------------------------------------------ #
+
 
 def test_note_records_the_code():
     c = _cam()
@@ -65,7 +70,7 @@ def test_note_survives_a_malformed_payload():
     c = _cam(code=_LIVE_PLAY_NOT_READY)
     for _bad in (None, [], "nope", 7):
         c._note_live_play_resp(_bad)
-    c._note_live_play_resp({})           # no "code" key
+    c._note_live_play_resp({})  # no "code" key
     assert c._live_play_not_ready() is False
 
 
@@ -75,6 +80,7 @@ def test_an_ok_code_is_not_not_ready():
 
 
 # --- classifying a finished session ------------------------------------------ #
+
 
 def test_burst_counts_up_while_the_camera_keeps_waking():
     c = _cam(code=_LIVE_PLAY_NOT_READY)
@@ -110,6 +116,7 @@ def test_evidence_detected_battery_gets_wake_retries():
 
 # --- the delay --------------------------------------------------------------- #
 
+
 def test_no_burst_hands_back_to_the_pacer():
     assert _CAM._not_ready_retry_delay(0) == (0.0, False)
 
@@ -132,6 +139,7 @@ def test_burst_stays_inside_one_peerid_window():
     # the SAME peerid; a fresh one registers another camera-side session, which
     # the camera frees only slowly (0.12.16).
     import inspect
+
     _body = inspect.getsource(cc.CameraMixin._sdes_keepalive_loop_inner)
     # One module-level bound so this loop and its tests share a number. It is
     # NOT shared with the DTLS serve loop, which does not reuse peer ids across
@@ -144,6 +152,7 @@ def test_fast_retry_is_much_shorter_than_the_pacer_floor():
     # The whole point: the pacer's floor is 10 s and escalates to 300 s; a waking
     # camera should be re-tried well inside that.
     import inspect
+
     _body = inspect.getsource(cc.CameraMixin._sdes_keepalive_loop_inner)
     assert "_MIN_DELAY = 10.0" in _body
     _delay, _fast = _CAM._not_ready_retry_delay(1, burst_max=3)
@@ -152,12 +161,14 @@ def test_fast_retry_is_much_shorter_than_the_pacer_floor():
 
 # --- what must NOT change ---------------------------------------------------- #
 
+
 def test_not_ready_never_aborts_an_open():
     # 0.12.15: -50019 is benign and the camera recovers via ICE. Only an explicit
     # livePlay=0 is a refusal. Guard the SDES open against a regression that turns
     # the code back into a fast-fail.
     import inspect
     import aidot_cameras.camera.sdes_open as so
+
     _body = inspect.getsource(so._SdesOpenMixin)
     _idx = _body.find("_LIVE_PLAY_NOT_READY")
     assert _idx != -1, "the SDES open no longer references the not-ready code"

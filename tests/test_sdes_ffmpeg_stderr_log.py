@@ -6,6 +6,7 @@ ffmpeg stderr on every serve retry. That must log at DEBUG (not spam WARNING).
 But a genuine ffmpeg error - whether media was flowing, or an unexpected failure
 with no media - still logs at WARNING so real problems are not hidden.
 """
+
 import logging
 import types
 
@@ -13,9 +14,7 @@ from aidot_cameras.camera.sdes import SdesSession
 
 
 def _log_fn(last_media, device_id="dev-abc"):
-    obj = types.SimpleNamespace(
-        last_media_monotonic=last_media, _device_id=device_id
-    )
+    obj = types.SimpleNamespace(last_media_monotonic=last_media, _device_id=device_id)
     return SdesSession._log_ffmpeg_stderr.__get__(obj)
 
 
@@ -24,8 +23,10 @@ def _stderr_records(caplog):
 
 
 def test_no_media_expected_shape_logs_debug(caplog):
-    for msg in (b"...Output file is empty, nothing was encoded",
-                b"Could not find codec parameters for stream 1 (Video: h264, none)"):
+    for msg in (
+        b"...Output file is empty, nothing was encoded",
+        b"Could not find codec parameters for stream 1 (Video: h264, none)",
+    ):
         caplog.clear()
         with caplog.at_level(logging.DEBUG, logger="aidot_cameras.camera.sdes"):
             _log_fn(0.0)(msg)

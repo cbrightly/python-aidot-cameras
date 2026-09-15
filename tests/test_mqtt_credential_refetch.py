@@ -13,6 +13,7 @@ password, so the Python side looks fine and the only symptom is the broker
 refusing every connect (rc=134) - no WebRTC signaling, therefore no live video,
 while snapshots keep working.
 """
+
 import asyncio
 
 from aidot_cameras.device_client import CameraDeviceClient
@@ -21,10 +22,10 @@ from aidot_cameras.device_client import CameraDeviceClient
 def _device_client(login_info: dict) -> CameraDeviceClient:
     """A camera device client with just enough state for the credential path."""
     c = CameraDeviceClient.__new__(CameraDeviceClient)
-    c._user_info = login_info          # THE account-shared dict, by identity
+    c._user_info = login_info  # THE account-shared dict, by identity
     c._smarthome_auth = None
     c._mqtt_credential_refresh_cb = None
-    c._mqtt_url = "wss://broker.example/mqtt"   # keeps strategy 3 off the network
+    c._mqtt_url = "wss://broker.example/mqtt"  # keeps strategy 3 off the network
     c.user_id = "u1"
     return c
 
@@ -63,7 +64,7 @@ def test_no_fetch_when_the_password_is_already_present():
     client.set_mqtt_credential_refresh_cb(_fetch)
     auth = asyncio.run(client._async_get_smarthome_auth())
 
-    assert calls == []                              # no needless rotation
+    assert calls == []  # no needless rotation
     assert auth["mqttPassword"] == "CURRENT"
 
 
@@ -77,7 +78,7 @@ def test_a_failing_fetch_degrades_instead_of_raising():
 
     client.set_mqtt_credential_refresh_cb(_fetch)
     auth = asyncio.run(client._async_get_smarthome_auth())
-    assert auth is not None and auth["mqttPassword"] == "AT"   # strategy 4
+    assert auth is not None and auth["mqttPassword"] == "AT"  # strategy 4
 
 
 def test_a_siblings_stale_cache_loses_to_the_shared_login_info():
@@ -88,10 +89,13 @@ def test_a_siblings_stale_cache_loses_to_the_shared_login_info():
     login_info = {"id": "u1", "accessToken": "AT", "mqttPassword": "FRESH"}
     client = _device_client(login_info)
     client._smarthome_auth = {
-        "mqttUser": "u1", "mqttPassword": "DEAD", "userId": "u1", "raw": {},
+        "mqttUser": "u1",
+        "mqttPassword": "DEAD",
+        "userId": "u1",
+        "raw": {},
     }
 
-    async def _fetch():   # must not be needed - login_info already has one
+    async def _fetch():  # must not be needed - login_info already has one
         raise AssertionError("fetched despite a usable shared password")
 
     client.set_mqtt_credential_refresh_cb(_fetch)
@@ -105,7 +109,10 @@ def test_a_cache_with_no_shared_counterpart_is_still_honoured():
     login_info = {"id": "u1", "accessToken": "AT"}
     client = _device_client(login_info)
     client._smarthome_auth = {
-        "mqttUser": "u1", "mqttPassword": "FROM-GETUSER", "userId": "u1", "raw": {},
+        "mqttUser": "u1",
+        "mqttPassword": "FROM-GETUSER",
+        "userId": "u1",
+        "raw": {},
     }
 
     async def _fetch():
@@ -128,7 +135,7 @@ def test_concurrent_callers_coalesce_into_one_fetch():
 
     async def _fetch_user_config():
         fetches.append(1)
-        await asyncio.sleep(0)      # yield, so the racers all pile up
+        await asyncio.sleep(0)  # yield, so the racers all pile up
 
     account._async_fetch_user_config = _fetch_user_config
 
@@ -175,11 +182,13 @@ def test_a_sibling_cache_that_came_from_login_info_is_treated_as_stale():
     # dead one WITH an empty login_info.  If that counts as "nothing to disagree
     # with", B rebuilds its client with the dead password and is refused too -
     # once per camera, and an unexercised camera keeps the poison indefinitely.
-    login_info = {"id": "u1", "accessToken": "AT"}      # password just popped
+    login_info = {"id": "u1", "accessToken": "AT"}  # password just popped
     client = _device_client(login_info)
     client._smarthome_auth = {
-        "mqttUser": "u1", "mqttPassword": "DEAD", "userId": "u1",
-        "raw": {"source": "login_info.mqttPassword"},   # the discriminator
+        "mqttUser": "u1",
+        "mqttPassword": "DEAD",
+        "userId": "u1",
+        "raw": {"source": "login_info.mqttPassword"},  # the discriminator
     }
 
     async def _fetch():
@@ -203,12 +212,12 @@ def test_the_refetch_floor_stops_a_hammering_loop():
 
     async def _drive():
         loop = asyncio.get_running_loop()
-        client._mqtt_refused_at = loop.time()     # refused just now
+        client._mqtt_refused_at = loop.time()  # refused just now
         await client._async_refresh_mqtt_credential()
-        assert calls == []                        # floored
-        client._mqtt_refused_at = loop.time() - 3600   # long past
+        assert calls == []  # floored
+        client._mqtt_refused_at = loop.time() - 3600  # long past
         await client._async_refresh_mqtt_credential()
-        assert calls == [1]                       # allowed again
+        assert calls == [1]  # allowed again
 
     asyncio.run(_drive())
 
@@ -218,14 +227,18 @@ def test_the_user_config_blob_kept_for_client_id_carries_no_password():
     # it reaches the config entry - one level below the key that was stripped.
     from aidot_cameras.client import _without_mqtt_password
 
-    out = _without_mqtt_password({
-        "mqttPassword": "P", "mqqtPwd": "P", "mqttPwd": "P",
-        "mqttClientId": "app-u1",
-        "mqtt": {"password": "P", "clientId": "app-u1"},
-    })
+    out = _without_mqtt_password(
+        {
+            "mqttPassword": "P",
+            "mqqtPwd": "P",
+            "mqttPwd": "P",
+            "mqttClientId": "app-u1",
+            "mqtt": {"password": "P", "clientId": "app-u1"},
+        }
+    )
     assert "mqttPassword" not in out and "mqqtPwd" not in out
     assert "mqttPwd" not in out
-    assert out["mqttClientId"] == "app-u1"          # the only value read back
+    assert out["mqttClientId"] == "app-u1"  # the only value read back
     assert "password" not in out["mqtt"]
     assert out["mqtt"]["clientId"] == "app-u1"
     assert "P" not in repr(out)
@@ -243,20 +256,21 @@ def test_a_refused_persistent_client_stops_reconnecting_and_releases_waiters():
 
     fired = []
     pm._on_auth_failure = fired.append
-    pm._on_connect(None, None, None, 134)     # MQTT5 "not authorized"
+    pm._on_connect(None, None, None, 134)  # MQTT5 "not authorized"
 
     assert fired == [134]
     assert pm._auth_refused.is_set()
-    assert not pm._connected.is_set()         # nothing may publish into it
+    assert not pm._connected.is_set()  # nothing may publish into it
 
     pm.retire()
     assert pm._retired
-    assert pm._on_auth_failure is None        # cannot re-fire from a retired one
+    assert pm._on_auth_failure is None  # cannot re-fire from a retired one
     # A waiter now returns immediately instead of blocking for the timeout, and
     # crucially without rebuilding: retire() nulls _client, which on its own
     # looks exactly like "never started" and would reconnect with the dead
     # password.
     import time
+
     started = time.monotonic()
     assert pm._ensure_started_sync(timeout=5.0) is False
     assert time.monotonic() - started < 1.0
@@ -275,8 +289,8 @@ def test_a_password_already_leaked_into_a_stored_entry_is_not_carried_forward():
     client.login_info = {
         "id": "u1",
         "accessToken": "AT",
-        "mqttPassword": "P",                     # top level, stripped already
-        "_userConfigRaw": {                      # the nested copy, from disk
+        "mqttPassword": "P",  # top level, stripped already
+        "_userConfigRaw": {  # the nested copy, from disk
             "mqtt": {"password": "P", "clientId": "app-u1"},
             "mqttPassword": "P",
             "mqttClientId": "app-u1",
@@ -284,5 +298,5 @@ def test_a_password_already_leaked_into_a_stored_entry_is_not_carried_forward():
     }
     out = CameraClient.serializable_login_info(client)
     assert "P" not in repr(out)
-    assert out["_userConfigRaw"]["mqttClientId"] == "app-u1"   # still usable
+    assert out["_userConfigRaw"]["mqttClientId"] == "app-u1"  # still usable
     assert out["_userConfigRaw"]["mqtt"]["clientId"] == "app-u1"

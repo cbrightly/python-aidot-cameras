@@ -27,6 +27,7 @@ slow attempt is never mistaken for a stalled one.  A warm camera never reaches
 this at all: it has answered before the media wait begins, which disarms the
 detector.  A camera that says nothing whatsoever keeps its full 75s window.
 """
+
 import os
 import sys
 import time
@@ -58,6 +59,7 @@ def _due(**kw):
 # The case it exists for
 # --------------------------------------------------------------------------- #
 
+
 def test_a_camera_that_showed_up_only_after_the_wait_began_is_abandoned():
     """The cold open: nothing from the camera when the wait started, it appears
     mid-wait, the grace passes, and there is still no media."""
@@ -75,6 +77,7 @@ def test_the_grace_has_to_pass_first():
 # --------------------------------------------------------------------------- #
 # Everything it must not touch
 # --------------------------------------------------------------------------- #
+
 
 def test_a_warm_camera_is_never_abandoned():
     """A warm camera answers livePlayResp before the media wait even begins, so
@@ -112,6 +115,7 @@ def test_a_camera_seen_before_the_wait_stays_disarmed_even_if_it_talks_again():
 # --------------------------------------------------------------------------- #
 # The shipped grace
 # --------------------------------------------------------------------------- #
+
 
 def test_the_shipped_grace_clears_a_healthy_attempt_by_a_margin():
     """Bounded from both sides.  Below by the healthy distribution - cold opens

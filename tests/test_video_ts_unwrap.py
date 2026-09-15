@@ -54,7 +54,7 @@ def test_the_shift_is_undone_for_EVERY_later_frame():
     leave everything after it wrong, which is why this is a running offset.
     """
     raw = [0, 6030]
-    raw.append(raw[-1] - 6030 + _TS_MODULO)      # the artifact
+    raw.append(raw[-1] - 6030 + _TS_MODULO)  # the artifact
     for _ in range(5):
         raw.append(raw[-1] + 6030)
     out = _feed(raw)
@@ -84,6 +84,6 @@ def test_the_measured_sequence_recovers_the_real_frame_rate():
     assert raw[-1] - raw[0] > 9e10, "the raw span really is ~94 billion"
     out = _feed(raw)
     steps = [b - a for a, b in zip(out, out[1:])]
-    assert not any(abs(s) > 2 ** 31 for s in steps), "no artifact survives"
+    assert not any(abs(s) > 2**31 for s in steps), "no artifact survives"
     fps = len(out) / ((max(out) - min(out)) / 90000)
     assert 14.5 < fps < 16.0, f"expected about 15.3 fps, got {fps:.1f}"

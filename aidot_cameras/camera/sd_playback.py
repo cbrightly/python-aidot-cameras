@@ -16,6 +16,7 @@ second caller value. The channel comes from `KVSWebRTCChannel.sdRecordPlay`,
 which allocates it as `sdChannelId += 1` wrapping 26 -> 1 before every play -
 so a real request never carries channel 0.
 """
+
 import struct
 from typing import Any, NamedTuple, Optional
 
@@ -68,8 +69,9 @@ class PlaycontrolReply(NamedTuple):
     second: int
 
 
-def playcontrol_payload(command: int, record: Any, *, sd_channel: int = 1,
-                        param: int = 0) -> bytes:
+def playcontrol_payload(
+    command: int, record: Any, *, sd_channel: int = 1, param: int = 0
+) -> bytes:
     """The 24 bytes for one playback command against one record.
 
     ``sd_channel`` must be 1..26, the range `sdRecordPlay` actually allocates.
@@ -80,20 +82,28 @@ def playcontrol_payload(command: int, record: Any, *, sd_channel: int = 1,
     """
     if not _MIN_SD_CHANNEL <= sd_channel <= _MAX_SD_CHANNEL:
         raise ValueError(
-            f"sd_channel must be {_MIN_SD_CHANNEL}..{_MAX_SD_CHANNEL}, "
-            f"got {sd_channel}")
+            f"sd_channel must be {_MIN_SD_CHANNEL}..{_MAX_SD_CHANNEL}, got {sd_channel}"
+        )
     # Offsets 0 and 8 are always 0 in the vendor app's own call - neither is a
     # caller-chosen channel or param, whatever the (III[B) overload implies.
     head = struct.pack("<III", 0, command, 0)
     when = struct.pack(
         "<HBBBBBB",
-        record.year, record.month, record.day,
-        0,                       # wday - the camera fills its own
-        record.hour, record.minute, record.second,
+        record.year,
+        record.month,
+        record.day,
+        0,  # wday - the camera fills its own
+        record.hour,
+        record.minute,
+        record.second,
     )
     tail = struct.pack("<BB", sd_channel, param)
-    return (head + when + tail
-            + b"\x00" * (_PAYLOAD_LEN - len(head) - len(when) - len(tail)))
+    return (
+        head
+        + when
+        + tail
+        + b"\x00" * (_PAYLOAD_LEN - len(head) - len(when) - len(tail))
+    )
 
 
 def decode_playcontrol_reply(data: Optional[bytes]) -> Optional[PlaycontrolReply]:
@@ -107,6 +117,8 @@ def decode_playcontrol_reply(data: Optional[bytes]) -> Optional[PlaycontrolReply
         return None
     command, field1, field2 = struct.unpack("<III", data[:12])
     year, month, day, _wday, hour, minute, second = struct.unpack(
-        "<HBBBBBB", data[12:20])
-    return PlaycontrolReply(command, field1, field2,
-                            year, month, day, hour, minute, second)
+        "<HBBBBBB", data[12:20]
+    )
+    return PlaycontrolReply(
+        command, field1, field2, year, month, day, hour, minute, second
+    )

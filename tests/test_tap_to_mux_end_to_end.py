@@ -23,8 +23,9 @@ from aidot_cameras.camera.protocol import (
     video_pts_dts,
 )
 
-FIXTURE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       "fixtures", "tap_timestamps_a000088.txt")
+FIXTURE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "fixtures", "tap_timestamps_a000088.txt"
+)
 
 
 def _raw():
@@ -35,7 +36,7 @@ def _raw():
 def _pipeline(raw, slack=SLACK):
     st = _unwrap_state()
     corrected = [_correct_ts(st, r) for r in raw]
-    v0 = corrected[0]                      # the mux anchors on its first frame
+    v0 = corrected[0]  # the mux anchors on its first frame
     tstate = {}
     return [video_pts_dts(tstate, c - v0, slack) for c in corrected]
 
@@ -44,7 +45,7 @@ def test_the_fixture_really_contains_the_artifacts():
     """Guards the fixture: without the artifacts this proves nothing."""
     raw = _raw()
     steps = [b - a for a, b in zip(raw, raw[1:])]
-    assert sum(1 for s in steps if s > 2 ** 31) == 22
+    assert sum(1 for s in steps if s > 2**31) == 22
     assert raw[-1] - raw[0] > 9e10, "raw span is ~94 billion, i.e. 22 x 2**32"
 
 
@@ -72,7 +73,7 @@ def test_nothing_is_negative():
 def test_no_2_32_artifact_survives_into_the_container():
     dts = [d for _, d in _pipeline(_raw())]
     steps = [b - a for a, b in zip(dts, dts[1:])]
-    assert not any(s > 2 ** 31 for s in steps)
+    assert not any(s > 2**31 for s in steps)
 
 
 def test_the_corrected_media_rate_is_far_closer_to_wall_clock():

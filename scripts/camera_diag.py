@@ -79,7 +79,9 @@ async def _diag_one(client, device, hold: float) -> bool:
     t0 = time.time()
     session = None
     print(f"\n>>> {name!r} ({model})")
-    print(f"    wifi_rssi: {rssi} dBm" if rssi is not None else "    wifi_rssi: unknown")
+    print(
+        f"    wifi_rssi: {rssi} dBm" if rssi is not None else "    wifi_rssi: unknown"
+    )
     try:
         session = await dc.async_open_webrtc_stream(
             on_frame=lambda _f: ts.append(time.time()),
@@ -102,14 +104,20 @@ async def _diag_one(client, device, hold: float) -> bool:
         if ts:
             rel = [t - ts[0] for t in ts]
             dur = rel[-1] or 0.1
-            print(f"    frames={len(ts)} span={dur:.1f}s avg_fps={len(ts)/dur:.1f} "
-                  f"first_frame=+{ts[0]-t0:.1f}s")
+            print(
+                f"    frames={len(ts)} span={dur:.1f}s avg_fps={len(ts) / dur:.1f} "
+                f"first_frame=+{ts[0] - t0:.1f}s"
+            )
             print(f"    fps/s: {_fmt_timeline(rel, dur)}")
-            gaps = sorted(((rel[i+1]-rel[i], rel[i]) for i in range(len(rel)-1)),
-                          reverse=True)[:3]
+            gaps = sorted(
+                ((rel[i + 1] - rel[i], rel[i]) for i in range(len(rel) - 1)),
+                reverse=True,
+            )[:3]
             if gaps:
-                print("    largest gaps: " + ", ".join(
-                    f"{g:.2f}s@t={at:.1f}s" for g, at in gaps))
+                print(
+                    "    largest gaps: "
+                    + ", ".join(f"{g:.2f}s@t={at:.1f}s" for g, at in gaps)
+                )
         else:
             print("    frames=0 (NO MEDIA)")
 
@@ -117,14 +125,20 @@ async def _diag_one(client, device, hold: float) -> bool:
             ice = stats.get("ice")
             if ice:
                 for p in ice:
-                    print(f"    ICE comp{p['component']}: "
-                          f"{p['local_type']} {p['local']} <-> "
-                          f"{p['remote_type']} {p['remote']} ({p['transport']})")
+                    print(
+                        f"    ICE comp{p['component']}: "
+                        f"{p['local_type']} {p['local']} <-> "
+                        f"{p['remote_type']} {p['remote']} ({p['transport']})"
+                    )
             else:
-                print(f"    ICE: no nominated pair{' - ' + stats['ice_error'] if stats.get('ice_error') else ''}")
+                print(
+                    f"    ICE: no nominated pair{' - ' + stats['ice_error'] if stats.get('ice_error') else ''}"
+                )
             for s in stats.get("inbound", []):
-                print(f"    RTP {s['kind']:5}: recv={s['packets_received']} "
-                      f"lost={s['packets_lost']} ({s['loss_pct']}%) jitter={s['jitter']}")
+                print(
+                    f"    RTP {s['kind']:5}: recv={s['packets_received']} "
+                    f"lost={s['packets_lost']} ({s['loss_pct']}%) jitter={s['jitter']}"
+                )
             if stats.get("error"):
                 print(f"    stats error: {stats['error']}")
 
@@ -166,13 +180,19 @@ async def _run(args) -> int:
             selected = cameras
             if args.name:
                 wanted = [n.lower() for n in args.name]
-                selected = [c for c in cameras
-                            if any(w in (c.get(CONF_NAME) or "").lower() for w in wanted)]
+                selected = [
+                    c
+                    for c in cameras
+                    if any(w in (c.get(CONF_NAME) or "").lower() for w in wanted)
+                ]
             if not selected:
-                print("no cameras matched --name"); return 1
+                print("no cameras matched --name")
+                return 1
             print(f"\ndiagnosing {len(selected)} camera(s) sequentially")
-            results = [(c.get(CONF_NAME), await _diag_one(client, c, args.hold))
-                       for c in selected]
+            results = [
+                (c.get(CONF_NAME), await _diag_one(client, c, args.hold))
+                for c in selected
+            ]
 
             print("\n==== SUMMARY ====")
             for name, ok in results:
@@ -184,12 +204,21 @@ async def _run(args) -> int:
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--list", action="store_true", help="list cameras and exit")
-    p.add_argument("--name", action="append", default=[],
-                   help="diagnose only cameras whose name contains this (repeatable)")
-    p.add_argument("--hold", type=float, default=45.0,
-                   help="seconds to hold each stream (default 45)")
+    p.add_argument(
+        "--name",
+        action="append",
+        default=[],
+        help="diagnose only cameras whose name contains this (repeatable)",
+    )
+    p.add_argument(
+        "--hold",
+        type=float,
+        default=45.0,
+        help="seconds to hold each stream (default 45)",
+    )
     args = p.parse_args()
     return asyncio.run(_run(args))
 

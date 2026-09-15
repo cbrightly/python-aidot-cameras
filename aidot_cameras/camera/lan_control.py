@@ -102,8 +102,11 @@ async def discover_unicast(ip: str, timeout: float = 2.0) -> Optional[dict]:
         "seq": str(int(time.time() * 1000))[-9:],
         "srcAddr": "0.lan",
         "tst": int(time.time() * 1000),
-        "payload": {"extends": {}, "localCtrFlag": 1,
-                    "timestamp": str(int(time.time() * 1000))},
+        "payload": {
+            "extends": {},
+            "localCtrFlag": 1,
+            "timestamp": str(int(time.time() * 1000)),
+        },
     }
     enc = aes_encrypt(json.dumps(msg).encode(), _DISCOVER_KEY)
 
@@ -136,8 +139,9 @@ def _local_ipv4() -> Optional[str]:
         s.close()
 
 
-async def discover_subnet(cidr24: Optional[str] = None, timeout: float = 3.0,
-                          concurrency: int = 64) -> dict[str, str]:
+async def discover_subnet(
+    cidr24: Optional[str] = None, timeout: float = 3.0, concurrency: int = 64
+) -> dict[str, str]:
     """Unicast-sweep a /24 and return ``{devId: ip}`` for every camera that answers.
 
     Cameras ignore the broadcast discovery sweep but answer a unicast probe, so the
@@ -196,8 +200,12 @@ class CameraLanClient:
     are serialized and each opens/closes its own socket.
     """
 
-    def __init__(self, device: dict[str, Any], user_info: dict[str, Any],
-                 ip: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        device: dict[str, Any],
+        user_info: dict[str, Any],
+        ip: Optional[str] = None,
+    ) -> None:
         self.device_id: str = device.get("id") or device.get("devId")
         _aes = device.get("aesKey") or []
         key_str = _aes[0] if isinstance(_aes, list) and _aes else (_aes or "")
@@ -210,7 +218,7 @@ class CameraLanClient:
         self._user_id = user_info.get("id")
         self._model_id = device.get("modelId") or ""
         self._ip = ip
-        self._lock = asyncio.Lock()           # single in-flight session per camera
+        self._lock = asyncio.Lock()  # single in-flight session per camera
         self._eligible: Optional[bool] = None  # set by async_resolve
 
     # -- discovery / eligibility ------------------------------------------- #
@@ -239,7 +247,9 @@ class CameraLanClient:
         self._ip = ip
         # localCtrFlag==1 / lanMode==1 advertise local control.  Battery gating is
         # confirmed separately on the first getDevAttr (battery_remaining is None).
-        self._eligible = bool(payload.get("localCtrFlag")) or bool(payload.get("lanMode"))
+        self._eligible = bool(payload.get("localCtrFlag")) or bool(
+            payload.get("lanMode")
+        )
         return self._eligible
 
     # -- low-level session ------------------------------------------------- #
@@ -259,13 +269,19 @@ class CameraLanClient:
                     asyncio.open_connection(self._ip, _CONTROL_PORT), timeout=5.0
                 )
             except (TimeoutError, OSError) as exc:
-                raise CameraLanError(f"{self.device_id}: connect failed: {exc}") from exc
+                raise CameraLanError(
+                    f"{self.device_id}: connect failed: {exc}"
+                ) from exc
             try:
                 asc = await self._login(reader, writer)
                 replies = []
                 for msgtype, body_obj in messages(self._user_id, asc):
-                    writer.write(_pack(msgtype, aes_encrypt(
-                        json.dumps(body_obj).encode(), self._key)))
+                    writer.write(
+                        _pack(
+                            msgtype,
+                            aes_encrypt(json.dumps(body_obj).encode(), self._key),
+                        )
+                    )
                     await writer.drain()
                     # The camera may emit an intermediate frame before the
                     # ``*Resp`` (e.g. a status echo before ``setDevAttrResp``), so
@@ -290,11 +306,17 @@ class CameraLanClient:
     async def _login(self, reader, writer) -> int:
         seq = str(int(time.time() * 1000))[-9:]
         msg = {
-            "service": "device", "method": "loginReq", "seq": seq,
-            "srcAddr": self._user_id, "deviceId": self.device_id,
-            "payload": {"userId": self._user_id, "password": self._password,
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.000"),
-                        "ascNumber": 1},
+            "service": "device",
+            "method": "loginReq",
+            "seq": seq,
+            "srcAddr": self._user_id,
+            "deviceId": self.device_id,
+            "payload": {
+                "userId": self._user_id,
+                "password": self._password,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.000"),
+                "ascNumber": 1,
+            },
         }
         writer.write(_pack(1, aes_encrypt(json.dumps(msg).encode(), self._key)))
         await writer.drain()
@@ -328,19 +350,35 @@ class CameraLanClient:
 
     async def async_get_attributes(self) -> dict:
         """Poll the full device attribute set over a short-lived session."""
+
         def build(uid, asc):
-            return [(1, {"method": "getDevAttrReq", "service": "device",
-                         "clientId": "ha-" + uid, "srcAddr": "0." + uid,
-                         "seq": "g" + str(int(time.time() * 1000))[-9:],
-                         "payload": {"devId": self.device_id, "parentId": self.device_id,
-                                     "userId": uid, "password": self._password,
-                                     "attr": [], "channel": "tcp", "ascNumber": asc},
-                         "tst": int(time.time() * 1000), "deviceId": self.device_id})]
+            return [
+                (
+                    1,
+                    {
+                        "method": "getDevAttrReq",
+                        "service": "device",
+                        "clientId": "ha-" + uid,
+                        "srcAddr": "0." + uid,
+                        "seq": "g" + str(int(time.time() * 1000))[-9:],
+                        "payload": {
+                            "devId": self.device_id,
+                            "parentId": self.device_id,
+                            "userId": uid,
+                            "password": self._password,
+                            "attr": [],
+                            "channel": "tcp",
+                            "ascNumber": asc,
+                        },
+                        "tst": int(time.time() * 1000),
+                        "deviceId": self.device_id,
+                    },
+                )
+            ]
+
         replies = await self._session(build)
         if not replies:
-            raise CameraLanError(
-                f"{self.device_id}: no reply to attribute query"
-            )
+            raise CameraLanError(f"{self.device_id}: no reply to attribute query")
         return (replies[0].get("payload") or {}).get("attr") or {}
 
     async def async_set_attributes(self, attr: dict) -> bool:
@@ -348,14 +386,32 @@ class CameraLanClient:
 
         Returns True on a ``setDevAttrResp`` ack.  Raises CameraLanError on failure.
         """
+
         def build(uid, asc):
-            return [(1, {"method": "setDevAttrReq", "service": "device",
-                         "clientId": "ha-" + uid, "srcAddr": "0." + uid,
-                         "seq": "s" + str(int(time.time() * 1000))[-9:],
-                         "payload": {"devId": self.device_id, "parentId": self.device_id,
-                                     "userId": uid, "password": self._password,
-                                     "attr": attr, "channel": "tcp", "ascNumber": asc},
-                         "tst": int(time.time() * 1000), "deviceId": self.device_id})]
+            return [
+                (
+                    1,
+                    {
+                        "method": "setDevAttrReq",
+                        "service": "device",
+                        "clientId": "ha-" + uid,
+                        "srcAddr": "0." + uid,
+                        "seq": "s" + str(int(time.time() * 1000))[-9:],
+                        "payload": {
+                            "devId": self.device_id,
+                            "parentId": self.device_id,
+                            "userId": uid,
+                            "password": self._password,
+                            "attr": attr,
+                            "channel": "tcp",
+                            "ascNumber": asc,
+                        },
+                        "tst": int(time.time() * 1000),
+                        "deviceId": self.device_id,
+                    },
+                )
+            ]
+
         replies = await self._session(build)
         return any(r.get("method") == "setDevAttrResp" for r in replies)
 

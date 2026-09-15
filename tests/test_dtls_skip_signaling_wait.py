@@ -8,16 +8,21 @@ unifies both behind one predicate so they can't drift apart again.
 
 Mirrors test_sdes_fast_liveplay's __new__/opt-precedence style; no camera needed.
 """
+
 import os
 import sys
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 
 import aidot_cameras.camera.client as cc
 
-_CAM = next(v for v in vars(cc).values()
-            if isinstance(v, type) and "_skip_dtls_signaling_wait" in v.__dict__)
+_CAM = next(
+    v
+    for v in vars(cc).values()
+    if isinstance(v, type) and "_skip_dtls_signaling_wait" in v.__dict__
+)
 
 
 def _cam():

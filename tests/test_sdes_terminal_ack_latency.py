@@ -15,6 +15,7 @@ Measured before the fix: ~48s to surface a refusal that arrived in about one
 second, on a path taken by two of the three validated models (A001513 SDES
 battery, A001064 SDES PTZ).
 """
+
 import asyncio
 import os
 import sys

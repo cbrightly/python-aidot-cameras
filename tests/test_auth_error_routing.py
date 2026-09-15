@@ -14,6 +14,7 @@ something else happens to trigger one.
 These tests pin the routing, not the transport: which recovery a code asks for,
 and that asking for a full login actually skips the refresh call.
 """
+
 import asyncio
 import os
 import sys
@@ -44,6 +45,7 @@ def _make_dc():
 
 # --- which recovery does each code ask for? ---------------------------------
 
+
 def test_21026_is_recoverable_by_the_refresh_token():
     assert CameraDeviceClient._auth_error_needs_full_login({"code": 21026}) is False
     assert CameraDeviceClient._auth_error_needs_full_login({"code": "21026"}) is False
@@ -51,7 +53,9 @@ def test_21026_is_recoverable_by_the_refresh_token():
 
 def test_21027_and_21041_need_a_full_login():
     for code in (21027, 21041, "21027", "21041"):
-        assert CameraDeviceClient._auth_error_needs_full_login({"code": code}) is True, code
+        assert (
+            CameraDeviceClient._auth_error_needs_full_login({"code": code}) is True
+        ), code
 
 
 def test_a_non_auth_body_needs_nothing():
@@ -62,11 +66,14 @@ def test_a_non_auth_body_needs_nothing():
 
 def test_a_bare_login_again_is_not_assumed_to_be_fatal():
     """The desc-only match has no code, so it cannot claim the session is void."""
-    assert CameraDeviceClient._auth_error_needs_full_login(
-        {"desc": "Please login again."}) is False
+    assert (
+        CameraDeviceClient._auth_error_needs_full_login({"desc": "Please login again."})
+        is False
+    )
 
 
 # --- does the classification reach the callback? ----------------------------
+
 
 def test_a_21027_body_asks_the_callback_for_a_full_login():
     dc = _make_dc()
@@ -109,6 +116,7 @@ def test_a_callback_that_takes_no_argument_still_works():
 
 
 # --- does a forced login actually skip the refresh call? --------------------
+
 
 def test_force_login_skips_the_refresh_token_endpoint():
     client = CameraClient(None, country_code="US")
@@ -170,6 +178,7 @@ def test_without_force_login_the_refresh_token_is_still_tried_first():
 
 # --- is the routing actually wired at the call sites? -----------------------
 
+
 def test_every_auth_retry_passes_the_body_it_classified():
     """A classifier nothing calls with a body is dead code.
 
@@ -183,7 +192,9 @@ def test_every_auth_retry_passes_the_body_it_classified():
 
     src_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "aidot_cameras", "camera", "client.py",
+        "aidot_cameras",
+        "camera",
+        "client.py",
     )
     src = open(src_path, encoding="utf-8").read()
 

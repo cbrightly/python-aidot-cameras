@@ -5,6 +5,7 @@ wins over AIDOT_PERSISTENT_MQTT env, default off) and the basic reuse semantics
 of the ``_PersistentMqtt`` collector routing. The live connection behaviour is
 validated on hardware, not here.
 """
+
 import os
 import sys
 
@@ -13,8 +14,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import aidot_cameras.camera.client as cc
 from aidot_cameras.camera.protocol import _PersistentMqtt
 
-_CAM = next(v for v in vars(cc).values()
-            if isinstance(v, type) and "_resolve_persistent_mqtt" in v.__dict__)
+_CAM = next(
+    v
+    for v in vars(cc).values()
+    if isinstance(v, type) and "_resolve_persistent_mqtt" in v.__dict__
+)
 
 
 def _cam():
@@ -51,6 +55,7 @@ def test_collector_routing_fans_out_messages():
     # _on_message must fan every message out to every registered collector queue,
     # so concurrent request()s each see the traffic (matching is per-collector).
     import queue
+
     pm = _PersistentMqtt("wss://h:8443/mqtt", "u", "p", "cid")
     q1, q2 = queue.Queue(), queue.Queue()
     pm._collectors = [q1, q2]
@@ -58,6 +63,7 @@ def test_collector_routing_fans_out_messages():
     class _Msg:
         topic = "iot/v1/cb/dev/x"
         payload = b'{"k":1}'
+
     pm._on_message(None, None, _Msg())
     assert q1.get_nowait() == ("iot/v1/cb/dev/x", '{"k":1}')
     assert q2.get_nowait() == ("iot/v1/cb/dev/x", '{"k":1}')

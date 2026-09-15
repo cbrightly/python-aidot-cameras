@@ -73,6 +73,7 @@ from .const import (
     RUNTIME_ONLY_LOGIN_INFO_KEYS,
 )
 from .device_client import CameraDeviceClient, LightDeviceClient
+
 # CARRIED: drop when python-aidot#6 merges - this is upstream's DeviceStatusData
 # plus the active_color_mode tracker (see aidot_cameras/device_client.py).
 from .device_client import DeviceStatusData as _CarriedStatusData
@@ -141,8 +142,10 @@ def _aes_key_is_null(device: Any) -> bool:
     was never provisioned with a key - raises AttributeError.  A missing or empty
     aesKey is fine; only this shape is dangerous.
     """
-    aes_key = getattr(device, "aesKey", None) if not isinstance(device, dict) else (
-        device.get("aesKey")
+    aes_key = (
+        getattr(device, "aesKey", None)
+        if not isinstance(device, dict)
+        else (device.get("aesKey"))
     )
     return isinstance(aes_key, list) and bool(aes_key) and aes_key[0] is None
 
@@ -289,10 +292,7 @@ class CameraClient(_UpstreamAidotClient):
 
         if token is not None:
             stored = token
-            if (
-                stored.get(CONF_ID) is None
-                and stored.get(CONF_LOGIN_INFO) is not None
-            ):
+            if stored.get(CONF_ID) is None and stored.get(CONF_LOGIN_INFO) is not None:
                 stored = stored.get(CONF_LOGIN_INFO) or {}
             # UserInformation is a strict dataclass: update_from_json() drops
             # any key it has no field for, which is every camera-only key
@@ -443,6 +443,7 @@ class CameraClient(_UpstreamAidotClient):
     # ---------------------------------------------------------------- #
 
     if HAS_TYPED_ACCOUNT:
+
         def _on_token_refreshed(self) -> None:
             """Sync the rotated token into login_info, then run upstream's hook.
 
@@ -500,7 +501,8 @@ class CameraClient(_UpstreamAidotClient):
         delay = max(60.0, expires_in_secs * 0.9 + random.uniform(-30, 30))
         _LOGGER.debug(
             "Proactive token refresh scheduled in %.0f s (TTL=%d s)",
-            delay, expires_in_secs,
+            delay,
+            expires_in_secs,
         )
 
         async def _refresh_after_delay():
@@ -753,7 +755,8 @@ class CameraClient(_UpstreamAidotClient):
                     _LOGGER.debug(
                         "skipping device %s (%s): no usable aesKey, upstream's "
                         "device client cannot be built for it",
-                        device.get(CONF_ID), model,
+                        device.get(CONF_ID),
+                        model,
                     )
         # Which devices this version cannot build is a property of the account,
         # not an event, and the device list refreshes for the life of the

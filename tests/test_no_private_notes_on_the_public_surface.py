@@ -15,6 +15,7 @@ and does not pretend to cover test identifiers.
 The pattern is assembled from fragments on purpose: spelled out literally, this
 file would match itself and the guard could never pass.
 """
+
 import os
 import re
 import sys
@@ -36,13 +37,25 @@ TEXT_SUFFIXES = (".py", ".md", ".toml", ".cfg", ".txt", ".yaml", ".yml", ".rst")
 # inside an Alpine container that does not own the checkout, and git refuses to
 # read a repository owned by another user (exit 128, "dubious ownership"). The
 # scan does not need git - it needs the files a user reads, which are on disk.
-SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__", ".pytest_cache",
-             ".mypy_cache", ".ruff_cache", "build", "dist"}
+SKIP_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "build",
+    "dist",
+}
 
 
 def _text_files():
     for root, dirs, files in os.walk(REPO):
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.endswith(".egg-info"))
+        dirs[:] = sorted(
+            d for d in dirs if d not in SKIP_DIRS and not d.endswith(".egg-info")
+        )
         for fn in sorted(files):
             if not fn.endswith(TEXT_SUFFIXES):
                 continue

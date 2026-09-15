@@ -8,6 +8,7 @@ streams h264 1280x960; with skip_turn it serves nothing. The opt/env must not be
 able to turn the relay off for a battery camera; the optimization applies only to
 mains SDES cameras that actually have a host candidate on the HA segment.
 """
+
 import os
 import sys
 
@@ -15,8 +16,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import aidot_cameras.camera.client as cc
 
-_CAM = next(v for v in vars(cc).values()
-            if isinstance(v, type) and "_resolve_sdes_skip_turn" in v.__dict__)
+_CAM = next(
+    v
+    for v in vars(cc).values()
+    if isinstance(v, type) and "_resolve_sdes_skip_turn" in v.__dict__
+)
 
 
 class _Info:

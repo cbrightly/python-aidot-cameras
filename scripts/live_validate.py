@@ -122,6 +122,8 @@ QUALITY_FIRST_MEDIA_S = 20.0
 QUALITY_SETTLE_S = 3.0
 QUALITY_WINDOW_S = 12.0
 QUALITY_GAP_S = 2.0
+
+
 # ffmpeg's -t has to cover the whole timeline plus the wait for first media,
 # because the SDES bridge thread - and with it the command channel and the byte
 # counter - lives and dies with that process. A -t that expires inside the
@@ -129,8 +131,9 @@ QUALITY_GAP_S = 2.0
 # experiment is hoping for.
 def _quality_max_seconds(window: float) -> int:
     """ffmpeg's -t for a campaign attempt, from the timeline it has to cover."""
-    return int(QUALITY_FIRST_MEDIA_S + QUALITY_SETTLE_S + window
-               + QUALITY_GAP_S + window + 8)
+    return int(
+        QUALITY_FIRST_MEDIA_S + QUALITY_SETTLE_S + window + QUALITY_GAP_S + window + 8
+    )
 
 
 # A session that died, or delivered nothing, during the second window is VOID -
@@ -210,11 +213,15 @@ async def _wait_until(not_before: float, label: str) -> float:
     """
     wait = _residual_wait(not_before, time.monotonic())
     if wait <= 0:
-        print(f"    no cooldown owed by {label} - it is not holding a viewer"
-              " slot from this run")
+        print(
+            f"    no cooldown owed by {label} - it is not holding a viewer"
+            " slot from this run"
+        )
         return 0.0
-    print(f"    waiting {wait:.0f}s for {label}: it streamed recently and holds"
-          " its own viewer slot ~120s")
+    print(
+        f"    waiting {wait:.0f}s for {label}: it streamed recently and holds"
+        " its own viewer slot ~120s"
+    )
     await asyncio.sleep(wait)
     return wait
 
@@ -235,7 +242,7 @@ def _model_key(model_id: str) -> str:
 
 
 def _classify(model_id: str) -> str:
-    """"required" gates the release; anything else is reported but never gates.
+    """ "required" gates the release; anything else is reported but never gates.
 
     Advisory covers both the models recognized in code but never validated on
     the reference account (ADVISORY_MODELS) and any model nobody has seen yet -
@@ -305,9 +312,9 @@ def _passes(result: dict, media_ok: bool) -> bool:
     if not media_ok:
         return False
     if result.get("decode_error"):
-        return True          # probe unavailable - do not fail the camera for it
+        return True  # probe unavailable - do not fail the camera for it
     if "decoded_frames" not in result:
-        return True          # nothing to say; older behaviour
+        return True  # nothing to say; older behaviour
     return int(result.get("decoded_frames") or 0) > 0
 
 
@@ -333,8 +340,17 @@ async def _decode_probe(path: str, timeout: float = 60.0) -> dict:
         return {"decode_error": "no recording"}
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-v", "error", "-i", path, "-an", "-f", "null", "-",
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            path,
+            "-an",
+            "-f",
+            "null",
+            "-",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError:
         return {"decode_error": "ffmpeg not found"}
@@ -352,9 +368,19 @@ async def _decode_probe(path: str, timeout: float = 60.0) -> dict:
     frames = 0
     try:
         probe = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames",
-            "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", path,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-count_frames",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "csv=p=0",
+            path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         out, _ = await asyncio.wait_for(probe.communicate(), timeout)
         # ffprobe emits one line per matching stream, and an mpegts recording
@@ -362,8 +388,9 @@ async def _decode_probe(path: str, timeout: float = 60.0) -> dict:
         # rather than "50". Parse the numeric lines and take the largest instead
         # of int()-ing the blob - which raised, and reported a perfectly good
         # stream as unprobed.
-        counts = [int(ln) for ln in (out or b"").decode().split()
-                  if ln.strip().isdigit()]
+        counts = [
+            int(ln) for ln in (out or b"").decode().split() if ln.strip().isdigit()
+        ]
         frames = max(counts) if counts else 0
     except FileNotFoundError:
         return {"decode_error": "ffprobe not found", "decode_errors": len(errors)}
@@ -371,8 +398,11 @@ async def _decode_probe(path: str, timeout: float = 60.0) -> dict:
         probe_err = "ffprobe gave no frame count"
         return {"decode_error": probe_err, "decode_errors": len(errors)}
 
-    return {"decoded_frames": frames, "decode_errors": len(errors),
-            "decode_first_error": errors[0][:200] if errors else None}
+    return {
+        "decoded_frames": frames,
+        "decode_errors": len(errors),
+        "decode_first_error": errors[0][:200] if errors else None,
+    }
 
 
 async def _recording_seconds(path: str, timeout: float = 30.0):
@@ -394,9 +424,18 @@ async def _recording_seconds(path: str, timeout: float = 30.0):
         return None
     try:
         probe = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "format=duration", "-of", "csv=p=0", path,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
+            path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         out, _ = await asyncio.wait_for(probe.communicate(), timeout)
     except Exception:
@@ -434,9 +473,18 @@ async def _video_bitrate_series(path: str, timeout: float = 60.0) -> dict:
         return {"series_error": "no recording"}
     try:
         probe = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "packet=pts_time,size", "-of", "csv=p=0", path,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=pts_time,size",
+            "-of",
+            "csv=p=0",
+            path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         out, _err = await asyncio.wait_for(probe.communicate(), timeout)
     except FileNotFoundError:
@@ -463,8 +511,7 @@ async def _video_bitrate_series(path: str, timeout: float = 60.0) -> dict:
 
     if not buckets:
         return {"series_error": "no video packets"}
-    series = [round(buckets.get(s, 0) * 8 / 1000, 1)
-              for s in range(max(buckets) + 1)]
+    series = [round(buckets.get(s, 0) * 8 / 1000, 1) for s in range(max(buckets) + 1)]
     # At one-second resolution this stream's PTS are too clumped to read: a
     # measured A001064 recording alternates 1550 / 3020 / 95 kbps second by
     # second around a true ~1700, because packets land unevenly either side of
@@ -473,8 +520,10 @@ async def _video_bitrate_series(path: str, timeout: float = 60.0) -> dict:
     # while still being far finer than the 12 s windows, so a 2:1 step stays
     # obvious. Both are reported: the per-second series is what was measured,
     # the coarse one is what can be read.
-    coarse = [round(sum(buckets.get(s, 0) for s in range(b, b + 4)) * 8 / 4000, 1)
-              for b in range(0, len(series), 4)]
+    coarse = [
+        round(sum(buckets.get(s, 0) for s in range(b, b + 4)) * 8 / 4000, 1)
+        for b in range(0, len(series), 4)
+    ]
     return {"video_kbps_by_second": series, "video_kbps_by_4s": coarse}
 
 
@@ -539,8 +588,12 @@ def _media_sample(session, frames: dict) -> dict:
     make a bitrate: on that transport the per-second video series from the
     recording is the measurement and this is only liveness.
     """
-    sample = {"t": time.monotonic(), "frames": frames["n"],
-              "bytes": None, "packets": None}
+    sample = {
+        "t": time.monotonic(),
+        "frames": frames["n"],
+        "bytes": None,
+        "packets": None,
+    }
     stats_fn = getattr(session, "media_stats", None)
     if callable(stats_fn):
         try:
@@ -560,8 +613,10 @@ def _window(start: dict, end: dict) -> dict:
     nominal 12 s would turn that into a higher bitrate.
     """
     seconds = end["t"] - start["t"]
-    out: dict = {"seconds": round(seconds, 2),
-                 "frames": end["frames"] - start["frames"]}
+    out: dict = {
+        "seconds": round(seconds, 2),
+        "frames": end["frames"] - start["frames"],
+    }
     if start["bytes"] is not None and end["bytes"] is not None:
         out["bytes"] = end["bytes"] - start["bytes"]
         out["packets"] = end["packets"] - start["packets"]
@@ -588,8 +643,9 @@ async def _wait_first_media(session, frames: dict, budget: float) -> float | Non
     return None
 
 
-async def _quality_probe(dc, session, arm: str, frames: dict,
-                         window: float = QUALITY_WINDOW_S) -> dict:
+async def _quality_probe(
+    dc, session, arm: str, frames: dict, window: float = QUALITY_WINDOW_S
+) -> dict:
     """Measure the bitrate either side of a mid-session resolution command.
 
     One session, two windows, one command between them. ``arm`` is the quality
@@ -648,8 +704,7 @@ async def _quality_probe(dc, session, arm: str, frames: dict,
         try:
             dc._stream_session = session
             t_cmd = time.monotonic()
-            out["set_resolution_returned"] = bool(
-                await dc.async_set_resolution(arm))
+            out["set_resolution_returned"] = bool(await dc.async_set_resolution(arm))
             out["set_resolution_s"] = round(time.monotonic() - t_cmd, 2)
         except Exception as exc:
             out["set_resolution_error"] = f"{type(exc).__name__}: {exc}"[:120]
@@ -685,9 +740,11 @@ async def _quality_probe(dc, session, arm: str, frames: dict,
         moved = out["window_b"].get("frames")
     if out["alive_after"] is False or not moved:
         out["verdict"] = "VOID"
-        out["void_reason"] = ("session ended during the measurement"
-                              if out["alive_after"] is False
-                              else "no media in window B")
+        out["void_reason"] = (
+            "session ended during the measurement"
+            if out["alive_after"] is False
+            else "no media in window B"
+        )
         return out
 
     ka, kb = out["window_a"].get("kbps"), out["window_b"].get("kbps")
@@ -778,17 +835,20 @@ def _quality_summary(attempts: list) -> dict:
         if not q:
             continue
         bucket = per_arm.setdefault(
-            q.get("arm") or "control", {"sessions": [], "void": 0})
+            q.get("arm") or "control", {"sessions": [], "void": 0}
+        )
         if q.get("verdict") != "OK":
             bucket["void"] += 1
             continue
-        bucket["sessions"].append({
-            "attempt": att.get("attempt"),
-            "kbps_a": q.get("kbps_a"),
-            "kbps_b": q.get("kbps_b"),
-            "ratio": q.get("ratio_b_over_a"),
-            "acked": bool(q.get("ack_log")),
-        })
+        bucket["sessions"].append(
+            {
+                "attempt": att.get("attempt"),
+                "kbps_a": q.get("kbps_a"),
+                "kbps_b": q.get("kbps_b"),
+                "ratio": q.get("ratio_b_over_a"),
+                "acked": bool(q.get("ack_log")),
+            }
+        )
     for bucket in per_arm.values():
         # Both counted over the SAME sessions. A session can be verdict OK with
         # no ratio at all - a transport with no byte counter reports "frames
@@ -816,49 +876,72 @@ def _print_quality_attempt(res: dict) -> None:
         print(f"       quality arm={q.get('arm')}: VOID - {q.get('void_reason')}")
         return
     ka, kb = q.get("kbps_a"), q.get("kbps_b")
-    rate = (f"A={ka} kbps  B={kb} kbps  B/A={q.get('ratio_b_over_a')}"
-            if ka and kb else f"no byte counter ({q.get('counter')})")
+    rate = (
+        f"A={ka} kbps  B={kb} kbps  B/A={q.get('ratio_b_over_a')}"
+        if ka and kb
+        else f"no byte counter ({q.get('counter')})"
+    )
     print(f"       quality arm={q.get('arm')}  {rate}")
     if q.get("arm") != "control":
-        print(f"       command: returned={q.get('set_resolution_returned')}"
-              f"  channel_ready={q.get('cmd_channel_ready')}"
-              f"  took={q.get('set_resolution_s')}s"
-              f"  tap at +{q.get('tap_after_first_media_s')}s of media")
+        print(
+            f"       command: returned={q.get('set_resolution_returned')}"
+            f"  channel_ready={q.get('cmd_channel_ready')}"
+            f"  took={q.get('set_resolution_s')}s"
+            f"  tap at +{q.get('tap_after_first_media_s')}s of media"
+        )
         for line in q.get("ack_log") or ["(no ack line logged)"]:
             print(f"       camera: {line}")
 
 
 def _print_quality_summary(entry: dict) -> None:
-    print(f"\n    quality campaign, {entry['name']!r} - each ratio is window B "
-          "over window A of the SAME session:")
+    print(
+        f"\n    quality campaign, {entry['name']!r} - each ratio is window B "
+        "over window A of the SAME session:"
+    )
     for arm, bucket in entry["quality_summary"].items():
-        ratios = ", ".join(f"{s['ratio']}" for s in bucket["sessions"]
-                           if s["ratio"]) or "-"
+        ratios = (
+            ", ".join(f"{s['ratio']}" for s in bucket["sessions"] if s["ratio"]) or "-"
+        )
         # acked is printed for every commanding arm, including when it equals
         # n - the reader has to be able to see that delivery was checked, not
         # infer it from the absence of a warning.
         acked = ""
         if arm != "control":
             acked = f"  acked={bucket.get('acked_n', 0)}/{bucket.get('n', 0)}"
-        print(f"      {arm:8} n={bucket.get('n', 0)}{acked}  ratios: {ratios}"
-              + (f"  mean={bucket['ratio_mean']}" if "ratio_mean" in bucket else "")
-              + (f"  void={bucket['void']}" if bucket.get("void") else ""))
+        print(
+            f"      {arm:8} n={bucket.get('n', 0)}{acked}  ratios: {ratios}"
+            + (f"  mean={bucket['ratio_mean']}" if "ratio_mean" in bucket else "")
+            + (f"  void={bucket['void']}" if bucket.get("void") else "")
+        )
         if arm != "control" and bucket.get("acked_n", 0) < bucket.get("n", 0):
-            print(f"        NOTE: {bucket.get('n', 0) - bucket.get('acked_n', 0)}"
-                  " of these sessions were never acked by the camera. Those are"
-                  " not evidence about the lever - the command did not arrive."
-                  " Do not read this arm as a null until they are explained.")
+            print(
+                f"        NOTE: {bucket.get('n', 0) - bucket.get('acked_n', 0)}"
+                " of these sessions were never acked by the camera. Those are"
+                " not evidence about the lever - the command did not arrive."
+                " Do not read this arm as a null until they are explained."
+            )
         for s in bucket["sessions"]:
-            print(f"        attempt {s['attempt']}: {s['kbps_a']} -> {s['kbps_b']} kbps")
-    print("      read it against the control arm: a stream that settles "
-          "downward on its own does so in both arms.")
+            print(
+                f"        attempt {s['attempt']}: {s['kbps_a']} -> {s['kbps_b']} kbps"
+            )
+    print(
+        "      read it against the control arm: a stream that settles "
+        "downward on its own does so in both arms."
+    )
 
 
-async def _attempt(dc, hold: float, out_dir: str, attempt: int,
-                   device: dict | None = None, pt_order=None,
-                   sd_probe: bool = False, quality_arm=None,
-                   max_seconds: int | None = None,
-                   quality_window: float = QUALITY_WINDOW_S) -> dict:
+async def _attempt(
+    dc,
+    hold: float,
+    out_dir: str,
+    attempt: int,
+    device: dict | None = None,
+    pt_order=None,
+    sd_probe: bool = False,
+    quality_arm=None,
+    max_seconds: int | None = None,
+    quality_window: float = QUALITY_WINDOW_S,
+) -> dict:
     """One streaming attempt. Never raises; classifies the outcome."""
     from aidot_cameras.exceptions import AidotCameraBusy
 
@@ -894,8 +977,11 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int,
             on_frame=lambda _f: frames.__setitem__("n", frames["n"] + 1),
             timeout=45.0,
             output_path=out,
-            max_seconds=(max_seconds if max_seconds is not None
-                         else max(1, int(hold - 2) + LIVE_PROBE_BUDGET_S)),
+            max_seconds=(
+                max_seconds
+                if max_seconds is not None
+                else max(1, int(hold - 2) + LIVE_PROBE_BUDGET_S)
+            ),
             talk=True,
         )
         result["handshake_s"] = round(time.time() - t0, 1)
@@ -904,7 +990,8 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int,
             await asyncio.sleep(hold)
         else:
             result["quality"] = await _quality_probe(
-                dc, session, quality_arm, frames, quality_window)
+                dc, session, quality_arm, frames, quality_window
+            )
             # Close the session before reading the recording. Everything the
             # campaign measures is already in hand (the counter is sampled on
             # the wall clock, in session), and the per-second video series is
@@ -926,8 +1013,12 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int,
                         f"{p.get('local_type')}->{p.get('remote_type')}" for p in ice
                     ]
                 result["rtp"] = [
-                    {"kind": s.get("kind"), "recv": s.get("packets_received"),
-                     "loss_pct": s.get("loss_pct"), "jitter": s.get("jitter")}
+                    {
+                        "kind": s.get("kind"),
+                        "recv": s.get("packets_received"),
+                        "loss_pct": s.get("loss_pct"),
+                        "jitter": s.get("jitter"),
+                    }
                     for s in (stats or {}).get("inbound", [])
                 ]
             except Exception as exc:
@@ -966,8 +1057,7 @@ async def _attempt(dc, hold: float, out_dir: str, attempt: int,
                     try:
                         result["sd_events"] = await probe_sd_events(session)
                     except Exception as exc:
-                        result["sd_events_error"] = (
-                            f"{type(exc).__name__}: {exc}"[:120])
+                        result["sd_events_error"] = f"{type(exc).__name__}: {exc}"[:120]
                 result["features"] = await probe_features(dc, device or {}, session)
             except Exception as exc:
                 result["features_error"] = f"{type(exc).__name__}: {exc}"[:120]
@@ -1040,8 +1130,9 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
     quality_arms = _parse_arms(getattr(args, "quality_arms", "") or "")
     quality_window = float(getattr(args, "quality_window", QUALITY_WINDOW_S))
     repeats = max(1, int(getattr(args, "arm_repeats", 1)))
-    pending = _interleave_arms(quality_arms, repeats,
-                               seed=getattr(args, "arm_seed", None))
+    pending = _interleave_arms(
+        quality_arms, repeats, seed=getattr(args, "arm_seed", None)
+    )
     if quality_arms:
         max_attempts = len(pending)
     elif campaigning:
@@ -1059,13 +1150,14 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
         "battery": bool(getattr(dc, "is_battery_camera", False)),
         "attempts": [],
     }
-    print(f"\n=== {entry['name']!r}  {model}  ({entry['transport']}"
-          f"{', battery' if entry['battery'] else ''}, {tier})")
+    print(
+        f"\n=== {entry['name']!r}  {model}  ({entry['transport']}"
+        f"{', battery' if entry['battery'] else ''}, {tier})"
+    )
 
     # Only THIS camera's own deadline. Normally already past - a camera the run
     # has not touched yet is not holding a slot for anybody.
-    await _wait_until(cooldown_until.get(dc.device_id, 0.0),
-                      repr(entry["name"]))
+    await _wait_until(cooldown_until.get(dc.device_id, 0.0), repr(entry["name"]))
 
     i = 0
     while True:
@@ -1083,23 +1175,35 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
             prev = entry["attempts"][-1].get("verdict", "")
             wait = _cooldown_after(prev, args.cooldown)
             if wait < args.cooldown:
-                print(f"    {prev} on attempt {i - 1} - no session was opened, "
-                      f"so no slot to release; waiting {wait:.0f}s not "
-                      f"{args.cooldown:.0f}s")
+                print(
+                    f"    {prev} on attempt {i - 1} - no session was opened, "
+                    f"so no slot to release; waiting {wait:.0f}s not "
+                    f"{args.cooldown:.0f}s"
+                )
             else:
-                print(f"    cooling down {wait:.0f}s before attempt {i} "
-                      "(a camera holds its viewer slot ~120s)")
+                print(
+                    f"    cooling down {wait:.0f}s before attempt {i} "
+                    "(a camera holds its viewer slot ~120s)"
+                )
             await asyncio.sleep(wait)
-        print(f"    attempt {i}/{total}..."
-              + (f"  quality arm: {quality_arm or 'control'}"
-                 if quality_arms else ""))
+        print(
+            f"    attempt {i}/{total}..."
+            + (f"  quality arm: {quality_arm or 'control'}" if quality_arms else "")
+        )
         res = await _attempt(
-            dc, args.hold, args.out_dir, i, device,
+            dc,
+            args.hold,
+            args.out_dir,
+            i,
+            device,
             pt_order=(arms[(i - 1) % len(arms)] if campaigning else None),
             sd_probe=bool(getattr(args, "sd_probe", False)),
-            quality_arm=quality_arm, quality_window=quality_window,
-            max_seconds=(_quality_max_seconds(quality_window)
-                         if quality_arms else None))
+            quality_arm=quality_arm,
+            quality_window=quality_window,
+            max_seconds=(
+                _quality_max_seconds(quality_window) if quality_arms else None
+            ),
+        )
         entry["attempts"].append(res)
         # This device may now be holding a viewer slot, so record when it may
         # next be opened. Every exit from this loop passes through here,
@@ -1109,15 +1213,20 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
         cooldown_until[dc.device_id] = time.monotonic() + _cooldown_after(
             res["verdict"], args.cooldown
         )
-        print(f"    -> {res['verdict']}"
-              + (f"  handshake={res['handshake_s']}s" if "handshake_s" in res else "")
-              + (f"  frames={res['frames']}" if "frames" in res else "")
-              + (f"  bytes={res['recorded_bytes']}" if "recorded_bytes" in res else "")
-              + (f"  decoded={res['decoded_frames']}" if "decoded_frames" in res else "")
-              + (f"  decode_err={res['decode_errors']}"
-                 if res.get("decode_errors") else "")
-              + (f"  decode_probe={res['decode_error']}" if "decode_error" in res else "")
-              + (f"  {res['error']}" if "error" in res else ""))
+        print(
+            f"    -> {res['verdict']}"
+            + (f"  handshake={res['handshake_s']}s" if "handshake_s" in res else "")
+            + (f"  frames={res['frames']}" if "frames" in res else "")
+            + (f"  bytes={res['recorded_bytes']}" if "recorded_bytes" in res else "")
+            + (f"  decoded={res['decoded_frames']}" if "decoded_frames" in res else "")
+            + (
+                f"  decode_err={res['decode_errors']}"
+                if res.get("decode_errors")
+                else ""
+            )
+            + (f"  decode_probe={res['decode_error']}" if "decode_error" in res else "")
+            + (f"  {res['error']}" if "error" in res else "")
+        )
         if quality_arms:
             _print_quality_attempt(res)
             # A void session measured nothing and must not stand in for one of
@@ -1127,23 +1236,28 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
             if void and voids < QUALITY_VOID_BUDGET:
                 voids += 1
                 pending.append(quality_arm)
-                print(f"    void session ({void}) - re-queueing arm "
-                      f"{quality_arm or 'control'} ({voids}/"
-                      f"{QUALITY_VOID_BUDGET} of the void budget used)")
+                print(
+                    f"    void session ({void}) - re-queueing arm "
+                    f"{quality_arm or 'control'} ({voids}/"
+                    f"{QUALITY_VOID_BUDGET} of the void budget used)"
+                )
         if res["verdict"] == "PASS" and not campaigning and not quality_arms:
             break
         # A camera that has only ever failed WITHOUT opening a session is not
         # being flaky, it is absent. Stop re-asking it; the verdict cannot change
         # and each further attempt costs a full signaling timeout.
         more_left = bool(pending) if quality_arms else i < max_attempts
-        if (len(entry["attempts"]) >= SLOTLESS_MAX_ATTEMPTS
-                and all(a["verdict"] in _SLOTLESS_VERDICTS
-                        for a in entry["attempts"])
-                and more_left):
-            print(f"    no session opened on {len(entry['attempts'])} attempts - "
-                  f"treating as absent, skipping the remaining "
-                  f"{len(pending) if quality_arms else max_attempts - i}"
-                  " attempt(s)")
+        if (
+            len(entry["attempts"]) >= SLOTLESS_MAX_ATTEMPTS
+            and all(a["verdict"] in _SLOTLESS_VERDICTS for a in entry["attempts"])
+            and more_left
+        ):
+            print(
+                f"    no session opened on {len(entry['attempts'])} attempts - "
+                f"treating as absent, skipping the remaining "
+                f"{len(pending) if quality_arms else max_attempts - i}"
+                " attempt(s)"
+            )
             break
 
     if quality_arms:
@@ -1151,9 +1265,14 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
         _print_quality_summary(entry)
 
     verdicts = [a["verdict"] for a in entry["attempts"]]
-    entry["verdict"] = "PASS" if "PASS" in verdicts else (
-        "BUSY" if "BUSY" in verdicts else
-        ("NO_MEDIA" if "NO_MEDIA" in verdicts else "ERROR")
+    entry["verdict"] = (
+        "PASS"
+        if "PASS" in verdicts
+        else (
+            "BUSY"
+            if "BUSY" in verdicts
+            else ("NO_MEDIA" if "NO_MEDIA" in verdicts else "ERROR")
+        )
     )
     entry["attempts_used"] = len(entry["attempts"])
     return entry
@@ -1163,7 +1282,9 @@ async def _run(args) -> int:
     creds = load_credentials()
     report: dict = {
         "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "ref": os.environ.get("GITHUB_SHA") or os.environ.get("AIDOT_VALIDATION_REF") or "",
+        "ref": os.environ.get("GITHUB_SHA")
+        or os.environ.get("AIDOT_VALIDATION_REF")
+        or "",
         "cameras": [],
     }
     async with aiohttp.ClientSession() as http:
@@ -1188,13 +1309,18 @@ async def _run(args) -> int:
             print(f"found {len(cameras)} camera(s) of {len(devices)} device(s)")
             for cam in cameras:
                 dc = client.get_device_client(cam)
-                print(f"  - {cam.get(CONF_NAME)!r:32} {_model_of(dc):18} "
-                      f"{_classify(_model_of(dc))}")
+                print(
+                    f"  - {cam.get(CONF_NAME)!r:32} {_model_of(dc):18} "
+                    f"{_classify(_model_of(dc))}"
+                )
 
             if args.list:
                 report["cameras"] = [
-                    {"name": c.get(CONF_NAME), "device_id": c.get(CONF_ID),
-                     "model": _model_of(client.get_device_client(c))}
+                    {
+                        "name": c.get(CONF_NAME),
+                        "device_id": c.get(CONF_ID),
+                        "model": _model_of(client.get_device_client(c)),
+                    }
                     for c in cameras
                 ]
                 # An enumeration that finds nothing is a failure, not a pass.
@@ -1208,25 +1334,33 @@ async def _run(args) -> int:
                 report["verdict"] = "PASS" if cameras and not missing else "FAIL"
                 _write_report(report, args)
                 if not cameras:
-                    print("\nFAIL: no cameras visible to this account."
-                          " If it is a shared (non-owner) account, set"
-                          " AIDOT_INCLUDE_SHARED_HOUSES=1.")
+                    print(
+                        "\nFAIL: no cameras visible to this account."
+                        " If it is a shared (non-owner) account, set"
+                        " AIDOT_INCLUDE_SHARED_HOUSES=1."
+                    )
                     return 1
                 if missing:
-                    print("\nFAIL: required model(s) absent from this account:"
-                          f" {', '.join(missing)}")
+                    print(
+                        "\nFAIL: required model(s) absent from this account:"
+                        f" {', '.join(missing)}"
+                    )
                     return 1
                 return 0
 
             selected = cameras
             if args.name:
                 wanted = [n.lower() for n in args.name]
-                selected = [c for c in cameras
-                            if any(w in (c.get(CONF_NAME) or "").lower() for w in wanted)]
+                selected = [
+                    c
+                    for c in cameras
+                    if any(w in (c.get(CONF_NAME) or "").lower() for w in wanted)
+                ]
             if args.model:
                 wanted_m = [m.upper() for m in args.model]
                 selected = [
-                    c for c in selected
+                    c
+                    for c in selected
                     if _model_key(_model_of(client.get_device_client(c))) in wanted_m
                 ]
 
@@ -1266,8 +1400,10 @@ def _summarize(report: dict, args) -> int:
     print("\n==== SUMMARY ====")
     for c in report["cameras"]:
         tag = "" if c["tier"] == "required" else "  (advisory)"
-        print(f"  {c['verdict']:9} {c['name']!r:32} {c['model']:18} "
-              f"{c['transport']}  attempts={c['attempts_used']}{tag}")
+        print(
+            f"  {c['verdict']:9} {c['name']!r:32} {c['model']:18} "
+            f"{c['transport']}  attempts={c['attempts_used']}{tag}"
+        )
 
     # The gate is about MODEL coverage, not fleet health: a release breaks a
     # transport/firmware path, and one camera of a model streaming proves that
@@ -1287,7 +1423,8 @@ def _summarize(report: dict, args) -> int:
 
     missing = [m for m in REQUIRED_MODELS if m not in by_model]
     models_failed = [
-        m for m in REQUIRED_MODELS
+        m
+        for m in REQUIRED_MODELS
         if m in by_model and not any(c["verdict"] == "PASS" for c in by_model[m])
     ]
 
@@ -1305,11 +1442,11 @@ def _summarize(report: dict, args) -> int:
 
     # Failures that did not gate are still printed: they are the early warning
     # that a model is degrading while one healthy camera masks it.
-    tolerated = [c for c in failed
-                 if _model_key(c["model"]) not in models_failed]
+    tolerated = [c for c in failed if _model_key(c["model"]) not in models_failed]
     if tolerated:
-        print("\n  did not gate (their model is covered by another camera) -"
-              " watch these:")
+        print(
+            "\n  did not gate (their model is covered by another camera) - watch these:"
+        )
         for c in tolerated:
             print(f"    {c['verdict']:9} {c['name']!r} {c['model']}")
 
@@ -1322,15 +1459,12 @@ def _summarize(report: dict, args) -> int:
     report["model_coverage"] = {
         m: {
             "cameras": len(by_model.get(m, [])),
-            "passed": len([c for c in by_model.get(m, [])
-                           if c["verdict"] == "PASS"]),
+            "passed": len([c for c in by_model.get(m, []) if c["verdict"] == "PASS"]),
         }
         for m in REQUIRED_MODELS
     }
     report["missing_required_models"] = missing
-    report["advisory_failed"] = [
-        c["name"] for c in advisory if c["verdict"] != "PASS"
-    ]
+    report["advisory_failed"] = [c["name"] for c in advisory if c["verdict"] != "PASS"]
     ok = not models_failed and not missing and bool(required)
     # The run reached its own end, so the report is no longer a partial written
     # mid-loop.  A report still carrying partial=True was killed (job timeout,
@@ -1513,59 +1647,102 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument("--list", action="store_true", help="list cameras and exit")
-    p.add_argument("--name", action="append", default=[],
-                   help="only cameras whose name contains this (repeatable)")
-    p.add_argument("--model", action="append", default=[],
-                   help="only these model keys, e.g. A001513 (repeatable)")
-    p.add_argument("--hold", type=float, default=16.0,
-                   help="seconds to hold each stream (default 16)")
-    p.add_argument("--cooldown", type=float, default=DEFAULT_COOLDOWN_S,
-                   help="seconds a camera is left alone after a session before"
-                        f" it is opened again (default {DEFAULT_COOLDOWN_S:.0f};"
-                        " a camera holds its viewer slot ~120s)")
-    p.add_argument("--pt-order-arms", default="",
-                   help="campaign mode: '|'-separated video codec orders to "
-                        "alternate per attempt on SDES cameras, e.g. "
-                        "'|97,96' for default-then-H265-first. An empty arm "
-                        "means leave the offer alone. Attempts do not stop on "
-                        "success, so both arms are measured on every camera.")
-    p.add_argument("--quality-arms", default="",
-                   help="in-session quality campaign: '|'-separated qualities "
-                        "to apply MID-SESSION, one per session, e.g. 'sd|' for "
-                        "sd-then-control. An empty arm is the control - it "
-                        "waits the same gap and sends nothing. Each session is "
-                        "measured against itself (bitrate before the command "
-                        "vs after), which is the comparison the 2026-08-07 "
-                        "sweep never made. Feature probes are skipped: the PTZ "
-                        "nudge moves the camera, and a scene change is a "
-                        "bitrate change. Use --arm-repeats 3 or more.")
-    p.add_argument("--quality-window", type=float, default=QUALITY_WINDOW_S,
-                   help="seconds per measurement window in a quality campaign "
-                        f"(default {QUALITY_WINDOW_S:.0f}). Two of these plus "
-                        "the settle and gap have to finish inside the session: "
-                        "an A001064 recycles itself every 60-85s, and a "
-                        "teardown inside the second window looks exactly like "
-                        "a bitrate that halved.")
-    p.add_argument("--arm-seed", type=int, default=None,
-                   help="seed for the per-block arm shuffle. Omit for a fresh "
-                        "random order; set it to re-run a campaign in the same "
-                        "order it was first run in.")
-    p.add_argument("--arm-repeats", type=int, default=1,
-                   help="how many BLOCKS of the arms to run (default 1). A "
-                        "block holds every arm exactly once, shuffled - the "
-                        "arms are no longer cycled, because a fixed period "
-                        "hands anything of the camera's own that shares it to "
-                        "one arm. Pass --arm-seed to reproduce a run.")
-    p.add_argument("--sd-probe", action="store_true",
-                   help="ask each camera what recordings it holds "
-                        "(HASLISTEVENT/LISTEVENT) and record the raw reply. "
-                        "Read-only: never deletes and never starts playback.")
+    p.add_argument(
+        "--name",
+        action="append",
+        default=[],
+        help="only cameras whose name contains this (repeatable)",
+    )
+    p.add_argument(
+        "--model",
+        action="append",
+        default=[],
+        help="only these model keys, e.g. A001513 (repeatable)",
+    )
+    p.add_argument(
+        "--hold",
+        type=float,
+        default=16.0,
+        help="seconds to hold each stream (default 16)",
+    )
+    p.add_argument(
+        "--cooldown",
+        type=float,
+        default=DEFAULT_COOLDOWN_S,
+        help="seconds a camera is left alone after a session before"
+        f" it is opened again (default {DEFAULT_COOLDOWN_S:.0f};"
+        " a camera holds its viewer slot ~120s)",
+    )
+    p.add_argument(
+        "--pt-order-arms",
+        default="",
+        help="campaign mode: '|'-separated video codec orders to "
+        "alternate per attempt on SDES cameras, e.g. "
+        "'|97,96' for default-then-H265-first. An empty arm "
+        "means leave the offer alone. Attempts do not stop on "
+        "success, so both arms are measured on every camera.",
+    )
+    p.add_argument(
+        "--quality-arms",
+        default="",
+        help="in-session quality campaign: '|'-separated qualities "
+        "to apply MID-SESSION, one per session, e.g. 'sd|' for "
+        "sd-then-control. An empty arm is the control - it "
+        "waits the same gap and sends nothing. Each session is "
+        "measured against itself (bitrate before the command "
+        "vs after), which is the comparison the 2026-08-07 "
+        "sweep never made. Feature probes are skipped: the PTZ "
+        "nudge moves the camera, and a scene change is a "
+        "bitrate change. Use --arm-repeats 3 or more.",
+    )
+    p.add_argument(
+        "--quality-window",
+        type=float,
+        default=QUALITY_WINDOW_S,
+        help="seconds per measurement window in a quality campaign "
+        f"(default {QUALITY_WINDOW_S:.0f}). Two of these plus "
+        "the settle and gap have to finish inside the session: "
+        "an A001064 recycles itself every 60-85s, and a "
+        "teardown inside the second window looks exactly like "
+        "a bitrate that halved.",
+    )
+    p.add_argument(
+        "--arm-seed",
+        type=int,
+        default=None,
+        help="seed for the per-block arm shuffle. Omit for a fresh "
+        "random order; set it to re-run a campaign in the same "
+        "order it was first run in.",
+    )
+    p.add_argument(
+        "--arm-repeats",
+        type=int,
+        default=1,
+        help="how many BLOCKS of the arms to run (default 1). A "
+        "block holds every arm exactly once, shuffled - the "
+        "arms are no longer cycled, because a fixed period "
+        "hands anything of the camera's own that shares it to "
+        "one arm. Pass --arm-seed to reproduce a run.",
+    )
+    p.add_argument(
+        "--sd-probe",
+        action="store_true",
+        help="ask each camera what recordings it holds "
+        "(HASLISTEVENT/LISTEVENT) and record the raw reply. "
+        "Read-only: never deletes and never starts playback.",
+    )
     p.add_argument("--out-dir", default="/tmp", help="where to write recordings")
-    p.add_argument("--json-out", default="live-report.json",
-                   help="machine-readable report path ('' to skip)")
-    p.add_argument("--log-level", default="INFO",
-                   help="level for the aidot loggers (default INFO; DEBUG for"
-                        " protocol detail, WARNING for the old behaviour)")
+    p.add_argument(
+        "--json-out",
+        default="live-report.json",
+        help="machine-readable report path ('' to skip)",
+    )
+    p.add_argument(
+        "--log-level",
+        default="INFO",
+        help="level for the aidot loggers (default INFO; DEBUG for"
+        " protocol detail, WARNING for the old behaviour)",
+    )
     args = p.parse_args()
     _configure_logging(args.log_level, bool(args.quality_arms))
     return asyncio.run(_run(args))

@@ -90,9 +90,7 @@ def hub_id_of(device: dict[str, Any]) -> str:
     return ""
 
 
-def is_ble_mesh_child(
-    device: dict[str, Any], hubs: dict[str, dict[str, Any]]
-) -> bool:
+def is_ble_mesh_child(device: dict[str, Any], hubs: dict[str, dict[str, Any]]) -> bool:
     """True when ``device`` must be driven through one of ``hubs``.
 
     Requires both that the record points at a known hub **and** that it carries
@@ -247,7 +245,9 @@ class BleMeshHubSession:
                                 f"{self.hub_id}: relay to {dev_id} failed: {exc}"
                             ) from exc
                         await asyncio.sleep(_BACKOFF_S * (attempt + 1))
-                raise BleMeshError(f"{self.hub_id}: relay to {dev_id} exhausted retries")
+                raise BleMeshError(
+                    f"{self.hub_id}: relay to {dev_id} exhausted retries"
+                )
             finally:
                 self._start_idle_timer()
 
@@ -438,9 +438,7 @@ class BleMeshGatewayClient:
         self._hub_password: str = hub_device.get("password") or ""
         self._user_id = user_id
 
-        modules = {
-            (m.get("identity") or "").lower() for m in _service_modules(device)
-        }
+        modules = {(m.get("identity") or "").lower() for m in _service_modules(device)}
         cct_min, cct_max = _cct_range(device)
         self.info = BleMeshDeviceInfo(
             dev_id=self.device_id,
@@ -521,9 +519,7 @@ class BleMeshGatewayClient:
         return await self.async_set_attributes({"OnOff": 1, "CCT": clamped})
 
     async def async_set_rgbw(self, rgbw: tuple[int, int, int, int]) -> bool:
-        return await self.async_set_attributes(
-            {"OnOff": 1, "RGBW": _pack_rgbw(rgbw)}
-        )
+        return await self.async_set_attributes({"OnOff": 1, "RGBW": _pack_rgbw(rgbw)})
 
     def update_status_from_device(self, device: dict[str, Any]) -> None:
         """Re-seed status from a fresh cloud record (the only inbound signal)."""

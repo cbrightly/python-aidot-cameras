@@ -15,6 +15,7 @@ receives:
 
 The stub records every request, which is what makes these assertable.
 """
+
 import asyncio
 
 import pytest
@@ -79,7 +80,9 @@ async def test_registration_records_the_serve_url_as_the_source(fake_go2rtc):
 
     async with aiohttp.ClientSession() as s:
         url = await prefer_go2rtc(
-            s, "cam-1", "http://127.0.0.1:9999/cam.ts",
+            s,
+            "cam-1",
+            "http://127.0.0.1:9999/cam.ts",
             base_url=fake_go2rtc.base_url,
         )
     assert url and url.startswith("rtsp://"), f"expected an RTSP pull URL, got {url!r}"
@@ -103,7 +106,7 @@ async def test_a_stream_is_never_registered_as_its_own_source(fake_go2rtc):
         f"rtsp://127.0.0.1:8554/{name}",
         f"rtsp://localhost:8554/{name}",
         f"rtsps://127.0.0.1:8554/{name}",
-        f"rtsp://127.0.0.1:8554/{name}/",       # trailing slash
+        f"rtsp://127.0.0.1:8554/{name}/",  # trailing slash
     ):
         assert _is_self_referential_source(own_url, name), (
             f"{own_url!r} is go2rtc's own address for {name!r} and must be "

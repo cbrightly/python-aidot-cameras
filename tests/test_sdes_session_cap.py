@@ -22,6 +22,7 @@ real cost to a battery device that has nothing to do with the experiment.
 So the cap FAILS CLOSED: a cap value that cannot be attributed to a specific
 device caps nothing at all.
 """
+
 import pytest
 
 from aidot_cameras.camera.sdes_open import (
@@ -39,28 +40,35 @@ class TestCapValue:
         assert _sdes_max_session_s(CAM, str(tmp_path / "absent")) == 0.0
 
     def test_read_for_the_named_device(self, tmp_path):
-        f = tmp_path / "cap"; f.write_text("%s:100\n" % CAM)
+        f = tmp_path / "cap"
+        f.write_text("%s:100\n" % CAM)
         assert _sdes_max_session_s(CAM, str(f)) == 100.0
 
     def test_another_device_is_not_capped(self, tmp_path):
         """The battery camera on the same code path must be left alone."""
-        f = tmp_path / "cap"; f.write_text("%s:100\n" % CAM)
+        f = tmp_path / "cap"
+        f.write_text("%s:100\n" % CAM)
         assert _sdes_max_session_s(OTHER, str(f)) == 0.0
 
     def test_a_bare_number_caps_nothing(self, tmp_path):
         """Fail closed: an unattributable cap must not hit the whole fleet."""
-        f = tmp_path / "cap"; f.write_text("100\n")
+        f = tmp_path / "cap"
+        f.write_text("100\n")
         assert _sdes_max_session_s(CAM, str(f)) == 0.0
         assert _sdes_max_session_s(OTHER, str(f)) == 0.0
 
     def test_zero_for_the_named_device_means_off(self, tmp_path):
-        f = tmp_path / "cap"; f.write_text("%s:0" % CAM)
+        f = tmp_path / "cap"
+        f.write_text("%s:0" % CAM)
         assert _sdes_max_session_s(CAM, str(f)) == 0.0
 
-    @pytest.mark.parametrize("raw", ["", "   ", "nonsense", "%s:" % CAM,
-                                     "%s:abc" % CAM, ":100", "%s:-5" % CAM])
+    @pytest.mark.parametrize(
+        "raw",
+        ["", "   ", "nonsense", "%s:" % CAM, "%s:abc" % CAM, ":100", "%s:-5" % CAM],
+    )
     def test_unusable_content_caps_nothing(self, tmp_path, raw):
-        f = tmp_path / "cap"; f.write_text(raw)
+        f = tmp_path / "cap"
+        f.write_text(raw)
         assert _sdes_max_session_s(CAM, str(f)) == 0.0
 
 
@@ -97,6 +105,7 @@ class TestTheKnobIsOffInAPublishedLibrary:
 
     def test_no_file_is_opened_when_the_knob_is_unset(self, monkeypatch):
         import aidot_cameras.camera.sdes_open as m
+
         monkeypatch.setattr(m, "EXPT_CAP_FILE", None)
         opened = []
         real_open = open
@@ -111,8 +120,10 @@ class TestTheKnobIsOffInAPublishedLibrary:
 
     def test_an_explicit_path_still_works_for_screening(self, tmp_path, monkeypatch):
         import aidot_cameras.camera.sdes_open as m
+
         monkeypatch.setattr(m, "EXPT_CAP_FILE", None)
         f = tmp_path / "cap"
         f.write_text("12b144cb12da4994945bffd4f1acfd0c:250")
-        assert m._sdes_max_session_s(
-            "12b144cb12da4994945bffd4f1acfd0c", str(f)) == 250.0
+        assert (
+            m._sdes_max_session_s("12b144cb12da4994945bffd4f1acfd0c", str(f)) == 250.0
+        )

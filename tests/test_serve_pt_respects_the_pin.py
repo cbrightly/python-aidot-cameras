@@ -26,6 +26,7 @@ on the offer, so narrowing past it can only produce a stream the camera was
 never asked for. The answer is the weakest of the three -- this camera
 demonstrably does not honour its own.
 """
+
 import pytest
 
 from aidot_cameras.camera.sdes_open import _serve_video_pt

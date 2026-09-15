@@ -32,6 +32,7 @@ library's own spawn sites still install the drain is pinned separately, by
 guard, because a deleted drain call is invisible until ~64KB of ffmpeg output
 has accumulated. The two together are what make this outage catchable.
 """
+
 import asyncio
 import os
 import shutil
@@ -50,7 +51,7 @@ pytestmark = [pytest.mark.e2e, pytest.mark.timeout(120)]
 
 pytest.importorskip("aiohttp")
 
-if shutil.which("ffmpeg") is None:                       # pragma: no cover
+if shutil.which("ffmpeg") is None:  # pragma: no cover
     pytest.skip("the serve is an ffmpeg subprocess", allow_module_level=True)
 
 
@@ -86,21 +87,35 @@ class _LossyRtpFeed:
         self._thread.start()
         self._feeder = subprocess.Popen(
             [
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-re",
-                "-f", "lavfi", "-i", "testsrc=size=640x480:rate=50",
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-re",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=640x480:rate=50",
                 # mpeg4 is built into every ffmpeg; libx264 is not, and a skipped
                 # test here would be a silent hole in exactly this coverage.
-                "-c:v", "mpeg4", "-b:v", "6000k",
-                "-f", "rtp", "-sdp_file", self.sdp_path,
+                "-c:v",
+                "mpeg4",
+                "-b:v",
+                "6000k",
+                "-f",
+                "rtp",
+                "-sdp_file",
+                self.sdp_path,
                 f"rtp://127.0.0.1:{src_port}",
             ],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         for _ in range(150):
             if os.path.exists(self.sdp_path) and os.path.getsize(self.sdp_path):
                 break
             await asyncio.sleep(0.1)
-        else:                                            # pragma: no cover
+        else:  # pragma: no cover
             raise AssertionError("the RTP feeder never wrote its SDP")
         # Read fully before opening for write: the SDP ffmpeg wrote points at the
         # feeder's own port, and the serve has to read the relay's output port.
@@ -120,7 +135,7 @@ class _LossyRtpFeed:
                 data, _addr = rx.recvfrom(65535)
             except TimeoutError:
                 continue
-            except OSError:                          # pragma: no cover
+            except OSError:  # pragma: no cover
                 break
             seen += 1
             if seen % 2:
@@ -168,9 +183,7 @@ def _spawn_serve(feed: _LossyRtpFeed, sink: FakeRtspSink, *, drain: bool):
         rtsp_push_url=sink.url_for("cam-1"),
         push_video_only=True,
     )
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-    )
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if drain:
         _start_serve_stderr_drain(proc)
     return proc
@@ -191,7 +204,7 @@ def _buffered_stderr(proc) -> int:
         flags = fcntl.fcntl(proc.stderr, fcntl.F_GETFL)
         fcntl.fcntl(proc.stderr, fcntl.F_SETFL, flags | os.O_NONBLOCK)
         return len(proc.stderr.read() or b"")
-    except Exception:                                    # pragma: no cover
+    except Exception:  # pragma: no cover
         return -1
 
 
@@ -268,8 +281,10 @@ async def test_an_undrained_serve_stalls_the_publisher(rtsp_sink, lossy_feed):
         for _ in range(12):
             # Two silent windows back to back: one alone could be a starved
             # runner rather than a dead publisher.
-            if await rtsp_sink.media_flowed_during(1.5) == 0 and \
-                    await rtsp_sink.media_flowed_during(1.5) == 0:
+            if (
+                await rtsp_sink.media_flowed_during(1.5) == 0
+                and await rtsp_sink.media_flowed_during(1.5) == 0
+            ):
                 stalled = True
                 break
         if not stalled:

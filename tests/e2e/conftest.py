@@ -3,12 +3,15 @@
 Every e2e test gets: a fake MQTT broker, a fake cloud, the AIDOT_* seams
 pointed at them, and STUN/TURN disabled so a run makes no external egress.
 """
+
 import os
 import sys
 
 import pytest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(
+    0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
 
 # Skip this whole tier when its extra deps are absent, instead of failing
 # COLLECTION for everyone. Marker filtering (-m "not e2e") happens after
@@ -103,6 +106,7 @@ def fakelab_env(monkeypatch, fake_broker, fake_cloud, fake_api):
     # regression that shipped a launch deadline inside the cold-start window.
     # The production value itself is asserted in tests/test_media_wait_floor.py.
     import aidot_cameras.camera.sdes_open as _sdes_open
+
     monkeypatch.setattr(_sdes_open, "_FIRST_MEDIA_WAIT_S", 6.0, raising=True)
     return fake_broker, fake_cloud, fake_api
 
@@ -123,12 +127,14 @@ def e2e_device_client(fakelab_env, make_camera_device_client):
         # The cloud must know this device, or the client warns about a missing
         # numeric userId and skips the topic subscriptions keyed on it.
         # batchGetDeviceUserInfo is served by the platform-API host.
-        api.device_user_info.append({
-            "deviceId": dc.device_id,
-            "userId": 4242,
-            "userUuid": "cam-user-uuid",
-            "localIp": "127.0.0.1",
-        })
+        api.device_user_info.append(
+            {
+                "deviceId": dc.device_id,
+                "userId": 4242,
+                "userUuid": "cam-user-uuid",
+                "localIp": "127.0.0.1",
+            }
+        )
         return dc
 
     return _make

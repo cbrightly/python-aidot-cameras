@@ -15,6 +15,7 @@ discard a peer id with the wrong transport digit.
 
 Off by default: with no override file the id is byte-identical to today's.
 """
+
 import re
 
 import pytest
@@ -51,19 +52,22 @@ class TestDefault:
 
 class TestOverride:
     def test_all_three_fields_can_be_set(self, tmp_path, monkeypatch):
-        f = tmp_path / "pid"; f.write_text(f"{DEV}:3_0_1\n")
+        f = tmp_path / "pid"
+        f.write_text(f"{DEV}:3_0_1\n")
         monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", str(f))
         assert SHAPE.match(_gen(device_id=DEV)).groups() == ("3", "0", "1")
 
     def test_the_random_parts_stay_random(self, tmp_path, monkeypatch):
-        f = tmp_path / "pid"; f.write_text(f"{DEV}:3_0_1")
+        f = tmp_path / "pid"
+        f.write_text(f"{DEV}:3_0_1")
         monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", str(f))
         a, b = _gen(device_id=DEV), _gen(device_id=DEV)
         assert a != b and a.split("_")[2:] == b.split("_")[2:]
 
     def test_four_fields_also_pin_the_terminal_id(self, tmp_path, monkeypatch):
         """Field 2 carries the client class, so it has to be pinnable."""
-        f = tmp_path / "pid"; f.write_text(f"{DEV}:4a1b2c_2_0_1")
+        f = tmp_path / "pid"
+        f.write_text(f"{DEV}:4a1b2c_2_0_1")
         monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", str(f))
         pid = _gen(device_id=DEV)
         assert SHAPE.match(pid), pid
@@ -77,8 +81,11 @@ class TestOneCharTerminalPinsOnlyTheClass:
     dedup path keyed on the peer id. A result got that way could not separate
     the client class from the reuse. One character pins the class only."""
 
-    def test_first_char_is_pinned_and_the_tail_stays_random(self, tmp_path, monkeypatch):
-        f = tmp_path / "pid"; f.write_text(f"{DEV}:4_2_0_1")
+    def test_first_char_is_pinned_and_the_tail_stays_random(
+        self, tmp_path, monkeypatch
+    ):
+        f = tmp_path / "pid"
+        f.write_text(f"{DEV}:4_2_0_1")
         monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", str(f))
         ids = [_gen(device_id=DEV) for _ in range(20)]
         for pid in ids:
@@ -89,27 +96,42 @@ class TestOneCharTerminalPinsOnlyTheClass:
         assert len(tails) > 1, "the tail must stay random - this is not reuse"
 
     def test_the_length_never_changes(self, tmp_path, monkeypatch):
-        f = tmp_path / "pid"; f.write_text(f"{DEV}:3_2_0_1")
+        f = tmp_path / "pid"
+        f.write_text(f"{DEV}:3_2_0_1")
         monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", str(f))
         assert len(_gen(device_id=DEV).split("_")[1]) == 6
 
     @pytest.mark.parametrize("term", ["", "z", "44", "4a1b2", "4a1b2c7", "G"])
     def test_only_widths_one_and_six_are_accepted(self, tmp_path, monkeypatch, term):
-        f = tmp_path / "pid"; f.write_text(f"{DEV}:{term}_2_0_1")
+        f = tmp_path / "pid"
+        f.write_text(f"{DEV}:{term}_2_0_1")
         monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", str(f))
         pid = _gen(device_id=DEV)
         assert SHAPE.match(pid).groups() == ("2", "0", "1")
 
-    @pytest.mark.parametrize("tail", ["", "  ", "3_0", "a_0_1", "3_0_x",
-                                      "-1_0_1", "3_0_1 extra",
-                                      "3_2_0_1",          # terminal not 6 hex
-                                      "zzzzzz_2_0_1",     # terminal not hex
-                                      "_2_0_1",           # empty terminal
-                                      "aabbcc_2_0_1_9"])  # five fields
-    def test_unusable_content_falls_back_to_the_default(self, tmp_path, monkeypatch, tail):
+    @pytest.mark.parametrize(
+        "tail",
+        [
+            "",
+            "  ",
+            "3_0",
+            "a_0_1",
+            "3_0_x",
+            "-1_0_1",
+            "3_0_1 extra",
+            "3_2_0_1",  # terminal not 6 hex
+            "zzzzzz_2_0_1",  # terminal not hex
+            "_2_0_1",  # empty terminal
+            "aabbcc_2_0_1_9",
+        ],
+    )  # five fields
+    def test_unusable_content_falls_back_to_the_default(
+        self, tmp_path, monkeypatch, tail
+    ):
         """A half-written override must never produce a malformed peer id - the
         camera rejects those outright and the camera would simply stop working."""
-        f = tmp_path / "pid"; f.write_text(f"{DEV}:{tail}")
+        f = tmp_path / "pid"
+        f.write_text(f"{DEV}:{tail}")
         monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", str(f))
         assert SHAPE.match(_gen(device_id=DEV)).groups() == ("2", "0", "1")
 
@@ -123,7 +145,8 @@ class TestDeviceScoping:
     camera, and the trailing transport digit is per-camera."""
 
     def test_another_device_is_untouched(self, tmp_path, monkeypatch):
-        f = tmp_path / "pid"; f.write_text(f"{DEV}:4a1b2c_3_0_1")
+        f = tmp_path / "pid"
+        f.write_text(f"{DEV}:4a1b2c_3_0_1")
         monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", str(f))
         assert SHAPE.match(_gen(device_id=DEV)).groups() == ("3", "0", "1")
         other = CameraMixin.generate_webrtc_peer_id(sdes=False, device_id=OTHER)
@@ -132,16 +155,23 @@ class TestDeviceScoping:
 
     def test_no_device_id_never_applies(self, tmp_path, monkeypatch):
         """A caller that forgets to pass a device id must not be overridden."""
-        f = tmp_path / "pid"; f.write_text(f"{DEV}:4a1b2c_3_0_1")
+        f = tmp_path / "pid"
+        f.write_text(f"{DEV}:4a1b2c_3_0_1")
         monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", str(f))
         assert SHAPE.match(_gen()).groups() == ("2", "0", "1")
 
-    @pytest.mark.parametrize("raw", ["3_0_1",              # unscoped, legacy form
-                                     "aabbcc_2_0_1",      # unscoped with terminal
-                                     ":3_0_1",            # empty device
-                                     "deadbeef:3_0_1"])   # some other device
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "3_0_1",  # unscoped, legacy form
+            "aabbcc_2_0_1",  # unscoped with terminal
+            ":3_0_1",  # empty device
+            "deadbeef:3_0_1",
+        ],
+    )  # some other device
     def test_an_unscoped_file_applies_to_nobody(self, tmp_path, monkeypatch, raw):
-        f = tmp_path / "pid"; f.write_text(raw)
+        f = tmp_path / "pid"
+        f.write_text(raw)
         monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", str(f))
         assert SHAPE.match(_gen(device_id=DEV)).groups() == ("2", "0", "1")
 
@@ -149,7 +179,8 @@ class TestDeviceScoping:
         """Same leniency as _sdes_max_session_s - a file written by hand or by
         `echo` picks up whitespace, and refusing it would silently run the
         control arm while the operator believes the treatment is live."""
-        f = tmp_path / "pid"; f.write_text(f"  {DEV}  : 3_0_1 \n")
+        f = tmp_path / "pid"
+        f.write_text(f"  {DEV}  : 3_0_1 \n")
         monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", str(f))
         assert SHAPE.match(_gen(device_id=DEV)).groups() == ("3", "0", "1")
 
@@ -160,6 +191,7 @@ class TestEveryCallSitePassesADeviceId:
     def test_no_bare_call_survives_in_the_source(self):
         import inspect
         from aidot_cameras.camera import client as c, webrtc_open as w
+
         for mod in (c, w):
             src = inspect.getsource(mod)
             for i, line in enumerate(src.splitlines()):
@@ -169,7 +201,7 @@ class TestEveryCallSitePassesADeviceId:
                     continue
                 if "def generate_webrtc_peer_id" in line:
                     continue
-                call = "\n".join(src.splitlines()[i:i + 4])
+                call = "\n".join(src.splitlines()[i : i + 4])
                 assert "device_id=" in call, (
                     f"{mod.__name__} line {i + 1} calls generate_webrtc_peer_id "
                     f"without a device_id:\n{call}"
@@ -207,7 +239,8 @@ class TestTheClassCharacterIsWeb:
         firsts = {_gen(device_id=DEV).split("_")[1][0] for _ in range(120)}
         assert firsts == {"2"}, (
             "field 2's first character is the client class; it must announce "
-            f"WEB ('2'), got {sorted(firsts)}")
+            f"WEB ('2'), got {sorted(firsts)}"
+        )
 
     def test_the_rest_of_field2_stays_random(self, tmp_path, monkeypatch):
         """Pinning all six would make every peer id identical across opens -
@@ -227,6 +260,7 @@ class TestTheClassCharacterIsWeb:
     def test_the_override_can_still_screen_another_class(self, tmp_path, monkeypatch):
         """The knob has to be able to contradict the default, or the class can
         never be screened again."""
-        f = tmp_path / "pid"; f.write_text(f"{DEV}:4_2_0_1")
+        f = tmp_path / "pid"
+        f.write_text(f"{DEV}:4_2_0_1")
         monkeypatch.setattr(client_mod, "EXPT_PEERID_FILE", str(f))
         assert _gen(device_id=DEV).split("_")[1][0] == "4"

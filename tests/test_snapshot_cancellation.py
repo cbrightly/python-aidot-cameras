@@ -15,6 +15,7 @@ have to wait for a snapshot that nobody is waiting for any more.
 These tests pin both halves: cancellation propagates (and still tears the
 session down on the way out), timeout still salvages.
 """
+
 import asyncio
 
 import pytest

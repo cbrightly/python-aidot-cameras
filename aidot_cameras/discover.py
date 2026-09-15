@@ -46,8 +46,8 @@ from .exceptions import AidotOSError
 
 _LOGGER = logging.getLogger(__name__)
 
-_DISCOVER_FAST = 6      # fast discovery cadence right after startup
-_DISCOVER_SLOW = 120    # slow maintenance cadence once stable
+_DISCOVER_FAST = 6  # fast discovery cadence right after startup
+_DISCOVER_SLOW = 120  # slow maintenance cadence once stable
 _DISCOVER_FAST_ROUNDS = 5
 _DISCOVER_PORT = 6666
 
@@ -113,7 +113,9 @@ def _get_broadcast_candidates() -> List[Tuple[str, str]]:
                 ):
                     results.append((m.group(1), m.group(2)))
     except (OSError, subprocess.SubprocessError) as exc:
-        _LOGGER.debug("_get_broadcast_candidates: interface enumeration failed: %s", exc)
+        _LOGGER.debug(
+            "_get_broadcast_candidates: interface enumeration failed: %s", exc
+        )
     except Exception as exc:  # never let enumeration crash discovery
         _LOGGER.debug("_get_broadcast_candidates: unexpected error: %s", exc)
 
@@ -169,7 +171,10 @@ class InterfaceBroadcastProtocol(_UpstreamBroadcastProtocol):
             self.transport.sendto(send_data, (self._broadcast_addr, _DISCOVER_PORT))
             _LOGGER.debug(
                 "discovery broadcast sent: %s:%s -> %s:%s",
-                local_addr[0], local_addr[1], self._broadcast_addr, _DISCOVER_PORT,
+                local_addr[0],
+                local_addr[1],
+                self._broadcast_addr,
+                _DISCOVER_PORT,
             )
         except Exception as error:
             _LOGGER.error("%s: send failed: %s", self.user_id, error)
@@ -187,7 +192,9 @@ class InterfaceBroadcastProtocol(_UpstreamBroadcastProtocol):
             data_str = aes_decrypt(data, self.aes_key)
             data_json = json.loads(data_str)
         except Exception as exc:
-            _LOGGER.debug("discovery: ignored undecodable packet from %s: %s", addr, exc)
+            _LOGGER.debug(
+                "discovery: ignored undecodable packet from %s: %s", addr, exc
+            )
             return
         try:
             response = DiscoverResponse.from_json(data=data_json)

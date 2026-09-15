@@ -31,23 +31,26 @@ from aidot_cameras.camera.sdes_open import (
 
 # An abridged but real-shaped camera answer: the credentials and the one udp
 # candidate that USE-CANDIDATE is actually addressed to.
-_ANSWER = "\r\n".join([
-    "v=0",
-    "o=- 0 0 IN IP4 192.168.0.124",
-    "s=-",
-    "t=0 0",
-    "m=audio 35488 RTP/SAVP 8",
-    "a=ice-ufrag:CAMufrag",
-    "a=ice-pwd:CAMpwdCAMpwdCAMpwd",
-    "a=candidate:1 1 udp 2130706431 192.168.0.124 35488 typ host",
-    "a=candidate:2 1 udp 1694498815 81.2.3.4 51820 typ srflx",
-    "m=video 35490 RTP/SAVP 96",
-])
+_ANSWER = "\r\n".join(
+    [
+        "v=0",
+        "o=- 0 0 IN IP4 192.168.0.124",
+        "s=-",
+        "t=0 0",
+        "m=audio 35488 RTP/SAVP 8",
+        "a=ice-ufrag:CAMufrag",
+        "a=ice-pwd:CAMpwdCAMpwdCAMpwd",
+        "a=candidate:1 1 udp 2130706431 192.168.0.124 35488 typ host",
+        "a=candidate:2 1 udp 1694498815 81.2.3.4 51820 typ srflx",
+        "m=video 35490 RTP/SAVP 96",
+    ]
+)
 
 
 # --------------------------------------------------------------------------- #
 # What nomination needs out of the answer
 # --------------------------------------------------------------------------- #
+
 
 def test_it_reads_the_credentials_and_candidates_the_nomination_addresses():
     ufrag, pwd, cands, host = _parse_answer_ice(_ANSWER)
@@ -101,23 +104,21 @@ def test_no_answer_at_all_cannot_nominate():
 # When the window is allowed to leave early
 # --------------------------------------------------------------------------- #
 
+
 def test_it_leaves_once_the_answer_is_in_hand_and_the_camera_is_doing_ice():
-    assert _stun_window_answer_exit_due(
-        stun_seen=True, answer_ready=True) is True
+    assert _stun_window_answer_exit_due(stun_seen=True, answer_ready=True) is True
 
 
 def test_it_stays_while_the_answer_has_not_arrived():
     """This is the case the window was built for and it is unchanged."""
-    assert _stun_window_answer_exit_due(
-        stun_seen=True, answer_ready=False) is False
+    assert _stun_window_answer_exit_due(stun_seen=True, answer_ready=False) is False
 
 
 def test_it_stays_until_the_camera_has_actually_started_its_checks():
     """Before the first binding request there is no evidence the camera is
     running ICE at all.  A relay-only camera that answers early and probes late
     keeps today's behaviour rather than being nominated into silence."""
-    assert _stun_window_answer_exit_due(
-        stun_seen=False, answer_ready=True) is False
+    assert _stun_window_answer_exit_due(stun_seen=False, answer_ready=True) is False
 
 
 def test_it_is_not_scoped_to_one_branch_of_the_window():
@@ -136,6 +137,7 @@ def test_it_is_not_scoped_to_one_branch_of_the_window():
 # --------------------------------------------------------------------------- #
 # The helpers have to be the ones the code actually runs
 # --------------------------------------------------------------------------- #
+
 
 def _open_source() -> str:
     from aidot_cameras.camera.client import CameraMixin
@@ -202,13 +204,15 @@ def test_the_flag_is_cleared_for_each_open():
 # Without a sender check the window would leave on our own SDP and the setup
 # nomination would address our own host and srflx addresses.
 
-_OUR_ANSWER = "\r\n".join([
-    "v=0",
-    "m=audio 39641 RTP/SAVPF 8",
-    "a=ice-ufrag:OURufrag",
-    "a=ice-pwd:OURpwdOURpwdOURpwd",
-    "a=candidate:1 1 udp 2130706431 192.168.0.114 39641 typ host",
-])
+_OUR_ANSWER = "\r\n".join(
+    [
+        "v=0",
+        "m=audio 39641 RTP/SAVPF 8",
+        "a=ice-ufrag:OURufrag",
+        "a=ice-pwd:OURpwdOURpwdOURpwd",
+        "a=candidate:1 1 udp 2130706431 192.168.0.114 39641 typ host",
+    ]
+)
 
 _USER = "76adc6bd26f516d0fb06e804ee3cf85e"
 
@@ -220,20 +224,22 @@ def test_our_own_answer_would_otherwise_pass_the_nomination_check():
 
 
 def test_our_own_echoed_answer_is_not_treated_as_the_cameras():
-    assert _answer_is_from_the_camera(
-        src_addr=f"0.{_USER}", user_id=_USER) is False
+    assert _answer_is_from_the_camera(src_addr=f"0.{_USER}", user_id=_USER) is False
 
 
 def test_the_cameras_answer_is():
-    assert _answer_is_from_the_camera(
-        src_addr="2.338603b50fce46ef8d2545fc7362c967", user_id=_USER) is True
+    assert (
+        _answer_is_from_the_camera(
+            src_addr="2.338603b50fce46ef8d2545fc7362c967", user_id=_USER
+        )
+        is True
+    )
 
 
 def test_a_server_message_is_not_mistaken_for_ours():
     """`9.` is the server prefix. It is not us, so it is not filtered here -
     the SDP check is what decides whether it can nominate."""
-    assert _answer_is_from_the_camera(
-        src_addr=f"9.{_USER}", user_id=_USER) is True
+    assert _answer_is_from_the_camera(src_addr=f"9.{_USER}", user_id=_USER) is True
 
 
 def test_an_answer_with_no_srcaddr_keeps_the_prior_behaviour():
@@ -262,8 +268,10 @@ def test_a_corrupt_candidate_line_is_still_rejected():
     """Widening the type token to accept a bare `typ` must not also accept
     `typo host` or `typhoon`: every parse this collapsed rejected those, and a
     corrupt line reaching the nomination gets a TURN permission and a probe."""
-    for bad in ("a=candidate:1 1 udp 1 1.2.3.4 5 typo host",
-                "a=candidate:1 1 udp 1 1.2.3.4 5 typhoon"):
+    for bad in (
+        "a=candidate:1 1 udp 1 1.2.3.4 5 typo host",
+        "a=candidate:1 1 udp 1 1.2.3.4 5 typhoon",
+    ):
         assert _parse_answer_ice(bad)[2] == [], bad
 
 
@@ -289,6 +297,7 @@ def test_the_candidate_parse_accepts_a_line_that_ends_at_typ():
 # Our own echo must not reach the future the nomination reads
 # --------------------------------------------------------------------------- #
 
+
 def test_our_own_echo_is_dropped_rather_than_routed():
     """Gating only the readiness marker left the failure it was written to
     prevent fully reachable: `answer_fut` is where the nomination reads its SDP,
@@ -300,19 +309,18 @@ def test_our_own_echo_is_dropped_rather_than_routed():
     async def _run():
         loop = asyncio.get_running_loop()
         first, second = loop.create_future(), loop.create_future()
-        _deliver_webrtc_answer(loop, first, second,
-                               {"sdp": _OUR_ANSWER}, from_camera=False)
+        _deliver_webrtc_answer(
+            loop, first, second, {"sdp": _OUR_ANSWER}, from_camera=False
+        )
         await asyncio.sleep(0)
         assert not first.done(), "our own SDP must not resolve answer_fut"
         assert not second.done(), "nor the future the late recovery reads"
 
-        _deliver_webrtc_answer(loop, first, second,
-                               {"sdp": _ANSWER}, from_camera=True)
+        _deliver_webrtc_answer(loop, first, second, {"sdp": _ANSWER}, from_camera=True)
         await asyncio.sleep(0)
         assert first.done() and first.result()["sdp"] == _ANSWER
 
-        _deliver_webrtc_answer(loop, first, second,
-                               {"sdp": _ANSWER}, from_camera=True)
+        _deliver_webrtc_answer(loop, first, second, {"sdp": _ANSWER}, from_camera=True)
         await asyncio.sleep(0)
         assert second.done(), "a later camera answer still reaches the recovery"
 
@@ -331,6 +339,7 @@ def test_delivery_defaults_to_treating_an_answer_as_the_cameras():
 # --------------------------------------------------------------------------- #
 # The marker belongs to one open
 # --------------------------------------------------------------------------- #
+
 
 def test_a_marker_from_this_open_arms_the_exit():
     assert _answer_ready_for_this_open(100.0, 99.0) is True
@@ -352,7 +361,8 @@ def test_the_window_checks_the_marker_belongs_to_this_open():
     src = _open_source()
     assert "_answer_ready_for_this_open" in src
     assert src.count("_answer_ready_for_this_open") >= 2, (
-        "both STUN windows must use it, not just the first")
+        "both STUN windows must use it, not just the first"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -371,19 +381,21 @@ def test_the_window_checks_the_marker_belongs_to_this_open():
 # ones are per-session credentials and do not belong in a repo - but the shape
 # is the shape that was captured.
 
-_ONE_PAIR_ANSWER = "\r\n".join([
-    "v=0",
-    "m=video 9 RTP/SAVP 96",
-    "a=ice-ufrag:9z7F",
-    "a=ice-pwd:mDe5uxBe1msnVNMlu8BwzQPy",
-    "a=candidate:1 1 udp 2130706431 192.168.0.124 33912 typ host",
-    "m=audio 9 RTP/SAVP 8",
-    "a=ice-ufrag:9z7F",
-    "a=ice-pwd:mDe5uxBe1msnVNMlu8BwzQPy",
-    "m=application 9 SCTP webrtc-datachannel",
-    "a=ice-ufrag:9z7F",
-    "a=ice-pwd:mDe5uxBe1msnVNMlu8BwzQPy",
-])
+_ONE_PAIR_ANSWER = "\r\n".join(
+    [
+        "v=0",
+        "m=video 9 RTP/SAVP 96",
+        "a=ice-ufrag:9z7F",
+        "a=ice-pwd:mDe5uxBe1msnVNMlu8BwzQPy",
+        "a=candidate:1 1 udp 2130706431 192.168.0.124 33912 typ host",
+        "m=audio 9 RTP/SAVP 8",
+        "a=ice-ufrag:9z7F",
+        "a=ice-pwd:mDe5uxBe1msnVNMlu8BwzQPy",
+        "m=application 9 SCTP webrtc-datachannel",
+        "a=ice-ufrag:9z7F",
+        "a=ice-pwd:mDe5uxBe1msnVNMlu8BwzQPy",
+    ]
+)
 
 
 def test_the_first_credential_pair_is_the_only_pair():
@@ -394,11 +406,15 @@ def test_the_first_credential_pair_is_the_only_pair():
     assert cands == [("192.168.0.124", 33912)]
 
     pairs = {
-        (ln[len("a=ice-ufrag:"):].strip() if ln.startswith("a=ice-ufrag:")
-         else ln[len("a=ice-pwd:"):].strip())
+        (
+            ln[len("a=ice-ufrag:") :].strip()
+            if ln.startswith("a=ice-ufrag:")
+            else ln[len("a=ice-pwd:") :].strip()
+        )
         for ln in _ONE_PAIR_ANSWER.splitlines()
         if ln.startswith(("a=ice-ufrag:", "a=ice-pwd:"))
     }
     assert pairs == {ufrag, pwd}, (
         "this answer carries more than one credential pair, so the single pair"
-        " the nomination uses on both sockets is no longer the whole story")
+        " the nomination uses on both sockets is no longer the whole story"
+    )

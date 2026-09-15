@@ -7,6 +7,7 @@ muxed MPEG-TS AAC back to PCM, then measures it for choppiness signatures:
   * output duration vs input (sample-accounting / desync drift)
 Tests steady white noise, white noise with packet loss, and AGC on/off.
 """
+
 import io
 import os
 import queue
@@ -21,7 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from aidot_cameras.camera.protocol import _dtls_av_mux_run
 
 SR = 8000
-PKT_SAMPLES = 320          # 40 ms PCMA packets (matches measured wire framing)
+PKT_SAMPLES = 320  # 40 ms PCMA packets (matches measured wire framing)
 SECONDS = 20
 
 
@@ -37,7 +38,7 @@ def make_pcma_packets(level_dbfs=-18.0, n_seconds=SECONDS, loss=0.0, seed=1):
     enc.format = "s16"
     pkts = []
     for i in range(0, n - PKT_SAMPLES, PKT_SAMPLES):
-        chunk = pcm[i:i + PKT_SAMPLES].reshape(1, -1)
+        chunk = pcm[i : i + PKT_SAMPLES].reshape(1, -1)
         fr = av.AudioFrame.from_ndarray(chunk, format="s16", layout="mono")
         fr.sample_rate = SR
         for p in enc.encode(fr):
@@ -46,7 +47,10 @@ def make_pcma_packets(level_dbfs=-18.0, n_seconds=SECONDS, loss=0.0, seed=1):
     raw = b"".join(pkts)
     # (packet_bytes, rtp_ts) with rtp_ts reflecting the TRUE wire position so a
     # dropped packet leaves a real timestamp gap (PCMA: 1 byte == 1 sample @8k).
-    wire = [(raw[i:i + PKT_SAMPLES], i) for i in range(0, len(raw) - PKT_SAMPLES, PKT_SAMPLES)]
+    wire = [
+        (raw[i : i + PKT_SAMPLES], i)
+        for i in range(0, len(raw) - PKT_SAMPLES, PKT_SAMPLES)
+    ]
     if loss > 0:
         wire = [(w, t) for (w, t) in wire if rng.rand() > loss]
     return wire, n
@@ -63,7 +67,9 @@ def run_mux(wire_pkts, realtime=False):
     for w, ts in wire_pkts:
         aq.put((w, ts))
     vq.put((idr, 0, True))
-    t = threading.Thread(target=_dtls_av_mux_run, args=(vq, aq, out, progress, stop), daemon=True)
+    t = threading.Thread(
+        target=_dtls_av_mux_run, args=(vq, aq, out, progress, stop), daemon=True
+    )
     t.start()
     # let the mux drain the queue
     deadline = time.time() + 15
@@ -100,7 +106,9 @@ def analyze(y, sr, expected_in_samples):
     # 20 ms RMS envelope
     w = int(0.02 * sr)
     nfr = len(y) // w
-    env = np.array([np.sqrt(np.mean(y[i * w:(i + 1) * w] ** 2)) + 1e-9 for i in range(nfr)])
+    env = np.array(
+        [np.sqrt(np.mean(y[i * w : (i + 1) * w] ** 2)) + 1e-9 for i in range(nfr)]
+    )
     env_db = 20 * np.log10(env)
     # dropouts: 20ms windows >25 dB below median level
     med = np.median(env_db)
@@ -111,9 +119,11 @@ def analyze(y, sr, expected_in_samples):
     # click/discontinuity proxy: count large sample-to-sample jumps
     d = np.abs(np.diff(y))
     jumps = int(np.sum(d > 0.5))  # |delta|>0.5 of full-scale in one sample @48k
-    print(f"    out {dur:6.2f}s (in {exp_dur:5.2f}s, drift {dur - exp_dur:+.2f}s) | "
-          f"env median {med:6.1f} dBFS | dropouts(20ms) {drop:3d} | "
-          f"pump sigma {pump:4.1f} dB | big-jumps {jumps:4d}")
+    print(
+        f"    out {dur:6.2f}s (in {exp_dur:5.2f}s, drift {dur - exp_dur:+.2f}s) | "
+        f"env median {med:6.1f} dBFS | dropouts(20ms) {drop:3d} | "
+        f"pump sigma {pump:4.1f} dB | big-jumps {jumps:4d}"
+    )
 
 
 def case(name, **kw):
@@ -141,8 +151,14 @@ def case(name, **kw):
 if __name__ == "__main__":
     print(f"=== DTLS audio-mux probe: {SECONDS}s white noise, 40ms PCMA packets ===")
     case("[1] loud white noise, AGC default (-15 target, -45 gate)", level=-12.0)
-    case("[2] loud white noise, AGC OFF (gate=-120, min=max=0dB)", level=-12.0,
-         env={"AIDOT_AUDIO_GATE_DBFS": "-120", "AIDOT_AUDIO_MINGAIN_DB": "0",
-              "AIDOT_AUDIO_MAXGAIN_DB": "0"})
+    case(
+        "[2] loud white noise, AGC OFF (gate=-120, min=max=0dB)",
+        level=-12.0,
+        env={
+            "AIDOT_AUDIO_GATE_DBFS": "-120",
+            "AIDOT_AUDIO_MINGAIN_DB": "0",
+            "AIDOT_AUDIO_MAXGAIN_DB": "0",
+        },
+    )
     case("[3] loud white noise + 3% packet loss, AGC default", level=-12.0, loss=0.03)
     case("[4] quiet white noise (-40 dBFS), AGC default (near gate)", level=-40.0)

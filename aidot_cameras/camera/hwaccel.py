@@ -62,13 +62,13 @@ _LOGGER = logging.getLogger(__name__)
 # proves fastest wins, and anything that cannot decode is dropped.
 _CANDIDATES = {
     "h264": [
-        ["-hwaccel", "videotoolbox"],   # macOS / Apple silicon
-        ["-hwaccel", "vaapi"],          # generic Linux (Intel/AMD)
-        ["-c:v", "h264_v4l2m2m"],       # Raspberry Pi 4 / many ARM SoCs
-        ["-c:v", "h264_rkmpp"],         # Rockchip
-        ["-c:v", "h264_qsv"],           # Intel QuickSync
-        ["-c:v", "h264_cuvid"],         # Nvidia
-        [],                             # software
+        ["-hwaccel", "videotoolbox"],  # macOS / Apple silicon
+        ["-hwaccel", "vaapi"],  # generic Linux (Intel/AMD)
+        ["-c:v", "h264_v4l2m2m"],  # Raspberry Pi 4 / many ARM SoCs
+        ["-c:v", "h264_rkmpp"],  # Rockchip
+        ["-c:v", "h264_qsv"],  # Intel QuickSync
+        ["-c:v", "h264_cuvid"],  # Nvidia
+        [],  # software
     ],
     "hevc": [
         ["-hwaccel", "videotoolbox"],
@@ -90,7 +90,7 @@ _CACHE_SCHEMA = 2
 # ("hwaccel:videotoolbox"). The prefix is needed because the two are not
 # interchangeable - VideoToolbox and VAAPI have no decoder to name.
 _ENV_OVERRIDE = "AIDOT_VIDEO_DECODER"
-_ENV_DISABLE = "AIDOT_DISABLE_HWACCEL"    # stay on software decoding
+_ENV_DISABLE = "AIDOT_DISABLE_HWACCEL"  # stay on software decoding
 
 _PROBE_TIMEOUT_S = 40.0
 _cache_mem: dict = {}
@@ -119,6 +119,7 @@ def _ffmpeg_identity() -> str:
     if _identity_memo is not None:
         return _identity_memo
     import shutil
+
     ident = "unknown"
     try:
         path = shutil.which(_ffmpeg()) or _ffmpeg()
@@ -130,7 +131,9 @@ def _ffmpeg_identity() -> str:
         try:
             ident = subprocess.run(
                 [_ffmpeg(), "-hide_banner", "-version"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             ).stdout.splitlines()[0]
         except Exception:
             pass
@@ -169,7 +172,9 @@ def _list_names(flag: str) -> set:
     try:
         out = subprocess.run(
             [_ffmpeg(), "-hide_banner", flag],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         ).stdout
     except Exception:
         return set()
@@ -197,7 +202,7 @@ def _plausible(cand: List[str]) -> bool:
     merely unlikely. Anything that survives still has to prove itself.
     """
     if not cand:
-        return True                                  # software
+        return True  # software
     name = cand[1]
     if name == "videotoolbox":
         return sys.platform == "darwin"
@@ -218,7 +223,7 @@ def _available(cand: List[str]) -> bool:
     passes here still has to prove it can decode."""
     global _decoders_memo, _hwaccels_memo
     if not cand:
-        return True                      # software
+        return True  # software
     if cand[0] == "-c:v":
         if _decoders_memo is None:
             _decoders_memo = _list_names("-decoders")
@@ -249,11 +254,29 @@ def _make_sample(codec: str, path: str) -> bool:
     enc = "libx264" if codec == "h264" else "libx265"
     try:
         r = subprocess.run(
-            [_ffmpeg(), "-hide_banner", "-loglevel", "error",
-             "-f", "lavfi", "-i", _SAMPLE,
-             "-c:v", enc, "-preset", "ultrafast", "-g", "15",
-             "-f", codec, "-y", path],
-            capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S,
+            [
+                _ffmpeg(),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                _SAMPLE,
+                "-c:v",
+                enc,
+                "-preset",
+                "ultrafast",
+                "-g",
+                "15",
+                "-f",
+                codec,
+                "-y",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT_S,
         )
         return r.returncode == 0 and os.path.getsize(path) > 0
     except Exception:
@@ -273,10 +296,22 @@ def _try_decoder(cand: List[str], sample: str) -> Optional[float]:
     t0 = time.monotonic()
     try:
         r = subprocess.run(
-            [_ffmpeg(), "-hide_banner", "-loglevel", "error",
-             *cand, "-i", sample,
-             "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"],
-            capture_output=True, timeout=_PROBE_TIMEOUT_S,
+            [
+                _ffmpeg(),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                *cand,
+                "-i",
+                sample,
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+                "-",
+            ],
+            capture_output=True,
+            timeout=_PROBE_TIMEOUT_S,
         )
     except Exception:
         return None
@@ -321,14 +356,18 @@ def probe_decoder(codec: str, force: bool = False) -> List[str]:
     # would never decode is the single largest cost in this module.
     hw = [c for c in _CANDIDATES[codec] if c and _plausible(c) and _available(c)]
     if not hw:
-        _LOGGER.debug("decoder probe: no hardware candidate is possible for %s "
-                      "on this machine; software, nothing probed", codec)
+        _LOGGER.debug(
+            "decoder probe: no hardware candidate is possible for %s "
+            "on this machine; software, nothing probed",
+            codec,
+        )
         cache[key] = []
         _cache_mem[key] = []
         _save_cache(cache)
         return []
 
     import tempfile
+
     winner: List[str] = []
     best = None
     with tempfile.TemporaryDirectory() as td:
@@ -339,8 +378,9 @@ def probe_decoder(codec: str, force: bool = False) -> List[str]:
         for cand in hw:
             took = _try_decoder(cand, sample)
             if took is None:
-                _LOGGER.debug("decoder probe: %s cannot decode %s here",
-                              " ".join(cand), codec)
+                _LOGGER.debug(
+                    "decoder probe: %s cannot decode %s here", " ".join(cand), codec
+                )
                 continue
             if best is None or took < best:
                 winner, best = list(cand), took
@@ -350,13 +390,22 @@ def probe_decoder(codec: str, force: bool = False) -> List[str]:
         if winner:
             sw = _try_decoder([], sample)
             if sw is not None and sw <= (best or 0.0):
-                _LOGGER.debug("decoder probe: software (%.2fs) beats %s (%.2fs) "
-                              "for %s", sw, " ".join(winner), best or 0.0, codec)
+                _LOGGER.debug(
+                    "decoder probe: software (%.2fs) beats %s (%.2fs) for %s",
+                    sw,
+                    " ".join(winner),
+                    best or 0.0,
+                    codec,
+                )
                 winner, best = [], sw
 
     if winner:
-        _LOGGER.info("decoder probe: using %s for %s (%.2fs on the probe clip)",
-                     " ".join(winner), codec, best or 0.0)
+        _LOGGER.info(
+            "decoder probe: using %s for %s (%.2fs on the probe clip)",
+            " ".join(winner),
+            codec,
+            best or 0.0,
+        )
     else:
         _LOGGER.debug("decoder probe: software decoding for %s", codec)
     cache[key] = winner
@@ -411,7 +460,8 @@ def warm_decoder_cache(codecs: tuple = ("h264",)) -> "threading.Thread":
         if _warm_thread is not None and _warm_thread.is_alive():
             return _warm_thread
         _warm_thread = threading.Thread(
-            target=_run, name="aidot-decoder-probe", daemon=True)
+            target=_run, name="aidot-decoder-probe", daemon=True
+        )
         _warm_thread.start()
         return _warm_thread
 

@@ -50,9 +50,7 @@ CHILD = {
             {"identity": "control.light.rgbw"},
             {
                 "identity": "control.light.cct",
-                "properties": [
-                    {"identity": "CCT", "minValue": 2000, "maxValue": 6500}
-                ],
+                "properties": [{"identity": "CCT", "minValue": 2000, "maxValue": 6500}],
             },
         ]
     },
@@ -107,7 +105,12 @@ def test_direct_wifi_light_is_not_a_mesh_child():
 
 
 def test_rgbw_round_trips_through_signed_packing():
-    for rgbw in [(0, 0, 0, 0), (255, 255, 255, 255), (255, 128, 0, 64), (12, 34, 56, 78)]:
+    for rgbw in [
+        (0, 0, 0, 0),
+        (255, 255, 255, 255),
+        (255, 128, 0, 64),
+        (12, 34, 56, 78),
+    ]:
         assert _unpack_rgbw(_pack_rgbw(rgbw)) == rgbw
 
 

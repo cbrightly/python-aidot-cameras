@@ -22,6 +22,7 @@ a snapshot or the `-f null` drain, never the live stream - the live serve passes
 no `max_seconds` - and arrival stamping exists to stop a long stream drifting on
 the camera's backward clock, which a ten-second grab does not care about.
 """
+
 import os
 import sys
 
@@ -64,6 +65,7 @@ def test_the_bound_reaches_the_drain_destination():
 
 
 # --- a sub-second bound must not truncate to nothing ------------------------
+
 
 def test_a_sub_second_bound_is_not_truncated_to_zero():
     """`int(0.5)` is 0, and `-t 0` asks ffmpeg for no output at all.

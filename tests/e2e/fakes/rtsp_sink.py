@@ -17,6 +17,7 @@ Deliberately minimal: it answers the request sequence ffmpeg's rtsp muxer
 issues and counts what follows.  It does not parse RTP, and it is not a media
 server.
 """
+
 import asyncio
 import time
 
@@ -40,9 +41,7 @@ class FakeRtspSink:
         self.port: int | None = None
 
     async def start(self) -> "FakeRtspSink":
-        self._server = await asyncio.start_server(
-            self._handle, "127.0.0.1", 0
-        )
+        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
         self.port = self._server.sockets[0].getsockname()[1]
         return self
 
@@ -59,6 +58,7 @@ class FakeRtspSink:
     def url_for(self):
         def _url(stream: str) -> str:
             return f"rtsp://127.0.0.1:{self.port}/{stream}"
+
         return _url
 
     async def __aenter__(self) -> "FakeRtspSink":
@@ -137,8 +137,7 @@ class FakeRtspSink:
                     line = await reader.readline()
                     if not line or line in (b"\r\n", b"\n"):
                         break
-                    name, _, value = line.decode(
-                        "utf-8", "replace").partition(":")
+                    name, _, value = line.decode("utf-8", "replace").partition(":")
                     headers[name.strip().lower()] = value.strip()
                 body = b""
                 length = int(headers.get("content-length") or 0)
@@ -174,15 +173,16 @@ class FakeRtspSink:
             "Server: fake-rtsp-sink",
         ]
         if verb == "OPTIONS":
-            lines.append(
-                "Public: OPTIONS, DESCRIBE, ANNOUNCE, SETUP, RECORD, TEARDOWN"
-            )
+            lines.append("Public: OPTIONS, DESCRIBE, ANNOUNCE, SETUP, RECORD, TEARDOWN")
         if verb in ("SETUP", "RECORD", "TEARDOWN", "PLAY"):
             lines.append(f"Session: {session};timeout=60")
         if verb == "SETUP":
             # Echo the transport back: ffmpeg needs its interleaved channel
             # assignment confirmed or it aborts the publish.
             transport = headers.get("transport", "")
-            lines.append(f"Transport: {transport}" if transport else
-                         "Transport: RTP/AVP/TCP;unicast;interleaved=0-1;mode=record")
+            lines.append(
+                f"Transport: {transport}"
+                if transport
+                else "Transport: RTP/AVP/TCP;unicast;interleaved=0-1;mode=record"
+            )
         return ("\r\n".join(lines) + "\r\n\r\n").encode()

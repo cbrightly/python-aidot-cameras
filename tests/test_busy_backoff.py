@@ -22,6 +22,7 @@ that genuinely has no free session, and on a battery model that risks the
 wake-then-sleep loop the original comment was guarding against. So: comfortably
 past the measured window, nowhere near five minutes.
 """
+
 from aidot_cameras.camera.client import _BUSY_BACKOFF_S
 
 

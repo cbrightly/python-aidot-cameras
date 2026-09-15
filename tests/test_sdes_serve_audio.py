@@ -10,6 +10,7 @@ type is narrowed now, with a video-only fallback when it cannot be characterised
 so audio can no longer cost the picture and the default is back on. The narrowing
 itself is covered by test_sdp_payload_type_narrowing.py.
 """
+
 import os
 import sys
 
@@ -17,8 +18,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import aidot_cameras.camera.client as cc
 
-_CAM = next(v for v in vars(cc).values()
-            if isinstance(v, type) and "_resolve_sdes_serve_audio" in v.__dict__)
+_CAM = next(
+    v
+    for v in vars(cc).values()
+    if isinstance(v, type) and "_resolve_sdes_serve_audio" in v.__dict__
+)
 
 
 def _cam():
@@ -45,7 +49,7 @@ def test_env_truthy_or_unknown_stays_on(monkeypatch):
 def test_kwarg_option_wins_over_env(monkeypatch):
     monkeypatch.setenv("AIDOT_SDES_SERVE_AUDIO", "1")
     cam = _cam()
-    cam._sdes_audio_opt = False           # start_keepalive(sdes_audio=False)
+    cam._sdes_audio_opt = False  # start_keepalive(sdes_audio=False)
     assert cam._resolve_sdes_serve_audio() is False
 
     cam2 = _cam()
@@ -80,8 +84,11 @@ if __name__ == "__main__":
     import traceback
 
     class _MP:
-        def setenv(self, k, v): os.environ[k] = v
-        def delenv(self, k, raising=False): os.environ.pop(k, None)
+        def setenv(self, k, v):
+            os.environ[k] = v
+
+        def delenv(self, k, raising=False):
+            os.environ.pop(k, None)
 
     _fail = 0
     for _k, _v in sorted(globals().items()):

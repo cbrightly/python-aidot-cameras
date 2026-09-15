@@ -79,7 +79,7 @@ def test_every_piped_spawn_installs_the_drain() -> None:
         "this guard is obsolete, but do not delete it without checking why"
     )
     for line_no in spawns:
-        window = "\n".join(src[line_no:line_no + 12])
+        window = "\n".join(src[line_no : line_no + 12])
         assert "_start_serve_stderr_drain(" in window, (
             f"{sdes_open.__name__}:{line_no + 1} spawns with stderr=PIPE and "
             "nothing drains it within the next few lines. An un-drained pipe "
@@ -150,7 +150,8 @@ def test_teardown_logs_the_drained_tail_when_the_pipe_is_empty(caplog) -> None:
     caplog.set_level(logging.DEBUG, logger="aidot_cameras.camera.sdes")
     _stopped_session(["frame= 120 fps=20", "Error writing trailer: Broken pipe"])
     warnings = [
-        r for r in caplog.records
+        r
+        for r in caplog.records
         if r.levelno == logging.WARNING and "ffmpeg SDES stderr" in r.getMessage()
     ]
     assert warnings, "a mid-stream ffmpeg error must still reach the log"
@@ -163,11 +164,13 @@ def test_teardown_tail_still_demotes_the_expected_no_media_shape(caplog) -> None
     caplog.set_level(logging.DEBUG, logger="aidot_cameras.camera.sdes")
     _stopped_session(["Output file is empty, nothing was encoded"])
     assert not [
-        r for r in caplog.records
+        r
+        for r in caplog.records
         if r.levelno == logging.WARNING and "ffmpeg SDES stderr" in r.getMessage()
     ]
     assert [
-        r for r in caplog.records
+        r
+        for r in caplog.records
         if r.levelno == logging.DEBUG and "ffmpeg SDES stderr" in r.getMessage()
     ]
 
@@ -175,9 +178,7 @@ def test_teardown_tail_still_demotes_the_expected_no_media_shape(caplog) -> None
 def test_teardown_without_a_tail_logs_nothing(caplog) -> None:
     caplog.set_level(logging.DEBUG, logger="aidot_cameras.camera.sdes")
     _stopped_session([])
-    assert not [
-        r for r in caplog.records if "ffmpeg SDES stderr" in r.getMessage()
-    ]
+    assert not [r for r in caplog.records if "ffmpeg SDES stderr" in r.getMessage()]
 
 
 def test_undecodable_bytes_do_not_crash_the_drain() -> None:

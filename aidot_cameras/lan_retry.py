@@ -30,8 +30,7 @@ _LOGIN_RETRY_BASE_S = 1.0
 #: all - `grep -cE "wait_for|timeout"` over its device_client returns 0 - so a
 #: device that accepts the TCP connection and then stops answering parks
 #: `readexactly(8)` forever, inside `connect()`.
-_LOGIN_CONNECT_TIMEOUT_S = float(
-    os.environ.get("AIDOT_LOGIN_CONNECT_TIMEOUT_S", "20"))
+_LOGIN_CONNECT_TIMEOUT_S = float(os.environ.get("AIDOT_LOGIN_CONNECT_TIMEOUT_S", "20"))
 
 
 async def _await_connect_with_deadline(
@@ -62,15 +61,18 @@ async def _await_connect_with_deadline(
         _LOGGER.warning(
             "%s: LAN connect/login did not answer within %.0fs - abandoning "
             "this attempt and closing the socket. Override with "
-            "AIDOT_LOGIN_CONNECT_TIMEOUT_S.", device_id, timeout,
+            "AIDOT_LOGIN_CONNECT_TIMEOUT_S.",
+            device_id,
+            timeout,
         )
         try:
             await on_timeout()
         except asyncio.CancelledError:
             raise
         except Exception:
-            _LOGGER.debug("%s: cleanup after connect timeout failed",
-                          device_id, exc_info=True)
+            _LOGGER.debug(
+                "%s: cleanup after connect timeout failed", device_id, exc_info=True
+            )
         return False
 
 
@@ -97,7 +99,7 @@ def _next_login_retry_delay(attempt: int) -> Optional[float]:
     """
     if attempt < 0 or attempt >= _LOGIN_RETRY_LIMIT:
         return None
-    return min(_LOGIN_RETRY_BASE_S * (2 ** attempt), _LOGIN_RETRY_CAP_S)
+    return min(_LOGIN_RETRY_BASE_S * (2**attempt), _LOGIN_RETRY_CAP_S)
 
 
 class LanRetryMixin:
@@ -178,7 +180,8 @@ class LanRetryMixin:
                 "%s: giving up LAN login after %d consecutive failures; it will "
                 "be retried when something asks for this device again. Set "
                 "AIDOT_LOGIN_RETRY_LIMIT to change the ceiling.",
-                getattr(self, "device_id", "?"), attempt,
+                getattr(self, "device_id", "?"),
+                attempt,
             )
             return
         self._login_attempt = attempt + 1
@@ -192,7 +195,8 @@ class LanRetryMixin:
             except Exception:
                 _LOGGER.debug(
                     "%s: delayed LAN login retry failed",
-                    getattr(self, "device_id", "?"), exc_info=True,
+                    getattr(self, "device_id", "?"),
+                    exc_info=True,
                 )
 
         self._login_task = asyncio.create_task(_retry())

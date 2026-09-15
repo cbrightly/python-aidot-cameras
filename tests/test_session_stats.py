@@ -5,6 +5,7 @@ API exists). These tests lock the parsing against fakes shaped like those
 internals, so a refactor that breaks the extraction fails loudly here instead of
 silently returning empty diagnostics on a live box. No camera needed.
 """
+
 import asyncio
 import os
 import sys
@@ -45,7 +46,11 @@ def _fake_pc(nominated, inbound):
 
 def _session(pc):
     return WebRTCSession(
-        pc=pc, outgoing_q=None, mqtt_fut=None, recorder=None, track_tasks=[],
+        pc=pc,
+        outgoing_q=None,
+        mqtt_fut=None,
+        recorder=None,
+        track_tasks=[],
     )
 
 
@@ -58,15 +63,19 @@ def test_get_stats_reports_ice_path_and_loss():
         ],
     )
     out = asyncio.run(_session(pc).get_stats())
-    assert out["ice"] == [{
-        "component": 1,
-        "local_type": "host", "local": "192.0.2.206:40410",
-        "remote_type": "prflx", "remote": "192.0.2.245:58305",
-        "transport": "udp",
-    }]
+    assert out["ice"] == [
+        {
+            "component": 1,
+            "local_type": "host",
+            "local": "192.0.2.206:40410",
+            "remote_type": "prflx",
+            "remote": "192.0.2.245:58305",
+            "transport": "udp",
+        }
+    ]
     video = next(s for s in out["inbound"] if s["kind"] == "video")
     assert video["packets_received"] == 900 and video["packets_lost"] == 100
-    assert video["loss_pct"] == 10.0          # 100 / (900+100)
+    assert video["loss_pct"] == 10.0  # 100 / (900+100)
     assert "error" not in out
 
 
@@ -74,6 +83,7 @@ def test_get_stats_never_raises_on_broken_internals():
     # pc with no ICE transports and a getStats that raises: must degrade, not throw.
     async def _boom():
         raise RuntimeError("aiortc said no")
+
     pc = SimpleNamespace(getStats=_boom)
     out = asyncio.run(_session(pc).get_stats())
     assert out["ice"] is None

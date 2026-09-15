@@ -83,33 +83,33 @@ def fallback_turn_uris() -> list:
 # Total header = 37 bytes
 # --------------------------------------------------------------------------- #
 
-_HDR_FMT         = ">HiHHiiqibhi"
-_HDR_SIZE        = struct.calcsize(_HDR_FMT)           # 37
-_HDR_PREFIX_FMT  = ">HiHHii"
-_HDR_PREFIX_SIZE = struct.calcsize(_HDR_PREFIX_FMT)    # 18
-_HDR_SUFFIX_FMT  = ">qibhi"
-_HDR_SUFFIX_SIZE = struct.calcsize(_HDR_SUFFIX_FMT)    # 19
+_HDR_FMT = ">HiHHiiqibhi"
+_HDR_SIZE = struct.calcsize(_HDR_FMT)  # 37
+_HDR_PREFIX_FMT = ">HiHHii"
+_HDR_PREFIX_SIZE = struct.calcsize(_HDR_PREFIX_FMT)  # 18
+_HDR_SUFFIX_FMT = ">qibhi"
+_HDR_SUFFIX_SIZE = struct.calcsize(_HDR_SUFFIX_FMT)  # 19
 
-assert _HDR_SIZE        == 37
+assert _HDR_SIZE == 37
 assert _HDR_PREFIX_SIZE == 18
 assert _HDR_SUFFIX_SIZE == 19
 
 # Fixed values for all outbound request frames
-_HDR_VERSION  = 256   # 0x0100
-_HDR_CONTEXT  = 1005
+_HDR_VERSION = 256  # 0x0100
+_HDR_CONTEXT = 1005
 _HDR_ENC_TYPE = 1
-_HDR_RESULT   = 4
-_HDR_RESERVE  = 2
+_HDR_RESULT = 4
+_HDR_RESERVE = 2
 
 # TCP command codes from AppCmd.java
-_CMD_LOGIN_REQ  = 0x0101
-_CMD_LOGIN_RES  = 0x0102
-_CMD_HB_REQ     = 0x0105
-_CMD_HB_RES     = 0x0106
+_CMD_LOGIN_REQ = 0x0101
+_CMD_LOGIN_RES = 0x0102
+_CMD_HB_REQ = 0x0105
+_CMD_HB_RES = 0x0106
 _CMD_STREAM_REQ = 0x0107
 _CMD_STREAM_RES = 0x0108
-_CMD_SUBCMD     = 0x0001
-_CMD_PARAM      = 0x00000002
+_CMD_SUBCMD = 0x0001
+_CMD_PARAM = 0x00000002
 
 # Video sub-frame header size from LDSPlayer.decodeStream():
 # padding(2) frameType(1) audioCodec(1) timestamp(8) encType(1) payloadLen(4)
@@ -118,17 +118,27 @@ _SF_HDR_SIZE = 17
 # Frame type values
 _FRAME_TYPE_P_FRAME = 2
 _FRAME_TYPE_B_FRAME = 3
-_FRAME_TYPE_I_FRAME = 4   # keyframe
-_FRAME_TYPE_AUDIO   = 5
+_FRAME_TYPE_I_FRAME = 4  # keyframe
+_FRAME_TYPE_AUDIO = 5
 
 _AUDIO_CODEC_G711A = 1
 
 _PTZ_DIR_CODES: dict = {
-    "stop": 0, "up": 1, "down": 2, "left": 3,
-    "left_up": 4, "left_down": 5, "right": 6,
-    "right_up": 7, "right_down": 8, "auto": 9,
-    "set_point": 10, "clear_point": 11, "goto": 12,
-    "zoom_in": 23, "zoom_out": 24,
+    "stop": 0,
+    "up": 1,
+    "down": 2,
+    "left": 3,
+    "left_up": 4,
+    "left_down": 5,
+    "right": 6,
+    "right_up": 7,
+    "right_down": 8,
+    "auto": 9,
+    "set_point": 10,
+    "clear_point": 11,
+    "goto": 12,
+    "zoom_in": 23,
+    "zoom_out": 24,
 }
 
 # Live-stream resolution (AVIOCTRL_QUALITY_*).  The official app's picker has
@@ -155,5 +165,5 @@ _LIVE_PLAY_NOT_READY = -50019
 # Two-way-audio (talk) / SDES timing constants (moved from client.py)
 TALK_PCM_RATE = 8000
 TALK_PCM_FRAME_BYTES = 320  # 160 samples (20 ms @ 8 kHz) x 2 bytes (s16)
-SDES_SPEAKERSTART_DELAY = 0.6     # seconds after command channel up
-SDES_TALK_PUMP_IDLE_TICK = 0.1   # pump idle sleep when not actively speaking
+SDES_SPEAKERSTART_DELAY = 0.6  # seconds after command channel up
+SDES_TALK_PUMP_IDLE_TICK = 0.1  # pump idle sleep when not actively speaking

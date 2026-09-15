@@ -6,6 +6,7 @@ default off) so the wiring is verifiable without a camera. The actual stability
 effect is validated by real-world soak (see scripts/sdes_soak_monitor.py), not
 here.
 """
+
 import os
 import sys
 
@@ -13,8 +14,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import aidot_cameras.camera.client as cc
 
-_CAM = next(v for v in vars(cc).values()
-            if isinstance(v, type) and "_resolve_sdes_fast_liveplay" in v.__dict__)
+_CAM = next(
+    v
+    for v in vars(cc).values()
+    if isinstance(v, type) and "_resolve_sdes_fast_liveplay" in v.__dict__
+)
 
 
 def _cam():
@@ -43,6 +47,7 @@ def test_role_reversal_model_always_excluded(monkeypatch):
     # A001064 (role-reversal) must NOT use the flag even when opt/env force it on -
     # the early webrtcReq degrades its media reliability.
     from types import SimpleNamespace
+
     monkeypatch.setenv("AIDOT_SDES_FAST_LIVEPLAY", "1")
     cam = _cam()
     cam.info = SimpleNamespace(model_id="LK.IPC.A001064")
@@ -71,8 +76,11 @@ if __name__ == "__main__":
     import traceback
 
     class _MP:
-        def setenv(self, k, v): os.environ[k] = v
-        def delenv(self, k, raising=False): os.environ.pop(k, None)
+        def setenv(self, k, v):
+            os.environ[k] = v
+
+        def delenv(self, k, raising=False):
+            os.environ.pop(k, None)
 
     _fail = 0
     for _k, _v in sorted(globals().items()):

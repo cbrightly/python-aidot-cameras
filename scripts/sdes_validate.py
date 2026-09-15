@@ -20,6 +20,7 @@ public library API, like smoke_stream.py - no extra setup.
   python scripts/sdes_validate.py --name FrontDoor --cycles 4 --hold 95 --gap 45
   python scripts/sdes_validate.py --name "Garage PTZ" --cycles 4   # clean stability
 """
+
 import argparse
 import asyncio
 import logging
@@ -56,15 +57,24 @@ async def _cycle(dc, flag, hold, tag, coll):
     out = f"/tmp/sdesval_{tag}.ts"
     if os.path.exists(out):
         os.remove(out)
-    rec = {"tag": tag, "flag": flag, "established": None, "echo_ms": None,
-           "resp_ms": None, "skipped": False, "media": False,
-           "stall_at": None, "bytes": 0, "error": None}
+    rec = {
+        "tag": tag,
+        "flag": flag,
+        "established": None,
+        "echo_ms": None,
+        "resp_ms": None,
+        "skipped": False,
+        "media": False,
+        "stall_at": None,
+        "bytes": 0,
+        "error": None,
+    }
     t0 = time.time()
     sess = None
     try:
         sess = await dc.async_open_webrtc_stream(
-            on_frame=lambda _f: None, timeout=45.0,
-            output_path=out, max_seconds=hold)
+            on_frame=lambda _f: None, timeout=45.0, output_path=out, max_seconds=hold
+        )
         rec["established"] = round(time.time() - t0, 1)
         last_sz, last_grow, start = 0, time.time(), time.time()
         while time.time() - start < hold:
@@ -74,7 +84,11 @@ async def _cycle(dc, flag, hold, tag, coll):
                 last_grow, last_sz = time.time(), sz
             if sz > 20000:
                 rec["media"] = True
-            if rec["media"] and rec["stall_at"] is None and time.time() - last_grow > 15:
+            if (
+                rec["media"]
+                and rec["stall_at"] is None
+                and time.time() - last_grow > 15
+            ):
                 rec["stall_at"] = round(time.time() - start)
         rec["bytes"] = os.path.getsize(out) if os.path.exists(out) else 0
     except Exception as exc:
@@ -99,23 +113,38 @@ async def _cycle(dc, flag, hold, tag, coll):
 
 def _summary(recs):
     print("\n" + "=" * 78)
-    print(f"{'cycle':14} {'estab':>6} {'echo':>7} {'resp':>10} {'media':>6} "
-          f"{'stall@':>7} {'bytes':>9}")
+    print(
+        f"{'cycle':14} {'estab':>6} {'echo':>7} {'resp':>10} {'media':>6} "
+        f"{'stall@':>7} {'bytes':>9}"
+    )
     print("-" * 78)
     for r in recs:
-        resp = "skipped" if r["skipped"] else (f"{r['resp_ms']}ms" if r["resp_ms"] is not None else "-")
+        resp = (
+            "skipped"
+            if r["skipped"]
+            else (f"{r['resp_ms']}ms" if r["resp_ms"] is not None else "-")
+        )
         echo = f"{r['echo_ms']}ms" if r["echo_ms"] is not None else "-"
         stall = f"{r['stall_at']}s" if r["stall_at"] is not None else "-"
-        est = f"{r['established']}s" if r["established"] is not None else (r["error"] or "?")
-        print(f"{r['tag']:14} {est:>6} {echo:>7} {resp:>10} "
-              f"{'yes' if r['media'] else 'NO':>6} {stall:>7} {r['bytes']:>9}")
+        est = (
+            f"{r['established']}s"
+            if r["established"] is not None
+            else (r["error"] or "?")
+        )
+        print(
+            f"{r['tag']:14} {est:>6} {echo:>7} {resp:>10} "
+            f"{'yes' if r['media'] else 'NO':>6} {stall:>7} {r['bytes']:>9}"
+        )
     print("-" * 78)
 
     def agg(flag):
         rs = [r for r in recs if r["flag"] is flag and r["error"] is None]
         if not rs:
             return None
-        sig = [(r["echo_ms"] or 0) + (0 if r["skipped"] else (r["resp_ms"] or 0)) for r in rs]
+        sig = [
+            (r["echo_ms"] or 0) + (0 if r["skipped"] else (r["resp_ms"] or 0))
+            for r in rs
+        ]
         media = sum(1 for r in rs if r["media"])
         stalls = sum(1 for r in rs if r["stall_at"] is not None)
         return (len(rs), round(sum(sig) / len(sig)), media, stalls)
@@ -125,15 +154,23 @@ def _summary(recs):
     for label, a in (("flag OFF", off), ("flag ON ", on)):
         if a:
             n, sig, media, stalls = a
-            print(f"  {label}: n={n}  signaling~{sig}ms  media {media}/{n}  stalls {stalls}/{n}")
+            print(
+                f"  {label}: n={n}  signaling~{sig}ms  media {media}/{n}  stalls {stalls}/{n}"
+            )
     if off and on:
         saved = off[1] - on[1]
-        print(f"  => signaling saved by flag: ~{saved}ms "
-              f"({'GOOD' if saved > 500 else 'negligible'})")
+        print(
+            f"  => signaling saved by flag: ~{saved}ms "
+            f"({'GOOD' if saved > 500 else 'negligible'})"
+        )
         if on[3] > off[3]:
-            print("  => WARNING: more stalls with flag ON (possible churn - watch on a mains camera)")
+            print(
+                "  => WARNING: more stalls with flag ON (possible churn - watch on a mains camera)"
+            )
         else:
-            print("  => no extra stalls with flag ON in this run (stability needs a longer/mains soak)")
+            print(
+                "  => no extra stalls with flag ON in this run (stability needs a longer/mains soak)"
+            )
 
 
 async def _run(args):
@@ -143,19 +180,32 @@ async def _run(args):
     lg.setLevel(logging.INFO)
     lg.addHandler(coll)
     async with aiohttp.ClientSession() as session:
-        client = AidotClient(session, country_code=creds.get("country", "US"),
-                             username=creds["username"], password=creds["password"])
+        client = AidotClient(
+            session,
+            country_code=creds.get("country", "US"),
+            username=creds["username"],
+            password=creds["password"],
+        )
         await client.async_post_login()
         devs = (await client.async_get_all_device())[CONF_DEVICE_LIST]
-        dc = next((client.get_device_client(d) for d in devs
-                   if args.name.lower() in (d.get(CONF_NAME) or "").lower()), None)
+        dc = next(
+            (
+                client.get_device_client(d)
+                for d in devs
+                if args.name.lower() in (d.get(CONF_NAME) or "").lower()
+            ),
+            None,
+        )
         if dc is None:
             raise SystemExit(f"camera not found: {args.name!r}")
         recs = []
         for i in range(args.cycles):
             flag = bool(i % 2)  # alternate OFF, ON, OFF, ON, ...
             tag = f"{'ON' if flag else 'OFF'}#{i // 2 + 1}"
-            print(f"\n>>> cycle {i + 1}/{args.cycles}  {tag}  (hold {args.hold}s)", flush=True)
+            print(
+                f"\n>>> cycle {i + 1}/{args.cycles}  {tag}  (hold {args.hold}s)",
+                flush=True,
+            )
             r = await _cycle(dc, flag, args.hold, tag, coll)
             print(f"    {r}", flush=True)
             recs.append(r)
@@ -169,7 +219,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", required=True, help="camera name substring (SDES)")
     ap.add_argument("--cycles", type=int, default=4, help="opens, alternating flag")
-    ap.add_argument("--hold", type=int, default=95, help="seconds to hold each open (>90 clears churn window)")
+    ap.add_argument(
+        "--hold",
+        type=int,
+        default=95,
+        help="seconds to hold each open (>90 clears churn window)",
+    )
     ap.add_argument("--gap", type=int, default=45, help="recovery gap between opens")
     asyncio.run(_run(ap.parse_args()))
 

@@ -66,14 +66,12 @@ def test_a_missing_stored_canary_still_finds_the_live_one():
 
 
 def test_audio_receivers_are_ignored():
-    pc = _PC([_Receiver("audio", {"frames": 5000}),
-              _Receiver("video", {"frames": 7})])
+    pc = _PC([_Receiver("audio", {"frames": 5000}), _Receiver("video", {"frames": 7})])
     assert _live_video_canary(pc, None)["frames"] == 7
 
 
 def test_the_fullest_video_canary_wins():
-    pc = _PC([_Receiver("video", {"frames": 3}),
-              _Receiver("video", {"frames": 900})])
+    pc = _PC([_Receiver("video", {"frames": 3}), _Receiver("video", {"frames": 900})])
     assert _live_video_canary(pc, None)["frames"] == 900
 
 
@@ -84,6 +82,7 @@ def test_nothing_anywhere_is_not_an_error():
 
 def test_a_broken_peer_connection_never_fails_the_check():
     """This must never be the reason a healthy session is judged dead."""
+
     class _Boom:
         def getReceivers(self):
             raise RuntimeError("boom")

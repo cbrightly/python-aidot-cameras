@@ -5,6 +5,7 @@ that took go2rtc down, a stream registered as its OWN source, and an
 idle-release oracle that counted go2rtc's producer connection as a viewer).
 All three are observable only from the go2rtc side, which is what this records.
 """
+
 import time
 
 from aiohttp import web
@@ -60,15 +61,21 @@ class FakeGo2rtc:
         self._log(request)
         name = request.query.get("src")
         if name is not None:
-            return web.json_response({
-                "producers": self.producers.get(name, []),
-                "consumers": self.consumers.get(name, []),
-            })
-        return web.json_response({
-            n: {"producers": self.producers.get(n, []),
-                "consumers": self.consumers.get(n, [])}
-            for n in self.streams
-        })
+            return web.json_response(
+                {
+                    "producers": self.producers.get(name, []),
+                    "consumers": self.consumers.get(name, []),
+                }
+            )
+        return web.json_response(
+            {
+                n: {
+                    "producers": self.producers.get(n, []),
+                    "consumers": self.consumers.get(n, []),
+                }
+                for n in self.streams
+            }
+        )
 
     async def _put_stream(self, request: web.Request) -> web.Response:
         self._log(request)

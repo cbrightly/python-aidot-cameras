@@ -5,6 +5,7 @@ from the URL scheme, so a plain ``ws://127.0.0.1:PORT/mqtt`` (handed over via
 the AIDOT_MQTT_URL seam) needs no other change to redirect the whole signaling
 plane here.
 """
+
 import asyncio
 import contextlib
 import socket
@@ -31,25 +32,27 @@ class FakeBroker:
         self._broker: Broker | None = None
 
     async def start(self) -> "FakeBroker":
-        self._broker = Broker({
-            "listeners": {
-                "default": {
-                    "type": "ws",
-                    "bind": f"127.0.0.1:{self.port}",
-                    "max_connections": 64,
+        self._broker = Broker(
+            {
+                "listeners": {
+                    "default": {
+                        "type": "ws",
+                        "bind": f"127.0.0.1:{self.port}",
+                        "max_connections": 64,
+                    },
                 },
-            },
-            # Declare the plugin set explicitly.  amqtt's default EntryPoint
-            # discovery ALSO loads FileAuthPlugin, which vetoes every login when
-            # no password file is configured - and the broker requires every
-            # auth plugin to pass, so anonymous connections are refused with no
-            # CONNACK at all.
-            "plugins": {
-                "amqtt.plugins.authentication.AnonymousAuthPlugin": {
-                    "allow_anonymous": True,
+                # Declare the plugin set explicitly.  amqtt's default EntryPoint
+                # discovery ALSO loads FileAuthPlugin, which vetoes every login when
+                # no password file is configured - and the broker requires every
+                # auth plugin to pass, so anonymous connections are refused with no
+                # CONNACK at all.
+                "plugins": {
+                    "amqtt.plugins.authentication.AnonymousAuthPlugin": {
+                        "allow_anonymous": True,
+                    },
                 },
-            },
-        })
+            }
+        )
         await self._broker.start()
         return self
 

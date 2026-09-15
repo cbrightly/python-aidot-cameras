@@ -20,6 +20,7 @@ the `.unstable` marker - which disables injection for that camera for good.
 So the gate has to include "did this packet decrypt", and the answer must be
 false unless something actually decrypted it.
 """
+
 import os
 import sys
 
@@ -53,11 +54,15 @@ def test_undecrypted_beats_every_other_condition():
     the property that keeps a poisoned file off disk."""
     for kind in ("video", "audio"):
         for done in (True, False):
-            assert _should_capture_sprop(kind, decrypted=False, sprop_done=done) is False
+            assert (
+                _should_capture_sprop(kind, decrypted=False, sprop_done=done) is False
+            )
 
 
 def test_returns_a_bool_not_a_truthy_value():
     """It guards a write to a file that outlives the process; a caller reading
     this as a tri-state would be a bad surprise."""
     for d in (True, False):
-        assert isinstance(_should_capture_sprop("video", decrypted=d, sprop_done=False), bool)
+        assert isinstance(
+            _should_capture_sprop("video", decrypted=d, sprop_done=False), bool
+        )

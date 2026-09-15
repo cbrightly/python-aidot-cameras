@@ -1,4 +1,5 @@
 """CLI-REC-001: playback TLS verification is opt-in via AIDOT_PLAYBACK_TLS_VERIFY."""
+
 import logging
 import ssl
 

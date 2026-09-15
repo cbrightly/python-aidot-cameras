@@ -90,7 +90,7 @@ class Go2rtcClient:
             return None
         consumers = entry.get("consumers")
         if consumers is None:
-            return 0          # go2rtc reports null rather than [] when there are none
+            return 0  # go2rtc reports null rather than [] when there are none
         if isinstance(consumers, list):
             return len(consumers)
         return None

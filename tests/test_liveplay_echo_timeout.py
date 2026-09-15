@@ -16,6 +16,7 @@ and on a cold battery camera it was 1.25 s of a 5.4 s time-to-first-media.
 The wait is kept so a broker that does echo still short-circuits it. Only the
 price of its absence changed, from 5.0 s to 0.25 s.
 """
+
 import pytest
 
 from aidot_cameras.camera.sdes_open import (
@@ -43,8 +44,9 @@ class TestTheDefault:
 
 
 class TestTheOverride:
-    @pytest.mark.parametrize("raw,expected", [("5.0", 5.0), ("0", 0.0),
-                                              ("1.5", 1.5), ("0.1", 0.1)])
+    @pytest.mark.parametrize(
+        "raw,expected", [("5.0", 5.0), ("0", 0.0), ("1.5", 1.5), ("0.1", 0.1)]
+    )
     def test_a_valid_value_is_honoured(self, monkeypatch, raw, expected):
         """The old behaviour has to remain reachable, or the change cannot be
         measured against it."""
@@ -67,7 +69,9 @@ class TestItIsWiredIn:
     def test_the_open_path_uses_the_resolver_not_a_literal(self):
         import inspect
         from aidot_cameras.camera import sdes_open
+
         src = inspect.getsource(sdes_open)
         assert "_echo_timeout = _sdes_liveplay_echo_timeout(" in src, (
-            "the echo wait is back to a hardcoded timeout")
+            "the echo wait is back to a hardcoded timeout"
+        )
         assert "_echo_timeout = 1.5 if" not in src

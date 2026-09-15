@@ -35,14 +35,18 @@ def aes_ecb_encrypt_str_key(plaintext: bytes, key_str: str) -> bytes:
     """AES-256/ECB/PKCS7 encrypt; key is a string zero-padded to 32 bytes."""
     padder = padding.PKCS7(128).padder()
     padded = padder.update(plaintext) + padder.finalize()
-    cipher = Cipher(algorithms.AES(_str_key_32(key_str)), modes.ECB(), backend=default_backend())
+    cipher = Cipher(
+        algorithms.AES(_str_key_32(key_str)), modes.ECB(), backend=default_backend()
+    )
     enc = cipher.encryptor()
     return enc.update(padded) + enc.finalize()
 
 
 def aes_ecb_decrypt_str_key(ciphertext: bytes, key_str: str) -> bytes:
     """AES-256/ECB/PKCS7 decrypt; key is a string zero-padded to 32 bytes."""
-    cipher = Cipher(algorithms.AES(_str_key_32(key_str)), modes.ECB(), backend=default_backend())
+    cipher = Cipher(
+        algorithms.AES(_str_key_32(key_str)), modes.ECB(), backend=default_backend()
+    )
     dec = cipher.decryptor()
     padded = dec.update(ciphertext) + dec.finalize()
     unpadder = padding.PKCS7(128).unpadder()

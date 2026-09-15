@@ -18,6 +18,7 @@ that hard-codes `keep_video=96` - the exact regression described above. The payl
 selection therefore lives INSIDE the builder: a caller free to pass a payload type
 of its own is a caller free to reintroduce the hard-coding.
 """
+
 import re
 
 import aidot_cameras.camera.sdes_open as so
@@ -55,6 +56,7 @@ def _m_line(sdp: str, media: str) -> str:
 # Transport
 # --------------------------------------------------------------------- #
 
+
 def test_plain_rtp_session_gets_rtp_avp_media_lines():
     sdp = _build(use_plain_rtp=True)
     assert _m_line(sdp, "audio").startswith(f"m=audio {_AUDIO_PORT} RTP/AVP ")
@@ -84,6 +86,7 @@ def test_srtp_session_keeps_savp_and_both_inline_keys():
 # --------------------------------------------------------------------- #
 # Video payload type
 # --------------------------------------------------------------------- #
+
 
 def test_h265_session_narrows_the_video_line_to_97():
     # The regression this file exists for: a restart that emits "96 97" (or a
@@ -131,6 +134,7 @@ def test_no_video_information_at_all_leaves_both_codecs_advertised():
 # Audio payload type
 # --------------------------------------------------------------------- #
 
+
 def test_pcma_session_narrows_the_audio_line_to_8():
     # An audio stream whose packets are all discarded withholds the PAT/PMT
     # just as effectively as a broken video line.
@@ -155,6 +159,7 @@ def test_an_unobserved_audio_type_leaves_the_line_alone():
 # --------------------------------------------------------------------- #
 # Shape and timing
 # --------------------------------------------------------------------- #
+
 
 def test_the_restart_sdp_is_a_well_formed_two_section_sdp():
     sdp = _build()

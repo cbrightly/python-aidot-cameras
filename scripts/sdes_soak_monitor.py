@@ -29,6 +29,7 @@ Usage
 
 No camera or cloud access; pure log parsing. Reads stdin if no file is given.
 """
+
 import argparse
 import re
 import sys
@@ -54,12 +55,12 @@ def _pct(vals, p):
 
 class Stats:
     def __init__(self):
-        self.serving_ms = []      # open -> serving (headline cold-start)
-        self.firstmedia_ms = []   # open -> first decrypted media
-        self.opens = 0            # webrtcReq markers (one per open attempt)
-        self.open_fail = 0        # SDES open failures
-        self.watchdog = 0         # no-media-watchdog restarts (instability)
-        self.idle_release = 0     # normal no-viewer releases (NOT instability)
+        self.serving_ms = []  # open -> serving (headline cold-start)
+        self.firstmedia_ms = []  # open -> first decrypted media
+        self.opens = 0  # webrtcReq markers (one per open attempt)
+        self.open_fail = 0  # SDES open failures
+        self.watchdog = 0  # no-media-watchdog restarts (instability)
+        self.idle_release = 0  # normal no-viewer releases (NOT instability)
 
 
 def parse(lines, names):
@@ -86,8 +87,11 @@ def parse(lines, names):
             elif label.startswith("serving"):
                 st.serving_ms.append(ms)
             continue
-        for rgx, attr in ((_OPEN_FAIL, "open_fail"), (_WATCHDOG, "watchdog"),
-                          (_IDLE_REL, "idle_release")):
+        for rgx, attr in (
+            (_OPEN_FAIL, "open_fail"),
+            (_WATCHDOG, "watchdog"),
+            (_IDLE_REL, "idle_release"),
+        ):
             m = rgx.search(line)
             if m:
                 setattr(cams[m.group(1)], attr, getattr(cams[m.group(1)], attr) + 1)
@@ -97,44 +101,60 @@ def parse(lines, names):
 
 def report(cams, flag_seen, t_first, t_last, names):
     print("=" * 74)
-    print(f"SDES soak summary  |  flag active in this window: "
-          f"{'YES' if flag_seen else 'no'} ({flag_seen} skip-logs)")
+    print(
+        f"SDES soak summary  |  flag active in this window: "
+        f"{'YES' if flag_seen else 'no'} ({flag_seen} skip-logs)"
+    )
     if t_first:
         print(f"window: {t_first}  ->  {t_last or '?'}")
     print("=" * 74)
     if not cams:
-        print("no SDES cold-start markers found.\n"
-              "  - need library >=0.7.19 (cold-start[...] markers) on the box\n"
-              "  - did any camera actually stream during the window?")
+        print(
+            "no SDES cold-start markers found.\n"
+            "  - need library >=0.7.19 (cold-start[...] markers) on the box\n"
+            "  - did any camera actually stream during the window?"
+        )
         return
-    hdr = (f"{'camera':24} {'opens':>5} {'cold-start ms (med/p90/max)':>28} "
-           f"{'fail':>5} {'churn':>6}")
+    hdr = (
+        f"{'camera':24} {'opens':>5} {'cold-start ms (med/p90/max)':>28} "
+        f"{'fail':>5} {'churn':>6}"
+    )
     print(hdr)
     print("-" * len(hdr))
     for dev in sorted(cams):
         st = cams[dev]
         name = names.get(dev[:12], dev[:12])
         sv = st.serving_ms
-        lat = (f"{_pct(sv,50)}/{_pct(sv,90)}/{max(sv)}" if sv else "-")
+        lat = f"{_pct(sv, 50)}/{_pct(sv, 90)}/{max(sv)}" if sv else "-"
         # churn = instability-driven restarts (watchdog), NOT normal idle release
-        print(f"{name:24} {st.opens:>5} {lat:>28} {st.open_fail:>5} "
-              f"{st.watchdog:>6}")
+        print(f"{name:24} {st.opens:>5} {lat:>28} {st.open_fail:>5} {st.watchdog:>6}")
     print("-" * len(hdr))
     print("cold-start ms = open -> ffmpeg serving (lower is better).")
-    print("fail = SDES open failures; churn = no-media watchdog restarts "
-          "(higher = less stable). idle releases are not counted as churn.")
-    print("Compare a flag-OFF window vs a flag-ON window: P5 is good only if "
-          "cold-start drops WITHOUT churn/fail rising.")
+    print(
+        "fail = SDES open failures; churn = no-media watchdog restarts "
+        "(higher = less stable). idle releases are not counted as churn."
+    )
+    print(
+        "Compare a flag-OFF window vs a flag-ON window: P5 is good only if "
+        "cold-start drops WITHOUT churn/fail rising."
+    )
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("logfile", nargs="?", help="log file (default: stdin)")
-    ap.add_argument("--follow", action="store_true",
-                    help="stream stdin, print a summary every --interval s")
+    ap.add_argument(
+        "--follow",
+        action="store_true",
+        help="stream stdin, print a summary every --interval s",
+    )
     ap.add_argument("--interval", type=int, default=60)
-    ap.add_argument("--name", action="append", default=[],
-                    help="devid12=Name (repeatable) for friendlier output")
+    ap.add_argument(
+        "--name",
+        action="append",
+        default=[],
+        help="devid12=Name (repeatable) for friendlier output",
+    )
     args = ap.parse_args()
     names = dict(n.split("=", 1) for n in args.name if "=" in n)
 

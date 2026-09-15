@@ -29,7 +29,7 @@ A license key was extracted from the APK and stored as the module-level constant
 *Code at the time of research (the reverted TUTK-init change):*
 
 ```python
-iotc.TUTK_SDK_Set_License_Key.restype  = ctypes.c_int
+iotc.TUTK_SDK_Set_License_Key.restype = ctypes.c_int
 iotc.TUTK_SDK_Set_License_Key.argtypes = [ctypes.c_char_p]
 # ...
 if self._license_key:
@@ -46,7 +46,7 @@ if self._license_key:
 can cause the server to silently drop the session after the SDK's default idle timeout.
 
 ```python
-iotc.IOTC_Setup_Session_Alive_Timeout.restype  = None
+iotc.IOTC_Setup_Session_Alive_Timeout.restype = None
 iotc.IOTC_Setup_Session_Alive_Timeout.argtypes = [ctypes.c_int]
 # ...
 iotc.IOTC_Setup_Session_Alive_Timeout(15)

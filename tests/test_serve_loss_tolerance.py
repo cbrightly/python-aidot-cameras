@@ -12,6 +12,7 @@ max_delay it stalls waiting ("max delay reached. need to consume packet") and
 backs its input queue up until the serve dies, dropping every attached viewer.
 A brief artefact is a far better outcome than a dropped stream.
 """
+
 import pytest
 
 from aidot_cameras.camera.client import (

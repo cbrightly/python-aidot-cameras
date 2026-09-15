@@ -157,7 +157,9 @@ class DeviceInformation(_UpstreamDeviceInformation):
         self.hw_version = device.get(CONF_HARDWARE_VERSION)
         self.password = device.get(CONF_PASSWORD) or ""
         self.simpleVersion = device.get("simpleVersion")
-        if CONF_PRODUCT in device and CONF_SERVICE_MODULES in (device[CONF_PRODUCT] or {}):
+        if CONF_PRODUCT in device and CONF_SERVICE_MODULES in (
+            device[CONF_PRODUCT] or {}
+        ):
             for service in device[CONF_PRODUCT][CONF_SERVICE_MODULES]:
                 if service[CONF_IDENTITY] == Identity.RGBW:
                     self.enable_rgbw = True
@@ -334,6 +336,7 @@ class CameraDeviceClient(CameraMixin, LanRetryMixin, _UpstreamDeviceClient):
             await super().close()
 
     if HAS_READ_DATA_SEAM:
+
         async def read_data(self) -> dict[str, Any]:
             """Read one frame, keeping the raw JSON for the camera attribute pass.
 

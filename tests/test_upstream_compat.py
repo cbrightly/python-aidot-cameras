@@ -40,6 +40,7 @@ dict_only = pytest.mark.skipif(TYPED, reason="dict upstream shape only")
 # The compat layer itself - it must agree with what is actually installed
 # --------------------------------------------------------------------------- #
 
+
 def test_shape_detection_is_self_consistent():
     """Every capability flag must match the tree that is really importable."""
     import importlib
@@ -110,6 +111,7 @@ def test_aes_helpers_round_trip():
 # AidotClient - the account seam (aidot_cameras/client.py)
 # --------------------------------------------------------------------------- #
 
+
 def test_get_device_client_is_the_dispatch_seam():
     """The single construction site our CameraClient overrides.
 
@@ -158,8 +160,8 @@ def test_on_token_refreshed_hook_exists_on_the_typed_shape():
 @pytest.mark.parametrize(
     "name",
     [
-        "_device_clients",   # the client cache our dispatch reads and writes
-        "_token_fresh_cb",   # fired by our _do_ensure_token
+        "_device_clients",  # the client cache our dispatch reads and writes
+        "_token_fresh_cb",  # fired by our _do_ensure_token
     ],
 )
 def test_client_attributes_we_reach_into(name):
@@ -197,14 +199,25 @@ def test_account_http_calls_used_by_async_get_all_device():
 
     client = AidotClient(None, country_code="US")
     if TYPED:
-        target, names = client._cloud_api, [
-            "get_houses", "get_devices", "get_products", "refresh_token",
-        ]
+        target, names = (
+            client._cloud_api,
+            [
+                "get_houses",
+                "get_devices",
+                "get_products",
+                "refresh_token",
+            ],
+        )
     else:
-        target, names = client, [
-            "async_get_houses", "async_get_devices", "async_get_products",
-            "async_refresh_token",
-        ]
+        target, names = (
+            client,
+            [
+                "async_get_houses",
+                "async_get_devices",
+                "async_get_products",
+                "async_refresh_token",
+            ],
+        )
     for name in names:
         assert callable(getattr(target, name, None)), name
 
@@ -248,6 +261,7 @@ def test_survivable_token_lets_a_partial_entry_load():
 # DeviceClient - the per-device seam (aidot_cameras/device_client.py)
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.parametrize(
     "name",
     [
@@ -281,9 +295,7 @@ def test_read_data_seam_flag_matches_reality():
     assert _upstream.HAS_READ_DATA_SEAM is callable(
         getattr(DeviceClient, "read_data", None)
     )
-    assert (
-        "read_data" in CameraDeviceClient.__dict__
-    ) is _upstream.HAS_READ_DATA_SEAM
+    assert ("read_data" in CameraDeviceClient.__dict__) is _upstream.HAS_READ_DATA_SEAM
 
 
 def test_device_client_constructor_argument_shape():
@@ -345,6 +357,7 @@ def test_reconnect_handle_is_cancellable_on_either_spelling():
     which is the whole point - a ``getattr(x, "_reconnect_timer", None)`` finds
     nothing on the dict shape and reports success.
     """
+
     class _Handle:
         cancelled = False
 
@@ -377,6 +390,7 @@ def test_device_session_authenticated_reads_the_right_signal():
 # --------------------------------------------------------------------------- #
 # Data classes we subclass
 # --------------------------------------------------------------------------- #
+
 
 def test_device_status_data_is_subclassable_and_updates_from_attr():
     """Our DeviceStatusData subclass adds active_color_mode on top of update()."""
@@ -432,6 +446,7 @@ def test_typed_account_round_trips_to_dict():
 # Module-level names re-exported by aidot_cameras.crypto / .const
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.parametrize(
     "name",
     ["aes_encrypt", "aes_decrypt", "aes_decrypt_to_json", "rsa_encrypt"],
@@ -465,6 +480,7 @@ def test_const_names_reexported():
 # --------------------------------------------------------------------------- #
 # Discovery - aidot_cameras/discover.py
 # --------------------------------------------------------------------------- #
+
 
 def test_discovered_device_map_reaches_upstreams_device_clients():
     """Our sweep's addresses must be visible to a plain upstream DeviceClient.

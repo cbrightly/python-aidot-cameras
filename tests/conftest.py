@@ -11,6 +11,7 @@ Model profiles mirror docs/CAMERAS.md:
 - ``A001064``  PTZ, SDES-SRTP, mains (role-reversal handshake)
 - ``A001108``  battery SDES, recognized in code but never validated live
 """
+
 import os
 import sys
 

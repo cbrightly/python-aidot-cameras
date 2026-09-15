@@ -7,6 +7,7 @@ library's own ad-hoc aiohttp sessions reach it with no patching.
 Every request is recorded in ``self.requests`` so tests can assert on call
 ORDER (battery wake before signaling) and call VOLUME (no request storms).
 """
+
 import asyncio
 import time
 
@@ -73,27 +74,37 @@ class FakeCloud:
     async def _dispatch(self, request: web.Request) -> web.Response:
         path = request.path
         if path.endswith("/commonController/getServerUrlConfig"):
-            return web.json_response({
-                "code": 0,
-                "data": {
-                    "mqttServerUrl": self.mqtt_url,
-                    "ip": self.public_ip,
-                    "mqttUser": "fake-mqtt-user",
-                    "mqttPassword": "fake-mqtt-password",
-                },
-            })
+            return web.json_response(
+                {
+                    "code": 0,
+                    "data": {
+                        "mqttServerUrl": self.mqtt_url,
+                        "ip": self.public_ip,
+                        "mqttUser": "fake-mqtt-user",
+                        "mqttPassword": "fake-mqtt-password",
+                    },
+                }
+            )
         if path.endswith("/user/getUser"):
-            return web.json_response({
-                "code": 0,
-                "data": {"mqttUser": "fake-mqtt-user",
-                         "mqttPassword": "fake-mqtt-password"},
-            })
+            return web.json_response(
+                {
+                    "code": 0,
+                    "data": {
+                        "mqttUser": "fake-mqtt-user",
+                        "mqttPassword": "fake-mqtt-password",
+                    },
+                }
+            )
         if path.endswith("/commons/userConfig"):
-            return web.json_response({
-                "code": 0,
-                "data": {"mqttClientId": "app-user-1",
-                         "mqttPassword": "fake-mqtt-password"},
-            })
+            return web.json_response(
+                {
+                    "code": 0,
+                    "data": {
+                        "mqttClientId": "app-user-1",
+                        "mqttPassword": "fake-mqtt-password",
+                    },
+                }
+            )
         if path.endswith("/devices/batchGetDeviceUserInfo"):
             return web.json_response({"code": 0, "data": self.device_user_info})
         if "/v29/api/webrtc/iceConfig" in path:

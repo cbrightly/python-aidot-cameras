@@ -13,13 +13,18 @@ So the request side is pinned against the decompiled client rather than trusted:
     offset 4 with length 8;
   * `STimeDay` is 8 bytes, an unsigned short year followed by six single bytes.
 """
+
 import os
 import struct
 import sys
 import time
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"
+    ),
+)
 
 from aidot_cameras.camera.sd_events import (
     HASLISTEVENT_REQ_CMD,
@@ -52,8 +57,10 @@ def test_stimeday_is_eight_bytes_with_a_little_endian_year():
     b = stimeday(_WHEN)
     assert len(b) == 8
     assert struct.unpack_from("<H", b, 0)[0] == 2026
-    assert b[1] == 0x07, "2026 little-endian is 0xEA 0x07 - a big-endian year " \
-                         "would put 0x07 first and the camera would read year 1770"
+    assert b[1] == 0x07, (
+        "2026 little-endian is 0xEA 0x07 - a big-endian year "
+        "would put 0x07 first and the camera would read year 1770"
+    )
 
 
 def test_stimeday_carries_the_wall_clock_fields_in_order():
@@ -88,9 +95,13 @@ def test_the_probe_and_the_package_agree_on_the_command_ids():
     # One definition, two names: the probe re-exports what the package ships,
     # so a divergence here means the probe stopped testing the shipped code.
     assert (HASLISTEVENT_REQ, LISTEVENT_REQ) == (
-        HASLISTEVENT_REQ_CMD, LISTEVENT_REQ_CMD)
+        HASLISTEVENT_REQ_CMD,
+        LISTEVENT_REQ_CMD,
+    )
     assert (HASLISTEVENT_RESP, LISTEVENT_RESP) == (
-        HASLISTEVENT_RESP_CMD, LISTEVENT_RESP_CMD)
+        HASLISTEVENT_RESP_CMD,
+        LISTEVENT_RESP_CMD,
+    )
 
 
 def test_the_channel_leads_and_the_first_time_starts_at_offset_four():
@@ -116,6 +127,7 @@ def test_the_two_requests_share_a_head():
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:

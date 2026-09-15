@@ -83,13 +83,23 @@ def test_the_offer_carries_one_pair_across_every_media_section():
     passed by luck - adding parens to a nearby comment would have failed it
     while changing nothing."""
     ufrag, pwd = _new_ice_credentials()
-    sdp = "\r\n".join([
-        "v=0", "o=- 0 0 IN IP4 1.2.3.4", "s=-", "t=0 0",
-        "m=audio 1111 RTP/SAVP 8",
-        f"a=ice-ufrag:{ufrag}", f"a=ice-pwd:{pwd}",
-        "m=video 2222 RTP/SAVP 96",
-        f"a=ice-ufrag:{ufrag}", f"a=ice-pwd:{pwd}",
-    ]) + "\r\n"
+    sdp = (
+        "\r\n".join(
+            [
+                "v=0",
+                "o=- 0 0 IN IP4 1.2.3.4",
+                "s=-",
+                "t=0 0",
+                "m=audio 1111 RTP/SAVP 8",
+                f"a=ice-ufrag:{ufrag}",
+                f"a=ice-pwd:{pwd}",
+                "m=video 2222 RTP/SAVP 96",
+                f"a=ice-ufrag:{ufrag}",
+                f"a=ice-pwd:{pwd}",
+            ]
+        )
+        + "\r\n"
+    )
     ufrags = re.findall(r"a=ice-ufrag:(\S+)", sdp)
     pwds = re.findall(r"a=ice-pwd:(\S+)", sdp)
     assert len(ufrags) == 2 and len(set(ufrags)) == 1
@@ -114,21 +124,32 @@ def test_the_compressed_offer_leaves_both_sockets_using_what_the_camera_got():
     from aidot_cameras.camera.client import CameraMixin
 
     src = inspect.getsource(CameraMixin._open_sdes_stream_impl)
-    m = _re.search(r"\n( +)def _compress_sdp_req\(.*?\n(?=\1[a-zA-Z_#]|\1def )",
-                   src, _re.S)
+    m = _re.search(
+        r"\n( +)def _compress_sdp_req\(.*?\n(?=\1[a-zA-Z_#]|\1def )", src, _re.S
+    )
     assert m, "could not locate _compress_sdp_req"
     ns: dict = {}
     exec(textwrap.dedent(m.group(0)), {"re": _re}, ns)  # noqa: S102 - test only
     compress = ns["_compress_sdp_req"]
 
     ufrag, pwd = _new_ice_credentials()
-    sdp = "\r\n".join([
-        "v=0", "o=- 0 0 IN IP4 1.2.3.4", "s=-", "t=0 0",
-        "m=audio 1111 RTP/SAVP 8",
-        f"a=ice-ufrag:{ufrag}", f"a=ice-pwd:{pwd}",
-        "m=video 2222 RTP/SAVP 96",
-        f"a=ice-ufrag:{ufrag}", f"a=ice-pwd:{pwd}",
-    ]) + "\r\n"
+    sdp = (
+        "\r\n".join(
+            [
+                "v=0",
+                "o=- 0 0 IN IP4 1.2.3.4",
+                "s=-",
+                "t=0 0",
+                "m=audio 1111 RTP/SAVP 8",
+                f"a=ice-ufrag:{ufrag}",
+                f"a=ice-pwd:{pwd}",
+                "m=video 2222 RTP/SAVP 96",
+                f"a=ice-ufrag:{ufrag}",
+                f"a=ice-pwd:{pwd}",
+            ]
+        )
+        + "\r\n"
+    )
     out = compress(sdp)
     kept_u = set(_re.findall(r"ice-ufrag:(\S+)", out))
     kept_p = set(_re.findall(r"ice-pwd:(\S+)", out))

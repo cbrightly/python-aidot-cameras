@@ -17,6 +17,7 @@ change than the question warrants - and on the camera measured, codec and
 resolution moved together in 11 of 11 sessions, so the codec is a sufficient
 stratifier today.
 """
+
 import os
 import sys
 

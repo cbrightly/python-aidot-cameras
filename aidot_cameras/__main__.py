@@ -130,7 +130,8 @@ async def _cameras(client: AidotClient) -> list[dict]:
     """Return the raw device dicts for every camera on the account."""
     data = await client.async_get_all_device()
     return [
-        d for d in data[CONF_DEVICE_LIST]
+        d
+        for d in data[CONF_DEVICE_LIST]
         if "IPC" in (d.get(CONF_MODEL_ID) or "").upper()
     ]
 
@@ -176,8 +177,12 @@ async def cmd_list() -> int:
             dc = client.get_device_client(d)
             transport = "SDES (rtsp-push)" if dc.is_sdes_camera else "DTLS (stdout)"
             print(f"{d[CONF_ID]:<40}  {(d.get(CONF_MODEL_ID) or ''):<14}  {transport}")
-            rows.append((_stream_slug(d.get(CONF_NAME), d[CONF_ID]),
-                         _go2rtc_source(d[CONF_ID], dc.is_sdes_camera)))
+            rows.append(
+                (
+                    _stream_slug(d.get(CONF_NAME), d[CONF_ID]),
+                    _go2rtc_source(d[CONF_ID], dc.is_sdes_camera),
+                )
+            )
         width = max(len(slug) for slug, _ in rows) + 1
         print("\n# Paste into go2rtc.yaml (rename the streams to taste). go2rtc needs")
         print("# the same AIDOT_* environment variables this command just used.")
@@ -220,7 +225,8 @@ async def cmd_stream(dev_id: str, output_url: str) -> int:
             # Why G.711 here: see the codec_args branch in camera/client.py.
             _LOGGER.info(
                 "DTLS RTSP push: publishing video + G.711 audio to %s. Pass '-' "
-                "instead to keep the mux's 48 kHz AAC.", output_url
+                "instead to keep the mux's 48 kHz AAC.",
+                output_url,
             )
         elif not output_url.startswith("rtsp") and dc.is_sdes_camera:
             _LOGGER.warning(

@@ -37,6 +37,7 @@ named after a secret - `_LOGGER.debug("response: %s", body)` where `body` is a
 decoded API response with a secret-bearing field. That class is real (see the
 PR that widened this test) and it is not enforceable by naming alone.
 """
+
 import ast
 import os
 import pathlib

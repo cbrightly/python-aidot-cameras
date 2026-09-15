@@ -17,6 +17,7 @@ with -50020. That is the 80.2 s cliff, and the same abort is why PTZ, talkback
 and SD listing stop answering about a minute into every session - they all ride
 this channel.
 """
+
 import re
 
 from aidot_cameras.camera.sdes_open import (
@@ -29,16 +30,16 @@ class TestSackWireFormat:
     def test_it_is_a_16_byte_type_3_chunk(self):
         b = _sctp_sack_chunk(0x11223344)
         assert len(b) == 16
-        assert b[0] == 3            # SACK
-        assert b[1] == 0            # no flags
+        assert b[0] == 3  # SACK
+        assert b[1] == 0  # no flags
         assert int.from_bytes(b[2:4], "big") == 16
 
     def test_the_fields_are_where_rfc_4960_puts_them(self):
         b = _sctp_sack_chunk(0x11223344, a_rwnd=65536)
-        assert int.from_bytes(b[4:8], "big") == 0x11223344   # cumulative TSN ack
-        assert int.from_bytes(b[8:12], "big") == 65536       # a_rwnd
-        assert int.from_bytes(b[12:14], "big") == 0          # gap ack blocks
-        assert int.from_bytes(b[14:16], "big") == 0          # duplicate TSNs
+        assert int.from_bytes(b[4:8], "big") == 0x11223344  # cumulative TSN ack
+        assert int.from_bytes(b[8:12], "big") == 65536  # a_rwnd
+        assert int.from_bytes(b[12:14], "big") == 0  # gap ack blocks
+        assert int.from_bytes(b[14:16], "big") == 0  # duplicate TSNs
 
     def test_a_tsn_past_the_32_bit_range_is_masked_not_raised(self):
         """TSNs wrap; struct.pack would raise on an out-of-range int."""
@@ -82,13 +83,16 @@ class TestItIsActuallyWiredIn:
     def test_the_inbound_data_branch_sacks_before_it_dispatches(self):
         import inspect
         from aidot_cameras.camera import sdes_open
+
         src = inspect.getsource(sdes_open)
-        m = re.search(r"elif _pd_ct8 == 0x00 and _sct == 'DONE':(.*?)_sc_pay =",
-                      src, re.S)
+        m = re.search(
+            r'elif _pd_ct8 == 0x00 and _sct == "DONE":(.*?)_sc_pay =', src, re.S
+        )
         assert m, "the inbound SCTP DATA branch has moved or gone"
         branch = m.group(1)
         assert "_sctp_sack_chunk" in branch, (
             "inbound DATA is not acknowledged - the camera will ABORT the "
-            "association and the 80.2 s cliff comes back")
+            "association and the 80.2 s cliff comes back"
+        )
         assert "_sctp_advance_cum_tsn" in branch
         assert "_br_send_to_cam" in branch, "the SACK is built but never sent"

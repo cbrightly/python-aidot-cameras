@@ -37,8 +37,7 @@ _LIVE = [{"autoAlarm": 0, "motionDetection": 0, "humanDetect": 1}]
 
 def test_reads_the_master_and_both_triggers():
     got = asyncio.run(_Cam(_LIVE).async_get_auto_alarm())
-    assert got == {"autoAlarm": False, "motionDetection": False,
-                   "humanDetect": True}
+    assert got == {"autoAlarm": False, "motionDetection": False, "humanDetect": True}
 
 
 def test_a_camera_that_does_not_answer_is_unknown_not_all_off():
@@ -52,9 +51,9 @@ def test_setting_one_flag_preserves_the_others():
     action, payload = cam.triggered[0]
     assert action == "setAutoAlarm"
     row = payload[0]
-    assert row["motionDetection"] == 1     # the one we changed
-    assert row["autoAlarm"] == 0           # master untouched - still disarmed
-    assert row["humanDetect"] == 1         # other trigger untouched
+    assert row["motionDetection"] == 1  # the one we changed
+    assert row["autoAlarm"] == 0  # master untouched - still disarmed
+    assert row["humanDetect"] == 1  # other trigger untouched
     assert set(row) == set(_LIVE[0])
 
 

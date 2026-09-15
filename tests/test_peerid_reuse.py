@@ -11,6 +11,7 @@ peerid and resends within one session. This locks:
   - the SDES keepalive loop holds one across retries and rotates it after a
     media-delivering session or a reuse cap.
 """
+
 import inspect
 import os
 import sys
@@ -44,7 +45,8 @@ def test_impl_uses_reuse_peer_id_verbatim_when_given():
     src = _fn_source("_async_open_webrtc_stream_impl")
     # peer_id = reuse_peer_id or generate_webrtc_peer_id(...)
     assert "reuse_peer_id or" in src, (
-        "when a peerid is supplied it must be used as-is, not regenerated")
+        "when a peerid is supplied it must be used as-is, not regenerated"
+    )
 
 
 def test_sdes_keepalive_loop_holds_and_rotates_one_peerid():
@@ -54,7 +56,8 @@ def test_sdes_keepalive_loop_holds_and_rotates_one_peerid():
     # rotate after a media-delivering session and after a reuse cap
     assert "_PEERID_MAX_REUSE" in src, "must cap consecutive reuses"
     assert src.count("generate_webrtc_peer_id") >= 2, (
-        "must be able to rotate to a fresh peerid (initial + rotation)")
+        "must be able to rotate to a fresh peerid (initial + rotation)"
+    )
 
 
 def test_generate_peer_id_is_unique_per_call():

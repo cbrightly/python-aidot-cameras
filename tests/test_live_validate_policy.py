@@ -5,6 +5,7 @@ helpers - which models gate, how a run is summarized - are unit-testable
 without a camera, and a mistake in them is silent: it would pass a release
 that was never really validated.
 """
+
 import argparse
 import importlib.util
 import json
@@ -17,7 +18,8 @@ from aidot_cameras.const import CONF_ID, CONF_NAME
 
 SCRIPT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "scripts", "live_validate.py",
+    "scripts",
+    "live_validate.py",
 )
 
 
@@ -36,16 +38,22 @@ def _args(tmp_path):
 
 def _cam(lv, model, verdict, tier=None, name="cam"):
     return {
-        "name": name, "device_id": "d", "model": model,
+        "name": name,
+        "device_id": "d",
+        "model": model,
         "tier": tier or lv._classify(model),
-        "transport": "SDES", "battery": False,
-        "attempts": [], "attempts_used": 1, "verdict": verdict,
+        "transport": "SDES",
+        "battery": False,
+        "attempts": [],
+        "attempts_used": 1,
+        "verdict": verdict,
     }
 
 
 def _recorder(into):
     async def _fake_sleep(seconds):
         into.append(seconds)
+
     return _fake_sleep
 
 
@@ -80,9 +88,7 @@ class _FakeDeviceClient:
 
 def _fleet(models):
     """({'a': 'LK.IPC.A001513', ...}) -> (fake client, {'a': device dict})."""
-    devices = {
-        key: {CONF_NAME: key, CONF_ID: key} for key in models
-    }
+    devices = {key: {CONF_NAME: key, CONF_ID: key} for key in models}
     clients = {key: _FakeDeviceClient(key, model) for key, model in models.items()}
 
     class _FakeClient:
@@ -93,8 +99,7 @@ def _fleet(models):
 
 
 def _run_args():
-    return argparse.Namespace(hold=1.0, out_dir="/tmp", cooldown=180.0,
-                              json_out="")
+    return argparse.Namespace(hold=1.0, out_dir="/tmp", cooldown=180.0, json_out="")
 
 
 def test_model_key_handles_hardware_revisions(lv):
@@ -115,21 +120,25 @@ def test_required_models_gate_and_unknown_models_do_not(lv):
 
 
 def test_all_required_passing_is_a_pass(lv, tmp_path):
-    report = {"cameras": [
-        _cam(lv, "LK.IPC.A000088", "PASS"),
-        _cam(lv, "LK.IPC.A001513", "PASS"),
-        _cam(lv, "LK.IPC.A001064", "PASS"),
-    ]}
+    report = {
+        "cameras": [
+            _cam(lv, "LK.IPC.A000088", "PASS"),
+            _cam(lv, "LK.IPC.A001513", "PASS"),
+            _cam(lv, "LK.IPC.A001064", "PASS"),
+        ]
+    }
     assert lv._summarize(report, _args(tmp_path)) == 0
     assert report["verdict"] == "PASS"
 
 
 def test_one_required_no_media_fails(lv, tmp_path):
-    report = {"cameras": [
-        _cam(lv, "LK.IPC.A000088", "PASS"),
-        _cam(lv, "LK.IPC.A001513", "NO_MEDIA", name="L2"),
-        _cam(lv, "LK.IPC.A001064", "PASS"),
-    ]}
+    report = {
+        "cameras": [
+            _cam(lv, "LK.IPC.A000088", "PASS"),
+            _cam(lv, "LK.IPC.A001513", "NO_MEDIA", name="L2"),
+            _cam(lv, "LK.IPC.A001064", "PASS"),
+        ]
+    }
     assert lv._summarize(report, _args(tmp_path)) == 1
     assert report["verdict"] == "FAIL"
     assert report["required_failed"] == ["L2"]
@@ -137,22 +146,26 @@ def test_one_required_no_media_fails(lv, tmp_path):
 
 def test_busy_is_not_a_pass(lv, tmp_path):
     """BUSY means nobody validated the camera - it must not ship a release."""
-    report = {"cameras": [
-        _cam(lv, "LK.IPC.A000088", "PASS"),
-        _cam(lv, "LK.IPC.A001513", "BUSY", name="L2"),
-        _cam(lv, "LK.IPC.A001064", "PASS"),
-    ]}
+    report = {
+        "cameras": [
+            _cam(lv, "LK.IPC.A000088", "PASS"),
+            _cam(lv, "LK.IPC.A001513", "BUSY", name="L2"),
+            _cam(lv, "LK.IPC.A001064", "PASS"),
+        ]
+    }
     assert lv._summarize(report, _args(tmp_path)) == 1
     assert "L2" in report["required_failed"]
 
 
 def test_missing_required_model_fails_closed(lv, tmp_path):
     """A fleet missing a required model is NOT a validated fleet."""
-    report = {"cameras": [
-        _cam(lv, "LK.IPC.A000088", "PASS"),
-        _cam(lv, "LK.IPC.A001513", "PASS"),
-        # no A001064 present
-    ]}
+    report = {
+        "cameras": [
+            _cam(lv, "LK.IPC.A000088", "PASS"),
+            _cam(lv, "LK.IPC.A001513", "PASS"),
+            # no A001064 present
+        ]
+    }
     assert lv._summarize(report, _args(tmp_path)) == 1
     assert report["missing_required_models"] == ["A001064"]
 
@@ -165,12 +178,14 @@ def test_one_healthy_camera_covers_its_model(lv, tmp_path):
     exists to prove each transport/firmware path still works, and one camera
     streaming proves that.
     """
-    report = {"cameras": [
-        _cam(lv, "LK.IPC.A000088", "PASS"),
-        _cam(lv, "LK.IPC.A001513", "PASS", name="L2_good"),
-        _cam(lv, "LK.IPC.A001513", "NO_MEDIA", name="L2_asleep"),
-        _cam(lv, "LK.IPC.A001064", "PASS"),
-    ]}
+    report = {
+        "cameras": [
+            _cam(lv, "LK.IPC.A000088", "PASS"),
+            _cam(lv, "LK.IPC.A001513", "PASS", name="L2_good"),
+            _cam(lv, "LK.IPC.A001513", "NO_MEDIA", name="L2_asleep"),
+            _cam(lv, "LK.IPC.A001064", "PASS"),
+        ]
+    }
     assert lv._summarize(report, _args(tmp_path)) == 0
     assert report["verdict"] == "PASS"
     # ...but the failure is still reported, not swallowed.
@@ -182,12 +197,14 @@ def test_one_healthy_camera_covers_its_model(lv, tmp_path):
 
 def test_every_camera_of_a_model_failing_still_fails(lv, tmp_path):
     """Coverage is per model: zero passing cameras of a model gates the release."""
-    report = {"cameras": [
-        _cam(lv, "LK.IPC.A000088", "PASS"),
-        _cam(lv, "LK.IPC.A001513", "NO_MEDIA", name="L2_a"),
-        _cam(lv, "LK.IPC.A001513", "BUSY", name="L2_b"),
-        _cam(lv, "LK.IPC.A001064", "PASS"),
-    ]}
+    report = {
+        "cameras": [
+            _cam(lv, "LK.IPC.A000088", "PASS"),
+            _cam(lv, "LK.IPC.A001513", "NO_MEDIA", name="L2_a"),
+            _cam(lv, "LK.IPC.A001513", "BUSY", name="L2_b"),
+            _cam(lv, "LK.IPC.A001064", "PASS"),
+        ]
+    }
     assert lv._summarize(report, _args(tmp_path)) == 1
     assert report["verdict"] == "FAIL"
     assert report["required_models_failed"] == ["A001513"]
@@ -202,11 +219,14 @@ def test_completed_run_is_not_marked_partial(lv, tmp_path):
     An interim report written mid-loop carries partial=True so a run killed by
     the job timeout is readable as "unfinished" rather than as a fleet result.
     """
-    report = {"cameras": [
-        _cam(lv, "LK.IPC.A000088", "PASS"),
-        _cam(lv, "LK.IPC.A001513", "PASS"),
-        _cam(lv, "LK.IPC.A001064", "PASS"),
-    ], "partial": True}
+    report = {
+        "cameras": [
+            _cam(lv, "LK.IPC.A000088", "PASS"),
+            _cam(lv, "LK.IPC.A001513", "PASS"),
+            _cam(lv, "LK.IPC.A001064", "PASS"),
+        ],
+        "partial": True,
+    }
     lv._summarize(report, _args(tmp_path))
     assert report["partial"] is False
     assert json.loads((tmp_path / "r.json").read_text())["partial"] is False
@@ -229,8 +249,9 @@ def test_recording_path_clears_a_stale_file_it_owns(lv, tmp_path):
     assert not stale.exists(), "a removable stale file should be cleared"
 
 
-def test_recording_path_falls_back_when_the_stale_file_is_not_ours(lv, tmp_path,
-                                                                  monkeypatch):
+def test_recording_path_falls_back_when_the_stale_file_is_not_ours(
+    lv, tmp_path, monkeypatch
+):
     """/tmp is shared and sticky: another user's leftover must not abort the run.
 
     This is not hypothetical - it killed a live-validation run on the
@@ -285,12 +306,14 @@ def test_cooldown_respects_a_shorter_configured_value(lv):
 
 
 def test_advisory_failure_does_not_block(lv, tmp_path):
-    report = {"cameras": [
-        _cam(lv, "LK.IPC.A000088", "PASS"),
-        _cam(lv, "LK.IPC.A001513", "PASS"),
-        _cam(lv, "LK.IPC.A001064", "PASS"),
-        _cam(lv, "LK.IPC.A001108", "NO_MEDIA", name="untested-battery"),
-    ]}
+    report = {
+        "cameras": [
+            _cam(lv, "LK.IPC.A000088", "PASS"),
+            _cam(lv, "LK.IPC.A001513", "PASS"),
+            _cam(lv, "LK.IPC.A001064", "PASS"),
+            _cam(lv, "LK.IPC.A001108", "NO_MEDIA", name="untested-battery"),
+        ]
+    }
     assert lv._summarize(report, _args(tmp_path)) == 0
     assert report["verdict"] == "PASS"
     assert report["advisory_failed"] == ["untested-battery"]
@@ -313,6 +336,7 @@ def test_report_is_written_and_machine_readable(lv, tmp_path):
 
 def test_media_seen_accepts_sdes_counters_without_on_frame(lv):
     """SDES never calls on_frame; media_stats packets must count as media."""
+
     class FakeSdesSession:
         def media_stats(self):
             return {"packets": 120, "bytes": 90_000, "video_pt": 96}
@@ -340,6 +364,7 @@ def test_media_seen_accepts_dtls_frames(lv):
 # --------------------------------------------------------------------------- #
 # absent-camera early exit
 # --------------------------------------------------------------------------- #
+
 
 def test_slotless_budget_is_smaller_than_the_dtls_budget(lv):
     """The early exit must actually save attempts, or it is decoration."""
@@ -402,6 +427,7 @@ def test_an_absent_camera_still_reaches_a_failing_verdict(lv, tmp_path):
 # same-camera retry path keeps the full wait it has always had.
 # --------------------------------------------------------------------------- #
 
+
 def test_a_device_never_opened_in_this_run_owes_nothing(lv):
     """The map has no entry for it, so the deadline is 0 - i.e. long past."""
     assert lv._residual_wait(0.0, 12345.0) == 0.0
@@ -429,8 +455,7 @@ def test_the_slotless_shortcut_still_shortens(lv):
     assert lv._residual_wait(slotless, now) < lv._residual_wait(held_slot, now)
 
 
-async def test_wait_until_sleeps_the_remainder_and_says_why(lv, monkeypatch,
-                                                            capsys):
+async def test_wait_until_sleeps_the_remainder_and_says_why(lv, monkeypatch, capsys):
     """A wait that happens must be visible in the log, with its reason."""
     slept = []
     monkeypatch.setattr(lv.asyncio, "sleep", _recorder(slept))
@@ -444,8 +469,7 @@ async def test_wait_until_sleeps_the_remainder_and_says_why(lv, monkeypatch,
     assert "42s" in out and "FrontDoor" in out
 
 
-async def test_wait_until_reports_the_wait_it_did_not_take(lv, monkeypatch,
-                                                           capsys):
+async def test_wait_until_reports_the_wait_it_did_not_take(lv, monkeypatch, capsys):
     """A silent speedup cannot be audited from a run's log afterwards.
 
     A log that simply stopped mentioning cooldowns reads the same whether the
@@ -510,8 +534,9 @@ async def test_the_same_camera_retry_cooldown_is_unchanged(lv, monkeypatch):
     assert slept == [180.0], "a same-camera retry must keep the full cooldown"
 
 
-async def test_the_retry_cooldown_still_shortens_after_a_slotless_error(lv,
-                                                                        monkeypatch):
+async def test_the_retry_cooldown_still_shortens_after_a_slotless_error(
+    lv, monkeypatch
+):
     slept = _patch_sleep(lv, monkeypatch)
     _patch_attempts(lv, monkeypatch, {"a": ["ERROR", "PASS"]})
     client, devices = _fleet({"a": "LK.IPC.A001513"})

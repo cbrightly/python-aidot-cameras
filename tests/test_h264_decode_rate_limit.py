@@ -9,6 +9,7 @@ suppressed and counted, and the first WARNING after the window elapses
 passes through carrying the suppressed count, so the corruption canary
 stays visible without flooding.
 """
+
 import logging
 
 import aidot_cameras  # noqa: F401 - import triggers filter installation
@@ -34,7 +35,9 @@ class _FakeClock:
         self.now += seconds
 
 
-def _make_record(level=logging.WARNING, msg=DECODE_MESSAGE, name=_H264_DECODE_LOGGER_NAME):
+def _make_record(
+    level=logging.WARNING, msg=DECODE_MESSAGE, name=_H264_DECODE_LOGGER_NAME
+):
     return logging.LogRecord(
         name=name,
         level=level,
@@ -118,7 +121,9 @@ def test_end_to_end_via_real_logger_suppresses_and_summarizes(caplog):
     # Swap out the module-installed filter (wired to the real time.monotonic,
     # which would also rate-limit these records) for a dedicated instance
     # driven by the fake clock, then restore it afterwards.
-    installed_filters = [f for f in lg.filters if isinstance(f, _RateLimitingWarningFilter)]
+    installed_filters = [
+        f for f in lg.filters if isinstance(f, _RateLimitingWarningFilter)
+    ]
     for f in installed_filters:
         lg.removeFilter(f)
     test_filter = _RateLimitingWarningFilter(window_seconds=10.0, time_func=clock)
@@ -131,7 +136,9 @@ def test_end_to_end_via_real_logger_suppresses_and_summarizes(caplog):
                 lg.warning(DECODE_MESSAGE)
             clock.advance(10.0)
             lg.warning(DECODE_MESSAGE)
-        messages = [r.getMessage() for r in caplog.records if r.name == _H264_DECODE_LOGGER_NAME]
+        messages = [
+            r.getMessage() for r in caplog.records if r.name == _H264_DECODE_LOGGER_NAME
+        ]
         assert len(messages) == 2
         assert messages[0] == DECODE_MESSAGE
         assert "suppressed 4" in messages[1]

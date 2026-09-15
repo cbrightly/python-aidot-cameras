@@ -7,6 +7,7 @@ importantly, the two behaviours that are easy to get wrong: a reboot must not be
 reported as failed just because the camera left before acking, and it must not
 be fired at a camera the cloud says is offline.
 """
+
 import asyncio
 
 
@@ -20,13 +21,14 @@ class _Cam:
         self._published = published
         self.calls = []
 
-    async def async_trigger_device_action(self, action, params, *,
-                                          timeout=4.0, expect_ack=True):
-        self.calls.append({"action": action, "in": params,
-                           "expect_ack": expect_ack})
+    async def async_trigger_device_action(
+        self, action, params, *, timeout=4.0, expect_ack=True
+    ):
+        self.calls.append({"action": action, "in": params, "expect_ack": expect_ack})
         return self._published
 
     from aidot_cameras.camera.controls import _CameraControlsMixin as _M
+
     async_reboot = _M.async_reboot
 
 
@@ -34,8 +36,7 @@ class TestTheWireShape:
     def test_it_sends_RebootFunc_with_an_empty_in(self):
         cam = _Cam()
         assert asyncio.run(cam.async_reboot()) is True
-        assert cam.calls == [{"action": "RebootFunc", "in": [],
-                              "expect_ack": False}]
+        assert cam.calls == [{"action": "RebootFunc", "in": [], "expect_ack": False}]
 
     def test_it_does_not_wait_for_an_ack(self):
         """A reboot acks by going away; waiting turns success into False."""

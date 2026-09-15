@@ -47,9 +47,7 @@ def test_a_partial_push_does_not_clear_it(field, wire, _setter):
     s = CameraStatusData()
     s.update({wire: 1})
     s.update({"Occupancy": 1})
-    assert getattr(s, field) is True, (
-        f"{field} was cleared by an unrelated push"
-    )
+    assert getattr(s, field) is True, f"{field} was cleared by an unrelated push"
 
 
 @pytest.mark.parametrize("friendly,wire,_setter", _CASES)

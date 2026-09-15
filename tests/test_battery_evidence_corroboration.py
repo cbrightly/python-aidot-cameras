@@ -25,8 +25,12 @@ import pytest
 from aidot_cameras.camera.client import CameraMixin
 
 # --- real payloads, verbatim from the cloud device list --------------------- #
-L2_BATTERY = {"batteryMode": "2", "lowPowerStatus": "0",
-              "Battery_remaining": "100", "charging": "0"}
+L2_BATTERY = {
+    "batteryMode": "2",
+    "lowPowerStatus": "0",
+    "Battery_remaining": "100",
+    "charging": "0",
+}
 M3_PRO_MAINS = {"batteryMode": "2"}
 PTZ_MAINS: dict = {}
 
@@ -58,8 +62,10 @@ def _cam(props, model="LK.IPC.A000088"):
 # the regression
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("name", ["mains-88-a", "mains-88-b",
-                                  "mains-88-c", "mains-88-d"])
+
+@pytest.mark.parametrize(
+    "name", ["mains-88-a", "mains-88-b", "mains-88-c", "mains-88-d"]
+)
 def test_mains_a000088_reporting_batterymode_is_not_a_battery_camera(name):
     """The shipped bug: four mains cameras classified as battery.
 
@@ -79,6 +85,7 @@ def test_mains_ptz_with_no_battery_fields_stays_mains():
 # --------------------------------------------------------------------------- #
 # the thing that must NOT regress
 # --------------------------------------------------------------------------- #
+
 
 def test_a_real_battery_camera_is_still_detected():
     """A001513 must stay battery - losing this costs it the TURN pre-alloc."""
@@ -104,13 +111,17 @@ def test_a_listed_model_with_no_properties_is_still_battery():
 # the corroboration rule itself
 # --------------------------------------------------------------------------- #
 
-@pytest.mark.parametrize("corroborating", [
-    {"Battery_remaining": "55"},
-    {"batteryRemaining": "55"},
-    {"batteryLevel": "55"},
-    {"lowPowerStatus": "0"},
-    {"charging": "1"},
-])
+
+@pytest.mark.parametrize(
+    "corroborating",
+    [
+        {"Battery_remaining": "55"},
+        {"batteryRemaining": "55"},
+        {"batteryLevel": "55"},
+        {"lowPowerStatus": "0"},
+        {"charging": "1"},
+    ],
+)
 def test_batterymode_counts_when_any_battery_field_corroborates(corroborating):
     """The flag is kept as a signal, not discarded - it just needs backing.
 

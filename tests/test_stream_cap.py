@@ -3,6 +3,7 @@
 The cap limits how many cameras serve at once so a small host (Raspberry Pi)
 isn't overwhelmed by N decode + mux + AAC pipelines.  No camera/network needed.
 """
+
 import asyncio
 import os
 import sys
@@ -27,8 +28,8 @@ def test_default_is_three_and_singleton():
     os.environ.pop("AIDOT_MAX_CONCURRENT_STREAMS", None)
     s1 = dc._get_stream_slots()
     s2 = dc._get_stream_slots()
-    assert s1 is s2                      # one global cap shared across cameras
-    assert s1._value == 3                # default
+    assert s1 is s2  # one global cap shared across cameras
+    assert s1._value == 3  # default
 
 
 def test_env_tunable():
@@ -59,11 +60,13 @@ def test_cap_blocks_beyond_limit_then_frees():
             pass
         sem.release()
         await asyncio.wait_for(sem.acquire(), timeout=0.2)  # now proceeds
+
     asyncio.run(_run())
 
 
 if __name__ == "__main__":
     import traceback
+
     _fail = 0
     for _k, _v in sorted(globals().items()):
         if _k.startswith("test_"):

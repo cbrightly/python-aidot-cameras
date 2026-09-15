@@ -54,7 +54,7 @@ def test_stable_sets_are_cached_and_injected(proto):
 def test_changed_sets_disable_injection_for_that_camera(proto):
     """The defect: sets that change between sessions must stop being injected."""
     proto._save_sprop(DEV, "AAAA,BBBB")
-    proto._save_sprop(DEV, "CCCC,DDDD")          # camera changed its sets
+    proto._save_sprop(DEV, "CCCC,DDDD")  # camera changed its sets
 
     assert proto._sprop_is_unstable(DEV)
     assert proto._load_sprop(DEV) is None
@@ -75,7 +75,7 @@ def test_instability_is_sticky(proto):
 def test_other_cameras_are_unaffected(proto):
     """The marker is per device - one bad camera must not disable the rest."""
     proto._save_sprop(DEV, "AAAA,BBBB")
-    proto._save_sprop(DEV, "CCCC,DDDD")          # DEV becomes unstable
+    proto._save_sprop(DEV, "CCCC,DDDD")  # DEV becomes unstable
     proto._save_sprop("other-cam", "1111,2222")
 
     assert proto._sprop_is_unstable(DEV)

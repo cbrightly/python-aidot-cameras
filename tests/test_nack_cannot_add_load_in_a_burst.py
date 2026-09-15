@@ -30,6 +30,7 @@ reports are already far apart. During a burst the interval coalesces sequence
 numbers into fewer, fuller reports -- the same cadence gating the PLI and REMB
 paths already use.
 """
+
 from aidot_cameras.camera.protocol import NackTracker
 
 
@@ -45,14 +46,15 @@ def test_a_wide_gap_does_not_fire_a_report_on_every_following_packet():
     sends = 0
     seq = 1251
     now = 0.0
-    for _ in range(30):                 # 30 consecutive in-order packets
+    for _ in range(30):  # 30 consecutive in-order packets
         if t.observe(seq, now=now):
             sends += 1
         seq += 1
-        now = round(now + 0.003, 4)     # ~330 packets/s, as measured
+        now = round(now + 0.003, 4)  # ~330 packets/s, as measured
     assert sends <= 5, (
         f"{sends} NACK sends across 30 packets: that is a request burst aimed "
-        f"at the moment the link is least able to carry it")
+        f"at the moment the link is least able to carry it"
+    )
 
 
 def test_the_interval_coalesces_rather_than_discards():

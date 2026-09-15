@@ -65,10 +65,10 @@ from aidot_cameras.credentials import load_credentials
 #: Payloads for the commands we know how to build, by command id.  Anything not
 #: listed is sent with an empty payload unless one is given on the command line.
 _PAYLOADS = {
-    848: b"\x00" * 8,                       # SPEAKERSTART, channel 0
-    849: b"\x00" * 8,                       # SPEAKERSTOP, channel 0
-    800: struct.pack("<IB3x", 0, 5),        # SETSTREAMCTRL, channel 0, quality sd
-    802: struct.pack("<I", 0),              # GETSTREAMCTRL, channel 0
+    848: b"\x00" * 8,  # SPEAKERSTART, channel 0
+    849: b"\x00" * 8,  # SPEAKERSTOP, channel 0
+    800: struct.pack("<IB3x", 0, 5),  # SETSTREAMCTRL, channel 0, quality sd
+    802: struct.pack("<I", 0),  # GETSTREAMCTRL, channel 0
 }
 _QUALITY = {"hd": 1, "sd": 5}
 
@@ -111,14 +111,16 @@ def _parse_probe(spec: str):
     parts = spec.split(":")
     if len(parts) not in (2, 3):
         raise argparse.ArgumentTypeError(
-            f"probe {spec!r} must be cmd:expect or cmd:expect:quality")
+            f"probe {spec!r} must be cmd:expect or cmd:expect:quality"
+        )
     cmd, expect = int(parts[0]), int(parts[1])
     payload = None
     if len(parts) == 3:
         quality = _QUALITY.get(parts[2].lower())
         if quality is None:
             raise argparse.ArgumentTypeError(
-                f"quality {parts[2]!r} must be one of {sorted(_QUALITY)}")
+                f"quality {parts[2]!r} must be one of {sorted(_QUALITY)}"
+            )
         payload = struct.pack("<IB3x", 0, quality)
     return cmd, expect, payload
 
@@ -132,9 +134,16 @@ async def _stop(session) -> None:
         await result
 
 
-async def _probe_one(client, device, probes, settle: float, timeout: float,
-                     record: float = 0.0, out_path: str = "",
-                     verbose: bool = False) -> bool:
+async def _probe_one(
+    client,
+    device,
+    probes,
+    settle: float,
+    timeout: float,
+    record: float = 0.0,
+    out_path: str = "",
+    verbose: bool = False,
+) -> bool:
     """Open a session, run each probe, report every reply.  True if any answered.
 
     With ``record``, the session is written to ``out_path`` and held that long
@@ -187,8 +196,10 @@ async def _probe_one(client, device, probes, settle: float, timeout: float,
 
         for cmd, expect, payload in probes:
             body = payload if payload is not None else _PAYLOADS.get(cmd, b"")
-            print(f"    -> cmd={cmd} payload={body.hex() or '<empty>'}"
-                  f" (waiting {timeout:.1f}s for {expect})")
+            print(
+                f"    -> cmd={cmd} payload={body.hex() or '<empty>'}"
+                f" (waiting {timeout:.1f}s for {expect})"
+            )
             t1 = time.time()
             reply = await session.async_avio_request(
                 cmd, body, response_cmd=expect, timeout=timeout
@@ -198,15 +209,19 @@ async def _probe_one(client, device, probes, settle: float, timeout: float,
                 print(f"    <- cmd={cmd}: NO REPLY for {expect} after {waited:.1f}s")
             else:
                 answered = True
-                print(f"    <- cmd={cmd}: REPLY {expect} in {waited:.2f}s"
-                      f" seq={reply.seq} payload={reply.payload.hex() or '<empty>'}")
+                print(
+                    f"    <- cmd={cmd}: REPLY {expect} in {waited:.2f}s"
+                    f" seq={reply.seq} payload={reply.payload.hex() or '<empty>'}"
+                )
 
         if record > 0.0 and out_path:
             print(f"    recording {record:.0f}s to {out_path} ...")
             await asyncio.sleep(record)
             size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
-            print(f"    recorded {size}B"
-                  f" (~{size * 8 / 1000.0 / max(record, 1):.0f} kbps average)")
+            print(
+                f"    recorded {size}B"
+                f" (~{size * 8 / 1000.0 / max(record, 1):.0f} kbps average)"
+            )
 
         # Leave the camera as we found it: if we opened the speaker, close it.
         if any(cmd == 848 for cmd, _, _ in probes):
@@ -247,27 +262,42 @@ async def _run(args) -> int:
             selected = cameras
             if args.name:
                 wanted = [n.lower() for n in args.name]
-                selected = [c for c in cameras
-                            if any(w in (c.get(CONF_NAME) or "").lower() for w in wanted)]
+                selected = [
+                    c
+                    for c in cameras
+                    if any(w in (c.get(CONF_NAME) or "").lower() for w in wanted)
+                ]
             if not selected:
                 print("no camera matched", file=sys.stderr)
                 return 2
 
             probes = args.probe or _DEFAULT_PROBES
             results = [
-                (c.get(CONF_NAME),
-                 await _probe_one(client, c, probes, args.settle, args.timeout,
-                                  args.record, args.out, args.debug))
+                (
+                    c.get(CONF_NAME),
+                    await _probe_one(
+                        client,
+                        c,
+                        probes,
+                        args.settle,
+                        args.timeout,
+                        args.record,
+                        args.out,
+                        args.debug,
+                    ),
+                )
                 for c in selected
             ]
 
             print("\n==== SUMMARY ====")
             for name, answered in results:
                 print(f"  {'ANSWERED' if answered else 'silent  '}  {name}")
-            print("\nA silent camera is a real result, not a failure: it means"
-                  " either the firmware\nhas no response for that command, or the"
-                  " reply does not parse. The [rx] lines\nabove tell them apart -"
-                  " a frame logged with cmd=None arrived and was rejected.")
+            print(
+                "\nA silent camera is a real result, not a failure: it means"
+                " either the firmware\nhas no response for that command, or the"
+                " reply does not parse. The [rx] lines\nabove tell them apart -"
+                " a frame logged with cmd=None arrived and was rejected."
+            )
             return 0
         finally:
             await client.async_cleanup()
@@ -275,22 +305,46 @@ async def _run(args) -> int:
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--list", action="store_true", help="list cameras and exit")
-    p.add_argument("--name", action="append",
-                   help="camera name substring (repeatable); default is all")
-    p.add_argument("--probe", action="append", type=_parse_probe,
-                   help="cmd:expect[:quality] (repeatable); default 848:851")
-    p.add_argument("--settle", type=float, default=5.0,
-                   help="seconds to wait for the control channel (default 5)")
-    p.add_argument("--timeout", type=float, default=5.0,
-                   help="seconds to wait for each reply (default 5)")
-    p.add_argument("--record", type=float, default=0.0,
-                   help="hold and record the session this long after the probes")
-    p.add_argument("--out", default="",
-                   help="where to write the recording (with --record)")
-    p.add_argument("--debug", action="store_true",
-                   help="show every inbound AVIO frame the receive path sees")
+    p.add_argument(
+        "--name",
+        action="append",
+        help="camera name substring (repeatable); default is all",
+    )
+    p.add_argument(
+        "--probe",
+        action="append",
+        type=_parse_probe,
+        help="cmd:expect[:quality] (repeatable); default 848:851",
+    )
+    p.add_argument(
+        "--settle",
+        type=float,
+        default=5.0,
+        help="seconds to wait for the control channel (default 5)",
+    )
+    p.add_argument(
+        "--timeout",
+        type=float,
+        default=5.0,
+        help="seconds to wait for each reply (default 5)",
+    )
+    p.add_argument(
+        "--record",
+        type=float,
+        default=0.0,
+        help="hold and record the session this long after the probes",
+    )
+    p.add_argument(
+        "--out", default="", help="where to write the recording (with --record)"
+    )
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="show every inbound AVIO frame the receive path sees",
+    )
     args = p.parse_args()
     if args.debug:
         _enable_avio_logging()

@@ -155,8 +155,9 @@ def _snapshot_budget(device: dict, base: float) -> float:
     return base
 
 
-async def _probe_snapshot(dc, timeout: float, out_dir: str = "/tmp"
-                          ) -> tuple[bool, bool, Optional[str]]:
+async def _probe_snapshot(
+    dc, timeout: float, out_dir: str = "/tmp"
+) -> tuple[bool, bool, Optional[str]]:
     """Capture a still and require a non-trivial file on disk.
 
     ``async_snapshot(output_path, timeout=...)`` takes a destination - the first
@@ -206,10 +207,12 @@ async def _probe_ptz(dc, timeout: float) -> tuple[bool, bool, Optional[str]]:
         return False, False, "no ptz methods"
     refused = []
     try:
-        for label, call in (("move right", lambda: move("right")),
-                            ("stop", lambda: stop()),
-                            ("move left", lambda: move("left")),
-                            ("stop", lambda: stop())):
+        for label, call in (
+            ("move right", lambda: move("right")),
+            ("stop", lambda: stop()),
+            ("move left", lambda: move("left")),
+            ("stop", lambda: stop()),
+        ):
             if await asyncio.wait_for(call(), timeout) is False:
                 refused.append(label)
             await asyncio.sleep(0.4)
@@ -222,14 +225,20 @@ async def _probe_ptz(dc, timeout: float) -> tuple[bool, bool, Optional[str]]:
             pass
         return True, False, f"{type(exc).__name__}: {exc}"[:120]
     if refused:
-        return True, False, (
-            f"camera refused {len(refused)}/4 commands ({', '.join(refused)}) "
-            f"- the call returned False and sent nothing")
+        return (
+            True,
+            False,
+            (
+                f"camera refused {len(refused)}/4 commands ({', '.join(refused)}) "
+                f"- the call returned False and sent nothing"
+            ),
+        )
     return True, True, None
 
 
-async def _probe_talk(session, timeout: float, hold: float = 6.0
-                     ) -> tuple[bool, bool, Optional[str]]:
+async def _probe_talk(
+    session, timeout: float, hold: float = 6.0
+) -> tuple[bool, bool, Optional[str]]:
     """Speak silence and require that our provider was actually polled.
 
     The hold is 6 s, not 1 s. On the SDES path `async_start_talk` returns as
@@ -262,20 +271,31 @@ async def _probe_talk(session, timeout: float, hold: float = 6.0
                 await asyncio.wait_for(stop(), 5)
             except Exception:
                 pass
-            return True, False, (
-                "start_talk False - the camera refused SPEAKERSTART, or the "
-                "session could no longer send it")
+            return (
+                True,
+                False,
+                (
+                    "start_talk False - the camera refused SPEAKERSTART, or the "
+                    "session could no longer send it"
+                ),
+            )
         for _ in range(int(hold / 0.25)):
             await asyncio.sleep(0.25)
             if sent["n"]:
-                break   # proven; no reason to keep the speaker open
+                break  # proven; no reason to keep the speaker open
         await asyncio.wait_for(stop(), timeout)
         # A talk path that accepted the call but never pulled a frame has not
         # been shown to work - the ack is the camera's, the pull is ours.
-        return True, sent["n"] > 0, (
-            None if sent["n"] else
-            f"SPEAKERSTART accepted but the pump never polled us in {hold:.0f}s "
-            f"- it also waits on the camera audio address and speaker_on")
+        return (
+            True,
+            sent["n"] > 0,
+            (
+                None
+                if sent["n"]
+                else f"SPEAKERSTART accepted but the pump never polled us in {hold:.0f}s "
+                f"- it also waits on the camera audio address and speaker_on"
+            ),
+        )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -306,17 +326,25 @@ async def _probe_thumbnail(dc, timeout: float) -> tuple[bool, bool, Optional[str
         return False, False, "no thumbnail method"
     try:
         res = await asyncio.wait_for(fn(), timeout)
-        return True, bool(res), None if res else (
-            "cloud returned no thumbnail (verify the account before reading "
-            "this as a defect - a shared-home member gets none)")
+        return (
+            True,
+            bool(res),
+            None
+            if res
+            else (
+                "cloud returned no thumbnail (verify the account before reading "
+                "this as a defect - a shared-home member gets none)"
+            ),
+        )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         return True, False, f"{type(exc).__name__}: {exc}"[:120]
 
 
-async def _probe_recent_recordings(dc, timeout: float
-                                   ) -> tuple[bool, bool, Optional[str]]:
+async def _probe_recent_recordings(
+    dc, timeout: float
+) -> tuple[bool, bool, Optional[str]]:
     """The listing the vendor app actually uses.
 
     Separate from the range query below, and reported separately, because the
@@ -337,13 +365,21 @@ async def _probe_recent_recordings(dc, timeout: float
         return True, False, f"{type(exc).__name__}: {exc}"[:120]
     # Zero is not a failure - a camera can simply have had no events - so this
     # passes either way and reports the count for the record.
-    return True, True, (None if res else
-                        "no recent events (verify the account before reading "
-                        "this as a defect - a shared-home member gets none)")
+    return (
+        True,
+        True,
+        (
+            None
+            if res
+            else "no recent events (verify the account before reading "
+            "this as a defect - a shared-home member gets none)"
+        ),
+    )
 
 
-async def _probe_recordings(dc, timeout: float, days: int = 7
-                            ) -> tuple[bool, bool, Optional[str]]:
+async def _probe_recordings(
+    dc, timeout: float, days: int = 7
+) -> tuple[bool, bool, Optional[str]]:
     fn = getattr(dc, "async_get_cloud_recordings", None)
     if fn is None:
         return False, False, "no recordings method"
@@ -355,17 +391,30 @@ async def _probe_recordings(dc, timeout: float, days: int = 7
         # reaching here at all means cloud storage is on. On the owner account
         # this returns a full page against server totals in the hundreds, so a
         # zero here is the account before it is anything else.
-        return True, True, (None if res else
-                            "listing returned 0 events (verify the account "
-                            "first - a shared-home member sees none)")
+        return (
+            True,
+            True,
+            (
+                None
+                if res
+                else "listing returned 0 events (verify the account "
+                "first - a shared-home member sees none)"
+            ),
+        )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         return True, False, f"{type(exc).__name__}: {exc}"[:120]
 
 
-async def probe_features(device_client, device: dict, session=None,
-                         *, timeout: float = 10.0, out_dir: str = "/tmp") -> dict:
+async def probe_features(
+    device_client,
+    device: dict,
+    session=None,
+    *,
+    timeout: float = 10.0,
+    out_dir: str = "/tmp",
+) -> dict:
     """Run every feature probe against one camera. Never raises.
 
     ``session`` is a live stream session where one is open; snapshot and talk
@@ -401,7 +450,9 @@ async def probe_features(device_client, device: dict, session=None,
         out["talk"] = NOT_RUN
         out["talk_error"] = "session closed before the talk probe ran"
     else:
-        a, ok, err = await _probe_talk(session, timeout) if sup else (False, False, None)
+        a, ok, err = (
+            await _probe_talk(session, timeout) if sup else (False, False, None)
+        )
         out["talk"] = _verdict(sup, a, ok, err)
         if err:
             out["talk_error"] = err
@@ -414,7 +465,9 @@ async def probe_features(device_client, device: dict, session=None,
         out["ptz"] = NOT_RUN
         out["ptz_error"] = "session closed before the ptz probe ran"
     else:
-        a, ok, err = await _probe_ptz(device_client, timeout) if sup else (False, False, None)
+        a, ok, err = (
+            await _probe_ptz(device_client, timeout) if sup else (False, False, None)
+        )
         out["ptz"] = _verdict(sup, a, ok, err)
         if err:
             out["ptz_error"] = err
@@ -423,7 +476,8 @@ async def probe_features(device_client, device: dict, session=None,
     if sup and session is not None:
         _t0 = time.monotonic()
         a, ok, err = await _probe_snapshot(
-                device_client, _snapshot_budget(device, timeout), out_dir)
+            device_client, _snapshot_budget(device, timeout), out_dir
+        )
         # Record how long it took, pass or fail. The SDES budget has been wrong
         # twice - 10 s timed out every SDES camera, and 25 s timed out an
         # A001513 in one run of three - and both times the only evidence was a
@@ -437,7 +491,9 @@ async def probe_features(device_client, device: dict, session=None,
         out["snapshot_error"] = err
 
     sup = getattr(device_client, "async_get_latest_thumbnail", None) is not None
-    a, ok, err = await _probe_thumbnail(device_client, timeout) if sup else (False, False, None)
+    a, ok, err = (
+        await _probe_thumbnail(device_client, timeout) if sup else (False, False, None)
+    )
     out["thumbnail"] = _verdict(sup, a, ok, err)
     if err:
         out["thumbnail_error"] = err
@@ -461,7 +517,11 @@ async def probe_features(device_client, device: dict, session=None,
     # this project had written off, so gating it on the same flag that wrote
     # them off would guarantee never finding out.
     sup = getattr(device_client, "async_get_recent_recordings", None) is not None
-    a, ok, err = await _probe_recent_recordings(device_client, timeout) if sup else (False, False, None)
+    a, ok, err = (
+        await _probe_recent_recordings(device_client, timeout)
+        if sup
+        else (False, False, None)
+    )
     out["recent_recordings"] = _verdict(sup, a, ok, err)
     if err:
         out["recent_recordings_error"] = err

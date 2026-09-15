@@ -17,6 +17,7 @@ So the drain keeps a second, separate tail of lines that are NOT the known
 repetitive noise. The raw tail still shows what the stream was doing; the
 notable tail shows the sentence that explains the exit.
 """
+
 import io
 
 from aidot_cameras.camera.sdes_open import _start_serve_stderr_drain
@@ -37,11 +38,14 @@ def _drained(lines, **kw):
         if proc.stderr.tell() >= len(proc.stderr.getvalue()):
             break
     import time
+
     time.sleep(0.05)
     return proc
 
 
-NOISE = "[vost#0:0/copy @ 0x7f] Non-monotonic DTS; previous: 1, current: 0; changing to 2."
+NOISE = (
+    "[vost#0:0/copy @ 0x7f] Non-monotonic DTS; previous: 1, current: 0; changing to 2."
+)
 LOSS = "[in#0/sdp @ 0x7f] RTP: missed 2 packets"
 DELAY = "[in#0/sdp @ 0x7f] max delay reached. need to consume packet"
 

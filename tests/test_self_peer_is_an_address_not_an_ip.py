@@ -23,6 +23,7 @@ is one ip:PORT. A peer sharing our NAT has the same ip and a different port, so
 comparing the pair keeps the guard and drops the false positive - which is also
 what ICE means by a transport address.
 """
+
 import os
 import sys
 
@@ -35,12 +36,13 @@ from aidot_cameras.camera.sdes_open import (
 
 LOCAL = "192.168.7.2"
 PUBLIC = "203.0.113.7"
-OURS = (41000, 41002)          # the ports our own srflx candidates advertise
+OURS = (41000, 41002)  # the ports our own srflx candidates advertise
 
 
 def _is_self(ip, port=None):
     return _is_self_transport_address(
-        ip, port, local_ip=LOCAL, public_ip=PUBLIC, own_ports=OURS)
+        ip, port, local_ip=LOCAL, public_ip=PUBLIC, own_ports=OURS
+    )
 
 
 def test_our_own_reflexive_address_is_still_refused():
@@ -77,17 +79,16 @@ def test_the_learner_uses_the_port_too():
     # so it has to ask the same question the same way.
     advertised = [("192.168.9.3", 34400)]
 
-    learned = _record_peer_reflexive(
-        advertised, [], (PUBLIC, 49887), _is_self)
+    learned = _record_peer_reflexive(advertised, [], (PUBLIC, 49887), _is_self)
     assert learned == [(PUBLIC, 49887)], "a peer behind our NAT must be learnable"
 
-    refused = _record_peer_reflexive(
-        advertised, [], (PUBLIC, 41000), _is_self)
+    refused = _record_peer_reflexive(advertised, [], (PUBLIC, 41000), _is_self)
     assert refused == [], "our own advertised address must never be learned"
 
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:

@@ -11,6 +11,7 @@ the suite opened one or two cameras:
 
 These drive several cameras through the real client at once.
 """
+
 import asyncio
 
 import pytest
@@ -38,27 +39,31 @@ async def test_a_four_camera_fleet_all_get_to_signal(
     camera must have SEEN an offer.
     """
     monkeypatch.setenv("AIDOT_MAX_CONCURRENT_OPENS", "2")
-    monkeypatch.setenv("AIDOT_MAX_CONCURRENT_STREAMS", "3")   # deliberately < fleet
+    monkeypatch.setenv("AIDOT_MAX_CONCURRENT_STREAMS", "3")  # deliberately < fleet
 
     clients = [e2e_device_client("A001513") for _ in range(4)]
     cams = [
-        FakeCameraSignaling(fake_broker.url, device_id=dc.device_id,
-                            user_id=dc.user_id, client_id=f"fleetcam-{i}")
+        FakeCameraSignaling(
+            fake_broker.url,
+            device_id=dc.device_id,
+            user_id=dc.user_id,
+            client_id=f"fleetcam-{i}",
+        )
         for i, dc in enumerate(clients)
     ]
     for cam in cams:
         await cam.start()
     try:
         results = await asyncio.wait_for(
-            asyncio.gather(*(_open_settling(dc) for dc in clients),
-                           return_exceptions=True),
+            asyncio.gather(
+                *(_open_settling(dc) for dc in clients), return_exceptions=True
+            ),
             timeout=150.0,
         )
         assert len(results) == 4
 
         unreached = [
-            i for i, cam in enumerate(cams)
-            if "webrtcReq" not in cam.methods_received()
+            i for i, cam in enumerate(cams) if "webrtcReq" not in cam.methods_received()
         ]
         assert not unreached, (
             f"camera(s) {unreached} of 4 were never offered a stream - a fleet "
@@ -78,8 +83,12 @@ async def test_a_saturated_open_gate_does_not_deadlock(
 
     clients = [e2e_device_client("A001513") for _ in range(3)]
     cams = [
-        FakeCameraSignaling(fake_broker.url, device_id=dc.device_id,
-                            user_id=dc.user_id, client_id=f"gatecam-{i}")
+        FakeCameraSignaling(
+            fake_broker.url,
+            device_id=dc.device_id,
+            user_id=dc.user_id,
+            client_id=f"gatecam-{i}",
+        )
         for i, dc in enumerate(clients)
     ]
     for cam in cams:
@@ -88,8 +97,10 @@ async def test_a_saturated_open_gate_does_not_deadlock(
         # asyncio.wait_for is the assertion: a deadlock shows up as a timeout
         # here rather than as a hung job.
         results = await asyncio.wait_for(
-            asyncio.gather(*(_open_settling(dc, timeout=8.0) for dc in clients),
-                           return_exceptions=True),
+            asyncio.gather(
+                *(_open_settling(dc, timeout=8.0) for dc in clients),
+                return_exceptions=True,
+            ),
             timeout=150.0,
         )
         assert len(results) == 3, "every open must settle under a saturated gate"

@@ -11,6 +11,7 @@ dropped, while the send still reported success. REMB still has that bug today
 (it calls ``_cam_srtp_sock.sendto`` directly); it is latent only because
 ``REMB_TARGET_BPS`` defaults to 0. A new feedback message must not repeat it.
 """
+
 import logging
 
 import pytest
@@ -88,26 +89,34 @@ def test_the_call_site_uses_the_relay_aware_sender_and_the_keyed_ssrc():
     """Source guard: the unit tests above pass with the bridge untouched."""
     import pathlib
 
-    src = (pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras"
-           / "camera" / "sdes_open.py").read_text()
+    src = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "aidot_cameras"
+        / "camera"
+        / "sdes_open.py"
+    ).read_text()
     # Every occurrence that is not the definition is a call site.
-    calls = [i for i in range(len(src))
-             if src.startswith("_send_video_tmmbr(", i)
-             and not src[:i].endswith("def ")]
+    calls = [
+        i
+        for i in range(len(src))
+        if src.startswith("_send_video_tmmbr(", i) and not src[:i].endswith("def ")
+    ]
     assert calls, "the bridge must actually send the TMMBR it can build"
     # Window from the cadence block's start to the PLI block that follows,
     # so it covers how the sender is resolved as well as how it is used -
     # structural terminators, not a fixed character count that goes vacuous
     # as comments grow.
-    start = src.index("_tmmbr_bps = getattr(_bridge_fn, '_tmmbr_bps', None)")
-    args = src[start:src.index("_pli_done", start)]
+    start = src.index('_tmmbr_bps = getattr(_bridge_fn, "_tmmbr_bps", None)')
+    args = src[start : src.index("_pli_done", start)]
     assert "_cam_srtp_sock.sendto" not in args, (
         "a raw socket write is silently inert on a TURN-relayed session -- "
-        "use the bridge's relay-aware sender, as the NACK path does")
+        "use the bridge's relay-aware sender, as the NACK path does"
+    )
     assert "_send_to_cam" in args
     assert "_CAM_RTCP_SENDER_SSRC" in args, (
         "the SRTP TX policy is keyed on this SSRC; a TMMBR that disagrees "
-        "with the PLI/RR/NACK is dropped by the camera")
+        "with the PLI/RR/NACK is dropped by the camera"
+    )
 
 
 def test_the_sender_ssrc_is_the_one_every_other_rtcp_uses():
@@ -126,6 +135,7 @@ def test_the_sender_ssrc_is_the_one_every_other_rtcp_uses():
 # be confounded by the codec or by the scene, because both windows share them.
 # `--quality-arms` already measures that way; holding the TMMBR back until
 # after window A lets it be measured on the same rig.
+
 
 def test_the_delay_is_off_by_default(monkeypatch):
     from aidot_cameras.camera.sdes_open import _sdes_tmmbr_after_s
@@ -165,13 +175,18 @@ def test_the_bridge_gates_the_send_on_it():
     """Source guard: the helper is inert unless the send site consults it."""
     import pathlib
 
-    src = (pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras"
-           / "camera" / "sdes_open.py").read_text()
-    i = src.index("_tmmbr_bps = getattr(_bridge_fn, '_tmmbr_bps', None)")
-    window = src[i:src.index("_pli_done", i)]
+    src = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "aidot_cameras"
+        / "camera"
+        / "sdes_open.py"
+    ).read_text()
+    i = src.index('_tmmbr_bps = getattr(_bridge_fn, "_tmmbr_bps", None)')
+    window = src[i : src.index("_pli_done", i)]
     assert "_tmmbr_ready(" in window, (
         "the TMMBR cadence must consult _tmmbr_ready, or AIDOT_SDES_TMMBR_AFTER_S "
-        "does nothing and the measurement is between-session again")
+        "does nothing and the measurement is between-session again"
+    )
     assert "_first_video_ts" in window
 
 
@@ -190,24 +205,32 @@ def test_the_switches_are_resolved_once_per_session_not_per_packet():
     """
     import pathlib
 
-    src = (pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras"
-           / "camera" / "sdes_open.py").read_text()
+    src = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "aidot_cameras"
+        / "camera"
+        / "sdes_open.py"
+    ).read_text()
 
     # Resolved where _nack_on is, at the first video packet.
-    setup = src[src.index("_bridge_fn._nack_on = _sdes_nack_enabled()"):][:600]
+    setup = src[src.index("_bridge_fn._nack_on = _sdes_nack_enabled()") :][:600]
     assert "_sdes_tmmbr_bps()" in setup, (
-        "resolve the TMMBR target once per session, beside _nack_on")
+        "resolve the TMMBR target once per session, beside _nack_on"
+    )
     assert "_sdes_tmmbr_after_s()" in setup
 
     # And the cadence reads the resolved value rather than the environment.
-    i = src.index("_tmmbr_bps = getattr(_bridge_fn, '_tmmbr_bps', None)")
-    cadence = src[i:src.index("_pli_done", i)]
+    i = src.index('_tmmbr_bps = getattr(_bridge_fn, "_tmmbr_bps", None)')
+    cadence = src[i : src.index("_pli_done", i)]
     assert "_sdes_tmmbr_bps()" not in cadence, (
-        "the cadence must not call os.environ; it runs on the packet loop")
+        "the cadence must not call os.environ; it runs on the packet loop"
+    )
     assert "_sdes_tmmbr_after_s()" not in cadence
     # Cost ordering inside the guard: the once-a-second cadence gate must sit
     # BEFORE the readiness math and the sender lookup, or both run per packet.
     assert cadence.index("_last_tmmbr_ts") < cadence.index("_tmmbr_ready("), (
-        "the 1s cadence gate must run before _tmmbr_ready")
+        "the 1s cadence gate must run before _tmmbr_ready"
+    )
     assert cadence.index("_tmmbr_ready(") < cadence.index("_send_to_cam"), (
-        "the sender lookup must be the last, rarest check")
+        "the sender lookup must be the last, rarest check"
+    )

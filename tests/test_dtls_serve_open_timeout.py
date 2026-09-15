@@ -9,6 +9,7 @@ arrived at 30.7-99.5s were thrown away (see the constant's own comment).
 
 Repo convention: no pytest-asyncio; drive coroutines with asyncio.run().
 """
+
 import asyncio
 import types
 
@@ -19,6 +20,7 @@ from aidot_cameras.camera.client import CameraMixin, _parse_env_float
 # --- _parse_env_float: the try/except-fallback idiom used elsewhere in this
 # module for numeric AIDOT_* env vars (see _get_webrtc_open_gate /
 # _get_stream_slots' AIDOT_MAX_CONCURRENT_OPENS / _STREAMS handling). ------- #
+
 
 def test_parse_env_float_defaults_when_unset(monkeypatch):
     monkeypatch.delenv("AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S", raising=False)
@@ -45,6 +47,7 @@ def test_module_constant_outlasts_the_second_offer_resend():
 
 
 # --- Nice-to-have: the serve loop passes the configured timeout through ---- #
+
 
 class _Ready:
     def clear(self):

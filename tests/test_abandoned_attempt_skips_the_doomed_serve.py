@@ -26,6 +26,7 @@ exception and is paced like the session-ended case it stands in for: the fast
 retry when the camera said -50019, and the ordinary unhealthy-session delay
 otherwise. Never the open-failure escalation.
 """
+
 import os
 import sys
 
@@ -46,6 +47,7 @@ def _s(**kw):
 # --------------------------------------------------------------------------- #
 # When to skip
 # --------------------------------------------------------------------------- #
+
 
 def test_an_abandoned_attempt_with_no_media_is_skipped():
     assert _s() is True
@@ -76,6 +78,7 @@ def test_the_plain_timeout_path_is_now_skipped_too():
 # The exception it raises
 # --------------------------------------------------------------------------- #
 
+
 def test_the_exception_is_distinct_from_a_terminal_refusal():
     """AidotCameraBusy means 'stop retrying'. This one means the opposite -
     retry now - so the loop must be able to tell them apart."""
@@ -99,6 +102,7 @@ def test_it_is_catchable_as_a_plain_exception_too():
 # --------------------------------------------------------------------------- #
 # How the loop paces the retry - the part that could make this worse
 # --------------------------------------------------------------------------- #
+
 
 def _loop_source() -> str:
     import inspect
@@ -126,8 +130,8 @@ def _no_media_branch() -> str:
 
     src = _loop_source()
     i = src.index("            except AidotCameraNoMedia")
-    m = re.search(r"\n            except ", src[i + 1:])
-    return src[i:i + 1 + m.start()] if m else src[i:]
+    m = re.search(r"\n            except ", src[i + 1 :])
+    return src[i : i + 1 + m.start()] if m else src[i:]
 
 
 def test_the_no_media_branch_feeds_the_futile_keepalive_guard():
@@ -138,9 +142,11 @@ def test_the_no_media_branch_feeds_the_futile_keepalive_guard():
     branch has to do that accounting itself."""
     branch = _no_media_branch()
     assert "_next_no_media_streak" in branch, (
-        "the streak must advance, or the circuit breaker never trips")
+        "the streak must advance, or the circuit breaker never trips"
+    )
     assert "_should_abandon_keepalive" in branch, (
-        "the branch must be able to stop the keepalive, as the loop bottom can")
+        "the branch must be able to stop the keepalive, as the loop bottom can"
+    )
 
 
 def test_the_guard_actually_trips_for_a_run_of_no_media_attempts():
@@ -157,8 +163,10 @@ def test_the_guard_actually_trips_for_a_run_of_no_media_attempts():
         streak = _next_no_media_streak(streak, False)
     assert _should_abandon_keepalive(streak, is_battery=True) is True
     # A delivered session clears it, so a camera that recovers is not punished.
-    assert _should_abandon_keepalive(
-        _next_no_media_streak(streak, True), is_battery=True) is False
+    assert (
+        _should_abandon_keepalive(_next_no_media_streak(streak, True), is_battery=True)
+        is False
+    )
 
 
 def test_the_no_media_branch_paces_as_a_session_that_ended_without_media():
@@ -171,9 +179,11 @@ def test_the_no_media_branch_paces_as_a_session_that_ended_without_media():
     delivers should back off - so the test now says what is true."""
     branch = _no_media_branch()
     assert "_not_ready_retry_delay" in branch, (
-        "a merely-slow camera keeps the fast not-ready burst")
+        "a merely-slow camera keeps the fast not-ready burst"
+    )
     assert "session_end_delay" in branch, (
-        "everything else paces as an ended session, escalation included")
+        "everything else paces as an ended session, escalation included"
+    )
 
 
 def test_the_no_media_branch_retries_rather_than_giving_up():
@@ -205,6 +215,7 @@ def test_the_no_media_branch_retries_rather_than_giving_up():
 # looping on a permanent one. So the skip now applies to the timeout path too:
 # what makes a serve doomed is that no media was observed, not which wait ended.
 
+
 def test_a_timed_out_attempt_with_nothing_observed_also_skips(monkeypatch):
     """The 2026-09-05 case: not abandoned by the backstop, just silent.
 
@@ -222,10 +233,14 @@ def test_a_talk_or_snapshot_open_is_never_abandoned(monkeypatch):
     ICE nomination are already up. Aborting those because no video arrived would
     break the siren on exactly the cameras this was written to help."""
     monkeypatch.delenv("AIDOT_SKIP_DOOMED_SERVE", raising=False)
-    assert _should_skip_doomed_serve(
-        abandoned=False, have_video=False, serving=False) is False
-    assert _should_skip_doomed_serve(
-        abandoned=True, have_video=False, serving=False) is False
+    assert (
+        _should_skip_doomed_serve(abandoned=False, have_video=False, serving=False)
+        is False
+    )
+    assert (
+        _should_skip_doomed_serve(abandoned=True, have_video=False, serving=False)
+        is False
+    )
 
 
 def test_the_gate_only_fires_when_a_serve_is_actually_being_built():
@@ -235,7 +250,8 @@ def test_the_gate_only_fires_when_a_serve_is_actually_being_built():
 
     src = inspect.getsource(CameraMixin._open_sdes_stream_impl)
     assert "serving=bool(rtsp_push_url or output_path)" in src, (
-        "the gate must be told whether this open builds a serve at all")
+        "the gate must be told whether this open builds a serve at all"
+    )
 
 
 def test_the_backstop_case_still_skips():

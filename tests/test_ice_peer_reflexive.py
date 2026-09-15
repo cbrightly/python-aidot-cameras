@@ -6,6 +6,7 @@ the camera's own probes arrive from an address we never nominate, so it stays in
 ICE "Checking" and never sends SRTP.  These cover the policy that decides what
 gets added to the nomination set.
 """
+
 from aidot_cameras.camera.sdes_open import (
     _MAX_PRFLX_CANDS,
     _record_peer_reflexive,
@@ -28,8 +29,7 @@ def test_an_unadvertised_source_is_learned():
     Its probes still reached us, from an address it never listed.  That address
     is the only working path, so it has to become nominable.
     """
-    out = _record_peer_reflexive(
-        ADVERTISED, [], ("203.0.113.7", 51234), _never_self)
+    out = _record_peer_reflexive(ADVERTISED, [], ("203.0.113.7", 51234), _never_self)
     assert out == [("203.0.113.7", 51234)]
 
 
@@ -39,16 +39,15 @@ def test_an_advertised_source_is_not_duplicated():
     Nothing is learned, so the healthy path keeps the exact nomination set it
     had before this existed.
     """
-    out = _record_peer_reflexive(
-        ADVERTISED, [], ("192.168.9.13", 40000), _never_self)
+    out = _record_peer_reflexive(ADVERTISED, [], ("192.168.9.13", 40000), _never_self)
     assert out == []
 
 
 def test_the_same_source_is_only_learned_once():
-    known = _record_peer_reflexive(
-        ADVERTISED, [], ("203.0.113.7", 51234), _never_self)
+    known = _record_peer_reflexive(ADVERTISED, [], ("203.0.113.7", 51234), _never_self)
     again = _record_peer_reflexive(
-        ADVERTISED, known, ("203.0.113.7", 51234), _never_self)
+        ADVERTISED, known, ("203.0.113.7", 51234), _never_self
+    )
     assert again is known, "a repeat probe must not rebind the list"
 
 
@@ -57,11 +56,11 @@ def test_our_own_address_is_never_learned():
 
     Nominating ourselves would form a pair that can never carry camera media.
     """
+
     def _is_self(ip, port=None):
         return (ip, port) == ("192.168.7.1", 3478)
 
-    out = _record_peer_reflexive(
-        ADVERTISED, [], ("192.168.7.1", 3478), _is_self)
+    out = _record_peer_reflexive(ADVERTISED, [], ("192.168.7.1", 3478), _is_self)
     assert out == []
 
 
@@ -70,15 +69,15 @@ def test_discovery_is_bounded():
     learned = []
     for i in range(_MAX_PRFLX_CANDS + 5):
         learned = _record_peer_reflexive(
-            ADVERTISED, learned, (f"203.0.113.{i}", 51234), _never_self)
+            ADVERTISED, learned, (f"203.0.113.{i}", 51234), _never_self
+        )
     assert len(learned) == _MAX_PRFLX_CANDS
 
 
 def test_a_missing_observation_is_ignored():
     """Relay-carried probes have no usable peer address until parsed."""
     for observed in (None, (None, 51234), ("203.0.113.7", None), ("", 0)):
-        assert _record_peer_reflexive(
-            ADVERTISED, [], observed, _never_self) == []
+        assert _record_peer_reflexive(ADVERTISED, [], observed, _never_self) == []
 
 
 def test_learning_works_with_no_advertised_candidates():
@@ -91,6 +90,7 @@ def test_the_caller_gets_a_new_list_not_a_mutation():
     """The bridge thread iterates the old list; it must never change under it."""
     original = [("198.51.100.1", 40000)]
     out = _record_peer_reflexive(
-        ADVERTISED, original, ("203.0.113.7", 51234), _never_self)
+        ADVERTISED, original, ("203.0.113.7", 51234), _never_self
+    )
     assert original == [("198.51.100.1", 40000)], "input was mutated"
     assert out is not original

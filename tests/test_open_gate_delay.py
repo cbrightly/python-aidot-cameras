@@ -12,6 +12,7 @@ while a healthy long session reopens immediately.
 
 Repo convention: pure helper, plain unit test.
 """
+
 from aidot_cameras.camera.client import _open_gate_delay
 
 

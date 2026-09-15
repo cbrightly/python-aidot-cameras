@@ -14,6 +14,7 @@ that the call returns None: with the guard deleted the call still ends in None,
 because loading the absent native libraries fails and the failure is swallowed.
 A test on the return value alone would pass against the broken code.
 """
+
 import logging
 
 import pytest
@@ -67,12 +68,11 @@ async def test_the_refusal_says_which_call_to_use_instead(
     """
     # The record a real camera returns: the fleet query that settled this found
     # liveType=2 on every device (docs/DEFERRED_FEATURES.md).
-    cam = no_p2p_uid(
-        make_camera_device_client("A000088", properties={"liveType": "2"}))
+    cam = no_p2p_uid(make_camera_device_client("A000088", properties={"liveType": "2"}))
 
     with caplog.at_level(logging.ERROR, logger="aidot_cameras.camera.client"):
         assert await cam.async_open_live_stream(lambda frame: None) is None
 
-    assert any(
-        "async_open_webrtc_stream" in r.getMessage() for r in caplog.records
-    ), f"no redirection to the supported call: {[r.getMessage() for r in caplog.records]}"
+    assert any("async_open_webrtc_stream" in r.getMessage() for r in caplog.records), (
+        f"no redirection to the supported call: {[r.getMessage() for r in caplog.records]}"
+    )

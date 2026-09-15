@@ -32,6 +32,7 @@ from typing import Any, Optional
 
 try:  # shape B (0.3.54 - 0.3.55): typed account/device dataclasses + CloudApi
     from aidot.models.auth_model import UserInformation as _UserInformation
+
     HAS_TYPED_ACCOUNT = True
 except ImportError:  # shape A (<=0.3.53, >=0.3.56): plain dicts
     _UserInformation = None
@@ -135,6 +136,7 @@ DeviceModel = DeviceRecord
 
 try:  # shape B
     from aidot.device_client import DeviceState as _DeviceState
+
     DEVICE_STATE_IS_UPSTREAMS = True
 except ImportError:  # shape A: no state machine, just two booleans
     DEVICE_STATE_IS_UPSTREAMS = False
@@ -163,6 +165,7 @@ except ImportError:  # shape A: no state machine, just two booleans
         AUTHENTICATED = 6
         AUTHENTICATION_FAILED = 7
         DISCONNECTED = 8
+
 
 DeviceState = _DeviceState
 
@@ -210,6 +213,7 @@ def cancel_pending_reconnect(device_client: Any) -> bool:
 # Account HTTP surface: ``CloudApi`` (shape B) -> client methods (shape A)
 # --------------------------------------------------------------------------- #
 
+
 async def api_get_houses(client: Any) -> Optional[list]:
     """List the account's houses."""
     if HAS_TYPED_ACCOUNT:
@@ -247,6 +251,7 @@ async def api_refresh_token(client: Any) -> Any:
 # Account fields: ``user_info`` dataclass (shape B) -> plain attrs (shape A)
 # --------------------------------------------------------------------------- #
 
+
 def account_region(client: Any) -> str:
     """The account's API region ("us", "eu", ...)."""
     if HAS_TYPED_ACCOUNT:
@@ -259,6 +264,7 @@ def account_refresh_token(client: Any) -> str:
     if HAS_TYPED_ACCOUNT:
         return getattr(client.user_info, "refreshToken", "") or ""
     from .const import CONF_REFRESH_TOKEN
+
     return (client.login_info or {}).get(CONF_REFRESH_TOKEN) or ""
 
 
@@ -324,6 +330,7 @@ def device_client_args(
 #: never escapes.  See ``CameraDeviceClient._notify_status_update``.
 try:
     from aidot.device_client import DeviceClient as _DeviceClient
+
     HAS_READ_DATA_SEAM = callable(getattr(_DeviceClient, "read_data", None))
 except ImportError:  # pragma: no cover - upstream is a hard dependency
     HAS_READ_DATA_SEAM = False
@@ -341,6 +348,7 @@ except ImportError:  # pragma: no cover - upstream is a hard dependency
 #: ``get_device_client``.
 try:
     from aidot.discover import Discover as _Discover
+
     HAS_SHARED_DISCOVERY_MAP = isinstance(
         getattr(_Discover, "DISCOVERED_DEVICE", None), dict
     )

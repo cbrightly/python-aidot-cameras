@@ -11,6 +11,7 @@ review:
 
 Runs under pytest, or standalone:  python tests/test_sdes_talk.py
 """
+
 import asyncio
 import os
 import sys
@@ -61,10 +62,15 @@ class _FakeQ:
 def _fresh_talk_state():
     # Mirrors the dict _open_sdes_stream builds for a talk-capable open.
     return {
-        "provider": None, "src": None, "sock": None,
-        "ssrc": 0x0000ABCD, "key": "x" * 40,   # 40 b64 chars -> 30-byte SRTP key
-        "want_speaker": False, "speaker_on": False,
-        "spk_eligible_ts": None, "stop": False,
+        "provider": None,
+        "src": None,
+        "sock": None,
+        "ssrc": 0x0000ABCD,
+        "key": "x" * 40,  # 40 b64 chars -> 30-byte SRTP key
+        "want_speaker": False,
+        "speaker_on": False,
+        "spk_eligible_ts": None,
+        "stop": False,
     }
 
 
@@ -88,7 +94,7 @@ def _make_sdes(talk_state):
         proc=_FakeProc(),
         sdp_path="/tmp/aidot_test_does_not_exist.sdp",
         outgoing_q=_FakeQ(),
-        mqtt_fut=None,            # stop() awaits this in try/except -> harmless
+        mqtt_fut=None,  # stop() awaits this in try/except -> harmless
         audio_sock=_FakeSock(),
         video_sock=_FakeSock(),
         cmd_chan=[None],
@@ -129,7 +135,7 @@ def test_start_talk_sets_want_speaker_and_provider():
 
 
 def test_start_talk_returns_false_without_talk_state():
-    s = _make_sdes(None)              # opened non-talk-capable (offer stayed recvonly)
+    s = _make_sdes(None)  # opened non-talk-capable (offer stayed recvonly)
     assert asyncio.run(s.async_start_talk(lambda: None)) is False
 
 
@@ -155,11 +161,11 @@ def test_retalk_on_same_session_rearms_delay():
 
     async def _seq():
         await s.async_start_talk(lambda: None)
-        ts["spk_eligible_ts"] = 100.0          # simulate the bridge arming clip 1
+        ts["spk_eligible_ts"] = 100.0  # simulate the bridge arming clip 1
         await s.async_stop_talk()
-        assert ts["spk_eligible_ts"] is None    # re-armed
+        assert ts["spk_eligible_ts"] is None  # re-armed
         await s.async_start_talk(lambda: None)  # clip 2
-        assert ts["spk_eligible_ts"] is None    # still None -> fresh delay, not stale
+        assert ts["spk_eligible_ts"] is None  # still None -> fresh delay, not stale
 
     asyncio.run(_seq())
     _stop_pump(s)  # join the pump from clip 2 so no daemon thread leaks
@@ -187,18 +193,18 @@ def test_stop_waits_for_bridge_speakerstop_then_tears_down():
     asyncio.run(s.stop())
     elapsed = time.monotonic() - t0
 
-    assert ts["speaker_on"] is False            # bridge got its window to send 849
+    assert ts["speaker_on"] is False  # bridge got its window to send 849
     assert ts["want_speaker"] is False
     assert ts["spk_eligible_ts"] is None
     assert ts["stop"] is True
-    assert s._proc.poll() is not None           # ffmpeg terminated (after the wait)
-    assert 0.02 < elapsed < 0.8                 # waited, but bounded (didn't hang)
+    assert s._proc.poll() is not None  # ffmpeg terminated (after the wait)
+    assert 0.02 < elapsed < 0.8  # waited, but bounded (didn't hang)
 
 
 def test_stop_no_wait_when_speaker_already_off():
     # Normal flow: the clip completed (pump already cleared speaker via the bridge),
     # so stop() must not block on the SPEAKERSTOP window.
-    ts = _fresh_talk_state()                    # speaker_on=False
+    ts = _fresh_talk_state()  # speaker_on=False
     s = _make_sdes(ts)
     t0 = time.monotonic()
     asyncio.run(s.stop())
@@ -209,6 +215,7 @@ def test_stop_no_wait_when_speaker_already_off():
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:

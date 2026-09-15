@@ -16,6 +16,7 @@ ffmpeg reported 21 new missed-packet lines in one window.
 These tests read the source because the bridge is one long closure that cannot
 be called in isolation.
 """
+
 import inspect
 import re
 
@@ -46,7 +47,7 @@ def test_the_tutk_sequence_counters_survive_between_packets():
     come back by renaming one side of the pair.
     """
     block = re.search(
-        r"if not hasattr\(_bridge_fn,\s*'([^']+)'\):\s*\n"
+        r'if not hasattr\(_bridge_fn,\s*"([^"]+)"\):\s*\n'
         r"\s*_bridge_fn\._tutk_seq_a = 0\s*\n"
         r"\s*_bridge_fn\._tutk_seq_v = 0",
         _SRC,
@@ -64,5 +65,5 @@ def test_the_counters_increment_rather_than_being_reassigned():
     """Both counters must advance from their previous value, not restart."""
     for name in ("_tutk_seq_a", "_tutk_seq_v"):
         assert re.search(
-            rf"_bridge_fn\.{name} = \(_bridge_fn\.{name} \+ 1\) & 0xFFFF", _SRC
+            rf"_bridge_fn\.{name} = \(\s*_bridge_fn\.{name} \+ 1\s*\) & 0xFFFF", _SRC
         ), f"{name} no longer advances from its own previous value"

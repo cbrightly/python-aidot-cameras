@@ -14,6 +14,7 @@ had the mapping right) is the one that runs -- so there is no live symptom to
 point at and there never was.  That is exactly why the mapping needs pinning
 here: a test is the only thing that can tell anyone this is right.
 """
+
 import struct
 
 from aidot_cameras.camera.sdes_open import _sctp_parse_init_ack
@@ -28,11 +29,11 @@ def _init_ack(*, peer_tag=CAMERA_TAG, peer_tsn=CAMERA_TSN, cookie=COOKIE):
     """A minimal but wire-accurate SCTP INIT-ACK carrying a State Cookie."""
     body = struct.pack(
         "!IIHHI",
-        peer_tag,     # Initiate Tag        - the camera's
-        131072,       # a_rwnd
-        1024,         # Number of Outbound Streams
-        2048,         # Number of Inbound Streams
-        peer_tsn,     # Initial TSN         - the camera's
+        peer_tag,  # Initiate Tag        - the camera's
+        131072,  # a_rwnd
+        1024,  # Number of Outbound Streams
+        2048,  # Number of Inbound Streams
+        peer_tsn,  # Initial TSN         - the camera's
     )
     body += struct.pack("!HH", 7, 4 + len(cookie)) + cookie  # State Cookie param
     chunk = struct.pack("!BBH", 0x02, 0, 4 + len(body)) + body
@@ -42,8 +43,11 @@ def _init_ack(*, peer_tag=CAMERA_TAG, peer_tsn=CAMERA_TSN, cookie=COOKIE):
 
 def _state():
     return {
-        'state': 'INIT_SENT', 'local_tag': 0xAAAAAAAA, 'peer_tag': 0,
-        'local_tsn': OUR_TSN, 'stream_seq': 0,
+        "state": "INIT_SENT",
+        "local_tag": 0xAAAAAAAA,
+        "peer_tag": 0,
+        "local_tsn": OUR_TSN,
+        "stream_seq": 0,
     }
 
 
@@ -52,7 +56,7 @@ def test_the_cameras_initial_tsn_is_recorded_as_the_peers():
 
     _sctp_parse_init_ack(_init_ack(), state)
 
-    assert state['peer_tsn'] == CAMERA_TSN
+    assert state["peer_tsn"] == CAMERA_TSN
 
 
 def test_our_own_tsn_survives_the_init_ack():
@@ -61,7 +65,7 @@ def test_our_own_tsn_survives_the_init_ack():
 
     _sctp_parse_init_ack(_init_ack(), state)
 
-    assert state['local_tsn'] == OUR_TSN
+    assert state["local_tsn"] == OUR_TSN
 
 
 def test_the_cameras_verification_tag_is_recorded():
@@ -69,7 +73,7 @@ def test_the_cameras_verification_tag_is_recorded():
 
     _sctp_parse_init_ack(_init_ack(), state)
 
-    assert state['peer_tag'] == CAMERA_TAG
+    assert state["peer_tag"] == CAMERA_TAG
 
 
 def test_the_state_cookie_is_returned_for_the_cookie_echo():

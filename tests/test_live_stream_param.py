@@ -13,6 +13,7 @@ benign: mains cameras emit it too and recover via ICE.
 
 No network: everything below builds from a bare instance.
 """
+
 import json
 import os
 import sys
@@ -22,8 +23,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import aidot_cameras.camera.client as cc
 
 # The camera mixin class that defines the builder (avoid hard-coding the name).
-_CAM = next(v for v in vars(cc).values()
-            if isinstance(v, type) and "_live_stream_param_request" in v.__dict__)
+_CAM = next(
+    v
+    for v in vars(cc).values()
+    if isinstance(v, type) and "_live_stream_param_request" in v.__dict__
+)
 
 
 def _stub(**over):
@@ -74,8 +78,11 @@ def test_auth_headers_carried():
 # to drift from it - which is how a flag that must stay off stayed "locked" by a
 # test that could not see it.
 
-_GATE = next(v for v in vars(cc).values()
-             if isinstance(v, type) and "_resolve_live_stream_param" in v.__dict__)
+_GATE = next(
+    v
+    for v in vars(cc).values()
+    if isinstance(v, type) and "_resolve_live_stream_param" in v.__dict__
+)
 
 
 class _Info:
@@ -112,8 +119,12 @@ def test_gate_stays_closed_for_an_explicit_opt(monkeypatch):
 
 def test_gate_closed_for_every_battery_model(monkeypatch):
     monkeypatch.setenv("AIDOT_LIVESTREAM_PARAM", "1")
-    for _m in ("LK.IPC.A001513", "LK.IPC.A001513-1", "LK.IPC.A001108",
-               "LK.IPC.A001360"):
+    for _m in (
+        "LK.IPC.A001513",
+        "LK.IPC.A001513-1",
+        "LK.IPC.A001108",
+        "LK.IPC.A001360",
+    ):
         c = _cam(_m, _live_stream_param_opt=True)
         assert c._resolve_live_stream_param() is False, _m
 

@@ -6,6 +6,7 @@ mid-handshake (or raises) before that hand-off, the wrapper must release them vi
 its ExitStack; on a successful return it must NOT (the session now owns them).
 These tests exercise that wrapper mechanism directly with a stub impl.
 """
+
 import asyncio
 import types
 

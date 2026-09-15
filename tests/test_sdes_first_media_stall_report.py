@@ -29,6 +29,7 @@ the per-probe classification are pure helpers tested directly here, plus a
 source-level guard that the stall path actually calls them (same shape as
 ``test_reap_sets_teardown_flag_before_kill``).
 """
+
 import inspect
 import re
 import logging
@@ -46,68 +47,118 @@ _TURN = "3.230.182.123"
 # The classifier: which veto refused this probe's source?
 # --------------------------------------------------------------------------- #
 def test_a_direct_probe_that_taught_us_an_address_reads_as_learned():
-    assert _probe_source_verdict(
-        ("192.168.7.20", 41234), None, None,
-        cam_peer=None, observed=("192.168.7.20", 41234),
-        known=False, learned=True,
-    ) == "learned"
+    assert (
+        _probe_source_verdict(
+            ("192.168.7.20", 41234),
+            None,
+            None,
+            cam_peer=None,
+            observed=("192.168.7.20", 41234),
+            known=False,
+            learned=True,
+        )
+        == "learned"
+    )
 
 
 def test_a_probe_from_an_address_we_already_nominate_is_not_a_veto():
-    assert _probe_source_verdict(
-        ("192.168.7.20", 41234), None, None,
-        cam_peer=None, observed=("192.168.7.20", 41234),
-        known=True, learned=False,
-    ) == "known"
+    assert (
+        _probe_source_verdict(
+            ("192.168.7.20", 41234),
+            None,
+            None,
+            cam_peer=None,
+            observed=("192.168.7.20", 41234),
+            known=True,
+            learned=False,
+        )
+        == "known"
+    )
 
 
 def test_the_self_ip_veto_is_named():
     """XOR-PEER-ADDRESS matched our own address, so _br_cam_peer was refused."""
-    assert _probe_source_verdict(
-        (_TURN, 5349), "203.0.113.7", 9000,
-        cam_peer=None, observed=None,
-        known=False, learned=False,
-    ) == "vetoed-self-ip"
+    assert (
+        _probe_source_verdict(
+            (_TURN, 5349),
+            "203.0.113.7",
+            9000,
+            cam_peer=None,
+            observed=None,
+            known=False,
+            learned=False,
+        )
+        == "vetoed-self-ip"
+    )
 
 
 def test_the_bsrc_fallback_veto_is_named_and_is_a_different_string():
     """No usable peer address, and the source is the TURN server itself."""
     verdict = _probe_source_verdict(
-        (_TURN, 5349), None, None,
-        cam_peer=None, observed=None,
-        known=False, learned=False,
+        (_TURN, 5349),
+        None,
+        None,
+        cam_peer=None,
+        observed=None,
+        known=False,
+        learned=False,
     )
     assert verdict == "vetoed-turn-source"
     assert verdict != _probe_source_verdict(
-        (_TURN, 5349), "203.0.113.7", 9000,
-        cam_peer=None, observed=None,
-        known=False, learned=False,
+        (_TURN, 5349),
+        "203.0.113.7",
+        9000,
+        cam_peer=None,
+        observed=None,
+        known=False,
+        learned=False,
     ), "the two vetoes must be distinguishable - that is the whole point"
 
 
 def test_a_peer_address_without_a_port_is_not_reported_as_the_self_ip_veto():
-    assert _probe_source_verdict(
-        (_TURN, 5349), "203.0.113.7", 0,
-        cam_peer=None, observed=None,
-        known=False, learned=False,
-    ) == "vetoed-no-peer-port"
+    assert (
+        _probe_source_verdict(
+            (_TURN, 5349),
+            "203.0.113.7",
+            0,
+            cam_peer=None,
+            observed=None,
+            known=False,
+            learned=False,
+        )
+        == "vetoed-no-peer-port"
+    )
 
 
 def test_an_observed_address_the_peer_reflexive_policy_refused_is_not_called_known():
     """_record_peer_reflexive drops silently too (self-IP, or the cap)."""
-    assert _probe_source_verdict(
-        ("192.168.7.20", 41234), None, None,
-        cam_peer=None, observed=("192.168.7.20", 41234),
-        known=False, learned=False,
-    ) == "prflx-refused"
+    assert (
+        _probe_source_verdict(
+            ("192.168.7.20", 41234),
+            None,
+            None,
+            cam_peer=None,
+            observed=("192.168.7.20", 41234),
+            known=False,
+            learned=False,
+        )
+        == "prflx-refused"
+    )
 
 
 def test_a_relay_carried_probe_that_was_learned_still_reads_as_learned():
-    assert _probe_source_verdict(
-        (_TURN, 5349), "192.168.9.3", 41234,
-        cam_peer=("192.168.9.3", 41234), observed=("192.168.9.3", 41234),
-        known=False, learned=True,
-    ) == "learned"
+    assert (
+        _probe_source_verdict(
+            (_TURN, 5349),
+            "192.168.9.3",
+            41234,
+            cam_peer=("192.168.9.3", 41234),
+            observed=("192.168.9.3", 41234),
+            known=False,
+            learned=True,
+        )
+        == "learned"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -174,8 +225,7 @@ def test_case_probe_seen_but_vetoed_by_the_bsrc_fallback():
 def test_case_no_probes_at_all_is_stated_not_omitted():
     line = _report(probes=())
     assert "probes=none" in line, (
-        "an empty probe list must read as a measured 'none', not as a "
-        "missing field"
+        "an empty probe list must read as a measured 'none', not as a missing field"
     )
 
 
@@ -195,8 +245,10 @@ def test_the_line_names_the_camera_and_the_wait_it_expired():
 def test_the_line_is_one_line():
     line = _report(
         nominated=[("192.168.9.3", 41234), ("10.0.0.4", 5000)],
-        probes=[("3.230.182.123:5349", "vetoed-turn-source"),
-                ("3.230.182.123:5349 via 203.0.113.7:9000", "vetoed-self-ip")],
+        probes=[
+            ("3.230.182.123:5349", "vetoed-turn-source"),
+            ("3.230.182.123:5349 via 203.0.113.7:9000", "vetoed-self-ip"),
+        ],
     )
     assert "\n" not in line, "a multi-line WARNING is unreadable in a log grep"
 
@@ -257,9 +309,10 @@ def test_the_report_is_gated_on_the_wait_actually_having_failed():
     block = _first_media_wait_block()
     sites = [m.start() for m in re.finditer(r"_report_first_media_stall\(", block)]
     # The definition itself is not a call site.
-    sites = [i for i in sites if "def " not in block[max(0, i - 12):i]]
+    sites = [i for i in sites if "def " not in block[max(0, i - 12) : i]]
     assert len(sites) >= 2, (
-        "both the expiry and the cancellation path must emit the report")
+        "both the expiry and the cancellation path must emit the report"
+    )
     for call in sites:
         guard = block.rfind("if _first_video_pt[0] is None:", 0, call)
         assert guard != -1 and guard < call, (
@@ -327,7 +380,7 @@ def test_the_binding_success_counter_is_not_an_alias_for_the_trigger_flag():
     the ``_use_plain_rtp and not _tutk_trigger_sent`` gate, not inside it.
     """
     src = inspect.getsource(sdes_open)
-    gate = src.index("if (_use_plain_rtp and not _tutk_trigger_sent")
+    gate = src.index("and not _tutk_trigger_sent")
     bump = src.index("_br_binding_success_count += 1")
     assert bump < gate, (
         "the inbound Binding Success counter increments inside the trigger "
@@ -339,7 +392,7 @@ def test_the_per_probe_veto_stays_out_of_the_per_packet_log_level():
     """One WARNING on the stall path, not a stream of them."""
     src = inspect.getsource(sdes_open)
     start = src.index("bridge: drop TURN self-loop STUN peer")
-    head = src[max(0, start - 300):start]
+    head = src[max(0, start - 300) : start]
     assert "_LOGGER.debug(" in head and "_LOGGER.warning(" not in head, (
         "the per-probe self-loop drop must stay at DEBUG - it fires per "
         "packet and would drown the single stall report"

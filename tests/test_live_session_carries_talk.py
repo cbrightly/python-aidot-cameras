@@ -16,6 +16,7 @@ Two things are locked here, because either alone would rot:
   - `async_speak` really does reuse a talk-capable live session instead of
     opening another one.
 """
+
 import asyncio
 import inspect
 import os
@@ -38,11 +39,11 @@ def test_the_sdes_keepalive_loop_opens_talk_capable():
     # The loop has exactly one async_open_webrtc_stream call; it must ask for
     # talk, or the session it publishes as _stream_session cannot carry any.
     assert src.count("async_open_webrtc_stream") == 1, (
-        "this test assumes a single open call in the loop - re-read it if that "
-        "changed")
+        "this test assumes a single open call in the loop - re-read it if that changed"
+    )
     assert "talk=True" in src, (
-        "the live-view session must be talk-capable or async_speak can never "
-        "reuse it")
+        "the live-view session must be talk-capable or async_speak can never reuse it"
+    )
 
 
 class _Session:
@@ -57,7 +58,7 @@ class _Session:
     async def async_start_talk(self, provider):
         self.started += 1
         while provider() is not None:
-            pass                       # drain the clip as the real pump would
+            pass  # drain the clip as the real pump would
         return True
 
     async def async_stop_talk(self):
@@ -88,11 +89,10 @@ def test_async_speak_reuses_the_live_session_instead_of_opening_another():
     client = _Client(session)
     frames = iter([b"\x00" * 320] * 3)
 
-    ok = asyncio.run(client.async_speak(lambda: next(frames, None),
-                                        max_seconds=5))
+    ok = asyncio.run(client.async_speak(lambda: next(frames, None), max_seconds=5))
 
     assert ok is True
-    assert client.opens == 0            # no second camera session
+    assert client.opens == 0  # no second camera session
     assert session.started == 1
     # And it must not close the session it borrowed - the live view is using it.
     assert session.stopped == 0
@@ -100,6 +100,7 @@ def test_async_speak_reuses_the_live_session_instead_of_opening_another():
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:

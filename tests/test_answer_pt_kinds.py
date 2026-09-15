@@ -101,10 +101,7 @@ def test_a000088_reordered_four_sections_still_map_correctly():
 def test_payload_type_claimed_by_both_kinds_is_dropped():
     # Ambiguity is not better evidence than the fallback table, so the map
     # declines to answer for that payload type rather than guessing.
-    ambiguous = (
-        "m=video 9 RTP/SAVPF 0\r\n"
-        "m=audio 9 RTP/SAVPF 0 8\r\n"
-    )
+    ambiguous = "m=video 9 RTP/SAVPF 0\r\nm=audio 9 RTP/SAVPF 0 8\r\n"
     kinds = answer_pt_kinds(ambiguous)
     assert 0 not in kinds
     assert kinds[8] == "audio"

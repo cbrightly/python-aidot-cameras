@@ -10,6 +10,7 @@ Observed live: four go2rtc streams registered against serve ports with nothing
 listening, and go2rtc reporting
 `dial tcp 127.0.0.1:18981: connect: connection refused`.
 """
+
 import inspect
 
 import aidot_cameras.camera.client as cc
@@ -26,24 +27,28 @@ def _src(name):
 
 def test_sdes_idle_release_deregisters_from_go2rtc():
     src = _src("_sdes_keepalive_loop_inner")
-    idle = src[src.index("if _idle_release:"):]
+    idle = src[src.index("if _idle_release:") :]
     assert "_deregister_go2rtc" in idle
 
 
 def test_dtls_idle_release_deregisters_from_go2rtc():
     src = _src("_dtls_serve_loop_inner")
-    idle = src[src.index("if idle_release:"):]
+    idle = src[src.index("if idle_release:") :]
     assert "_deregister_go2rtc" in idle
 
 
 def test_deregistration_failure_cannot_break_the_release():
     # Going dormant must still complete if go2rtc is unreachable.
-    for name, marker in (("_sdes_keepalive_loop_inner", "if _idle_release:"),
-                         ("_dtls_serve_loop_inner", "if idle_release:")):
+    for name, marker in (
+        ("_sdes_keepalive_loop_inner", "if _idle_release:"),
+        ("_dtls_serve_loop_inner", "if idle_release:"),
+    ):
         idle = _src(name)
-        idle = idle[idle.index(marker):]
-        block = idle[idle.index("_deregister_go2rtc") - 200:
-                     idle.index("_deregister_go2rtc") + 300]
+        idle = idle[idle.index(marker) :]
+        block = idle[
+            idle.index("_deregister_go2rtc") - 200 : idle.index("_deregister_go2rtc")
+            + 300
+        ]
         assert "try:" in block and "except Exception" in block
 
 
@@ -86,27 +91,33 @@ def test_every_exit_that_stops_streaming_also_deregisters():
         tree = ast.parse(textwrap.dedent(_src(name)))
         fn = tree.body[0]
 
-        stops = []          # (lineno of `_streaming_active = False`)
+        stops = []  # (lineno of `_streaming_active = False`)
         for node in ast.walk(fn):
             if not isinstance(node, ast.Assign):
                 continue
             for t in node.targets:
-                if (isinstance(t, ast.Attribute) and t.attr == "_streaming_active"
-                        and isinstance(node.value, ast.Constant)
-                        and node.value.value is False):
+                if (
+                    isinstance(t, ast.Attribute)
+                    and t.attr == "_streaming_active"
+                    and isinstance(node.value, ast.Constant)
+                    and node.value.value is False
+                ):
                     stops.append(node.lineno)
 
         assert stops, f"{name}: no `_streaming_active = False` found at all"
 
-        deregs = [n.lineno for n in ast.walk(fn)
-                  if isinstance(n, ast.Attribute) and n.attr == "_deregister_go2rtc"]
+        deregs = [
+            n.lineno
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Attribute) and n.attr == "_deregister_go2rtc"
+        ]
         returns = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Return)]
 
         for stop in stops:
             # The return that this stop falls through to.
             after = [r for r in returns if r > stop]
             if not after:
-                continue        # falls through to the loop, not an exit
+                continue  # falls through to the loop, not an exit
             exit_line = min(after)
             between = [d for d in deregs if stop < d < exit_line]
             assert between, (

@@ -17,12 +17,17 @@ Three ways that experiment can quietly fail to be the experiment:
 These lock the first two directly and the third by carrying the offer's own
 receipt per attempt.
 """
+
 import logging
 import os
 import sys
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"
+    ),
+)
 
 from live_validate import _ReceiptCollector, _apply_pt_order, _parse_arms
 
@@ -71,8 +76,14 @@ def test_the_control_arm_clears_the_variable_rather_than_setting_it_empty():
 
 def _record(msg: str) -> logging.LogRecord:
     return logging.LogRecord(
-        name="aidot_cameras.camera.webrtc_open", level=logging.INFO,
-        pathname=__file__, lineno=1, msg="%s", args=(msg,), exc_info=None)
+        name="aidot_cameras.camera.webrtc_open",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="%s",
+        args=(msg,),
+        exc_info=None,
+    )
 
 
 def test_the_offer_receipt_is_captured_so_a_null_result_can_be_trusted():
@@ -89,7 +100,8 @@ def test_the_collector_accepts_info_because_the_receipt_is_an_info_line():
     c = _ReceiptCollector()
     assert c.level <= logging.INFO, (
         "a handler whose level is above the line it collects silently collects "
-        "nothing, and a campaign cannot tell that from a null result")
+        "nothing, and a campaign cannot tell that from a null result"
+    )
 
 
 def test_unrelated_lines_are_not_mistaken_for_a_receipt():
@@ -100,6 +112,7 @@ def test_unrelated_lines_are_not_mistaken_for_a_receipt():
 
 if __name__ == "__main__":
     import traceback
+
     _fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     _fail = 0
     for _fn in _fns:

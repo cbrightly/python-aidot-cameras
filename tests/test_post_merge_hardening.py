@@ -64,6 +64,7 @@ def make_dc(device=DEVICE):
 # discovery
 # --------------------------------------------------------------------------- #
 
+
 def test_discover_quiescent_after_close():
     async def run():
         d = Discover({"id": "user1"}, None)
@@ -84,6 +85,7 @@ def test_camera_filter():
 # teardown
 # --------------------------------------------------------------------------- #
 
+
 def test_no_reconnect_after_client_close():
     """Closing the account must silence an already-armed reconnect timer.
 
@@ -100,6 +102,7 @@ def test_no_reconnect_after_client_close():
     rather than by name - hardcoding one would arm nothing on the other shape
     and this assertion would pass without testing anything.
     """
+
     async def run():
         client = CameraClient(None, country_code="US")
         dc = make_upstream_device_client(dict(DEVICE), dict(USER))
@@ -118,6 +121,7 @@ def test_no_reconnect_after_client_close():
 # --------------------------------------------------------------------------- #
 # status semantics
 # --------------------------------------------------------------------------- #
+
 
 def test_status_defaults_are_unknown():
     s = CameraStatusData()
@@ -166,6 +170,7 @@ def test_camera_state_carry_forward():
 # camera-only attributes across the upstream receive loop
 # --------------------------------------------------------------------------- #
 
+
 @pytest.mark.skipif(
     not HAS_READ_DATA_SEAM,
     reason=(
@@ -210,6 +215,7 @@ def test_raw_camera_attrs_survive_upstreams_typed_model(monkeypatch):
 # --------------------------------------------------------------------------- #
 # upstream-merge tripwire
 # --------------------------------------------------------------------------- #
+
 
 def test_no_silent_mro_shadowing():
     """If upstream adds a DeviceClient method whose name CameraMixin already

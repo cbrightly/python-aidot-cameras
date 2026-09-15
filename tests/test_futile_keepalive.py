@@ -21,6 +21,7 @@ Giving up is scoped to the background keepalive. A view still starts a session
 on demand - the user asking to see the camera is new information, and the
 retry ceiling should not decide on their behalf that it cannot work.
 """
+
 import pytest
 
 from aidot_cameras.camera.client import _next_no_media_streak as next_streak

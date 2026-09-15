@@ -5,6 +5,7 @@ serialization failure must not truncate a previously-valid token), and a
 corrupt/partial cache is a caught ValueError (so _make_client can fall back
 to username/password login instead of crashing).
 """
+
 import os
 import stat
 

@@ -12,6 +12,7 @@ serve is untouched, which is what these tests pin - a regression here would
 either break every existing HTTP-listen serve or silently send media to
 /dev/null.
 """
+
 import asyncio
 import types
 

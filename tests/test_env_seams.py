@@ -5,6 +5,7 @@ fake cloud) has to preserve today's production URLs / ICE servers with the env
 var absent, and take effect when set.  A regression here would silently
 redirect real cloud traffic, so both directions are locked.
 """
+
 import os
 import sys
 
@@ -132,8 +133,12 @@ def test_sdes_media_stats_defaults_and_counts():
 
     stats = sess.media_stats()
     assert stats == {
-        "packets": 0, "bytes": 0, "last_media_monotonic": 0.0,
-        "video_pt": None, "audio_pt": None, "media_path": None,
+        "packets": 0,
+        "bytes": 0,
+        "last_media_monotonic": 0.0,
+        "video_pt": None,
+        "audio_pt": None,
+        "media_path": None,
     }
 
     # bridge-thread updates are visible through the shared lists
@@ -151,7 +156,10 @@ def test_sdes_media_stats_defaults_and_counts():
 def test_sdes_session_media_defaults_when_not_wired():
     """A session built without the new lists must still answer media_stats()."""
     sess = SdesSession(
-        proc=object(), sdp_path="/tmp/x.sdp", outgoing_q=object(), mqtt_fut=object(),
+        proc=object(),
+        sdp_path="/tmp/x.sdp",
+        outgoing_q=object(),
+        mqtt_fut=object(),
     )
     assert sess.media_stats()["packets"] == 0
     assert sess.media_stats()["video_pt"] is None

@@ -107,6 +107,7 @@ def test_the_timeout_is_reported_rather_than_swallowed():
 # wait is not unconditional - it is the wait for a device that has never been
 # seen to echo.
 
+
 def test_a_device_that_has_echoed_goes_back_to_the_full_wait():
     assert _sdes_echo_wait_timeout(False, echo_seen=True) == 2.0
 
@@ -142,7 +143,8 @@ def test_a_late_echo_is_recorded_so_the_next_open_waits_for_it():
     src = inspect.getsource(CameraMixin._open_sdes_stream_impl)
     assert "_sdes_echo_seen" in src
     assert "AIDOT_SDES_ECHO_WAIT_S=%.1f" in src, (
-        "the line must name the knob that makes it permanent")
+        "the line must name the knob that makes it permanent"
+    )
 
 
 def test_the_wait_reads_the_devices_history():

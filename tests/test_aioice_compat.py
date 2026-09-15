@@ -16,6 +16,7 @@ degrading on a live box (the patch no-ops, diagnostics return empty).  When it
 fails, re-validate the patch against the new aioice and widen the pin in
 pyproject.toml.
 """
+
 import inspect
 
 from aioice import ice
@@ -43,7 +44,9 @@ def test_candidate_and_pair_shape_used_by_ice_path():
     # CandidatePair exposes the candidate accessors _ice_path walks:
     # local_candidate is a property; remote_candidate is set from the ctor arg.
     assert isinstance(ice.CandidatePair.local_candidate, property)
-    assert "remote_candidate" in inspect.signature(ice.CandidatePair.__init__).parameters
+    assert (
+        "remote_candidate" in inspect.signature(ice.CandidatePair.__init__).parameters
+    )
 
 
 def test_highport_patch_installs_cleanly():

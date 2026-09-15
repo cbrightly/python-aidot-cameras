@@ -10,6 +10,7 @@ work. It cost three separate investigations, each of which blamed the camera,
 because the helper in use returns messages and drops the transport status.
 This test is cheaper than the fourth investigation.
 """
+
 import pathlib
 import re
 
@@ -31,7 +32,7 @@ def test_no_client_id_is_built_by_appending_to_the_registered_one():
     for path in _python_files():
         for n, line in enumerate(path.read_text().splitlines(), 1):
             if line.lstrip().startswith("#"):
-                continue          # comments explain the defect; they are not it
+                continue  # comments explain the defect; they are not it
             for pat in patterns:
                 if pat.search(line):
                     offenders.append(f"{path.name}:{n}: {line.strip()[:90]}")

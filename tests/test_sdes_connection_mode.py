@@ -35,12 +35,16 @@ from aidot_cameras.camera.sdes_open import _sdes_offer_candidate_lines
 def _client_with(mode=None, env=None, monkeypatch=None, battery=False):
     import aidot_cameras.camera.client as cc
 
-    cls = next(v for v in vars(cc).values()
-               if isinstance(v, type) and "_resolve_sdes_connection_mode" in v.__dict__)
+    cls = next(
+        v
+        for v in vars(cc).values()
+        if isinstance(v, type) and "_resolve_sdes_connection_mode" in v.__dict__
+    )
     # is_battery_camera is a read-only property on the mixin; override it on a
     # throwaway subclass rather than reconstructing the evidence chain.
-    sub = type("_ModeProbe", (cls,),
-               {"is_battery_camera": property(lambda self: self._batt)})
+    sub = type(
+        "_ModeProbe", (cls,), {"is_battery_camera": property(lambda self: self._batt)}
+    )
     cam = sub.__new__(sub)
     cam._batt = battery
     if mode is not None:
@@ -55,8 +59,11 @@ def _client_with(mode=None, env=None, monkeypatch=None, battery=False):
 
 # -- the resolver -------------------------------------------------------------
 
+
 def test_the_default_is_auto(monkeypatch):
-    assert _client_with(monkeypatch=monkeypatch)._resolve_sdes_connection_mode() == "auto"
+    assert (
+        _client_with(monkeypatch=monkeypatch)._resolve_sdes_connection_mode() == "auto"
+    )
 
 
 def test_the_per_open_option_wins_over_the_environment(monkeypatch):
@@ -65,13 +72,26 @@ def test_the_per_open_option_wins_over_the_environment(monkeypatch):
 
 
 def test_the_environment_is_read_when_no_option_is_set(monkeypatch):
-    assert _client_with(env="lan", monkeypatch=monkeypatch)._resolve_sdes_connection_mode() == "lan"
+    assert (
+        _client_with(env="lan", monkeypatch=monkeypatch)._resolve_sdes_connection_mode()
+        == "lan"
+    )
 
 
 def test_nonsense_is_auto_not_an_error(monkeypatch):
     # This is resolved while opening a stream; a typo must not stop video.
-    assert _client_with(env="fast", monkeypatch=monkeypatch)._resolve_sdes_connection_mode() == "auto"
-    assert _client_with(mode="LAN!", monkeypatch=monkeypatch)._resolve_sdes_connection_mode() == "auto"
+    assert (
+        _client_with(
+            env="fast", monkeypatch=monkeypatch
+        )._resolve_sdes_connection_mode()
+        == "auto"
+    )
+    assert (
+        _client_with(
+            mode="LAN!", monkeypatch=monkeypatch
+        )._resolve_sdes_connection_mode()
+        == "auto"
+    )
 
 
 def test_lan_mode_skips_the_relay_via_the_existing_resolver(monkeypatch):
@@ -105,7 +125,8 @@ _RELAY = ("203.0.113.9", 40100)
 
 def test_auto_offers_all_reachable_candidates():
     lines = _sdes_offer_candidate_lines(
-        "auto", "192.168.7.2", 41000, "198.51.100.7", _RELAY)
+        "auto", "192.168.7.2", 41000, "198.51.100.7", _RELAY
+    )
     assert "typ host" in lines and "typ srflx" in lines and "typ relay" in lines
     # LAN preference is the priority ordering, and it is load-bearing.
     assert lines.index("typ host") < lines.index("typ srflx") < lines.index("typ relay")
@@ -114,14 +135,16 @@ def test_auto_offers_all_reachable_candidates():
 
 def test_lan_offers_no_relay_candidate():
     lines = _sdes_offer_candidate_lines(
-        "lan", "192.168.7.2", 41000, "198.51.100.7", None)
+        "lan", "192.168.7.2", 41000, "198.51.100.7", None
+    )
     assert "typ relay" not in lines
     assert "typ host" in lines
 
 
 def test_relay_offers_only_the_relay_candidate():
     lines = _sdes_offer_candidate_lines(
-        "relay", "192.168.7.2", 41000, "198.51.100.7", _RELAY)
+        "relay", "192.168.7.2", 41000, "198.51.100.7", _RELAY
+    )
     assert "typ relay" in lines
     assert "typ host" not in lines and "typ srflx" not in lines
 
@@ -131,7 +154,8 @@ def test_relay_mode_with_no_allocation_falls_back_to_auto():
     # zero candidates is a session that cannot start; a stream on the wrong
     # path beats no stream.
     lines = _sdes_offer_candidate_lines(
-        "relay", "192.168.7.2", 41000, "198.51.100.7", None)
+        "relay", "192.168.7.2", 41000, "198.51.100.7", None
+    )
     assert "typ host" in lines and "typ srflx" in lines
 
 
@@ -140,7 +164,8 @@ def test_candidate_lines_end_with_crlf_and_nothing_else():
     # linearly; a missing CRLF corrupts the following attribute.
     for mode in ("auto", "lan", "relay"):
         lines = _sdes_offer_candidate_lines(
-            mode, "192.168.7.2", 41000, "198.51.100.7", _RELAY)
+            mode, "192.168.7.2", 41000, "198.51.100.7", _RELAY
+        )
         assert lines == "" or lines.endswith("\r\n")
         assert "\n\n" not in lines and "\r\r" not in lines
 
@@ -153,11 +178,16 @@ def test_the_offer_builder_uses_the_helper():
     """
     import pathlib
 
-    src = (pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras"
-           / "camera" / "sdes_open.py").read_text()
+    src = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "aidot_cameras"
+        / "camera"
+        / "sdes_open.py"
+    ).read_text()
     assert src.count("_sdes_offer_candidate_lines(") >= 3, (
         "expected the offer builder to emit audio and video candidate blocks "
-        "through _sdes_offer_candidate_lines (definition + at least two calls)")
+        "through _sdes_offer_candidate_lines (definition + at least two calls)"
+    )
 
 
 # -- the c=/m= endpoint (relay forcing that firmware cannot ignore) -----------
@@ -177,20 +207,23 @@ from aidot_cameras.camera.sdes_open import _sdes_offer_media_endpoint
 
 def test_auto_keeps_the_direct_endpoint():
     ip, port, is_relay = _sdes_offer_media_endpoint(
-        "auto", "198.51.100.7", 41000, _RELAY, "198.51.100.7")
+        "auto", "198.51.100.7", 41000, _RELAY, "198.51.100.7"
+    )
     assert (ip, port, is_relay) == ("198.51.100.7", 41000, False)
 
 
 def test_relay_mode_moves_c_and_m_to_the_allocation():
     ip, port, is_relay = _sdes_offer_media_endpoint(
-        "relay", "198.51.100.7", 41000, _RELAY, "198.51.100.7")
+        "relay", "198.51.100.7", 41000, _RELAY, "198.51.100.7"
+    )
     assert (ip, port) == _RELAY
     assert is_relay is True
 
 
 def test_relay_mode_without_an_allocation_stays_direct():
     ip, port, is_relay = _sdes_offer_media_endpoint(
-        "relay", "198.51.100.7", 41000, None, "198.51.100.7")
+        "relay", "198.51.100.7", 41000, None, "198.51.100.7"
+    )
     assert (ip, port, is_relay) == ("198.51.100.7", 41000, False)
 
 
@@ -199,7 +232,8 @@ def test_relay_mode_without_a_public_ip_stays_direct():
     # address; without one the relayed path is a black hole, and a stream on
     # the wrong path beats no stream.
     ip, port, is_relay = _sdes_offer_media_endpoint(
-        "relay", "192.168.7.2", 41000, _RELAY, None)
+        "relay", "192.168.7.2", 41000, _RELAY, None
+    )
     assert (ip, port, is_relay) == ("192.168.7.2", 41000, False)
 
 
@@ -207,15 +241,21 @@ def test_the_offer_uses_the_endpoint_helper_and_prearms_the_permission():
     """Source guard: relay-in-c= without the early permission is a black hole."""
     import pathlib
 
-    src = (pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras"
-           / "camera" / "sdes_open.py").read_text()
+    src = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "aidot_cameras"
+        / "camera"
+        / "sdes_open.py"
+    ).read_text()
     assert src.count("_sdes_offer_media_endpoint(") >= 3, (
-        "audio and video endpoints must both come from the helper")
+        "audio and video endpoints must both come from the helper"
+    )
     # The permission for OUR public address, installed at the setup phase and
     # gated to relay mode (indiscriminate installs caused TURN self-loop
     # storms - the allocation helper carries the warning).
-    j = src.index('if _relay_in_c and _public_ip:')
-    window = src[j:j + 300]
+    j = src.index("if _relay_in_c and _public_ip:")
+    window = src[j : j + 300]
     assert "_turn_install_permissions" in window and "relay-mode WAN" in window, (
         "relay-in-c= must install the permission for our public address, or "
-        "the relayed path is a black hole")
+        "the relayed path is a black hole"
+    )

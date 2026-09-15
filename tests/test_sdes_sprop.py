@@ -5,6 +5,7 @@ the camera's SPS/PPS into the ffmpeg SDP as sprop-parameter-sets initializes the
 decoder out-of-band so the loss no longer matters. These pure helpers capture
 the param sets from RTP, format the sprop value, and cache it per camera.
 """
+
 import os
 import sys
 import tempfile
@@ -19,7 +20,9 @@ from aidot_cameras.device_client import (
 )
 
 # Real A001513 parameter sets captured live 2026-06-08.
-SPS = bytes.fromhex("27640033ad00ce8050079a6a020203e0000003002000000303c6f207d00bbffff814")
+SPS = bytes.fromhex(
+    "27640033ad00ce8050079a6a020203e0000003002000000303c6f207d00bbffff814"
+)
 PPS = bytes.fromhex("28ee3cb0")
 SPROP = "J2QAM60AzoBQB5pqAgID4AAAAwAgAAADA8byB9ALv//4FA==,KO48sA=="
 
@@ -28,11 +31,13 @@ RTP = b"\x80\x60\x00\x01\x00\x00\x00\x00\x12\x34\x56\x78"  # V2, no CC/ext, 12B
 
 # ---- _build_sprop ----------------------------------------------------------
 
+
 def test_build_sprop_matches_live_vector():
     assert _build_sprop(SPS, PPS) == SPROP
 
 
 # ---- _extract_param_sets_from_rtp -----------------------------------------
+
 
 def test_single_nal_sps():
     assert _extract_param_sets_from_rtp(RTP + SPS) == {7: SPS}
@@ -53,15 +58,15 @@ def test_stap_a_truncated_size_is_dropped():
     # Advertised NAL size overruns the packet (frame loss / relay truncation):
     # the parser must NOT slice a short NAL and cache it as a corrupt SPS.
     stap = bytes([0x78])
-    stap += (len(SPS) + 50).to_bytes(2, "big") + SPS   # claims 50 extra bytes
+    stap += (len(SPS) + 50).to_bytes(2, "big") + SPS  # claims 50 extra bytes
     assert _extract_param_sets_from_rtp(RTP + stap) == {}
 
 
 def test_stap_a_keeps_valid_prefix_before_truncation():
     # A valid SPS followed by a truncated PPS: keep the SPS, drop the garbage.
     stap = bytes([0x78])
-    stap += len(SPS).to_bytes(2, "big") + SPS            # valid SPS
-    stap += (len(PPS) + 20).to_bytes(2, "big") + PPS     # truncated PPS
+    stap += len(SPS).to_bytes(2, "big") + SPS  # valid SPS
+    stap += (len(PPS) + 20).to_bytes(2, "big") + PPS  # truncated PPS
     assert _extract_param_sets_from_rtp(RTP + stap) == {7: SPS}
 
 
@@ -78,34 +83,41 @@ def test_short_or_empty_packet_safe():
 
 def test_csrc_header_offset_handled():
     # CC=2 -> 12 + 8 bytes of CSRC before the payload
-    hdr = b"\x82\x60\x00\x01\x00\x00\x00\x00\x12\x34\x56\x78" + b"\xaa\xaa\xaa\xaa\xbb\xbb\xbb\xbb"
+    hdr = (
+        b"\x82\x60\x00\x01\x00\x00\x00\x00\x12\x34\x56\x78"
+        + b"\xaa\xaa\xaa\xaa\xbb\xbb\xbb\xbb"
+    )
     assert _extract_param_sets_from_rtp(hdr + SPS) == {7: SPS}
 
 
 # ---- cache roundtrip -------------------------------------------------------
 
+
 def test_cache_roundtrip(monkeypatch):
     d = tempfile.mkdtemp()
     monkeypatch.setenv("AIDOT_SPROP_DIR", d)
     devid = "abc123"
-    assert _load_sprop(devid) is None          # nothing cached yet
+    assert _load_sprop(devid) is None  # nothing cached yet
     _save_sprop(devid, SPROP)
-    assert _load_sprop(devid) == SPROP          # persists + reads back
+    assert _load_sprop(devid) == SPROP  # persists + reads back
 
 
 def test_load_missing_is_none(monkeypatch):
     monkeypatch.setenv("AIDOT_SPROP_DIR", "/nonexistent/path/xyz")
-    assert _load_sprop("whatever") is None      # fail-safe, no raise
+    assert _load_sprop("whatever") is None  # fail-safe, no raise
 
 
 if __name__ == "__main__":
     import traceback
 
     class _MP:  # tiny monkeypatch shim so this runs without pytest
-        def __init__(self): self._undo = []
+        def __init__(self):
+            self._undo = []
+
         def setattr(self, obj, name, val):
             self._undo.append((obj, name, getattr(obj, name)))
             setattr(obj, name, val)
+
         def undo(self):
             for obj, name, val in reversed(self._undo):
                 setattr(obj, name, val)
@@ -144,5 +156,6 @@ def test_the_sprop_dir_is_read_at_call_time(monkeypatch, tmp_path):
     protocol._save_sprop("cafe" * 8, "QUJD,REVG")
     expected = tmp_path / "late" / ("cafe" * 8 + ".sprop")
     assert expected.exists(), (
-        "a sprop write after a late env change must land in the new dir")
+        "a sprop write after a late env change must land in the new dir"
+    )
     assert protocol._load_sprop("cafe" * 8) == "QUJD,REVG"

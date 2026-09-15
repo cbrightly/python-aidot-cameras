@@ -17,6 +17,7 @@ camera's own traffic and not on the cloud's ack for it, which is why
 ``_is_camera_present_signal`` grew ``accept_server_ack``.  The gate itself is
 unchanged - it still accepts the ack, for every camera.
 """
+
 import os
 import sys
 
@@ -52,13 +53,13 @@ WAKEUP = {
 }
 
 KEEPALIVE_TOPIC = f"iot/v1/cb/{DEV}/device/keepAliveState"
-KEEPALIVE = {"service": "device", "method": "keepAliveState",
-             "payload": {"devId": DEV}}
+KEEPALIVE = {"service": "device", "method": "keepAliveState", "payload": {"devId": DEV}}
 
 
 # --------------------------------------------------------------------------- #
 # Naming the sender
 # --------------------------------------------------------------------------- #
+
 
 def test_a_camera_message_is_named_by_its_srcaddr():
     assert _signal_device_id(WAKEUP_TOPIC, WAKEUP) == DEV
@@ -79,8 +80,9 @@ def test_a_server_message_is_not_attributed_to_any_camera():
 
 
 def test_an_app_message_is_not_attributed_to_any_camera():
-    assert _signal_device_id("iot/v1/s/x/IPC/livePlayReq",
-                             {"srcAddr": f"0.{UID}"}) is None
+    assert (
+        _signal_device_id("iot/v1/s/x/IPC/livePlayReq", {"srcAddr": f"0.{UID}"}) is None
+    )
 
 
 def test_an_unidentifiable_message_is_not_guessed_at():
@@ -101,9 +103,14 @@ def test_a_malformed_message_does_not_raise_into_the_dispatcher():
 # Camera evidence vs the cloud's ack for it
 # --------------------------------------------------------------------------- #
 
+
 def test_the_ack_is_not_the_camera():
-    assert _is_camera_present_signal(
-        SERVER_ACK_TOPIC, SERVER_ACK, DEV, accept_server_ack=False) is False
+    assert (
+        _is_camera_present_signal(
+            SERVER_ACK_TOPIC, SERVER_ACK, DEV, accept_server_ack=False
+        )
+        is False
+    )
 
 
 def test_the_gate_itself_is_unchanged_and_still_accepts_the_ack():
@@ -113,24 +120,36 @@ def test_the_gate_itself_is_unchanged_and_still_accepts_the_ack():
 
 
 def test_the_cameras_own_traffic_is_evidence_without_the_ack_clause():
-    assert _is_camera_present_signal(
-        WAKEUP_TOPIC, WAKEUP, DEV, accept_server_ack=False) is True
-    assert _is_camera_present_signal(
-        KEEPALIVE_TOPIC, KEEPALIVE, DEV, accept_server_ack=False) is True
+    assert (
+        _is_camera_present_signal(WAKEUP_TOPIC, WAKEUP, DEV, accept_server_ack=False)
+        is True
+    )
+    assert (
+        _is_camera_present_signal(
+            KEEPALIVE_TOPIC, KEEPALIVE, DEV, accept_server_ack=False
+        )
+        is True
+    )
 
 
 def test_another_cameras_traffic_is_not_evidence_for_this_one():
     """The property the stale-offer detector rests on: two battery cameras share
     this connection, and one waking must not arm the other's detector."""
-    assert _is_camera_present_signal(
-        f"iot/v1/cb/{OTHER}/device/wakeupStatus",
-        {**WAKEUP, "srcAddr": f"2.{OTHER}"}, DEV,
-        accept_server_ack=False) is False
+    assert (
+        _is_camera_present_signal(
+            f"iot/v1/cb/{OTHER}/device/wakeupStatus",
+            {**WAKEUP, "srcAddr": f"2.{OTHER}"},
+            DEV,
+            accept_server_ack=False,
+        )
+        is False
+    )
 
 
 # --------------------------------------------------------------------------- #
 # How the sender is written into the line
 # --------------------------------------------------------------------------- #
+
 
 def test_this_cameras_message_is_tagged_with_its_id():
     assert _signal_origin(WAKEUP_TOPIC, WAKEUP, DEV) == f"dev={DEV[:12]}"
@@ -138,13 +157,17 @@ def test_this_cameras_message_is_tagged_with_its_id():
 
 def test_another_cameras_message_says_so():
     other = {**WAKEUP, "srcAddr": f"2.{OTHER}"}
-    assert _signal_origin(f"iot/v1/cb/{OTHER}/device/wakeupStatus", other,
-                          DEV) == f"dev={OTHER[:12]} (not this camera)"
+    assert (
+        _signal_origin(f"iot/v1/cb/{OTHER}/device/wakeupStatus", other, DEV)
+        == f"dev={OTHER[:12]} (not this camera)"
+    )
 
 
 def test_a_message_from_no_camera_is_not_called_another_camera():
     """The cloud ack and our own echoes carry a user id, not a device id.
     Tagging them "not this camera" reads as a camera that exists somewhere."""
     assert _signal_origin(SERVER_ACK_TOPIC, SERVER_ACK, DEV) == "dev=-"
-    assert _signal_origin("iot/v1/s/x/IPC/livePlayReq",
-                          {"srcAddr": f"0.{UID}"}, DEV) == "dev=-"
+    assert (
+        _signal_origin("iot/v1/s/x/IPC/livePlayReq", {"srcAddr": f"0.{UID}"}, DEV)
+        == "dev=-"
+    )

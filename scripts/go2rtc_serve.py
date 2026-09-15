@@ -67,21 +67,32 @@ async def _run(args) -> int:
                 return 0
 
             target = next(
-                (c for c in cameras
-                 if args.name.lower() in (c.get(CONF_NAME) or "").lower()), None)
+                (
+                    c
+                    for c in cameras
+                    if args.name.lower() in (c.get(CONF_NAME) or "").lower()
+                ),
+                None,
+            )
             if target is None:
                 print(f"no camera matching {args.name!r}")
                 return 2
             dc = client.get_device_client(target)
             kind = "SDES" if dc.is_sdes_camera else "DTLS"
-            print(f"\n>>> {target.get(CONF_NAME)!r} ({kind}) start_keepalive serve={args.serve!r}")
+            print(
+                f"\n>>> {target.get(CONF_NAME)!r} ({kind}) start_keepalive serve={args.serve!r}"
+            )
 
             t0 = time.time()
             await dc.start_keepalive(rtsp_push_url=args.serve)
             ready = await dc.async_wait_serve_ready(timeout=args.timeout)
-            print(f"    serve_ready={ready} in {time.time() - t0:.1f}s; "
-                  f"stream_rtsp_url={dc.stream_rtsp_url!r}")
-            print(f"    holding {args.hold:.0f}s (point go2rtc/ffprobe at the URL above)...")
+            print(
+                f"    serve_ready={ready} in {time.time() - t0:.1f}s; "
+                f"stream_rtsp_url={dc.stream_rtsp_url!r}"
+            )
+            print(
+                f"    holding {args.hold:.0f}s (point go2rtc/ffprobe at the URL above)..."
+            )
             await asyncio.sleep(args.hold)
             ok = bool(dc.stream_rtsp_url) and (ready or kind == "SDES")
             print(f"    RESULT: {'PASS (serve up)' if ok else 'serve not confirmed'}")
@@ -96,12 +107,16 @@ async def _run(args) -> int:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--list", action="store_true", help="list cameras and exit")
     p.add_argument("--name", default="", help="camera name substring to serve")
-    p.add_argument("--serve", default=None,
-                   help="go2rtc target: http(s)://host:port (DTLS) or rtsp://host:port/name (SDES)")
+    p.add_argument(
+        "--serve",
+        default=None,
+        help="go2rtc target: http(s)://host:port (DTLS) or rtsp://host:port/name (SDES)",
+    )
     p.add_argument("--hold", type=float, default=60.0, help="seconds to hold the serve")
     p.add_argument("--timeout", type=float, default=30.0, help="serve-ready timeout")
     return asyncio.run(_run(p.parse_args()))

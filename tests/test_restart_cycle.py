@@ -11,6 +11,7 @@ These tests do the full cycle - build state, persist it the way a consumer
 does, drop the process, reload from disk only - and assert what has to be
 true on the far side.
 """
+
 import asyncio
 import json
 import os
@@ -91,9 +92,7 @@ def test_a_second_restart_is_still_clean(tmp_path):
 
     second = _persist_and_reload(second_boot, tmp_path)
     for key in LOGIN_INFO_MQTT_PASSWORD_KEYS:
-        assert key not in second, (
-            f"{key} leaked back into storage on the second cycle"
-        )
+        assert key not in second, f"{key} leaked back into storage on the second cycle"
 
 
 def test_persisted_state_is_json_round_trippable(tmp_path):

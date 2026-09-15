@@ -9,11 +9,13 @@ this session) - is that narrowing the LOCAL pc must NOT touch the camera-facing
 webrtcReq IceServerList source list.  These tests pin that: host_only returns []
 while the input STUN list is left intact and STUN-bearing.
 """
+
 from aidot_cameras.camera.webrtc_open import _narrow_pc_ice
 
 
 class _Srv:
     """Minimal RTCIceServer stand-in (urls only)."""
+
     def __init__(self, urls):
         self.urls = urls
 

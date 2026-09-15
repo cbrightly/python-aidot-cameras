@@ -13,6 +13,7 @@ import time as _time
 from .client import AidotClient, CameraClient
 from .device_client import CameraDeviceClient, DeviceInformation, DeviceStatusData
 from .camera.client import configure_stream_limits
+
 # Promised by docs/API-STABILITY.md and previously not reachable from the
 # package root. Verified to pull no optional dependency: importing these does
 # not drag in av or aiortc, so a plain (non-[webrtc]) install still imports.
@@ -101,7 +102,11 @@ class _RateLimitingWarningFilter(_logging.Filter):
     can drive the window deterministically without real sleeps.
     """
 
-    def __init__(self, window_seconds: float = _H264_DECODE_RATE_LIMIT_WINDOW_SECONDS, time_func=_time.monotonic) -> None:
+    def __init__(
+        self,
+        window_seconds: float = _H264_DECODE_RATE_LIMIT_WINDOW_SECONDS,
+        time_func=_time.monotonic,
+    ) -> None:
         super().__init__()
         self._window_seconds = window_seconds
         self._time_func = time_func

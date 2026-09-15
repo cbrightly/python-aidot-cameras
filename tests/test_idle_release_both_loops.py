@@ -6,6 +6,7 @@ pipe only backs up when nothing drains the serve socket, and go2rtc drains it
 forever as the stream's producer. On a fleet that is mostly DTLS cameras (this one
 is 4 of 5) the fix therefore did nothing.
 """
+
 import inspect
 
 import aidot_cameras.camera.client as cc

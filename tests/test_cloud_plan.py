@@ -9,6 +9,7 @@ plan answers `{"code": 200, "data": {"packageName": "AI Protection ",
 The method returns None rather than {} on failure because the caller's question
 is "is there a plan", and an empty dict answers it wrong in a truthiness test.
 """
+
 import asyncio
 import os
 import sys
@@ -73,8 +74,7 @@ def _run(reply, raises=False):
 
     class _Resp:
         async def json(self, content_type=None):
-            return (client._queue.pop(0) if len(client._queue) > 1
-                    else client._queue[0])
+            return client._queue.pop(0) if len(client._queue) > 1 else client._queue[0]
 
         async def __aenter__(self):
             return self
@@ -97,6 +97,7 @@ def _run(reply, raises=False):
             return False
 
     import aiohttp
+
     real = aiohttp.ClientSession
     aiohttp.ClientSession = lambda *a, **k: _Session()
     try:
@@ -138,8 +139,9 @@ def test_an_unexpected_shape_does_not_raise():
 def test_a_401_is_retried_once_after_a_token_refresh():
     # Delete the retry line from the method and this test must fail. Before
     # this existed, deleting it changed nothing.
-    client, out = _run([{"code": 401, "desc": "token expired"},
-                        {"code": 200, "data": _PLAN}])
+    client, out = _run(
+        [{"code": 401, "desc": "token expired"}, {"code": 200, "data": _PLAN}]
+    )
     assert client.refreshed is True
     assert out is not None and out["subscribeStatus"] == 1
 
@@ -162,6 +164,5 @@ def test_the_request_goes_to_the_plan_endpoint():
     # The path is built by concatenation; a dropped or doubled slash would
     # otherwise pass silently.
     client, _ = _run({"code": 200, "data": _PLAN})
-    assert client.last_url.endswith(
-        "/recordPlanController/getPackageInfoByDevId")
+    assert client.last_url.endswith("/recordPlanController/getPackageInfoByDevId")
     assert "//recordPlanController" not in client.last_url

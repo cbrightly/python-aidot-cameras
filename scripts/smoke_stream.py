@@ -70,16 +70,20 @@ async def _stream_one(client, device, hold: float, out_dir: str) -> bool:
             output_path=out,
             max_seconds=int(hold - 2),
         )
-        print(f"    established in {time.time() - t0:.1f}s via "
-              f"{type(session).__name__}; holding {hold:.0f}s...")
+        print(
+            f"    established in {time.time() - t0:.1f}s via "
+            f"{type(session).__name__}; holding {hold:.0f}s..."
+        )
         await asyncio.sleep(hold)
         await _stop(session)
         session = None
         await asyncio.sleep(1.0)
         size = os.path.getsize(out) if os.path.exists(out) else 0
         ok = frames["n"] > 0 or size > 20000
-        print(f"    {name!r}: on_frame={frames['n']} recorded={size}B "
-              f"-> {'PASS' if ok else 'NO MEDIA'}")
+        print(
+            f"    {name!r}: on_frame={frames['n']} recorded={size}B "
+            f"-> {'PASS' if ok else 'NO MEDIA'}"
+        )
         return ok
     except Exception as exc:
         print(f"    {name!r}: ERROR {type(exc).__name__}: {exc}")
@@ -119,11 +123,19 @@ async def _run(args) -> int:
             selected = cameras
             if args.name:
                 wanted = [n.lower() for n in args.name]
-                selected = [c for c in cameras
-                            if any(w in (c.get(CONF_NAME) or "").lower() for w in wanted)]
+                selected = [
+                    c
+                    for c in cameras
+                    if any(w in (c.get(CONF_NAME) or "").lower() for w in wanted)
+                ]
             print(f"\nstreaming {len(selected)} camera(s) sequentially")
-            results = [(c.get(CONF_NAME), await _stream_one(client, c, args.hold, args.out_dir))
-                       for c in selected]
+            results = [
+                (
+                    c.get(CONF_NAME),
+                    await _stream_one(client, c, args.hold, args.out_dir),
+                )
+                for c in selected
+            ]
 
             print("\n==== SUMMARY ====")
             for name, ok in results:
@@ -136,13 +148,22 @@ async def _run(args) -> int:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     p.add_argument("--list", action="store_true", help="list cameras and exit")
-    p.add_argument("--name", action="append", default=[],
-                   help="stream only cameras whose name contains this (repeatable)")
-    p.add_argument("--hold", type=float, default=16.0,
-                   help="seconds to hold each stream (default 16)")
+    p.add_argument(
+        "--name",
+        action="append",
+        default=[],
+        help="stream only cameras whose name contains this (repeatable)",
+    )
+    p.add_argument(
+        "--hold",
+        type=float,
+        default=16.0,
+        help="seconds to hold each stream (default 16)",
+    )
     p.add_argument("--out-dir", default="/tmp", help="where to write recordings")
     return asyncio.run(_run(p.parse_args()))
 

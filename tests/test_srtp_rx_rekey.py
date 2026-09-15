@@ -25,6 +25,7 @@ session unset when construction raises so the next packet retries, and treats a
 missing SRTP module as permanent (an ImportError cannot become true later in the
 process, and retrying it per packet re-walks sys.path at frame rate).
 """
+
 import ast
 import os
 import sys
@@ -129,12 +130,8 @@ def test_the_first_build_is_reported_as_first_and_a_rebuild_is_not():
     holder = _Holder()
     reported = []
 
-    _ensure_srtp_rx_session(
-        holder, "keyA", _FakeSession, on_built=reported.append
-    )
-    _ensure_srtp_rx_session(
-        holder, "keyB", _FakeSession, on_built=reported.append
-    )
+    _ensure_srtp_rx_session(holder, "keyA", _FakeSession, on_built=reported.append)
+    _ensure_srtp_rx_session(holder, "keyB", _FakeSession, on_built=reported.append)
 
     assert reported == [True, False]
 

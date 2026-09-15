@@ -18,6 +18,7 @@ import stat
 
 _LOGGER = logging.getLogger(__name__)
 
+
 def _xdg_config_home() -> str:
     """Return the XDG base config dir, honoring XDG_CONFIG_HOME (per the spec)."""
     xdg = os.environ.get("XDG_CONFIG_HOME")
@@ -34,6 +35,7 @@ _KEY_FILE = os.environ.get("AIDOT_CRED_KEY_FILE") or os.path.join(_CONFIG_DIR, "
 
 # -- Public API ---------------------------------------------------------------
 
+
 def load_credentials(creds_path: str | None = None) -> dict:
     """Return {"username": ..., "password": ..., "country": ...}.
 
@@ -47,7 +49,7 @@ def load_credentials(creds_path: str | None = None) -> dict:
         return {
             "username": env_user,
             "password": env_pass,
-            "country":  os.environ.get("AIDOT_COUNTRY", "US"),
+            "country": os.environ.get("AIDOT_COUNTRY", "US"),
         }
 
     # Priority 2: Fernet-encrypted file
@@ -65,8 +67,13 @@ def load_credentials(creds_path: str | None = None) -> dict:
         data = _load_plain(plain)
         # Auto-migrate to encrypted storage
         try:
-            _save_encrypted(data["username"], data["password"],
-                            data.get("country", "US"), enc_path, key_path)
+            _save_encrypted(
+                data["username"],
+                data["password"],
+                data.get("country", "US"),
+                enc_path,
+                key_path,
+            )
             os.unlink(plain)
         except Exception:
             pass
@@ -97,7 +104,7 @@ def delete_credentials(creds_path: str | None = None) -> None:
     """Remove stored credentials (encrypted and/or plain JSON)."""
     enc_path = (creds_path + ".enc") if creds_path else _ENC_FILE
     key_path = (creds_path + ".key") if creds_path else _KEY_FILE
-    plain    = creds_path or _DEFAULT_CREDS_FILE
+    plain = creds_path or _DEFAULT_CREDS_FILE
     for path in (enc_path, key_path, plain):
         if os.path.exists(path):
             try:
@@ -108,9 +115,11 @@ def delete_credentials(creds_path: str | None = None) -> None:
 
 # -- Internal helpers ---------------------------------------------------------
 
+
 def _fernet():
     try:
         from cryptography.fernet import Fernet
+
         return Fernet
     except ImportError as exc:
         raise ImportError(
@@ -134,8 +143,11 @@ def _load_encrypted(enc_path: str, key_path: str) -> dict:
 
 
 def _save_encrypted(
-    username: str, password: str, country: str,
-    enc_path: str, key_path: str,
+    username: str,
+    password: str,
+    country: str,
+    enc_path: str,
+    key_path: str,
 ) -> None:
     Fernet = _fernet()
     # Generate or reuse key - _write_secret handles makedirs
@@ -146,20 +158,24 @@ def _save_encrypted(
         key = Fernet.generate_key()
         _write_secret(key_path, key)
 
-    payload = json.dumps({"username": username, "password": password,
-                          "country": country}).encode()
+    payload = json.dumps(
+        {"username": username, "password": password, "country": country}
+    ).encode()
     _write_secret(enc_path, Fernet(key).encrypt(payload))
 
     # Co-locating the key with the ciphertext means the encryption adds little
     # over file permissions: anyone who can read one can read the other.  Warn
     # and point at AIDOT_CRED_KEY_FILE to relocate the key off this directory.
-    if os.path.dirname(os.path.abspath(key_path)) == os.path.dirname(os.path.abspath(enc_path)):
+    if os.path.dirname(os.path.abspath(key_path)) == os.path.dirname(
+        os.path.abspath(enc_path)
+    ):
         _LOGGER.warning(
             "credentials: key %s sits in the same directory as ciphertext %s, "
             "so encryption adds little over file permissions; set "
             "AIDOT_CRED_KEY_FILE to a path outside this directory (ideally a "
             "separate secret store) to harden at-rest protection.",
-            key_path, enc_path,
+            key_path,
+            enc_path,
         )
 
 

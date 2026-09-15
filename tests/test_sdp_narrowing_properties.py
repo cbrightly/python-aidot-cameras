@@ -13,6 +13,7 @@ Invariants, for every generated SDP:
   3. the other media line is untouched
   4. narrowing is idempotent
 """
+
 import itertools
 import os
 import sys
@@ -85,7 +86,9 @@ def test_dropped_video_payloads_lose_their_rtpmap_and_fmtp():
             out = narrow_sdp_payload_types(sdp, keep_video=int(keep))
             dropped = {p for p in video if p != keep}
             # Audio pts legitimately remain, so only check the video ones.
-            surviving = (_attr_pts(out, "rtpmap") | _attr_pts(out, "fmtp")) & set(VIDEO_PTS)
+            surviving = (_attr_pts(out, "rtpmap") | _attr_pts(out, "fmtp")) & set(
+                VIDEO_PTS
+            )
             assert not (surviving & dropped), (
                 f"rtpmap/fmtp survived for dropped {surviving & dropped} "
                 f"(kept {keep} from {list(video)})"

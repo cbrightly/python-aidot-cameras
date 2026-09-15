@@ -73,7 +73,7 @@ def test_every_measured_excursion_holds_both_invariants():
     pts, cur = [], 0
     for i in range(400):
         if i and i % 55 == 0:
-            cur -= 138060                 # the largest excursion seen
+            cur -= 138060  # the largest excursion seen
         else:
             cur += 6030
         pts.append(cur)

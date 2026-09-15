@@ -18,6 +18,7 @@ Wire format, taken from the frames we already build (`<IIqII4x` + payload):
     offset 24  4 bytes  padding
     offset 28  payload
 """
+
 import struct
 
 import pytest

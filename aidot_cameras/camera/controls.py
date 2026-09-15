@@ -46,7 +46,8 @@ class _CameraControlsMixin:
         """Enable or disable the camera's motion detection."""
         # MotionDetection_Enable is read as getString() in IpcServiceImpl -> use str
         return await self.async_set_device_attribute(
-            "MotionDetection_Enable", "1" if enabled else "0")
+            "MotionDetection_Enable", "1" if enabled else "0"
+        )
 
     async def async_set_floodlight(self, on: bool, brightness: int = 100) -> bool:
         """Turn the floodlight on/off (with optional 0-100 brightness)."""
@@ -62,7 +63,8 @@ class _CameraControlsMixin:
         ok = await self.async_set_device_attribute("LightOnOff", 1 if on else 0)
         if ok and on and brightness != 100:
             await self.async_set_device_attribute(
-                "Dimming", max(0, min(100, brightness)))
+                "Dimming", max(0, min(100, brightness))
+            )
         return ok
 
     async def async_set_status_led(self, enabled: bool) -> bool:
@@ -81,7 +83,8 @@ class _CameraControlsMixin:
         which label the app prints for the model, not a separate setting).
         """
         return await self.async_set_device_attribute(
-            "autoLightEnable", 1 if enabled else 0)
+            "autoLightEnable", 1 if enabled else 0
+        )
 
     async def async_set_light_behavior(self, behavior: str) -> bool:
         """Set how the light behaves when it triggers: "constant" or "flash".
@@ -107,7 +110,8 @@ class _CameraControlsMixin:
         except KeyError:
             raise ValueError(
                 f"unknown light behavior {behavior!r}; "
-                f"expected one of {sorted(LIGHT_BEHAVIORS)}") from None
+                f"expected one of {sorted(LIGHT_BEHAVIORS)}"
+            ) from None
         return await self.async_set_device_attribute("lightBehavior", value)
 
     async def async_set_light_linger_duration(self, seconds: int) -> bool:
@@ -115,7 +119,8 @@ class _CameraControlsMixin:
         if seconds not in LIGHT_LINGER_DURATIONS:
             raise ValueError(
                 f"unsupported linger duration {seconds!r}; "
-                f"the camera offers {list(LIGHT_LINGER_DURATIONS)}")
+                f"the camera offers {list(LIGHT_LINGER_DURATIONS)}"
+            )
         return await self.async_set_device_attribute("LingerDuration", seconds)
 
     async def async_set_light_brightness(self, level: int) -> bool:
@@ -126,13 +131,12 @@ class _CameraControlsMixin:
         uses when its own automation fires.
         """
         return await self.async_set_device_attribute(
-            "Dimming",
-            max(LIGHT_BRIGHTNESS_MIN, min(LIGHT_BRIGHTNESS_MAX, int(level))))
+            "Dimming", max(LIGHT_BRIGHTNESS_MIN, min(LIGHT_BRIGHTNESS_MAX, int(level)))
+        )
 
     async def async_set_voice_prompts(self, enabled: bool) -> bool:
         """Enable or disable spoken prompts from the camera speaker (voiceEnable)."""
-        return await self.async_set_device_attribute(
-            "voiceEnable", 1 if enabled else 0)
+        return await self.async_set_device_attribute("voiceEnable", 1 if enabled else 0)
 
     async def async_set_hdr(self, enabled: bool) -> bool:
         """Enable or disable HDR (HDRStatus)."""
@@ -146,7 +150,8 @@ class _CameraControlsMixin:
     async def async_set_speaker_volume(self, level: int) -> bool:
         """Set the camera's speaker volume (0-100, clamped)."""
         return await self.async_set_device_attribute(
-            "SoundLevel", max(0, min(100, level)))
+            "SoundLevel", max(0, min(100, level))
+        )
 
     async def async_set_siren(self, on: bool) -> bool:
         """Turn the camera's siren on or off."""
@@ -154,7 +159,8 @@ class _CameraControlsMixin:
         # in[0]=1/0, in[1]=type?, in[2]=duration seconds
         # No attr notification comes back - track state locally.
         result = await self.async_trigger_device_action(
-            "playSound", [1 if on else 0, 1, 30])
+            "playSound", [1 if on else 0, 1, 30]
+        )
         self.status.siren = on
         return result
 
@@ -196,7 +202,8 @@ class _CameraControlsMixin:
         if not isinstance(out, list):
             _LOGGER.warning(
                 "sound detection: %s did not report its algorithms; not writing",
-                self.device_id)
+                self.device_id,
+            )
             return False
         found = False
         payload = []
@@ -207,7 +214,9 @@ class _CameraControlsMixin:
             else:
                 payload.append(item)
         if not found:
-            _LOGGER.warning("sound detection: %s does not report %r", self.device_id, key)
+            _LOGGER.warning(
+                "sound detection: %s does not report %r", self.device_id, key
+            )
             return False
         return await self.async_trigger_device_action("soundAlgorithmSet", payload)
 
@@ -215,8 +224,7 @@ class _CameraControlsMixin:
     #: from the camera, not from us -- probed 2026-09-07 on an A000088 and an
     #: A001064, both of which answer with all five.  ``publicZone`` is in the
     #: same dict but is not a detection type; it is carried through untouched.
-    DETECTION_TYPE_KEYS = ("humanDetect", "vehicleDetect", "packageDetect",
-                           "petDetect")
+    DETECTION_TYPE_KEYS = ("humanDetect", "vehicleDetect", "packageDetect", "petDetect")
 
     async def async_get_detection_types(self) -> "Optional[dict]":
         """Which detection types are armed, as ``{key: bool}``.
@@ -247,17 +255,18 @@ class _CameraControlsMixin:
         if not isinstance(roi, list) or not roi or not isinstance(roi[0], dict):
             _LOGGER.warning(
                 "detection types: %s did not report its ROI; not writing",
-                self.device_id)
+                self.device_id,
+            )
             return False
         current = roi[0]
         if key not in current:
-            _LOGGER.warning("detection types: %s does not report %r",
-                            self.device_id, key)
+            _LOGGER.warning(
+                "detection types: %s does not report %r", self.device_id, key
+            )
             return False
         payload = dict(current)
         payload[key] = 1 if enabled else 0
-        return await self.async_trigger_device_action(
-            "setRoiHuman", {"roi": [payload]})
+        return await self.async_trigger_device_action("setRoiHuman", {"roi": [payload]})
 
     #: The siren's automatic trigger.  ``autoAlarm`` is the master; the other
     #: two say what sets it off.  Probed 2026-09-07: NOT a mirror of anything
@@ -291,12 +300,12 @@ class _CameraControlsMixin:
         if not isinstance(out, list) or not out or not isinstance(out[0], dict):
             _LOGGER.warning(
                 "auto alarm: %s did not report its settings; not writing",
-                self.device_id)
+                self.device_id,
+            )
             return False
         current = out[0]
         if key not in current:
-            _LOGGER.warning("auto alarm: %s does not report %r",
-                            self.device_id, key)
+            _LOGGER.warning("auto alarm: %s does not report %r", self.device_id, key)
             return False
         payload = dict(current)
         payload[key] = 1 if enabled else 0
@@ -337,10 +346,20 @@ class _CameraControlsMixin:
         out = await self.async_query_device_action("SDcardBaseInfo")
         if not isinstance(out, list) or not out:
             return None
+
         def _n(i):
-            return int(out[i]) if len(out) > i and isinstance(out[i], (int, float)) else None
-        return {"present": bool(out[0]), "total": _n(1), "used": _n(2),
-                "raw": list(out)}
+            return (
+                int(out[i])
+                if len(out) > i and isinstance(out[i], (int, float))
+                else None
+            )
+
+        return {
+            "present": bool(out[0]),
+            "total": _n(1),
+            "used": _n(2),
+            "raw": list(out),
+        }
 
     async def async_reboot(self) -> bool:
         """Ask the camera to reboot. True means the request was SENT.
@@ -368,24 +387,29 @@ class _CameraControlsMixin:
         """
         if (not self.status.online) and getattr(self, "_cloud_online_explicit", False):
             _LOGGER.warning(
-                "reboot refused for %s: the cloud reports it offline", self.device_id)
+                "reboot refused for %s: the cloud reports it offline", self.device_id
+            )
             return False
         _LOGGER.info("reboot requested for %s", self.device_id)
         return await self.async_trigger_device_action(
-            "RebootFunc", [], expect_ack=False)
+            "RebootFunc", [], expect_ack=False
+        )
 
     async def async_set_night_vision(self, mode: str) -> bool:
         """mode: 'auto' (0), 'on' (1), 'off' (2)"""
         _modes = {"auto": 0, "on": 1, "off": 2}
         value = _modes.get(mode.lower())
         if value is None:
-            raise ValueError(f"Invalid night vision mode: {mode!r}. Expected 'auto', 'on', or 'off'.")
+            raise ValueError(
+                f"Invalid night vision mode: {mode!r}. Expected 'auto', 'on', or 'off'."
+            )
         return await self.async_set_device_attribute("nightVisionMode", value)
 
     async def async_set_ptz_tracking(self, enabled: bool) -> bool:
         """Enable or disable PTZ motion auto-tracking."""
         return await self.async_set_device_attribute(
-            "trackingMode", 1 if enabled else 0)
+            "trackingMode", 1 if enabled else 0
+        )
 
     async def async_set_motion_sensitivity(self, level: int) -> bool:
         """Set motion detection sensitivity.
@@ -394,7 +418,8 @@ class _CameraControlsMixin:
         Attribute: MotionDetection_Sen (observed value '2' on A000088).
         """
         return await self.async_set_device_attribute(
-            "MotionDetection_Sen", max(1, min(5, int(level))))
+            "MotionDetection_Sen", max(1, min(5, int(level)))
+        )
 
     async def async_set_ir_light(self, enabled: bool) -> bool:
         """Control the IR illumination LEDs independently of night-vision mode.
@@ -413,7 +438,8 @@ class _CameraControlsMixin:
         `True` return means the camera changed anything.
         """
         return await self.async_set_device_attribute(
-            "nightVisionIRLight", 1 if enabled else 0)
+            "nightVisionIRLight", 1 if enabled else 0
+        )
 
     async def async_ptz_move(
         self,
@@ -461,7 +487,11 @@ class _CameraControlsMixin:
         ok = session._avio_cmd(4097, payload)
         _LOGGER.debug(
             "PTZ %s (code=%d speed=%d preset=%d) -> %s",
-            direction, code, speed, preset, "sent" if ok else "no channel yet",
+            direction,
+            code,
+            speed,
+            preset,
+            "sent" if ok else "no channel yet",
         )
         return ok
 
@@ -520,7 +550,9 @@ class _CameraControlsMixin:
         if session is None:
             _LOGGER.info(
                 "resolution %s remembered; the camera is not streaming, so it "
-                "will be applied when a session next starts", quality)
+                "will be applied when a session next starts",
+                quality,
+            )
             return True
         # Ask, and read what comes back.  The camera acks with 801 in
         # 0.01-0.19s and reports the new value through GETSTREAMCTRL afterwards
@@ -542,18 +574,25 @@ class _CameraControlsMixin:
         # quieter cameras. Reading the reply is what we could not do before; it
         # makes a refusal visible instead of indistinguishable from success.
         reply = await session.async_avio_request(
-            SETSTREAMCTRL_CMD, payload,
-            response_cmd=SETSTREAMCTRL_RESP_CMD, timeout=_SETSTREAMCTRL_ACK_S,
+            SETSTREAMCTRL_CMD,
+            payload,
+            response_cmd=SETSTREAMCTRL_RESP_CMD,
+            timeout=_SETSTREAMCTRL_ACK_S,
         )
         if reply is None:
             _LOGGER.debug(
                 "set resolution %s (quality=%d): sent, no ack within %.1fs",
-                quality, q, _SETSTREAMCTRL_ACK_S,
+                quality,
+                q,
+                _SETSTREAMCTRL_ACK_S,
             )
         else:
             _LOGGER.debug(
                 "set resolution %s (quality=%d): camera acked %d payload=%s",
-                quality, q, reply.command, reply.payload.hex() or "<empty>",
+                quality,
+                q,
+                reply.command,
+                reply.payload.hex() or "<empty>",
             )
         return True
 

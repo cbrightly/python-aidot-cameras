@@ -7,6 +7,7 @@ serve's input timeout kill the session.  This policy decides when: bounded
 sends, spaced out, and never before a real stall threshold - the input
 timeout and the keepalive reopen remain the fallback.
 """
+
 import os
 import sys
 
@@ -40,12 +41,11 @@ def test_nudges_are_bounded():
 
 
 def test_threshold_is_parameterised():
-    assert due(silence_s=1.1, nudges_sent=0, since_last_nudge_s=99.0,
-               stall_after_s=1.0)
-    assert not due(silence_s=1.1, nudges_sent=0, since_last_nudge_s=99.0,
-                   stall_after_s=2.5)
+    assert due(silence_s=1.1, nudges_sent=0, since_last_nudge_s=99.0, stall_after_s=1.0)
+    assert not due(
+        silence_s=1.1, nudges_sent=0, since_last_nudge_s=99.0, stall_after_s=2.5
+    )
 
 
 def test_max_is_parameterised():
-    assert due(silence_s=60.0, nudges_sent=3, since_last_nudge_s=99.0,
-               max_nudges=5)
+    assert due(silence_s=60.0, nudges_sent=3, since_last_nudge_s=99.0, max_nudges=5)

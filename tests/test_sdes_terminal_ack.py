@@ -12,6 +12,7 @@ These tests lock the two halves of the fix: the codes are classified as
 terminal, and the SDES keepalive loop treats AidotCameraBusy as "back off for
 the release window" rather than "retry immediately".
 """
+
 import inspect
 import os
 import sys
@@ -57,9 +58,10 @@ def _fn_source(mod, qualname):
 def test_sdes_open_path_checks_the_terminal_future():
     # The SDES branch must consult terminal_error_fut; before the fix it never did.
     src = _fn_source(wo, "_async_open_webrtc_stream_impl")
-    sdes_branch = src[src.rindex("if use_sdes:"):]
+    sdes_branch = src[src.rindex("if use_sdes:") :]
     assert "terminal_error_fut" in sdes_branch, (
-        "SDES branch must read terminal_error_fut (GAP D was DTLS-only)")
+        "SDES branch must read terminal_error_fut (GAP D was DTLS-only)"
+    )
     assert "AidotCameraBusy" in sdes_branch
 
 
@@ -67,13 +69,16 @@ def test_sdes_keepalive_loop_backs_off_on_camera_busy():
     loop_src = _fn_source(cc, "_sdes_keepalive_loop_inner")
     assert "except AidotCameraBusy" in loop_src, (
         "the SDES keepalive loop must honour a camera refusal instead of "
-        "retrying on the short backoff")
+        "retrying on the short backoff"
+    )
     busy_at = loop_src.index("except AidotCameraBusy")
-    assert "_BUSY_BACKOFF_S" in loop_src[busy_at:busy_at + 1600], (
+    assert "_BUSY_BACKOFF_S" in loop_src[busy_at : busy_at + 1600], (
         "a camera refusal must wait out the release window rather than "
-        "retrying on the short backoff")
-    assert "_MAX_DELAY" not in loop_src[busy_at:busy_at + 1600], (
+        "retrying on the short backoff"
+    )
+    assert "_MAX_DELAY" not in loop_src[busy_at : busy_at + 1600], (
         "the refusal wait used to be _MAX_DELAY (300s) on the belief that the "
         "camera releases slowly. Measured 2026-08-07: 2s is refused, 8s "
         "reopens cleanly. A camera that clears in seconds must not cost "
-        "minutes - see _BUSY_BACKOFF_S")
+        "minutes - see _BUSY_BACKOFF_S"
+    )

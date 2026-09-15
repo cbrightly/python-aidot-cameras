@@ -4,6 +4,7 @@ The official app re-issues setKeepAliveTime throughout a live view so a battery
 camera's low-power timer doesn't return it to sleep mid-stream. We renew inside
 the 25 s window; mains cameras never sleep and are skipped.
 """
+
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -32,7 +33,7 @@ def test_renew_loop_renews_battery_until_stream_stops():
     async def fake_sleep(_s):
         n["i"] += 1
         if n["i"] >= 3:
-            o._streaming_active = False   # stop after the 3rd sleep
+            o._streaming_active = False  # stop after the 3rd sleep
 
     with patch("aidot_cameras.camera.client.asyncio.sleep", fake_sleep):
         asyncio.run(CameraMixin._keepalive_renew_loop(o))
@@ -45,9 +46,9 @@ def test_renew_loop_swallows_cancel():
 
     async def _run():
         t = asyncio.ensure_future(CameraMixin._keepalive_renew_loop(o))
-        await asyncio.sleep(0)   # let it reach the first (real) sleep
-        t.cancel()               # cancel interrupts the sleep immediately
-        await t                  # CancelledError is swallowed inside the loop
+        await asyncio.sleep(0)  # let it reach the first (real) sleep
+        t.cancel()  # cancel interrupts the sleep immediately
+        await t  # CancelledError is swallowed inside the loop
 
     asyncio.run(_run())
     o._async_set_keep_alive.assert_not_awaited()
@@ -67,10 +68,12 @@ def test_start_renew_cancels_a_still_running_prior_loop():
     prior = MagicMock()
     prior.done.return_value = False
     o._keepalive_task = prior
-    with patch("aidot_cameras.camera.client.asyncio.ensure_future", return_value="new") as ef:
+    with patch(
+        "aidot_cameras.camera.client.asyncio.ensure_future", return_value="new"
+    ) as ef:
         CameraMixin._start_keepalive_renew(o)
-    prior.cancel.assert_called_once()   # old loop stopped
-    ef.assert_called_once()             # exactly one new loop
+    prior.cancel.assert_called_once()  # old loop stopped
+    ef.assert_called_once()  # exactly one new loop
     assert o._keepalive_task == "new"
 
 
