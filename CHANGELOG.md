@@ -4,6 +4,21 @@ All notable changes to `python-aidot-cameras` are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this project uses
 date-less, incrementing versions published to PyPI via GitHub Releases.
 
+## [Unreleased]
+
+### Changed
+
+- **A first-media stall now records whether the camera's answer carried ICE
+  credentials**, beside the candidate count it already reported. A
+  `nominated=none` stall with a zero-candidate answer had two causes the count
+  alone could not separate - a malformed or empty answer, versus a camera that
+  ran ICE and gathered no candidate of its own - and the two want different
+  investigations. The stall WARNING now reads `answer=0-candidates (no creds)`
+  or `answer=0-candidates (creds present)`, and flags candidates that arrived
+  without credentials too. Diagnostics only: no streaming behaviour changes, the
+  default path is byte-identical, and the credential itself never reaches the
+  log.
+
 ## [1.0.0rc20]
 
 ### Fixed

@@ -2303,11 +2303,57 @@ def _stall_answer_candidates(pre_launch_sdp, answer_fut):
     return (result.get("sdp", "") or "").count("a=candidate:")
 
 
+def _stall_answer_has_creds(pre_launch_sdp, answer_fut):
+    """Whether the camera's answer carried ICE credentials, for the stall report.
+
+    Companion to :func:`_stall_answer_candidates`.  The candidate count alone
+    cannot separate the two degenerate answers that both nominate nothing:
+
+      * an answer with ICE credentials but no candidate - the camera ran ICE
+        and offered no address to nominate; its own gathering, not ours; and
+      * an answer with neither - a malformed or empty answer.
+
+    ``_answer_sdp_can_nominate`` already treats both as un-nominatable, but the
+    log needs them apart: the corpus holds a "(no ICE creds in answer)" row that
+    the count alone could never tell from a routable answer that failed later.
+
+    Returns ``True`` (both ice-ufrag and ice-pwd present), ``False`` (an answer
+    arrived carrying neither, or only one half of the pair), or ``None`` (nobody
+    could tell - no answer, or an unresolved or failed future).
+
+    Arrival is decided exactly as the candidate count decides it - by whether a
+    RESULT came back, never by whether the SDP string is truthy - so an answer
+    carrying an empty SDP reads as ``False`` (it arrived, it had no creds), never
+    ``None``.  The two helpers must agree on which SDP they read, or the report
+    contradicts itself.
+
+    Pure, so the classification is testable without a camera.
+    """
+    if pre_launch_sdp:
+        _sdp = pre_launch_sdp
+    else:
+        # No answer, an unresolved wait, or a cancelled one: nobody can tell.
+        if answer_fut is None or answer_fut.cancelled() or not answer_fut.done():
+            return None
+        try:
+            if answer_fut.exception() is not None:
+                return None
+            result = answer_fut.result()
+        except Exception:
+            return None
+        if result is None:
+            return None
+        _sdp = result.get("sdp", "") or ""
+    _ufrag, _pwd, _cands, _host = _parse_answer_ice(_sdp)
+    return bool(_ufrag and _pwd)
+
+
 def _first_media_stall_report(device_id, waited_s, nominated,
                               use_candidate_sent, binding_success,
                               trigger_sent, probes, probes_dropped=0,
                               cancelled=False, media_pkts=0, decrypt_fails=0,
-                              answer_cands=-1, trigger_acked=None):
+                              answer_cands=-1, answer_has_creds=None,
+                              trigger_acked=None):
     """Build the one line a first-media stall emits.
 
     A session that never delivers a byte looks, in a log, exactly like one that
@@ -2371,7 +2417,28 @@ def _first_media_stall_report(device_id, waited_s, nominated,
         _why += ("  The camera never answered, so there was nothing to"
                  " nominate - this is signaling, not ICE.")
     elif answer_cands >= 0:
-        _answer = " answer=%d-candidates;" % answer_cands
+        # The count says how many candidates; whether ICE credentials came with
+        # them is the other half of "what the answer carried", and the two
+        # degenerate shapes want different subsystems: creds-without-candidate is
+        # the camera's own gathering, no-creds is the answer itself.
+        _creds = ""
+        if answer_has_creds is True:
+            _creds = " (creds present)"
+        elif answer_has_creds is False:
+            _creds = " (no creds)"
+        _answer = " answer=%d-candidates%s;" % (answer_cands, _creds)
+        if answer_has_creds is False:
+            _why += (
+                "  The answer carried no ICE credentials, so nothing in it"
+                " could be nominated whatever it listed - a malformed or empty"
+                " answer, not an ICE-reachability failure."
+            )
+        elif answer_has_creds is True and answer_cands == 0:
+            _why += (
+                "  The answer carried ICE credentials but no candidate, so the"
+                " nomination had no address to reach - the camera ran ICE and"
+                " offered no path, its own gathering rather than ours."
+            )
 
     # The counters exist to separate two sessions that otherwise write the same
     # line: one where the camera sent nothing, and one where it sent media that
@@ -7323,6 +7390,11 @@ class _SdesOpenMixin:
                 # ever appears.
                 _stall_answer = _stall_answer_candidates(
                     _pre_launch_answer_sdp, answer_fut)
+                # Same two sources, same arrival rule: whether that answer also
+                # carried ICE credentials, so a 0-candidate answer says which
+                # degenerate shape it was.
+                _stall_answer_creds = _stall_answer_has_creds(
+                    _pre_launch_answer_sdp, answer_fut)
                 _stall_probes = list(
                     (getattr(_bridge_fn, "_br_probe_verdicts", None) or {}).items()
                 )
@@ -7354,6 +7426,7 @@ class _SdesOpenMixin:
                     decrypt_fails=int(
                         getattr(_bridge_fn, "_br_decrypt_fails", 0)),
                     answer_cands=_stall_answer,
+                    answer_has_creds=_stall_answer_creds,
                     trigger_acked=bool(getattr(
                         _bridge_fn, "_br_session_mode_resp", 0)),
                 ))
