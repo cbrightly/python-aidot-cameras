@@ -416,6 +416,26 @@ def _video_presence_verdict(
     return "give-up" if (now - connected_at) > grace else "waiting"
 
 
+def _video_has_started(canary: Optional[dict]) -> bool:
+    """Has this session delivered video a consumer can actually use?
+
+    "Frames arrived" is not enough. The serve mux begins on a keyframe and
+    discards everything before it, so a session carrying only P-frames yields
+    an empty stream however many frames come in. Measured 2026-08-17 on an
+    A000088: 600 frames, zero keyframes, ~15 PLIs, three empty segments - and
+    the presence watchdog quiet throughout because it read the frame count.
+
+    So the answer is the keyframe count when the canary keeps one. A canary
+    that never learned to count keyframes falls back to frames, so an older
+    shape is not read as permanently video-less.
+    """
+    if not canary:
+        return False
+    if "keyframes" in canary:
+        return canary.get("keyframes", 0) > 0
+    return canary.get("frames", 0) > 0
+
+
 def _futile_video_limit(env: Optional[dict] = None) -> int:
     """Consecutive video-less DTLS sessions before the loop stops re-opening.
 
@@ -6469,7 +6489,7 @@ class CameraMixin(
                             _canary_v = _live_video_canary(
                                 pc, getattr(self, "_serve_video_canary", None)
                             )
-                            if _canary_v and _canary_v.get("frames", 0) > 0:
+                            if _video_has_started(_canary_v):
                                 _first_video_at = _now
                                 # Keep the one that is actually filling, so the
                                 # canary log line describes the live session.

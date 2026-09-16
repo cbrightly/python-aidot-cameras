@@ -8,6 +8,16 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ### Changed
 
+- **A DTLS session is not counted as delivering video until a keyframe has
+  arrived.** The serve mux begins on a keyframe and discards everything before
+  it, so a session carrying only P-frames yields an empty stream however many
+  frames come in. Measured 2026-08-17 on an A000088: 600 frames, zero
+  keyframes, ~15 PLIs, three empty segments - and the presence watchdog quiet
+  throughout, because it read the frame count. The canary has counted
+  keyframes separately since then; the serve loop now consults that count when
+  deciding whether video has started, so a P-frame-only session reaches the
+  same "give-up" verdict as a video-less one and the abandon counter can act.
+
 - **The BLE-mesh hub relay (`aidot_cameras.ble_gateway`) is removed.** It
   shipped in 0.14.0 as control for mesh bulbs behind a `BleMesh_Hub`, relaying
   over the hub's TCP:10000 channel. It never gained a consumer: no module in
