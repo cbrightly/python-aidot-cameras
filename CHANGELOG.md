@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc21]
+
 ### Changed
 
 - **A DTLS session is not counted as delivering video until a keyframe has

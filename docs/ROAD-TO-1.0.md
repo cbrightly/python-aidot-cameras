@@ -1828,6 +1828,25 @@ measures nothing. Days 2026-09-13 to 2026-09-16 therefore do not count, and day
 zero moves to the day the box settles on the next release installed as a
 release. The rollback to `rc20` and `2.24.3` is kept on the box.
 
+#### 2026-09-16: `rc21` resets the clock
+
+`rc21` is that release. Classified against the bar rather than assumed:
+
+| find | streaming-breaking? |
+|---|---|
+| An SDES attempt whose nominated candidate answered nothing waited the full 75 s before its retry | No regression - present since the wait existed - but it changes the first-media path |
+| A DTLS session carrying only P-frames was counted as delivering video, so the abandon counter never acted on it | No regression - present since 2026-08-17 at the latest - but it changes when a session is judged started |
+| A stall report did not say whether the answer carried ICE credentials | No. Diagnostics only |
+| The BLE-mesh hub relay is removed | No. It had no caller |
+
+Neither streaming change fixes a defect introduced by `rc20`, but both change
+code the soak is meant to be measuring, so on the strict reading in force they
+reset it. Before release both were run live: the release-gate run on real
+cameras passed every required model, and on the box one forced cold open each
+on the two battery A001513 units, the mains PTZ and two A000088s streamed
+video to a viewer. Day zero is the day the box settles on `rc21` installed as a
+release, with integration `2.24.4`.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /
