@@ -43,13 +43,15 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 ### Fixed
 
 - **A nominated candidate that never answers no longer burns the whole
-  first-media wait.** A camera can advertise a host candidate on this host's
-  own /24 that is nonetheless unreachable - a stale DHCP lease, or AP client
-  isolation. `_candidate_is_off_subnet` cannot flag it (the address IS on our
-  subnet), so the library nominated a dead address and spent its full 75 s
-  budget on it before retrying. Measured 2026-09-15 on an A001513 advertising
-  `192.168.0.159` to a host at `192.168.0.114` that `ping` could not reach:
-  four consecutive stalls, `nominated=192.168.0.159` each time. Now, once a
+  first-media wait.** The trigger that starts media arms within about a second
+  of the camera's answer or never (ROAD-TO-1.0 item 3), yet an attempt whose
+  nominated candidate answered nothing still waited the full 75 s before
+  retrying. Seen 2026-09-15 on an A001513 answering with only its own
+  on-subnet host address (`192.168.0.159`, to a host at `192.168.0.114`),
+  which `_candidate_is_off_subnet` cannot flag: four stalls in three minutes.
+  The address was the camera's real one - ARP resolves it to the camera's own
+  MAC and ICMP to it comes and goes - so the likely shape is a battery camera
+  dozing after it answered, not a dead address. Now, once a
   candidate has been nominated and a grace
   (`AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S`, default 20 s) passes with zero
   inbound STUN Binding Success and no peer-reflexive candidate learned from a

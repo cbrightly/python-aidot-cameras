@@ -1,12 +1,13 @@
 """A nominated candidate that never answers must not burn the whole wait.
 
-Confirmed on an A001513 (camera b5284...) on 2026-09-15: its answer advertised a
+Seen on an A001513 (camera b5284...) on 2026-09-15: its answer advertised a
 single host candidate, 192.168.0.159, on the host's own /24 (Home Assistant at
-192.168.0.114). ping got no reply -- a stale DHCP lease or AP client isolation
--- so the address is on-subnet but not actually reachable. _candidate_is_off_subnet
-cannot catch that, because the address IS on our subnet; nothing we nominated
-ever answered (zero STUN Binding Success, no media), and the session spent its
-whole 75 s first-media budget on a dead address before the retry.
+192.168.0.114). _candidate_is_off_subnet cannot flag that - the address IS on
+our subnet, and it is the camera's real one (ARP resolves it to the camera's
+MAC; ICMP to it comes and goes, a battery camera dozing). Nothing we nominated
+answered (zero STUN Binding Success, no media), and the session spent its whole
+75 s first-media budget before the retry, although ROAD-TO-1.0 item 3 measured
+that the trigger arms within about a second of the answer or never.
 
 _no_answer_abandon_due cuts that short: once we have nominated a candidate and a
 grace has passed with zero Binding Success AND no peer-reflexive candidate
@@ -56,7 +57,7 @@ def test_a_learned_relay_peer_keeps_the_wait_alive():
 
 def test_it_never_fires_before_we_have_nominated():
     # A battery camera still waking: its answer is not nominated yet, so there
-    # is no dead address to give up on.
+    # is nothing nominated to give up on.
     assert _due(nominated_since_s=None) is False
 
 
@@ -108,7 +109,7 @@ def test_the_wait_loop_wires_the_abandon_with_the_right_signals():
     call = src[calls[0] : calls[0] + 500]
     assert "_br_binding_success_count" in call, (
         "the abandon must read the bridge's binding-success count, or it cannot "
-        "tell a dead address from a working one"
+        "tell a silent nominee from a working one"
     )
     assert "prflx" in call, (
         "the abandon must consult the learned relay peer, or it would cut the "

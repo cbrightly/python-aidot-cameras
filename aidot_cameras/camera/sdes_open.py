@@ -1152,16 +1152,19 @@ _BATTERY_STALE_OFFER_GRACE_S = float(
 
 
 # How long a nominated candidate has to produce ANY inbound STUN Binding Success
-# before its attempt is abandoned to the retry.  Guards the on-subnet-but-dead
-# case _candidate_is_off_subnet cannot see: a camera whose answer advertises a
-# host address on this host's own /24 that is nonetheless unreachable (a stale
-# DHCP lease, or AP client isolation).  Measured on 2026-09-15 on an A001513
-# advertising 192.168.0.159 to a host at 192.168.0.114 that ping could not
-# reach -- nothing we nominate there ever answers, so the attempt otherwise
-# burns its whole 75 s budget on a dead address before the retry.  Timed from
-# nomination, not from the open, so a slow battery wake is never clipped; and a
-# learned relay peer or any Binding Success keeps the wait alive, so the
-# relay-observed-peer recovery is preserved.
+# before its attempt is abandoned to the retry.  ROAD-TO-1.0 item 3 measured
+# that the trigger "arms within about a second of the answer or never" - there
+# is no slow-success state - so a nominated pair that has answered nothing for
+# this long will not start media in this attempt.  Seen on 2026-09-15 on an
+# A001513 whose answer carried only its own on-subnet host address
+# (_candidate_is_off_subnet cannot flag that): the attempt otherwise ran its
+# whole 75 s budget before the retry.  The address was the camera's real one
+# (ARP resolved it to the camera's own MAC; ICMP to it came and went), so the
+# likely shape is a battery camera dozing after it answered, as rc7 measured -
+# not a dead address.  Timed from nomination, not from the open, so a slow
+# battery wake is never clipped; and a learned relay peer or any Binding
+# Success keeps the wait alive, so the relay-observed-peer recovery is
+# preserved.
 #
 # Set AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S=0 to restore the previous behaviour.
 _UNREACHABLE_NOMINEE_GRACE_S = float(
@@ -1245,12 +1248,14 @@ def _no_answer_abandon_due(
     The companion to :func:`_stale_offer_abandon_due`, whose own docstring notes
     it leaves "a camera that never speaks at all ... unreachable" on the full
     window.  This is that case, and it is narrower: we DID nominate -- the answer
-    arrived and carried a candidate -- but nothing came back.  Measured on
-    2026-09-15, an A001513 advertised a single host candidate on this host's own
-    /24 that ping could not reach (a stale lease or AP client isolation);
-    :func:`_candidate_is_off_subnet` cannot flag it because the address is on our
-    subnet, so the attempt spent its whole 75 s budget on a dead address before
-    the retry.
+    arrived and carried a candidate -- but nothing came back.  Seen on
+    2026-09-15: an A001513 answered with only its own on-subnet host address,
+    nothing answered a connectivity check, and the attempt ran its whole 75 s
+    budget before the retry.  :func:`_candidate_is_off_subnet` cannot flag it
+    (the address is on our subnet), and the address was the camera's real one -
+    the likely shape is a battery camera dozing after it answered (rc7).
+    ROAD-TO-1.0 item 3 measured that the trigger arms within about a second of
+    the answer or never, so waiting out the window buys nothing.
 
     Fires only when ALL of these hold:
 
@@ -8522,11 +8527,11 @@ class _SdesOpenMixin:
                 ):
                     # We nominated a candidate and, for the whole grace since,
                     # nothing answered: no STUN Binding Success and no relay-
-                    # learned peer. The address is not reachable (an on-subnet
-                    # host candidate that ping cannot reach - a stale lease or
-                    # AP client isolation - which _candidate_is_off_subnet cannot
-                    # flag). Nothing recovers this attempt; the retry's fresh
-                    # offer is served in seconds. Stop paying for the window.
+                    # learned peer. The trigger arms within about a second of
+                    # the answer or never (ROAD-TO-1.0 item 3), so nothing
+                    # recovers this attempt; the retry's fresh offer is served
+                    # in seconds and re-wakes a camera that dozed. Stop paying
+                    # for the window.
                     _stale_offer_abandoned = True
                     _status(
                         "nothing answered the nominated candidate(s) in %.0fs"

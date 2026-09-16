@@ -1230,7 +1230,11 @@ targets `answer=none` and not the present-but-degenerate `answer=0-candidates`
 shape, which would need its own trigger. Either way it cannot be validated
 without a camera, which is why the report comes first.
 
-#### 2026-09-15 (later): the kitchen stall is an on-subnet dead address, and the wait now gives it up
+#### 2026-09-15 (later): the kitchen stall nominates an on-subnet address that answers nothing, and the wait now gives it up
+
+*Corrected 2026-09-16: this entry first called `192.168.0.159` a dead address
+(a stale lease or AP client isolation). It is not - see the correction at the
+end of this entry. The mechanism below stands; its stated cause did not.*
 
 The 13-A (kitchen) stalls recurred four times in three minutes,
 `nominated=192.168.0.159` each time. Two measurements on the box settle which
@@ -1240,14 +1244,13 @@ mode it is:
   is on this host's own subnet. `_candidate_is_off_subnet` returns False for it
   - this is NOT the off-subnet mode, and the "every candidate ... cannot reach"
   warning never fires.
-- `ping 192.168.0.159` gets no reply. The camera advertises an address on our
-  /24 that nothing answers at - a stale DHCP lease, or AP client isolation, now
-  that the camera is off the IoT SSID.
+- `ping 192.168.0.159` got no reply at the time.
 
-So we nominate a dead address, no STUN Binding Success ever comes back, the
-trigger never arms, and the attempt spends its whole 75 s budget before the
-retry - the shape `_stale_offer_abandon_due`'s own docstring explicitly left on
-the full window ("a camera that never speaks at all ... unreachable").
+So we nominate that address, no STUN Binding Success comes back, the trigger
+never arms, and the attempt spends its whole 75 s budget before the retry -
+although this item already measured that the trigger arms within about a second
+of the answer or never, and `_stale_offer_abandon_due`'s own docstring leaves
+"a camera that never speaks at all" on the full window.
 
 The wait now gives it up: `_no_answer_abandon_due` abandons the attempt to the
 retry once a candidate has been nominated and a grace (default 20 s, env
@@ -1257,15 +1260,39 @@ battery camera still waking is never clipped; any Binding Success or a learned
 relay peer keeps the wait alive, so the relay-observed-peer recovery above is
 untouched. Pinned by unit tests, with the wiring guarded at the source.
 
-**What this does and does not fix.** It stops the library wasting 75 s on an
-address that cannot answer - the retry's fresh offer follows in about 20 s
-instead. It does not make 13-A stream: that needs the camera to hold a
-reachable address, which is network-side. Confirmed on hardware only that the
-address is dead; the abandon itself has not yet been observed live, and like
-every change on this path it waits on fleet validation. The box will show the
-new line ("nothing answered the nominated candidate(s) in 20s ... abandoning
-this attempt to the retry") in place of the 75 s stall once it runs a build
-that carries it.
+**What this does and does not fix.** It stops the library waiting out 75 s on
+a nominated pair that has answered nothing - the retry's fresh offer follows in
+about 20 s instead, and re-wakes a camera that dozed. It does not by itself make
+the unit stream. The abandon has not yet been observed live. The box will show
+the new line ("nothing answered the nominated candidate(s) in 20s ...
+abandoning this attempt to the retry") in place of the 75 s stall once it runs a
+build that carries it.
+
+**Correction, 2026-09-16: the address was not dead.** Checked from the camera
+LAN the next morning:
+
+- ARP resolves `192.168.0.159` to `1c:d6:bd:e8:f8:a3` - the camera's own MAC
+  (the unit is `L2 F8A3` in the device registry) - so it is the camera's real,
+  current address, not a stale lease.
+- Home Assistant's own `ping` to it succeeded; from another LAN host it did
+  not. ICMP that comes and goes is what a battery camera dozing and waking looks
+  like, and this item's rc7 row already measured an A001513 answering and then
+  going back to sleep mid-handshake.
+- The same pattern holds for the other stalling battery unit, `L2 F127`, whose
+  stalls nominated `192.168.0.126` - ARP resolves that to its own MAC too.
+
+So the likely shape is the rc7 one, not an unreachable address. The fix is
+unaffected, because it never depended on why nothing answered - only on this
+item's measurement that nothing answering by then means nothing will. What
+changed is the reading of the soak: these are the battery-SDES stall classes
+this item closed on, so the soak watcher now tallies stalls on the three
+A001513 units daily instead of treating each as a reset, and still raises
+stalls on the mains PTZ or any unlisted camera immediately.
+
+Run on the box 2026-09-16 (see item 1 for what that does to the soak): one
+forced cold open each on `L2 F8A3`, `L2 F127` and the mains PTZ reached first
+media in 4.8 s, 4.4 s and 2.5 s, with no stall, warning or traceback. The
+abandon did not fire because nothing needed it; it is still unobserved live.
 
 ### 4. Coverage holes - closed 2026-08-08
 
@@ -1789,6 +1816,17 @@ clock: a sub-second bound truncated to zero (present since the bound existed),
 21027/21041 routed as refresh-first (present since the codes were added), and
 two private note filenames in comments (a public-surface defect, not a
 behaviour). Day zero is now the `rc20` release date.
+
+#### 2026-09-16: the box was hot-patched, so the `rc20` window is void
+
+On 2026-09-16 the box was moved off the released `rc20` wheel onto an unreleased
+build of `main` (`1.0.0rc20+gf245145`, the nominee-abandon change and the
+first-media report fields) and integration `2.24.4` (the clip-proxy fix), to
+validate both live. The version metadata says so honestly this time, but the
+rule above is unchanged: a soak measured on files that are not a release
+measures nothing. Days 2026-09-13 to 2026-09-16 therefore do not count, and day
+zero moves to the day the box settles on the next release installed as a
+release. The rollback to `rc20` and `2.24.3` is kept on the box.
 
 ## Out of scope for 1.0.0
 
