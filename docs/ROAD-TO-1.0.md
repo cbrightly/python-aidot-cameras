@@ -1847,6 +1847,11 @@ on the two battery A001513 units, the mains PTZ and two A000088s streamed
 video to a viewer. Day zero is the day the box settles on `rc21` installed as a
 release, with integration `2.24.4`.
 
+**Day zero is 2026-09-16. Two weeks from it is 2026-09-30.** The box was moved
+onto `rc21` that morning the ordinary way - the integration's raised floor,
+installed by Home Assistant from PyPI on restart - and its installed files hash
+identical to the published wheel. `1.0.0rc20+gf245145` is gone from the box.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /
