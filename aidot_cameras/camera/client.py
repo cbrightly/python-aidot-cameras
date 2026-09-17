@@ -2198,7 +2198,7 @@ class CameraMixin(
             return self._mqtt_url
 
         except Exception as exc:
-            _LOGGER.error("_async_get_mqtt_url failed: %s", exc)
+            _LOGGER.error("_async_get_mqtt_url failed: %r", exc)
             return None
 
     async def _async_get_smarthome_auth(self) -> Optional[dict]:
@@ -2519,7 +2519,7 @@ class CameraMixin(
                 return self._store_device_user_info(data[0] if data else None)
         except Exception as exc:
             _LOGGER.error(
-                "async_get_device_user_info failed for %s: %s", self.device_id, exc
+                "async_get_device_user_info failed for %s: %r", self.device_id, exc
             )
         return None
 
@@ -2590,7 +2590,7 @@ class CameraMixin(
             )
         except Exception as exc:
             _LOGGER.debug(
-                "async_get_p2p_uid: smarthome call failed for %s: %s",
+                "async_get_p2p_uid: smarthome call failed for %s: %r",
                 self.device_id,
                 exc,
             )
@@ -2637,7 +2637,7 @@ class CameraMixin(
                 break
             except Exception as exc:
                 _LOGGER.debug(
-                    "async_get_p2p_uid: v32%s failed for %s: %s",
+                    "async_get_p2p_uid: v32%s failed for %s: %r",
                     path,
                     self.device_id,
                     exc,
@@ -3581,7 +3581,7 @@ class CameraMixin(
             return mine
         except Exception as exc:
             _LOGGER.warning(
-                "getRecentEventRecordingList failed for %s: %s", self.device_id, exc
+                "getRecentEventRecordingList failed for %s: %r", self.device_id, exc
             )
             return []
 
@@ -3666,7 +3666,7 @@ class CameraMixin(
 
         except Exception as exc:
             _LOGGER.error(
-                "async_get_cloud_recordings failed for %s: %s", self.device_id, exc
+                "async_get_cloud_recordings failed for %s: %r", self.device_id, exc
             )
             return []
 
@@ -3720,7 +3720,7 @@ class CameraMixin(
             return int(total) if isinstance(total, int) else None
         except Exception as exc:
             _LOGGER.debug(
-                "eventRecordingList count failed for %s: %s", self.device_id, exc
+                "eventRecordingList count failed for %s: %r", self.device_id, exc
             )
             return None
 
@@ -3768,7 +3768,7 @@ class CameraMixin(
             return data if isinstance(data, dict) and data else None
         except Exception as exc:
             _LOGGER.debug(
-                "getPackageInfoByDevId failed for %s: %s", self.device_id, exc
+                "getPackageInfoByDevId failed for %s: %r", self.device_id, exc
             )
             return None
 
@@ -3932,7 +3932,7 @@ class CameraMixin(
 
         except Exception as exc:
             _LOGGER.error(
-                "async_get_latest_thumbnail failed for %s: %s", self.device_id, exc
+                "async_get_latest_thumbnail failed for %s: %r", self.device_id, exc
             )
             return None
 
@@ -7163,7 +7163,7 @@ class CameraMixin(
                     self._cache_ice_config(cfg)
                     return cfg
         except Exception as exc:
-            _LOGGER.warning("async_get_ice_config_http failed: %s", exc)
+            _LOGGER.warning("async_get_ice_config_http failed: %r", exc)
             return None
 
     def _cache_ice_config(self, cfg: "Any") -> None:

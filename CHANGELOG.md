@@ -6,6 +6,17 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Changed
+
+- **Cloud-call failures now name their exception type in the log.** A transient
+  cloud timeout raises `asyncio.TimeoutError`, whose `str()` is empty, so the
+  handlers - which formatted the exception with `%s` - logged
+  `... failed for <id>: ` with nothing after the colon. That is unclassifiable:
+  it makes every benign network blip look like the same mystery error. The
+  cloud-HTTP error/warning handlers now format the exception with `%r`, so a
+  timeout reads `... failed for <id>: TimeoutError()`. Behaviour is unchanged -
+  the calls were already caught and returned empty.
+
 ## [1.0.0rc21]
 
 ### Changed
