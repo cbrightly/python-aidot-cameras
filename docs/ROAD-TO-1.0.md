@@ -1852,6 +1852,17 @@ onto `rc21` that morning the ordinary way - the integration's raised floor,
 installed by Home Assistant from PyPI on restart - and its installed files hash
 identical to the published wheel. `1.0.0rc20+gf245145` is gone from the box.
 
+#### 2026-09-17: `rc22` is a log fix and does not reset the clock
+
+`rc22` changes one thing: cloud-call error logs now format the exception with
+`%r`, so a transient timeout reads `TimeoutError()` instead of an empty string
+(a benign box-side DNS blip had produced an unclassifiable line). It touches no
+streaming path, changes no behaviour a viewer sees, and is not a fix to
+previously-good streaming code - it is observability only. The bar counts
+*streaming-breaking* releases, so `rc22` does not reset it.
+
+**Day zero stays 2026-09-16. Two weeks from it is 2026-09-30.**
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /

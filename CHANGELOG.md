@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc22]
+
 ### Changed
 
 - **Cloud-call failures now name their exception type in the log.** A transient
