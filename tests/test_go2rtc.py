@@ -87,7 +87,9 @@ def test_ensure_stream():
     assert asyncio.run(Go2rtcClient(s).ensure_stream("cam", "rtsp://x/y")) is True
     # the PUT carries name + src params
     put = [c for c in s.calls if c[0] == "PUT"][0]
-    assert put[2] == {"name": "cam", "src": "rtsp://x/y"}
+    # An ORDERED list, not a dict: go2rtc serves a consumer from the first
+    # source whose codecs match, so src order is part of the contract.
+    assert put[2] == [("name", "cam"), ("src", "rtsp://x/y")]
     assert (
         asyncio.run(Go2rtcClient(_FakeSession(put_status=500)).ensure_stream("c", "s"))
         is False
@@ -98,6 +100,27 @@ def test_ensure_stream():
         )
         is False
     )
+
+
+def test_ensure_stream_extra_sources_follow_the_primary():
+    """A transcoding source is registered AFTER the live one, so it is used
+    only by a consumer the live source cannot satisfy (HA's AAC-only HLS
+    player), and never in place of the passthrough."""
+    s = _FakeSession(put_status=200)
+    assert (
+        asyncio.run(
+            Go2rtcClient(s).ensure_stream(
+                "cam", "rtsp://x/y", extra_sources=("ffmpeg:cam#audio=aac",)
+            )
+        )
+        is True
+    )
+    put = [c for c in s.calls if c[0] == "PUT"][0]
+    assert put[2] == [
+        ("name", "cam"),
+        ("src", "rtsp://x/y"),
+        ("src", "ffmpeg:cam#audio=aac"),
+    ]
 
 
 def test_remove_stream():

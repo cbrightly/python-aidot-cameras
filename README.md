@@ -496,8 +496,11 @@ Stream #0:1: Audio: aac (LC), 48000 Hz, mono
   stream carries the camera's own **PCMA (G.711 A-law, 8 kHz)** instead: WebRTC
   viewers play it natively and nothing is transcoded, but a consumer that only
   takes AAC (for example Home Assistant's HLS player) gets video without audio.
-  go2rtc can transcode for such a consumer on demand with an extra
-  `ffmpeg:<stream>#audio=aac` source.
+  go2rtc can transcode for such a consumer on demand: register the stream with
+  `ensure_stream(name, src, extra_sources=("ffmpeg:<stream>#audio=aac",))`, or
+  list that source after the live one in `go2rtc.yaml`. It is used only by a
+  consumer the live source cannot satisfy, so WebRTC viewers keep the
+  passthrough. (The Home Assistant integration does this for you.)
 - **A stream that starts with no video** and picks it up a few seconds later is
   normal: the mux waits for a keyframe so the first GOP is decodable. A stream
   that stays audio-only is a camera that never sent one - retry the view.

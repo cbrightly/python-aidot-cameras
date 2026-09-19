@@ -40,6 +40,20 @@ def _free_port():
     return p
 
 
+def _cfg(api, rtsp, extra_src=None):
+    src = f"  aidot_cam:\n    - rtsp://127.0.0.1:{_free_port()}/placeholder\n"
+    if extra_src:
+        src += f'    - "{extra_src}"\n'
+    return (
+        f'api:\n  listen: "127.0.0.1:{api}"\n'
+        f'rtsp:\n  listen: "127.0.0.1:{rtsp}"\n'
+        'webrtc:\n  listen: ""\n'
+        "exec:\n  allow_paths:\n    - ffmpeg\n"
+        "log:\n  level: debug\n"
+        "streams:\n" + src
+    )
+
+
 @pytest.fixture
 def go2rtc(tmp_path):
     api, rtsp = _free_port(), _free_port()
@@ -246,3 +260,59 @@ def test_publish_into_a_missing_stream_fails_fast(go2rtc):
     url = f"rtsp://127.0.0.1:{go2rtc['rtsp']}/no_such_stream"
     proc = rp.LoopbackRtpPublisher(serve_sdp, url, device_id="it")
     assert proc.wait(8) == rp.EXIT_FAILED
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="no ffmpeg binary")
+def test_an_aac_only_consumer_is_served_from_a_pcma_publish(tmp_path):
+    """Home Assistant's HLS player takes AAC only, and a direct publish sends
+    PCMA. A transcoding source listed after the live one covers exactly that
+    consumer: go2rtc starts it on demand and the publisher stays untouched."""
+    api, rtsp = _free_port(), _free_port()
+    cfg = tmp_path / "go2rtc.yaml"
+    cfg.write_text(_cfg(api, rtsp, "ffmpeg:aidot_cam#audio=aac"))
+    log = open(tmp_path / "go2rtc.log", "wb")
+    proc = subprocess.Popen([GO2RTC, "-config", str(cfg)], stdout=log, stderr=log)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{api}/api", timeout=1)
+            break
+        except Exception:
+            time.sleep(0.1)
+    aus = _encode_h264_aus()
+    vq, aq = queue.Queue(), queue.Queue()
+    stop = threading.Event()
+    url = f"rtsp://127.0.0.1:{rtsp}/aidot_cam"
+    t = threading.Thread(
+        target=rp.dtls_rtp_publish_run,
+        args=(vq, aq, url, [0.0], stop),
+        kwargs={"device_id": "it"},
+        daemon=True,
+    )
+    t.start()
+
+    def feed():
+        k = 0
+        while not stop.is_set():
+            data, kf = aus[k % len(aus)]
+            vq.put((data, k * 6000, kf))
+            aq.put((b"\xd5" * 160, k * 533))
+            k += 1
+            time.sleep(1 / 15)
+
+    threading.Thread(target=feed, daemon=True).start()
+    try:
+        assert _wait_for_publisher(api)
+        aac = _read_back(url + "?video&audio=aac", want_frames=5)
+        pcma = _read_back(url + "?video&audio=pcma", want_frames=5)
+    finally:
+        stop.set()
+        t.join(5)
+        proc.terminate()
+        proc.wait(5)
+        log.close()
+    tail = (tmp_path / "go2rtc.log").read_text()[-3000:]
+    assert aac.get("codecs") == ["aac", "h264"], (aac, tail)
+    assert aac["frames"] >= 5, (aac, tail)
+    # The publisher's own audio still reaches a consumer that takes it.
+    assert pcma.get("codecs") == ["h264", "pcm_alaw"], (pcma, tail)
