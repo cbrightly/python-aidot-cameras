@@ -389,6 +389,10 @@ class RtspPublisher:
         self._keepalive_s = keepalive_s
         self._ua = user_agent
         self._sock: Optional[socket.socket] = None
+        #: Set by close(), and checked by connect() at each step, so a close
+        #: that lands while the handshake is still running wins: the handshake
+        #: tears itself down instead of leaving an orphaned publish in go2rtc.
+        self._closed = False
         self._cseq = 0
         self._session: Optional[str] = None
         self._lock = threading.Lock()
@@ -405,7 +409,11 @@ class RtspPublisher:
     def connect(self) -> None:
         sock = socket.create_connection((self._host, self._port), timeout=self._timeout)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self._sock = sock
+        with self._lock:
+            if self._closed:
+                sock.close()
+                raise RtspPublishError("publisher closed before it connected")
+            self._sock = sock
         try:
             self._request("OPTIONS", self.url)
             self._request(
@@ -425,6 +433,8 @@ class RtspPublisher:
                 if self._session is None and "session" in rh:
                     self._session = rh["session"].split(";")[0].strip()
             self._request("RECORD", self.url, {"Range": "npt=0.000-"})
+            if self._closed:
+                raise RtspPublishError("publisher closed during the handshake")
         except Exception:
             self._close_sock()
             raise
@@ -562,6 +572,8 @@ class RtspPublisher:
             self._dead.set()
 
     def close(self, teardown: bool = True) -> None:
+        with self._lock:
+            self._closed = True
         if self._sock is None:
             return
         if teardown and not self._dead.is_set():
@@ -591,6 +603,104 @@ class RtspPublisher:
                 sock.close()
             except OSError:
                 pass
+
+
+# --------------------------------------------------------------------------- #
+# Reordering                                                                   #
+# --------------------------------------------------------------------------- #
+
+
+class RtpReorderBuffer:
+    """Put one track's RTP back into sequence order before it is published.
+
+    The SDES bridge forwards packets in arrival order, and NACK retransmits
+    arrive late by design. go2rtc does not reorder a publisher's packets (its
+    H.264 depacketizer is marker-driven), so a late packet would corrupt the
+    frame it belongs to. The serve ffmpeg reordered for us
+    (``-reorder_queue_size 500 -max_delay 500000``); this is its replacement,
+    with the same defaults.
+
+    In-order packets pass straight through with no added latency. A gap holds
+    later packets until it fills or the oldest held packet has waited
+    ``max_delay_s``; then the gap is skipped. Packets older than what has
+    already been released are dropped (``late``). A jump of more than
+    ``reset_span`` resynchronises (a new sender, not a gap).
+    """
+
+    def __init__(
+        self,
+        max_delay_s: float = 0.5,
+        max_packets: int = 500,
+        reset_span: int = 3000,
+    ):
+        self.max_delay_s = max_delay_s
+        self.max_packets = max_packets
+        self.reset_span = reset_span
+        self._next: Optional[int] = None
+        self._held: dict = {}  # seq -> (item, arrival)
+        self.late = 0
+        self.skipped = 0
+
+    @staticmethod
+    def _delta(a: int, b: int) -> int:
+        d = (a - b) & 0xFFFF
+        return d - 0x10000 if d >= 0x8000 else d
+
+    def push(self, seq: int, item, arrival: float) -> list:
+        """Queue one packet; return the items now releasable, in order."""
+        if self._next is None:
+            self._next = seq
+        d = self._delta(seq, self._next)
+        if d < 0:
+            if -d > self.reset_span:
+                return self._resync(seq, item, arrival)
+            self.late += 1
+            return []
+        if d > self.reset_span:
+            return self._resync(seq, item, arrival)
+        if seq in self._held:
+            self.late += 1  # duplicate
+            return []
+        self._held[seq] = (item, arrival)
+        out = self._drain()
+        if len(self._held) > self.max_packets:
+            out += self._skip_gap()
+        return out
+
+    def expire(self, now: float) -> list:
+        """Release past a gap whose oldest held packet waited too long."""
+        out: list = []
+        while (
+            self._held
+            and now - min(a for _, a in self._held.values()) >= self.max_delay_s
+        ):
+            out += self._skip_gap()
+        return out
+
+    def _drain(self) -> list:
+        out = []
+        while self._next in self._held:
+            out.append(self._held.pop(self._next)[0])
+            self._next = (self._next + 1) & 0xFFFF
+        return out
+
+    def _skip_gap(self) -> list:
+        nxt = self._next
+        first = min(self._held, key=lambda sq: self._delta(sq, nxt))
+        self.skipped += self._delta(first, nxt)
+        self._next = first
+        return self._drain()
+
+    def _resync(self, seq, item, arrival) -> list:
+        out = [
+            it
+            for _, (it, _a) in sorted(
+                self._held.items(), key=lambda kv: self._delta(kv[0], self._next)
+            )
+        ]
+        self._held.clear()
+        self._next = (seq + 1) & 0xFFFF
+        return [*out, item]
 
 
 # --------------------------------------------------------------------------- #
@@ -697,9 +807,18 @@ class LoopbackRtpPublisher:
         self.returncode: Optional[int] = None
         self.device_id = device_id
         self._url = url
-        self._sdp, self._tracks, ports = publish_sdp_from_serve_sdp(
+        self._sdp, self._tracks, announced_ports = publish_sdp_from_serve_sdp(
             serve_sdp, ("video", "audio") if include_audio else ("video",)
         )
+        # Bind EVERY port the serve SDP names, announced or not, exactly as the
+        # ffmpeg it replaces did: the SDES open waits for both loopback ports to
+        # be bound before it signals, and the bridge sends audio regardless.
+        # Media on a port that is not announced is read and discarded.
+        _, _all_tracks, ports = publish_sdp_from_serve_sdp(serve_sdp)
+        self._port_track: List[Optional[int]] = [
+            announced_ports.index(p) if p in announced_ports else None for p in ports
+        ]
+        self._reorder = [RtpReorderBuffer() for _ in self._tracks]
         self._input_timeout = input_timeout_s
         self._gain = alaw_gain_table(audio_gain_db)
         pol = policy or timestamp_policy()
@@ -768,6 +887,8 @@ class LoopbackRtpPublisher:
             "timestamp_repairs": sum(t.repairs for t in self._timelines),
             "dropped_pt": self.dropped_pt,
             "preroll_dropped": self.preroll_dropped,
+            "reorder_late": sum(b.late for b in self._reorder),
+            "reorder_skipped": sum(b.skipped for b in self._reorder),
             "tracks": [f"{t.kind}:{t.codec}/{t.pt}" for t in self._tracks],
         }
 
@@ -839,6 +960,8 @@ class LoopbackRtpPublisher:
                                 preroll.popleft()
                                 self.preroll_dropped += 1
                             preroll.append((idx, pkt, now))
+                if connected:
+                    self._expire(pub, now)
                 if connected and pub.keepalive_due(now):
                     try:
                         pub.send_keepalive()
@@ -866,11 +989,13 @@ class LoopbackRtpPublisher:
             self._log(
                 logging.INFO,
                 "publish ended: %d packets, %d timestamp repair(s), %d dropped"
-                " (payload type), %d dropped (pre-roll)",
+                " (payload type), %d dropped (pre-roll), %d late, %d lost",
                 stats["packets"],
                 stats["timestamp_repairs"],
                 stats["dropped_pt"],
                 stats["preroll_dropped"],
+                stats["reorder_late"],
+                stats["reorder_skipped"],
             )
             self.returncode = code
             self._done.set()
@@ -886,20 +1011,38 @@ class LoopbackRtpPublisher:
         self._connect_done.set()
 
     def _forward(
-        self, pub: RtspPublisher, idx: int, pkt: bytes, arrival: float
+        self, pub: RtspPublisher, sock_idx: int, pkt: bytes, arrival: float
     ) -> None:
+        """One datagram from loopback socket ``sock_idx``: reorder, then send."""
+        idx = self._port_track[sock_idx]
+        if idx is None:
+            self.last_media = arrival  # media is flowing, just not announced
+            return
         parsed = parse_rtp(pkt)
         if parsed is None:
             return
-        pt, marker, _seq, ts, payload = parsed
-        track = self._tracks[idx]
-        if pt != track.pt:
+        pt, marker, in_seq, ts, payload = parsed
+        if pt != self._tracks[idx].pt:
             self.dropped_pt += 1
             return
+        self.last_media = arrival
+        for item in self._reorder[idx].push(
+            in_seq, (marker, ts, payload, arrival), arrival
+        ):
+            self._send(pub, idx, item)
+
+    def _expire(self, pub: RtspPublisher, now: float) -> None:
+        """Release packets held behind a gap that has waited long enough."""
+        for idx, buf in enumerate(self._reorder):
+            for item in buf.expire(now):
+                self._send(pub, idx, item)
+
+    def _send(self, pub: RtspPublisher, idx: int, item) -> None:
+        marker, ts, payload, arrival = item
+        track = self._tracks[idx]
         if self._gain is not None and track.codec == "PCMA":
             payload = payload.translate(self._gain)
         seq, out_ts = self._timelines[idx].stamp(ts, arrival)
-        self.last_media = arrival
         try:
             pub.send_rtp(
                 track,

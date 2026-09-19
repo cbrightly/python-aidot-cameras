@@ -971,15 +971,23 @@ _SERVE_STDERR_NOISE = (
 )
 
 
-def _should_direct_publish(rtsp_push_url, output_path, max_seconds) -> bool:
+def _should_direct_publish(
+    rtsp_push_url, output_path, max_seconds, plain_rtp: bool
+) -> bool:
     """Whether the SDES serve publishes in-process instead of running ffmpeg.
 
     Only a live RTSP push qualifies, and only with ``AIDOT_DIRECT_PUBLISH`` on:
     recordings and snapshots (``output_path`` / ``max_seconds``) and the
     ``-f null`` decode drain keep ffmpeg. See docs/DESIGN-direct-publish.md.
+
+    And only when the bridge itself decrypts (``plain_rtp``): for any other
+    SDES model the loopback ports carry SRTP that the serve ffmpeg decrypts
+    from the SDP's ``a=crypto`` keys, and the publisher would forward it still
+    encrypted - a stream go2rtc accepts and nobody can decode.
     """
     return (
-        direct_publish_enabled()
+        plain_rtp
+        and direct_publish_enabled()
         and is_publishable_url(rtsp_push_url)
         and not output_path
         and not max_seconds
@@ -8883,8 +8891,16 @@ class _SdesOpenMixin:
         # live push qualifies - recordings, snapshots and the decode drain keep
         # ffmpeg. See docs/DESIGN-direct-publish.md.
         _direct_publish = _should_direct_publish(
-            rtsp_push_url, output_path, max_seconds
+            rtsp_push_url, output_path, max_seconds, _use_plain_rtp
         )
+        if not _direct_publish and _should_direct_publish(
+            rtsp_push_url, output_path, max_seconds, True
+        ):
+            _LOGGER.info(
+                "camera %s: direct publish is on but this model's media reaches"
+                " the serve still SRTP-encrypted; keeping the ffmpeg serve",
+                getattr(self, "device_id", "?"),
+            )
         _direct_audio = bool(_serve_audio and _keep_a is not None)
         _direct_timeout = _resolve_serve_input_timeout_s(
             bool(getattr(self, "is_battery_camera", False))

@@ -709,13 +709,28 @@ def test_sdes_direct_publish_decision(monkeypatch):
 
     url = "rtsp://127.0.0.1:8554/aidot_x"
     monkeypatch.delenv(rp.ENV_DIRECT_PUBLISH, raising=False)
-    assert not _should_direct_publish(url, None, None)  # default off
+    assert not _should_direct_publish(url, None, None, True)  # default off
     monkeypatch.setenv(rp.ENV_DIRECT_PUBLISH, "1")
-    assert _should_direct_publish(url, None, None)
-    assert not _should_direct_publish("http://127.0.0.1:18600/x.ts", None, None)
-    assert not _should_direct_publish(None, None, None)  # decode drain
-    assert not _should_direct_publish(url, "/tmp/clip.ts", None)  # recording
-    assert not _should_direct_publish(url, None, 10)  # snapshot
+    assert _should_direct_publish(url, None, None, True)
+    assert not _should_direct_publish("http://127.0.0.1:18600/x.ts", None, None, True)
+    assert not _should_direct_publish(None, None, None, True)  # decode drain
+    assert not _should_direct_publish(url, "/tmp/clip.ts", None, True)  # recording
+    assert not _should_direct_publish(url, None, 10, True)  # snapshot
+    # SRTP reaches the serve still encrypted (ffmpeg decrypts it from the
+    # SDP's a=crypto) for any model the bridge does not decrypt itself.
+    assert not _should_direct_publish(url, None, None, False)
+
+
+def test_the_open_passes_the_plain_rtp_decision_through():
+    import inspect
+
+    from aidot_cameras.camera import sdes_open
+
+    src = inspect.getsource(sdes_open)
+    assert (
+        "_direct_publish = _should_direct_publish(\n"
+        "            rtsp_push_url, output_path, max_seconds, _use_plain_rtp\n"
+    ) in src
 
 
 def test_both_sdes_serve_launches_go_through_the_spawn_helper():
@@ -747,3 +762,140 @@ def test_dtls_serve_loop_checks_publish_before_the_direct_ts_serve():
     i_ts = src.index("elif _direct_serve_enabled()")
     assert i_pub < i_ts
     assert "target=dtls_rtp_publish_run" in src
+
+
+# --------------------------------------------------------------------------- #
+# review fixes: reorder, unannounced ports, close during connect               #
+# --------------------------------------------------------------------------- #
+
+
+def test_reorder_passes_in_order_packets_straight_through():
+    b = rp.RtpReorderBuffer()
+    assert b.push(10, "a", 0.0) == ["a"]
+    assert b.push(11, "b", 0.0) == ["b"]
+    assert b.push(0xFFFF, "late", 0.0) == [] and b.late == 1
+
+
+def test_reorder_fills_a_gap_in_sequence_order():
+    b = rp.RtpReorderBuffer()
+    assert b.push(1, "1", 0.0) == ["1"]
+    assert b.push(3, "3", 0.01) == []
+    assert b.push(4, "4", 0.02) == []
+    assert b.push(2, "2", 0.05) == ["2", "3", "4"]  # e.g. a NACK retransmit
+    assert b.push(2, "dup", 0.06) == [] and b.late == 1
+
+
+def test_reorder_skips_a_gap_that_never_fills():
+    b = rp.RtpReorderBuffer(max_delay_s=0.5)
+    b.push(1, "1", 0.0)
+    b.push(3, "3", 1.0)
+    assert b.expire(1.4) == []
+    assert b.expire(1.5) == ["3"] and b.skipped == 1
+    assert b.push(4, "4", 1.6) == ["4"]
+
+
+def test_reorder_wraps_and_resyncs_on_a_new_sender():
+    b = rp.RtpReorderBuffer()
+    b.push(0xFFFE, "a", 0.0)
+    assert b.push(0x0000, "c", 0.0) == []
+    assert b.push(0xFFFF, "b", 0.0) == ["b", "c"]
+    assert b.push(30000, "new", 0.1) == ["new"]  # far jump: resync, not a gap
+    assert b.push(30001, "next", 0.1) == ["next"]
+
+
+def test_reorder_bounds_what_it_holds():
+    b = rp.RtpReorderBuffer(max_packets=3)
+    b.push(1, 1, 0.0)
+    for sq in (3, 4, 5):
+        assert b.push(sq, sq, 0.0) == []
+    assert b.push(6, 6, 0.0) == [3, 4, 5, 6]
+
+
+def test_loopback_publisher_reorders_before_publishing(go2rtc):
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for sq, body, mk in ((100, b"A", False), (102, b"C", True), (101, b"B", False)):
+            tx.sendto(rp.build_rtp(96, mk, sq, 9000, 1, body), ("127.0.0.1", v_port))
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 3)
+        got = [rp.parse_rtp(p) for _, p in go2rtc.frames]
+        assert [g[4] for g in got] == [b"A", b"B", b"C"]
+        assert len({g[3] for g in got}) == 1  # one frame, one timestamp
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_video_only_publish_still_binds_the_audio_port(go2rtc):
+    """The SDES open waits for BOTH loopback ports before signalling; binding
+    only the announced one cost every video-only open the 3 s wait plus 1.5 s."""
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), include_audio=False
+    )
+    try:
+        assert _udp_port_bound(a_port) and _udp_port_bound(v_port)
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        assert "m=audio" not in go2rtc.announced[0]
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        tx.sendto(
+            rp.build_rtp(8, False, 1, 160, 1, b"\xd5" * 160), ("127.0.0.1", a_port)
+        )
+        tx.sendto(rp.build_rtp(96, True, 1, 90, 1, b"\x65v"), ("127.0.0.1", v_port))
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 1)
+        time.sleep(0.2)
+        assert [ch for ch, _ in go2rtc.frames] == [0]  # audio read and discarded
+    finally:
+        proc.terminate()
+        proc.wait(3)
+    assert not _udp_port_bound(a_port)
+
+
+def test_a_close_during_connect_leaves_no_publish_behind():
+    """close() before the handshake finishes must win: the handshake tears
+    itself down rather than leaving an orphaned producer in go2rtc."""
+    srv = FakeGo2rtc()
+    gate = threading.Event()
+    orig = srv._serve
+
+    def slow(c):
+        gate.wait(5)  # hold the handshake open
+        orig(c)
+
+    srv._serve = slow
+    try:
+        sdp, tracks, _ = rp.publish_sdp_from_serve_sdp(SERVE_SDP, ("video",))
+        pub = rp.RtspPublisher(srv.url(), sdp, tracks)
+        err = []
+
+        def run():
+            try:
+                pub.connect()
+            except Exception as exc:
+                err.append(exc)
+
+        t = threading.Thread(target=run)
+        t.start()
+        time.sleep(0.2)
+        pub.close()
+        gate.set()
+        t.join(6)
+        assert err and not pub.alive
+        assert "RECORD" not in srv.requests or _wait(srv.closed.is_set)
+    finally:
+        srv.stop()
+
+
+def test_close_before_connect_is_sticky(go2rtc):
+    sdp, tracks, _ = rp.publish_sdp_from_serve_sdp(SERVE_SDP)
+    pub = rp.RtspPublisher(go2rtc.url(), sdp, tracks)
+    pub.close()
+    with pytest.raises(rp.RtspPublishError):
+        pub.connect()
+    assert "ANNOUNCE" not in go2rtc.requests
