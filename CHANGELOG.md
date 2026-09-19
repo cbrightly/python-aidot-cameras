@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc25]
+
 ### Changed
 
 - **Direct publish now only takes H.264 sessions.** The publisher is measured

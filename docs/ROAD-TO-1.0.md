@@ -1892,6 +1892,16 @@ The bar counts *streaming-breaking* releases, so this does not reset it.
 
 **Day zero stays wherever `rc23` set it.**
 
+#### 2026-09-19: `rc25` narrows direct publish to H.264
+
+`rc25` stops the direct publisher taking a session that negotiated H.265: it
+keeps the ffmpeg serve instead, the path that has carried H.265 all along.
+Direct publish is opt-in and off by default, so the shipped default behaviour
+is unchanged, and for anyone who has turned it on this REMOVES an unvalidated
+path rather than adding one. It does not reset the clock.
+
+**Day zero stays wherever `rc23` set it.**
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /
