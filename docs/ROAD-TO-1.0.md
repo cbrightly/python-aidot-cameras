@@ -1882,6 +1882,16 @@ installed as a release, with the integration release that pins it.
 **Day zero moves to the date the box settles on `rc23`; two weeks from it is
 the new target.**
 
+#### 2026-09-19: `rc24` is an additive go2rtc-registration change
+
+`rc24` adds `extra_sources` to `Go2rtcClient.ensure_stream`, so a stream can
+be registered with a transcoding source after the live one. Nothing in the
+streaming path changed: no serve, no bridge, no publisher code is touched, and
+with no caller passing `extra_sources` the PUT is byte-identical to before.
+The bar counts *streaming-breaking* releases, so this does not reset it.
+
+**Day zero stays wherever `rc23` set it.**
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /

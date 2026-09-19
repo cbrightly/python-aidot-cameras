@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc24]
+
 ### Added
 
 - **`Go2rtcClient.ensure_stream(..., extra_sources=...)`.** A stream can be
