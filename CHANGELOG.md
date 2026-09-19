@@ -6,6 +6,17 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- **`Go2rtcClient.ensure_stream(..., extra_sources=...)`.** A stream can be
+  registered with more than one source. go2rtc serves each consumer from the
+  first source whose codecs match, so a transcoding source listed after the
+  live one is used only by a consumer the live one cannot satisfy - which is
+  how a direct publish (PCMA audio) can still feed an AAC-only consumer such
+  as Home Assistant's HLS player, with go2rtc starting that transcode on
+  demand and stopping it with its last consumer. A WebRTC viewer keeps the
+  untranscoded passthrough.
+
 ## [1.0.0rc23]
 
 ### Added

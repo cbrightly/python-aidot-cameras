@@ -95,16 +95,26 @@ class Go2rtcClient:
             return len(consumers)
         return None
 
-    async def ensure_stream(self, name: str, source: str) -> bool:
-        """Register (or replace) ``name`` -> ``source``. Returns True on 200."""
+    async def ensure_stream(self, name: str, source, *, extra_sources=()) -> bool:
+        """Register (or replace) ``name`` -> ``source``. Returns True on 200.
+
+        ``extra_sources`` adds further sources to the same stream. go2rtc tries
+        a stream's sources in order and serves a consumer from the first whose
+        codecs match, so a transcoding source listed before the live one is
+        used only by consumers the live one cannot satisfy. That is how a
+        PCMA publisher can still serve an AAC-only consumer (Home Assistant's
+        HLS player): add ``ffmpeg:<name>#audio=aac``, which go2rtc starts on
+        demand and stops with its last consumer.
+        """
+        sources = [source, *extra_sources]
         try:
             async with self._session.put(
                 f"{self._base}/api/streams",
-                params={"name": name, "src": source},
+                params=[("name", name), *(("src", s) for s in sources)],
                 timeout=self._timeout,
             ) as resp:
                 if resp.status == 200:
-                    _LOGGER.info("go2rtc: registered stream %r -> %s", name, source)
+                    _LOGGER.info("go2rtc: registered stream %r -> %s", name, sources)
                     return True
                 _LOGGER.warning(
                     "go2rtc: add stream %r failed http=%s", name, resp.status

@@ -162,12 +162,16 @@ the publisher applies it on the A-law bytes through a 256-entry lookup table
 (`g711` decode -> scale/clip -> encode), so the knob keeps working. DTLS AGC is
 not carried over in A1 (noted as a gap; re-evaluate after listening tests).
 
-Trade-off: HA's HLS fallback and recorder drop PCMA and keep video only. Phase
-A3 restores AAC *only for those consumers*, lazily, via go2rtc: the stream
-definition gains an `ffmpeg:aidot_x#audio=aac` source and the HLS branch of
-`stream_source()` (already detected via `_STREAM_SOURCE_HLS`) returns the
-`?video&audio=aac` URL, so go2rtc starts that transcode only while an HLS
-consumer exists. WebRTC viewers never pay for it.
+Trade-off: HA's HLS fallback and recorder drop PCMA and keep video only.
+**Phase A3 (built)** restores AAC for exactly those consumers: the stream
+definition gains an `ffmpeg:aidot_x#audio=aac` source *after* the live one.
+go2rtc serves each consumer from the first source whose codecs match, so an
+AAC-only consumer gets the transcode - started on demand, stopped with its
+last consumer - while a WebRTC viewer, whose browser does not offer AAC,
+still gets the PCMA passthrough. No URL variant is needed, so the HLS branch
+of `stream_source()` is unchanged. Verified against go2rtc 1.9.14:
+`?audio=aac` yields `aac + h264` and `?audio=pcma` yields `pcm_alaw + h264`
+from the same publish (`tests/test_rtsp_publish_go2rtc.py`).
 
 ## Integration (hass-aidot-cameras)
 
@@ -200,7 +204,7 @@ consumer exists. WebRTC viewers never pay for it.
 | **A1** | Library: `rtsp_publish.py`, SDES launch-site swap, DTLS publish runner, `AIDOT_DIRECT_PUBLISH` (default off), CLI honours it. Unit tests + e2e against `FakeRtspSink` and a real go2rtc 1.9.14 binary on loopback. | Suite green; synthetic RTP round-trips through a real go2rtc to an RTSP reader with correct codecs. |
 | **A2** | Integration: option, DTLS push routing when enabled, tests. | HA test suite green. |
 | **Live** | On the camera LAN box: each model (A000088, A001064, A001513) - cold start, 30 min soak, HA WebRTC view, HLS fallback, idle release, go2rtc restart, camera power-cycle. Compare against flag-off baseline. | See "Validation gate". |
-| **A3** | HLS/recorder AAC via lazy go2rtc `ffmpeg:` source; decide DTLS AGC. | HLS has audio; WebRTC unaffected. |
+| **A3** | DONE: HLS/recorder AAC via a lazy go2rtc `ffmpeg:` source listed after the live one. DTLS AGC still undecided. | HLS has audio; WebRTC unaffected. |
 | **A4** | Default on; ffmpeg push path kept one release as fallback, then removed along with `_ServeRelay`, CRC ports and the pull registration for push cameras. | One release with no regressions reported. |
 
 ## Validation gate (before any push or publish)
