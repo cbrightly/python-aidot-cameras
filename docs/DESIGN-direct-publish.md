@@ -1,7 +1,7 @@
 # Design: publish decrypted media straight into go2rtc (no ffmpeg hop)
 
-Status: **proposed, phase A1 in progress** on `feat/direct-rtsp-publish` (library
-and integration). Local only - nothing pushed or published until it has passed
+Status: **A1 and A2 implemented, awaiting live validation** on
+`feat/direct-rtsp-publish` (library and integration). Local only - nothing pushed or published until it has passed
 live validation on real cameras (see "Validation gate").
 
 ## Why
@@ -203,6 +203,21 @@ consumer exists. WebRTC viewers never pay for it.
 | **A4** | Default on; ffmpeg push path kept one release as fallback, then removed along with `_ServeRelay`, CRC ports and the pull registration for push cameras. | One release with no regressions reported. |
 
 ## Validation gate (before any push or publish)
+
+Run `scripts/live_publish_ab.py` on the camera LAN, against a go2rtc you
+control, with HA's own sessions closed (the camera answers -50002 when busy):
+
+```bash
+python scripts/live_publish_ab.py --go2rtc http://127.0.0.1:1984 --rtsp-port 8554 \
+    --view-s 30 --repeats 2                 # A/B per camera, ~10 min per camera
+python scripts/live_publish_ab.py --go2rtc http://127.0.0.1:1984 --rtsp-port 8554 \
+    --view-s 30 --soak-s 1800 --name <cam>  # 30 min soak, one camera at a time
+```
+
+`live_validate.py` (the release gate) is not enough on its own: it records
+through `output_path`, which keeps ffmpeg by design, so it never runs the
+direct publisher. Then, with the integration's option on, check HA itself
+(WebRTC view with audio, HLS fallback with video).
 
 Measured against the same box with the flag off:
 
