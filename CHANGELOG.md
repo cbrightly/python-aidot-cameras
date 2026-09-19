@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc23]
+
 ### Added
 
 - **Direct publish into go2rtc, no ffmpeg (opt-in, `AIDOT_DIRECT_PUBLISH=1`).**

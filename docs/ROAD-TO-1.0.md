@@ -1863,6 +1863,25 @@ previously-good streaming code - it is observability only. The bar counts
 
 **Day zero stays 2026-09-16. Two weeks from it is 2026-09-30.**
 
+#### 2026-09-19: `rc23` resets the clock
+
+`rc23` adds direct publish (`AIDOT_DIRECT_PUBLISH`, opt-in and inert unset)
+and fixes `aidot-go2rtc <dtls-camera> -`, which served no media. With the
+switch off the streaming behaviour a viewer sees is unchanged, but the release
+still changes code the soak is meant to be measuring - both SDES serve launch
+sites now go through one spawn helper, and the DTLS serve loop chooses its
+sink differently - and the stdout fix is a fix to a broken streaming path. On
+the strict reading in force (see `rc21`) that resets the clock.
+
+Before release it was run live on seven cameras (A000088 x3, A001064,
+A001513 x3) with the switch off and on, plus 30 min soaks on one SDES and one
+DTLS camera, battery soaks and an idle-release timing - see "Live results" in
+`docs/DESIGN-direct-publish.md`. Day zero is the day the box settles on `rc23`
+installed as a release, with the integration release that pins it.
+
+**Day zero moves to the date the box settles on `rc23`; two weeks from it is
+the new target.**
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /
