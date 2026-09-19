@@ -971,8 +971,24 @@ _SERVE_STDERR_NOISE = (
 )
 
 
+#: Codec the direct publisher is validated for. H.265 sessions keep the ffmpeg
+#: serve unless AIDOT_DIRECT_PUBLISH_H265 says otherwise - see
+#: _should_direct_publish.
+_DIRECT_PUBLISH_VIDEO_PT = 96
+
+
+def _direct_publish_h265_allowed() -> bool:
+    """Whether a session that negotiated H.265 may be direct-published."""
+    return os.environ.get("AIDOT_DIRECT_PUBLISH_H265", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _should_direct_publish(
-    rtsp_push_url, output_path, max_seconds, plain_rtp: bool
+    rtsp_push_url, output_path, max_seconds, plain_rtp: bool, video_pt=None
 ) -> bool:
     """Whether the SDES serve publishes in-process instead of running ffmpeg.
 
@@ -984,7 +1000,21 @@ def _should_direct_publish(
     SDES model the loopback ports carry SRTP that the serve ffmpeg decrypts
     from the SDP's ``a=crypto`` keys, and the publisher would forward it still
     encrypted - a stream go2rtc accepts and nobody can decode.
+
+    And only for the codec the publisher is validated on. ``video_pt`` is what
+    the serve SDP was narrowed to: 96 (H.264) is measured on seven cameras,
+    while H.265 has only ever been published synthetically - the A001064
+    chooses its own codec and answered H.264 every time it was asked. An H.265
+    session therefore keeps the ffmpeg serve, which has carried H.265 in the
+    field all along. ``AIDOT_DIRECT_PUBLISH_H265=1`` lifts that for anyone
+    validating it, and ``video_pt=None`` (codec not yet known) does not gate.
     """
+    if (
+        video_pt is not None
+        and video_pt != _DIRECT_PUBLISH_VIDEO_PT
+        and not _direct_publish_h265_allowed()
+    ):
+        return False
     return (
         plain_rtp
         and direct_publish_enabled()
@@ -8949,15 +8979,25 @@ class _SdesOpenMixin:
         # live push qualifies - recordings, snapshots and the decode drain keep
         # ffmpeg. See docs/DESIGN-direct-publish.md.
         _direct_publish = _should_direct_publish(
-            rtsp_push_url, output_path, max_seconds, _use_plain_rtp
+            rtsp_push_url, output_path, max_seconds, _use_plain_rtp, _keep_v
         )
         if not _direct_publish and _should_direct_publish(
-            rtsp_push_url, output_path, max_seconds, True
+            rtsp_push_url, output_path, max_seconds, True, _keep_v
         ):
             _LOGGER.info(
                 "camera %s: direct publish is on but this model's media reaches"
                 " the serve still SRTP-encrypted; keeping the ffmpeg serve",
                 getattr(self, "device_id", "?"),
+            )
+        elif not _direct_publish and _should_direct_publish(
+            rtsp_push_url, output_path, max_seconds, _use_plain_rtp
+        ):
+            _LOGGER.info(
+                "camera %s: this session negotiated video pt=%s, which the"
+                " direct publisher is not validated for; keeping the ffmpeg"
+                " serve (AIDOT_DIRECT_PUBLISH_H265=1 to publish it anyway)",
+                getattr(self, "device_id", "?"),
+                _keep_v,
             )
         _direct_audio = bool(_serve_audio and _keep_a is not None)
         _direct_timeout = _resolve_serve_input_timeout_s(

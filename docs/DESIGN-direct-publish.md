@@ -314,10 +314,18 @@ in 7.5 min on the worst camera) where the ffmpeg arm logged repeated
    RTSP on 18554). Supporting the bundled server needs the stream-create call to
    go through HA's own go2rtc client; worth doing independently of this design.
 2. Should the DTLS runner keep the mux's AGC? Needs a listening test.
-3. H.265 publishing is unexercised: the A001064 answered H.264 in 4 of 4
-   H.265-first offers on 2026-09-19. go2rtc drops an H.265 fmtp without
-   vps/sps/pps, and the publisher sends none, so parameter sets must arrive
-   in-band - to be confirmed on a session that actually negotiates H.265.
+3. H.265 from a CAMERA is still unexercised, and direct publish is gated to
+   H.264 because of it (`_should_direct_publish`'s `video_pt`; an H.265
+   session keeps the ffmpeg serve, `AIDOT_DIRECT_PUBLISH_H265=1` lifts it).
+   Across 9 sessions on 2026-09-19 - 4 of them with H.265 offered first - the
+   A001064 answered H.264 every time, and the HD/SD control that might have
+   moved it is acked and inert on that model. What IS proven is the publisher
+   and go2rtc: synthetic H.265 (libx265, headers repeated per keyframe)
+   publishes and decodes, with go2rtc dropping our parameter-less fmtp and
+   taking the parameter sets in-band. What that does NOT prove is the
+   camera's own H.265: its payload-type numbering (this fleet has put H.265
+   on pt 0), whether it repeats parameter sets in-band or only at session
+   start, and its fragmentation. Lift the gate on a real H.265 session.
 4. A persistent per-camera publisher across camera sessions (continuous
    timeline, no re-ANNOUNCE) would hide reconnects from viewers entirely - but
    the A001064's H.264/H.265 flip forces a re-ANNOUNCE anyway. Revisit after A4.

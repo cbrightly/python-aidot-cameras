@@ -6,6 +6,18 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Changed
+
+- **Direct publish now only takes H.264 sessions.** The publisher is measured
+  on seven cameras with H.264; a camera's H.265 has never been published,
+  because the A001064 chooses its own codec and answered H.264 in 9 of 9
+  sessions (4 of them offered H.265 first) and the HD/SD control that might
+  have moved it is inert on that model. A session that negotiates H.265 keeps
+  the ffmpeg serve, which has carried H.265 in the field all along, and says
+  so in the log. `AIDOT_DIRECT_PUBLISH_H265=1` lifts the gate for anyone
+  validating it on hardware. Synthetic H.265 through the publisher is covered
+  by a test, which proves the publisher and go2rtc but not the camera.
+
 ## [1.0.0rc24]
 
 ### Added

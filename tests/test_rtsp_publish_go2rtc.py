@@ -316,3 +316,104 @@ def test_an_aac_only_consumer_is_served_from_a_pcma_publish(tmp_path):
     assert aac["frames"] >= 5, (aac, tail)
     # The publisher's own audio still reaches a consumer that takes it.
     assert pcma.get("codecs") == ["h264", "pcm_alaw"], (pcma, tail)
+
+
+def _encode_h265_aus(n=40, fps=15):
+    """``n`` Annex-B H.265 access units (VPS/SPS/PPS in-band on keyframes)."""
+    from fractions import Fraction
+
+    import numpy as np
+
+    ctx = av.CodecContext.create("libx265", "w")
+    ctx.width, ctx.height = 320, 240
+    ctx.pix_fmt = "yuv420p"
+    ctx.time_base = Fraction(1, fps)
+    ctx.framerate = Fraction(fps, 1)
+    ctx.options = {"x265-params": "keyint=15:min-keyint=15:bframes=0:repeat-headers=1"}
+    aus = []
+    for i in range(n):
+        img = np.zeros((240, 320, 3), dtype=np.uint8)
+        img[:, (i * 5) % 320 :] = (i * 4) % 255
+        frame = av.VideoFrame.from_ndarray(img, format="rgb24").reformat(
+            format="yuv420p"
+        )
+        frame.pts = i
+        for pkt in ctx.encode(frame):
+            aus.append(bytes(pkt))
+    for pkt in ctx.encode(None):
+        aus.append(bytes(pkt))
+    return aus
+
+
+def _packetize_h265(au, mtu=1200):
+    """RFC 7798 payloads for one access unit: single NAL, or FU when too big."""
+    out = []
+    for nal in rp.split_annexb(au):
+        if len(nal) <= mtu:
+            out.append((nal, False))
+            continue
+        typ = (nal[0] >> 1) & 0x3F
+        layer_tid = ((nal[0] & 0x01) << 8) | nal[1]
+        payload_hdr = bytes(((49 << 1) | (layer_tid >> 8), layer_tid & 0xFF))
+        body = nal[2:]
+        step = mtu - 3
+        for off in range(0, len(body), step):
+            chunk = body[off : off + step]
+            start, end = off == 0, off + step >= len(body)
+            fu = (0x80 if start else 0) | (0x40 if end else 0) | typ
+            out.append((payload_hdr + bytes((fu,)) + chunk, False))
+    if out:
+        out[-1] = (out[-1][0], True)
+    return out
+
+
+def test_h265_publish_through_real_go2rtc(go2rtc):
+    """The A001064 answers H.265 in some sessions and this package's SDP names
+    no sprop-vps/sps/pps for it, so go2rtc drops that fmtp - the parameter sets
+    have to arrive in-band. Publish real H.265 the way the SDES path would and
+    read it back decoded."""
+    aus = _encode_h265_aus()
+    a_port, v_port = _free_port(), _free_port()
+    # What the SDES open narrows to when the camera answers H.265 (pt 97).
+    serve_sdp = (
+        "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=aidot-tutk-rx\r\nt=0 0\r\n"
+        f"m=audio {a_port} RTP/AVP 8\r\nc=IN IP4 127.0.0.1\r\n"
+        "a=rtpmap:8 PCMA/8000\r\na=rtcp-mux\r\n"
+        f"m=video {v_port} RTP/AVP 97\r\nc=IN IP4 127.0.0.1\r\n"
+        "a=rtpmap:97 H265/90000\r\na=fmtp:97 level-id=93\r\na=rtcp-mux\r\n"
+    )
+    url = f"rtsp://127.0.0.1:{go2rtc['rtsp']}/aidot_cam"
+    proc = rp.LoopbackRtpPublisher(serve_sdp, url, device_id="it", input_timeout_s=20)
+    stop = threading.Event()
+
+    def feed():
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        seq = ts = k = 0
+        while not stop.is_set():
+            for payload, marker in _packetize_h265(aus[k % len(aus)]):
+                seq += 1
+                tx.sendto(
+                    rp.build_rtp(97, marker, seq, ts, 0x3333, payload),
+                    ("127.0.0.1", v_port),
+                )
+            ts += 6000
+            k += 1
+            time.sleep(1 / 15)
+        tx.close()
+
+    threading.Thread(target=feed, daemon=True).start()
+    try:
+        assert _wait_for_publisher(go2rtc["api"])
+        out = _read_back(url, want_frames=15)
+    finally:
+        stop.set()
+        proc.terminate()
+        proc.wait(5)
+    assert "error" not in out, (out, go2rtc["log"].read_text()[-2500:])
+    # The audio track is announced from the same serve SDP, so it is listed
+    # even though this test publishes no audio.
+    assert out["codecs"] == ["hevc", "pcm_alaw"], (
+        out,
+        go2rtc["log"].read_text()[-2500:],
+    )
+    assert out["frames"] >= 15, out

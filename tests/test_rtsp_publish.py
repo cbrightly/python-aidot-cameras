@@ -729,7 +729,7 @@ def test_the_open_passes_the_plain_rtp_decision_through():
     src = inspect.getsource(sdes_open)
     assert (
         "_direct_publish = _should_direct_publish(\n"
-        "            rtsp_push_url, output_path, max_seconds, _use_plain_rtp\n"
+        "            rtsp_push_url, output_path, max_seconds, _use_plain_rtp, _keep_v\n"
     ) in src
 
 
@@ -955,3 +955,33 @@ def test_close_racing_an_aborting_handshake_does_not_raise(go2rtc):
     pub._sock = Vanishing(pub._sock)
     pub.close()  # must not raise
     assert not pub.alive
+
+
+def test_direct_publish_is_gated_to_the_validated_codec(monkeypatch):
+    """H.265 has only ever been published synthetically: the A001064 picks its
+    own codec and answered H.264 every time it was asked. Such a session keeps
+    the ffmpeg serve, which has carried H.265 in the field all along."""
+    from aidot_cameras.camera.sdes_open import _should_direct_publish
+
+    url = "rtsp://127.0.0.1:8554/aidot_x"
+    monkeypatch.setenv(rp.ENV_DIRECT_PUBLISH, "1")
+    monkeypatch.delenv("AIDOT_DIRECT_PUBLISH_H265", raising=False)
+    assert _should_direct_publish(url, None, None, True, 96)  # H.264
+    assert not _should_direct_publish(url, None, None, True, 97)  # H.265
+    # Codec not known yet (no narrowing): the caller decides later.
+    assert _should_direct_publish(url, None, None, True, None)
+    # An escape hatch for whoever validates H.265 on real hardware.
+    monkeypatch.setenv("AIDOT_DIRECT_PUBLISH_H265", "1")
+    assert _should_direct_publish(url, None, None, True, 97)
+
+
+def test_the_open_passes_the_narrowed_codec_to_the_decision():
+    import inspect
+
+    from aidot_cameras.camera import sdes_open
+
+    src = inspect.getsource(sdes_open)
+    assert (
+        "_direct_publish = _should_direct_publish(\n"
+        "            rtsp_push_url, output_path, max_seconds, _use_plain_rtp, _keep_v\n"
+    ) in src
