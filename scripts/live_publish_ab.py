@@ -256,18 +256,20 @@ async def _camera(client, cam, g2, http, args, gate) -> tuple:
     if soak_s and battery and args.battery_soak_s is not None:
         soak_s = min(soak_s, args.battery_soak_s)
     entry = {
-        "name": cam.get(CONF_NAME),
-        "device_id": cam.get(CONF_ID),
+        "camera": cam["_label"],
         "model": _model(dc),
         "battery": battery,
         "soak_s": soak_s,
         "opens": [],
     }
-    tag = f"[{entry['name']}]"
+    if args.show_names:
+        entry["name"] = cam.get(CONF_NAME)
+        entry["device_id"] = cam.get(CONF_ID)
+    tag = f"[{entry['camera']}]"
     ok = True
     arms = tuple(a for a in ARMS if a in args.arms)
     async with gate:
-        print(f"== {entry['name']} ({entry['model']}{', battery' if battery else ''})")
+        print(f"== {tag} ({entry['model']}{', battery' if battery else ''})")
         for rep in range(args.repeats):
             for arm in arms if rep % 2 == 0 else tuple(reversed(arms)):
                 if entry["opens"]:
@@ -320,6 +322,17 @@ async def _run(args) -> int:
         )
         devices = (await client.async_get_all_device())[CONF_DEVICE_LIST]
         cams = [d for d in devices if _is_camera(client.get_device_client(d))]
+        # Labelled before any --name filter, so an index is stable across runs.
+        # Anonymous labels by default ("A001513 #2"): the output is what ends
+        # up pasted into docs and issues, and camera names are the user's own
+        # room/location names. --show-names is for a private debugging session.
+        seen: dict = {}
+        for cam in cams:
+            key = _model(client.get_device_client(cam)).rsplit(".", 1)[-1] or "camera"
+            seen[key] = seen.get(key, 0) + 1
+            cam["_label"] = f"{key} #{seen[key]}"
+            if args.show_names:
+                cam["_label"] += f" ({cam.get(CONF_NAME)})"
         if args.name:
             want = [n.lower() for n in args.name]
             cams = [
@@ -372,6 +385,12 @@ def main() -> int:
         default=1,
         help="cameras run at once (opens of one camera stay sequential); needs a"
         " single --arms value, because the direct/ffmpeg switch is process-wide",
+    )
+    p.add_argument(
+        "--show-names",
+        action="store_true",
+        help="print and record camera names and device ids (default: model + index"
+        " only, so the output can be shared without the camera owner's details)",
     )
     p.add_argument("--report", default="/tmp/aidot-publish-ab.json")
     args = p.parse_args()
