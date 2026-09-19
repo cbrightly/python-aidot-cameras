@@ -25,6 +25,11 @@ from .constants import (
 )
 from .models import VideoFrame  # noqa: F401 - forward-ref annotation
 from .sdes import SdesSession
+from .rtsp_publish import (
+    LoopbackRtpPublisher,
+    direct_publish_enabled,
+    is_publishable_url,
+)
 from .protocol import (
     AVIO_HDR_LEN,
     REMB_TARGET_BPS,
@@ -964,6 +969,21 @@ _SERVE_STDERR_NOISE = (
     "RTP: missed",
     "max delay reached",
 )
+
+
+def _should_direct_publish(rtsp_push_url, output_path, max_seconds) -> bool:
+    """Whether the SDES serve publishes in-process instead of running ffmpeg.
+
+    Only a live RTSP push qualifies, and only with ``AIDOT_DIRECT_PUBLISH`` on:
+    recordings and snapshots (``output_path`` / ``max_seconds``) and the
+    ``-f null`` decode drain keep ffmpeg. See docs/DESIGN-direct-publish.md.
+    """
+    return (
+        direct_publish_enabled()
+        and is_publishable_url(rtsp_push_url)
+        and not output_path
+        and not max_seconds
+    )
 
 
 def _start_serve_stderr_drain(
@@ -8856,10 +8876,53 @@ class _SdesOpenMixin:
                     "_open_sdes_stream",
                     exc_info=True,
                 )
+        # Direct publish (AIDOT_DIRECT_PUBLISH): an in-process RTSP publisher
+        # replaces the push ffmpeg. It reads the same narrowed SDP and the same
+        # loopback ports and is Popen-compatible, so everything below that
+        # polls, terminates, reaps or relaunches `proc` is unchanged. Only a
+        # live push qualifies - recordings, snapshots and the decode drain keep
+        # ffmpeg. See docs/DESIGN-direct-publish.md.
+        _direct_publish = _should_direct_publish(
+            rtsp_push_url, output_path, max_seconds
+        )
+        _direct_audio = bool(_serve_audio and _keep_a is not None)
+        _direct_timeout = _resolve_serve_input_timeout_s(
+            bool(getattr(self, "is_battery_camera", False))
+        )
+        _direct_gain_db = self._resolve_sdes_audio_gain_db()
+
+        def _spawn_serve():
+            """Start the serve: the direct publisher, or the ffmpeg in `cmd`."""
+            if _direct_publish:
+                with open(sdp_path, encoding="utf-8") as _f_dp:
+                    _dp_sdp = _f_dp.read()
+                return LoopbackRtpPublisher(
+                    _dp_sdp,
+                    rtsp_push_url,
+                    input_timeout_s=_direct_timeout,
+                    audio_gain_db=_direct_gain_db,
+                    device_id=str(getattr(self, "device_id", "?")),
+                    include_audio=_direct_audio,
+                )
+            _p = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            _start_serve_stderr_drain(_p)
+            return _p
+
         # Do not launch the publisher into a listener that is not up yet.
         await _await_rtsp_publish_target(rtsp_push_url)
-        _LOGGER.info("SDES ffmpeg cmd: %s", " ".join(cmd))
-        if _ffmpeg_path() is None:
+        if _direct_publish:
+            _LOGGER.info(
+                "camera %s: SDES serve: direct RTSP publish (no ffmpeg)%s",
+                getattr(self, "device_id", "?"),
+                "" if _direct_audio else ", video only",
+            )
+        else:
+            _LOGGER.info("SDES ffmpeg cmd: %s", " ".join(cmd))
+        if not _direct_publish and _ffmpeg_path() is None:
             # ffmpeg is not installed - clean up and surface a clear error
             # before launching (avoids a cryptic FileNotFoundError).
             for _rsock in (_audio_sock, _video_sock):
@@ -8889,12 +8952,7 @@ class _SdesOpenMixin:
                 "  Windows:         https://ffmpeg.org/download.html"
             )
         try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            _start_serve_stderr_drain(proc)
+            proc = _spawn_serve()
             _proc_holder[0] = proc
             _cl(_reap, proc)  # kill ffmpeg if the open is cancelled before hand-off
         except FileNotFoundError:
@@ -9166,12 +9224,7 @@ class _SdesOpenMixin:
                             _LOGGER.warning(
                                 "could not rewrite SDP for restart: %s", _sdp_exc2
                             )
-                        proc = subprocess.Popen(
-                            cmd,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE,
-                        )
-                        _start_serve_stderr_drain(proc)
+                        proc = _spawn_serve()
                         # Point the shared holder at the live proc immediately.
                         # The bridge thread polls _proc_holder[0]; if it still
                         # sees the terminated old proc it logs "stream ended",
