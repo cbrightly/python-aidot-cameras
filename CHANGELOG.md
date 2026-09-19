@@ -33,7 +33,10 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   no ffmpeg ran on the direct opens, the publisher reached go2rtc sooner on
   every camera (DTLS 6.6-7.0 s -> 1.5-1.8 s; SDES 4.7-9.2 s -> 2.5-6.7 s),
   first frame on DTLS came 3.4-3.9 s -> 0.5-0.8 s, and no packet was late or
-  lost. Off by default until it has soaked; see
+  lost. 30 min soaks on one SDES and one DTLS camera: no publisher drops, flat
+  thread and fd counts. Battery cameras are released on the same ~120 s idle
+  window as with ffmpeg (measured 120.2-120.4 s), so direct publish does not
+  keep them awake. H.265 publishing is not yet exercised. Off by default; see
   `docs/DESIGN-direct-publish.md`.
 - **`scripts/live_publish_ab.py`** - the live check for the above, which
   `live_validate.py` cannot give (a recording keeps ffmpeg). Opens each camera

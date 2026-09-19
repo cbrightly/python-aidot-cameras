@@ -1,7 +1,8 @@
 # Design: publish decrypted media straight into go2rtc (no ffmpeg hop)
 
-Status: **A1 and A2 implemented; live A/B passed on seven cameras (H.264),
-soak in progress** on `feat/direct-rtsp-publish` (library and integration). Local only - nothing pushed or published until it has passed
+Status: **A1 and A2 implemented; live-validated on seven cameras (H.264):
+A/B, 30 min soaks per transport, battery soaks and idle release** on
+`feat/direct-rtsp-publish` (library and integration). H.265 unexercised. Local only - nothing pushed or published until it has passed
 live validation on real cameras (see "Validation gate").
 
 ## Why
@@ -265,8 +266,42 @@ second case is why audio is now attached from the negotiated answer.
 
 **Pass 2 (2026-09-19):** H.265-first offer on the A001064, both arms, twice:
 4/4 passed, but the camera answered H.264 every time, so H.265 publishing is
-still unexercised. Direct attach 2.5-2.8 s vs ffmpeg 4.4-5.2 s. Soaks: see
-below once complete.
+still unexercised. Direct attach 2.5-2.8 s vs ffmpeg 4.4-5.2 s.
+
+30 min soaks, direct arm, a viewer attached throughout:
+
+| | A001064 PTZ (SDES) | A000088 mains #1 (DTLS) |
+| --- | --- | --- |
+| Publisher drops / uptime | 0 / 100% | 0 / 100% |
+| Longest gap between packets at the viewer | 0.45 s | 1.63 s (once) |
+| Threads, first -> last sample | 8 -> 9 | 15 -> 15 |
+| fds, first -> last sample | 33 -> 32 | 33 -> 32 |
+| ffmpeg processes | 0 | 0 |
+
+The PTZ published 240,082 packets: 28 timestamp repairs, 0 late, 2 lost.
+
+**Pass 3 (2026-09-19): battery cameras (A001513 x3), in parallel.** ffmpeg arm,
+then direct arm with the negotiated-audio change, a 5 min soak and the
+idle-release timing (session left running after the viewer detached).
+
+| | ffmpeg arm | direct arm |
+| --- | --- | --- |
+| Publisher attached | 6.5 / 9.5 / 11.8 s | 4.7 / 5.4* / 9.5 s |
+| Idle release after the viewer left | 120.2 / 118.2 / 120.2 s | 120.4 / 120.3* / 120.2 s |
+| Audio | 2 of 3 (one went video-only) | announced on 3 of 3; one attached from the answer before its first packet |
+| 5 min soak | - | 0 drops, 100% up, longest gap 0.29-1.32 s |
+
+\* battery #2's direct open failed first with a signalling no-show (no
+`webrtcResp`, no ICE, no media - before any serve starts, so neither publisher
+nor ffmpeg ran); the figures are its retry, run alone. Battery #2 sends no
+audio at all - no audio RTP in a 7.5 min session - so its announced track
+stays empty; that is the camera, not negotiation.
+
+So a battery camera is released on the same ~120 s idle window with the
+direct publisher as with ffmpeg: the publisher does not keep it awake. On
+lossy links the reorder buffer absorbed late packets (up to 11 late / 15 lost
+in 7.5 min on the worst camera) where the ffmpeg arm logged repeated
+"missed N packets" and corrupted NAL units.
 
 ## Open questions
 
