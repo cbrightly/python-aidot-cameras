@@ -572,9 +572,14 @@ class RtspPublisher:
             self._dead.set()
 
     def close(self, teardown: bool = True) -> None:
+        """Idempotent and never raises: it runs in every owner's cleanup, and
+        can race a handshake that is aborting on another thread (which clears
+        ``_sock``) - so it works on ONE reference taken under the lock."""
         with self._lock:
             self._closed = True
-        if self._sock is None:
+            sock = self._sock
+        if sock is None:
+            self._mark_dead(self.error or "closed")
             return
         if teardown and not self._dead.is_set():
             try:
@@ -585,15 +590,16 @@ class RtspPublisher:
                     + "\r\n"
                 )
                 with self._lock:
-                    self._sock.settimeout(1.0)
-                    self._sock.sendall(msg.encode())
-            except OSError:
+                    sock.settimeout(1.0)
+                    sock.sendall(msg.encode())
+            except (OSError, ValueError):
                 pass
         self._mark_dead(self.error or "closed")
         self._close_sock()
 
     def _close_sock(self) -> None:
-        sock, self._sock = self._sock, None
+        with self._lock:
+            sock, self._sock = self._sock, None
         if sock is not None:
             try:
                 sock.shutdown(socket.SHUT_RDWR)
@@ -632,22 +638,39 @@ class RtpReorderBuffer:
         max_delay_s: float = 0.5,
         max_packets: int = 500,
         reset_span: int = 3000,
+        late_run_resync: int = 50,
     ):
         self.max_delay_s = max_delay_s
         self.max_packets = max_packets
         self.reset_span = reset_span
+        self.late_run_resync = late_run_resync
         self._next: Optional[int] = None
+        self._ssrc: Optional[int] = None
+        self._late_run = 0
         self._held: dict = {}  # seq -> (item, arrival)
         self.late = 0
         self.skipped = 0
+        self.resyncs = 0
 
     @staticmethod
     def _delta(a: int, b: int) -> int:
         d = (a - b) & 0xFFFF
         return d - 0x10000 if d >= 0x8000 else d
 
-    def push(self, seq: int, item, arrival: float) -> list:
-        """Queue one packet; return the items now releasable, in order."""
+    def push(self, seq: int, item, arrival: float, ssrc: Optional[int] = None) -> list:
+        """Queue one packet; return the items now releasable, in order.
+
+        A new ``ssrc`` is a new sender with its own numbering: resync. (The
+        SDES bridge does exactly this on one port - TUTK SFrames numbered from
+        its own counter, then the camera's SRTP with random sequence numbers.)
+        A long run of consecutive "late" packets can only be the same thing
+        without an SSRC change, so it resyncs too.
+        """
+        if ssrc is not None and ssrc != self._ssrc:
+            first = self._ssrc is None
+            self._ssrc = ssrc
+            if not first:
+                return self._resync(seq, item, arrival)
         if self._next is None:
             self._next = seq
         d = self._delta(seq, self._next)
@@ -655,7 +678,11 @@ class RtpReorderBuffer:
             if -d > self.reset_span:
                 return self._resync(seq, item, arrival)
             self.late += 1
+            self._late_run += 1
+            if self._late_run >= self.late_run_resync:
+                return self._resync(seq, item, arrival)
             return []
+        self._late_run = 0
         if d > self.reset_span:
             return self._resync(seq, item, arrival)
         if seq in self._held:
@@ -692,6 +719,8 @@ class RtpReorderBuffer:
         return self._drain()
 
     def _resync(self, seq, item, arrival) -> list:
+        self.resyncs += 1
+        self._late_run = 0
         out = [
             it
             for _, (it, _a) in sorted(
@@ -1022,12 +1051,13 @@ class LoopbackRtpPublisher:
         if parsed is None:
             return
         pt, marker, in_seq, ts, payload = parsed
+        ssrc = struct.unpack_from("!I", pkt, 8)[0]
         if pt != self._tracks[idx].pt:
             self.dropped_pt += 1
             return
         self.last_media = arrival
         for item in self._reorder[idx].push(
-            in_seq, (marker, ts, payload, arrival), arrival
+            in_seq, (marker, ts, payload, arrival), arrival, ssrc
         ):
             self._send(pub, idx, item)
 

@@ -899,3 +899,59 @@ def test_close_before_connect_is_sticky(go2rtc):
     with pytest.raises(rp.RtspPublishError):
         pub.connect()
     assert "ANNOUNCE" not in go2rtc.requests
+
+
+def test_reorder_resyncs_on_a_new_ssrc_just_behind_the_old_numbering():
+    """TUTK SFrames (bridge counter 1..N) then the camera's SRTP (random
+    sequence numbers) on one port: a new sender landing just behind N must not
+    be dropped as late until it wraps past N."""
+    b = rp.RtpReorderBuffer()
+    for sq in range(1, 1001):
+        b.push(sq, sq, 0.0, ssrc=0xAAAA)
+    assert b.push(400, "srtp", 0.1, ssrc=0xBBBB) == ["srtp"]
+    assert b.push(401, "srtp2", 0.1, ssrc=0xBBBB) == ["srtp2"]
+    assert b.resyncs == 1 and b.late == 0
+
+
+def test_reorder_resyncs_after_a_run_of_late_packets():
+    b = rp.RtpReorderBuffer(late_run_resync=5)
+    for sq in range(1000, 1010):
+        b.push(sq, sq, 0.0)
+    out = []
+    for sq in range(900, 905):
+        out += b.push(sq, sq, 0.0)
+    assert out == [904] and b.resyncs == 1
+    assert b.push(905, 905, 0.0) == [905]
+
+
+def test_close_never_raises_and_is_idempotent():
+    sdp, tracks, _ = rp.publish_sdp_from_serve_sdp(SERVE_SDP)
+    pub = rp.RtspPublisher("rtsp://127.0.0.1:1/x", sdp, tracks)
+    pub.close()
+    pub.close()
+    assert not pub.alive
+
+
+def test_close_racing_an_aborting_handshake_does_not_raise(go2rtc):
+    """close() used to read self._sock twice; the aborting handshake clears it
+    in between, and the AttributeError escaped the publisher's cleanup."""
+    sdp, tracks, _ = rp.publish_sdp_from_serve_sdp(SERVE_SDP)
+    pub = rp.RtspPublisher(go2rtc.url(), sdp, tracks)
+    pub.connect()
+
+    class Vanishing:
+        """A socket reference that is cleared the moment close() touches it."""
+
+        def __init__(self, real):
+            self.real = real
+
+        def settimeout(self, t):
+            pub._sock = None  # the other thread's _close_sock()
+            return self.real.settimeout(t)
+
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+
+    pub._sock = Vanishing(pub._sock)
+    pub.close()  # must not raise
+    assert not pub.alive
