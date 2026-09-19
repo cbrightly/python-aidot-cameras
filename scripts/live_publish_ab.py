@@ -185,6 +185,8 @@ async def _one_open(dc, g2, http, arm, args, soak_s: float) -> dict:
             await asyncio.sleep(args.view_s)
             res["soak"] = await _soak(g2, http, name, soak_s)
         res.update(await reader)
+        if args.idle_check:
+            res["idle_release"] = await _idle_release(dc, g2, http, name, args)
     finally:
         await dc.async_stop_streaming()
         await asyncio.sleep(3)
@@ -193,6 +195,28 @@ async def _one_open(dc, g2, http, arm, args, soak_s: float) -> dict:
         res["ffmpeg_children_after"] = _ffmpeg_children()
         await g2.remove_stream(name)
     return res
+
+
+async def _idle_release(dc, g2, http, name, args) -> dict:
+    """With the viewer gone and the session NOT stopped, time how long the
+    library takes to release it on its own - the idle release that decides how
+    long a camera (a battery camera especially) stays awake after a view.
+
+    Released = go2rtc no longer lists a pushed producer AND the client reports
+    no live stream URL. Expected: the idle window (AIDOT_STREAM_IDLE_S, default
+    120 s) plus the watchdog's polling tick.
+    """
+    t0 = time.monotonic()
+    deadline = t0 + args.idle_budget_s
+    while time.monotonic() < deadline:
+        attached = await _publisher_attached(g2, http, name)
+        if not attached and getattr(dc, "stream_rtsp_url", None) is None:
+            return {"released_after_s": round(time.monotonic() - t0, 1)}
+        await asyncio.sleep(2)
+    return {
+        "released_after_s": None,
+        "note": f"still up after {args.idle_budget_s:.0f}s",
+    }
 
 
 async def _soak(g2, http, name, soak_s) -> dict:
@@ -227,6 +251,9 @@ async def _soak(g2, http, name, soak_s) -> dict:
 
 def _passes(res: dict, min_frames: int) -> bool:
     ok = "attach_s" in res and "error" not in res and res.get("frames", 0) >= min_frames
+    if "idle_release" in res:
+        # A session the library never lets go of is the battery-drain failure.
+        ok = ok and res["idle_release"].get("released_after_s") is not None
     if res.get("arm") == "direct":
         # The point of the arm: no ffmpeg anywhere in a live view.
         ok = (
@@ -292,6 +319,11 @@ async def _camera(client, cam, g2, http, args, gate) -> tuple:
                         f" threads<={soak.get('threads_max')}"
                         f" fds<={soak.get('fds_max')}"
                         if soak
+                        else ""
+                    )
+                    + (
+                        f" idle_release={res['idle_release'].get('released_after_s')}s"
+                        if "idle_release" in res
                         else ""
                     )
                     + f" {'PASS' if res['pass'] else 'FAIL'}"
@@ -385,6 +417,18 @@ def main() -> int:
         default=1,
         help="cameras run at once (opens of one camera stay sequential); needs a"
         " single --arms value, because the direct/ffmpeg switch is process-wide",
+    )
+    p.add_argument(
+        "--idle-check",
+        action="store_true",
+        help="after the view, leave the session running with no viewer and time"
+        " how long the library takes to release it (the battery-drain question)",
+    )
+    p.add_argument(
+        "--idle-budget-s",
+        type=float,
+        default=240.0,
+        help="give up waiting for the idle release after this long (a FAIL)",
     )
     p.add_argument(
         "--show-names",
