@@ -1614,6 +1614,37 @@ def video_pt_from_answer_sdp(sdp_text: str) -> Optional[int]:
     return None
 
 
+def audio_pt_from_answer_sdp(sdp_text: str) -> Optional[int]:
+    """The audio payload type the camera's answer negotiated, if it is one we
+    serve (PCMU 0 / PCMA 8); None otherwise.
+
+    Read from the first ``m=audio`` section only, and a number is accepted only
+    if :func:`answer_pt_kinds` agrees it is audio: on this fleet payload type 0
+    is sometimes H265 VIDEO (see there), so a bare "0" proves nothing.
+
+    Used by the direct publish, which - unlike the ffmpeg serve - does not need
+    to SEE an audio packet before it starts: go2rtc takes an announced audio
+    track whose first packet arrives later. Measured 2026-09-19 on an A001513:
+    the answer said ``m=audio 9 RTP/SAVPF 8``, video started, the 1 s audio
+    grace ran out and the serve went video-only - and the first PCMA packet
+    arrived 0.86 s after that.
+    """
+    kinds = answer_pt_kinds(sdp_text)
+    for raw in (sdp_text or "").splitlines():
+        line = raw.strip()
+        if not line.startswith("m=audio"):
+            continue
+        for tok in line.split()[3:]:
+            if (
+                tok.isdigit()
+                and int(tok) in _SDP_AUDIO_PTS
+                and kinds.get(int(tok)) == "audio"
+            ):
+                return int(tok)
+        return None
+    return None
+
+
 def answer_pt_kinds(sdp_text: str) -> dict:
     """Map each payload type in the camera's answer to the kind that owns it.
 
@@ -8737,12 +8768,39 @@ class _SdesOpenMixin:
                 _waited,
             )
             raise AidotCameraNoMedia(waited_s=_waited)
-        if _serve_audio and _first_audio_pt[0] is None:
+        # Direct publish attaches audio from the NEGOTIATED payload type rather
+        # than an observed one - see audio_pt_from_answer_sdp - so it neither
+        # waits the audio grace nor goes video-only when the camera's first
+        # audio packet trails its first video. The ffmpeg serve keeps needing a
+        # packet in hand (a mapped stream with none stalls its mpegts mux).
+        _answer_apt = None
+        if (
+            _serve_audio
+            and _first_audio_pt[0] is None
+            and _should_direct_publish(
+                rtsp_push_url, output_path, max_seconds, _use_plain_rtp
+            )
+            and answer_fut is not None
+            and answer_fut.done()
+            and not answer_fut.cancelled()
+            and answer_fut.exception() is None
+        ):
+            _answer_apt = audio_pt_from_answer_sdp(
+                (answer_fut.result() or {}).get("sdp", "") or ""
+            )
+            if _answer_apt is not None:
+                _LOGGER.info(
+                    "camera %s: direct publish: attaching audio pt=%d from the"
+                    " camera's answer (no audio packet seen yet)",
+                    getattr(self, "device_id", "?"),
+                    _answer_apt,
+                )
+        if _serve_audio and _first_audio_pt[0] is None and _answer_apt is None:
             _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
             while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:
                 await asyncio.sleep(0.1)
         _vpt = _first_video_pt[0]
-        _apt = _first_audio_pt[0]
+        _apt = _first_audio_pt[0] if _first_audio_pt[0] is not None else _answer_apt
         # Which single payload type (if any) each line can be narrowed to. Audio
         # is usable only when its type was actually observed; otherwise the "0 8"
         # line cannot be narrowed.
@@ -9226,7 +9284,11 @@ class _SdesOpenMixin:
                             srtp_key_video=srtp_key_video,
                             first_video_pt=_first_video_pt[0],
                             answer_video_pt=_answer_video_pt[0],
-                            first_audio_pt=_first_audio_pt[0],
+                            first_audio_pt=(
+                                _first_audio_pt[0]
+                                if _first_audio_pt[0] is not None
+                                else _keep_a
+                            ),
                         )
                         try:
                             # Re-apply the cached sprop-parameter-sets here too:
