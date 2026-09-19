@@ -11,15 +11,35 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 - **Direct publish into go2rtc, no ffmpeg (opt-in, `AIDOT_DIRECT_PUBLISH=1`).**
   A live push into go2rtc no longer needs an ffmpeg process: the library
   publishes the decrypted RTP itself over RTSP (TCP-interleaved, the form
-  go2rtc 1.9.x accepts). SDES cameras swap the push ffmpeg for a
-  Popen-compatible in-process publisher reading the same loopback ports; DTLS
-  cameras packetize the tapped H.264 and PCMA directly instead of muxing
-  MPEG-TS. Audio goes out as PCMA (no AAC transcode); the SDES audio gain still
-  applies. Timestamps keep the camera's frame spacing and repair its backward
-  and forward jumps from the arrival clock (`AIDOT_PUBLISH_TIMESTAMPS` =
-  `hybrid` default, `arrival`, `camera`). Recordings, snapshots and the decode
-  drain keep ffmpeg. Off by default until validated on real cameras; see
+  go2rtc 1.9.x accepts), for both transports.
+  - SDES cameras swap the push ffmpeg for a `Popen`-compatible in-process
+    publisher reading the same loopback ports, so the open's lifecycle is
+    unchanged. SDES models the bridge does not decrypt itself keep ffmpeg.
+  - DTLS cameras packetize the tapped H.264 and A-law directly instead of
+    muxing MPEG-TS, and can now use `{output}` like SDES ones.
+  - Packets are put back in sequence order before publishing (go2rtc does not
+    reorder), with the ffmpeg serve's window: 500 packets / 0.5 s.
+  - Audio goes out as PCMA (no AAC transcode; the SDES audio gain still
+    applies) and is attached from the camera's negotiated answer, so a camera
+    whose first audio packet trails its video no longer serves video-only, and
+    the 1 s audio grace is skipped.
+  - Timestamps keep the camera's frame spacing and repair its backward and
+    forward jumps from the arrival clock (`AIDOT_PUBLISH_TIMESTAMPS` =
+    `hybrid` default, `arrival`, `camera`).
+  - Recordings, snapshots and `-` / `http://` serves keep ffmpeg.
+
+  Measured live on seven cameras (A000088 x3, A001064, A001513 x3) against
+  go2rtc 1.9.14, each opened with the switch off and on: every open passed,
+  no ffmpeg ran on the direct opens, the publisher reached go2rtc sooner on
+  every camera (DTLS 6.6-7.0 s -> 1.5-1.8 s; SDES 4.7-9.2 s -> 2.5-6.7 s),
+  first frame on DTLS came 3.4-3.9 s -> 0.5-0.8 s, and no packet was late or
+  lost. Off by default until it has soaked; see
   `docs/DESIGN-direct-publish.md`.
+- **`scripts/live_publish_ab.py`** - the live check for the above, which
+  `live_validate.py` cannot give (a recording keeps ffmpeg). Opens each camera
+  with the switch off and on against a go2rtc, reads the stream back, counts
+  ffmpeg processes, threads and fds, and optionally soaks (`--soak-s`,
+  `--parallel`, battery cameras capped by `--battery-soak-s`).
 
 ### Fixed
 

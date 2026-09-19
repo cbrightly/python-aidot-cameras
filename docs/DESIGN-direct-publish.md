@@ -1,7 +1,7 @@
 # Design: publish decrypted media straight into go2rtc (no ffmpeg hop)
 
-Status: **A1 and A2 implemented, awaiting live validation** on
-`feat/direct-rtsp-publish` (library and integration). Local only - nothing pushed or published until it has passed
+Status: **A1 and A2 implemented; live A/B passed on seven cameras (H.264),
+soak in progress** on `feat/direct-rtsp-publish` (library and integration). Local only - nothing pushed or published until it has passed
 live validation on real cameras (see "Validation gate").
 
 ## Why
@@ -239,6 +239,35 @@ Measured against the same box with the flag off:
 - HA WebRTC view plays video + audio on each model; HLS fallback plays video;
 - timestamp repair counter reported per session (expect non-zero on A001513).
 
+## Live results
+
+A Raspberry Pi 4 (aarch64, Debian 13) on the camera LAN, go2rtc 1.9.14, Home Assistant's
+AiDot entry disabled for the run. Each camera opened once per arm, 30 s viewed
+by a real RTSP consumer reading back from go2rtc.
+
+**Pass 1 (2026-09-19, H.264 pinned):** 14/14 opens passed.
+
+| Camera | Model | Publisher attached, ffmpeg -> direct | First frame | Frames in 30 s |
+| --- | --- | --- | --- | --- |
+| Battery #1 | A001513 | 9.2 -> 5.3 s | 1.7 -> 2.2 s | 446 -> 471 |
+| Battery #2 | A001513 | 8.3 -> 6.7 s | 2.6 -> 2.2 s | 462 -> 494 |
+| PTZ | A001064 | 4.7 -> 2.5 s | 1.9 -> 1.5 s | 604 -> 614 |
+| Battery #3 | A001513 | 8.0 -> 6.7 s | 1.6 -> 3.8 s | 545 -> 548 |
+| Mains #1 | A000088 | 7.0 -> 1.8 s | 3.8 -> 0.5 s | 418 -> 465 |
+| Mains #2 | A000088 | 6.6 -> 1.8 s | 3.4 -> 0.5 s | 423 -> 467 |
+| Mains #3 | A000088 | 6.8 -> 1.5 s | 3.9 -> 0.8 s | 415 -> 461 |
+
+Direct opens ran no ffmpeg, published with 0 late and 0 lost packets, repaired
+2-4 timestamps per 30 s on the SDES cameras, and left thread and fd counts
+flat. Two A001513 opens went video-only: one camera sent no audio in either
+arm, the other's first audio packet arrived 0.86 s after the 1 s grace. The
+second case is why audio is now attached from the negotiated answer.
+
+**Pass 2 (2026-09-19):** H.265-first offer on the A001064, both arms, twice:
+4/4 passed, but the camera answered H.264 every time, so H.265 publishing is
+still unexercised. Direct attach 2.5-2.8 s vs ffmpeg 4.4-5.2 s. Soaks: see
+below once complete.
+
 ## Open questions
 
 1. **Which go2rtc does the live box run?** The integration talks to
@@ -246,7 +275,11 @@ Measured against the same box with the flag off:
    RTSP on 18554). Supporting the bundled server needs the stream-create call to
    go through HA's own go2rtc client; worth doing independently of this design.
 2. Should the DTLS runner keep the mux's AGC? Needs a listening test.
-3. A persistent per-camera publisher across camera sessions (continuous
+3. H.265 publishing is unexercised: the A001064 answered H.264 in 4 of 4
+   H.265-first offers on 2026-09-19. go2rtc drops an H.265 fmtp without
+   vps/sps/pps, and the publisher sends none, so parameter sets must arrive
+   in-band - to be confirmed on a session that actually negotiates H.265.
+4. A persistent per-camera publisher across camera sessions (continuous
    timeline, no re-ANNOUNCE) would hide reconnects from viewers entirely - but
    the A001064's H.264/H.265 flip forces a re-ANNOUNCE anyway. Revisit after A4.
 

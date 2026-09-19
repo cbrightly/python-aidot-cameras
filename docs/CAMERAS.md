@@ -258,6 +258,47 @@ every watchdog cycle, so it stayed broken until the process restarted. The
 `SDES: narrowed ffmpeg SDP to ...` status line is the signal that narrowing ran;
 its absence is the fault.
 
+### Direct publish: no ffmpeg in the live path (opt-in)
+
+`AIDOT_DIRECT_PUBLISH=1` replaces the serve's ffmpeg with an RTSP publisher
+inside the library, for a live `rtsp://` push only (recordings, snapshots, `-`
+and `http://` serves are unchanged). Design, measurements and rollout:
+[`DESIGN-direct-publish.md`](DESIGN-direct-publish.md).
+
+- **SDES.** The bridge still decrypts and forwards plain RTP to the two loopback
+  ports; what reads them is now `LoopbackRtpPublisher`, a `Popen`-compatible
+  stand-in for the ffmpeg, so the open's lifecycle code (bind wait, key-change
+  relaunch, reaping, `SdesSession`) is unchanged. It is used only when the
+  bridge itself decrypts (`_PLAIN_RTP_MODELS`); any other SDES model keeps
+  ffmpeg, which decrypts SRTP from the SDP's `a=crypto` keys.
+- **DTLS.** The tapped access units are packetized (RFC 6184, FU-A) and the
+  tapped A-law published as-is, in place of the MPEG-TS mux.
+- **Ordering.** go2rtc does not reorder a publisher's packets, so the publisher
+  does - the same 500-packet / 0.5 s window the ffmpeg serve used - and
+  resynchronises on a new SSRC (the bridge switches from TUTK framing to the
+  camera's SRTP on one port).
+- **Audio** is attached from the payload type the camera's answer negotiated,
+  not from an observed packet, because go2rtc accepts an announced track whose
+  first packet arrives late. That removes the 1 s audio grace and the
+  video-only fallback it caused when a camera's audio trailed its video.
+- **Timestamps.** `AIDOT_PUBLISH_TIMESTAMPS` (default `hybrid`) keeps the
+  camera's frame spacing and substitutes the arrival clock for a backward step
+  or a jump.
+
+What go2rtc needs, and what goes wrong without it:
+
+| Requirement | If missing |
+| --- | --- |
+| The stream exists before the publish (`PUT /api/streams`; go2rtc cannot create an empty one, so use a placeholder source that fails fast) | go2rtc answers 200 through RECORD and then closes the connection; the log says `the RTSP server closed the publish (does the stream exist in go2rtc?)` |
+| TCP-interleaved transport | UDP is refused with 461 (the publisher always uses TCP) |
+| Traffic at least every 15 s | go2rtc drops the publisher; the publisher sends `OPTIONS` every 5 s |
+
+Useful log lines (logger `aidot_cameras.camera.rtsp_publish`):
+`direct publish: publishing audio PCMA, video H264 to ...` when it attaches, and
+`publish ended: N packets, N timestamp repair(s), ..., N late, N lost` when it
+stops. On a healthy LAN `late` and `lost` are 0; the repair count is a few per
+30 s on an A001513 and 0 on a camera with a clean clock.
+
 ### What a cold SDES open costs
 
 Measured on the reference A001064 (mains, LAN-direct), cold opens forced by a

@@ -230,6 +230,7 @@ decides it:
 | --- | --- | --- |
 | **DTLS** (mains, e.g. A000088) | `-` | keeps the mux's 48 kHz AAC. The push path has to transcode audio down to 8 kHz G.711 |
 | **SDES** (the A001513 and A001064 families) | `'{output}'` | these stream by pushing RTSP; there is nothing to read from stdout |
+| either, with `AIDOT_DIRECT_PUBLISH=1` | `'{output}'` | published by the library with no ffmpeg; audio stays 8 kHz A-law |
 | either, if you want to pull | an `http://` URL | the process serves there and waits for a consumer to connect |
 
 `'{output}'` is a placeholder that go2rtc substitutes with the stream's own push
@@ -265,7 +266,15 @@ stream entirely through an ffmpeg subprocess, and pip cannot install a system
 binary. DTLS cameras no longer serve through it: the muxed MPEG-TS goes straight
 to the consumer, because that hop was the only component in the chain that lost
 timestamps (see `AIDOT_DTLS_DIRECT_SERVE` below). ffmpeg is still required, both
-for the SDES path and as the DTLS fallback when the serve port cannot be bound:
+for the SDES path and as the DTLS fallback when the serve port cannot be bound.
+
+**Or skip ffmpeg for live pushes: `AIDOT_DIRECT_PUBLISH=1` (experimental).** With
+it set, an `rtsp://` / `{output}` push is published into go2rtc by the library
+itself - no ffmpeg process per stream, no audio transcode - for **both**
+transports, so a DTLS camera can use `{output}` too. Audio goes out as the
+camera's own G.711 A-law (see "Audio" under [Getting an RTSP URL](#getting-an-rtsp-url)).
+ffmpeg is still used for recordings and snapshots. Off by default while it is
+being validated; see [`docs/DESIGN-direct-publish.md`](docs/DESIGN-direct-publish.md).
 
 ```bash
 sudo apt install ffmpeg      # Debian/Ubuntu
@@ -483,7 +492,12 @@ Stream #0:1: Audio: aac (LC), 48000 Hz, mono
 - **Audio.** Both forms carry AAC at 48 kHz mono, resampled from the camera's
   8 kHz A-law, because 8 kHz AAC plays silent in a lot of browsers and browsers
   on the MSE path have no mapping for G.711 at all. Audio is on by default; see
-  `AIDOT_SDES_SERVE_AUDIO` to turn it off.
+  `AIDOT_SDES_SERVE_AUDIO` to turn it off. With `AIDOT_DIRECT_PUBLISH=1` the
+  stream carries the camera's own **PCMA (G.711 A-law, 8 kHz)** instead: WebRTC
+  viewers play it natively and nothing is transcoded, but a consumer that only
+  takes AAC (for example Home Assistant's HLS player) gets video without audio.
+  go2rtc can transcode for such a consumer on demand with an extra
+  `ffmpeg:<stream>#audio=aac` source.
 - **A stream that starts with no video** and picks it up a few seconds later is
   normal: the mux waits for a keyframe so the first GOP is decodable. A stream
   that stays audio-only is a camera that never sent one - retry the view.
@@ -558,7 +572,9 @@ audio, idle release, the sprop cache path) are documented in
 | `AIDOT_SDES_TMMBR_AFTER_S` | Seconds of media to let pass before the first TMMBR, so a bound can be measured *within* one session - window A before it, window B after - instead of between sessions. Measured from the first video packet, not from the open, so a slow-waking camera does not spend window A already capped. | `0` (send from the first video packet) |
 | `AIDOT_DTLS_FAST_LIVEPLAY` | The DTLS (A000088) analogue: skip the `livePlayReq`-echo and `livePlayResp` waits (the dominant LAN cold-start cost) while keeping the full ICE/TURN/DTLS handshake, so remote/relay viewing is unaffected. **On by default**; set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_PERSISTENT_MQTT` | Reuse ONE account-level persistent MQTT connection for commands, attribute fetches, and stream-open signaling (matching the official app) instead of connecting per operation. **On by default** (live soaks cut SDES NO_MEDIA from ~57% to ~11-19%); set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
-| `AIDOT_SERVE_RELAY` | Hold the public stream port via an internal relay that proxies to ffmpeg, so the first (cold) view connects instead of failing while ffmpeg can't pre-bind the port. Set to `0` to serve ffmpeg directly. | `1` (enabled) |
+| `AIDOT_DIRECT_PUBLISH` | **Experimental, opt-in.** Publish a live `rtsp://` push into go2rtc from the library itself instead of through ffmpeg, for both transports: SDES hands the bridge's plain RTP straight to an RTSP publisher, DTLS packetizes the tapped H.264 and A-law directly. No ffmpeg process per stream, no audio transcode (audio is PCMA), packets put back in order before publishing, and audio attached from the camera's negotiated answer rather than waiting to observe a packet. Recordings, snapshots and `-`/`http://` serves are unchanged. Live-validated with H.264 on A000088, A001064 and A001513; H.265 not yet exercised (see `docs/DESIGN-direct-publish.md`). Truthy (`1`/`true`/`yes`/`on`) enables. | unset (off) |
+| `AIDOT_PUBLISH_TIMESTAMPS` | How the direct publisher stamps RTP time: `hybrid` keeps the camera's frame spacing and substitutes the arrival clock only when the camera's timestamp steps backwards or jumps (the A001513 steps back ~1.7 s about every 30 s); `arrival` stamps every frame by arrival, as the ffmpeg serve does; `camera` trusts the camera. Unknown values mean `hybrid`. | `hybrid` |
+| `AIDOT_SERVE_RELAY` | Hold the public stream port via an internal relay that proxies to ffmpeg, so the first (cold) view connects instead of failing while ffmpeg can't pre-bind the port. Set to `0` to serve ffmpeg directly. Not involved in a direct publish, which has no port to hold. | `1` (enabled) |
 | `AIDOT_DTLS_VIDEO_GRACE_S` | How long a connected DTLS session may go without a single video frame before it is torn down and re-opened. A session that receives audio and no video passes every other check the serve loop makes - the peer connection is healthy, ffmpeg respawns for each consumer - so without this it is held open indefinitely while the viewer sees "no video". `0` disables the check. | `30` |
 | `AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S` | How long one WebRTC open attempt for a served DTLS camera may take before it is abandoned and retried. Raised from 30 s because the camera's own offer-resend fires at 30 s, so the attempt used to die at the instant its last resend went out; answers measured arriving at 30.7-99.5 s were discarded as a result. | `75` |
 | `AIDOT_DTLS_SERVE_ICE_WAIT_S` | Separate budget for the ICE half of that open, clamped to `AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S`. The open is two sequential waits - signalling then ICE - so without its own budget the ICE wait inherits the timeout above and doubles the worst case while holding the global open gate. | `30` |
