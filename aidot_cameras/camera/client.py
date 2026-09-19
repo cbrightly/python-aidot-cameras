@@ -49,6 +49,11 @@ from .playback import (  # re-exported (split into playback.py)
     LiveStreamSession,  # noqa: F401 - back-compat re-export (unused in-module)
 )
 from .webrtc import WebRTCSession  # re-exported (split into webrtc.py)
+from .rtsp_publish import (
+    direct_publish_enabled,
+    dtls_rtp_publish_run,
+    is_publishable_url,
+)
 from .sdes import (
     SdesSession,
 )  # re-exported (split into sdes.py); also the SDES return type
@@ -626,6 +631,12 @@ _SERVE_MAX_DELAY_US = int(os.environ.get("AIDOT_SERVE_MAX_DELAY_US", "500000"))
 #: freezes the picture.  ``AIDOT_SERVE_INPUT_TIMEOUT_S`` overrides both.
 _SERVE_INPUT_TIMEOUT_MAINS_S = 30
 _SERVE_INPUT_TIMEOUT_BATTERY_S = 10
+
+
+def _is_http_serve_url(url) -> bool:
+    """True for a pull serve (``http://...``) - the only kind the direct TS
+    server can stand in for. ``-`` (stdout) and ``rtsp://`` (push) are not."""
+    return str(url or "").lower().startswith("http://")
 
 
 def _resolve_serve_input_timeout_s(is_battery: bool) -> int:
@@ -6348,6 +6359,7 @@ class CameraMixin(
                 idle_secs = 0.0
             proc = wfile = stop_flag = mux_thread = None
             cancelled = idle_release = False
+            _pub_fail_n = 0
             try:
                 # (Re)start the ffmpeg serve whenever go2rtc (re)connects, while
                 # the warm WebRTC session keeps delivering encoded frames.
@@ -6378,7 +6390,22 @@ class CameraMixin(
                     # carry none) - which go2rtc renders as RTP timestamp 0 and
                     # HA reports as a negative DTS. See _DirectTsServer.
                     _direct = None
-                    if _direct_serve_enabled():
+                    # Direct RTSP publish (AIDOT_DIRECT_PUBLISH): the tapped
+                    # frames are packetized and published into go2rtc on a
+                    # thread - no ffmpeg, no listen port for go2rtc to dial.
+                    # Checked before the direct TS serve, which would otherwise
+                    # try to BIND the rtsp:// URL's port (go2rtc's own).
+                    _publishing = direct_publish_enabled() and is_publishable_url(
+                        serve_url
+                    )
+                    if _publishing:
+                        pass
+                    elif _direct_serve_enabled() and _is_http_serve_url(serve_url):
+                        # Only an http:// serve is one go2rtc DIALS. For "-"
+                        # this bound a random port and wrote nothing to stdout
+                        # (so `aidot-go2rtc <dtls-id> -` produced no media),
+                        # and for rtsp:// it bound the push target's port
+                        # locally instead of publishing to it.
                         # Bind the port the consumer was TOLD about. `_ff_port`
                         # is only set on the relay branch, so `_ff_port or 0`
                         # bound a random ephemeral port whenever no relay was
@@ -6397,7 +6424,10 @@ class CameraMixin(
                                 _exc,
                             )
                             _direct = None
-                    if _direct is not None:
+                    if _publishing:
+                        proc = None
+                        wfile = None
+                    elif _direct is not None:
                         proc = None
                         wfile = _direct
                         if _relay is not None:
@@ -6419,11 +6449,24 @@ class CameraMixin(
                         wfile = os.fdopen(wfd, "wb", buffering=0)
                     progress = [loop.time()]
                     stop_flag = _threading.Event()
-                    mux_thread = _threading.Thread(
-                        target=_dtls_av_mux_run,
-                        args=(vq, aq, wfile, progress, stop_flag),
-                        daemon=True,
-                    )
+                    _publish_result: dict = {}
+                    if _publishing:
+                        mux_thread = _threading.Thread(
+                            target=dtls_rtp_publish_run,
+                            args=(vq, aq, serve_url, progress, stop_flag),
+                            kwargs={
+                                "device_id": str(getattr(self, "device_id", "?")),
+                                "result": _publish_result,
+                            },
+                            name="aidot-dtls-publish",
+                            daemon=True,
+                        )
+                    else:
+                        mux_thread = _threading.Thread(
+                            target=_dtls_av_mux_run,
+                            args=(vq, aq, wfile, progress, stop_flag),
+                            daemon=True,
+                        )
                     mux_thread.start()
                     # Once the mux is feeding and ffmpeg has had a moment to bind
                     # its -listen socket, signal "serve ready" so stream_source can
@@ -6483,6 +6526,11 @@ class CameraMixin(
                     ):
                         await asyncio.sleep(0.5)
                         if _pc_dead():
+                            break
+                        if _publishing and not mux_thread.is_alive():
+                            # The publish ended (go2rtc gone, stream missing,
+                            # connection dropped): end this cycle; the next one
+                            # republishes after a short backoff.
                             break
                         _now = loop.time()
                         if _first_video_at is None:
@@ -6559,7 +6607,8 @@ class CameraMixin(
                     # Tear down this ffmpeg+mux cycle before the next.
                     stop_flag.set()
                     try:
-                        wfile.close()
+                        if wfile is not None:
+                            wfile.close()
                     except Exception:
                         _LOGGER.debug(
                             "camera %s: swallowed exception in %s",
@@ -6574,6 +6623,12 @@ class CameraMixin(
                         _relay.set_backend(None)  # no backend until next ffmpeg
                     _terminate_proc(proc)
                     proc = None
+                    if _publishing and _publish_result.get("error"):
+                        # Do not spin on a go2rtc that is down or restarting.
+                        _pub_fail_n += 1
+                        await asyncio.sleep(min(10.0, 1.0 * (2 ** (_pub_fail_n - 1))))
+                    elif _publishing:
+                        _pub_fail_n = 0
                     if _first_video_at is not None:
                         # A session that delivered video clears the futile run:
                         # the count is about CONSECUTIVE video-less sessions.

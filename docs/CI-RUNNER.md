@@ -242,6 +242,30 @@ ffprobe -v error -show_entries stream=codec_name,codec_type -of csv=p=0 /tmp/x.t
 # expect: h264,video and aac,audio -- zero bytes means the consumer was never spliced
 ```
 
+## Direct publish is not gated by `live_validate.py` either
+
+`live_validate.py` records through `output_path`, and a recording keeps ffmpeg
+by design, so a green gate says nothing about `AIDOT_DIRECT_PUBLISH`. Until the
+gate covers it, run the A/B harness on the runner host before a release that
+touches `camera/rtsp_publish.py` or the serve launch sites - with Home
+Assistant's AiDot entry disabled, exactly as for a gate run:
+
+```bash
+# a go2rtc of the version HA pins, on ports nothing else uses
+./go2rtc -config ab.yaml &   # api 127.0.0.1:21984, rtsp 127.0.0.1:28554, no streams
+python scripts/live_publish_ab.py --go2rtc http://127.0.0.1:21984 --rtsp-port 28554 \
+    --view-s 30                                             # both arms, every camera
+python scripts/live_publish_ab.py --go2rtc http://127.0.0.1:21984 --rtsp-port 28554 \
+    --arms direct --soak-s 1800 --parallel 3                # soaks; battery capped at 5 min
+```
+
+On the CI account (a shared, non-owner account) also set
+`AIDOT_INCLUDE_SHARED_HOUSES=1`, or it finds no cameras. The script exits 0
+only when every direct-publish open attached, decoded at least `--min-frames`
+and ran no ffmpeg; the ffmpeg arm is the baseline and never fails the run.
+Wiring it into the private `live-validate.yml` as its own step is the way to
+close this hole.
+
 ## Which account should CI use?
 
 **This needs deciding before the gate goes live, and it needs an experiment -

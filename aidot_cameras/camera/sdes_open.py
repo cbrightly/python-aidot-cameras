@@ -25,6 +25,11 @@ from .constants import (
 )
 from .models import VideoFrame  # noqa: F401 - forward-ref annotation
 from .sdes import SdesSession
+from .rtsp_publish import (
+    LoopbackRtpPublisher,
+    direct_publish_enabled,
+    is_publishable_url,
+)
 from .protocol import (
     AVIO_HDR_LEN,
     REMB_TARGET_BPS,
@@ -966,6 +971,29 @@ _SERVE_STDERR_NOISE = (
 )
 
 
+def _should_direct_publish(
+    rtsp_push_url, output_path, max_seconds, plain_rtp: bool
+) -> bool:
+    """Whether the SDES serve publishes in-process instead of running ffmpeg.
+
+    Only a live RTSP push qualifies, and only with ``AIDOT_DIRECT_PUBLISH`` on:
+    recordings and snapshots (``output_path`` / ``max_seconds``) and the
+    ``-f null`` decode drain keep ffmpeg. See docs/DESIGN-direct-publish.md.
+
+    And only when the bridge itself decrypts (``plain_rtp``): for any other
+    SDES model the loopback ports carry SRTP that the serve ffmpeg decrypts
+    from the SDP's ``a=crypto`` keys, and the publisher would forward it still
+    encrypted - a stream go2rtc accepts and nobody can decode.
+    """
+    return (
+        plain_rtp
+        and direct_publish_enabled()
+        and is_publishable_url(rtsp_push_url)
+        and not output_path
+        and not max_seconds
+    )
+
+
 def _start_serve_stderr_drain(
     proc, *, maxlines: int = 40, notable_lines: int = 20
 ) -> None:
@@ -1583,6 +1611,37 @@ def video_pt_from_answer_sdp(sdp_text: str) -> Optional[int]:
         codec = rtpmap.get(pt)
         if codec in _SDP_VIDEO_PT_BY_CODEC:
             return _SDP_VIDEO_PT_BY_CODEC[codec]
+    return None
+
+
+def audio_pt_from_answer_sdp(sdp_text: str) -> Optional[int]:
+    """The audio payload type the camera's answer negotiated, if it is one we
+    serve (PCMU 0 / PCMA 8); None otherwise.
+
+    Read from the first ``m=audio`` section only, and a number is accepted only
+    if :func:`answer_pt_kinds` agrees it is audio: on this fleet payload type 0
+    is sometimes H265 VIDEO (see there), so a bare "0" proves nothing.
+
+    Used by the direct publish, which - unlike the ffmpeg serve - does not need
+    to SEE an audio packet before it starts: go2rtc takes an announced audio
+    track whose first packet arrives later. Measured 2026-09-19 on an A001513:
+    the answer said ``m=audio 9 RTP/SAVPF 8``, video started, the 1 s audio
+    grace ran out and the serve went video-only - and the first PCMA packet
+    arrived 0.86 s after that.
+    """
+    kinds = answer_pt_kinds(sdp_text)
+    for raw in (sdp_text or "").splitlines():
+        line = raw.strip()
+        if not line.startswith("m=audio"):
+            continue
+        for tok in line.split()[3:]:
+            if (
+                tok.isdigit()
+                and int(tok) in _SDP_AUDIO_PTS
+                and kinds.get(int(tok)) == "audio"
+            ):
+                return int(tok)
+        return None
     return None
 
 
@@ -8709,12 +8768,39 @@ class _SdesOpenMixin:
                 _waited,
             )
             raise AidotCameraNoMedia(waited_s=_waited)
-        if _serve_audio and _first_audio_pt[0] is None:
+        # Direct publish attaches audio from the NEGOTIATED payload type rather
+        # than an observed one - see audio_pt_from_answer_sdp - so it neither
+        # waits the audio grace nor goes video-only when the camera's first
+        # audio packet trails its first video. The ffmpeg serve keeps needing a
+        # packet in hand (a mapped stream with none stalls its mpegts mux).
+        _answer_apt = None
+        if (
+            _serve_audio
+            and _first_audio_pt[0] is None
+            and _should_direct_publish(
+                rtsp_push_url, output_path, max_seconds, _use_plain_rtp
+            )
+            and answer_fut is not None
+            and answer_fut.done()
+            and not answer_fut.cancelled()
+            and answer_fut.exception() is None
+        ):
+            _answer_apt = audio_pt_from_answer_sdp(
+                (answer_fut.result() or {}).get("sdp", "") or ""
+            )
+            if _answer_apt is not None:
+                _LOGGER.info(
+                    "camera %s: direct publish: attaching audio pt=%d from the"
+                    " camera's answer (no audio packet seen yet)",
+                    getattr(self, "device_id", "?"),
+                    _answer_apt,
+                )
+        if _serve_audio and _first_audio_pt[0] is None and _answer_apt is None:
             _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
             while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:
                 await asyncio.sleep(0.1)
         _vpt = _first_video_pt[0]
-        _apt = _first_audio_pt[0]
+        _apt = _first_audio_pt[0] if _first_audio_pt[0] is not None else _answer_apt
         # Which single payload type (if any) each line can be narrowed to. Audio
         # is usable only when its type was actually observed; otherwise the "0 8"
         # line cannot be narrowed.
@@ -8856,10 +8942,61 @@ class _SdesOpenMixin:
                     "_open_sdes_stream",
                     exc_info=True,
                 )
+        # Direct publish (AIDOT_DIRECT_PUBLISH): an in-process RTSP publisher
+        # replaces the push ffmpeg. It reads the same narrowed SDP and the same
+        # loopback ports and is Popen-compatible, so everything below that
+        # polls, terminates, reaps or relaunches `proc` is unchanged. Only a
+        # live push qualifies - recordings, snapshots and the decode drain keep
+        # ffmpeg. See docs/DESIGN-direct-publish.md.
+        _direct_publish = _should_direct_publish(
+            rtsp_push_url, output_path, max_seconds, _use_plain_rtp
+        )
+        if not _direct_publish and _should_direct_publish(
+            rtsp_push_url, output_path, max_seconds, True
+        ):
+            _LOGGER.info(
+                "camera %s: direct publish is on but this model's media reaches"
+                " the serve still SRTP-encrypted; keeping the ffmpeg serve",
+                getattr(self, "device_id", "?"),
+            )
+        _direct_audio = bool(_serve_audio and _keep_a is not None)
+        _direct_timeout = _resolve_serve_input_timeout_s(
+            bool(getattr(self, "is_battery_camera", False))
+        )
+        _direct_gain_db = self._resolve_sdes_audio_gain_db()
+
+        def _spawn_serve():
+            """Start the serve: the direct publisher, or the ffmpeg in `cmd`."""
+            if _direct_publish:
+                with open(sdp_path, encoding="utf-8") as _f_dp:
+                    _dp_sdp = _f_dp.read()
+                return LoopbackRtpPublisher(
+                    _dp_sdp,
+                    rtsp_push_url,
+                    input_timeout_s=_direct_timeout,
+                    audio_gain_db=_direct_gain_db,
+                    device_id=str(getattr(self, "device_id", "?")),
+                    include_audio=_direct_audio,
+                )
+            _p = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            _start_serve_stderr_drain(_p)
+            return _p
+
         # Do not launch the publisher into a listener that is not up yet.
         await _await_rtsp_publish_target(rtsp_push_url)
-        _LOGGER.info("SDES ffmpeg cmd: %s", " ".join(cmd))
-        if _ffmpeg_path() is None:
+        if _direct_publish:
+            _LOGGER.info(
+                "camera %s: SDES serve: direct RTSP publish (no ffmpeg)%s",
+                getattr(self, "device_id", "?"),
+                "" if _direct_audio else ", video only",
+            )
+        else:
+            _LOGGER.info("SDES ffmpeg cmd: %s", " ".join(cmd))
+        if not _direct_publish and _ffmpeg_path() is None:
             # ffmpeg is not installed - clean up and surface a clear error
             # before launching (avoids a cryptic FileNotFoundError).
             for _rsock in (_audio_sock, _video_sock):
@@ -8889,12 +9026,7 @@ class _SdesOpenMixin:
                 "  Windows:         https://ffmpeg.org/download.html"
             )
         try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            _start_serve_stderr_drain(proc)
+            proc = _spawn_serve()
             _proc_holder[0] = proc
             _cl(_reap, proc)  # kill ffmpeg if the open is cancelled before hand-off
         except FileNotFoundError:
@@ -9152,7 +9284,11 @@ class _SdesOpenMixin:
                             srtp_key_video=srtp_key_video,
                             first_video_pt=_first_video_pt[0],
                             answer_video_pt=_answer_video_pt[0],
-                            first_audio_pt=_first_audio_pt[0],
+                            first_audio_pt=(
+                                _first_audio_pt[0]
+                                if _first_audio_pt[0] is not None
+                                else _keep_a
+                            ),
                         )
                         try:
                             # Re-apply the cached sprop-parameter-sets here too:
@@ -9166,12 +9302,7 @@ class _SdesOpenMixin:
                             _LOGGER.warning(
                                 "could not rewrite SDP for restart: %s", _sdp_exc2
                             )
-                        proc = subprocess.Popen(
-                            cmd,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE,
-                        )
-                        _start_serve_stderr_drain(proc)
+                        proc = _spawn_serve()
                         # Point the shared holder at the live proc immediately.
                         # The bridge thread polls _proc_holder[0]; if it still
                         # sees the terminated old proc it logs "stream ended",

@@ -92,10 +92,34 @@ See [`CI-RUNNER.md`](CI-RUNNER.md). `scripts/live_validate.py` is the harness;
 it gates PyPI publishes through the private repo's `live-validate.yml` + `publish.yml`'s
 `live-gate`.
 
+`live_validate.py` records through `output_path`, which keeps ffmpeg by design,
+so it never runs the direct publisher. `scripts/live_publish_ab.py` is the live
+check for that: it opens each camera with `AIDOT_DIRECT_PUBLISH` off and on,
+pushing into a go2rtc the way the integration does, and reads the result back.
+See "Direct publish" in [`CI-RUNNER.md`](CI-RUNNER.md).
+
 Note that the two transports report media differently, and anything asserting
 "is it streaming?" has to handle both: the DTLS path decodes in-process and
 calls `on_frame`, while **the SDES path never calls `on_frame`** (ffmpeg owns
 the media). For SDES, use `SdesSession.media_stats()` or recorded bytes.
+
+## Real go2rtc (`tests/test_rtsp_publish_go2rtc.py`)
+
+The direct publisher (`AIDOT_DIRECT_PUBLISH`) is checked against a real go2rtc
+binary as well as the go2rtc-shaped fake in `tests/test_rtsp_publish.py`: it
+publishes H.264 encoded on the spot plus A-law through both the SDES and DTLS
+publishers, reads the stream back from go2rtc over RTSP and decodes it. The
+test skips unless a binary is available:
+
+```bash
+AIDOT_GO2RTC_BIN=/path/to/go2rtc pytest tests/test_rtsp_publish_go2rtc.py
+```
+
+Use the version Home Assistant pins (1.9.14 at the time of writing): its RTSP
+server's publish rules are what the publisher is written against. On a box
+whose venv also holds `pytest-homeassistant-custom-component`, that plugin
+turns on `pytest-socket` and every socket-using test here fails with
+`SocketBlockedError`; run with `-p no:homeassistant -p no:socket`.
 
 ## Adding a test: which tier?
 

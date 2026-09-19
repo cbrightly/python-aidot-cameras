@@ -6,6 +6,52 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- **Direct publish into go2rtc, no ffmpeg (opt-in, `AIDOT_DIRECT_PUBLISH=1`).**
+  A live push into go2rtc no longer needs an ffmpeg process: the library
+  publishes the decrypted RTP itself over RTSP (TCP-interleaved, the form
+  go2rtc 1.9.x accepts), for both transports.
+  - SDES cameras swap the push ffmpeg for a `Popen`-compatible in-process
+    publisher reading the same loopback ports, so the open's lifecycle is
+    unchanged. SDES models the bridge does not decrypt itself keep ffmpeg.
+  - DTLS cameras packetize the tapped H.264 and A-law directly instead of
+    muxing MPEG-TS, and can now use `{output}` like SDES ones.
+  - Packets are put back in sequence order before publishing (go2rtc does not
+    reorder), with the ffmpeg serve's window: 500 packets / 0.5 s.
+  - Audio goes out as PCMA (no AAC transcode; the SDES audio gain still
+    applies) and is attached from the camera's negotiated answer, so a camera
+    whose first audio packet trails its video no longer serves video-only, and
+    the 1 s audio grace is skipped.
+  - Timestamps keep the camera's frame spacing and repair its backward and
+    forward jumps from the arrival clock (`AIDOT_PUBLISH_TIMESTAMPS` =
+    `hybrid` default, `arrival`, `camera`).
+  - Recordings, snapshots and `-` / `http://` serves keep ffmpeg.
+
+  Measured live on seven cameras (A000088 x3, A001064, A001513 x3) against
+  go2rtc 1.9.14, each opened with the switch off and on: every open passed,
+  no ffmpeg ran on the direct opens, the publisher reached go2rtc sooner on
+  every camera (DTLS 6.6-7.0 s -> 1.5-1.8 s; SDES 4.7-9.2 s -> 2.5-6.7 s),
+  first frame on DTLS came 3.4-3.9 s -> 0.5-0.8 s, and no packet was late or
+  lost. 30 min soaks on one SDES and one DTLS camera: no publisher drops, flat
+  thread and fd counts. Battery cameras are released on the same ~120 s idle
+  window as with ffmpeg (measured 120.2-120.4 s), so direct publish does not
+  keep them awake. H.265 publishing is not yet exercised. Off by default; see
+  `docs/DESIGN-direct-publish.md`.
+- **`scripts/live_publish_ab.py`** - the live check for the above, which
+  `live_validate.py` cannot give (a recording keeps ffmpeg). Opens each camera
+  with the switch off and on against a go2rtc, reads the stream back, counts
+  ffmpeg processes, threads and fds, and optionally soaks (`--soak-s`,
+  `--parallel`, battery cameras capped by `--battery-soak-s`).
+
+### Fixed
+
+- **`aidot-go2rtc <dtls-camera> -` produces media again.** The DTLS direct TS
+  server (an HTTP listener) was chosen for every destination: for `-` it bound
+  a random port and wrote nothing to stdout, and for an `rtsp://` push it bound
+  the target's port locally instead of publishing. It now only stands in for
+  an `http://` serve.
+
 ## [1.0.0rc22]
 
 ### Changed
