@@ -365,6 +365,13 @@ async def _run(args) -> int:
             cam["_label"] = f"{key} #{seen[key]}"
             if args.show_names:
                 cam["_label"] += f" ({cam.get(CONF_NAME)})"
+        if args.model:
+            want_m = [m.upper() for m in args.model]
+            cams = [
+                c
+                for c in cams
+                if any(m in _model(client.get_device_client(c)).upper() for m in want_m)
+            ]
         if args.name:
             want = [n.lower() for n in args.name]
             cams = [
@@ -393,6 +400,13 @@ def main() -> int:
     p.add_argument("--go2rtc", default="http://127.0.0.1:1984", help="go2rtc API base")
     p.add_argument("--rtsp-port", type=int, default=8554)
     p.add_argument("--name", action="append", help="camera name substring (repeatable)")
+    p.add_argument(
+        "--model",
+        action="append",
+        help="model id substring, e.g. A001513 (repeatable); selects cameras without"
+        " naming them",
+    )
+
     p.add_argument("--repeats", type=int, default=1, help="A/B pairs per camera")
     p.add_argument("--view-s", type=float, default=30.0)
     p.add_argument("--soak-s", type=float, default=0.0)
