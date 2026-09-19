@@ -744,6 +744,6 @@ def test_dtls_serve_loop_checks_publish_before_the_direct_ts_serve():
 
     src = inspect.getsource(client)
     i_pub = src.index("_publishing = direct_publish_enabled() and is_publishable_url(")
-    i_ts = src.index("elif _direct_serve_enabled():")
+    i_ts = src.index("elif _direct_serve_enabled()")
     assert i_pub < i_ts
     assert "target=dtls_rtp_publish_run" in src

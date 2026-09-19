@@ -633,6 +633,12 @@ _SERVE_INPUT_TIMEOUT_MAINS_S = 30
 _SERVE_INPUT_TIMEOUT_BATTERY_S = 10
 
 
+def _is_http_serve_url(url) -> bool:
+    """True for a pull serve (``http://...``) - the only kind the direct TS
+    server can stand in for. ``-`` (stdout) and ``rtsp://`` (push) are not."""
+    return str(url or "").lower().startswith("http://")
+
+
 def _resolve_serve_input_timeout_s(is_battery: bool) -> int:
     """Seconds the serve's SDP input tolerates total silence before erroring.
 
@@ -6394,7 +6400,12 @@ class CameraMixin(
                     )
                     if _publishing:
                         pass
-                    elif _direct_serve_enabled():
+                    elif _direct_serve_enabled() and _is_http_serve_url(serve_url):
+                        # Only an http:// serve is one go2rtc DIALS. For "-"
+                        # this bound a random port and wrote nothing to stdout
+                        # (so `aidot-go2rtc <dtls-id> -` produced no media),
+                        # and for rtsp:// it bound the push target's port
+                        # locally instead of publishing to it.
                         # Bind the port the consumer was TOLD about. `_ff_port`
                         # is only set on the relay branch, so `_ff_port or 0`
                         # bound a random ephemeral port whenever no relay was
