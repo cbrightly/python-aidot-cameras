@@ -29,6 +29,8 @@ but never failing the run.
 
 Nothing here touches Home Assistant. Close the HA integration's sessions (or
 stop HA) first: the camera allows few viewers and answers -50002 when busy.
+On a shared (non-owner) account, as CI uses, set AIDOT_INCLUDE_SHARED_HOUSES=1
+or no cameras are found.
 """
 
 from __future__ import annotations
@@ -99,11 +101,17 @@ async def _publisher_attached(g2: Go2rtcClient, http, name: str) -> bool:
     return any(not p.get("url") for p in (info or {}).get("producers") or [])
 
 
-def _read_back(url: str, view_s: float) -> dict:
-    """A real consumer: decode video from go2rtc for ``view_s`` seconds."""
+def _read_back(url: str, view_s: float, hold_s: float = 0.0) -> dict:
+    """A real consumer: decode video from go2rtc for ``view_s`` seconds, then
+    stay attached for ``hold_s`` more, counting packets without decoding.
+
+    Staying attached matters for a soak: with no viewer, the library's idle
+    release ends the session, which would read as publisher churn. The hold
+    also records the longest gap between video packets (``max_gap_s``) - a
+    stall a viewer would see."""
     import av
 
-    out: dict = {"frames": 0}
+    out: dict = {"frames": 0, "hold_packets": 0, "max_gap_s": 0.0}
     t0 = time.monotonic()
     try:
         c = av.open(url, options={"rtsp_transport": "tcp", "timeout": "15000000"})
@@ -112,18 +120,30 @@ def _read_back(url: str, view_s: float) -> dict:
         return out
     try:
         out["codecs"] = sorted(s.codec_context.name for s in c.streams)
-        for _frame in c.decode(video=0):
+        video = c.streams.video[0]
+        for _frame in c.decode(video):
             if out["frames"] == 0:
                 out["first_frame_s"] = round(time.monotonic() - t0, 2)
             out["frames"] += 1
             if time.monotonic() - t0 >= view_s:
                 break
+        span = time.monotonic() - t0 - out.get("first_frame_s", 0)
+        out["fps"] = round(out["frames"] / span, 2) if span > 0 else 0
+        if hold_s > 0:
+            last = time.monotonic()
+            end = last + hold_s
+            for _pkt in c.demux(video):
+                now = time.monotonic()
+                out["max_gap_s"] = max(out["max_gap_s"], round(now - last, 2))
+                last = now
+                out["hold_packets"] += 1
+                if now >= end:
+                    break
     except Exception as exc:
         out["error"] = repr(exc)
     finally:
         c.close()
-    span = time.monotonic() - t0 - out.get("first_frame_s", 0)
-    out["fps"] = round(out["frames"] / span, 2) if span > 0 and out["frames"] else 0
+    out.setdefault("fps", 0)
     return out
 
 
@@ -157,13 +177,14 @@ async def _one_open(dc, g2, http, arm, args) -> dict:
             res["error"] = f"no publisher within {args.attach_budget_s:.0f}s"
             return res
         res["ffmpeg_children_live"] = _ffmpeg_children()
-        res.update(
-            await asyncio.get_running_loop().run_in_executor(
-                None, _read_back, rtsp_url, args.view_s
-            )
+        reader = asyncio.get_running_loop().run_in_executor(
+            None, _read_back, rtsp_url, args.view_s, args.soak_s
         )
         if args.soak_s:
+            # Sample while the reader holds the stream (it runs view_s longer).
+            await asyncio.sleep(args.view_s)
             res["soak"] = await _soak(g2, http, name, args.soak_s)
+        res.update(await reader)
     finally:
         await dc.async_stop_streaming()
         await asyncio.sleep(3)
@@ -258,8 +279,9 @@ async def _run(args) -> int:
                 "opens": [],
             }
             print(f"\n== {entry['name']} ({entry['model']})")
+            arms = tuple(a for a in ARMS if a in args.arms)
             for rep in range(args.repeats):
-                for arm in ARMS if rep % 2 == 0 else tuple(reversed(ARMS)):
+                for arm in arms if rep % 2 == 0 else tuple(reversed(arms)):
                     if entry["opens"]:
                         print(f"   waiting {SLOT_HOLD_S:.0f}s for the viewer slot")
                         await asyncio.sleep(SLOT_HOLD_S)
@@ -297,6 +319,12 @@ def main() -> int:
     p.add_argument("--soak-s", type=float, default=0.0)
     p.add_argument("--attach-budget-s", type=float, default=75.0)
     p.add_argument("--min-frames", type=int, default=60)
+    p.add_argument(
+        "--arms",
+        default="ffmpeg,direct",
+        type=lambda v: tuple(a.strip() for a in v.split(",") if a.strip()),
+        help="which arms to run (a soak usually wants just: direct)",
+    )
     p.add_argument("--report", default="/tmp/aidot-publish-ab.json")
     return asyncio.run(_run(p.parse_args()))
 
