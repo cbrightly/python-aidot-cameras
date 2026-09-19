@@ -6,6 +6,29 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- **Direct publish into go2rtc, no ffmpeg (opt-in, `AIDOT_DIRECT_PUBLISH=1`).**
+  A live push into go2rtc no longer needs an ffmpeg process: the library
+  publishes the decrypted RTP itself over RTSP (TCP-interleaved, the form
+  go2rtc 1.9.x accepts). SDES cameras swap the push ffmpeg for a
+  Popen-compatible in-process publisher reading the same loopback ports; DTLS
+  cameras packetize the tapped H.264 and PCMA directly instead of muxing
+  MPEG-TS. Audio goes out as PCMA (no AAC transcode); the SDES audio gain still
+  applies. Timestamps keep the camera's frame spacing and repair its backward
+  and forward jumps from the arrival clock (`AIDOT_PUBLISH_TIMESTAMPS` =
+  `hybrid` default, `arrival`, `camera`). Recordings, snapshots and the decode
+  drain keep ffmpeg. Off by default until validated on real cameras; see
+  `docs/DESIGN-direct-publish.md`.
+
+### Fixed
+
+- **`aidot-go2rtc <dtls-camera> -` produces media again.** The DTLS direct TS
+  server (an HTTP listener) was chosen for every destination: for `-` it bound
+  a random port and wrote nothing to stdout, and for an `rtsp://` push it bound
+  the target's port locally instead of publishing. It now only stands in for
+  an `http://` serve.
+
 ## [1.0.0rc22]
 
 ### Changed
