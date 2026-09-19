@@ -211,8 +211,19 @@ control, with HA's own sessions closed (the camera answers -50002 when busy):
 python scripts/live_publish_ab.py --go2rtc http://127.0.0.1:1984 --rtsp-port 8554 \
     --view-s 30 --repeats 2                 # A/B per camera, ~10 min per camera
 python scripts/live_publish_ab.py --go2rtc http://127.0.0.1:1984 --rtsp-port 8554 \
-    --view-s 30 --soak-s 1800 --name <cam>  # 30 min soak, one camera at a time
+    --arms direct --view-s 30 --soak-s 1800 --parallel 3   # soaks, 3 cameras at once
 ```
+
+Soak standard: **30 min on one mains camera per transport** (DTLS, SDES) is
+what catches slow growth - threads, fds, publisher churn - which is a property
+of the code path, not the camera. Every other camera gets a short soak: the
+time-based failures this stack has had (the A001513's backward timestamp step
+every ~30 s, the old 80 s SCTP cliff, the camera's 20 s watchdog, go2rtc's
+15 s idle cut) all recur within minutes. Battery cameras are capped at 5 min
+(`--battery-soak-s`, default 300): a long session is not how they are used
+and it costs battery. `--parallel` overlaps different cameras (opens of one
+camera stay sequential and slot-hold apart); it needs a single `--arms`
+value, because the direct/ffmpeg switch is process-wide.
 
 `live_validate.py` (the release gate) is not enough on its own: it records
 through `output_path`, which keeps ffmpeg by design, so it never runs the

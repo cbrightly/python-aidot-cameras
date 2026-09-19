@@ -147,7 +147,7 @@ def _read_back(url: str, view_s: float, hold_s: float = 0.0) -> dict:
     return out
 
 
-async def _one_open(dc, g2, http, arm, args) -> dict:
+async def _one_open(dc, g2, http, arm, args, soak_s: float) -> dict:
     name = f"aidot_{dc.device_id[:12]}"
     rtsp_url = g2.rtsp_url(name, args.rtsp_port)
     if arm == "direct":
@@ -178,12 +178,12 @@ async def _one_open(dc, g2, http, arm, args) -> dict:
             return res
         res["ffmpeg_children_live"] = _ffmpeg_children()
         reader = asyncio.get_running_loop().run_in_executor(
-            None, _read_back, rtsp_url, args.view_s, args.soak_s
+            None, _read_back, rtsp_url, args.view_s, soak_s
         )
-        if args.soak_s:
+        if soak_s:
             # Sample while the reader holds the stream (it runs view_s longer).
             await asyncio.sleep(args.view_s)
-            res["soak"] = await _soak(g2, http, name, args.soak_s)
+            res["soak"] = await _soak(g2, http, name, soak_s)
         res.update(await reader)
     finally:
         await dc.async_stop_streaming()
@@ -242,6 +242,64 @@ def _write_report(path: str, report: dict) -> None:
         json.dump(report, f, indent=2)
 
 
+async def _camera(client, cam, g2, http, args, gate) -> tuple:
+    """Every open for one camera, in order; returns ``(entry, ok)``.
+
+    Opens of the SAME camera stay sequential and SLOT_HOLD_S apart (the
+    camera's viewer-slot hold). Different cameras may overlap, up to
+    ``--parallel`` at once - one login is shared, and the library's own stream
+    cap still applies.
+    """
+    dc = client.get_device_client(cam)
+    battery = bool(getattr(dc, "is_battery_camera", False))
+    soak_s = args.soak_s
+    if soak_s and battery and args.battery_soak_s is not None:
+        soak_s = min(soak_s, args.battery_soak_s)
+    entry = {
+        "name": cam.get(CONF_NAME),
+        "device_id": cam.get(CONF_ID),
+        "model": _model(dc),
+        "battery": battery,
+        "soak_s": soak_s,
+        "opens": [],
+    }
+    tag = f"[{entry['name']}]"
+    ok = True
+    arms = tuple(a for a in ARMS if a in args.arms)
+    async with gate:
+        print(f"== {entry['name']} ({entry['model']}{', battery' if battery else ''})")
+        for rep in range(args.repeats):
+            for arm in arms if rep % 2 == 0 else tuple(reversed(arms)):
+                if entry["opens"]:
+                    print(f"   {tag} waiting {SLOT_HOLD_S:.0f}s for the viewer slot")
+                    await asyncio.sleep(SLOT_HOLD_S)
+                res = await _one_open(dc, g2, http, arm, args, soak_s)
+                res["pass"] = _passes(res, args.min_frames)
+                entry["opens"].append(res)
+                soak = res.get("soak") or {}
+                print(
+                    f"   {tag} {arm:6} attach={res.get('attach_s')}s"
+                    f" first_frame={res.get('first_frame_s')}s"
+                    f" frames={res.get('frames')} fps={res.get('fps')}"
+                    f" codecs={res.get('codecs')}"
+                    f" ffmpeg={res.get('ffmpeg_children_live')}"
+                    + (
+                        f" soak={soak_s:.0f}s lost={soak.get('publisher_lost')}"
+                        f" up={soak.get('uptime_pct')}%"
+                        f" max_gap={res.get('max_gap_s')}s"
+                        f" threads<={soak.get('threads_max')}"
+                        f" fds<={soak.get('fds_max')}"
+                        if soak
+                        else ""
+                    )
+                    + f" {'PASS' if res['pass'] else 'FAIL'}"
+                    + (f" error={res['error']}" if "error" in res else "")
+                )
+                if arm == "direct" and not res["pass"]:
+                    ok = False
+    return entry, ok
+
+
 async def _run(args) -> int:
     creds = load_credentials()
     report: dict = {
@@ -269,36 +327,12 @@ async def _run(args) -> int:
                 for c in cams
                 if any(w in (c.get(CONF_NAME) or "").lower() for w in want)
             ]
-        ok = True
-        for cam in cams:
-            dc = client.get_device_client(cam)
-            entry = {
-                "name": cam.get(CONF_NAME),
-                "device_id": cam.get(CONF_ID),
-                "model": _model(dc),
-                "opens": [],
-            }
-            print(f"\n== {entry['name']} ({entry['model']})")
-            arms = tuple(a for a in ARMS if a in args.arms)
-            for rep in range(args.repeats):
-                for arm in arms if rep % 2 == 0 else tuple(reversed(arms)):
-                    if entry["opens"]:
-                        print(f"   waiting {SLOT_HOLD_S:.0f}s for the viewer slot")
-                        await asyncio.sleep(SLOT_HOLD_S)
-                    res = await _one_open(dc, g2, http, arm, args)
-                    res["pass"] = _passes(res, args.min_frames)
-                    entry["opens"].append(res)
-                    print(
-                        f"   {arm:6} attach={res.get('attach_s')}s"
-                        f" first_frame={res.get('first_frame_s')}s"
-                        f" frames={res.get('frames')} fps={res.get('fps')}"
-                        f" codecs={res.get('codecs')} ffmpeg={res.get('ffmpeg_children_live')}"
-                        f" {'PASS' if res['pass'] else 'FAIL'}"
-                        + (f" error={res['error']}" if "error" in res else "")
-                    )
-                    if arm == "direct" and not res["pass"]:
-                        ok = False
-            report["cameras"].append(entry)
+        gate = asyncio.Semaphore(max(1, args.parallel))
+        results = await asyncio.gather(
+            *(_camera(client, cam, g2, http, args, gate) for cam in cams)
+        )
+        report["cameras"] = [entry for entry, _ok in results]
+        ok = all(_ok for _entry, _ok in results)
     report["verdict"] = "PASS" if ok and report["cameras"] else "FAIL"
     await asyncio.get_running_loop().run_in_executor(
         None, _write_report, args.report, report
@@ -325,8 +359,25 @@ def main() -> int:
         type=lambda v: tuple(a.strip() for a in v.split(",") if a.strip()),
         help="which arms to run (a soak usually wants just: direct)",
     )
+    p.add_argument(
+        "--battery-soak-s",
+        type=float,
+        default=300.0,
+        help="cap the soak for battery cameras (default 300); a long session is"
+        " not how they are used and costs battery",
+    )
+    p.add_argument(
+        "--parallel",
+        type=int,
+        default=1,
+        help="cameras run at once (opens of one camera stay sequential); needs a"
+        " single --arms value, because the direct/ffmpeg switch is process-wide",
+    )
     p.add_argument("--report", default="/tmp/aidot-publish-ab.json")
-    return asyncio.run(_run(p.parse_args()))
+    args = p.parse_args()
+    if args.parallel > 1 and len(args.arms) != 1:
+        p.error("--parallel > 1 needs exactly one --arms value (e.g. --arms direct)")
+    return asyncio.run(_run(args))
 
 
 if __name__ == "__main__":
