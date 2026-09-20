@@ -1914,6 +1914,26 @@ path, not to previously-good streaming. It does not reset the clock.
 
 **Day zero stays wherever `rc23` set it.**
 
+#### 2026-09-20: `rc27` fixes what running `rc26` through Home Assistant found
+
+`rc27` corrects the frame-gap attribution `rc26` added (it reported a silence
+as drops on exactly the shape this hardware produces), stops a non-finite
+audio-gain setting raising inside the publish loop, and moves two SDP file
+operations off the event loop.
+
+One of those touches a DEFAULT path rather than the opt-in one: the SDES
+serve-restart SDP write now goes through the executor, so the restart gains a
+suspension point it did not have. It is before the new publisher is created,
+so a cancellation there still reaps only the old process and cannot orphan a
+publisher - checked deliberately, because the restart path has no `_cl`
+registration for a replacement proc. Everything else is inside direct publish,
+which is opt-in and off by default.
+
+The behaviour change on the default path is I/O scheduling, not media: no
+packet, timestamp or lifecycle decision differs. It does not reset the clock.
+
+**Day zero stays wherever `rc23` set it.**
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /

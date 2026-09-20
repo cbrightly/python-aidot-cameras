@@ -2,7 +2,9 @@
 
 Status: **shipped, opt-in and off by default.** A1 (library) and A2
 (integration) released as `1.0.0rc23` / integration `2.25.0`; A3 (AAC for an
-HLS consumer) as `1.0.0rc24` / `2.26.0`; the H.264-only gate as `1.0.0rc25`.
+HLS consumer) as `1.0.0rc24` / `2.26.0`; the H.264-only gate as `1.0.0rc25`;
+the restored audio conditioning as `1.0.0rc26`; and `1.0.0rc27` after the
+first run through Home Assistant rather than a harness (see Pass 4).
 A4 (default on) is not done - it waits on a soak in normal use.
 
 Live-validated on seven cameras with H.264: A/B against the ffmpeg serve,

@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc27]
+
 ### Fixed
 
 - **The direct publish no longer reads a file on the event loop.** The serve
