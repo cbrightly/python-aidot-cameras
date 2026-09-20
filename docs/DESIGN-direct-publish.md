@@ -372,20 +372,33 @@ never takes the cold path.
    timeline, no re-ANNOUNCE) would hide reconnects from viewers entirely - but
    the A001064's H.264/H.265 flip forces a re-ANNOUNCE anyway (and today an
    H.265 session leaves the publisher entirely). Revisit after A4.
-5. **What are the DTLS frame gaps?** The box logs 1.0-3.3 s gaps between
-   publishable frames on most sessions (35 in a day's testing), and the queue
-   depth at the warning is not one story: some fire with the queue empty, which
-   is the camera not delivering, and some with four frames behind them, which is
-   a burst arriving at once. Neither is the publisher stalling, and a burst is
-   timed correctly (the hybrid policy steps by the camera's delta for any step
-   in 0..3 s), but "consistent with" is not "measured". The warning now reports
-   the gap split three ways - seconds idle waiting for a frame to arrive,
-   seconds inside the publish, and the pre-keyframe/already-served drops as
-   per-gap deltas; read those off a real session before deciding whether
-   anything needs fixing. Getting that split right took three attempts: timing
-   to the arrival that ENDS the gap just restates it, and timing to the
-   PREVIOUS arrival reads a silence that ends in a resend burst - the normal
-   shape here - as drops.
+5. ~~**What are the DTLS frame gaps?**~~ **Answered 2026-09-20 on `rc27`,
+   measured through Home Assistant.** They are the camera, in two shapes, and
+   the publisher is not involved in either - `inside the publish` was
+   0.00-0.01 s on every one of them:
+
+   | Gap | Queue | Idle | In publish | Dropped (resent) | Cause |
+   | --- | --- | --- | --- | --- | --- |
+   | 2.51 s | 2 | 2.51 s | 0.00 s | 0 | the camera sent nothing |
+   | 1.13 s | 5 | 1.13 s | 0.00 s | 0 | the camera sent nothing |
+   | 1.48 s | 13 | 1.33 s | 0.01 s | 31 | silence, then a resend burst |
+   | 1.00 s | 0 | 0.81 s | 0.00 s | 13 | mostly silence |
+   | 1.54 s | 2 | 0.05 s | 0.01 s | 45 | a resend burst, no silence at all |
+
+   So: either the camera stops sending for a second or three, or it sends a
+   run of presentation times it has already sent (45 in one burst here, above
+   the 41 the fixture measured) which `is_resent_video_frame` drops, leaving
+   nothing publishable. Nothing to fix in the publisher: serving those repeats
+   instead is exactly what the MPEG-TS mux did, and it was legal and
+   unplayable - a burst of frames a single tick apart.
+
+   Note the `queue 13` row, because it is the trap this instrument was built
+   to close. On the old line it read as "plenty queued, so the publish must be
+   stalling"; in fact 1.33 s of that gap was silence and the queue only filled
+   at the very end. Getting the split right took three attempts: timing to the
+   arrival that ENDS the gap just restates it, and timing to the PREVIOUS
+   arrival reads a silence that ends in a resend burst - the normal shape here
+   - as drops.
 
 ## Revisit as it grows
 
