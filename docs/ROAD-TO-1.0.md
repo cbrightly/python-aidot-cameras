@@ -1902,6 +1902,17 @@ path rather than adding one. It does not reset the clock.
 
 **Day zero stays wherever `rc23` set it.**
 
+#### 2026-09-20: `rc26` restores conditioning the direct publisher had dropped
+
+`rc26` puts the mux's audio conditioning (level tracker, gain clamp, noise
+gate, soft limiter) back on the direct publish path, which had been sending a
+DTLS camera's A-law untouched, and adds frame-gap reporting to that path.
+Direct publish is opt-in and off by default, so the shipped default behaviour
+is unchanged; for anyone who has turned it on this is a fix to the opt-in
+path, not to previously-good streaming. It does not reset the clock.
+
+**Day zero stays wherever `rc23` set it.**
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /

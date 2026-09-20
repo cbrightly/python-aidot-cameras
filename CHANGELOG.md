@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc26]
+
 ### Fixed
 
 - **A DTLS camera's audio is conditioned again under direct publish.** The
