@@ -230,7 +230,7 @@ decides it:
 | --- | --- | --- |
 | **DTLS** (mains, e.g. A000088) | `-` | keeps the mux's 48 kHz AAC. The push path has to transcode audio down to 8 kHz G.711 |
 | **SDES** (the A001513 and A001064 families) | `'{output}'` | these stream by pushing RTSP; there is nothing to read from stdout |
-| either, with `AIDOT_DIRECT_PUBLISH=1` | `'{output}'` | published by the library with no ffmpeg; audio stays 8 kHz A-law |
+| either, with `AIDOT_DIRECT_PUBLISH=1` | `'{output}'` | published by the library with no ffmpeg; audio stays 8 kHz A-law. An H.265 session falls back to the ffmpeg push |
 | either, if you want to pull | an `http://` URL | the process serves there and waits for a consumer to connect |
 
 `'{output}'` is a placeholder that go2rtc substitutes with the stream's own push
@@ -271,8 +271,9 @@ for the SDES path and as the DTLS fallback when the serve port cannot be bound.
 **Or skip ffmpeg for live pushes: `AIDOT_DIRECT_PUBLISH=1` (experimental).** With
 it set, an `rtsp://` / `{output}` push is published into go2rtc by the library
 itself - no ffmpeg process per stream, no audio transcode - for **both**
-transports, so a DTLS camera can use `{output}` too. Audio goes out as the
-camera's own G.711 A-law (see "Audio" under [Getting an RTSP URL](#getting-an-rtsp-url)).
+transports, so a DTLS camera can use `{output}` too. It takes H.264 sessions
+only; a session that negotiates H.265 keeps the ffmpeg serve. Audio goes out as
+the camera's own G.711 A-law (see "Audio" under [Getting an RTSP URL](#getting-an-rtsp-url)).
 ffmpeg is still used for recordings and snapshots. Off by default while it is
 being validated; see [`docs/DESIGN-direct-publish.md`](docs/DESIGN-direct-publish.md).
 
@@ -575,7 +576,8 @@ audio, idle release, the sprop cache path) are documented in
 | `AIDOT_SDES_TMMBR_AFTER_S` | Seconds of media to let pass before the first TMMBR, so a bound can be measured *within* one session - window A before it, window B after - instead of between sessions. Measured from the first video packet, not from the open, so a slow-waking camera does not spend window A already capped. | `0` (send from the first video packet) |
 | `AIDOT_DTLS_FAST_LIVEPLAY` | The DTLS (A000088) analogue: skip the `livePlayReq`-echo and `livePlayResp` waits (the dominant LAN cold-start cost) while keeping the full ICE/TURN/DTLS handshake, so remote/relay viewing is unaffected. **On by default**; set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_PERSISTENT_MQTT` | Reuse ONE account-level persistent MQTT connection for commands, attribute fetches, and stream-open signaling (matching the official app) instead of connecting per operation. **On by default** (live soaks cut SDES NO_MEDIA from ~57% to ~11-19%); set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
-| `AIDOT_DIRECT_PUBLISH` | **Experimental, opt-in.** Publish a live `rtsp://` push into go2rtc from the library itself instead of through ffmpeg, for both transports: SDES hands the bridge's plain RTP straight to an RTSP publisher, DTLS packetizes the tapped H.264 and A-law directly. No ffmpeg process per stream, no audio transcode (audio is PCMA), packets put back in order before publishing, and audio attached from the camera's negotiated answer rather than waiting to observe a packet. Recordings, snapshots and `-`/`http://` serves are unchanged. Live-validated with H.264 on A000088, A001064 and A001513; H.265 not yet exercised (see `docs/DESIGN-direct-publish.md`). Truthy (`1`/`true`/`yes`/`on`) enables. | unset (off) |
+| `AIDOT_DIRECT_PUBLISH_H265` | Let the direct publisher take a session that negotiated **H.265** too. Off by default: the publisher is measured on H.264 only - a camera's H.265 has never been published through it (the A001064 answered H.264 in 9 of 9 sessions, 4 of them offered H.265 first), so an H.265 session keeps the ffmpeg serve, which has carried it all along. Set this while validating H.265 on hardware. | unset (off) |
+| `AIDOT_DIRECT_PUBLISH` | **Experimental, opt-in.** Publish a live `rtsp://` push into go2rtc from the library itself instead of through ffmpeg, for both transports: SDES hands the bridge's plain RTP straight to an RTSP publisher, DTLS packetizes the tapped H.264 and A-law directly. No ffmpeg process per stream, no audio transcode (audio is PCMA), packets put back in order before publishing, and audio attached from the camera's negotiated answer rather than waiting to observe a packet. Recordings, snapshots and `-`/`http://` serves are unchanged. Takes H.264 sessions only - an H.265 session keeps the ffmpeg serve (see `AIDOT_DIRECT_PUBLISH_H265`). Live-validated with H.264 on A000088, A001064 and A001513 (see `docs/DESIGN-direct-publish.md`). Truthy (`1`/`true`/`yes`/`on`) enables. | unset (off) |
 | `AIDOT_PUBLISH_TIMESTAMPS` | How the direct publisher stamps RTP time: `hybrid` keeps the camera's frame spacing and substitutes the arrival clock only when the camera's timestamp steps backwards or jumps (the A001513 steps back ~1.7 s about every 30 s); `arrival` stamps every frame by arrival, as the ffmpeg serve does; `camera` trusts the camera. Unknown values mean `hybrid`. | `hybrid` |
 | `AIDOT_SERVE_RELAY` | Hold the public stream port via an internal relay that proxies to ffmpeg, so the first (cold) view connects instead of failing while ffmpeg can't pre-bind the port. Set to `0` to serve ffmpeg directly. Not involved in a direct publish, which has no port to hold. | `1` (enabled) |
 | `AIDOT_DTLS_VIDEO_GRACE_S` | How long a connected DTLS session may go without a single video frame before it is torn down and re-opened. A session that receives audio and no video passes every other check the serve loop makes - the peer connection is healthy, ffmpeg respawns for each consumer - so without this it is held open indefinitely while the viewer sees "no video". `0` disables the check. | `30` |

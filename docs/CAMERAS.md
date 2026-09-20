@@ -284,6 +284,11 @@ and `http://` serves are unchanged). Design, measurements and rollout:
 - **Timestamps.** `AIDOT_PUBLISH_TIMESTAMPS` (default `hybrid`) keeps the
   camera's frame spacing and substitutes the arrival clock for a backward step
   or a jump.
+- **H.264 only.** The publisher is measured on H.264; a camera's H.265 has
+  never gone through it (the A001064 picks its own codec and answered H.264 in
+  9 of 9 sessions, 4 of them offered H.265 first). A session narrowed to H.265
+  keeps the ffmpeg serve and says so in the log.
+  `AIDOT_DIRECT_PUBLISH_H265=1` lifts that for anyone validating it.
 
 What go2rtc needs, and what goes wrong without it:
 

@@ -1,9 +1,14 @@
 # Design: publish decrypted media straight into go2rtc (no ffmpeg hop)
 
-Status: **A1 and A2 implemented; live-validated on seven cameras (H.264):
-A/B, 30 min soaks per transport, battery soaks and idle release** on
-`feat/direct-rtsp-publish` (library and integration). H.265 unexercised. Local only - nothing pushed or published until it has passed
-live validation on real cameras (see "Validation gate").
+Status: **shipped, opt-in and off by default.** A1 (library) and A2
+(integration) released as `1.0.0rc23` / integration `2.25.0`; A3 (AAC for an
+HLS consumer) as `1.0.0rc24` / `2.26.0`; the H.264-only gate as `1.0.0rc25`.
+A4 (default on) is not done - it waits on a soak in normal use.
+
+Live-validated on seven cameras with H.264: A/B against the ffmpeg serve,
+30 min soaks per transport, battery soaks and idle-release timing. A camera's
+H.265 is still unexercised, so direct publish takes H.264 sessions only and an
+H.265 session keeps the ffmpeg serve (see "Open questions").
 
 ## Why
 
@@ -205,9 +210,9 @@ from the same publish (`tests/test_rtsp_publish_go2rtc.py`).
 | **A2** | Integration: option, DTLS push routing when enabled, tests. | HA test suite green. |
 | **Live** | On the camera LAN box: each model (A000088, A001064, A001513) - cold start, 30 min soak, HA WebRTC view, HLS fallback, idle release, go2rtc restart, camera power-cycle. Compare against flag-off baseline. | See "Validation gate". |
 | **A3** | DONE: HLS/recorder AAC via a lazy go2rtc `ffmpeg:` source listed after the live one. DTLS AGC still undecided. | HLS has audio; WebRTC unaffected. |
-| **A4** | Default on; ffmpeg push path kept one release as fallback, then removed along with `_ServeRelay`, CRC ports and the pull registration for push cameras. | One release with no regressions reported. |
+| **A4** | NOT DONE. Default on; ffmpeg push path kept one release as fallback, then removed along with `_ServeRelay`, CRC ports and the pull registration for push cameras. Note the ffmpeg serve cannot be removed outright while H.265 sessions fall back to it. | A soak in normal use with the option on, then one release with no regressions reported. |
 
-## Validation gate (before any push or publish)
+## Validation gate (run before each release that touches this path)
 
 Run `scripts/live_publish_ab.py` on the camera LAN, against a go2rtc you
 control, with HA's own sessions closed (the camera answers -50002 when busy):
@@ -328,7 +333,8 @@ in 7.5 min on the worst camera) where the ffmpeg arm logged repeated
    start, and its fragmentation. Lift the gate on a real H.265 session.
 4. A persistent per-camera publisher across camera sessions (continuous
    timeline, no re-ANNOUNCE) would hide reconnects from viewers entirely - but
-   the A001064's H.264/H.265 flip forces a re-ANNOUNCE anyway. Revisit after A4.
+   the A001064's H.264/H.265 flip forces a re-ANNOUNCE anyway (and today an
+   H.265 session leaves the publisher entirely). Revisit after A4.
 
 ## Revisit as it grows
 

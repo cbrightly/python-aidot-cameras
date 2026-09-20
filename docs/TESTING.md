@@ -108,8 +108,11 @@ the media). For SDES, use `SdesSession.media_stats()` or recorded bytes.
 The direct publisher (`AIDOT_DIRECT_PUBLISH`) is checked against a real go2rtc
 binary as well as the go2rtc-shaped fake in `tests/test_rtsp_publish.py`: it
 publishes H.264 encoded on the spot plus A-law through both the SDES and DTLS
-publishers, reads the stream back from go2rtc over RTSP and decodes it. The
-test skips unless a binary is available:
+publishers, reads the stream back from go2rtc over RTSP and decodes it. One
+test publishes **synthetic H.265** (libx265, parameter sets repeated per
+keyframe): it covers the publisher and go2rtc, not a camera's H.265, which is
+why direct publish is gated to H.264. The tests skip unless a binary is
+available:
 
 ```bash
 AIDOT_GO2RTC_BIN=/path/to/go2rtc pytest tests/test_rtsp_publish_go2rtc.py
