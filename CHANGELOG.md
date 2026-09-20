@@ -6,6 +6,26 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A DTLS camera's audio is conditioned again under direct publish.** The
+  PyAV mux this path replaces did not send the camera's audio as it arrived:
+  it ran a level tracker with a gain clamp, a noise gate and a soft limiter
+  toward a target level. Publishing raw A-law dropped all of that, so a quiet
+  camera stayed quiet and a loud one was never limited. The same conditioning
+  now runs on the published audio, reading the same knobs
+  (`AIDOT_AUDIO_TARGET_DBFS`, `AIDOT_AUDIO_MAXGAIN_DB`,
+  `AIDOT_AUDIO_MINGAIN_DB`, `AIDOT_AUDIO_GATE_DBFS`), with
+  `AIDOT_AUDIO_AGC=0` to send the camera's bytes untouched.
+
+### Added
+
+- **A direct publish reports its worst frame gap.** A viewer sees a stall as a
+  gap between frames; one 1.63 s gap in a 30 min soak was never explained.
+  Each DTLS publish now records the largest gap between published frames and
+  logs a line naming a notable one, with the video queue depth at the time
+  (`AIDOT_PUBLISH_GAP_WARN_S`, default 1.0 s; 0 disables).
+
 ## [1.0.0rc25]
 
 ### Changed

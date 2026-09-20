@@ -28,6 +28,7 @@ from __future__ import annotations
 import base64
 import collections
 import logging
+import math
 import os
 import queue as _queue
 import random
@@ -76,6 +77,14 @@ def direct_publish_enabled() -> bool:
 def is_publishable_url(url: Optional[str]) -> bool:
     """Only ``rtsp://`` / ``rtsps://``-less plain RTSP destinations are published."""
     return bool(url) and str(url).lower().startswith("rtsp://")
+
+
+def _publish_gap_warn_s() -> float:
+    """Seconds without a frame to publish before saying so; 0 disables."""
+    try:
+        return max(0.0, float(os.environ.get("AIDOT_PUBLISH_GAP_WARN_S", "1.0")))
+    except (TypeError, ValueError):
+        return 1.0
 
 
 def timestamp_policy() -> str:
@@ -737,6 +746,11 @@ class RtpReorderBuffer:
 # --------------------------------------------------------------------------- #
 
 
+def _db2amp(db: float) -> float:
+    """Decibels (full scale) to a linear amplitude factor."""
+    return 10.0 ** (db / 20.0)
+
+
 def _alaw_to_linear(a: int) -> int:
     a ^= 0x55
     t = (a & 0x0F) << 4
@@ -762,6 +776,68 @@ def alaw_gain_table(gain_db: float) -> Optional[bytes]:
         v = round(_alaw_to_linear(a) * k)
         out[a] = linear2alaw(max(-32768, min(32767, v)))
     return bytes(out)
+
+
+class AlawAgc:
+    """The DTLS mux's audio conditioning, applied to A-law payloads.
+
+    The PyAV mux this publisher replaces did not send the camera's audio as it
+    arrived: it decoded, ran a level tracker with a gain clamp, a noise gate
+    and a tanh soft-limiter toward a target level, and re-encoded. Publishing
+    raw A-law would quietly drop all of that, so the same conditioning runs
+    here, reading the same environment variables:
+
+    ``AIDOT_AUDIO_TARGET_DBFS`` (-15), ``AIDOT_AUDIO_MAXGAIN_DB`` (30),
+    ``AIDOT_AUDIO_MINGAIN_DB`` (-12), ``AIDOT_AUDIO_GATE_DBFS`` (-45).
+    ``AIDOT_AUDIO_AGC=0`` turns it off and sends the camera's bytes unchanged.
+
+    The gate matters: below it the gain is scaled down quadratically rather
+    than cranked toward maximum, which is what stops a quiet camera's A-law
+    quantization floor being amplified into audible clicking.
+    """
+
+    def __init__(self, env=None):
+        env = os.environ if env is None else env
+
+        def _f(name, default):
+            try:
+                return float(env.get(name, default))
+            except (TypeError, ValueError):
+                return float(default)
+
+        self.enabled = str(env.get("AIDOT_AUDIO_AGC", "1")).strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+        self.target = _db2amp(_f("AIDOT_AUDIO_TARGET_DBFS", -15)) * 32767.0
+        self.maxg = _db2amp(_f("AIDOT_AUDIO_MAXGAIN_DB", 30))
+        self.ming = _db2amp(_f("AIDOT_AUDIO_MINGAIN_DB", -12))
+        self.gate = _db2amp(_f("AIDOT_AUDIO_GATE_DBFS", -45)) * 32767.0
+        self._ms = None  # smoothed mean square
+
+    def process(self, payload: bytes) -> bytes:
+        """One A-law frame in, one conditioned A-law frame out."""
+        if not self.enabled or not payload:
+            return payload
+        from ..g711 import linear2alaw
+
+        samples = [_alaw_to_linear(b) for b in payload]
+        ms = sum(float(x) * x for x in samples) / len(samples)
+        self._ms = ms if self._ms is None else self._ms * 0.95 + ms * 0.05
+        rms = (self._ms**0.5) + 1.0
+        gain = self.target / rms
+        if rms < self.gate:
+            # Below the gate: fade the gain down with the square of how far
+            # under it we are, instead of cranking toward maximum.
+            gain *= (rms / self.gate) ** 2
+        gain = max(self.ming, min(self.maxg, gain))
+        out = bytearray(len(samples))
+        for i, x in enumerate(samples):
+            y = math.tanh(x * (gain / 32767.0)) * 32767.0
+            out[i] = linear2alaw(int(max(-32768, min(32767, y))))
+        return bytes(out)
 
 
 # --------------------------------------------------------------------------- #
@@ -1182,6 +1258,8 @@ def dtls_rtp_publish_run(
     pol = timestamp_policy()
     vtl = RtpTimeline(90000, policy=pol)
     atl = RtpTimeline(8000, policy=pol)
+    # The mux this replaces conditioned the camera's audio; keep that.
+    agc = AlawAgc()
     pub = publisher_factory(url, sdp, tracks)
     try:
         pub.connect()
@@ -1195,6 +1273,13 @@ def dtls_rtp_publish_run(
     vstarted = False
     v0 = None
     ts_state: dict = {}
+    # A viewer sees a stall as a gap between frames. One 1.63 s gap was
+    # measured in a 30 min soak and never explained; report the worst gap per
+    # session, and name a notable one when it happens, so a repeat can be
+    # attributed rather than guessed at.
+    gap_warn_s = _publish_gap_warn_s()
+    last_frame = None
+    max_gap = 0.0
     try:
         while not stop_flag.is_set():
             if not pub.alive:
@@ -1225,6 +1310,21 @@ def dtls_rtp_publish_run(
                         video, build_rtp(96, marker, seq, out_ts, vtl.ssrc, payload)
                     )
                 if seq_ts is not None:
+                    if last_frame is not None:
+                        gap = now - last_frame
+                        if gap > max_gap:
+                            max_gap = gap
+                        if gap_warn_s and gap >= gap_warn_s:
+                            _LOGGER.warning(
+                                "camera %s: DTLS direct publish: %.2f s without a"
+                                " frame to publish (queue %d, largest so far"
+                                " %.2f s)",
+                                device_id,
+                                gap,
+                                vq.qsize(),
+                                max_gap,
+                            )
+                    last_frame = now
                     progress[0] = now
             while True:
                 try:
@@ -1235,7 +1335,10 @@ def dtls_rtp_publish_run(
                 if not vstarted:
                     continue  # no audio ahead of the first picture
                 seq, out_ts = atl.stamp(ats)
-                pub.send_rtp(audio, build_rtp(8, False, seq, out_ts, atl.ssrc, adata))
+                pub.send_rtp(
+                    audio,
+                    build_rtp(8, False, seq, out_ts, atl.ssrc, agc.process(adata)),
+                )
             if pub.keepalive_due():
                 pub.send_keepalive()
             if not moved:
@@ -1246,4 +1349,5 @@ def dtls_rtp_publish_run(
     finally:
         res["timestamp_repairs"] = vtl.repairs + atl.repairs
         res["packets"] = pub.packets_sent
+        res["max_frame_gap_s"] = round(max_gap, 2)
         pub.close(teardown=True)

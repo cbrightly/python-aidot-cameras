@@ -985,3 +985,127 @@ def test_the_open_passes_the_narrowed_codec_to_the_decision():
         "_direct_publish = _should_direct_publish(\n"
         "            rtsp_push_url, output_path, max_seconds, _use_plain_rtp, _keep_v\n"
     ) in src
+
+
+# --------------------------------------------------------------------------- #
+# DTLS audio conditioning                                                      #
+# --------------------------------------------------------------------------- #
+
+
+def _alaw_tone(level: int, n: int = 160) -> bytes:
+    """``n`` A-law samples of a square wave at +/- ``level``."""
+    from aidot_cameras.g711 import linear2alaw
+
+    return bytes(linear2alaw(level if i % 2 else -level) for i in range(n))
+
+
+def _alaw_rms(payload: bytes) -> float:
+    vals = [rp._alaw_to_linear(b) for b in payload]
+    return (sum(float(v) * v for v in vals) / len(vals)) ** 0.5
+
+
+def test_agc_lifts_a_quiet_camera_toward_the_target():
+    """The mux ran a level tracker toward -15 dBFS; publishing raw A-law would
+    have dropped it, leaving quiet cameras quiet."""
+    agc = rp.AlawAgc(env={})
+    quiet = _alaw_tone(600)  # about -35 dBFS
+    out = quiet
+    for _ in range(40):  # the tracker smooths, so let it settle
+        out = agc.process(quiet)
+    assert _alaw_rms(out) > _alaw_rms(quiet) * 4
+
+
+def test_agc_limits_a_loud_camera_instead_of_clipping():
+    agc = rp.AlawAgc(env={})
+    loud = _alaw_tone(30000)
+    out = loud
+    for _ in range(40):
+        out = agc.process(loud)
+    assert _alaw_rms(out) <= 32767
+    # Pulled down toward the target rather than left at full scale.
+    assert _alaw_rms(out) < _alaw_rms(loud)
+
+
+def test_agc_gate_does_not_amplify_near_silence():
+    """Below the gate the gain is faded out quadratically - without that, the
+    A-law quantization floor of a silent camera becomes audible clicking."""
+    agc = rp.AlawAgc(env={})
+    silence = _alaw_tone(4)
+    out = silence
+    for _ in range(40):
+        out = agc.process(silence)
+    assert _alaw_rms(out) < 200
+
+
+def test_agc_can_be_turned_off_and_passes_bytes_through():
+    agc = rp.AlawAgc(env={"AIDOT_AUDIO_AGC": "0"})
+    payload = _alaw_tone(600)
+    assert agc.process(payload) is payload
+
+
+def test_agc_reads_the_same_knobs_as_the_mux():
+    agc = rp.AlawAgc(
+        env={
+            "AIDOT_AUDIO_TARGET_DBFS": "-20",
+            "AIDOT_AUDIO_MAXGAIN_DB": "6",
+            "AIDOT_AUDIO_MINGAIN_DB": "-3",
+            "AIDOT_AUDIO_GATE_DBFS": "-50",
+        }
+    )
+    assert round(agc.target) == round(rp._db2amp(-20) * 32767)
+    assert round(agc.maxg, 6) == round(rp._db2amp(6), 6)
+    assert round(agc.ming, 6) == round(rp._db2amp(-3), 6)
+    assert round(agc.gate) == round(rp._db2amp(-50) * 32767)
+    # A malformed value falls back to the default rather than raising.
+    assert (
+        rp.AlawAgc(env={"AIDOT_AUDIO_TARGET_DBFS": "loud"}).target
+        == rp.AlawAgc(env={}).target
+    )
+
+
+def test_the_dtls_runner_conditions_its_audio():
+    import inspect
+
+    src = inspect.getsource(rp.dtls_rtp_publish_run)
+    assert "agc = AlawAgc()" in src and "agc.process(adata)" in src
+
+
+def test_gap_warn_threshold_env():
+    import os
+
+    from unittest.mock import patch
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("AIDOT_PUBLISH_GAP_WARN_S", None)
+        assert rp._publish_gap_warn_s() == 1.0
+        os.environ["AIDOT_PUBLISH_GAP_WARN_S"] = "2.5"
+        assert rp._publish_gap_warn_s() == 2.5
+        os.environ["AIDOT_PUBLISH_GAP_WARN_S"] = "0"
+        assert rp._publish_gap_warn_s() == 0.0  # disabled
+        os.environ["AIDOT_PUBLISH_GAP_WARN_S"] = "nonsense"
+        assert rp._publish_gap_warn_s() == 1.0
+
+
+def test_dtls_runner_reports_its_worst_frame_gap(go2rtc):
+    """A viewer sees a stall as a gap between frames; the session reports its
+    worst one so a repeat of the unexplained 1.63 s gap can be attributed."""
+    import queue
+
+    vq, aq = queue.Queue(), queue.Queue()
+    stop, res = threading.Event(), {}
+    t = threading.Thread(
+        target=rp.dtls_rtp_publish_run,
+        args=(vq, aq, go2rtc.url(), [0.0], stop),
+        kwargs={"result": res},
+        daemon=True,
+    )
+    t.start()
+    assert _wait(lambda: "RECORD" in go2rtc.requests)
+    vq.put((b"\x00\x00\x00\x01\x65" + b"k" * 200, 0, True))
+    assert _wait(lambda: any(ch == 0 for ch, _ in go2rtc.frames))
+    time.sleep(0.3)
+    vq.put((b"\x00\x00\x00\x01\x41" + b"d" * 50, 6000, False))
+    assert _wait(lambda: len([1 for ch, _ in go2rtc.frames if ch == 0]) >= 2)
+    stop.set()
+    t.join(3)
+    assert res["max_frame_gap_s"] >= 0.25
