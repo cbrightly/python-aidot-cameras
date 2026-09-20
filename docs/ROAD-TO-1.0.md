@@ -172,10 +172,11 @@ byte-identical to the released wheel. A soak measured on hot-patched files
 measures nothing, so that check is part of dating day zero rather than a
 formality.
 
-**The soak covers eight cameras, not nine.** `camera.deck` is an orphaned
-registry entry - `restored: True`, no device behind it, the integration does not
-log it at all - and it was already in that state before any of 2026-09-04's
-work. It is not a streaming failure and must not be scored as one.
+**The soak covers eight cameras, not nine.** One of the nine entities is an
+orphaned registry entry - `restored: True`, no device behind it, the
+integration does not log it at all - and it was already in that state before
+any of 2026-09-04's work. It is not a streaming failure and must not be scored
+as one.
 
 Read `sh ~/source/aidot-soak-check.sh` for the running count. It is read-only,
 and it attributes tracebacks rather than printing a raw total, because 96 of one
@@ -325,13 +326,13 @@ COLD open; an immediate retry on the now-warm session returned 200. rc12
 changes no media-path code, so this is not attributable to it, but it is the
 cold-open join case worth a look on its own.
 
-**`camera.kitchen` is expected to be `unavailable`, and it is not the orphan.**
-It is `L2_F8A3`, the A001513 that sits on `192.168.100.x` while Home Assistant
-is on `192.168.0.x` -- the same camera the live-validation run reports as its
-one tolerated `ERROR`. Its root cause is routing, not this library. So two of
-the entities are down by design: `camera.deck` (orphaned registry entry, no
-device) and `camera.kitchen` (unroutable). Neither is a soak failure, and a
-window that shows them down is not showing a regression.
+**A second entity is expected to be `unavailable`, and it is not the orphan.**
+It is an A001513 on a different subnet from Home Assistant -- the same camera
+the live-validation run reports as its one tolerated `ERROR`. Its root cause is
+routing, not this library. So two of the entities are down by design: the
+orphaned registry entry with no device behind it, and the unroutable A001513.
+Neither is a soak failure, and a window that shows them down is not showing a
+regression.
 
 **One thing to know before reading a quiet window as a quiet fleet.**
 `webrtc_open` logs every AVIO data-channel message at INFO, keepalives
@@ -934,7 +935,7 @@ is the first one.
 of this section claimed the stalling unit was the A001064 PTZ. That was wrong and
 is retracted: it took the device id from a log line that merely sat nearby rather
 than from the device list. Verified against the list, `unit 13-A` is **unit 13-A**
-and `unit 13-B` is **L2_181**, both `LK.IPC.A001513`; the A001064 is `the PTZ`
+and `unit 13-B` is **<unit-2>**, both `LK.IPC.A001513`; the A001064 is `the PTZ`
 and appears in none of the reports. The lesson is one this project keeps
 relearning - never source an identifier from something that only sits next to
 it.
@@ -951,10 +952,10 @@ this open:
              54.144.38.43:5349 via <wan-ip>:P2 -> vetoed-self-ip
              54.144.38.43:5349 via 54.144.38.43:P3  -> known
 
-    unit 13-B = L2_181 (A001513), once:
-      nominated=192.168.7.21:53246, 192.168.7.21:47093
+    unit 13-B = <unit-2> (A001513), once:
+      nominated=<camera-ip>:53246, <camera-ip>:47093
       use-candidate=NOT-SENT; binding-success=0; trigger=not-sent
-      probes=192.168.7.21:53246 -> learned; 192.168.7.21:47093 -> learned
+      probes=<camera-ip>:53246 -> learned; <camera-ip>:47093 -> learned
 
     unit 13-A, the sixth of its reports (run 31348997269):
       nominated=none; use-candidate=not-sent; binding-success=0; probes=none
@@ -1039,10 +1040,10 @@ The kill written above, before any of this evidence existed, was:
 > an open that logs `SDES: sent trigger` and delivers no media, or one that
 > delivers media without it.
 
-`L2_181` attempt 1 in run 31448429413:
+`<unit-2>` attempt 1 in run 31448429413:
 
-    nominated=192.168.7.21:46846, 192.168.7.21:36740; use-candidate=sent;
-    binding-success=4; trigger=sent; probes=192.168.7.21:46846 -> learned
+    nominated=<camera-ip>:46846, <camera-ip>:36740; use-candidate=sent;
+    binding-success=4; trigger=sent; probes=<camera-ip>:46846 -> learned
 
 Four inbound Binding Successes, the trigger sent, an ordinary LAN candidate
 learned and nominated - and zero media for the full 75 s. The retry passed.
@@ -1184,14 +1185,14 @@ at ICE.
 The soak fired two first-media stalls in one window, and they are the two shipped
 modes this item closed on rather than anything new:
 
-- `338603...` (unit 13-B = L2_181, the driveway A001513) stalled `nominated=none`
+- `338603...` (unit 13-B, an A001513) stalled `nominated=none`
   after 75 s. This unit is normally reachable and streamed 5 of 5 in this item's
   own sweep (the 13-B row, 4.7-6.3 s), so `nominated=none` on it reads as a
   transient - the answer was absent or degenerate for this one open - not the
   persistent state the A001064 sat in. The device id is checked against this
   file's own unit-name embedding (`unit 13-B0fce`), not the unit the earlier
   reports describe: the persistent staller is 13-A, a different camera.
-- `b5284...` (unit 13-A = L2_F8A3, the kitchen A001513, the one on the IoT SSID)
+- `b5284...` (unit 13-A, an A001513, the one on the IoT SSID)
   stalled after 68 s having nominated a single host address it cannot route to.
   That is the host-only shape this item already describes, on 13-A the unit it
   describes, unchanged.
@@ -1230,21 +1231,21 @@ targets `answer=none` and not the present-but-degenerate `answer=0-candidates`
 shape, which would need its own trigger. Either way it cannot be validated
 without a camera, which is why the report comes first.
 
-#### 2026-09-15 (later): the kitchen stall nominates an on-subnet address that answers nothing, and the wait now gives it up
+#### 2026-09-15 (later): the 13-A stall nominates an on-subnet address that answers nothing, and the wait now gives it up
 
-*Corrected 2026-09-16: this entry first called `192.168.0.159` a dead address
+*Corrected 2026-09-16: this entry first called `<camera-ip>` a dead address
 (a stale lease or AP client isolation). It is not - see the correction at the
 end of this entry. The mechanism below stands; its stated cause did not.*
 
-The 13-A (kitchen) stalls recurred four times in three minutes,
-`nominated=192.168.0.159` each time. Two measurements on the box settle which
+The 13-A stalls recurred four times in three minutes,
+`nominated=<camera-ip>` each time. Two measurements on the box settle which
 mode it is:
 
-- `ip -4 addr` puts Home Assistant on `192.168.0.114/24`, so `192.168.0.159`
+- `ip -4 addr` puts Home Assistant on `<ha-ip>/24`, so `<camera-ip>`
   is on this host's own subnet. `_candidate_is_off_subnet` returns False for it
   - this is NOT the off-subnet mode, and the "every candidate ... cannot reach"
   warning never fires.
-- `ping 192.168.0.159` got no reply at the time.
+- `ping <camera-ip>` got no reply at the time.
 
 So we nominate that address, no STUN Binding Success comes back, the trigger
 never arms, and the attempt spends its whole 75 s budget before the retry -
@@ -1271,15 +1272,15 @@ build that carries it.
 **Correction, 2026-09-16: the address was not dead.** Checked from the camera
 LAN the next morning:
 
-- ARP resolves `192.168.0.159` to `1c:d6:bd:e8:f8:a3` - the camera's own MAC
-  (the unit is `L2 F8A3` in the device registry) - so it is the camera's real,
+- ARP resolves `<camera-ip>` to `<camera-mac>` - the camera's own MAC
+  (the unit is `<unit>` in the device registry) - so it is the camera's real,
   current address, not a stale lease.
 - Home Assistant's own `ping` to it succeeded; from another LAN host it did
   not. ICMP that comes and goes is what a battery camera dozing and waking looks
   like, and this item's rc7 row already measured an A001513 answering and then
   going back to sleep mid-handshake.
-- The same pattern holds for the other stalling battery unit, `L2 F127`, whose
-  stalls nominated `192.168.0.126` - ARP resolves that to its own MAC too.
+- The same pattern holds for the other stalling battery unit, `<unit>`, whose
+  stalls nominated `<camera-ip-2>` - ARP resolves that to its own MAC too.
 
 So the likely shape is the rc7 one, not an unreachable address. The fix is
 unaffected, because it never depended on why nothing answered - only on this
@@ -1290,7 +1291,7 @@ A001513 units daily instead of treating each as a reset, and still raises
 stalls on the mains PTZ or any unlisted camera immediately.
 
 Run on the box 2026-09-16 (see item 1 for what that does to the soak): one
-forced cold open each on `L2 F8A3`, `L2 F127` and the mains PTZ reached first
+forced cold open each on `<unit>`, `<unit>` and the mains PTZ reached first
 media in 4.8 s, 4.4 s and 2.5 s, with no stall, warning or traceback. The
 abandon did not fire because nothing needed it; it is still unobserved live.
 

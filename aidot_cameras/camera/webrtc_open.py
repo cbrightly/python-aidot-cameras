@@ -614,7 +614,7 @@ class _WebRTCOpenMixin:
             # See _install_highport_nomination_patch.
             _install_highport_nomination_patch()
 
-            # Allow DTLS 1.0 client hellos.  L2_162 (A001513) and likely other
+            # Allow DTLS 1.0 client hellos.  An A001513, and likely other
             # KVS-derived camera firmware sends DTLS 1.0 ClientHello (0xfeff).
             # OpenSSL 3.x disables DTLS 1.0 by default, so aiortc's SSL context
             # aborts the handshake immediately ("Unexpected EOF") without

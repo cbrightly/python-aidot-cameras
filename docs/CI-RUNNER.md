@@ -376,10 +376,39 @@ Both happened on 2026-09-01, on a deployment and then in CI, from the same
 cause. So the order is:
 
 1. Land the library change and gate it.
-2. Publish the library, and **confirm the wheel is actually on PyPI** -- a
+2. **Update the human-readable docs** (see below) in the release commit, not
+   after it.
+3. Publish the library, and **confirm the wheel is actually on PyPI** -- a
    created GitHub release is not enough; the publish job waits on an
    environment approval.
-3. Only then push the integration commit that pins the new version.
+4. Only then push the integration commit that pins the new version.
+
+## Update the human readables in the release commit
+
+Every release ships the prose as well as the code, and prose that describes
+the *previous* release is worse than none: it is read as current. Whatever the
+change touched, walk this list and fix what the release makes untrue.
+
+| File | What goes stale |
+| --- | --- |
+| `CHANGELOG.md` | The `[Unreleased]` heading becomes the version; entries describe behaviour, not commits |
+| `README.md` | Measured numbers (cold-open timings, CPU), option names and defaults, supported models |
+| `docs/CAMERAS.md` | Per-model behaviour and anything a new model or transport changed |
+| `docs/ROAD-TO-1.0.md` | The soak clock: say explicitly whether this release resets it, and why |
+| `docs/TESTING.md` | New markers, fixtures, or a test that now needs real hardware |
+| `docs/CI-RUNNER.md` | Gate coverage: a new code path the live gate does **not** exercise belongs in a "not gated" section |
+| Design docs (e.g. `DESIGN-direct-publish.md`) | The status line, the phase reached, and results that a live run has now superseded |
+| Integration `README` / options strings | An option that changed default, name, or meaning |
+
+Two rules that have bitten:
+
+- **A measured figure carries its date and its conditions**, because the next
+  reader cannot tell a stale measurement from a current one. "~2.4-3.3 s over
+  about 300 cold opens, 2026-09-15 to 16" survives a release that invalidates
+  it; "~3 s" does not.
+- **No device PII**: no camera names, entity ids, device ids, IPs or
+  hostnames - model plus index (`A001513 #2`). This repo is public, and room
+  names describe the layout of a house. Grep the diff before committing.
 
 Verifying a release exists is not the same as verifying it is installable:
 
