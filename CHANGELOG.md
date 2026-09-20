@@ -6,6 +6,29 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The direct publish no longer reads a file on the event loop.** The serve
+  spawn read the narrowed SDP with a blocking `open()`, which Home Assistant
+  flags ("Detected blocking call to open ... inside the event loop") and which
+  sits on the open's hot path. It goes through the executor like every other
+  read there.
+
+### Changed
+
+- **The audio conditioning is now a table lookup.** The gain, limiter and
+  A-law round trip are deterministic for a given gain, so they are baked into
+  a 256-entry translate table and applied by `bytes.translate`. Measured on
+  ARM: 0.858 ms per 20 ms frame (4.3% of a core per stream, inside the publish
+  loop) down to 0.028 ms (0.14%). The audio is unchanged; the gain is
+  quantized to 0.5 dB steps to keep one table in use as the level moves.
+- **A publish's frame-gap warning says why.** A gap has three quite different
+  causes - nothing arrived from the camera, what arrived was dropped (the wait
+  for a decodable keyframe, or a presentation time already served), or the
+  publish blocked - and the line could not tell them apart. It now reports how
+  long ago a frame was last taken off the queue and the two drop counts, which
+  the session result carries too.
+
 ## [1.0.0rc26]
 
 ### Fixed

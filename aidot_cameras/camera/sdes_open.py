@@ -8929,6 +8929,7 @@ class _SdesOpenMixin:
                 bool(getattr(self, "is_battery_camera", False))
             ),
         )
+
         # Audio matters even more than video here.  A multi-PT m-line makes ffmpeg
         # bind the depacketizer to the FIRST payload type and silently discard the
         # rest, and the mpegts mux withholds its PAT/PMT until EVERY mapped stream
@@ -8936,12 +8937,11 @@ class _SdesOpenMixin:
         # on a camera that sends PCMA discards every audio packet and the consumer
         # receives zero bytes.  That takes the video down with it, which is why
         # enabling serve audio appeared to break streaming outright.
+        def _read_sdp_file() -> str:
+            with open(sdp_path, encoding="utf-8") as _f_sdp:
+                return _f_sdp.read()
+
         if _keep_v is not None or _keep_a is not None:
-
-            def _read_sdp_file() -> str:
-                with open(sdp_path, encoding="utf-8") as _f_sdp:
-                    return _f_sdp.read()
-
             try:
                 _cur_sdp = await asyncio.get_running_loop().run_in_executor(
                     None, _read_sdp_file
@@ -9005,11 +9005,18 @@ class _SdesOpenMixin:
         )
         _direct_gain_db = self._resolve_sdes_audio_gain_db()
 
-        def _spawn_serve():
-            """Start the serve: the direct publisher, or the ffmpeg in `cmd`."""
+        async def _spawn_serve():
+            """Start the serve: the direct publisher, or the ffmpeg in `cmd`.
+
+            The publisher needs the narrowed SDP, and reading it is file I/O:
+            it goes through the executor like every other read on this path.
+            Home Assistant flags a blocking `open()` in the event loop and it
+            is a real stall, however short.
+            """
             if _direct_publish:
-                with open(sdp_path, encoding="utf-8") as _f_dp:
-                    _dp_sdp = _f_dp.read()
+                _dp_sdp = await asyncio.get_running_loop().run_in_executor(
+                    None, _read_sdp_file
+                )
                 return LoopbackRtpPublisher(
                     _dp_sdp,
                     rtsp_push_url,
@@ -9066,7 +9073,7 @@ class _SdesOpenMixin:
                 "  Windows:         https://ffmpeg.org/download.html"
             )
         try:
-            proc = _spawn_serve()
+            proc = await _spawn_serve()
             _proc_holder[0] = proc
             _cl(_reap, proc)  # kill ffmpeg if the open is cancelled before hand-off
         except FileNotFoundError:
@@ -9342,7 +9349,7 @@ class _SdesOpenMixin:
                             _LOGGER.warning(
                                 "could not rewrite SDP for restart: %s", _sdp_exc2
                             )
-                        proc = _spawn_serve()
+                        proc = await _spawn_serve()
                         # Point the shared holder at the live proc immediately.
                         # The bridge thread polls _proc_holder[0]; if it still
                         # sees the terminated old proc it logs "stream ended",

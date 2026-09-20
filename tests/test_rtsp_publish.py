@@ -742,7 +742,11 @@ def test_both_sdes_serve_launches_go_through_the_spawn_helper():
     from aidot_cameras.camera import sdes_open
 
     src = inspect.getsource(sdes_open)
-    assert src.count("proc = _spawn_serve()") == 2
+    assert src.count("proc = await _spawn_serve()") == 2
+    # The SDP read goes through the executor: Home Assistant flags a blocking
+    # open() in the event loop, and this one runs on the open's hot path.
+    assert 'with open(sdp_path, encoding="utf-8") as _f_dp' not in src
+    assert "_dp_sdp = await asyncio.get_running_loop().run_in_executor(" in src
     body = src[src.index("def _spawn_serve():") :]
     body = body[: body.index("# Do not launch the publisher")]
     assert "LoopbackRtpPublisher(" in body and "subprocess.Popen(" in body
@@ -1109,3 +1113,33 @@ def test_dtls_runner_reports_its_worst_frame_gap(go2rtc):
     stop.set()
     t.join(3)
     assert res["max_frame_gap_s"] >= 0.25
+
+
+def test_dtls_runner_attributes_a_gap_to_drops_or_starvation(go2rtc):
+    """A gap means one of three things - nothing arrived, what arrived was
+    dropped, or the publish blocked - and the warning could not tell them
+    apart. The session result carries the drop counts behind it."""
+    import queue
+
+    vq, aq = queue.Queue(), queue.Queue()
+    stop, res = threading.Event(), {}
+    t = threading.Thread(
+        target=rp.dtls_rtp_publish_run,
+        args=(vq, aq, go2rtc.url(), [0.0], stop),
+        kwargs={"result": res},
+        daemon=True,
+    )
+    t.start()
+    assert _wait(lambda: "RECORD" in go2rtc.requests)
+    # Two non-keyframes before the first keyframe: dropped, not published.
+    vq.put((b"\x00\x00\x00\x01\x41" + b"a" * 30, 0, False))
+    vq.put((b"\x00\x00\x00\x01\x41" + b"b" * 30, 3000, False))
+    vq.put((b"\x00\x00\x00\x01\x65" + b"k" * 60, 6000, True))
+    assert _wait(lambda: any(ch == 0 for ch, _ in go2rtc.frames))
+    # A presentation time already served: dropped as re-sent.
+    vq.put((b"\x00\x00\x00\x01\x41" + b"c" * 30, 6000, False))
+    time.sleep(0.4)
+    stop.set()
+    t.join(3)
+    assert res["skipped_pre_keyframe"] == 2
+    assert res["dropped_resent"] == 1

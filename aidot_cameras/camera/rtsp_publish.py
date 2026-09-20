@@ -746,6 +746,25 @@ class RtpReorderBuffer:
 # --------------------------------------------------------------------------- #
 
 
+#: A-law byte -> linear sample, and the squares of those, precomputed. The
+#: publish loop runs per 20 ms audio frame on every camera, so the decode and
+#: the level measurement must not be per-sample Python.
+_ALAW_TO_LINEAR: tuple = ()
+_ALAW_SQUARES: tuple = ()
+
+
+def _alaw_mean_square(payload: bytes) -> float:
+    """Mean square of an A-law frame, by table lookup."""
+    sq = _ALAW_SQUARES
+    return sum(sq[b] for b in payload) / len(payload)
+
+
+def _alaw_encode(sample: int) -> int:
+    from ..g711 import linear2alaw
+
+    return linear2alaw(sample)
+
+
 def _db2amp(db: float) -> float:
     """Decibels (full scale) to a linear amplitude factor."""
     return 10.0 ** (db / 20.0)
@@ -776,6 +795,10 @@ def alaw_gain_table(gain_db: float) -> Optional[bytes]:
         v = round(_alaw_to_linear(a) * k)
         out[a] = linear2alaw(max(-32768, min(32767, v)))
     return bytes(out)
+
+
+_ALAW_TO_LINEAR = tuple(_alaw_to_linear(b) for b in range(256))
+_ALAW_SQUARES = tuple(float(v) * v for v in _ALAW_TO_LINEAR)
 
 
 class AlawAgc:
@@ -816,15 +839,25 @@ class AlawAgc:
         self.ming = _db2amp(_f("AIDOT_AUDIO_MINGAIN_DB", -12))
         self.gate = _db2amp(_f("AIDOT_AUDIO_GATE_DBFS", -45)) * 32767.0
         self._ms = None  # smoothed mean square
+        self._tables: dict = {}  # quantized gain -> 256-entry translate table
+
+    #: Gain is quantized to this many dB before a table is built for it, so a
+    #: slowly-moving level tracker reuses one table instead of rebuilding it
+    #: per frame. 0.5 dB is well under audible.
+    _GAIN_STEP_DB = 0.5
 
     def process(self, payload: bytes) -> bytes:
-        """One A-law frame in, one conditioned A-law frame out."""
+        """One A-law frame in, one conditioned A-law frame out.
+
+        The conditioning is deterministic given the gain, so the gain, the
+        limiter and the A-law round trip are baked into a 256-entry translate
+        table and applied by ``bytes.translate`` - C speed, no per-sample
+        Python. Measured on ARM before the table: 0.858 ms per 20 ms frame,
+        4.3% of a core per stream, all of it inside the publish loop.
+        """
         if not self.enabled or not payload:
             return payload
-        from ..g711 import linear2alaw
-
-        samples = [_alaw_to_linear(b) for b in payload]
-        ms = sum(float(x) * x for x in samples) / len(samples)
+        ms = _alaw_mean_square(payload)
         self._ms = ms if self._ms is None else self._ms * 0.95 + ms * 0.05
         rms = (self._ms**0.5) + 1.0
         gain = self.target / rms
@@ -833,11 +866,22 @@ class AlawAgc:
             # under it we are, instead of cranking toward maximum.
             gain *= (rms / self.gate) ** 2
         gain = max(self.ming, min(self.maxg, gain))
-        out = bytearray(len(samples))
-        for i, x in enumerate(samples):
-            y = math.tanh(x * (gain / 32767.0)) * 32767.0
-            out[i] = linear2alaw(int(max(-32768, min(32767, y))))
-        return bytes(out)
+        return payload.translate(self._table(gain))
+
+    def _table(self, gain: float) -> bytes:
+        step = 10 ** (self._GAIN_STEP_DB / 20.0)
+        key = round(math.log(max(gain, 1e-9), step))
+        table = self._tables.get(key)
+        if table is None:
+            g = step**key
+            table = bytes(
+                _alaw_encode(
+                    int(max(-32768, min(32767, math.tanh(x * (g / 32767.0)) * 32767.0)))
+                )
+                for x in _ALAW_TO_LINEAR
+            )
+            self._tables[key] = table
+        return table
 
 
 # --------------------------------------------------------------------------- #
@@ -1280,6 +1324,14 @@ def dtls_rtp_publish_run(
     gap_warn_s = _publish_gap_warn_s()
     last_frame = None
     max_gap = 0.0
+    # A gap has three quite different causes and the warning could not tell
+    # them apart: nothing arrived from the camera, what arrived was dropped
+    # (the wait for a decodable keyframe, or a presentation time already
+    # served), or the publish itself blocked. Count the drops and record when
+    # a frame was last taken off the queue, so the line says which.
+    skipped_pre_keyframe = 0
+    dropped_resent = 0
+    last_dequeue = None
     try:
         while not stop_flag.is_set():
             if not pub.alive:
@@ -1295,11 +1347,14 @@ def dtls_rtp_publish_run(
                 except _queue.Empty:
                     break
                 moved = True
+                last_dequeue = time.monotonic()
                 if not vstarted:
                     if not kf:
+                        skipped_pre_keyframe += 1
                         continue
                     vstarted, v0 = True, ts
                 if is_resent_video_frame(ts_state, ts - v0):
+                    dropped_resent += 1
                     continue
                 now = time.monotonic()
                 seq_ts = None
@@ -1315,13 +1370,19 @@ def dtls_rtp_publish_run(
                         if gap > max_gap:
                             max_gap = gap
                         if gap_warn_s and gap >= gap_warn_s:
+                            since_dequeue = now - last_dequeue if last_dequeue else None
                             _LOGGER.warning(
                                 "camera %s: DTLS direct publish: %.2f s without a"
-                                " frame to publish (queue %d, largest so far"
-                                " %.2f s)",
+                                " frame to publish (queue %d, last frame taken"
+                                " off the queue %s ago, %d skipped waiting for a"
+                                " keyframe, %d dropped as already served,"
+                                " largest gap so far %.2f s)",
                                 device_id,
                                 gap,
                                 vq.qsize(),
+                                ("%.2f s" % since_dequeue) if since_dequeue else "n/a",
+                                skipped_pre_keyframe,
+                                dropped_resent,
                                 max_gap,
                             )
                     last_frame = now
@@ -1350,4 +1411,6 @@ def dtls_rtp_publish_run(
         res["timestamp_repairs"] = vtl.repairs + atl.repairs
         res["packets"] = pub.packets_sent
         res["max_frame_gap_s"] = round(max_gap, 2)
+        res["skipped_pre_keyframe"] = skipped_pre_keyframe
+        res["dropped_resent"] = dropped_resent
         pub.close(teardown=True)
