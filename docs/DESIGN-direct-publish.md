@@ -312,6 +312,41 @@ lossy links the reorder buffer absorbed late packets (up to 11 late / 15 lost
 in 7.5 min on the worst camera) where the ffmpeg arm logged repeated
 "missed N packets" and corrupted NAL units.
 
+**Pass 4 (2026-09-20, driven through Home Assistant rather than a harness.)**
+Every arm above opened the camera from a script. This pass used HA's own
+`camera/stream`, so it exercises the path a Picture card takes - the
+integration's budgets, HA's stream worker, go2rtc - and it found three things
+the harness could not.
+
+HLS now carries audio on every model (`h264` + `aac` on the A001513, A001064
+and A000088), which A3 could previously only show synthetically.
+
+Cold open through HA, A000088 mains, same camera, `mains_idle_s=120` so each
+arm was genuinely cold:
+
+| | ffmpeg pull serve | direct publish |
+| --- | --- | --- |
+| `stream_source` returns | 2.7 s | **1.8 s** |
+| Warm re-open | 0.0 s | 0.0 s |
+
+So the in-HA cold path agrees with the harness: direct publish is faster, and
+it sits well inside both the 8.5 s push-publisher budget and HA's 10 s
+`CAMERA_STREAM_SOURCE_TIMEOUT`. The non-functional "no regression in cold
+start" requirement holds through HA, not just on the bench.
+
+The third finding is a failure this design does **not** cause but does get
+blamed for. Six repeated HLS opens of a cold A000088 gave fail, fail, then
+four passes, the failures taking over 20 s each and one of them logging
+`Error demuxing stream (Operation timed out, rtsp://...)`. That is the
+signalling no-show recorded in the Pass 3 footnote: the open stalls before any
+serve or publisher exists, the library abandons it at about +25 s and its retry
+serves media by +35-40 s - straddling HA's 10 s HLS clock, so the first one or
+two clicks are lost and the next succeeds. Turning direct publish off does not
+fix it (that arm's cold open was slower), and the WebRTC path never sees it
+because it has no timeout. It reaches users only where a positive warm-hold
+window is configured; the default `mains_idle_s=0` holds mains cameras warm and
+never takes the cold path.
+
 ## Open questions
 
 1. **Which go2rtc does the live box run?** The integration talks to
@@ -335,6 +370,16 @@ in 7.5 min on the worst camera) where the ffmpeg arm logged repeated
    timeline, no re-ANNOUNCE) would hide reconnects from viewers entirely - but
    the A001064's H.264/H.265 flip forces a re-ANNOUNCE anyway (and today an
    H.265 session leaves the publisher entirely). Revisit after A4.
+5. **What are the DTLS frame gaps?** The box logs 1.0-3.3 s gaps between
+   publishable frames on most sessions (35 in a day's testing), and the queue
+   depth at the warning is not one story: some fire with the queue empty, which
+   is the camera not delivering, and some with four frames behind them, which is
+   a burst arriving at once. Neither is the publisher stalling, and a burst is
+   timed correctly (the hybrid policy steps by the camera's delta for any step
+   in 0..3 s), but "consistent with" is not "measured". The warning now reports
+   when a frame was last dequeued and how many were skipped pre-keyframe or
+   dropped as already served; read those counters off a real session before
+   deciding whether anything needs fixing.
 
 ## Revisit as it grows
 
