@@ -1327,11 +1327,12 @@ def dtls_rtp_publish_run(
     # A gap has three quite different causes and the warning could not tell
     # them apart: nothing arrived from the camera, what arrived was dropped
     # (the wait for a decodable keyframe, or a presentation time already
-    # served), or the publish itself blocked. Count the drops and record when
-    # a frame was last taken off the queue, so the line says which.
+    # served), or the publish itself blocked. Count the drops, and time how
+    # much of the gap had an empty queue, so the line says which.
     skipped_pre_keyframe = 0
     dropped_resent = 0
     last_dequeue = None
+    prev_dequeue = None
     try:
         while not stop_flag.is_set():
             if not pub.alive:
@@ -1347,7 +1348,11 @@ def dtls_rtp_publish_run(
                 except _queue.Empty:
                     break
                 moved = True
-                last_dequeue = time.monotonic()
+                # Keep the PREVIOUS arrival: comparing this frame's dequeue to
+                # it is what separates "nothing arrived" from "what arrived was
+                # dropped". Comparing to this frame's own dequeue cannot - it
+                # ends the gap either way, so it just restates the gap.
+                prev_dequeue, last_dequeue = last_dequeue, time.monotonic()
                 if not vstarted:
                     if not kf:
                         skipped_pre_keyframe += 1
@@ -1370,17 +1375,25 @@ def dtls_rtp_publish_run(
                         if gap > max_gap:
                             max_gap = gap
                         if gap_warn_s and gap >= gap_warn_s:
-                            since_dequeue = now - last_dequeue if last_dequeue else None
+                            # Time between the previous frame ARRIVING and this
+                            # one. Near the gap means the camera sent nothing;
+                            # much shorter means frames kept arriving and were
+                            # dropped, and the counters after it say why.
+                            waited = (
+                                last_dequeue - prev_dequeue
+                                if prev_dequeue is not None
+                                else gap
+                            )
                             _LOGGER.warning(
                                 "camera %s: DTLS direct publish: %.2f s without a"
-                                " frame to publish (queue %d, last frame taken"
-                                " off the queue %s ago, %d skipped waiting for a"
-                                " keyframe, %d dropped as already served,"
+                                " frame to publish (queue %d, %.2f s since the"
+                                " previous frame arrived, %d skipped waiting for"
+                                " a keyframe, %d dropped as already served,"
                                 " largest gap so far %.2f s)",
                                 device_id,
                                 gap,
                                 vq.qsize(),
-                                ("%.2f s" % since_dequeue) if since_dequeue else "n/a",
+                                waited,
                                 skipped_pre_keyframe,
                                 dropped_resent,
                                 max_gap,

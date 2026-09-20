@@ -26,8 +26,11 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   causes - nothing arrived from the camera, what arrived was dropped (the wait
   for a decodable keyframe, or a presentation time already served), or the
   publish blocked - and the line could not tell them apart. It now reports how
-  long ago a frame was last taken off the queue and the two drop counts, which
-  the session result carries too.
+  long it had been since the previous frame *arrived*, plus the two drop
+  counts, which the session result carries too. Timing to the arrival that
+  ends the gap cannot separate the causes: that happens at the end either way,
+  so it only restates the gap and reads as starvation even when frames were
+  arriving all along and being dropped.
 
 ## [1.0.0rc26]
 

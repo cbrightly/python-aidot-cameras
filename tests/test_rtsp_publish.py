@@ -10,6 +10,7 @@ answered 200 all the way through RECORD and then closed.
 
 from __future__ import annotations
 
+import logging
 import re
 import socket
 import struct
@@ -1143,3 +1144,63 @@ def test_dtls_runner_attributes_a_gap_to_drops_or_starvation(go2rtc):
     t.join(3)
     assert res["skipped_pre_keyframe"] == 2
     assert res["dropped_resent"] == 1
+
+
+def _gap_warning(caplog):
+    """The seconds-since-previous-arrival the gap warning reported."""
+    for rec in caplog.records:
+        m = re.search(r"([0-9.]+) s since the previous frame arrived", rec.getMessage())
+        if m:
+            return float(m.group(1))
+    return None
+
+
+def test_gap_warning_separates_starvation_from_dropped_frames(go2rtc, caplog):
+    """The gap line has to say WHICH cause, not just that there was a gap.
+
+    Measuring to the dequeue of the frame that ENDS the gap cannot: that
+    happens at the end either way, so it restates the gap and reads as
+    starvation even when frames were arriving all along. The previous
+    arrival is what tells them apart.
+    """
+    import queue
+
+    def run(feed):
+        vq, aq = queue.Queue(), queue.Queue()
+        stop, res = threading.Event(), {}
+        t = threading.Thread(
+            target=rp.dtls_rtp_publish_run,
+            args=(vq, aq, go2rtc.url(), [0.0], stop),
+            kwargs={"result": res},
+            daemon=True,
+        )
+        t.start()
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        vq.put((b"\x00\x00\x00\x01\x65" + b"k" * 60, 0, True))
+        assert _wait(lambda: any(ch == 0 for ch, _ in go2rtc.frames))
+        feed(vq)
+        vq.put((b"\x00\x00\x00\x01\x41" + b"d" * 30, 30000, False))
+        time.sleep(0.4)
+        stop.set()
+        t.join(3)
+        return res
+
+    with caplog.at_level(logging.WARNING, logger="aidot_cameras.camera.rtsp_publish"):
+        run(lambda vq: time.sleep(1.3))
+    starved = _gap_warning(caplog)
+    assert starved is not None and starved >= 1.0, f"starvation reported {starved}"
+
+    caplog.clear()
+
+    def keep_arriving(vq):
+        end = time.monotonic() + 1.3
+        while time.monotonic() < end:
+            # Arrives, but its presentation time was already served.
+            vq.put((b"\x00\x00\x00\x01\x41" + b"c" * 30, 0, False))
+            time.sleep(0.05)
+
+    with caplog.at_level(logging.WARNING, logger="aidot_cameras.camera.rtsp_publish"):
+        res = run(keep_arriving)
+    dropping = _gap_warning(caplog)
+    assert dropping is not None and dropping < 0.5, f"drops reported {dropping}"
+    assert res["dropped_resent"] >= 10

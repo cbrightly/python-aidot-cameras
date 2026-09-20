@@ -377,9 +377,11 @@ never takes the cold path.
    a burst arriving at once. Neither is the publisher stalling, and a burst is
    timed correctly (the hybrid policy steps by the camera's delta for any step
    in 0..3 s), but "consistent with" is not "measured". The warning now reports
-   when a frame was last dequeued and how many were skipped pre-keyframe or
-   dropped as already served; read those counters off a real session before
-   deciding whether anything needs fixing.
+   how long it had been since the previous frame *arrived*, and how many were
+   skipped pre-keyframe or dropped as already served; read those off a real
+   session before deciding whether anything needs fixing. (Timing to the
+   arrival that ends the gap does not work - it happens at the end whatever the
+   cause, so it restates the gap and reads as starvation every time.)
 
 ## Revisit as it grows
 
