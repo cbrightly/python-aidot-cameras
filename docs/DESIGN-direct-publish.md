@@ -212,7 +212,28 @@ from the same publish (`tests/test_rtsp_publish_go2rtc.py`).
 | **A2** | Integration: option, DTLS push routing when enabled, tests. | HA test suite green. |
 | **Live** | On the camera LAN box: each model (A000088, A001064, A001513) - cold start, 30 min soak, HA WebRTC view, HLS fallback, idle release, go2rtc restart, camera power-cycle. Compare against flag-off baseline. | See "Validation gate". |
 | **A3** | DONE: HLS/recorder AAC via a lazy go2rtc `ffmpeg:` source listed after the live one. DTLS AGC still undecided. | HLS has audio; WebRTC unaffected. |
-| **A4** | NOT DONE. Default on; ffmpeg push path kept one release as fallback, then removed along with `_ServeRelay`, CRC ports and the pull registration for push cameras. Note the ffmpeg serve cannot be removed outright while H.265 sessions fall back to it. | A soak in normal use with the option on, then one release with no regressions reported. |
+| **A4** | NOT DONE. Default on; ffmpeg push path kept one release as fallback, then removed along with `_ServeRelay`, CRC ports and the pull registration for push cameras. Note the ffmpeg serve cannot be removed outright while H.265 sessions fall back to it, and see "Stale pull sources" below. | A soak in normal use with the option on, then one release with no regressions reported. **Day zero is 2026-09-20**, when `rc27` reached the box: the days before it were spent releasing into this path five times and toggling the option, which is testing, not soaking. |
+
+### Stale pull sources, to clear as part of A4
+
+A camera that published still carries its pull-era source in `go2rtc.yaml`:
+
+```
+aidot_<id12>:
+  - http://127.0.0.1:186xx/<id32>.ts     <- registered before it published
+  - ffmpeg:aidot_<id12>#audio=aac
+```
+
+Read off the live box 2026-09-20 with a session up, that first producer has no
+`id`, no `protocol` and no `remote_addr` - go2rtc is not dialling it while the
+publisher holds the stream, so it is inert today. The publisher is the live
+producer (`format_name: rtsp`, `user_agent: python-aidot-cameras/...`, SDP
+carrying `H264/90000` + `PCMA/8000`) and A3's AAC source hangs off that.
+
+It matters at A4 because the default flips for everyone: every published
+camera would keep a source pointing at a port nothing binds, for go2rtc to
+try on a consumer attach. Clearing it belongs with "remove the pull
+registration for push cameras" in the row above.
 
 ## Validation gate (run before each release that touches this path)
 

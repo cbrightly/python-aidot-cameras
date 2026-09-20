@@ -1,7 +1,8 @@
 # Testing tiers
 
-> **Status: all three tiers are on `main`.** The unit tier is 708 passed /
-> 5 skipped and the fake lab is 20 passed; the `e2e` and `live` markers, the
+> **Status: all three tiers are on `main`.** Measured 2026-09-20 on `rc27`:
+> the unit tier is 2063 passed / 17 skipped and the fake lab is 21 passed /
+> 1 skipped; the `e2e` and `live` markers, the
 > `[tool.pytest.ini_options]` block with `addopts`, `tests/e2e/` and the env
 > seams are all in place. The live tier's workflow lives in a private repo and
 > gates publishing on a commit status - see [`CI-RUNNER.md`](CI-RUNNER.md).
