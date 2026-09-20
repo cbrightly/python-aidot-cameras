@@ -13,6 +13,7 @@ own parser.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import queue
 import shutil
@@ -417,3 +418,131 @@ def test_h265_publish_through_real_go2rtc(go2rtc):
         go2rtc["log"].read_text()[-2500:],
     )
     assert out["frames"] >= 15, out
+
+
+# --------------------------------------------------------------------------- #
+# Home Assistant's BUNDLED go2rtc                                              #
+# --------------------------------------------------------------------------- #
+
+
+def _bundled_cfg(tmp_path, rtsp_port):
+    """go2rtc configured the way Home Assistant configures its bundled copy.
+
+    Taken from homeassistant/components/go2rtc/server.py: no TCP API at all
+    (a unix socket instead), RTSP on 127.0.0.1:18554 rather than 8554, and
+    only a subset of modules. A camera integration running beside it cannot
+    reach its API, while Home Assistant itself can - which is the difference
+    that decides whether a camera must be pulled rather than published.
+    """
+    sock = tmp_path / "go2rtc.sock"
+    return (
+        "api:\n"
+        '  listen: ""\n'
+        f'  unix_listen: "{sock}"\n'
+        "  local_auth: true\n"
+        "exec:\n  allow_paths:\n    - ffmpeg\n"
+        f'rtsp:\n  listen: "127.0.0.1:{rtsp_port}"\n'
+        'webrtc:\n  listen: ":18555/tcp"\n'
+        "log:\n  level: debug\n"
+        "streams:\n  aidot_cam:\n"
+        f"    - rtsp://127.0.0.1:{_free_port()}/placeholder\n"
+    )
+
+
+@pytest.fixture
+def bundled_go2rtc(tmp_path):
+    """A go2rtc shaped like Home Assistant's bundled one."""
+    rtsp = _free_port()  # stands in for HA's 18554
+    cfg = tmp_path / "go2rtc.yaml"
+    cfg.write_text(_bundled_cfg(tmp_path, rtsp))
+    log = open(tmp_path / "go2rtc.log", "wb")
+    proc = subprocess.Popen([GO2RTC, "-config", str(cfg)], stdout=log, stderr=log)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        s = socket.socket()
+        try:
+            s.connect(("127.0.0.1", rtsp))
+            s.close()
+            break
+        except OSError:
+            time.sleep(0.1)
+    else:
+        proc.kill()
+        pytest.fail("bundled-shaped go2rtc did not start")
+    yield {"rtsp": rtsp, "log": tmp_path / "go2rtc.log"}
+    proc.terminate()
+    proc.wait(5)
+    log.close()
+
+
+def test_bundled_go2rtc_exposes_no_tcp_api(bundled_go2rtc):
+    """The integration's reachability probe must come back False here: there
+    is no TCP API to answer it, which is why a camera that CAN be pulled has
+    to be, letting Home Assistant register it with its own go2rtc."""
+    import aiohttp
+
+    from aidot_cameras.camera.go2rtc import Go2rtcClient
+
+    async def probe():
+        async with aiohttp.ClientSession() as s:
+            return await Go2rtcClient(
+                s, "http://127.0.0.1:1984", timeout=2.0
+            ).available()
+
+    assert asyncio.run(probe()) is False
+
+
+def test_publishing_to_the_default_rtsp_port_fails_against_the_bundled_shape():
+    """8554 is where this package publishes by default; the bundled server
+    listens on 18554, so a publish aimed at the default has nowhere to land -
+    the failure that blanked DTLS cameras when they were switched to push."""
+    a_port, v_port = _free_port(), _free_port()
+    dead = _free_port()  # nothing listening, as 8554 is in that deployment
+    serve_sdp = (
+        f"v=0\r\nm=video {v_port} RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n"
+        f"m=audio {a_port} RTP/AVP 8\r\n"
+    )
+    proc = rp.LoopbackRtpPublisher(serve_sdp, f"rtsp://127.0.0.1:{dead}/aidot_cam")
+    assert proc.wait(8) == rp.EXIT_FAILED
+
+
+def test_publishing_works_when_aimed_at_the_bundled_rtsp_port(bundled_go2rtc):
+    """Pointed at the port that server actually listens on, the publish lands -
+    so the constraint is the address, not the publisher."""
+    aus = _encode_h264_aus()
+    a_port, v_port = _free_port(), _free_port()
+    serve_sdp = (
+        "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\ns=aidot\r\nt=0 0\r\n"
+        f"m=audio {a_port} RTP/AVP 8\r\nc=IN IP4 127.0.0.1\r\n"
+        "a=rtpmap:8 PCMA/8000\r\n"
+        f"m=video {v_port} RTP/AVP 96\r\nc=IN IP4 127.0.0.1\r\n"
+        "a=rtpmap:96 H264/90000\r\n"
+    )
+    url = f"rtsp://127.0.0.1:{bundled_go2rtc['rtsp']}/aidot_cam"
+    proc = rp.LoopbackRtpPublisher(serve_sdp, url, input_timeout_s=15)
+    stop = threading.Event()
+
+    def feed():
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        seq = ts = k = 0
+        while not stop.is_set():
+            for payload, marker in rp.packetize_h264(aus[k % len(aus)][0]):
+                seq += 1
+                tx.sendto(
+                    rp.build_rtp(96, marker, seq, ts, 0x4444, payload),
+                    ("127.0.0.1", v_port),
+                )
+            ts += 6000
+            k += 1
+            time.sleep(1 / 15)
+        tx.close()
+
+    threading.Thread(target=feed, daemon=True).start()
+    try:
+        out = _read_back(url, want_frames=10)
+    finally:
+        stop.set()
+        proc.terminate()
+        proc.wait(5)
+    assert "error" not in out, (out, bundled_go2rtc["log"].read_text()[-2000:])
+    assert "h264" in out["codecs"] and out["frames"] >= 10

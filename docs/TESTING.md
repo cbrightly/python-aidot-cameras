@@ -119,7 +119,15 @@ AIDOT_GO2RTC_BIN=/path/to/go2rtc pytest tests/test_rtsp_publish_go2rtc.py
 ```
 
 Use the version Home Assistant pins (1.9.14 at the time of writing): its RTSP
-server's publish rules are what the publisher is written against. On a box
+server's publish rules are what the publisher is written against.
+
+Some of those tests start go2rtc **shaped like Home Assistant's bundled copy**
+(no TCP API - a unix socket instead - and RTSP on 18554 rather than 8554,
+per `homeassistant/components/go2rtc/server.py`). That is the default
+deployment for most users, and it is the one where this package cannot reach
+go2rtc while Home Assistant can, so a camera that can be pulled has to be
+rather than published. It went untested until a blanked camera in that
+deployment made the gap obvious. On a box
 whose venv also holds `pytest-homeassistant-custom-component`, that plugin
 turns on `pytest-socket` and every socket-using test here fails with
 `SocketBlockedError`; run with `-p no:homeassistant -p no:socket`.
