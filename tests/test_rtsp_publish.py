@@ -10,6 +10,7 @@ answered 200 all the way through RECORD and then closed.
 
 from __future__ import annotations
 
+import math
 import logging
 import re
 import socket
@@ -1146,49 +1147,52 @@ def test_dtls_runner_attributes_a_gap_to_drops_or_starvation(go2rtc):
     assert res["dropped_resent"] == 1
 
 
-def _gap_warning(caplog):
-    """The seconds-since-previous-arrival the gap warning reported."""
+def _gap_fields(caplog):
+    """(idle, blocked, skipped, dropped) from the gap warning, or None."""
+    rx = re.compile(
+        r"([0-9.]+) s idle waiting for one to arrive, ([0-9.]+) s inside the"
+        r" publish, (\d+) skipped waiting for a keyframe, (\d+) dropped"
+    )
     for rec in caplog.records:
-        m = re.search(r"([0-9.]+) s since the previous frame arrived", rec.getMessage())
+        m = rx.search(rec.getMessage())
         if m:
-            return float(m.group(1))
+            return (float(m.group(1)), float(m.group(2)),
+                    int(m.group(3)), int(m.group(4)))
     return None
 
 
-def test_gap_warning_separates_starvation_from_dropped_frames(go2rtc, caplog):
-    """The gap line has to say WHICH cause, not just that there was a gap.
-
-    Measuring to the dequeue of the frame that ENDS the gap cannot: that
-    happens at the end either way, so it restates the gap and reads as
-    starvation even when frames were arriving all along. The previous
-    arrival is what tells them apart.
-    """
+def _run_gap(go2rtc, feed):
     import queue
 
-    def run(feed):
-        vq, aq = queue.Queue(), queue.Queue()
-        stop, res = threading.Event(), {}
-        t = threading.Thread(
-            target=rp.dtls_rtp_publish_run,
-            args=(vq, aq, go2rtc.url(), [0.0], stop),
-            kwargs={"result": res},
-            daemon=True,
-        )
-        t.start()
-        assert _wait(lambda: "RECORD" in go2rtc.requests)
-        vq.put((b"\x00\x00\x00\x01\x65" + b"k" * 60, 0, True))
-        assert _wait(lambda: any(ch == 0 for ch, _ in go2rtc.frames))
-        feed(vq)
-        vq.put((b"\x00\x00\x00\x01\x41" + b"d" * 30, 30000, False))
-        time.sleep(0.4)
-        stop.set()
-        t.join(3)
-        return res
+    vq, aq = queue.Queue(), queue.Queue()
+    stop, res = threading.Event(), {}
+    t = threading.Thread(
+        target=rp.dtls_rtp_publish_run,
+        args=(vq, aq, go2rtc.url(), [0.0], stop),
+        kwargs={"result": res},
+        daemon=True,
+    )
+    t.start()
+    assert _wait(lambda: "RECORD" in go2rtc.requests)
+    vq.put((b"\x00\x00\x00\x01\x65" + b"k" * 60, 0, True))
+    assert _wait(lambda: any(ch == 0 for ch, _ in go2rtc.frames))
+    feed(vq)
+    vq.put((b"\x00\x00\x00\x01\x41" + b"d" * 30, 30000, False))
+    time.sleep(0.4)
+    stop.set()
+    t.join(3)
+    return res
 
+
+def test_gap_warning_separates_starvation_from_dropped_frames(go2rtc, caplog):
+    """The gap line has to say WHICH cause, not just that there was a gap."""
     with caplog.at_level(logging.WARNING, logger="aidot_cameras.camera.rtsp_publish"):
-        run(lambda vq: time.sleep(1.3))
-    starved = _gap_warning(caplog)
-    assert starved is not None and starved >= 1.0, f"starvation reported {starved}"
+        _run_gap(go2rtc, lambda vq: time.sleep(1.3))
+    got = _gap_fields(caplog)
+    assert got is not None, "expected a gap warning"
+    idle, _blocked, _skipped, dropped = got
+    assert idle >= 1.0, f"starvation reported idle={idle}"
+    assert dropped == 0
 
     caplog.clear()
 
@@ -1200,7 +1204,49 @@ def test_gap_warning_separates_starvation_from_dropped_frames(go2rtc, caplog):
             time.sleep(0.05)
 
     with caplog.at_level(logging.WARNING, logger="aidot_cameras.camera.rtsp_publish"):
-        res = run(keep_arriving)
-    dropping = _gap_warning(caplog)
-    assert dropping is not None and dropping < 0.5, f"drops reported {dropping}"
-    assert res["dropped_resent"] >= 10
+        _run_gap(go2rtc, keep_arriving)
+    got = _gap_fields(caplog)
+    assert got is not None
+    idle, _blocked, _skipped, dropped = got
+    assert idle < 0.5, f"drops reported idle={idle}"
+    assert dropped >= 10
+
+
+def test_a_silence_ending_in_a_resend_burst_still_reads_as_silence(go2rtc, caplog):
+    """The realistic shape, and the one that broke two earlier attempts.
+
+    This camera family re-sends runs of already-served timestamps - 40.75% of
+    frames, bursts of up to 41, about twice a second - so a silence normally
+    ENDS in a resend burst. Timing the gap to the LAST arrival before the
+    publish reports ~0 s here and blames the drop path, when the camera was in
+    fact silent for the whole gap.
+    """
+
+    def silence_then_burst(vq):
+        time.sleep(1.3)
+        # The burst that ends the silence starts with already-served frames.
+        for _ in range(5):
+            vq.put((b"\x00\x00\x00\x01\x41" + b"r" * 30, 0, False))
+
+    with caplog.at_level(logging.WARNING, logger="aidot_cameras.camera.rtsp_publish"):
+        _run_gap(go2rtc, silence_then_burst)
+    got = _gap_fields(caplog)
+    assert got is not None, "expected a gap warning"
+    idle, _blocked, _skipped, dropped = got
+    assert idle >= 1.0, f"silence ending in a resend burst reported idle={idle}"
+    assert dropped >= 1, "the burst should still be counted as drops"
+
+
+def test_agc_ignores_a_non_finite_gain_setting():
+    """`inf`/`nan` parse as floats and would reach math.log() when the
+    translate table is keyed - raising inside the publish loop, which takes
+    the stream down. They fall back to the default instead."""
+    for bad in ("inf", "-inf", "nan"):
+        agc = rp.AlawAgc(env={"AIDOT_AUDIO_MINGAIN_DB": bad})
+        assert math.isfinite(agc.ming), bad
+        # The real hazard: conditioning a frame must not raise.
+        assert len(agc.process(bytes(range(256)))) == 256
+    for bad in ("nan", "inf"):
+        agc = rp.AlawAgc(env={"AIDOT_AUDIO_TARGET_DBFS": bad})
+        assert math.isfinite(agc.target), bad
+        assert len(agc.process(b"\xd5" * 160)) == 160

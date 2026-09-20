@@ -377,11 +377,13 @@ never takes the cold path.
    a burst arriving at once. Neither is the publisher stalling, and a burst is
    timed correctly (the hybrid policy steps by the camera's delta for any step
    in 0..3 s), but "consistent with" is not "measured". The warning now reports
-   how long it had been since the previous frame *arrived*, and how many were
-   skipped pre-keyframe or dropped as already served; read those off a real
-   session before deciding whether anything needs fixing. (Timing to the
-   arrival that ends the gap does not work - it happens at the end whatever the
-   cause, so it restates the gap and reads as starvation every time.)
+   the gap split three ways - seconds idle waiting for a frame to arrive,
+   seconds inside the publish, and the pre-keyframe/already-served drops as
+   per-gap deltas; read those off a real session before deciding whether
+   anything needs fixing. Getting that split right took three attempts: timing
+   to the arrival that ENDS the gap just restates it, and timing to the
+   PREVIOUS arrival reads a silence that ends in a resend burst - the normal
+   shape here - as drops.
 
 ## Revisit as it grows
 

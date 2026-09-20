@@ -25,12 +25,20 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 - **A publish's frame-gap warning says why.** A gap has three quite different
   causes - nothing arrived from the camera, what arrived was dropped (the wait
   for a decodable keyframe, or a presentation time already served), or the
-  publish blocked - and the line could not tell them apart. It now reports how
-  long it had been since the previous frame *arrived*, plus the two drop
-  counts, which the session result carries too. Timing to the arrival that
-  ends the gap cannot separate the causes: that happens at the end either way,
-  so it only restates the gap and reads as starvation even when frames were
-  arriving all along and being dropped.
+  publish itself blocked - and the line could not tell them apart. It now
+  measures all three *for that gap*: seconds idle waiting for a frame to
+  arrive, seconds spent inside the publish, and the two drop counts as deltas
+  rather than session totals.
+
+  The idle figure is timed to the FIRST frame to arrive after the last
+  publish, which is the only one of the obvious choices that works. Timing to
+  the arrival that ends the gap just restates the gap. Timing to the previous
+  arrival looks right and is worse: this camera family re-sends runs of
+  already-served timestamps (40.75% of frames, bursts of up to 41, about twice
+  a second), so a silence normally *ends* in a resend burst - measured, a
+  1.33 s silence reported `0.00 s` and blamed the drop path. The drop counters
+  are deltas for the same reason: the keyframe wait can only happen before the
+  first publish, so as a total it would print a constant from startup forever.
 
 ## [1.0.0rc26]
 
@@ -185,7 +193,7 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   of the camera's answer or never (ROAD-TO-1.0 item 3), yet an attempt whose
   nominated candidate answered nothing still waited the full 75 s before
   retrying. Seen 2026-09-15 on an A001513 answering with only its own
-  on-subnet host address (`192.168.0.159`, to a host at `192.168.0.114`),
+  on-subnet host address (`<camera-ip>`, to a host at `<ha-ip>`),
   which `_candidate_is_off_subnet` cannot flag: four stalls in three minutes.
   The address was the camera's real one - ARP resolves it to the camera's own
   MAC and ICMP to it comes and goes - so the likely shape is a battery camera
@@ -766,8 +774,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 - **A camera on an unreachable subnet now says so.** When every ICE candidate a
   camera offers is a private address on a network this host is not on, the log
   states that directly instead of reporting `first media never arrived` 75 s
-  later. Measured on an A001513 advertising `192.168.100.4` to a host on
-  `192.168.0.0/24`: STUN binding successes still accumulate, so connectivity
+  later. Measured on an A001513 advertising `<camera-ip on another subnet>` to a host on
+  `<ha-subnet>/24`: STUN binding successes still accumulate, so connectivity
   looks fine, but the data channel never establishes and no media ever arrives
   (`inbound-media=0` with `decrypt-failed=0` -- nothing reached us at all). The
   old wording sent people looking at the camera; the cause is that it sits on a

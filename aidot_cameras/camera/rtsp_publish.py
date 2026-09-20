@@ -824,9 +824,14 @@ class AlawAgc:
 
         def _f(name, default):
             try:
-                return float(env.get(name, default))
+                val = float(env.get(name, default))
             except (TypeError, ValueError):
                 return float(default)
+            # "inf"/"nan" parse as floats and then poison the gain: a
+            # non-finite gain reaches math.log() when the translate table is
+            # keyed and raises *inside the publish loop*, taking the stream
+            # down. The per-sample path this replaced merely saturated.
+            return val if math.isfinite(val) else float(default)
 
         self.enabled = str(env.get("AIDOT_AUDIO_AGC", "1")).strip().lower() not in (
             "0",
@@ -851,9 +856,13 @@ class AlawAgc:
 
         The conditioning is deterministic given the gain, so the gain, the
         limiter and the A-law round trip are baked into a 256-entry translate
-        table and applied by ``bytes.translate`` - C speed, no per-sample
-        Python. Measured on ARM before the table: 0.858 ms per 20 ms frame,
-        4.3% of a core per stream, all of it inside the publish loop.
+        table and applied by ``bytes.translate`` at C speed. Measured on ARM
+        before the table: 0.858 ms per 20 ms frame, 4.3% of a core per stream,
+        all of it inside the publish loop.
+
+        The level measurement below is still per-sample Python, and is now
+        ~90% of what this costs; the conditioning itself is ~0.0007 ms. That
+        is where to look if more headroom is ever wanted.
         """
         if not self.enabled or not payload:
             return payload
@@ -1304,6 +1313,14 @@ def dtls_rtp_publish_run(
     atl = RtpTimeline(8000, policy=pol)
     # The mux this replaces conditioned the camera's audio; keep that.
     agc = AlawAgc()
+    # Set before anything can return: a failed connect leaves through an early
+    # return, above the try/finally that fills these in, and a caller reading
+    # res["dropped_resent"] should not get a KeyError because the publish never
+    # started.
+    res.setdefault("skipped_pre_keyframe", 0)
+    res.setdefault("dropped_resent", 0)
+    res.setdefault("max_frame_gap_s", 0.0)
+    res.setdefault("packets", 0)
     pub = publisher_factory(url, sdp, tracks)
     try:
         pub.connect()
@@ -1327,12 +1344,29 @@ def dtls_rtp_publish_run(
     # A gap has three quite different causes and the warning could not tell
     # them apart: nothing arrived from the camera, what arrived was dropped
     # (the wait for a decodable keyframe, or a presentation time already
-    # served), or the publish itself blocked. Count the drops, and time how
-    # much of the gap had an empty queue, so the line says which.
+    # served), or the publish itself blocked. So measure all three, and
+    # measure them FOR THIS GAP:
+    #
+    # * ``idle``    - last publish -> the FIRST frame to arrive after it. Not
+    #   the last frame before this one: this camera family re-sends runs of
+    #   already-served timestamps (40.75% of frames, bursts of up to 41, about
+    #   twice a second - see ``is_resent_video_frame``), so a silence normally
+    #   ENDS in a resend burst. Timing to the last arrival would read that as
+    #   "frames were arriving", which is the misattribution this exists to
+    #   stop.
+    # * ``blocked`` - time spent inside ``send_rtp`` since the last publish.
+    #   Dequeue time is not arrival time: while a send blocks, frames pile up
+    #   unread and their wait is charged to nobody.
+    # * the two drop counters, as DELTAS over the gap. As session totals they
+    #   carry no information about the gap in front of you - the keyframe wait
+    #   can only happen before the first publish, so it would print a constant
+    #   from startup forever, and the resend count reaches the thousands.
     skipped_pre_keyframe = 0
     dropped_resent = 0
-    last_dequeue = None
-    prev_dequeue = None
+    first_arrival = None
+    send_blocked = 0.0
+    gap_skipped = 0
+    gap_dropped = 0
     try:
         while not stop_flag.is_set():
             if not pub.alive:
@@ -1348,58 +1382,58 @@ def dtls_rtp_publish_run(
                 except _queue.Empty:
                     break
                 moved = True
-                # Keep the PREVIOUS arrival: comparing this frame's dequeue to
-                # it is what separates "nothing arrived" from "what arrived was
-                # dropped". Comparing to this frame's own dequeue cannot - it
-                # ends the gap either way, so it just restates the gap.
-                prev_dequeue, last_dequeue = last_dequeue, time.monotonic()
+                if first_arrival is None:
+                    first_arrival = time.monotonic()
                 if not vstarted:
                     if not kf:
                         skipped_pre_keyframe += 1
+                        gap_skipped += 1
                         continue
                     vstarted, v0 = True, ts
                 if is_resent_video_frame(ts_state, ts - v0):
                     dropped_resent += 1
+                    gap_dropped += 1
                     continue
                 now = time.monotonic()
                 seq_ts = None
+                _send_started = now
                 for payload, marker in packetize_h264(data):
                     seq, out_ts = vtl.stamp(ts, now)
                     seq_ts = out_ts
                     pub.send_rtp(
                         video, build_rtp(96, marker, seq, out_ts, vtl.ssrc, payload)
                     )
+                _sent_in = time.monotonic() - _send_started
                 if seq_ts is not None:
                     if last_frame is not None:
                         gap = now - last_frame
                         if gap > max_gap:
                             max_gap = gap
                         if gap_warn_s and gap >= gap_warn_s:
-                            # Time between the previous frame ARRIVING and this
-                            # one. Near the gap means the camera sent nothing;
-                            # much shorter means frames kept arriving and were
-                            # dropped, and the counters after it say why.
-                            waited = (
-                                last_dequeue - prev_dequeue
-                                if prev_dequeue is not None
-                                else gap
-                            )
+                            idle = max(0.0, (first_arrival or now) - last_frame)
                             _LOGGER.warning(
                                 "camera %s: DTLS direct publish: %.2f s without a"
-                                " frame to publish (queue %d, %.2f s since the"
-                                " previous frame arrived, %d skipped waiting for"
-                                " a keyframe, %d dropped as already served,"
-                                " largest gap so far %.2f s)",
+                                " frame to publish (queue %d; %.2f s idle waiting"
+                                " for one to arrive, %.2f s inside the publish,"
+                                " %d skipped waiting for a keyframe, %d dropped"
+                                " as already served; largest gap so far %.2f s)",
                                 device_id,
                                 gap,
                                 vq.qsize(),
-                                waited,
-                                skipped_pre_keyframe,
-                                dropped_resent,
+                                idle,
+                                send_blocked,
+                                gap_skipped,
+                                gap_dropped,
                                 max_gap,
                             )
                     last_frame = now
                     progress[0] = now
+                    # This frame's own send belongs to the NEXT gap: the gap
+                    # above is measured to `now`, which precedes it.
+                    first_arrival = None
+                    send_blocked = _sent_in
+                    gap_skipped = 0
+                    gap_dropped = 0
             while True:
                 try:
                     adata, ats = aq.get_nowait()
@@ -1409,10 +1443,14 @@ def dtls_rtp_publish_run(
                 if not vstarted:
                     continue  # no audio ahead of the first picture
                 seq, out_ts = atl.stamp(ats)
+                _a_started = time.monotonic()
                 pub.send_rtp(
                     audio,
                     build_rtp(8, False, seq, out_ts, atl.ssrc, agc.process(adata)),
                 )
+                # Audio shares the publisher's lock, so a blocked audio send
+                # holds up the next picture just as a video one does.
+                send_blocked += time.monotonic() - _a_started
             if pub.keepalive_due():
                 pub.send_keepalive()
             if not moved:

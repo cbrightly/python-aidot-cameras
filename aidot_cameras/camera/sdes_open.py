@@ -220,7 +220,7 @@ def _candidate_is_off_subnet(ip: str) -> bool:
     A camera whose only ICE candidate is such an address cannot be reached
     directly, no matter how long we wait: the packets leave via the default
     gateway and are dropped. Measured on an A001513 advertising
-    ``192.168.100.4`` to a host on ``192.168.0.0/24`` -- STUN binding successes
+    an address on one subnet to a host on another -- STUN binding successes
     still accumulate (they come back by other paths), the data channel never
     establishes, and the session spends its whole 75 s first-media budget on a
     path that never had a chance.
@@ -2386,7 +2386,7 @@ def _record_peer_reflexive(known, discovered, observed, is_self=None):
     route to, the nomination goes into a black hole, and the session sits in
     ICE "Checking" while the camera's probes keep arriving from an address we
     never nominate.  Observed on the A001064 PTZ while it was on a separate
-    192.168.9.0/24: it advertised 192.168.9.13 as its only candidate.
+    subnet: it advertised its own address there as its only candidate.
 
     Returns the new discovered list, or ``discovered`` unchanged when there is
     nothing to learn.  Callers must REBIND rather than mutate in place - the
@@ -9343,8 +9343,18 @@ class _SdesOpenMixin:
                             # ffmpeg actually reads on every watchdog cycle, so
                             # without this the out-of-band SPS is lost on restart
                             # (the failure persisted live even for cached cameras).
-                            with open(sdp_path, "w") as _f2:
-                                _f2.write(_inject_sprop(_new_sdp, self.device_id))
+                            # Through the executor: Home Assistant patches
+                            # builtins.open and flags a write here exactly as
+                            # it flags the read six lines below.
+                            _sdp_text = _inject_sprop(_new_sdp, self.device_id)
+
+                            def _write_sdp_file() -> None:
+                                with open(sdp_path, "w") as _f2:
+                                    _f2.write(_sdp_text)
+
+                            await asyncio.get_running_loop().run_in_executor(
+                                None, _write_sdp_file
+                            )
                         except Exception as _sdp_exc2:
                             _LOGGER.warning(
                                 "could not rewrite SDP for restart: %s", _sdp_exc2
