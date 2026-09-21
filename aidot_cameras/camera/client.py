@@ -117,6 +117,29 @@ from .protocol import (  # noqa: F401 - re-exported for device_client / back-com
 
 _LOGGER = logging.getLogger(__name__)
 
+
+def _is_transient_cloud_error(exc: BaseException) -> bool:
+    """True for the network failures a retry is expected to clear.
+
+    Deliberately a list of KNOWN classes rather than "anything from aiohttp":
+    a surprise should keep its ERROR on the first occurrence. What is here is
+    what the vendor cloud actually produces on a bad day - measured on the live
+    box, a 30 s request timeout and a DNS resolution failure, at about 2% of
+    polls while streaming was unaffected.
+    """
+    import aiohttp
+
+    transient = [
+        TimeoutError,
+        asyncio.TimeoutError,
+        aiohttp.ClientConnectorError,  # covers ClientConnectorDNSError
+        aiohttp.ClientOSError,
+        aiohttp.ServerDisconnectedError,
+        aiohttp.ServerTimeoutError,
+        aiohttp.ClientPayloadError,
+    ]
+    return isinstance(exc, tuple(transient))
+
 # Offline keepalive pause (see CameraMixin._backoff_or_offline_pause): while the
 # cloud explicitly reports a device offline, failed-open retries re-check the
 # flag every RECHECK seconds and only probe a real open every PROBE seconds,
@@ -3651,6 +3674,11 @@ class CameraMixin(
             _LOGGER.debug(
                 "eventRecordingList raw response for %s: %s", self.device_id, body
             )
+            # The streak counts CONNECTIVITY failures, and a response - whatever
+            # it says - proves connectivity. A server-level code has its own
+            # warning below and should not feed an escalation about reaching the
+            # cloud at all.
+            self._cloud_recordings_fail_streak = 0
             if body.get("code") != 200:
                 _LOGGER.warning(
                     "eventRecordingList code=%s msg=%s for %s",
@@ -3673,12 +3701,39 @@ class CameraMixin(
                 data.get("total"),
                 len(items),
             )
+            self._cloud_recordings_fail_streak = 0
             return items
 
         except Exception as exc:
-            _LOGGER.error(
-                "async_get_cloud_recordings failed for %s: %r", self.device_id, exc
-            )
+            streak = getattr(self, "_cloud_recordings_fail_streak", 0) + 1
+            self._cloud_recordings_fail_streak = streak
+            # A failed poll is not a lost event: the next one re-reads the same
+            # lookback window and dedupes by event id, so nothing is missed
+            # until a RUN of failures has outlasted that window. Escalate at
+            # exactly that point rather than on the first blip - this log has
+            # twice been read as a fault (2026-09-17, 2026-09-21) when the
+            # vendor cloud was merely slow, and a severity that cannot tell
+            # "slow" from "broken" is what buys that.
+            interval = float(getattr(self, "_motion_interval", 30.0) or 30.0)
+            lookback = float(getattr(self, "_motion_lookback_s", 600) or 600)
+            if _is_transient_cloud_error(exc) and streak * interval < lookback:
+                # Same prefix as the escalated line on purpose: one grep finds
+                # every occurrence whichever level it landed at.
+                _LOGGER.debug(
+                    "async_get_cloud_recordings failed for %s: %r"
+                    " (transient, failure %d; the next poll re-reads the same"
+                    " window)",
+                    self.device_id,
+                    exc,
+                    streak,
+                )
+            else:
+                _LOGGER.error(
+                    "async_get_cloud_recordings failed for %s: %r (failure %d)",
+                    self.device_id,
+                    exc,
+                    streak,
+                )
             return []
 
     async def async_count_cloud_recordings(
@@ -4277,6 +4332,9 @@ class CameraMixin(
         """
         self._motion_cb = callback
         self._motion_interval = max(5.0, float(interval))
+        # Remembered so a run of cloud failures can be judged against the window
+        # it would have to outlast before an event is actually missed.
+        self._motion_lookback_s = lookback_s
         if self._motion_task is not None and not self._motion_task.done():
             return
         self._motion_active = True

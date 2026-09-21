@@ -11,6 +11,15 @@ An error line that cannot be classified is worse than one that can: it turns
 every transient cloud timeout into a same-looking page. The fix is to format
 the exception so its TYPE always shows. These tests pin that for the cloud-HTTP
 error/warning logs where a bare timeout is a realistic path.
+
+Updated 2026-09-21: the same log paged again, this time BECAUSE it was an
+ERROR - a slow afternoon on the vendor cloud failed about 2% of polls and each
+one paged. A single transient failure is now logged at debug and a run that
+outlasts the lookback window escalates (see
+test_cloud_error_severity). That changes the LEVEL this line is emitted at,
+not the property these tests exist for: whatever level it lands at, the
+exception TYPE has to appear, because `str(asyncio.TimeoutError())` is empty.
+So the capture level moved and the assertions did not.
 """
 
 import asyncio
@@ -60,7 +69,7 @@ def _run_timeout(caplog):
     real = aiohttp.ClientSession
     aiohttp.ClientSession = lambda *a, **k: _Session()
     try:
-        with caplog.at_level(logging.ERROR, logger="aidot_cameras.camera.client"):
+        with caplog.at_level(logging.DEBUG, logger="aidot_cameras.camera.client"):
             out = asyncio.run(client.async_get_cloud_recordings(0, 1))
         return out, caplog.text
     finally:

@@ -6,6 +6,20 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Changed
+
+- **A transient cloud blip no longer logs an error.** The motion poll calls the
+  cloud event list every 30 s per camera and any failure was logged at ERROR,
+  so a slow afternoon on the vendor cloud produced a run of error lines that
+  read as a fault. Measured on a live box 2026-09-21: 30 failures in 134
+  minutes, about 2% of polls, against a 30 s request timeout, with streaming
+  unaffected throughout. A failed poll is not a lost event - the next one
+  re-reads the same lookback window and dedupes by event id - so a known
+  transient network failure is now logged at debug, and a run of them escalates
+  to ERROR once it has outlasted that window, which is the point at which an
+  event can actually be missed. An unexpected exception still errors on its
+  first occurrence.
+
 ## [1.0.0rc27]
 
 ### Fixed
