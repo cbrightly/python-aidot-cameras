@@ -546,3 +546,57 @@ def test_publishing_works_when_aimed_at_the_bundled_rtsp_port(bundled_go2rtc):
         proc.wait(5)
     assert "error" not in out, (out, bundled_go2rtc["log"].read_text()[-2000:])
     assert "h264" in out["codecs"] and out["frames"] >= 10
+
+
+def test_an_unbindable_placeholder_still_accepts_a_publish(go2rtc):
+    """The source a PUSH camera's stream definition is created with.
+
+    go2rtc will not hold a source-less stream and refuses a publish into a name
+    it does not know, so the definition needs a source before the ANNOUNCE. The
+    integration used to give it the camera's own local serve URL - the port that
+    push mode never binds - which leaves a definition pointing at an address
+    nothing of ours listens on, for go2rtc to dial whenever the publisher is
+    absent and for any other process to occupy.
+
+    A placeholder on port 1 cannot be bound without root and refuses instantly.
+    This asserts the two properties that makes it safe to use: go2rtc ACCEPTS
+    the definition, and a publish into it still works.
+    """
+    import json
+    import urllib.parse
+    import urllib.request
+
+    name = "aidot_placeholder_cam"
+    placeholder = "rtsp://127.0.0.1:1/aidot-placeholder"
+    q = urllib.parse.urlencode({"name": name, "src": placeholder})
+    with urllib.request.urlopen(
+        urllib.request.Request(
+            f"http://127.0.0.1:{go2rtc['api']}/api/streams?{q}", method="PUT"
+        ),
+        timeout=5,
+    ) as resp:
+        assert resp.status == 200, "go2rtc refused the placeholder definition"
+
+    a_port, v_port = _free_port(), _free_port()
+    serve_sdp = (
+        f"v=0\r\nm=video {v_port} RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n"
+        f"m=audio {a_port} RTP/AVP 8\r\n"
+    )
+    url = f"rtsp://127.0.0.1:{go2rtc['rtsp']}/{name}"
+    proc = rp.LoopbackRtpPublisher(serve_sdp, url, device_id="it")
+    try:
+        assert _wait_for_publisher(go2rtc["api"], name=name, timeout=10), (
+            "publish into a stream defined with the placeholder did not attach"
+        )
+        raw = urllib.request.urlopen(
+            f"http://127.0.0.1:{go2rtc['api']}/api/streams", timeout=5
+        ).read()
+        prods = json.loads(raw)[name].get("producers") or []
+        # The placeholder must sit there undialled while the publisher holds the
+        # stream - no id/protocol/remote_addr - which is how the live box shows
+        # it too.
+        dialled = [p for p in prods if p.get("url") == placeholder and p.get("id")]
+        assert not dialled, f"go2rtc dialled the placeholder: {dialled}"
+    finally:
+        proc.terminate()
+        proc.wait(5)
