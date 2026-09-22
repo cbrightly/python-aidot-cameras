@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc28]
+
 ### Changed
 
 - **A transient cloud blip no longer logs an error.** The motion poll calls the

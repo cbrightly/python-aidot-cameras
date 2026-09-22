@@ -1934,6 +1934,21 @@ packet, timestamp or lifecycle decision differs. It does not reset the clock.
 
 **Day zero stays wherever `rc23` set it.**
 
+#### 2026-09-22: `rc28` demotes a transient cloud failure
+
+`rc28` stops a transient cloud-poll failure logging at ERROR. The motion poll
+re-reads a 600 s lookback and dedupes by event id, so a failed poll is covered
+by the next one; a run that outlasts that window still escalates, and an
+unexpected exception still errors on its first occurrence. Measured on the box:
+92 ERROR lines in 24 hours from a vendor cloud answering slowly, with streaming
+untouched throughout.
+
+It touches the cloud/motion path, not the media path, so it does not reset the
+A4 soak clock - confirmed with the maintainer rather than assumed. Day zero
+stays 2026-09-21.
+
+**Day zero stays wherever `rc23` set it.**
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /
