@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc29]
+
 ### Fixed
 
 - **A rejected go2rtc register call no longer drops a camera to HLS when the
