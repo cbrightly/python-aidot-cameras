@@ -169,6 +169,19 @@ def test_prefer_go2rtc_none_when_register_fails():
     )
 
 
+def test_prefer_go2rtc_uses_a_stream_go2rtc_kept_despite_a_400():
+    # go2rtc can answer the register call with 400 - a duplicate key in its own
+    # config makes it reject every PUT - while still holding the stream. Falling
+    # back on that 400 downgrades a camera go2rtc can actually serve to HLS.
+    s = _FakeSession(api_status=200, put_status=400, streams={"rear": {}})
+    url = asyncio.run(
+        prefer_go2rtc(
+            s, "rear", "rtsp://cam/src", base_url="http://homeassistant.local:1984"
+        )
+    )
+    assert url == "rtsp://homeassistant.local:8554/rear"
+
+
 if __name__ == "__main__":
     _fail = 0
     for _k, _v in sorted(globals().items()):

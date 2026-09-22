@@ -6,6 +6,21 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A rejected go2rtc register call no longer drops a camera to HLS when the
+  stream is actually registered.** `prefer_go2rtc()` treated any non-200 from
+  `ensure_stream()` as "go2rtc cannot serve this" and returned `None`, so the
+  caller served through Home Assistant's HLS pipeline instead of go2rtc's
+  low-latency path. go2rtc can reject the PUT and still be holding the stream:
+  a duplicate stream key in its own `go2rtc.yaml` makes it answer *every*
+  `PUT /api/streams` with `400 yaml: unmarshal errors: mapping key "<name>"
+  already defined`, which takes every camera off the low-latency path at once,
+  not just the one that owns the key. Nothing errors, so the only symptom
+  reaching a user is a camera that appears to play slower than real time.
+  `GET /api/streams` now settles it - the fallback happens only when the stream
+  is genuinely absent.
+
 ## [1.0.0rc28]
 
 ### Changed

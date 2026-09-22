@@ -153,13 +153,24 @@ async def prefer_go2rtc(
 
     If go2rtc is reachable at ``base_url``, register ``source`` under ``name``
     and return the go2rtc RTSP pull URL (low-latency / native codec path).
-    If go2rtc is unavailable or registration fails, return ``None`` so the
-    caller falls back to serving ``source`` directly (e.g. HA HLS).
+    If go2rtc is unavailable, or the stream is neither registered nor already
+    present, return ``None`` so the caller falls back to serving ``source``
+    directly (e.g. HA HLS).
     """
     client = Go2rtcClient(session, base_url)
     if not await client.available():
         _LOGGER.debug("go2rtc unavailable - falling back to direct serve for %r", name)
         return None
     if not await client.ensure_stream(name, source):
-        return None
+        # A rejected register call does not mean go2rtc cannot serve the stream:
+        # a duplicate key in its own config makes it answer every PUT with 400
+        # while the stream stays registered. Falling back on that alone would
+        # drop a camera go2rtc can serve onto the slower HLS path, so ask.
+        if not await client.has_stream(name):
+            return None
+        _LOGGER.info(
+            "go2rtc: register call for %r failed but the stream is present - "
+            "using go2rtc rather than falling back",
+            name,
+        )
     return client.rtsp_url(name, rtsp_port)
