@@ -188,11 +188,23 @@ jobs:
   ha-constraints:
     name: Install under HA constraints (${{ matrix.ha }})
     runs-on: ubuntu-latest
+    # `dev` is advisory: it moves under us and a pin landing there mid-PR must
+    # not block a merge. A red on the stable pin still fails the job.
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
-        # Current stable and the previous release. Bump deliberately.
-        ha: ["2026.7.0", "2026.6.0"]
+        include:
+          # Current stable. Bump deliberately - testing a release nobody runs
+          # any more buys nothing, and users are on current or next.
+          - ha: "2026.9.3"
+            experimental: false
+          # HA's dev branch carries the NEXT release's constraints as they
+          # land, so a pin that will break us surfaces before that release
+          # ships rather than after. A tagged beta would go stale between
+          # cycles (there is no 2026.10 beta yet); `dev` always resolves.
+          - ha: "dev"
+            experimental: true
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24)
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6 (node24)
