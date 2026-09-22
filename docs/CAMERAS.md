@@ -304,6 +304,37 @@ Useful log lines (logger `aidot_cameras.camera.rtsp_publish`):
 stops. On a healthy LAN `late` and `lost` are 0; the repair count is a few per
 30 s on an A001513 and 0 on a camera with a clean clock.
 
+### A failed go2rtc registration silently downgrades to HLS
+
+`prefer_go2rtc()` registers the stream with `ensure_stream()`
+(`PUT /api/streams`, carrying `name` and one or more `src`). On any non-200 it
+returns `None`, and the caller then serves the source directly through Home
+Assistant's HLS pipeline instead of go2rtc's low-latency path. Nothing fails
+loudly - the viewer simply gets the slower, lower-framerate pipeline, which
+reads as a camera "playing slower than real time" rather than as an error.
+
+The signal is the `go2rtc: add stream <name> failed http=<status>` warning
+(logger `aidot_cameras.camera.go2rtc`). When it appears for *every* camera,
+suspect go2rtc's own config rather than the cameras:
+
+- A **duplicate stream key** in go2rtc's persisted `go2rtc.yaml` makes go2rtc
+  reject every `PUT /api/streams` with a 400 whose body is
+  `yaml: unmarshal errors: mapping key "<name>" already defined`, because it
+  cannot re-serialize a config it cannot parse. One bad key therefore drops
+  *every* camera to HLS, not just the camera that owns the key.
+- Older go2rtc builds can create that duplicate themselves: a `PUT` for a name
+  already present appends a second entry instead of replacing it when two
+  registrations race - for example the mass re-registration that follows a
+  go2rtc restart or a config-entry reload. A later non-racing `PUT` rewrites the
+  entry and repairs the file.
+
+To recover, delete the duplicate key from `go2rtc.yaml` and restart go2rtc
+(`POST /api/restart`); the next `PUT` answers 200 and the camera returns to the
+go2rtc path. Note that go2rtc can also answer a register call with 400 while
+still holding the stream registered, so a caller that treats any non-200 as
+"go2rtc is unavailable" falls back further than it needs to; `GET /api/streams`
+tells the two apart.
+
 ### What a cold SDES open costs
 
 Measured on the reference A001064 (mains, LAN-direct), cold opens forced by a
