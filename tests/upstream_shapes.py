@@ -68,23 +68,31 @@ def set_refresh_token(client, token: str) -> None:
         client.login_info[CONF_REFRESH_TOKEN] = token
 
 
-def make_upstream_device_client(raw_device: dict, raw_account: dict):
+def make_upstream_device_client(raw_device: dict, raw_account: dict, client=None):
     """Build a PLAIN upstream ``DeviceClient`` from raw cloud dicts.
 
     Tests that exercise the non-camera path construct upstream's own class, so
     they need whatever *it* takes: typed models on the typed shape, the raw
-    dicts on the dict shape.  ``_upstream.device_client_args`` already encodes
-    that decision, so reuse it rather than branching again here.
+    dicts on the dict shape, plus the account back-reference on >=0.3.57.
+    ``_upstream.device_client_args`` already encodes every one of those
+    decisions, so reuse it rather than branching again here - and **splat** the
+    result, because its length varies by upstream.
+
+    ``client`` defaults to ``None`` because these fixtures never reach
+    ``async_set_effect``, the one upstream method that uses it.  Production
+    code has no such default: the seam requires it.
     """
     from aidot.device_client import DeviceClient
 
-    device, account = _upstream.device_client_args(
-        device_record(raw_device),
-        raw_device,
-        account_record(raw_account),
-        raw_account,
+    return DeviceClient(
+        *_upstream.device_client_args(
+            device_record(raw_device),
+            raw_device,
+            account_record(raw_account),
+            raw_account,
+            client=client,
+        )
     )
-    return DeviceClient(device, account)
 
 
 def arm_reconnect(device_client, callback, delay: float = 0.05) -> None:

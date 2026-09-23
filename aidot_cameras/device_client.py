@@ -246,6 +246,7 @@ class CameraDeviceClient(CameraMixin, LanRetryMixin, _UpstreamDeviceClient):
         user_info: "UserInformation | dict",
         raw_device: Optional[dict] = None,
         login_info: Optional[dict] = None,
+        client: Any = None,
     ) -> None:
         """Build the upstream client, then initialize camera state.
 
@@ -275,14 +276,17 @@ class CameraDeviceClient(CameraMixin, LanRetryMixin, _UpstreamDeviceClient):
         if _aes_key and _aes_key[0] is None:
             device.aesKey = None
 
-        # Which pair upstream wants depends on its shape; _upstream decides.
+        # Which arguments upstream wants depends on its shape AND on whether it
+        # takes the account back-reference; _upstream decides both.  The result
+        # is splatted because its length varies (2 on <=0.3.56, 3 on >=0.3.57).
         # raw_device is required for the dict shape - fall back to the typed
         # model's dict form when a caller omitted it (light-only devices).
         _raw_device = raw_device if isinstance(raw_device, dict) else device.to_dict()
-        _upstream_device, _upstream_account = device_client_args(
-            device, _raw_device, user_info, login_info
+        super().__init__(
+            *device_client_args(
+                device, _raw_device, user_info, login_info, client=client
+            )
         )
-        super().__init__(_upstream_device, _upstream_account)
 
         # Upstream's typed models stay reachable; _init_camera_state overwrites
         # self._user_info with the raw dict the camera layer expects.

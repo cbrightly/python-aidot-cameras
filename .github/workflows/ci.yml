@@ -66,10 +66,38 @@ jobs:
   # musllinux wheels) install and run exactly as they do on a real HA host.
   # Alpine container jobs REQUIRE node24-runtime actions (checkout@v5+): GitHub's
   # node20 binary is glibc-only and cannot execute inside a musl container.
+  #
+  # The upstream axis exists because a bare install only ever tests the NEWEST
+  # python-aidot the range admits. Once 0.3.57+ became the default resolve,
+  # nothing would have tested the 0.3.56 path Home Assistant core pins - and the
+  # typed shape (0.3.54-0.3.55, inside the declared floor) had not been tested
+  # by any job at all. See docs/UPSTREAM.md.
+  #
+  # The `resolved` arm is the one publish.yml's release gate mirrors: its
+  # install and invocation must stay identical to publish.yml's `test` job.
+  # The pinned arms only add the pin step on top.
   test:
-    name: Unit tests (Alpine / musl - HA runtime)
+    name: Unit tests (Alpine / musl, python-aidot ${{ matrix.upstream }})
     runs-on: ubuntu-latest
     container: python:3.13-alpine
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Whatever the declared range resolves to today.
+          - upstream: resolved
+            experimental: false
+          # Home Assistant core's own aidot pin, and what a live Home Assistant
+          # install runs: the two-argument DeviceClient path.
+          - upstream: "0.3.56"
+            experimental: false
+          # The declared floor, and the only typed-shape install anywhere in
+          # CI. Advisory: two LAN-retry tests are known to fail on this shape
+          # (docs/UPSTREAM.md, "Known dual-support gaps"). Make it gating once
+          # they pass.
+          - upstream: "0.3.55"
+            experimental: true
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24, mandatory in a musl container)
       # git for checkout; ffmpeg for the mux-path tests (tests/test_audio_mux_offline.py
@@ -86,6 +114,23 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[webrtc]" pytest pytest-cov pytest-asyncio pyflakes
+      # Both pins are inside the declared range, so this never fights the
+      # resolver; it only replaces the version the install above picked.
+      - name: Pin python-aidot ${{ matrix.upstream }}
+        if: matrix.upstream != 'resolved'
+        run: pip install "python-aidot==${{ matrix.upstream }}"
+      # Record what actually ran. A pin that silently failed to apply would
+      # otherwise make this arm test the same version as `resolved`.
+      - name: Record the installed python-aidot
+        run: |
+          python - <<'PY'
+          import importlib.metadata as m, sys
+          got = m.version("python-aidot")
+          want = "${{ matrix.upstream }}"
+          print(f"::notice::python-aidot {got} (requested: {want})")
+          if want != "resolved" and got != want:
+              sys.exit(f"requested python-aidot=={want} but {got} is installed")
+          PY
       # Coverage is informational (term-missing report); it does not gate the build.
       # The suite includes tests/test_scripts_importable.py, which fails if any
       # scripts/ harness rots against the installed package (they all silently
@@ -215,9 +260,24 @@ jobs:
           set -euo pipefail
           curl -fsSL -o ha-constraints.txt \
             "https://raw.githubusercontent.com/home-assistant/core/${{ matrix.ha }}/homeassistant/package_constraints.txt"
+          # Core pins python-aidot in its own aidot integration's manifest, NOT
+          # in package_constraints.txt, so without this step the job never saw
+          # that pin at all. Add it, so this job checks the combination a Home
+          # Assistant install actually resolves.
+          if curl -fsSL -o aidot-manifest.json \
+              "https://raw.githubusercontent.com/home-assistant/core/${{ matrix.ha }}/homeassistant/components/aidot/manifest.json"; then
+            python - >> ha-constraints.txt <<'PY'
+          import json
+          for req in json.load(open("aidot-manifest.json"))["requirements"]:
+              print(req)
+          PY
+          else
+            echo "::warning::no aidot manifest in HA core ${{ matrix.ha }}; python-aidot is unconstrained in this run"
+          fi
           echo "--- constraints that matter to us ---"
-          grep -Ei '^(av|numpy|pillow|cryptography|aiohttp)==' ha-constraints.txt || true
+          grep -Ei '^(av|numpy|pillow|cryptography|aiohttp|python-aidot)==' ha-constraints.txt || true
           pip install -e ".[webrtc]" -c ha-constraints.txt
+          python -c "import importlib.metadata as m; print('::notice::python-aidot', m.version('python-aidot'))"
       # Resolving is necessary but not sufficient: the pinned versions have to
       # actually work together at runtime.
       - name: Import the camera stack

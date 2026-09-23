@@ -10,6 +10,14 @@ shape is also the current one:
     0.3.54   typed dataclasses, ``api/``, ``utils/crypto``          <- shape B
     0.3.55   shape B
     0.3.56   shape A again (plus the ``models/`` package)
+    0.3.57   shape A, plus the account back-reference, plus API v35
+    0.3.58   same as 0.3.57
+
+The back-reference is a second, independent axis: 0.3.57+ is shape A in every
+respect except that ``DeviceClient.__init__`` also takes the owning
+``AidotClient``.  It has its own flag, ``HAS_DEVICE_CLIENT_BACKREF``, and is not
+a third value of ``UPSTREAM_SHAPE``.  The API version (``API_URL_TEMPLATE``) is
+a third; see ``docs/UPSTREAM.md``.
 
 Because upstream has flip-flopped once, neither shape can be assumed permanent,
 so both are supported rather than tracked.  Every difference is resolved here,
@@ -296,31 +304,73 @@ def device_client_args(
     raw_device: dict,
     typed_account: Any,
     login_info: Optional[dict],
+    *,
+    client: Any,
 ) -> tuple:
-    """The ``(device, user_info)`` pair upstream's ``DeviceClient`` expects.
+    """The positional args upstream's ``DeviceClient.__init__`` expects.
 
-    Shape B: ``(DeviceModel, UserInformation)`` - typed dataclasses.
-    Shape A: ``(dict, dict)`` - the raw cloud records, natively.
+    Two axes, detected independently:
+
+    * **record shape** - ``(DeviceModel, UserInformation)`` typed dataclasses
+      (0.3.54-0.3.55), or ``(dict, dict)`` raw cloud records natively
+      (<=0.3.53, >=0.3.56).
+    * **account back-reference** - 0.3.57+ takes the owning ``AidotClient`` as
+      a third positional and stores it as ``self.client``.
 
     Shape A taking raw dicts is why this package carried ``raw_device`` /
     ``login_info`` alongside the typed models in the first place: the typed
     round trip drops every camera-only field.  On shape A the originals go
     straight through and nothing is lost.
 
-    Takes the four values rather than the account client, because the only
-    caller (``CameraDeviceClient.__init__``) is handed them directly and has no
-    client reference.  ``typed_account`` may be a ``UserInformation`` or, from
-    an older caller, already a dict - on shape A a dict ``login_info`` wins and
-    a dict ``typed_account`` is the fallback, so both call styles work.
+    Callers **splat** the result - its length is 2 or 3 depending on what is
+    installed.
+
+    ``client`` is keyword-only with no default on purpose.  Upstream stores it
+    unchecked, so a ``None`` that slipped through here would not surface until
+    something called ``async_set_effect`` and got ``'NoneType' object has no
+    attribute 'async_execute_diff_command'`` - an upstream traceback for our
+    bug.  A caller that cannot supply one has to say so explicitly.
     """
     if HAS_TYPED_ACCOUNT:
-        return (device_record, typed_account)
-    account = login_info if isinstance(login_info, dict) else None
-    if account is None:
-        account = typed_account if isinstance(typed_account, dict) else {}
-        if not isinstance(typed_account, dict) and hasattr(typed_account, "to_dict"):
-            account = typed_account.to_dict()
-    return (raw_device, account)
+        pair = (device_record, typed_account)
+    else:
+        account = login_info if isinstance(login_info, dict) else None
+        if account is None:
+            account = typed_account if isinstance(typed_account, dict) else {}
+            if not isinstance(typed_account, dict) and hasattr(
+                typed_account, "to_dict"
+            ):
+                account = typed_account.to_dict()
+        pair = (raw_device, account)
+    return pair + ((client,) if HAS_DEVICE_CLIENT_BACKREF else ())
+
+
+def light_device_client_args(client: Any, raw_device: dict) -> tuple:
+    """Positional args for a NON-camera device client, from the account client.
+
+    The camera path builds the typed record itself (the camera layer reads
+    ``.id`` / ``.aesKey`` off it); the light path has only the raw cloud dict.
+    Building the record HERE, and only on the shape that needs one, keeps the
+    dict path handing upstream the untouched original as it does today rather
+    than adding a ``dacite`` parse to every light on the shape Home Assistant
+    actually runs.
+
+    Before this existed the light branch passed the raw dict straight to
+    upstream, bypassing the seam entirely - which is why it raised
+    ``AttributeError: 'dict' object has no attribute 'id'`` on the typed shape
+    (0.3.55, this package's own declared floor) long before 0.3.57 made it
+    fail on every shape.
+    """
+    device_record = (
+        DeviceModel.from_json(data=raw_device) if HAS_TYPED_ACCOUNT else None
+    )
+    return device_client_args(
+        device_record,
+        raw_device,
+        account_record(client),
+        client.login_info,
+        client=client,
+    )
 
 
 #: True when upstream's ``DeviceClient`` exposes a ``read_data`` seam - one
@@ -356,6 +406,47 @@ except ImportError:  # pragma: no cover - upstream is a hard dependency
     HAS_SHARED_DISCOVERY_MAP = False
 
 
+def _init_takes_account_client(init: Any) -> bool:
+    """True when this ``DeviceClient.__init__`` wants the account client third.
+
+    Takes the plain function, so ``self`` is ``params[0]`` and the
+    back-reference, where present, is ``params[3]``.
+
+    Matches the NAME at that position, not the arity.  Accepting any fourth
+    parameter would splat our account client into whatever upstream invents
+    next; a differently-named one must instead reach the constructor short by
+    one and raise a ``TypeError`` that names it.  ``POSITIONAL_OR_KEYWORD``
+    only, for the same reason: if upstream makes it keyword-only we want the
+    loud failure, not a silent stop-supplying.
+    """
+    import inspect
+
+    try:
+        params = list(inspect.signature(init).parameters.values())
+    except (TypeError, ValueError):  # pragma: no cover - builtins/slots
+        return False
+    return (
+        len(params) >= 4
+        and params[3].name == "client"
+        and params[3].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    )
+
+
+#: True when upstream's ``DeviceClient`` takes the owning ``AidotClient`` as a
+#: third positional argument and keeps it as ``self.client`` (0.3.57+).  It
+#: feeds exactly one upstream method, ``async_set_effect``, which calls
+#: ``client.async_execute_diff_command``; nothing in this package calls it, but
+#: a consumer's light platform may, so the real client is supplied rather than
+#: a placeholder.  Orthogonal to ``HAS_TYPED_ACCOUNT`` - 0.3.58 is the dict
+#: shape *plus* this back-reference, so it is a second axis, not a third shape.
+try:
+    from aidot.device_client import DeviceClient as _DeviceClientForSig
+
+    HAS_DEVICE_CLIENT_BACKREF = _init_takes_account_client(_DeviceClientForSig.__init__)
+except ImportError:  # pragma: no cover - upstream is a hard dependency
+    HAS_DEVICE_CLIENT_BACKREF = False
+
+
 def broadcast_protocol_args(callback: Any, user_id: str) -> tuple:
     """Positional args for upstream's ``BroadcastProtocol.__init__``.
 
@@ -375,6 +466,7 @@ __all__ = [
     "APP_ID",
     "DEFAULT_REGION",
     "DEVICE_STATE_IS_UPSTREAMS",
+    "HAS_DEVICE_CLIENT_BACKREF",
     "HAS_READ_DATA_SEAM",
     "HAS_SHARED_DISCOVERY_MAP",
     "HAS_TYPED_ACCOUNT",
@@ -400,5 +492,6 @@ __all__ = [
     "cancel_pending_reconnect",
     "device_client_args",
     "device_session_authenticated",
+    "light_device_client_args",
     "rsa_encrypt",
 ]

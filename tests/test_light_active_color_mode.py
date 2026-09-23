@@ -20,6 +20,8 @@ the carried status to plain upstream clients - and only to the RGBW+CCT ones.
 
 import asyncio
 
+import pytest
+
 from aidot.device_client import DeviceClient as UpstreamDeviceClient
 from aidot.device_client import DeviceStatusData as UpstreamDeviceStatusData
 from aidot.models.device_client_model import DeviceAttr
@@ -28,6 +30,7 @@ from upstream_shapes import (
 )
 
 import aidot_cameras.client as client_mod
+from aidot_cameras import _upstream
 from aidot_cameras.client import CameraClient
 from aidot_cameras.device_client import (
     CameraDeviceClient,
@@ -196,3 +199,36 @@ def test_camera_gets_the_camera_client(monkeypatch):
     monkeypatch.setattr(client_mod, "_prefetch_ice_config", _no_prefetch)
     _client, dc = _dispatch(CAMERA)
     assert isinstance(dc, CameraDeviceClient)
+
+
+# --------------------------------------------------------------------------- #
+# The account back-reference (upstream >=0.3.57)
+# --------------------------------------------------------------------------- #
+
+backref_only = pytest.mark.skipif(
+    not _upstream.HAS_DEVICE_CLIENT_BACKREF,
+    reason="upstream takes no account client",
+)
+
+
+@backref_only
+def test_a_light_gets_the_real_account_client_back_reference():
+    """Not merely "construction succeeded" - the object identity matters.
+
+    Upstream keeps this as ``self.client`` and calls
+    ``client.async_execute_diff_command`` from ``async_set_effect``.  Passing
+    ``None`` would construct perfectly well and only fail later, inside
+    upstream, the first time a consumer's light platform asked for an effect.
+    """
+    client, dc = _dispatch(RGBW_BULB)
+    assert dc.client is client
+
+
+@backref_only
+def test_a_camera_gets_the_real_account_client_back_reference(monkeypatch):
+    async def _no_prefetch(_dc):
+        return None
+
+    monkeypatch.setattr(client_mod, "_prefetch_ice_config", _no_prefetch)
+    client, dc = _dispatch(CAMERA)
+    assert dc.client is client

@@ -13,6 +13,12 @@ is a *revert* of the refactor 0.3.54 introduced and 0.3.55 carried, so "old" and
     <=0.3.53, >=0.3.56   dict-based client, ``aes_utils``, ``login_const``
     0.3.54 - 0.3.55      typed dataclasses, ``api/``, ``utils/crypto``
 
+Separately, 0.3.57+ passes the owning ``AidotClient`` to ``DeviceClient`` as a
+third argument - an independent axis, flagged by
+``_upstream.HAS_DEVICE_CLIENT_BACKREF`` - and moved the cloud API from v17 to
+v35.  A run can only see the arity that is installed; the other one is covered
+by ``test_upstream_seam_adapter.py``, which stubs both.
+
 Which one is installed is detected by ``aidot_cameras._upstream``, and that
 module is the only place in the package allowed to know.  Tests below that
 apply to one shape only are marked with the matching skipif; tests with no mark
@@ -34,6 +40,13 @@ TYPED = _upstream.HAS_TYPED_ACCOUNT
 
 typed_only = pytest.mark.skipif(not TYPED, reason="typed upstream shape only")
 dict_only = pytest.mark.skipif(TYPED, reason="dict upstream shape only")
+
+BACKREF = _upstream.HAS_DEVICE_CLIENT_BACKREF
+
+# Orthogonal to the record shape: 0.3.57+ is the dict shape plus this.
+backref_only = pytest.mark.skipif(
+    not BACKREF, reason="upstream DeviceClient takes the account client"
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -59,6 +72,15 @@ def test_shape_detection_is_self_consistent():
     )
     assert _upstream.UPSTREAM_SHAPE == ("typed" if TYPED else "dict")
 
+    # Derived independently of the detector: calling
+    # _init_takes_account_client here would only compare the flag with itself.
+    from aidot.device_client import DeviceClient
+
+    params = list(inspect.signature(DeviceClient.__init__).parameters)
+    assert _upstream.HAS_DEVICE_CLIENT_BACKREF is (
+        len(params) >= 4 and params[3] == "client"
+    ), params
+
 
 def test_compat_layer_resolves_every_name_it_promises():
     """``__all__`` is the package-internal surface; none of it may be missing."""
@@ -73,14 +95,38 @@ def test_moved_constants_resolve_wherever_they_live():
     assert b"BEGIN PUBLIC KEY" in _upstream.PUBLIC_KEY_PEM
 
 
-def test_api_url_template_is_identical_across_shapes():
-    """Both shapes must build the same base URL.
+#: Cloud API versions verified against the live cloud, and what was verified.
+#: Add a version here only after comparing it with a known-good one; never to
+#: turn this test green.
+VERIFIED_API_URL_TEMPLATES = {
+    # <=0.3.56.
+    "https://prod-{region}-api.arnoo.com/v17",
+    # 0.3.57+.  Compared with v17 on 2026-09-23 using an existing token (no
+    # login, no refresh): /houses identical; /devices 40/40 with zero fields or
+    # values differing across 17 models including all three camera models;
+    # /products byte-identical over 12 interleaved calls; the same error codes
+    # with no token (21027) and a bogus refresh token (21025).  A real login
+    # and a real token refresh on v35 were NOT exercised - both rotate the
+    # account's single live token.
+    "https://prod-{region}-api.arnoo.com/v35",
+}
 
-    ``aidot_cameras.const.BASE_URL`` is computed from this at import time; a
-    changed version segment would silently point every cloud call at a
-    different API without failing anything by name.
+
+def test_api_url_template_is_a_version_we_have_verified():
+    """Fail BY NAME when upstream moves the cloud API version.
+
+    Upstream's ``AidotClient`` builds its account calls (login, token refresh,
+    houses, devices, products) from this template, so a changed version
+    segment silently points all of them at a different API.  The camera layer
+    builds its own ``/v1/...`` URLs and does not use it.
+
+    0.3.57 moved it from v17 to v35 and this test is what caught it.  Read a
+    failure as "compare the new version with a verified one before adding it",
+    not as a string to update.
     """
-    assert _upstream.API_URL_TEMPLATE == "https://prod-{region}-api.arnoo.com/v17"
+    assert _upstream.API_URL_TEMPLATE in VERIFIED_API_URL_TEMPLATES, (
+        _upstream.API_URL_TEMPLATE
+    )
 
 
 def test_rsa_encrypt_keeps_its_two_argument_signature():
@@ -298,12 +344,53 @@ def test_read_data_seam_flag_matches_reality():
     assert ("read_data" in CameraDeviceClient.__dict__) is _upstream.HAS_READ_DATA_SEAM
 
 
+def test_device_client_requires_only_arguments_we_know_how_to_supply():
+    """Fail BY NAME the moment upstream adds a required constructor argument.
+
+    ``test_device_client_constructor_argument_shape`` below checks
+    ``params[:3]``, so it stays green when upstream *appends* a required
+    argument - which is exactly what 0.3.57 did, adding ``client`` (the
+    ``AidotClient`` back-reference) as a third positional.  Every construction
+    then raised ``TypeError: DeviceClient.__init__() missing 1 required
+    positional argument: 'client'`` from deep inside upstream, naming nothing
+    about which upstream release moved.
+
+    This assertion names the parameter instead.  Read a failure as "upstream
+    wants something new at construction - teach ``_upstream`` about it and add
+    it to the allowed list here", never as "widen the list to make it pass".
+
+    ``KEYWORD_ONLY`` is included deliberately: ``_init_takes_account_client``
+    only recognises a POSITIONAL_OR_KEYWORD ``client``, so a required
+    keyword-only reshape would slip past the detector and must be caught here.
+    """
+    from aidot.device_client import DeviceClient
+
+    required = [
+        p.name
+        for p in inspect.signature(DeviceClient.__init__).parameters.values()
+        if p.name != "self"
+        and p.default is inspect.Parameter.empty
+        and p.kind
+        in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    ]
+    assert required in (
+        ["device", "user_info"],  # <=0.3.56
+        ["device", "user_info", "client"],  # >=0.3.57, supplied via _upstream
+    ), required
+
+
 def test_device_client_constructor_argument_shape():
     """``__init__(device, user_info)`` - typed models or raw dicts."""
     from aidot.device_client import DeviceClient
 
     params = list(inspect.signature(DeviceClient.__init__).parameters)
     assert params[:3] == ["self", "device", "user_info"], params
+    if BACKREF:
+        assert params[3] == "client", params
     annotations = inspect.signature(DeviceClient.__init__).parameters
     device_annotation = annotations["device"].annotation
     if TYPED:
@@ -311,6 +398,18 @@ def test_device_client_constructor_argument_shape():
     else:
         # dict[str, Any] - the raw cloud record, natively.
         assert getattr(device_annotation, "__origin__", None) is dict
+
+
+@backref_only
+def test_the_back_reference_carries_the_method_upstream_calls_on_it():
+    """The account client is only useful if it has what upstream calls on it.
+
+    Catches upstream keeping the name ``client`` but changing what it expects
+    to find there - which the signature checks above cannot see.
+    """
+    from aidot.client import AidotClient
+
+    assert callable(getattr(AidotClient, "async_execute_diff_command", None))
 
 
 def test_device_client_builds_from_whatever_the_shape_wants():
@@ -328,10 +427,19 @@ def test_device_client_builds_from_whatever_the_shape_wants():
         "password": "pw",
     }
     record = _upstream.DeviceModel.from_json(data=raw_device)
-    device, account = _upstream.device_client_args(
-        record, raw_device, _fake_typed_account(), {"id": "u1", "region": "us"}
+    account_client = object()
+    args = _upstream.device_client_args(
+        record,
+        raw_device,
+        _fake_typed_account(),
+        {"id": "u1", "region": "us"},
+        client=account_client,
     )
-    client = DeviceClient(device, account)
+    client = DeviceClient(*args)
+    if _upstream.HAS_DEVICE_CLIENT_BACKREF:
+        # Upstream keeps it as ``self.client`` and calls
+        # ``async_execute_diff_command`` on it from ``async_set_effect``.
+        assert client.client is account_client
     # EXACT type, not isinstance: CameraClient._carry_active_color_mode swaps
     # this object for the carried DeviceStatusData subclass only when it is
     # upstream's own plain class, and skips (with a warning) otherwise.  An

@@ -6,6 +6,49 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Works with `python-aidot` 0.3.57 and later.** Those releases added a third
+  required argument to upstream's `DeviceClient` - the owning `AidotClient`,
+  kept as `self.client` - so every device client this package built failed
+  with `TypeError: DeviceClient.__init__() missing 1 required positional
+  argument: 'client'`. The declared range admits them, so any install that
+  resolved dependencies fresh broke, including a fresh Home Assistant install;
+  an existing install keeps its older upstream and was unaffected. Both
+  dispatch paths now pass the real account client. Upstream uses it only for
+  lighting effects (`async_set_effect`), and **effects are not wired up by
+  this change** - it makes 0.3.57+ work, it does not add effects support.
+
+- **Lights on the typed upstream shape.** The non-camera dispatch path handed
+  upstream the raw cloud dict directly instead of going through the
+  compatibility layer. On the typed shape (0.3.54-0.3.55, which includes this
+  package's declared floor) upstream reads `device.id` from it, so every light
+  would have raised `AttributeError`. No CI job installed that shape, which is
+  why it went unnoticed. Lights now construct there, but the LAN retry policy
+  still does not apply on that shape: its upstream client has no `connect` for
+  the policy to wrap. That is older than this release, and only affects
+  `python-aidot` 0.3.54-0.3.55.
+
+### Changed
+
+- **Cloud account calls use API v35 on `python-aidot` 0.3.57+.** Upstream moved
+  its API version from v17 to v35. It applies to upstream's own account calls
+  (login, token refresh, houses, devices, products); the camera layer builds its
+  own URLs and is unaffected. v35 was compared with v17 on the live cloud before
+  being accepted: houses and devices identical, product profiles byte-identical,
+  and the same authentication error codes. A real login and token refresh on
+  v35 have not yet been exercised.
+
+### Tests
+
+- A contract test now fails **by name** when upstream adds a required
+  constructor argument, and the API-version check fails by name on any version
+  not yet verified. Previously the first surfaced only as a `TypeError` from
+  inside upstream.
+- Stub-based tests cover both constructor arities whichever upstream is
+  installed, and dispatch tests check that the account client handed over is
+  the real one rather than a placeholder.
+
 ## [1.0.0rc29]
 
 ### Fixed

@@ -50,6 +50,7 @@ from ._upstream import (
     api_get_products,
     api_refresh_token,
     cancel_pending_reconnect,
+    light_device_client_args,
 )
 
 from .const import (
@@ -833,7 +834,13 @@ class CameraClient(_UpstreamAidotClient):
             device_id = device.get(CONF_ID)
             device_client = self._device_clients.get(device_id)
             if device_client is None:
-                device_client = LightDeviceClient(device, self.login_info)
+                # Through the seam, not straight to upstream: the raw dict this
+                # used to pass is wrong on the typed shape (upstream reads
+                # `device.id` off it) and short by one on >=0.3.57, which wants
+                # the account client as well.
+                device_client = LightDeviceClient(
+                    *light_device_client_args(self, device)
+                )
                 self._device_clients[device_id] = device_client
             if self._discover is not None:
                 device_client.update_ip_address(
@@ -865,6 +872,7 @@ class CameraClient(_UpstreamAidotClient):
                 account_record(self),
                 raw_device=device,
                 login_info=self.login_info,
+                client=self,
             )
             # Let the camera HTTP calls force a token refresh on 21026
             # ("Please login again") and retry.

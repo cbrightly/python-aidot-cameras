@@ -10,17 +10,20 @@ Because no upstream file is edited, taking a new upstream release is never a
 merge and never a conflict.  It is **not**, however, always just a version bump:
 see the warning immediately below before assuming a patch release is routine.
 
-## WARNING: upstream ships two incompatible shapes, and both are live
+## WARNING: upstream changes its private API inside patch releases
 
-A patch-version bump has twice changed the private API this package attaches to,
-and the second one **reverted the first**:
+A patch-version bump has now changed the private API this package attaches to
+three times. The second one **reverted the first**, and the third added a new
+constructor argument on top of the reverted shape:
 
-| version | uploaded | shape |
-| --- | --- | --- |
-| `<=0.3.53` | | **dict shape** - `aes_utils`, `login_const`, dict-based client |
-| `0.3.54` | 2026-07-24 08:50 | **typed shape** - `api/`, `models/auth_model.py`, `utils/crypto.py` |
-| `0.3.55` | 2026-07-24 09:40 | typed shape |
-| `0.3.56` | 2026-07-29 | **dict shape again** (plus the `models/` package) |
+| version | uploaded | record shape | account back-reference | cloud API |
+| --- | --- | --- | --- | --- |
+| `<=0.3.53` | | **dict** - `aes_utils`, `login_const`, dict-based client | no | `v17` |
+| `0.3.54` | 2026-07-24 08:50 | **typed** - `api/`, `models/auth_model.py`, `utils/crypto.py` | no | `v17` |
+| `0.3.55` | 2026-07-24 09:40 | typed | no | `v17` |
+| `0.3.56` | 2026-07-29 | **dict again** (plus the `models/` package) | no | `v17` |
+| `0.3.57` | 2026-09-23 08:47 (sdist only) | dict | **yes** | **`v35`** |
+| `0.3.58` | 2026-09-23 11:11 | dict | yes | `v35` |
 
 So "newer" does not mean "further along": the typed shape existed on PyPI for
 five days and upstream then went back.  Home Assistant core pins
@@ -28,7 +31,47 @@ five days and upstream then went back.  Home Assistant core pins
 declares a **range** rather than a pin - an exact pin on any other version would
 be unsatisfiable alongside core's.
 
-**Both shapes are supported.** Every difference is resolved in
+**These are independent axes, not a sequence of shapes.** 0.3.58 is the dict
+shape *plus* a back-reference, so `HAS_TYPED_ACCOUNT` stays `False` there and
+the back-reference has its own flag, `HAS_DEVICE_CLIENT_BACKREF`. Do not model
+it as a third value of `UPSTREAM_SHAPE`: that would encode a version rather than
+a capability.
+
+### The account back-reference (0.3.57+)
+
+`DeviceClient.__init__` gained a third required positional argument, the owning
+`AidotClient`, kept as `self.client`. Before this package supplied it, every
+device client construction raised
+`TypeError: DeviceClient.__init__() missing 1 required positional argument: 'client'`.
+Upstream uses it in exactly one method, `async_set_effect`, which calls
+`client.async_execute_diff_command`. Nothing in this package calls it, but both
+dispatch paths pass the real account client anyway, because a consumer's light
+platform may. `device_client_args` makes `client` a required keyword with no
+default so a `None` cannot slip through unnoticed.
+
+**Effects are not wired up.** Supplying the back-reference makes 0.3.57+ work;
+it does not add `async_set_effect` support to this package.
+
+### The cloud API version (0.3.57+: v17 -> v35)
+
+The same release moved `API_URL_TEMPLATE` from `.../v17` to `.../v35`.
+Upstream's own `AidotClient` builds its account calls from it - login, token
+refresh, houses, devices, products. This package's camera layer builds its own
+`/v1/...` URLs and does not use it.
+
+v35 was compared with v17 on the live cloud on 2026-09-23, using an existing
+token with no login and no refresh: `/houses` identical; `/devices` 40 of 40
+with no field or value differing across 17 models including all three camera
+models; `/products` byte-identical over 12 interleaved calls; the same error
+codes with no token (21027) and a bogus refresh token (21025). **A real login
+and a real token refresh on v35 were not exercised** - both rotate the
+account's single live token.
+
+`tests/test_upstream_compat.py::test_api_url_template_is_a_version_we_have_verified`
+holds the list of verified versions. Add to it only after comparing a new
+version with a known-good one.
+
+**Both record shapes are supported.** Every difference is resolved in
 `aidot_cameras/_upstream.py`, which detects the shape *by capability* (does the
 name import?) and never by parsing a version string - a version comparison would
 encode the five-day excursion rather than the shape.  No other module in the
@@ -50,17 +93,25 @@ Tests with no mark must hold on both.
    ]
    ```
 
-   The `<0.4` cap is deliberate - upstream has already broken this API twice
-   inside `0.3.x`, so a minor bump should be validated before a resolver can
-   pick it up silently.
+   The `<0.4` cap is deliberate but does not protect you on its own - upstream
+   has broken this API three times *inside* `0.3.x`, so a patch release can
+   break it too. The scheduled upstream-watch workflow is what catches those;
+   see "How CI watches upstream" below.
 
-2. Reinstall and run the seam-contract test first - it fails fast and names the
-   exact symbol if upstream moved something we depend on:
+2. Reinstall **in a fresh environment** and run the seam-contract test first -
+   it fails fast and names the exact symbol if upstream moved something we
+   depend on:
 
    ```bash
    pip install -e '.[webrtc]'
-   pytest tests/test_upstream_compat.py -v
+   pytest tests/test_upstream_compat.py tests/test_upstream_seam_adapter.py -v
    ```
+
+   A fresh environment matters. A venv made before an upstream release keeps
+   the older upstream, so its tests stay green while CI - which resolves
+   dependencies fresh - fails. That is how the 0.3.57 break first appeared: as
+   an unexplained red on an unrelated branch, with every failing test passing
+   locally.
 
 3. Run the full suite:
 
@@ -71,6 +122,24 @@ Tests with no mark must hold on both.
 4. If everything is green, you are done: commit the bump. If something failed,
    see "When a seam breaks" below.
 
+## How CI watches upstream
+
+Three separate things, because each catches a different failure:
+
+| What | Where | Catches |
+| --- | --- | --- |
+| **Upstream version matrix** on the unit tests | `ci.yml`, `test` job | the newest version the range resolves (gating), `0.3.56` - Home Assistant core's pin (gating), and `0.3.55` - the declared floor and only typed-shape install (advisory, see "Known dual-support gaps") |
+| **Scheduled upstream watch** | `upstream-watch.yml`, daily | a new python-aidot release, on the day it ships. Installs the newest release even past our `<0.4` cap and runs the seam contract, then the unit tier. Gating on the schedule, so a break sends mail; advisory on pull requests |
+| **Home Assistant's own pin** | `ci.yml`, `ha-constraints` job | whether we resolve alongside core. Core pins python-aidot in its aidot integration's manifest, not in `package_constraints.txt`, so the job appends that manifest's requirements to the constraints |
+
+Without the matrix, CI only ever tests the newest release the range admits:
+once 0.3.57 became the default resolve, nothing would have tested the 0.3.56
+path Home Assistant runs. Without the watch, a new release first shows up as an
+unexplained failure on whichever branch is pushed next.
+
+GitHub disables scheduled workflows after 60 days without commits. After a
+quiet spell, dispatch `upstream-watch.yml` by hand.
+
 ## How the extension attaches to upstream
 
 Keep this list in sync when you add or remove a seam; it is what
@@ -79,13 +148,14 @@ Keep this list in sync when you add or remove a seam; it is what
 | What we do | Upstream API we rely on |
 | --- | --- |
 | Dispatch camera vs non-camera devices | `AidotClient.get_device_client(device)` - the single place upstream constructs a device client |
+| Device client constructor arguments | `DeviceClient.__init__(device, user_info[, client])` - built by `_upstream.device_client_args` (cameras) and `_upstream.light_device_client_args` (everything else), splatted because the length varies |
 | Camera device client | subclass `DeviceClient`, overriding `async_login`, `close`, `_notify_status_update`, and `read_data` **where it exists** (typed shape only) |
 | Camera status / info | subclass `DeviceStatusData`, `DeviceInformation` |
 | Raw cloud records | typed shape: `DeviceModel.to_dict()`, `UserInformation.to_dict()`.  Dict shape: the raw dicts natively (no round trip) |
 | Shared crypto | `aidot.utils.crypto` (typed) / `aidot.aes_utils` (dict): `aes_encrypt`, `aes_decrypt`, `aes_decrypt_to_json`.  `rsa_encrypt` is **ours** - see below |
 | Account HTTP | typed shape: `client._cloud_api.{get_houses,get_devices,get_products,refresh_token}`.  Dict shape: `client.async_*` methods |
 | Consumer-facing re-exports | `aidot.device_client`: `DeviceClient`, `DeviceState` - handed on under `aidot_cameras.device_client` so a consumer never imports `aidot` itself.  `DeviceState` does not exist on the dict shape and is supplied by `_upstream` |
-| Constants | `aidot.const` (+ `aidot.login_const` on the dict shape): `APP_ID`, `PUBLIC_KEY_PEM`, `API_URL_TEMPLATE`, `DEFAULT_REGION`, `Identity`, `CONF_*` |
+| Constants | `aidot.const` (+ `aidot.login_const` on the dict shape): `APP_ID`, `PUBLIC_KEY_PEM`, `API_URL_TEMPLATE` (the cloud API version - see above), `DEFAULT_REGION`, `Identity`, `CONF_*` |
 
 **Non-camera devices are upstream's job.** `CameraClient.get_device_client`
 returns a plain upstream `DeviceClient` for anything that is not a camera, so
@@ -141,6 +211,16 @@ is deliberate and narrow; none affects the camera path.
 | `rsa_encrypt` is implemented locally | both | The typed shape had `rsa_encrypt(message, public_key)`; the dict shape replaced it with a one-argument `rsa_password_encrypt(message)`.  Neither signature exists on both, and `aidot_cameras.crypto.rsa_encrypt` is public surface the integration repo may import, so the two-argument form is kept and satisfied here. |
 | Discovered addresses are per-instance | dict shape | The typed shape needed the sweep to write into the process-wide `Discover.DISCOVERED_DEVICE` class dict, because that is what upstream's `get_device_client` reads.  The dict shape reads `self._discover.discovered_device` off our own object instead, so a per-instance map suffices - and is better: two accounts no longer pool addresses in global state. |
 
+**One known gap is NOT deliberate, and is open.** On the typed shape
+(0.3.54-0.3.55) the LAN retry policy does not apply to lights. `LanRetryMixin`
+wraps upstream's `connect` and replaces `_schedule_reconnect`, and the typed
+shape has neither - its client has only `async_login` and a `_reconnect_timer`.
+Two tests in `tests/test_lan_retry_reaches_the_storming_devices.py` fail on
+0.3.55 for this reason, which is why that CI arm is advisory. It was hidden
+until 2026-09-23 because every light on that shape failed earlier, at
+construction (`device.id` read from a raw dict). Cameras are unaffected, and
+Home Assistant pins 0.3.56, so no live install is known to run the typed shape.
+
 ## Carried overrides (self-liquidating)
 
 A "carried override" is a fix we needed before upstream shipped it.  Each one is
@@ -177,16 +257,25 @@ version bump can check whether upstream fixed it and the workaround can go.
 ## When a seam breaks
 
 A broken seam shows up as an `ImportError` or `AttributeError` naming the symbol,
-in one of our modules - not as a merge conflict. To fix it:
+in one of our modules - not as a merge conflict. A *changed signature* can
+instead surface as a `TypeError` from deep inside upstream, naming nothing about
+which release moved; `test_device_client_requires_only_arguments_we_know_how_to_supply`
+exists to turn that into a failure that names the parameter. To fix it:
 
 1. Read the upstream diff for the symbol that moved
-   (`git log`/`git diff` on the upstream repo, or the release notes).
+   (`git log`/`git diff` on the upstream repo, or the release notes). Diff the
+   **module-level constants** as well as the function signatures: 0.3.57's
+   API-version change was a constant, and a signature diff alone missed it.
 2. Update the single extension module that referenced it. Constants belong in
    `aidot_cameras/const.py`, crypto in `aidot_cameras/crypto.py`, exceptions in
    `aidot_cameras/exceptions.py` - camera modules import from those, so a moved
    upstream name is usually a one-line change in one file.
 3. Add or adjust the assertion in `tests/test_upstream_compat.py` so the new
-   shape is covered.
+   shape is covered. Where the change is a new argument or a new arity, also
+   cover it in `tests/test_upstream_seam_adapter.py`, which stubs the upstream
+   constructors so *both* arities are tested whichever upstream is installed.
+4. Never widen an allowed list in those tests just to make it pass. Each entry
+   records something that was verified; add one only once it has been.
 
 If upstream removes a seam entirely (for example, if device clients stop being
 constructed in one place), prefer opening an upstream PR that restores a hook

@@ -1,0 +1,70 @@
+name: Upstream watch (python-aidot)
+
+# Catches a breaking python-aidot release on the day it ships, instead of as an
+# unexplained red on whichever branch happens to be pushed next.
+#
+# Why this exists: upstream has changed the private API this package attaches
+# to three times inside 0.3.x - 0.3.57 (2026-09-23) added a required
+# DeviceClient argument and moved the cloud API from v17 to v35 - and ci.yml
+# runs only on push and pull_request. The first sign of 0.3.57 was 12 e2e
+# failures on an unrelated docs-only branch, while every failing test passed
+# locally because local venvs still held the older upstream.
+#
+# It installs the NEWEST python-aidot, past our own <0.4 cap if need be: pip
+# installs a version outside an installed package's declared range, prints the
+# conflict, and exits 0 (checked with pip 26.2.1). So a 0.4.0 is tested here
+# the day it appears, rather than silently skipped.
+#
+# Gating on the schedule, advisory on pull requests. A failing scheduled run is
+# the whole point, because it is what sends mail; a pull request should not be
+# blocked by an upstream release it did not cause.
+#
+# Two GitHub behaviours to know about: scheduled workflows are disabled after
+# 60 days without commits to the repository, and scheduled-run failure mail
+# goes to whoever last edited the cron line. Dispatch this workflow by hand
+# after any long quiet spell.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "pyproject.toml"
+      - "aidot_cameras/_upstream.py"
+      - "tests/test_upstream_compat.py"
+      - "tests/test_upstream_seam_adapter.py"
+      - ".github/workflows/upstream-watch.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  newest:
+    name: Newest python-aidot on PyPI
+    runs-on: ubuntu-latest
+    # Same container and system deps as ci.yml's unit job, so a failure here is
+    # about upstream and not about the environment.
+    container: python:3.13-alpine
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24, mandatory in a musl container)
+      - name: System deps
+        run: apk add --no-cache git ffmpeg gcc musl-dev libffi-dev
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[webrtc]" pytest pytest-asyncio
+      - name: Upgrade python-aidot to the newest release
+        run: pip install --upgrade python-aidot
+      - name: Record the installed python-aidot
+        run: python -c "import importlib.metadata as m; print('::notice::python-aidot', m.version('python-aidot'))"
+      # The seam-contract tests first: they fail fast and name the symbol or
+      # parameter that moved. The full unit tier after shows the blast radius.
+      - name: Seam contract
+        run: pytest tests/test_upstream_compat.py tests/test_upstream_seam_adapter.py -q
+      - name: Unit tier
+        # Run even when the seam contract failed, to show how far a break
+        # reaches - but not after a cancel.
+        if: ${{ !cancelled() }}
+        run: pytest tests/ -q -m "not e2e and not live" --ignore=tests/e2e

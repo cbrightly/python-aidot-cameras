@@ -26,8 +26,9 @@ classifiers = [
     "Topic :: Home Automation",
     "Typing :: Typed",
 ]
-# Conservative lower bounds only - no upper caps. When installed under Home
-# Assistant, HA core pins aiohttp/cryptography itself; an upper cap here would
+# Conservative lower bounds, with an upper cap only where a dependency has
+# actually broken us (python-aidot, av, aioice). When installed under Home
+# Assistant, HA core pins aiohttp/cryptography itself; an upper cap there would
 # fight HA's resolver on the box. Floors just exclude ancient releases while
 # leaving the consumer (or HA) free to use a newer version. Bump a floor only
 # after re-validating against it.
@@ -35,17 +36,20 @@ dependencies = [
     # Upstream lights library: this package EXTENDS it (subclass/override) and
     # never edits its files.  See docs/UPSTREAM.md.
     #
-    # A RANGE, not a pin, and deliberately so.  Upstream ships two incompatible
-    # shapes of the private API this package attaches to, and both are live:
-    # 0.3.54-0.3.55 refactored to typed dataclasses and 0.3.56 REVERTED that.
-    # Home Assistant core pins `python-aidot==0.3.56` in its own aidot
-    # integration, so an exact pin here on any other version is unsatisfiable
-    # alongside it.  Both shapes are supported (aidot_cameras/_upstream.py) and
-    # both are exercised by tests/test_upstream_compat.py.
+    # A RANGE, not a pin, and deliberately so.  Upstream has changed the
+    # private API this package attaches to three times inside 0.3.x:
+    # 0.3.54-0.3.55 refactored to typed dataclasses, 0.3.56 REVERTED that, and
+    # 0.3.57 added a required account-client argument to DeviceClient and moved
+    # the cloud API from v17 to v35.  Home Assistant core pins
+    # `python-aidot==0.3.56` in its own aidot integration, so an exact pin here
+    # on any other version is unsatisfiable alongside it.  Every variant is
+    # handled in aidot_cameras/_upstream.py; see docs/UPSTREAM.md.
     #
-    # The <0.4 cap is real: upstream has already broken this API twice inside
-    # 0.3.x, so a major/minor bump gets validated before it is allowed, rather
-    # than being picked up silently by a resolver.
+    # The <0.4 cap stops a minor bump from being picked up silently, but it
+    # does NOT protect against a breaking 0.3.x patch - all three breaks were
+    # patches.  The scheduled upstream-watch workflow is what catches those.
+    # No tighter cap on purpose: narrowing the range would collide with
+    # whatever Home Assistant core pins next.
     "python-aidot>=0.3.55,<0.4",
     "aiohttp>=3.9",
     "paho-mqtt>=1.6.1",
