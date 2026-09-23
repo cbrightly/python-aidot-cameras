@@ -82,6 +82,35 @@ def test_shape_detection_is_self_consistent():
     ), params
 
 
+def test_declared_range_excludes_the_typed_shape():
+    """The typed shape (0.3.54-0.3.55) is no longer supported.
+
+    It existed on PyPI for five days in July 2026 before 0.3.56 reverted it,
+    Home Assistant core pins 0.3.56, and on it the LAN retry policy cannot
+    apply to lights at all - that upstream client has neither ``connect`` nor
+    ``_schedule_reconnect`` for ``LanRetryMixin`` to wrap.  Declaring it in
+    range promised support that did not exist.  Lowering the floor again means
+    solving that first.
+    """
+    import tomllib
+    from pathlib import Path
+
+    from packaging.requirements import Requirement
+
+    pyproject = tomllib.loads(
+        (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    )
+    (spec,) = [
+        Requirement(r).specifier
+        for r in pyproject["project"]["dependencies"]
+        if Requirement(r).name == "python-aidot"
+    ]
+    assert "0.3.55" not in spec, spec
+    assert "0.3.54" not in spec, spec
+    assert "0.3.56" in spec, spec  # Home Assistant core's pin
+    assert "0.3.58" in spec, spec
+
+
 def test_compat_layer_resolves_every_name_it_promises():
     """``__all__`` is the package-internal surface; none of it may be missing."""
     for name in _upstream.__all__:

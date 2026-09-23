@@ -19,6 +19,10 @@ respect except that ``DeviceClient.__init__`` also takes the owning
 a third value of ``UPSTREAM_SHAPE``.  The API version (``API_URL_TEMPLATE``) is
 a third; see ``docs/UPSTREAM.md``.
 
+Since 2026-09-23 the declared range starts at 0.3.56, so shape B is no longer
+installable and its branches below are unreachable.  They are left in place
+rather than removed in the same change as the floor bump.
+
 Because upstream has flip-flopped once, neither shape can be assumed permanent,
 so both are supported rather than tracked.  Every difference is resolved here,
 once, at import time; no other module in this package may branch on the upstream
@@ -358,7 +362,7 @@ def light_device_client_args(client: Any, raw_device: dict) -> tuple:
     Before this existed the light branch passed the raw dict straight to
     upstream, bypassing the seam entirely - which is why it raised
     ``AttributeError: 'dict' object has no attribute 'id'`` on the typed shape
-    (0.3.55, this package's own declared floor) long before 0.3.57 made it
+    (0.3.55, then this package's declared floor) long before 0.3.57 made it
     fail on every shape.
     """
     device_record = (

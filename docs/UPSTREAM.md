@@ -71,7 +71,12 @@ account's single live token.
 holds the list of verified versions. Add to it only after comparing a new
 version with a known-good one.
 
-**Both record shapes are supported.** Every difference is resolved in
+**Only the dict shape is supported, from 0.3.56.** The typed shape
+(0.3.54-0.3.55) was dropped on 2026-09-23 - see "The typed shape is no longer
+supported" below - and `pyproject.toml` requires `python-aidot>=0.3.56`. The
+typed branches in `_upstream.py` remain but are unreachable.
+
+Every difference is resolved in
 `aidot_cameras/_upstream.py`, which detects the shape *by capability* (does the
 name import?) and never by parsing a version string - a version comparison would
 encode the five-day excursion rather than the shape.  No other module in the
@@ -88,7 +93,7 @@ Tests with no mark must hold on both.
 
    ```toml
    dependencies = [
-       "python-aidot>=0.3.55,<0.4",
+       "python-aidot>=0.3.56,<0.4",
        ...
    ]
    ```
@@ -128,7 +133,7 @@ Three separate things, because each catches a different failure:
 
 | What | Where | Catches |
 | --- | --- | --- |
-| **Upstream version matrix** on the unit tests | `ci.yml`, `test` job | the newest version the range resolves (gating), `0.3.56` - Home Assistant core's pin (gating), and `0.3.55` - the declared floor and only typed-shape install (advisory, see "Known dual-support gaps") |
+| **Upstream version matrix** on the unit tests | `ci.yml`, `test` job | the newest version the range resolves, and `0.3.56` - Home Assistant core's pin and the declared floor. Both gate |
 | **Scheduled upstream watch** | `upstream-watch.yml`, daily | a new python-aidot release, on the day it ships. Installs the newest release even past our `<0.4` cap and runs the seam contract, then the unit tier. Gating on the schedule, so a break sends mail; advisory on pull requests |
 | **Home Assistant's own pin** | `ci.yml`, `ha-constraints` job | whether we resolve alongside core. Core pins python-aidot in its aidot integration's manifest, not in `package_constraints.txt`, so the job appends that manifest's requirements to the constraints |
 
@@ -211,15 +216,23 @@ is deliberate and narrow; none affects the camera path.
 | `rsa_encrypt` is implemented locally | both | The typed shape had `rsa_encrypt(message, public_key)`; the dict shape replaced it with a one-argument `rsa_password_encrypt(message)`.  Neither signature exists on both, and `aidot_cameras.crypto.rsa_encrypt` is public surface the integration repo may import, so the two-argument form is kept and satisfied here. |
 | Discovered addresses are per-instance | dict shape | The typed shape needed the sweep to write into the process-wide `Discover.DISCOVERED_DEVICE` class dict, because that is what upstream's `get_device_client` reads.  The dict shape reads `self._discover.discovered_device` off our own object instead, so a per-instance map suffices - and is better: two accounts no longer pool addresses in global state. |
 
-**One known gap is NOT deliberate, and is open.** On the typed shape
-(0.3.54-0.3.55) the LAN retry policy does not apply to lights. `LanRetryMixin`
-wraps upstream's `connect` and replaces `_schedule_reconnect`, and the typed
-shape has neither - its client has only `async_login` and a `_reconnect_timer`.
-Two tests in `tests/test_lan_retry_reaches_the_storming_devices.py` fail on
-0.3.55 for this reason, which is why that CI arm is advisory. It was hidden
-until 2026-09-23 because every light on that shape failed earlier, at
-construction (`device.id` read from a raw dict). Cameras are unaffected, and
-Home Assistant pins 0.3.56, so no live install is known to run the typed shape.
+### The typed shape is no longer supported
+
+On the typed shape (0.3.54-0.3.55) the LAN retry policy could not apply to
+lights: `LanRetryMixin` wraps upstream's `connect` and replaces
+`_schedule_reconnect`, and that shape's client has neither - only `async_login`
+and a `_reconnect_timer`. Two tests in
+`tests/test_lan_retry_reaches_the_storming_devices.py` failed on 0.3.55 for
+this reason. It stayed hidden until 2026-09-23 because every light on that
+shape failed even earlier, at construction.
+
+Rather than build LAN retry for a shape that lived five days on PyPI and that
+no known install runs (Home Assistant core pins 0.3.56), the floor was raised to
+0.3.56 and the 0.3.55 CI arm removed.
+`test_upstream_compat.py::test_declared_range_excludes_the_typed_shape` pins
+that decision: lowering the floor again means solving the LAN retry gap first.
+The rows above that mention the typed shape describe code that is now
+unreachable, kept until someone removes those branches.
 
 ## Carried overrides (self-liquidating)
 

@@ -69,9 +69,9 @@ jobs:
   #
   # The upstream axis exists because a bare install only ever tests the NEWEST
   # python-aidot the range admits. Once 0.3.57+ became the default resolve,
-  # nothing would have tested the 0.3.56 path Home Assistant core pins - and the
-  # typed shape (0.3.54-0.3.55, inside the declared floor) had not been tested
-  # by any job at all. See docs/UPSTREAM.md.
+  # nothing would have tested the 0.3.56 path Home Assistant core pins. The
+  # typed shape (0.3.54-0.3.55) is no longer in range, so it has no arm. See
+  # docs/UPSTREAM.md.
   #
   # The `resolved` arm is the one publish.yml's release gate mirrors: its
   # install and invocation must stay identical to publish.yml's `test` job.
@@ -88,16 +88,12 @@ jobs:
           # Whatever the declared range resolves to today.
           - upstream: resolved
             experimental: false
-          # Home Assistant core's own aidot pin, and what a live Home Assistant
-          # install runs: the two-argument DeviceClient path.
+          # Home Assistant core's own aidot pin, the declared floor, and what a
+          # live Home Assistant install runs: the two-argument DeviceClient path.
           - upstream: "0.3.56"
             experimental: false
-          # The declared floor, and the only typed-shape install anywhere in
-          # CI. Advisory: two LAN-retry tests are known to fail on this shape
-          # (docs/UPSTREAM.md, "Known dual-support gaps"). Make it gating once
-          # they pass.
-          - upstream: "0.3.55"
-            experimental: true
+          # `experimental: true` makes an arm advisory - for example a new
+          # upstream release under evaluation before it is admitted as gating.
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24, mandatory in a musl container)
       # git for checkout; ffmpeg for the mux-path tests (tests/test_audio_mux_offline.py

@@ -21,6 +21,16 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   has logged the password since 0.3.56. Logs written before this release still
   contain it.
 
+### Changed
+
+- **Requires `python-aidot` 0.3.56 or later.** The typed upstream shape
+  (0.3.54-0.3.55) is no longer supported. On it, the LAN retry policy could not
+  apply to lights at all - that client has neither of the methods the policy
+  wraps - so declaring it in range promised support that did not exist. It was
+  on PyPI for five days in July 2026 before 0.3.56 reverted it, and Home
+  Assistant core pins 0.3.56, so no known install is affected. Installing next
+  to 0.3.54 or 0.3.55 now fails to resolve instead of running without LAN retry.
+
 ## [1.0.0rc30]
 
 ### Fixed

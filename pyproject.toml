@@ -45,12 +45,17 @@ dependencies = [
     # on any other version is unsatisfiable alongside it.  Every variant is
     # handled in aidot_cameras/_upstream.py; see docs/UPSTREAM.md.
     #
+    # The floor is 0.3.56, not 0.3.55: the typed shape (0.3.54-0.3.55) is no
+    # longer supported.  It lived five days on PyPI, and on it the LAN retry
+    # policy cannot apply to lights at all.  The typed branches in _upstream.py
+    # remain but are unreachable.
+    #
     # The <0.4 cap stops a minor bump from being picked up silently, but it
     # does NOT protect against a breaking 0.3.x patch - all three breaks were
     # patches.  The scheduled upstream-watch workflow is what catches those.
     # No tighter cap on purpose: narrowing the range would collide with
     # whatever Home Assistant core pins next.
-    "python-aidot>=0.3.55,<0.4",
+    "python-aidot>=0.3.56,<0.4",
     "aiohttp>=3.9",
     "paho-mqtt>=1.6.1",
     "cryptography>=42.0",
