@@ -31,6 +31,19 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   Assistant core pins 0.3.56, so no known install is affected. Installing next
   to 0.3.54 or 0.3.55 now fails to resolve instead of running without LAN retry.
 
+### Tests
+
+- **Live validation now exercises a real token refresh, and the release gate
+  fails if it breaks.** After every camera has streamed, the harness refreshes
+  the account token through `users/refreshToken`, checks that an access token
+  came back and was stored where the camera layer reads it, and lists houses
+  with it. Rotation is recorded but not required: on the v35 cloud a refresh
+  re-issues the still-valid token unchanged. It calls the refresh directly
+  rather than through `CameraClient.async_ensure_token`, which falls back to a
+  full password login and would have hidden a broken refresh. Until now the
+  gate proved only a login on the v35 cloud API that `python-aidot` 0.3.57 moved
+  to, never a refresh. Only the validating account's token is rotated.
+
 ## [1.0.0rc30]
 
 ### Fixed

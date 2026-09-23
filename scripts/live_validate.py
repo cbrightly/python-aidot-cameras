@@ -58,7 +58,14 @@ import time
 
 import aiohttp
 
-from aidot_cameras.const import CONF_DEVICE_LIST, CONF_ID, CONF_NAME
+from aidot_cameras import _upstream
+from aidot_cameras.const import (
+    CONF_ACCESS_TOKEN,
+    CONF_DEVICE_LIST,
+    CONF_ID,
+    CONF_NAME,
+    CONF_REFRESH_TOKEN,
+)
 from aidot_cameras.cloud_auth import _make_client
 from aidot_cameras.credentials import load_credentials
 
@@ -224,6 +231,74 @@ async def _wait_until(not_before: float, label: str) -> float:
     )
     await asyncio.sleep(wait)
     return wait
+
+
+async def _check_token_refresh(client) -> dict:
+    """Exercise a REAL token refresh and prove the new token works.
+
+    Calls ``_upstream.api_refresh_token`` directly on purpose.
+    ``CameraClient.async_ensure_token`` falls back to a full password re-login
+    when the refresh fails, so a check built on it would pass with the refresh
+    endpoint completely broken - which is exactly what this exists to catch
+    (python-aidot 0.3.57 moved the cloud API from v17 to v35, and a live run had
+    proved login there but never a refresh).
+
+    Rotates only the token of the account the harness logged in as.  Records
+    whether the tokens changed, never their values.
+    """
+    info = client.login_info or {}
+    before_access = info.get(CONF_ACCESS_TOKEN)
+    before_refresh = info.get(CONF_REFRESH_TOKEN)
+    result = {"ok": False, "access_rotated": False, "refresh_rotated": False}
+    try:
+        response = await _upstream.api_refresh_token(client)
+    except Exception as exc:  # any failure here is the finding
+        result["detail"] = f"refresh rejected: {type(exc).__name__}"
+        return result
+    if not response:
+        result["detail"] = "refresh returned no response"
+        return result
+    info = client.login_info or {}
+    # Where the tokens went, as booleans and key names only - enough to tell
+    # "the server re-issued the token it already had" from "a new token never
+    # reached login_info" without writing a token anywhere.
+    body = response if isinstance(response, dict) else {}
+    new_access = body.get(CONF_ACCESS_TOKEN)
+    new_refresh = body.get(CONF_REFRESH_TOKEN)
+    result["response"] = {
+        "keys": sorted(body),
+        "has_access": bool(new_access),
+        "access_is_previous": bool(new_access) and new_access == before_access,
+        "stored_access_is_response": bool(new_access)
+        and info.get(CONF_ACCESS_TOKEN) == new_access,
+        "has_refresh": bool(new_refresh),
+        "refresh_is_previous": bool(new_refresh) and new_refresh == before_refresh,
+    }
+    # Rotation is recorded but NOT required: the v35 cloud re-issued the
+    # still-valid tokens unchanged on the first live run of this check
+    # (access_is_previous and refresh_is_previous both true).  What a working
+    # refresh must deliver is an access token, stored where the camera layer
+    # reads it, that the cloud accepts.
+    result["access_rotated"] = bool(new_access) and new_access != before_access
+    result["refresh_rotated"] = bool(new_refresh) and new_refresh != before_refresh
+    if not new_access:
+        result["detail"] = "refresh returned no access token"
+        return result
+    if info.get(CONF_ACCESS_TOKEN) != new_access:
+        result["detail"] = "the refreshed token did not reach login_info"
+        return result
+    try:
+        await _upstream.api_get_houses(client)
+    except Exception as exc:
+        result["detail"] = f"the refreshed token was refused: {type(exc).__name__}"
+        return result
+    result["ok"] = True
+    result["detail"] = (
+        "refreshed ("
+        + ("rotated" if result["access_rotated"] else "current token re-issued")
+        + "); the stored token lists houses"
+    )
+    return result
 
 
 def _is_camera(device_client) -> bool:
@@ -1386,6 +1461,13 @@ async def _run(args) -> int:
                 # uploads none at all.  Partial is worth more than nothing.
                 report["partial"] = True
                 _write_report(report, args, quiet=True)
+
+            # After every camera, so rotating the token cannot disturb a stream.
+            report["token_refresh"] = await _check_token_refresh(client)
+            print(
+                f"\ntoken refresh: {'ok' if report['token_refresh']['ok'] else 'FAIL'}"
+                f" - {report['token_refresh']['detail']}"
+            )
         finally:
             await client.async_cleanup()
 
@@ -1465,7 +1547,17 @@ def _summarize(report: dict, args) -> int:
     }
     report["missing_required_models"] = missing
     report["advisory_failed"] = [c["name"] for c in advisory if c["verdict"] != "PASS"]
-    ok = not models_failed and not missing and bool(required)
+    # A broken token refresh gates: in the field it would surface hours later,
+    # as every session dies at its first token expiry.  A report without the
+    # check (a --list run, or an older report) is not held to it.
+    refresh = report.get("token_refresh")
+    refresh_failed = refresh is not None and not refresh.get("ok")
+    if refresh is not None:
+        print(
+            f"\n  token refresh: {'ok' if refresh.get('ok') else 'FAIL'}"
+            f" - {refresh.get('detail', '')}"
+        )
+    ok = not models_failed and not missing and bool(required) and not refresh_failed
     # The run reached its own end, so the report is no longer a partial written
     # mid-loop.  A report still carrying partial=True was killed (job timeout,
     # cancellation) before every camera was attempted - read its verdict as
