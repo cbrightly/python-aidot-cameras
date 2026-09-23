@@ -335,6 +335,42 @@ still holding the stream registered, so a caller that treats any non-200 as
 "go2rtc is unavailable" falls back further than it needs to; `GET /api/streams`
 tells the two apart.
 
+### An AAC transcoding source makes every player crawl
+
+A stream registered with an `ffmpeg:<name>#audio=aac` source alongside the live
+one - the usual trick for feeding an AAC-only consumer such as Home Assistant's
+HLS player from a PCMA publisher - can make playback run at roughly a tenth of
+real speed. Some go2rtc builds stamp that transcode's RTP on a **90 kHz clock**
+while advertising `MPEG4-GENERIC/8000`. The audio is all there and undamaged;
+only its timestamps are stretched, and because players sync video to audio, the
+video crawls to match.
+
+Measured on one stream over a single 15 s wall-clock window:
+
+| URL | codec | container duration |
+|---|---|---|
+| `rtsp://.../<name>?audio=pcma` | pcm_alaw 8000 | **15.000 s** (1.000x) |
+| `rtsp://.../<name>?audio=aac` | aac 8000 | **163.143 s** (10.88x) |
+
+It is not camera- or model-specific: five cameras across three models sat
+between 10.76x and 11.12x. The RTP timestamp delta is the tell - it should
+advance by the frame's sample count (1024 for AAC-LC), and on an affected build
+it advances by about 11520, which is 1024 rescaled from 8 kHz to 90 kHz.
+
+**Offering the source is enough**, even if nothing you control consumes it. A
+downstream go2rtc pulling the stream also prefers it, because go2rtc serves a
+consumer from the first source whose codecs match, and relays the stretched
+timestamps unchanged - Home Assistant's own bundled go2rtc pulled the AAC and
+reported 166.3 s for that same 15 s window. Moving viewers to a different
+player or card does not help for the same reason.
+
+Note the symptom reads as "plays slower than real time", the same words that
+fit an unintended HLS downgrade (above). They are different faults: check
+whether the stream's source list contains an `#audio=aac` entry, and compare
+`?audio=pcma` against `?audio=aac` on the same stream over the same wall-clock
+window. The fix is to stop offering the source; the cost is that AAC-only
+players get no audio.
+
 ### What a cold SDES open costs
 
 Measured on the reference A001064 (mains, LAN-direct), cold opens forced by a

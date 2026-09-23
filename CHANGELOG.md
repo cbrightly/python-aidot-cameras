@@ -39,6 +39,17 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   and the same authentication error codes. A real login and token refresh on
   v35 have not yet been exercised.
 
+### Documentation
+
+- **`Go2rtcClient.ensure_stream` no longer recommends an AAC transcoding
+  source.** Its docstring suggested adding `ffmpeg:<name>#audio=aac` to serve
+  an AAC-only consumer such as Home Assistant's HLS player. On affected go2rtc
+  builds that transcode is stamped on a 90 kHz clock while advertising
+  `MPEG4-GENERIC/8000`, so playback crawls at about a tenth of real speed -
+  measured as a 163 s container for 15 s of wall-clock. The docstring now warns
+  against it, and `docs/CAMERAS.md` explains how to tell this apart from an
+  unintended HLS downgrade, which reads the same.
+
 ### Tests
 
 - A contract test now fails **by name** when upstream adds a required

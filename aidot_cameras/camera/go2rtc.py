@@ -101,10 +101,22 @@ class Go2rtcClient:
         ``extra_sources`` adds further sources to the same stream. go2rtc tries
         a stream's sources in order and serves a consumer from the first whose
         codecs match, so a transcoding source listed before the live one is
-        used only by consumers the live one cannot satisfy. That is how a
-        PCMA publisher can still serve an AAC-only consumer (Home Assistant's
-        HLS player): add ``ffmpeg:<name>#audio=aac``, which go2rtc starts on
-        demand and stops with its last consumer.
+        used only by consumers the live one cannot satisfy.
+
+        **Do not add ``ffmpeg:<name>#audio=aac`` to feed an AAC-only consumer**
+        such as Home Assistant's HLS player, which this docstring used to
+        recommend. Some go2rtc builds stamp that transcode on a 90 kHz clock
+        while advertising ``MPEG4-GENERIC/8000``, so the audio arrives stretched
+        about elevenfold and any player that syncs to audio crawls: measured on
+        the same stream over one 15 s wall-clock window, the passthrough came
+        back as a 15.0 s container and the transcode as 163.1 s. Nothing logs an
+        error - the only symptom is playback in slow motion.
+
+        Offering the source is enough to cause it, because a *downstream* go2rtc
+        prefers it too (first source whose codecs match) and relays the bad
+        timestamps unchanged. If an AAC consumer must be served, transcode
+        somewhere you control the timestamps, or confirm on your own build that
+        the RTP timestamps advance by the frame's sample count.
         """
         sources = [source, *extra_sources]
         try:
