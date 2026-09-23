@@ -141,6 +141,13 @@ def _install_h264_decode_rate_limit_filter() -> None:
 
 _install_h264_decode_rate_limit_filter()
 
+# Upstream python-aidot logs a device's LAN password (WARNING) and the account's
+# tokens (DEBUG); mask them before any handler sees the record.  See
+# aidot_cameras/_log_redaction.py.
+from ._log_redaction import install_upstream_redaction as _install_redaction  # noqa: E402
+
+_install_redaction()
+
 __all__ = [
     "AidotAuthFailed",
     "AidotAuthTokenExpired",

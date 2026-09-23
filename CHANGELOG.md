@@ -6,6 +6,21 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Security
+
+- **Credentials that upstream `python-aidot` logs are now masked.** Two of its
+  log lines carry secrets. `DeviceClient.login` logs the device's login reply
+  at WARNING - Home Assistant's default level - and the device echoes its LAN
+  password back in it, so any install doing LAN login wrote that password into
+  its log, where it lets anyone on the LAN control the device.
+  `AidotClient.async_refresh_token` logs the refresh response at DEBUG, which
+  carries the account's access and refresh tokens. This package now attaches a
+  filter to those two upstream loggers that replaces the value of `password`,
+  `accessToken`, `refreshToken`, `token` and `aesKey` with `<redacted>` and
+  leaves every other field, so the lines stay useful for debugging. Upstream
+  has logged the password since 0.3.56. Logs written before this release still
+  contain it.
+
 ## [1.0.0rc30]
 
 ### Fixed
