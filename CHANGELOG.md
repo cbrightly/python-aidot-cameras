@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc30]
+
 ### Fixed
 
 - **Works with `python-aidot` 0.3.57 and later.** Those releases added a third
@@ -36,8 +38,9 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   (login, token refresh, houses, devices, products); the camera layer builds its
   own URLs and is unaffected. v35 was compared with v17 on the live cloud before
   being accepted: houses and devices identical, product profiles byte-identical,
-  and the same authentication error codes. A real login and token refresh on
-  v35 have not yet been exercised.
+  and the same authentication error codes. Live validation on 0.3.58 has since
+  done a real password login on v35 and streamed every camera model; a token
+  refresh on v35 has not yet been exercised.
 
 ### Documentation
 
