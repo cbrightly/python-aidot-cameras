@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc31]
+
 ### Security
 
 - **Credentials that upstream `python-aidot` logs are now masked.** Two of its
