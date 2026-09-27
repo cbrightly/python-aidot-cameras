@@ -128,3 +128,71 @@ def test_ticks_during_continuous_audio_add_nothing():
     for i in range(50):
         p.feed(b"\x01" * 160, 1000 + 160 * i, i * 0.02)
         assert p.tick(i * 0.02 + 0.01) == []
+
+
+def _sine_alaw(seconds, freq=440):
+    import numpy as np
+
+    from aidot_cameras.camera.rtsp_publish import _alaw_encode
+
+    n = int(seconds * 8000)
+    pcm = (np.sin(2 * np.pi * freq * np.arange(n) / 8000) * 8000).astype(int)
+    return bytes(_alaw_encode(int(v)) for v in pcm)
+
+
+def test_track_emits_1024_steps_and_decodes_back_to_the_same_duration():
+    import av
+
+    trk = at.AacTrack()
+    alaw = _sine_alaw(2.0)
+    pkts = []
+    for i in range(0, len(alaw), 160):
+        pkts += trk.feed(alaw[i : i + 160], 5000 + i, i / 8000)
+    ts = [t for _, t, _ in pkts]
+    assert all(((b - a) & 0xFFFFFFFF) == 1024 for a, b in zip(ts, ts[1:]))
+    seqs = [s for s, _, _ in pkts]
+    assert all(((b - a) & 0xFFFF) == 1 for a, b in zip(seqs, seqs[1:]))
+    # 2 s at 48 kHz = 93.75 AUs; the encoder holds back its priming delay.
+    assert 88 <= len(pkts) <= 94
+    dec = av.CodecContext.create("aac", "r")
+    dec.extradata = at.audio_specific_config()
+    samples = 0
+    for _, _, payload in pkts:
+        for fr in dec.decode(av.Packet(payload[4:])):
+            samples += fr.samples
+    assert abs(samples / 48000 - len(pkts) * 1024 / 48000) < 0.05
+
+
+def test_idle_track_still_produces_packets():
+    trk = at.AacTrack()
+    trk.tick(0.0)
+    pkts = trk.tick(1.0)
+    assert len(pkts) >= 40  # ~46 AUs per second of silence, minus priming
+
+
+def test_an_encoder_failure_stops_only_the_aac_track(caplog):
+    class Broken:
+        def encode(self, alaw):
+            raise RuntimeError("boom")
+
+    trk = at.AacTrack(encoder=Broken())
+    assert trk.feed(b"\x01" * 160, 0, 0.0) == []
+    assert trk.failed
+    assert trk.feed(b"\x01" * 160, 160, 0.02) == []
+    assert sum("AAC track stopped" in r.message for r in caplog.records) == 1
+
+
+def test_make_aac_track_honours_the_kill_switch(monkeypatch):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    assert at.make_aac_track() is None
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
+    assert isinstance(at.make_aac_track(), at.AacTrack)
+
+
+def test_make_aac_track_returns_none_when_the_encoder_cannot_open(monkeypatch, caplog):
+    def _fail(*a, **k):
+        raise ImportError("no av")
+
+    monkeypatch.setattr(at, "AacEncoder", _fail)
+    assert at.make_aac_track("cam1") is None
+    assert "publishing without it" in caplog.text

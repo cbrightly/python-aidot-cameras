@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import struct
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -148,3 +149,99 @@ class AacPacer:
             self._pos = (self._pos + n) & _MASK
         self.silence_samples += n
         return [ALAW_SILENCE * n]
+
+
+class AacEncoder:
+    """A-law (8 kHz) in, raw AAC-LC access units (48 kHz mono) out.
+
+    ``av`` and ``numpy`` belong to the ``[webrtc]`` extra and are imported here,
+    so a core-only install can still import this module.
+    """
+
+    def __init__(self) -> None:
+        import av
+        import numpy as np
+        from av.audio.resampler import AudioResampler
+
+        from .rtsp_publish import _ALAW_TO_LINEAR
+
+        self._av = av
+        self._np = np
+        self._lut = np.array(_ALAW_TO_LINEAR, dtype=np.int16)
+        self._ctx = av.CodecContext.create("aac", "w")
+        self._ctx.sample_rate = AAC_CLOCK_RATE
+        self._ctx.layout = "mono"
+        self._ctx.format = "fltp"
+        self._ctx.bit_rate = AAC_BITRATE
+        self._ctx.open()  # fail at construction, not on the first packet
+        self._resampler = AudioResampler(
+            format="fltp", layout="mono", rate=AAC_CLOCK_RATE
+        )
+        self._in = 0
+
+    def encode(self, alaw: bytes) -> List[bytes]:
+        np = self._np
+        pcm = self._lut[np.frombuffer(alaw, dtype=np.uint8)].reshape(1, -1)
+        frame = self._av.AudioFrame.from_ndarray(pcm, format="s16", layout="mono")
+        frame.sample_rate = PCMA_RATE
+        frame.pts = self._in
+        self._in += len(alaw)
+        out: List[bytes] = []
+        for resampled in self._resampler.resample(frame):
+            for pkt in self._ctx.encode(resampled):
+                out.append(bytes(pkt))
+        return out
+
+
+class AacTrack:
+    """Pacer + encoder + RTP numbering for the AAC track of one publish."""
+
+    def __init__(self, encoder=None, pacer: Optional[AacPacer] = None) -> None:
+        self._enc = encoder if encoder is not None else AacEncoder()
+        self.pacer = pacer if pacer is not None else AacPacer()
+        self.ssrc = random.getrandbits(32)
+        self._seq = random.getrandbits(16)
+        self._ts = random.getrandbits(31)
+        self.frames = 0
+        self.failed = False
+
+    def feed(
+        self, alaw: bytes, pcma_ts: int, now: float
+    ) -> List[Tuple[int, int, bytes]]:
+        if self.failed:
+            return []
+        return self._encode(self.pacer.feed(alaw, pcma_ts, now))
+
+    def tick(self, now: float) -> List[Tuple[int, int, bytes]]:
+        if self.failed:
+            return []
+        return self._encode(self.pacer.tick(now))
+
+    def _encode(self, blocks: List[bytes]) -> List[Tuple[int, int, bytes]]:
+        out: List[Tuple[int, int, bytes]] = []
+        try:
+            for block in blocks:
+                for au in self._enc.encode(block):
+                    self._seq = (self._seq + 1) & 0xFFFF
+                    out.append((self._seq, self._ts, packetize_aac(au)))
+                    self._ts = (self._ts + AAC_SAMPLES_PER_FRAME) & _MASK
+                    self.frames += 1
+        except Exception as exc:
+            self.failed = True
+            _LOGGER.warning("AAC track stopped (%r) - video and A-law continue", exc)
+        return out
+
+
+def make_aac_track(device_id: str = "?") -> Optional[AacTrack]:
+    """An ``AacTrack`` for one publish, or None (disabled, or cannot encode)."""
+    if not publish_aac_enabled():
+        return None
+    try:
+        return AacTrack()
+    except Exception as exc:
+        _LOGGER.warning(
+            "camera %s: AAC track unavailable (%r) - publishing without it",
+            device_id,
+            exc,
+        )
+        return None
