@@ -123,6 +123,50 @@ def test_idle_fill_after_audio_stops_then_resumes_without_a_backward_step():
     assert out == b"\x02" * 160
 
 
+def test_audio_resumes_after_a_gap_the_camera_stamps_do_not_cover():
+    # The camera's stamps advance less than wall time across an arrival gap:
+    # tick() fills ahead of them, so the first packets after the gap lie
+    # wholly behind the position and are trimmed. Those trimmed packets are
+    # still the camera sending audio - the pacer must not treat it as idle
+    # and keep filling, or no real sample would ever be emitted again.
+    p = at.AacPacer()
+    real = b"\x01"
+    ts, t = 1000, 0.0
+    for _ in range(50):  # 1 s of continuous audio
+        p.feed(real * 160, ts, t)
+        p.tick(t + 0.01)
+        ts, t = ts + 160, t + 0.02
+    gap_end = t + 0.6
+    while t < gap_end:  # 0.6 s arrival gap; video keeps ticking
+        p.tick(t)
+        t += 0.02
+    resumed = t
+    first_real = None
+    silence_at_catch_up = None
+    while t < resumed + 4.0:  # the camera resumes where its stamps stopped
+        out = _flat(p.feed(real * 160, ts, t))
+        p.tick(t + 0.01)
+        if first_real is None and real in out:
+            first_real = t
+            silence_at_catch_up = p.silence_samples
+        ts, t = ts + 160, t + 0.02
+    assert first_real is not None, "AAC stayed silent after the camera resumed"
+    assert first_real - resumed <= 1.0
+    assert p.silence_samples == silence_at_catch_up  # no fill once caught up
+
+
+def test_idle_catch_up_is_capped_per_block():
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 1000, 0.0)
+    blocks = []
+    for now in (12.02, 12.04, 12.06):  # 12 s with no tick at all
+        blocks += p.tick(now)
+    assert len(blocks) == 3
+    assert all(len(b) <= at.AAC_MAX_FILL_S * at.PCMA_RATE for b in blocks)
+    # Caught up: the filled silence covers the idle time up to the last tick.
+    assert sum(len(b) for b in blocks) == round(12.06 * at.PCMA_RATE)
+
+
 def test_ticks_during_continuous_audio_add_nothing():
     p = at.AacPacer()
     for i in range(50):

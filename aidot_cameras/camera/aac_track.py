@@ -127,7 +127,11 @@ class AacPacer:
         elif d < 0:
             overlap = -d
             if overlap >= len(alaw):
+                # Wholly old, but the camera IS sending audio: record that,
+                # or tick() would keep filling ahead of its stamps and every
+                # later packet would be trimmed too - silence for good.
                 self.trimmed_samples += len(alaw)
+                self._last = now
                 return out
             alaw = alaw[overlap:]
             self.trimmed_samples += overlap
