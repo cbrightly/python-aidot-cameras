@@ -28,7 +28,9 @@ AAC_BITRATE = 64000
 PCMA_RATE = 8000
 #: How long the camera may send no audio before silence is generated in its place.
 AAC_IDLE_FILL_S = 0.5
-#: The largest silence one step may insert; a larger jump re-anchors instead.
+#: The largest silence one tick may insert, and the largest stamp jump feed()
+#: fills without the wall clock confirming it; an unexplained larger jump
+#: re-anchors instead.
 AAC_MAX_FILL_S = 5.0
 #: How far a forward stamp jump may disagree with the wall clock and still be a real gap.
 AAC_GAP_TOLERANCE_S = 1.0
