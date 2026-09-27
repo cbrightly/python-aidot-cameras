@@ -6,6 +6,19 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- **The direct publish carries an AAC track, so Home Assistant's HLS player and
+  recordings have sound.** Home Assistant's stream component keeps AAC and MP3
+  audio and drops G.711, and the direct publish sent the camera's A-law only,
+  so the HLS dialog and `camera.record` were silent. It now also publishes an
+  AAC-LC 48 kHz mono track, after the A-law one, encoded in-process. Its
+  timestamps follow the camera's own audio clock, gaps are filled with silence,
+  and a camera that sends no audio still gets a continuous silent track, so
+  sound stays in step with the picture. Everything that reads the first audio
+  track - WebRTC included - still gets A-law, unchanged. Set
+  `AIDOT_PUBLISH_AAC=0` to publish exactly as before.
+
 ## [1.0.0rc31]
 
 ### Security
