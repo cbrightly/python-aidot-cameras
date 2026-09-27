@@ -48,3 +48,83 @@ def test_kill_switch(monkeypatch, val, on):
     else:
         monkeypatch.setenv("AIDOT_PUBLISH_AAC", val)
     assert at.publish_aac_enabled() is on
+
+
+S = at.ALAW_SILENCE
+
+
+def _flat(blocks):
+    return b"".join(blocks)
+
+
+def test_continuous_audio_passes_straight_through():
+    p = at.AacPacer()
+    a = p.feed(b"\x01" * 160, 1000, 0.00)
+    b = p.feed(b"\x02" * 160, 1160, 0.02)
+    assert _flat(a + b) == b"\x01" * 160 + b"\x02" * 160
+    assert p.silence_samples == 0 and p.trimmed_samples == 0
+
+
+def test_a_gap_in_the_camera_stamps_is_filled_with_silence():
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 1000, 0.0)
+    out = p.feed(b"\x02" * 160, 1000 + 160 + 800, 0.12)  # 100 ms missing
+    assert _flat(out) == S * 800 + b"\x02" * 160
+    assert p.silence_samples == 800
+
+
+def test_an_overlapping_packet_is_trimmed_never_stepped_back():
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 1000, 0.0)
+    out = p.feed(b"\x02" * 160, 1080, 0.02)  # overlaps 80 samples
+    assert _flat(out) == b"\x02" * 80
+    assert p.trimmed_samples == 80
+    assert p.feed(b"\x03" * 160, 1000, 0.03) == []  # entirely old: dropped
+    assert p.trimmed_samples == 80 + 160
+
+
+def test_the_32_bit_timestamp_wraps():
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 0xFFFFFF60, 0.0)  # ends exactly at the wrap
+    out = p.feed(b"\x02" * 160, 0, 0.02)
+    assert _flat(out) == b"\x02" * 160 and p.silence_samples == 0
+
+
+def test_a_huge_forward_jump_reanchors_instead_of_emitting_minutes_of_silence():
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 1000, 0.0)
+    out = p.feed(b"\x02" * 160, 1000 + 160 + 8000 * 60, 0.02)
+    assert _flat(out) == b"\x02" * 160
+    assert p.reanchors == 1 and p.silence_samples == 0
+
+
+def test_idle_fill_keeps_the_track_alive_when_the_camera_sends_no_audio():
+    p = at.AacPacer()
+    assert p.tick(10.0) == []  # first tick only starts the clock
+    assert p.tick(10.3) == []  # under AAC_IDLE_FILL_S
+    out = p.tick(10.6)
+    assert _flat(out) == S * 4800  # 0.6 s at 8 kHz, measured from 10.0
+    assert p.tick(10.7) == []  # just filled - not idle again yet
+
+
+def test_idle_fill_after_audio_stops_then_resumes_without_a_backward_step():
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 1000, 0.00)
+    filled = _flat(p.tick(1.00))  # 1 s of silence since the last packet
+    assert filled == S * 8000
+    # The camera resumes; its first packet lies wholly inside the filled silence.
+    out = _flat(p.feed(b"\x02" * 160, 1000 + 160 + 7800, 1.00))
+    assert out == b""
+    # The next packet overlaps the fill by 40 samples: only its tail is kept.
+    out = _flat(p.feed(b"\x02" * 160, 1000 + 160 + 7960, 1.02))
+    assert out == b"\x02" * 120
+    # From here on the camera's stamps are exactly continuous.
+    out = _flat(p.feed(b"\x02" * 160, 1000 + 160 + 8120, 1.04))
+    assert out == b"\x02" * 160
+
+
+def test_ticks_during_continuous_audio_add_nothing():
+    p = at.AacPacer()
+    for i in range(50):
+        p.feed(b"\x01" * 160, 1000 + 160 * i, i * 0.02)
+        assert p.tick(i * 0.02 + 0.01) == []
