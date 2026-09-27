@@ -726,6 +726,7 @@ def test_dtls_publish_announces_and_sends_an_aac_track(go2rtc, monkeypatch):
     ts = [a[3] for a in aac]
     assert all(((b - a) & 0xFFFFFFFF) == 1024 for a, b in zip(ts, ts[1:]))
     assert res["aac_frames"] == len(aac)
+    assert res["aac_seconds"] > 0
 
 
 def test_dtls_publish_kill_switch_keeps_todays_sdp(go2rtc, monkeypatch):
@@ -734,6 +735,7 @@ def test_dtls_publish_kill_switch_keeps_todays_sdp(go2rtc, monkeypatch):
     assert "RTP/AVP 97" not in go2rtc.announced[0]
     assert not any(ch == 4 for ch, _ in go2rtc.frames)
     assert res["aac_frames"] == 0
+    assert res["aac_seconds"] == 0.0
 
 
 def test_dtls_runner_reports_a_failed_publish():

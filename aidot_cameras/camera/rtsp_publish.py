@@ -1333,6 +1333,7 @@ def dtls_rtp_publish_run(
     res.setdefault("max_frame_gap_s", 0.0)
     res.setdefault("packets", 0)
     res.setdefault("aac_frames", 0)
+    res.setdefault("aac_seconds", 0.0)
     pub = publisher_factory(url, sdp, tracks)
     try:
         pub.connect()
@@ -1380,6 +1381,7 @@ def dtls_rtp_publish_run(
     dropped_resent = 0
     first_arrival = None
     send_blocked = 0.0
+    aac_seconds = 0.0
     gap_skipped = 0
     gap_dropped = 0
     try:
@@ -1444,10 +1446,12 @@ def dtls_rtp_publish_run(
                     last_frame = now
                     progress[0] = now
                     if aac:
+                        _aac_started = time.monotonic()
                         for aseq, ats_, apl in aac.tick(now):
                             pub.send_rtp(
                                 aac_t, build_rtp(97, True, aseq, ats_, aac.ssrc, apl)
                             )
+                        aac_seconds += time.monotonic() - _aac_started
                     # This frame's own send belongs to the NEXT gap: the gap
                     # above is measured to `now`, which precedes it.
                     first_arrival = None
@@ -1468,14 +1472,19 @@ def dtls_rtp_publish_run(
                 pub.send_rtp(
                     audio, build_rtp(8, False, seq, out_ts, atl.ssrc, conditioned)
                 )
+                # Audio shares the publisher's lock, so a blocked audio send
+                # holds up the next picture just as a video one does. Charge
+                # only the PCMA send here - the AAC encode/send below is
+                # timed separately, into aac_seconds, so it does not skew
+                # this diagnostic between the audio and video paths.
+                send_blocked += time.monotonic() - _a_started
                 if aac:
+                    _aac_started = time.monotonic()
                     for aseq, ats_, apl in aac.feed(conditioned, out_ts, _a_started):
                         pub.send_rtp(
                             aac_t, build_rtp(97, True, aseq, ats_, aac.ssrc, apl)
                         )
-                # Audio shares the publisher's lock, so a blocked audio send
-                # holds up the next picture just as a video one does.
-                send_blocked += time.monotonic() - _a_started
+                    aac_seconds += time.monotonic() - _aac_started
             if pub.keepalive_due():
                 pub.send_keepalive()
             if not moved:
@@ -1490,4 +1499,5 @@ def dtls_rtp_publish_run(
         res["skipped_pre_keyframe"] = skipped_pre_keyframe
         res["dropped_resent"] = dropped_resent
         res["aac_frames"] = aac.frames if aac else 0
+        res["aac_seconds"] = round(aac_seconds, 3)
         pub.close(teardown=True)
