@@ -1009,6 +1009,7 @@ class LoopbackRtpPublisher:
         self._aac = make_aac_track(device_id) if self._pcma_idx is not None else None
         self._aac_track: Optional[PublishTrack] = None
         self._aac_seconds = 0.0
+        self._video_forwarded = False
         self._publish_tracks = list(self._tracks)
         if self._aac is not None:
             self._aac_track = PublishTrack(
@@ -1163,7 +1164,10 @@ class LoopbackRtpPublisher:
                             preroll.append((idx, pkt, now))
                 if connected:
                     self._expire(pub, now)
-                if connected and self._aac is not None:
+                if connected and self._aac is not None and self._video_forwarded:
+                    # Idle fill runs beside video, as on the DTLS path: a
+                    # camera that has gone quiet gets no silent AAC either.
+                    self._video_forwarded = False
                     _aac_started = time.monotonic()
                     for aseq, ats_, apl in self._aac.tick(now):
                         self._send_aac(pub, aseq, ats_, apl)
@@ -1259,6 +1263,8 @@ class LoopbackRtpPublisher:
             )
         except RtspPublishError:
             pass  # the loop's alive check ends the publish with the reason
+        if track.kind == "video":
+            self._video_forwarded = True
         if idx == self._pcma_idx and self._aac is not None:
             _aac_started = time.monotonic()
             for aseq, ats_, apl in self._aac.feed(payload, out_ts, arrival):

@@ -607,6 +607,39 @@ def test_loopback_publish_adds_aac_after_pcma(go2rtc, monkeypatch):
     assert "audio:MPEG4-GENERIC/" in str(stats["tracks"])
 
 
+def test_loopback_publish_fills_aac_silence_only_while_video_flows(go2rtc, monkeypatch):
+    monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", audio_gain_db=0
+    )
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for i in range(10):
+            tx.sendto(
+                rp.build_rtp(8, False, 1 + i, 160 * (i + 1), 0xBBBB, b"\x01" * 160),
+                ("127.0.0.1", a_port),
+            )
+            time.sleep(0.02)
+        assert _wait(lambda: proc._aac.frames > 0)
+        # The camera goes quiet - no audio, no video. Silence is generated to
+        # keep the track alive BESIDE video, so none is generated now.
+        time.sleep(1.2)
+        assert proc._aac.pacer.silence_samples == 0
+        for i in range(40):  # video resumes, audio does not: fill beside it
+            tx.sendto(
+                rp.build_rtp(96, True, 1 + i, 1800 * i, 0xAAAA, b"\x41pic"),
+                ("127.0.0.1", v_port),
+            )
+            time.sleep(0.02)
+        assert _wait(lambda: proc._aac.pacer.silence_samples > 0)
+        tx.close()
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
 def test_loopback_publish_without_audio_has_no_aac(go2rtc, monkeypatch):
     monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
     a_port, v_port = _free_udp_ports(2)
