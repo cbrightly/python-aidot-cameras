@@ -219,6 +219,22 @@ def publish_sdp_from_serve_sdp(
     return "\r\n".join(out) + "\r\n", tracks, ports
 
 
+def _free_dynamic_pt(tracks: List[PublishTrack]) -> int:
+    """The first dynamic payload type from 97 that no track uses."""
+    used = {t.pt for t in tracks}
+    return next(pt for pt in range(97, 128) if pt not in used)
+
+
+def append_aac_media(sdp: str, track: PublishTrack) -> str:
+    """Append the AAC track's media section to an ANNOUNCE body."""
+    return sdp + (
+        f"m=audio 0 RTP/AVP {track.pt}\r\n"
+        f"a=rtpmap:{track.pt} MPEG4-GENERIC/{AAC_CLOCK_RATE}\r\n"
+        f"a=fmtp:{track.pt} {aac_fmtp()}\r\n"
+        f"a=control:trackID={track.index}\r\n"
+    )
+
+
 def build_publish_sdp(tracks: List[PublishTrack], fmtp: Optional[dict] = None) -> str:
     """ANNOUNCE body for tracks built in-process (the DTLS path)."""
     fmtp = fmtp or {}
@@ -983,6 +999,27 @@ class LoopbackRtpPublisher:
         self._gain = alaw_gain_table(audio_gain_db)
         pol = policy or timestamp_policy()
         self._timelines = [RtpTimeline(t.clock_rate, policy=pol) for t in self._tracks]
+        # AAC after A-law for Home Assistant's HLS (see aac_track). Only for an
+        # A-law track: the encoder decodes A-law, and a PCMU camera is published
+        # exactly as before. self._tracks stays the media tracks - the reorder
+        # buffers and timelines index it - and the publisher gets the full list.
+        self._pcma_idx = next(
+            (i for i, t in enumerate(self._tracks) if t.codec == "PCMA"), None
+        )
+        self._aac = make_aac_track(device_id) if self._pcma_idx is not None else None
+        self._aac_track: Optional[PublishTrack] = None
+        self._aac_seconds = 0.0
+        self._publish_tracks = list(self._tracks)
+        if self._aac is not None:
+            self._aac_track = PublishTrack(
+                "audio",
+                _free_dynamic_pt(self._tracks),
+                AAC_CLOCK_RATE,
+                "MPEG4-GENERIC",
+                len(self._tracks),
+            )
+            self._publish_tracks.append(self._aac_track)
+            self._sdp = append_aac_media(self._sdp, self._aac_track)
         self._publisher_factory = publisher_factory
         self._publisher: Optional[RtspPublisher] = None
         self._stop = threading.Event()
@@ -1049,7 +1086,9 @@ class LoopbackRtpPublisher:
             "preroll_dropped": self.preroll_dropped,
             "reorder_late": sum(b.late for b in self._reorder),
             "reorder_skipped": sum(b.skipped for b in self._reorder),
-            "tracks": [f"{t.kind}:{t.codec}/{t.pt}" for t in self._tracks],
+            "tracks": [f"{t.kind}:{t.codec}/{t.pt}" for t in self._publish_tracks],
+            "aac_frames": self._aac.frames if self._aac is not None else 0,
+            "aac_seconds": round(self._aac_seconds, 3),
         }
 
     def _log(self, level: int, msg: str, *args) -> None:
@@ -1067,7 +1106,7 @@ class LoopbackRtpPublisher:
         preroll: Deque[Tuple[int, bytes, float]] = collections.deque()
         started = time.monotonic()
         try:
-            pub = self._publisher_factory(self._url, self._sdp, self._tracks)
+            pub = self._publisher_factory(self._url, self._sdp, self._publish_tracks)
             self._publisher = pub
             connector = threading.Thread(
                 target=self._connect,
@@ -1095,7 +1134,9 @@ class LoopbackRtpPublisher:
                         self._log(
                             logging.INFO,
                             "publishing %s to %s",
-                            ", ".join(f"{t.kind} {t.codec}" for t in self._tracks),
+                            ", ".join(
+                                f"{t.kind} {t.codec}" for t in self._publish_tracks
+                            ),
                             redact_url(self._url),
                         )
                         while preroll:
@@ -1122,6 +1163,11 @@ class LoopbackRtpPublisher:
                             preroll.append((idx, pkt, now))
                 if connected:
                     self._expire(pub, now)
+                if connected and self._aac is not None:
+                    _aac_started = time.monotonic()
+                    for aseq, ats_, apl in self._aac.tick(now):
+                        self._send_aac(pub, aseq, ats_, apl)
+                    self._aac_seconds += time.monotonic() - _aac_started
                 if connected and pub.keepalive_due(now):
                     try:
                         pub.send_keepalive()
@@ -1210,6 +1256,21 @@ class LoopbackRtpPublisher:
                 build_rtp(
                     track.pt, marker, seq, out_ts, self._timelines[idx].ssrc, payload
                 ),
+            )
+        except RtspPublishError:
+            pass  # the loop's alive check ends the publish with the reason
+        if idx == self._pcma_idx and self._aac is not None:
+            _aac_started = time.monotonic()
+            for aseq, ats_, apl in self._aac.feed(payload, out_ts, arrival):
+                self._send_aac(pub, aseq, ats_, apl)
+            self._aac_seconds += time.monotonic() - _aac_started
+
+    def _send_aac(self, pub: RtspPublisher, seq: int, ts: int, payload: bytes) -> None:
+        track = self._aac_track
+        assert track is not None and self._aac is not None
+        try:
+            pub.send_rtp(
+                track, build_rtp(track.pt, True, seq, ts, self._aac.ssrc, payload)
             )
         except RtspPublishError:
             pass  # the loop's alive check ends the publish with the reason

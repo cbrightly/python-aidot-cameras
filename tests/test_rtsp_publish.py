@@ -220,6 +220,14 @@ def test_publish_sdp_rejects_dynamic_pt_without_rtpmap():
         rp.publish_sdp_from_serve_sdp("v=0\r\nm=video 6 RTP/AVP 96\r\n")
 
 
+def test_free_dynamic_pt_skips_used_payload_types():
+    t = [
+        rp.PublishTrack("video", 97, 90000, "H264", 0),
+        rp.PublishTrack("audio", 8, 8000, "PCMA", 1),
+    ]
+    assert rp._free_dynamic_pt(t) == 98
+
+
 # --------------------------------------------------------------------------- #
 # RTP                                                                          #
 # --------------------------------------------------------------------------- #
@@ -493,7 +501,8 @@ def _udp_port_bound(port):
         s.close()
 
 
-def test_loopback_publisher_forwards_and_rewrites(go2rtc):
+def test_loopback_publisher_forwards_and_rewrites(go2rtc, monkeypatch):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
     a_port, v_port = _free_udp_ports(2)
     proc = rp.LoopbackRtpPublisher(
         _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", audio_gain_db=0
@@ -539,7 +548,8 @@ def test_loopback_publisher_forwards_and_rewrites(go2rtc):
     assert proc.stderr.read().decode().count("publish ended") == 1
 
 
-def test_loopback_publisher_applies_audio_gain(go2rtc):
+def test_loopback_publisher_applies_audio_gain(go2rtc, monkeypatch):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
     a_port, v_port = _free_udp_ports(2)
     proc = rp.LoopbackRtpPublisher(
         _serve_sdp(a_port, v_port), go2rtc.url(), audio_gain_db=-8.0
@@ -559,6 +569,65 @@ def test_loopback_publisher_applies_audio_gain(go2rtc):
     finally:
         proc.kill()
     assert proc.poll() == rp.EXIT_KILLED
+
+
+def test_loopback_publish_adds_aac_after_pcma(go2rtc, monkeypatch):
+    monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", audio_gain_db=0
+    )
+    try:
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for i in range(50):
+            tx.sendto(
+                rp.build_rtp(8, False, 1 + i, 160 * (i + 1), 0xBBBB, b"\xd5" * 160),
+                ("127.0.0.1", a_port),
+            )
+            time.sleep(0.02)
+        sdp_ok = _wait(
+            lambda: go2rtc.announced and "MPEG4-GENERIC/48000" in go2rtc.announced[0]
+        )
+        assert sdp_ok
+        sdp = go2rtc.announced[0]
+        assert sdp.index("PCMA/8000") < sdp.index("MPEG4-GENERIC")
+        assert _wait(lambda: sum(1 for ch, _ in go2rtc.frames if ch == 4) >= 20)
+        tx.close()
+    finally:
+        proc.terminate()
+        proc.wait(3)
+    stats = proc.publish_stats()
+    assert stats["aac_frames"] >= 20
+    assert stats["aac_seconds"] > 0
+    assert "audio:MPEG4-GENERIC/" in str(stats["tracks"])
+
+
+def test_loopback_publish_without_audio_has_no_aac(go2rtc, monkeypatch):
+    monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", include_audio=False
+    )
+    try:
+        assert _wait(lambda: bool(go2rtc.announced))
+        assert "MPEG4-GENERIC" not in go2rtc.announced[0]
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_pcmu_camera_gets_no_aac(go2rtc, monkeypatch):
+    monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
+    a_port, v_port = _free_udp_ports(2)
+    pcmu_sdp = _serve_sdp(a_port, v_port).replace("RTP/AVP 8", "RTP/AVP 0")
+    pcmu_sdp = pcmu_sdp.replace("a=rtpmap:8 PCMA/8000", "a=rtpmap:0 PCMU/8000")
+    proc = rp.LoopbackRtpPublisher(pcmu_sdp, go2rtc.url(), device_id="cam")
+    try:
+        assert _wait(lambda: bool(go2rtc.announced))
+        assert "MPEG4-GENERIC" not in go2rtc.announced[0]
+    finally:
+        proc.terminate()
+        proc.wait(3)
 
 
 def test_loopback_publisher_exits_1_when_the_stream_is_missing():
@@ -873,7 +942,11 @@ def test_reorder_bounds_what_it_holds():
     assert b.push(6, 6, 0.0) == [3, 4, 5, 6]
 
 
-def test_loopback_publisher_reorders_before_publishing(go2rtc):
+def test_loopback_publisher_reorders_before_publishing(go2rtc, monkeypatch):
+    # Video-only assertions on go2rtc.frames, not filtered by channel: an AAC
+    # idle-fill packet landing on channel 4 before the check would break the
+    # exact count, same reason as the two tests above.
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
     a_port, v_port = _free_udp_ports(2)
     proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
     try:
