@@ -16,7 +16,11 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   timestamps follow the camera's own audio clock, gaps are filled with silence,
   and a camera that sends no audio still gets a continuous silent track, so
   sound stays in step with the picture. Everything that reads the first audio
-  track - WebRTC included - still gets A-law, unchanged. Set
+  track - WebRTC included - still gets A-law, unchanged. A consumer selects
+  the track with go2rtc's `audio=aac` (the Home Assistant integration does
+  this on its HLS path only). The encode is always on: it costs one AAC encode
+  per streaming camera for as long as its direct publish runs, watched or not.
+  A camera whose audio is mu-law (PCMU) gets no AAC track. Set
   `AIDOT_PUBLISH_AAC=0` to publish exactly as before.
 
 ## [1.0.0rc31]
