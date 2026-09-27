@@ -607,6 +607,36 @@ def test_loopback_publish_adds_aac_after_pcma(go2rtc, monkeypatch):
     assert "audio:MPEG4-GENERIC/" in str(stats["tracks"])
 
 
+def test_loopback_publish_builds_the_aac_track_off_the_constructing_thread(
+    go2rtc, monkeypatch
+):
+    # The constructor runs on Home Assistant's event loop, and the first AAC
+    # track imports numpy and av and opens a codec: that belongs on the worker.
+    monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
+    calls = []
+    real_make = rp.make_aac_track
+
+    def _make(device_id="?"):
+        calls.append(threading.current_thread())
+        return real_make(device_id)
+
+    monkeypatch.setattr(rp, "make_aac_track", _make)
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam"
+    )
+    try:
+        assert _wait(lambda: bool(go2rtc.announced))
+        assert calls, "make_aac_track was never called"
+        assert threading.current_thread() not in calls
+        sdp = go2rtc.announced[0]
+        assert sdp.index("PCMA/8000") < sdp.index("a=rtpmap:97 MPEG4-GENERIC/48000")
+        assert "audio:MPEG4-GENERIC/97" in proc.publish_stats()["tracks"]
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
 def test_loopback_publish_fills_aac_silence_only_while_video_flows(go2rtc, monkeypatch):
     monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
     a_port, v_port = _free_udp_ports(2)

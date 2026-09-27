@@ -42,7 +42,7 @@ import time
 from typing import Callable, Deque, List, Optional, Tuple
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-from .aac_track import AAC_CLOCK_RATE, aac_fmtp, make_aac_track
+from .aac_track import AAC_CLOCK_RATE, AacTrack, aac_fmtp, make_aac_track
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1003,24 +1003,17 @@ class LoopbackRtpPublisher:
         # A-law track: the encoder decodes A-law, and a PCMU camera is published
         # exactly as before. self._tracks stays the media tracks - the reorder
         # buffers and timelines index it - and the publisher gets the full list.
+        # The track itself is built on the worker (_setup_aac): this runs on
+        # the caller's event loop, and the first one imports av and numpy and
+        # opens a codec.
         self._pcma_idx = next(
             (i for i, t in enumerate(self._tracks) if t.codec == "PCMA"), None
         )
-        self._aac = make_aac_track(device_id) if self._pcma_idx is not None else None
+        self._aac: Optional[AacTrack] = None
         self._aac_track: Optional[PublishTrack] = None
         self._aac_seconds = 0.0
         self._video_forwarded = False
         self._publish_tracks = list(self._tracks)
-        if self._aac is not None:
-            self._aac_track = PublishTrack(
-                "audio",
-                _free_dynamic_pt(self._tracks),
-                AAC_CLOCK_RATE,
-                "MPEG4-GENERIC",
-                len(self._tracks),
-            )
-            self._publish_tracks.append(self._aac_track)
-            self._sdp = append_aac_media(self._sdp, self._aac_track)
         self._publisher_factory = publisher_factory
         self._publisher: Optional[RtspPublisher] = None
         self._stop = threading.Event()
@@ -1102,11 +1095,31 @@ class LoopbackRtpPublisher:
 
     # -- worker -------------------------------------------------------------- #
 
+    def _setup_aac(self) -> None:
+        """Build the AAC track and announce it (worker thread, before connect)."""
+        if self._pcma_idx is None:
+            return
+        aac = make_aac_track(self.device_id)
+        if aac is None:
+            return
+        track = PublishTrack(
+            "audio",
+            _free_dynamic_pt(self._tracks),
+            AAC_CLOCK_RATE,
+            "MPEG4-GENERIC",
+            len(self._tracks),
+        )
+        self._sdp = append_aac_media(self._sdp, track)
+        self._publish_tracks.append(track)
+        self._aac_track = track
+        self._aac = aac
+
     def _run(self) -> None:
         code = EXIT_FAILED
         preroll: Deque[Tuple[int, bytes, float]] = collections.deque()
         started = time.monotonic()
         try:
+            self._setup_aac()
             pub = self._publisher_factory(self._url, self._sdp, self._publish_tracks)
             self._publisher = pub
             connector = threading.Thread(
