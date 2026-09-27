@@ -210,17 +210,22 @@ class AacTrack:
     ) -> List[Tuple[int, int, bytes]]:
         if self.failed:
             return []
-        return self._encode(self.pacer.feed(alaw, pcma_ts, now))
+        return self._run(lambda: self.pacer.feed(alaw, pcma_ts, now))
 
     def tick(self, now: float) -> List[Tuple[int, int, bytes]]:
         if self.failed:
             return []
-        return self._encode(self.pacer.tick(now))
+        return self._run(lambda: self.pacer.tick(now))
 
-    def _encode(self, blocks: List[bytes]) -> List[Tuple[int, int, bytes]]:
+    def _run(self, pace) -> List[Tuple[int, int, bytes]]:
+        # The pacer call and the encode loop share one try: either can raise
+        # (an encoder failure, or a pacer bug), and both must isolate the
+        # same way. Packets already produced earlier in this call are
+        # discarded along with the rest, since a mid-call failure leaves the
+        # pacer/encoder state untrustworthy for the packets already built.
         out: List[Tuple[int, int, bytes]] = []
         try:
-            for block in blocks:
+            for block in pace():
                 for au in self._enc.encode(block):
                     self._seq = (self._seq + 1) & 0xFFFF
                     out.append((self._seq, self._ts, packetize_aac(au)))
@@ -229,6 +234,7 @@ class AacTrack:
         except Exception as exc:
             self.failed = True
             _LOGGER.warning("AAC track stopped (%r) - video and A-law continue", exc)
+            return []
         return out
 
 

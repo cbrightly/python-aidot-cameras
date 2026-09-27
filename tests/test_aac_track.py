@@ -182,6 +182,25 @@ def test_an_encoder_failure_stops_only_the_aac_track(caplog):
     assert sum("AAC track stopped" in r.message for r in caplog.records) == 1
 
 
+def test_a_pacer_failure_also_stops_only_the_aac_track(caplog):
+    class BrokenPacer:
+        def feed(self, alaw, pcma_ts, now):
+            raise RuntimeError("pacer boom")
+
+        def tick(self, now):
+            raise RuntimeError("pacer boom")
+
+    class Encoder:
+        def encode(self, alaw):
+            return []
+
+    trk = at.AacTrack(encoder=Encoder(), pacer=BrokenPacer())
+    assert trk.feed(b"\x01" * 160, 0, 0.0) == []
+    assert trk.failed
+    assert trk.tick(1.0) == []
+    assert sum("AAC track stopped" in r.message for r in caplog.records) == 1
+
+
 def test_make_aac_track_honours_the_kill_switch(monkeypatch):
     monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
     assert at.make_aac_track() is None
