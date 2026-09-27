@@ -101,10 +101,56 @@ def test_a_huge_forward_jump_reanchors_instead_of_emitting_minutes_of_silence():
 def test_idle_fill_keeps_the_track_alive_when_the_camera_sends_no_audio():
     p = at.AacPacer()
     assert p.tick(10.0) == []  # first tick only starts the clock
-    assert p.tick(10.3) == []  # under AAC_IDLE_FILL_S
-    out = p.tick(10.6)
-    assert _flat(out) == S * 4800  # 0.6 s at 8 kHz, measured from 10.0
-    assert p.tick(10.7) == []  # just filled - not idle again yet
+    assert _flat(p.tick(10.3)) == S * 2400  # no audio yet: fill up to now
+    assert _flat(p.tick(10.6)) == S * 2400
+    assert _flat(p.tick(10.7)) == S * 800
+
+
+def test_before_any_audio_the_fill_follows_every_tick():
+    p = at.AacPacer()
+    step = 0.04
+    t0 = 5.0
+    assert p.tick(t0) == []
+    for k in range(1, 50):
+        now = t0 + k * step
+        assert p.tick(now), f"tick {k} filled nothing"
+        # The silence reaches `now`: the delivery lag is under one tick.
+        lag = now - (t0 + p.silence_samples / at.PCMA_RATE)
+        assert abs(lag) < step
+    assert p.silence_samples == round(49 * step * at.PCMA_RATE)
+
+
+def test_after_audio_stops_the_fill_starts_at_the_threshold_then_tracks_now():
+    p = at.AacPacer()
+    for i in range(50):  # audio until 0.98
+        p.feed(b"\x01" * 160, 1000 + 160 * i, i * 0.02)
+    last_audio = 49 * 0.02
+    filled_at = []
+    for k in range(1, 40):
+        now = last_audio + k * 0.04
+        out = _flat(p.tick(now))
+        if now - last_audio < at.AAC_IDLE_FILL_S - 1e-9:
+            assert out == b"", f"filled {len(out)} before the threshold"
+            continue
+        assert out, f"idle at {now:.2f} and nothing filled"
+        filled_at.append(now)
+        # Every tick once idle brings the silence up to `now`.
+        covered = last_audio + 0.02 + p.silence_samples / at.PCMA_RATE
+        assert abs(covered - (now + 0.02)) < 1.0 / at.PCMA_RATE
+    assert filled_at and filled_at[0] - last_audio < at.AAC_IDLE_FILL_S + 0.04
+
+
+def test_resume_after_a_continuous_fill_never_steps_backward():
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 1000, 0.0)
+    for k in range(1, 26):  # 1 s of ticks, the fill tracking every one
+        p.tick(k * 0.04)
+    pos = 1000 + 160 + p.silence_samples
+    # The camera resumes 80 samples behind the filled position: only its tail
+    # is new, and the position keeps moving forward from there.
+    assert _flat(p.feed(b"\x02" * 160, pos - 80, 1.02)) == b"\x02" * 80
+    assert _flat(p.feed(b"\x02" * 160, pos + 80, 1.04)) == b"\x02" * 160
+    assert p.tick(1.05) == []  # audio is flowing again: no fill
 
 
 def test_idle_fill_after_audio_stops_then_resumes_without_a_backward_step():
