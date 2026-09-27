@@ -98,6 +98,27 @@ def test_a_huge_forward_jump_reanchors_instead_of_emitting_minutes_of_silence():
     assert p.reanchors == 1 and p.silence_samples == 0
 
 
+def test_a_long_real_gap_is_filled_not_reanchored():
+    """Audio and video both stop for 8 s; the stamps and the wall clock agree."""
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 1000, 0.0)  # position 1160, anchored at t=0.0
+    gap = 8 * 8000 - 160  # the stamp advance the hybrid timeline gives an 8 s gap
+    out = _flat(p.feed(b"\x02" * 160, 1160 + gap, 8.0))
+    assert out == S * gap + b"\x02" * 160
+    assert p.reanchors == 0
+    assert p.silence_samples == gap
+    # and the next packet continues without a trim or another fill
+    assert _flat(p.feed(b"\x03" * 160, 1160 + gap + 160, 8.02)) == b"\x03" * 160
+
+
+def test_a_stamp_jump_the_wall_clock_does_not_explain_still_reanchors():
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 1000, 0.0)
+    out = _flat(p.feed(b"\x02" * 160, 1160 + 8000 * 60, 0.02))  # 60 s jump, 20 ms later
+    assert out == b"\x02" * 160
+    assert p.reanchors == 1 and p.silence_samples == 0
+
+
 def test_idle_fill_keeps_the_track_alive_when_the_camera_sends_no_audio():
     p = at.AacPacer()
     assert p.tick(10.0) == []  # first tick only starts the clock

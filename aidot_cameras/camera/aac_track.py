@@ -30,6 +30,8 @@ PCMA_RATE = 8000
 AAC_IDLE_FILL_S = 0.5
 #: The largest silence one step may insert; a larger jump re-anchors instead.
 AAC_MAX_FILL_S = 5.0
+#: How far a forward stamp jump may disagree with the wall clock and still be a real gap.
+AAC_GAP_TOLERANCE_S = 1.0
 
 _SR_INDEX = {
     96000: 0,
@@ -119,10 +121,19 @@ class AacPacer:
             self._pos = ts
         d = _signed32(ts - self._pos)
         if d > AAC_MAX_FILL_S * PCMA_RATE:
-            self.reanchors += 1
-            _LOGGER.info(
-                "AAC track: camera audio jumped %.1f s - re-anchoring", d / PCMA_RATE
-            )
+            if (
+                self._last is not None
+                and abs(d / PCMA_RATE - (now - self._last)) <= AAC_GAP_TOLERANCE_S
+            ):
+                # A real gap: the wall clock accounts for the jump, so fill it.
+                out.append(ALAW_SILENCE * d)
+                self.silence_samples += d
+            else:
+                self.reanchors += 1
+                _LOGGER.info(
+                    "AAC track: camera audio jumped %.1f s - re-anchoring",
+                    d / PCMA_RATE,
+                )
             self._pos = ts
         elif d > 0:
             out.append(ALAW_SILENCE * d)
@@ -131,9 +142,9 @@ class AacPacer:
         elif d < 0:
             overlap = -d
             if overlap >= len(alaw):
-                # Wholly old, but the camera IS sending audio: the position
-                # describes now, and tick() must not fill ahead of its stamps
-                # again, or every later packet is trimmed - silence for good.
+                # Wholly old, but the camera IS sending audio: keep the wall
+                # time the position describes current, so a later gap check
+                # and fill size count from this packet, not from before it.
                 self.trimmed_samples += len(alaw)
                 self._last = now
                 return out
