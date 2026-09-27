@@ -1072,6 +1072,7 @@ class LoopbackRtpPublisher:
 
     def publish_stats(self) -> dict:
         pub = self._publisher
+        aac = self._aac
         return {
             "packets": pub.packets_sent if pub else 0,
             "bytes": pub.bytes_sent if pub else 0,
@@ -1081,8 +1082,11 @@ class LoopbackRtpPublisher:
             "reorder_late": sum(b.late for b in self._reorder),
             "reorder_skipped": sum(b.skipped for b in self._reorder),
             "tracks": [f"{t.kind}:{t.codec}/{t.pt}" for t in self._publish_tracks],
-            "aac_frames": self._aac.frames if self._aac is not None else 0,
+            "aac_frames": aac.frames if aac is not None else 0,
             "aac_seconds": round(self._aac_seconds, 3),
+            "aac_silence_samples": aac.pacer.silence_samples if aac is not None else 0,
+            "aac_trimmed_samples": aac.pacer.trimmed_samples if aac is not None else 0,
+            "aac_reanchors": aac.pacer.reanchors if aac is not None else 0,
         }
 
     def _log(self, level: int, msg: str, *args) -> None:
@@ -1209,16 +1213,30 @@ class LoopbackRtpPublisher:
                 pub.close(teardown=True)
             self._close_socks()
             stats = self.publish_stats()
+            aac_part = ""
+            if self._aac is not None:
+                aac_part = (
+                    ", AAC %d frames / %.3f s / %d silence-filled / %d trimmed"
+                    " / %d re-anchors"
+                    % (
+                        stats["aac_frames"],
+                        stats["aac_seconds"],
+                        stats["aac_silence_samples"],
+                        stats["aac_trimmed_samples"],
+                        stats["aac_reanchors"],
+                    )
+                )
             self._log(
                 logging.INFO,
                 "publish ended: %d packets, %d timestamp repair(s), %d dropped"
-                " (payload type), %d dropped (pre-roll), %d late, %d lost",
+                " (payload type), %d dropped (pre-roll), %d late, %d lost%s",
                 stats["packets"],
                 stats["timestamp_repairs"],
                 stats["dropped_pt"],
                 stats["preroll_dropped"],
                 stats["reorder_late"],
                 stats["reorder_skipped"],
+                aac_part,
             )
             self.returncode = code
             self._done.set()
@@ -1414,6 +1432,9 @@ def dtls_rtp_publish_run(
     res.setdefault("packets", 0)
     res.setdefault("aac_frames", 0)
     res.setdefault("aac_seconds", 0.0)
+    res.setdefault("aac_silence_samples", 0)
+    res.setdefault("aac_trimmed_samples", 0)
+    res.setdefault("aac_reanchors", 0)
     pub = publisher_factory(url, sdp, tracks)
     try:
         pub.connect()
@@ -1583,4 +1604,19 @@ def dtls_rtp_publish_run(
         res["dropped_resent"] = dropped_resent
         res["aac_frames"] = aac.frames if aac else 0
         res["aac_seconds"] = round(aac_seconds, 3)
+        res["aac_silence_samples"] = aac.pacer.silence_samples if aac else 0
+        res["aac_trimmed_samples"] = aac.pacer.trimmed_samples if aac else 0
+        res["aac_reanchors"] = aac.pacer.reanchors if aac else 0
+        if aac:
+            _LOGGER.info(
+                "camera %s: DTLS direct publish: AAC %d frames, %.3f s"
+                " encoding+sending, %d samples silence-filled, %d trimmed,"
+                " %d re-anchors",
+                device_id,
+                res["aac_frames"],
+                res["aac_seconds"],
+                res["aac_silence_samples"],
+                res["aac_trimmed_samples"],
+                res["aac_reanchors"],
+            )
         pub.close(teardown=True)

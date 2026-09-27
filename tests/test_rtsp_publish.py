@@ -546,6 +546,10 @@ def test_loopback_publisher_forwards_and_rewrites(go2rtc, monkeypatch):
     assert not _udp_port_bound(a_port) and not _udp_port_bound(v_port)
     assert _wait(lambda: "TEARDOWN" in go2rtc.requests)
     assert proc.stderr.read().decode().count("publish ended") == 1
+    stats = proc.publish_stats()
+    for key in ("aac_silence_samples", "aac_trimmed_samples", "aac_reanchors"):
+        assert stats[key] == 0
+    assert "AAC" not in proc.stderr.read().decode()
 
 
 def test_loopback_publisher_applies_audio_gain(go2rtc, monkeypatch):
@@ -605,6 +609,14 @@ def test_loopback_publish_adds_aac_after_pcma(go2rtc, monkeypatch):
     assert stats["aac_frames"] >= 20
     assert stats["aac_seconds"] > 0
     assert "audio:MPEG4-GENERIC/" in str(stats["tracks"])
+    # Audio only, contiguous stamps: nothing filled, trimmed or re-anchored.
+    assert stats["aac_silence_samples"] == 0
+    assert stats["aac_trimmed_samples"] == 0
+    assert stats["aac_reanchors"] == 0
+    ended = [ln for ln in proc.stderr.tail() if "publish ended" in ln]
+    assert len(ended) == 1
+    assert f"AAC {stats['aac_frames']} frames" in ended[0]
+    assert "0 silence-filled / 0 trimmed / 0 re-anchors" in ended[0]
 
 
 def test_loopback_publish_builds_the_aac_track_off_the_constructing_thread(
@@ -844,8 +856,9 @@ def _run_dtls(go2rtc, feed, *, secs=1.2):
     return res
 
 
-def test_dtls_publish_announces_and_sends_an_aac_track(go2rtc, monkeypatch):
+def test_dtls_publish_announces_and_sends_an_aac_track(go2rtc, monkeypatch, caplog):
     monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
+    caplog.set_level(logging.INFO, logger="aidot_cameras.camera.rtsp_publish")
 
     def feed(vq, aq):
         for i in range(50):  # 1 s of A-law
@@ -864,6 +877,18 @@ def test_dtls_publish_announces_and_sends_an_aac_track(go2rtc, monkeypatch):
     assert all(((b - a) & 0xFFFFFFFF) == 1024 for a, b in zip(ts, ts[1:]))
     assert res["aac_frames"] == len(aac)
     assert res["aac_seconds"] > 0
+    # Any silence is the fill before the first A-law packet; nothing real is lost.
+    assert res["aac_silence_samples"] >= 0
+    assert res["aac_trimmed_samples"] == 0
+    assert res["aac_reanchors"] == 0
+    ended = [
+        r.getMessage()
+        for r in caplog.records
+        if "DTLS direct publish: AAC" in r.getMessage()
+    ]
+    assert len(ended) == 1
+    assert f"AAC {res['aac_frames']} frames" in ended[0]
+    assert f"{res['aac_silence_samples']} samples silence-filled" in ended[0]
 
 
 def test_dtls_publish_feeds_queued_audio_before_the_idle_fill(go2rtc, monkeypatch):
@@ -895,13 +920,17 @@ def test_dtls_publish_feeds_queued_audio_before_the_idle_fill(go2rtc, monkeypatc
     assert made[0].pacer.trimmed_samples == 0
 
 
-def test_dtls_publish_kill_switch_keeps_todays_sdp(go2rtc, monkeypatch):
+def test_dtls_publish_kill_switch_keeps_todays_sdp(go2rtc, monkeypatch, caplog):
     monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    caplog.set_level(logging.INFO, logger="aidot_cameras.camera.rtsp_publish")
     res = _run_dtls(go2rtc, lambda vq, aq: None, secs=0.2)
     assert "RTP/AVP 97" not in go2rtc.announced[0]
     assert not any(ch == 4 for ch, _ in go2rtc.frames)
     assert res["aac_frames"] == 0
     assert res["aac_seconds"] == 0.0
+    for key in ("aac_silence_samples", "aac_trimmed_samples", "aac_reanchors"):
+        assert res[key] == 0
+    assert not any("AAC" in r.getMessage() for r in caplog.records)
 
 
 def test_dtls_runner_reports_a_failed_publish():
