@@ -648,7 +648,10 @@ def test_sdes_bridge_classifies_publisher_teardown_as_expected():
 # --------------------------------------------------------------------------- #
 
 
-def test_dtls_runner_starts_on_a_keyframe_and_publishes_both_tracks(go2rtc):
+def test_dtls_runner_starts_on_a_keyframe_and_publishes_both_tracks(
+    go2rtc, monkeypatch
+):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
     import queue
 
     vq, aq = queue.Queue(), queue.Queue()
@@ -680,6 +683,57 @@ def test_dtls_runner_starts_on_a_keyframe_and_publishes_both_tracks(go2rtc):
     assert nals[-1] == b"\x41" + b"d" * 40
     assert sum(1 for v in video if v[1]) == 2  # one marker per access unit
     assert _wait(lambda: "TEARDOWN" in go2rtc.requests)
+
+
+def _run_dtls(go2rtc, feed, *, secs=1.2):
+    import queue
+
+    vq, aq = queue.Queue(), queue.Queue()
+    sps_pps = b"\0\0\0\1\x67" + b"s" * 8 + b"\0\0\0\1\x68" + b"p" * 3
+    vq.put((sps_pps + b"\0\0\0\1\x65" + b"k" * 3000, 3000, True))
+    progress, stop, res = [0.0], threading.Event(), {}
+    t = threading.Thread(
+        target=rp.dtls_rtp_publish_run,
+        args=(vq, aq, go2rtc.url(), progress, stop),
+        kwargs={"result": res},
+        daemon=True,
+    )
+    t.start()
+    assert _wait(lambda: progress[0] > 0)
+    feed(vq, aq)
+    time.sleep(secs)
+    stop.set()
+    t.join(3)
+    return res
+
+
+def test_dtls_publish_announces_and_sends_an_aac_track(go2rtc, monkeypatch):
+    monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
+
+    def feed(vq, aq):
+        for i in range(50):  # 1 s of A-law
+            aq.put((b"\xd5" * 160, 160 + 160 * i))
+            vq.put((b"\0\0\0\1\x41" + b"d" * 40, 6000 + 1800 * i, False))
+
+    res = _run_dtls(go2rtc, feed)
+    sdp = go2rtc.announced[0]
+    assert "m=audio 0 RTP/AVP 8" in sdp
+    assert sdp.index("RTP/AVP 8") < sdp.index("RTP/AVP 97")  # PCMA stays first
+    assert "a=rtpmap:97 MPEG4-GENERIC/48000" in sdp
+    assert "config=1188" in sdp
+    aac = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 4]
+    assert len(aac) >= 20
+    ts = [a[3] for a in aac]
+    assert all(((b - a) & 0xFFFFFFFF) == 1024 for a, b in zip(ts, ts[1:]))
+    assert res["aac_frames"] == len(aac)
+
+
+def test_dtls_publish_kill_switch_keeps_todays_sdp(go2rtc, monkeypatch):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    res = _run_dtls(go2rtc, lambda vq, aq: None, secs=0.2)
+    assert "RTP/AVP 97" not in go2rtc.announced[0]
+    assert not any(ch == 4 for ch, _ in go2rtc.frames)
+    assert res["aac_frames"] == 0
 
 
 def test_dtls_runner_reports_a_failed_publish():

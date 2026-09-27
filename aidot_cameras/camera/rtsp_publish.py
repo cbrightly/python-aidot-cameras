@@ -42,6 +42,8 @@ import time
 from typing import Callable, Deque, List, Optional, Tuple
 from urllib.parse import unquote, urlsplit, urlunsplit
 
+from .aac_track import AAC_CLOCK_RATE, aac_fmtp, make_aac_track
+
 _LOGGER = logging.getLogger(__name__)
 
 #: Env switch for the whole feature. Default OFF until it has soaked live.
@@ -1306,8 +1308,17 @@ def dtls_rtp_publish_run(
     res = result if result is not None else {}
     video = PublishTrack("video", 96, 90000, "H264", 0)
     audio = PublishTrack("audio", 8, 8000, "PCMA", 1)
-    tracks = [video, audio]
-    sdp = build_publish_sdp(tracks, {96: "packetization-mode=1"})
+    # AAC after A-law: Home Assistant's HLS keeps only AAC/MP3 and asks for it by
+    # name; everything reading the first audio track keeps A-law. See aac_track.
+    aac = make_aac_track(device_id)
+    aac_t = (
+        PublishTrack("audio", 97, AAC_CLOCK_RATE, "MPEG4-GENERIC", 2) if aac else None
+    )
+    tracks = [video, audio] + ([aac_t] if aac_t else [])
+    fmtp = {96: "packetization-mode=1"}
+    if aac_t:
+        fmtp[97] = aac_fmtp()
+    sdp = build_publish_sdp(tracks, fmtp)
     pol = timestamp_policy()
     vtl = RtpTimeline(90000, policy=pol)
     atl = RtpTimeline(8000, policy=pol)
@@ -1321,6 +1332,7 @@ def dtls_rtp_publish_run(
     res.setdefault("dropped_resent", 0)
     res.setdefault("max_frame_gap_s", 0.0)
     res.setdefault("packets", 0)
+    res.setdefault("aac_frames", 0)
     pub = publisher_factory(url, sdp, tracks)
     try:
         pub.connect()
@@ -1329,7 +1341,10 @@ def dtls_rtp_publish_run(
         _LOGGER.warning("camera %s: DTLS direct publish: %s", device_id, res["error"])
         return
     _LOGGER.info(
-        "camera %s: DTLS direct publish: H264+PCMA to %s", device_id, redact_url(url)
+        "camera %s: DTLS direct publish: %s to %s",
+        device_id,
+        "H264+PCMA+AAC" if aac else "H264+PCMA",
+        redact_url(url),
     )
     vstarted = False
     v0 = None
@@ -1428,6 +1443,11 @@ def dtls_rtp_publish_run(
                             )
                     last_frame = now
                     progress[0] = now
+                    if aac:
+                        for aseq, ats_, apl in aac.tick(now):
+                            pub.send_rtp(
+                                aac_t, build_rtp(97, True, aseq, ats_, aac.ssrc, apl)
+                            )
                     # This frame's own send belongs to the NEXT gap: the gap
                     # above is measured to `now`, which precedes it.
                     first_arrival = None
@@ -1444,10 +1464,15 @@ def dtls_rtp_publish_run(
                     continue  # no audio ahead of the first picture
                 seq, out_ts = atl.stamp(ats)
                 _a_started = time.monotonic()
+                conditioned = agc.process(adata)
                 pub.send_rtp(
-                    audio,
-                    build_rtp(8, False, seq, out_ts, atl.ssrc, agc.process(adata)),
+                    audio, build_rtp(8, False, seq, out_ts, atl.ssrc, conditioned)
                 )
+                if aac:
+                    for aseq, ats_, apl in aac.feed(conditioned, out_ts, _a_started):
+                        pub.send_rtp(
+                            aac_t, build_rtp(97, True, aseq, ats_, aac.ssrc, apl)
+                        )
                 # Audio shares the publisher's lock, so a blocked audio send
                 # holds up the next picture just as a video one does.
                 send_blocked += time.monotonic() - _a_started
@@ -1464,4 +1489,5 @@ def dtls_rtp_publish_run(
         res["max_frame_gap_s"] = round(max_gap, 2)
         res["skipped_pre_keyframe"] = skipped_pre_keyframe
         res["dropped_resent"] = dropped_resent
+        res["aac_frames"] = aac.frames if aac else 0
         pub.close(teardown=True)
