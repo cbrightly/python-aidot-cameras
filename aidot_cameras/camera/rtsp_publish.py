@@ -1460,6 +1460,7 @@ def dtls_rtp_publish_run(
                 )
                 return
             moved = False
+            vpublished = False
             while True:
                 try:
                     data, ts, kf = vq.get_nowait()
@@ -1512,13 +1513,7 @@ def dtls_rtp_publish_run(
                             )
                     last_frame = now
                     progress[0] = now
-                    if aac:
-                        _aac_started = time.monotonic()
-                        for aseq, ats_, apl in aac.tick(now):
-                            pub.send_rtp(
-                                aac_t, build_rtp(97, True, aseq, ats_, aac.ssrc, apl)
-                            )
-                        aac_seconds += time.monotonic() - _aac_started
+                    vpublished = True
                     # This frame's own send belongs to the NEXT gap: the gap
                     # above is measured to `now`, which precedes it.
                     first_arrival = None
@@ -1552,6 +1547,14 @@ def dtls_rtp_publish_run(
                             aac_t, build_rtp(97, True, aseq, ats_, aac.ssrc, apl)
                         )
                     aac_seconds += time.monotonic() - _aac_started
+            if aac and vpublished:
+                # Idle fill beside video, once per pass and AFTER the audio
+                # drain: after a stall, audio queued behind the video is real
+                # and must be fed first, not trimmed as covered by silence.
+                _aac_started = time.monotonic()
+                for aseq, ats_, apl in aac.tick(_aac_started):
+                    pub.send_rtp(aac_t, build_rtp(97, True, aseq, ats_, aac.ssrc, apl))
+                aac_seconds += time.monotonic() - _aac_started
             if pub.keepalive_due():
                 pub.send_keepalive()
             if not moved:

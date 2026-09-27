@@ -836,6 +836,35 @@ def test_dtls_publish_announces_and_sends_an_aac_track(go2rtc, monkeypatch):
     assert res["aac_seconds"] > 0
 
 
+def test_dtls_publish_feeds_queued_audio_before_the_idle_fill(go2rtc, monkeypatch):
+    # After a loop stall, audio and video are queued together. The audio is
+    # real and continuous; the idle fill must not run ahead of it and have it
+    # trimmed away as already covered.
+    monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
+    made = []
+
+    def _make(device_id="?"):
+        made.append(real_make(device_id))
+        return made[-1]
+
+    real_make = rp.make_aac_track
+    monkeypatch.setattr(rp, "make_aac_track", _make)
+
+    def feed(vq, aq):
+        for i in range(10):
+            aq.put((b"\x01" * 160, 160 + 160 * i))
+            vq.put((b"\0\0\0\1\x41" + b"d" * 40, 6000 + 1800 * i, False))
+        time.sleep(0.8)  # the stall: nothing is drained
+        for i in range(10, 20):  # audio queued first, as it arrived first
+            aq.put((b"\x01" * 160, 160 + 160 * i))
+        for i in range(10, 20):
+            vq.put((b"\0\0\0\1\x41" + b"d" * 40, 6000 + 1800 * i, False))
+
+    _run_dtls(go2rtc, feed, secs=0.5)
+    assert made and made[0] is not None
+    assert made[0].pacer.trimmed_samples == 0
+
+
 def test_dtls_publish_kill_switch_keeps_todays_sdp(go2rtc, monkeypatch):
     monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
     res = _run_dtls(go2rtc, lambda vq, aq: None, secs=0.2)
