@@ -21,7 +21,9 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   this on its HLS path only). The encode is always on: it costs one AAC encode
   per streaming camera for as long as its direct publish runs, watched or not.
   A camera whose audio is mu-law (PCMU) gets no AAC track. Set
-  `AIDOT_PUBLISH_AAC=0` to publish exactly as before.
+  `AIDOT_PUBLISH_AAC=0` to publish exactly as before. It absorbs small camera
+  audio timestamp jitter (up to 40 ms ahead, or up to one packet behind)
+  instead of filling or trimming it.
 
 ### Changed
 
@@ -37,10 +39,6 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   that runs ~7% fast; it now steers that clock to real time. Two-minute
   recordings measured video 130.9 s / audio 117.0 s before; 119.8 / 119.8 s
   after.
-
-- **HLS audio no longer crackles on cameras whose audio timestamps jitter.**
-  The M3 Pro steps 32/48 ms for 40 ms packets; the AAC track absorbs up to
-  40 ms of timestamp jitter.
 
 ## [1.0.0rc31]
 

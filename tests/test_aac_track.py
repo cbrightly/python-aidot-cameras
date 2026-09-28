@@ -336,10 +336,15 @@ def _distinct(i, n):
     return bytes([(i % 200) + 1]) * n
 
 
-def test_timestamp_jitter_inside_the_dead_band_is_absorbed():
+@pytest.mark.parametrize("first_step,second_step", [(256, 384), (384, 256)])
+def test_timestamp_jitter_inside_the_dead_band_is_absorbed(first_step, second_step):
     # The M3 Pro: 320-sample (40 ms) PCMA packets whose stamps step alternately
     # +256 and +384 (mean 320). Every step disagrees with the position by only
     # 64 samples, well inside AAC_JITTER_TOL_S, so nothing is filled or trimmed.
+    # Pinned for both orderings of the alternation: starting +256 only ever
+    # puts the stamp behind or level with the position (d in {0, -64}), so it
+    # alone would not cover the forward half of the tolerance; starting +384
+    # does (d in {0, +64}).
     p = at.AacPacer()
     n = 250
     content_len = 320
@@ -348,10 +353,48 @@ def test_timestamp_jitter_inside_the_dead_band_is_absorbed():
     out = []
     for i, content in enumerate(packets):
         out += p.feed(content, ts, i * 0.04)
-        ts += 256 if i % 2 == 0 else 384
+        ts += first_step if i % 2 == 0 else second_step
     assert _flat(out) == _flat(packets)
     assert p.silence_samples == 0
     assert p.trimmed_samples == 0
+
+
+def test_dead_band_edges():
+    # Each case starts fresh after a 160-sample packet stamped 1000 (position
+    # -> 1160), then feeds one more packet right at (absorbed) or one sample
+    # past (filled/trimmed) the AAC_JITTER_TOL_S edge.
+
+    # 320 samples ahead is exactly the tolerance: absorbed, no silence.
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 1000, 0.0)
+    payload = _distinct(0, 160)
+    out = _flat(p.feed(payload, 1160 + 320, 0.02))
+    assert out == payload
+    assert p.silence_samples == 0 and p.trimmed_samples == 0
+
+    # 321 samples ahead is one past the tolerance: filled.
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 1000, 0.0)
+    payload = _distinct(0, 160)
+    out = _flat(p.feed(payload, 1160 + 321, 0.02))
+    assert out == S * 321 + payload
+    assert p.silence_samples == 321
+
+    # 320 samples behind is exactly the tolerance: all of it absorbed.
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 1000, 0.0)
+    payload = _distinct(0, 640)
+    out = _flat(p.feed(payload, 1160 - 320, 0.02))
+    assert out == payload
+    assert p.trimmed_samples == 0
+
+    # 321 samples behind is one past the tolerance: the overlap is trimmed.
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 1000, 0.0)
+    payload = _distinct(0, 640)
+    out = _flat(p.feed(payload, 1160 - 321, 0.02))
+    assert out == payload[321:]
+    assert p.trimmed_samples == 321
 
 
 def test_a_gap_beyond_the_dead_band_is_still_filled():
@@ -388,25 +431,19 @@ def test_slow_clock_drift_is_resynced_when_it_passes_the_tolerance():
     content_len = 320
     ts = 1000
     appended = 0
-    resynced_at = None
-    max_abs_d = 0
+    fills = []  # (packet index, silence samples inserted by that feed)
+    last_ts = None
     for i in range(n):
         content = _distinct(i, content_len)
-        pos_before = p._pos if p._pos is not None else ts
-        max_abs_d = max(max_abs_d, abs(ts - pos_before))
         before_silence = p.silence_samples
         blocks = p.feed(content, ts, i * (step_ts / at.PCMA_RATE))
         out_len = sum(len(b) for b in blocks)
         added_silence = p.silence_samples - before_silence
         appended += out_len - added_silence
         if added_silence:
-            if resynced_at is None:
-                resynced_at = i
-        elif resynced_at is None:
-            assert added_silence == 0  # nothing filled until the drift resyncs
+            fills.append((i, added_silence))
+        last_ts = ts
         ts += step_ts
-    assert resynced_at is not None, "the drift never resynced"
-    assert max_abs_d <= step_ts + content_len
-    # The position always accounts for every sample: what was appended plus
-    # what was filled equals how far the position has moved from the start.
-    assert abs(p._pos - (1000 + appended + p.silence_samples)) <= step_ts
+    assert [i for i, _ in fills] == [33, 66, 99]
+    assert all(silence == 330 for _, silence in fills)
+    assert p.silence_samples == (last_ts + content_len - 1000) - appended
