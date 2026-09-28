@@ -123,7 +123,7 @@ New module `aidot_cameras/camera/rtsp_publish.py` (no new dependencies):
 | Component | Responsibility |
 | --- | --- |
 | `RtspPublisher` | Blocking RTSP client for publish. Handshake with 5 s per-request timeout, `$`-framed send, background reader that drains/handles server replies, OPTIONS keepalive every 5 s, TEARDOWN on close. Thread-safe `send_rtp(track, pkt)`. Raises/flags on any socket error - it never reconnects on its own (the caller's lifecycle decides). |
-| `RtpTimeline` | Per-track output timestamp/sequence owner. Passes camera deltas through when they are sane; on a backward step or a forward jump beyond a bound, substitutes the arrival-clock delta. Continuous sequence numbers. Keeps packets of one frame on one timestamp. |
+| `RtpTimeline` | Per-track output timestamp/sequence owner. Passes camera deltas through when they are sane; on a backward step or a forward jump beyond a bound, substitutes the arrival-clock delta. Continuous sequence numbers. Keeps packets of one frame on one timestamp. SDES video uses the `steered` policy by default (camera spacing, rate and phase locked to wall time). |
 | `publish_sdp_from_serve_sdp()` | Turns the already-narrowed loopback SDP (the file ffmpeg reads today) into an ANNOUNCE body: one PT per `m=`, rtpmap/fmtp (incl. injected sprop) kept, ports/crypto/rtcp-mux/direction dropped, `a=control:trackID=N` added. |
 | `RtpReorderBuffer` | Per-track sequence reordering in front of the timeline - the replacement for the serve ffmpeg's `-reorder_queue_size 500 -max_delay 500000`, with the same defaults. go2rtc does not reorder a publisher's packets, and NACK retransmits arrive late by design. In-order packets pass with no added latency. |
 | `LoopbackRtpPublisher` | **Drop-in for the SDES ffmpeg `Popen`.** Binds *every* loopback port the serve SDP names (the open waits on both; unannounced media is read and discarded), reorders, then forwards via `RtpTimeline` (+ optional PCMA gain via `aidot_cameras.g711`) into `RtspPublisher`. Used only when the bridge itself decrypts (`_use_plain_rtp`, i.e. `_PLAIN_RTP_MODELS`); any other SDES model keeps ffmpeg, which decrypts SRTP from the SDP's `a=crypto`. Implements `poll/wait/terminate/kill/returncode/pid/stderr`, so `_proc_holder`, the bridge break, `SdesSession.is_alive/wait_done/stop`, the key-restart relaunch and `_reap` work unchanged. Exits non-zero on publish failure or on the serve input timeout (the same no-input exit ffmpeg gives today, which is what drives the keepalive's reconnect). |
@@ -159,6 +159,8 @@ timestamps, not DTS/PTS pairs, so the publisher needs less than the mux did:
   160-sample frame.
 - Sequence numbers are renumbered per track, continuous across the session.
 - DTLS keeps the existing high-water "resent frame" drop before packetizing.
+- SDES video applies the same high-water drop (`is_resent_video_frame`)
+  before the timeline.
 
 ### Audio
 

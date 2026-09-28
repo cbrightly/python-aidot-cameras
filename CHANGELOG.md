@@ -23,6 +23,21 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   A camera whose audio is mu-law (PCMU) gets no AAC track. Set
   `AIDOT_PUBLISH_AAC=0` to publish exactly as before.
 
+### Changed
+
+- **`AIDOT_PUBLISH_TIMESTAMPS` accepts `steered`, and SDES video defaults to
+  it.** Other tracks stay `hybrid`. Setting the variable applies to every
+  track, as before.
+
+### Fixed
+
+- **SDES video now runs at real time in HLS and recordings.** The direct
+  publish of an SDES camera republished video frames the camera re-sends (it
+  now drops them, as the DTLS path already did) and trusted a video clock
+  that runs ~7% fast; it now steers that clock to real time. Two-minute
+  recordings measured video 130.9 s / audio 117.0 s before; 119.8 / 119.8 s
+  after.
+
 ## [1.0.0rc31]
 
 ### Security

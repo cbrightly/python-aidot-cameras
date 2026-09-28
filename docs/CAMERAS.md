@@ -281,9 +281,10 @@ and `http://` serves are unchanged). Design, measurements and rollout:
   not from an observed packet, because go2rtc accepts an announced track whose
   first packet arrives late. That removes the 1 s audio grace and the
   video-only fallback it caused when a camera's audio trailed its video.
-- **Timestamps.** `AIDOT_PUBLISH_TIMESTAMPS` (default `hybrid`) keeps the
-  camera's frame spacing and substitutes the arrival clock for a backward step
-  or a jump.
+- **Timestamps.** `AIDOT_PUBLISH_TIMESTAMPS` (unset: SDES video `steered` -
+  the camera's spacing at real-time rate - and every other track `hybrid`)
+  keeps the camera's frame spacing and substitutes the arrival clock for a
+  backward step or a jump.
 - **H.264 only.** The publisher is measured on H.264; a camera's H.265 has
   never gone through it (the A001064 picks its own codec and answered H.264 in
   9 of 9 sessions, 4 of them offered H.265 first). A session narrowed to H.265
@@ -302,15 +303,16 @@ Useful log lines (logger `aidot_cameras.camera.rtsp_publish`):
 `direct publish: publishing audio PCMA, video H264 to ...` when it attaches, and
 `publish ended: N packets, N timestamp repair(s), ..., N late, N lost, N
 re-sent frames dropped, N filter resets` when it stops. On a healthy LAN
-`late` and `lost` are 0; the repair count is a few per 30 s on an A001513 and
-0 on a camera with a clean clock. `re-sent frames dropped` counts the
+`late` and `lost` are 0; the repair count is normally 0 or near it; a steered
+snap or a filter reset adds one. `re-sent frames dropped` counts the
 camera's own already-served video frames (SDES mirrors the DTLS path's
-`is_resent_video_frame`); expect a small, steady trickle of these on a camera
-that periodically re-sends, not zero. `filter resets` counts the rarer cases
-where a backward step is too big to be one of those re-sends (a new
-timestamp base) or the video SSRC changed (a TUTK-framed camera switching to
-real SRTP mid-session); this is normally 0, and a session that keeps
-accumulating them is worth a closer look.
+`is_resent_video_frame`); expect a few per second on an SDES camera that
+re-sends, arriving in runs of tens of frames after each backward jump of its
+video timestamps (one 23.5 s capture: 128), not zero. `filter resets` counts
+the rarer cases where a backward step is too big to be one of those re-sends
+(a new timestamp base) or the video SSRC changed (a TUTK-framed camera
+switching to real SRTP mid-session); this is normally 0, and a session that
+keeps accumulating them is worth a closer look.
 
 ### A failed go2rtc registration silently downgrades to HLS
 
