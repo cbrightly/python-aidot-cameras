@@ -43,6 +43,7 @@ from typing import Callable, Deque, List, Optional, Tuple
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from .aac_track import AAC_CLOCK_RATE, AacTrack, aac_fmtp, make_aac_track
+from .protocol import is_resent_video_frame
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1022,6 +1023,16 @@ class LoopbackRtpPublisher:
         self._connect_done = threading.Event()
         self.dropped_pt = 0
         self.preroll_dropped = 0
+        self.dropped_resent = 0
+        # Per video track: the camera's own presentation time, unwrapped past
+        # its 32-bit rollover, and the high-water state `is_resent_video_frame`
+        # keeps over it - the same filter the DTLS path already applies. Never
+        # built for an audio track: this loopback path forwards audio as-is.
+        self._video_dedup: dict = {
+            i: {"last_raw": None, "unwrapped": 0, "drop": False, "state": {}}
+            for i, t in enumerate(self._tracks)
+            if t.kind == "video"
+        }
         self.last_media = 0.0
         self._aidot_stderr_tail: List[str] = []
         self._aidot_stderr_notable: List[str] = []
@@ -1079,6 +1090,7 @@ class LoopbackRtpPublisher:
             "timestamp_repairs": sum(t.repairs for t in self._timelines),
             "dropped_pt": self.dropped_pt,
             "preroll_dropped": self.preroll_dropped,
+            "dropped_resent": self.dropped_resent,
             "reorder_late": sum(b.late for b in self._reorder),
             "reorder_skipped": sum(b.skipped for b in self._reorder),
             "tracks": [f"{t.kind}:{t.codec}/{t.pt}" for t in self._publish_tracks],
@@ -1229,13 +1241,15 @@ class LoopbackRtpPublisher:
             self._log(
                 logging.INFO,
                 "publish ended: %d packets, %d timestamp repair(s), %d dropped"
-                " (payload type), %d dropped (pre-roll), %d late, %d lost%s",
+                " (payload type), %d dropped (pre-roll), %d late, %d lost, %d"
+                " re-sent frames dropped%s",
                 stats["packets"],
                 stats["timestamp_repairs"],
                 stats["dropped_pt"],
                 stats["preroll_dropped"],
                 stats["reorder_late"],
                 stats["reorder_skipped"],
+                stats["dropped_resent"],
                 aac_part,
             )
             self.returncode = code
@@ -1282,6 +1296,25 @@ class LoopbackRtpPublisher:
     def _send(self, pub: RtspPublisher, idx: int, item) -> None:
         marker, ts, payload, arrival = item
         track = self._tracks[idx]
+        dedup = self._video_dedup.get(idx)
+        if dedup is not None:
+            if dedup["last_raw"] is None or ts != dedup["last_raw"]:
+                # A new frame (by RTP timestamp change): judge it once, here,
+                # on its first packet. Every later packet carrying this same
+                # timestamp follows the same decision.
+                if dedup["last_raw"] is not None:
+                    d = (ts - dedup["last_raw"]) & 0xFFFFFFFF
+                    if d >= 0x80000000:
+                        d -= 0x100000000
+                    dedup["unwrapped"] += d
+                dedup["last_raw"] = ts
+                dedup["drop"] = is_resent_video_frame(
+                    dedup["state"], dedup["unwrapped"]
+                )
+                if dedup["drop"]:
+                    self.dropped_resent += 1
+            if dedup["drop"]:
+                return  # already served: not forwarded, not timelined, no AAC
         if self._gain is not None and track.codec == "PCMA":
             payload = payload.translate(self._gain)
         seq, out_ts = self._timelines[idx].stamp(ts, arrival)

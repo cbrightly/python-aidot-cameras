@@ -1091,6 +1091,104 @@ def test_loopback_publisher_reorders_before_publishing(go2rtc, monkeypatch):
         proc.wait(3)
 
 
+def test_loopback_publish_drops_resent_video_frames(go2rtc, monkeypatch):
+    """The A001064 family re-sends runs of video frames it has already sent,
+    after a periodic backward jump of its own timestamps. Forwarding a resend
+    duplicates picture content and, worse, RtpTimeline gives the repeat a
+    fresh forward output timestamp - so its time is counted twice."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        seq = 100
+        for ts in (0, 6000, 12000, 18000, 6000, 12000, 24000):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xAAAA, b"pic"), ("127.0.0.1", v_port)
+            )
+            seq += 1
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 5)
+        time.sleep(0.1)  # nothing more should arrive
+        assert len(go2rtc.frames) == 5
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert len(video) == 5
+        ts_out = [v[3] for v in video]
+        assert ts_out == sorted(set(ts_out)) and len(set(ts_out)) == 5
+        assert proc.publish_stats()["dropped_resent"] == 2
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_never_splits_an_accepted_frame(go2rtc, monkeypatch):
+    """A frame that is accepted must be forwarded whole, even when the resend
+    filter is judging it: the decision is made once, on the frame's first
+    packet, and every later packet of that same frame follows it."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        packets = [
+            (100, 0, True, b"a"),
+            (101, 6000, True, b"b"),
+            (102, 12000, False, b"c1"),
+            (103, 12000, False, b"c2"),
+            (104, 12000, True, b"c3"),
+        ]
+        for seq, ts, mk, body in packets:
+            tx.sendto(
+                rp.build_rtp(96, mk, seq, ts, 0xAAAA, body), ("127.0.0.1", v_port)
+            )
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 5)
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert [v[4] for v in video] == [b"a", b"b", b"c1", b"c2", b"c3"]
+        assert len({v[3] for v in video[2:]}) == 1  # the 3 pkts share one ts
+        assert proc.publish_stats()["dropped_resent"] == 0
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_does_not_filter_audio(go2rtc, monkeypatch):
+    """The resend filter is video-only: an audio track whose timestamp goes
+    backward is still forwarded (the DTLS path never applies it to audio
+    either)."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        tx.sendto(
+            rp.build_rtp(8, False, 1, 1000, 0xBBBB, b"\xd5" * 160),
+            ("127.0.0.1", a_port),
+        )
+        tx.sendto(
+            rp.build_rtp(8, False, 2, 500, 0xBBBB, b"\xd5" * 160),  # backward
+            ("127.0.0.1", a_port),
+        )
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 2)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 2
+        audio = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 0]
+        assert len(audio) == 2
+        assert proc.publish_stats()["dropped_resent"] == 0
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
 def test_video_only_publish_still_binds_the_audio_port(go2rtc):
     """The SDES open waits for BOTH loopback ports before signalling; binding
     only the announced one cost every video-only open the 3 s wait plus 1.5 s."""
