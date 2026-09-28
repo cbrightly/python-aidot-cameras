@@ -270,10 +270,11 @@ for the SDES path and as the DTLS fallback when the serve port cannot be bound.
 
 **Or skip ffmpeg for live pushes: `AIDOT_DIRECT_PUBLISH=1` (experimental).** With
 it set, an `rtsp://` / `{output}` push is published into go2rtc by the library
-itself - no ffmpeg process per stream, no audio transcode - for **both**
-transports, so a DTLS camera can use `{output}` too. It takes H.264 sessions
-only; a session that negotiates H.265 keeps the ffmpeg serve. Audio goes out as
-the camera's own G.711 A-law (see "Audio" under [Getting an RTSP URL](#getting-an-rtsp-url)).
+itself - no ffmpeg process per stream - for **both** transports, so a DTLS
+camera can use `{output}` too. It takes H.264 sessions only; a session that
+negotiates H.265 keeps the ffmpeg serve. Audio goes out as the camera's own
+G.711 A-law plus an in-process AAC track (see "Audio" under
+[Getting an RTSP URL](#getting-an-rtsp-url)).
 ffmpeg is still used for recordings and snapshots. Off by default while it is
 being validated; see [`docs/DESIGN-direct-publish.md`](docs/DESIGN-direct-publish.md).
 
@@ -494,14 +495,16 @@ Stream #0:1: Audio: aac (LC), 48000 Hz, mono
   8 kHz A-law, because 8 kHz AAC plays silent in a lot of browsers and browsers
   on the MSE path have no mapping for G.711 at all. Audio is on by default; see
   `AIDOT_SDES_SERVE_AUDIO` to turn it off. With `AIDOT_DIRECT_PUBLISH=1` the
-  stream carries the camera's own **PCMA (G.711 A-law, 8 kHz)** instead: WebRTC
-  viewers play it natively and nothing is transcoded, but a consumer that only
-  takes AAC (for example Home Assistant's HLS player) gets video without audio.
-  go2rtc can transcode for such a consumer on demand: register the stream with
-  `ensure_stream(name, src, extra_sources=("ffmpeg:<stream>#audio=aac",))`, or
-  list that source after the live one in `go2rtc.yaml`. It is used only by a
-  consumer the live source cannot satisfy, so WebRTC viewers keep the
-  passthrough. (The Home Assistant integration does this for you.)
+  publish carries the camera's own **PCMA (G.711 A-law, 8 kHz)** first - WebRTC
+  viewers play it natively and nothing is transcoded. With
+  `AIDOT_PUBLISH_AAC=1` it also carries an **AAC-LC 48 kHz mono** track
+  encoded in-process; an AAC-only consumer (for example Home Assistant's HLS
+  player) selects it with `?audio=aac`. No ffmpeg transcode
+  source is needed for this - see
+  [`docs/CAMERAS.md`](https://github.com/cbrightly/python-aidot-cameras/blob/main/docs/CAMERAS.md#an-aac-transcoding-source-makes-every-player-crawl)
+  for why the old `ffmpeg:<stream>#audio=aac` advice made playback crawl.
+  The AAC track is off by default. A camera whose audio is mu-law (PCMU)
+  gets no AAC track either way.
 - **A stream that starts with no video** and picks it up a few seconds later is
   normal: the mux waits for a keyframe so the first GOP is decodable. A stream
   that stays audio-only is a camera that never sent one - retry the view.
@@ -577,10 +580,11 @@ audio, idle release, the sprop cache path) are documented in
 | `AIDOT_DTLS_FAST_LIVEPLAY` | The DTLS (A000088) analogue: skip the `livePlayReq`-echo and `livePlayResp` waits (the dominant LAN cold-start cost) while keeping the full ICE/TURN/DTLS handshake, so remote/relay viewing is unaffected. **On by default**; set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_PERSISTENT_MQTT` | Reuse ONE account-level persistent MQTT connection for commands, attribute fetches, and stream-open signaling (matching the official app) instead of connecting per operation. **On by default** (live soaks cut SDES NO_MEDIA from ~57% to ~11-19%); set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_DIRECT_PUBLISH_H265` | Let the direct publisher take a session that negotiated **H.265** too. Off by default: the publisher is measured on H.264 only - a camera's H.265 has never been published through it (the A001064 answered H.264 in 9 of 9 sessions, 4 of them offered H.265 first), so an H.265 session keeps the ffmpeg serve, which has carried it all along. Set this while validating H.265 on hardware. | unset (off) |
-| `AIDOT_DIRECT_PUBLISH` | **Experimental, opt-in.** Publish a live `rtsp://` push into go2rtc from the library itself instead of through ffmpeg, for both transports: SDES hands the bridge's plain RTP straight to an RTSP publisher, DTLS packetizes the tapped H.264 and A-law directly. No ffmpeg process per stream, no audio transcode (audio is PCMA), packets put back in order before publishing, and audio attached from the camera's negotiated answer rather than waiting to observe a packet. Recordings, snapshots and `-`/`http://` serves are unchanged. Takes H.264 sessions only - an H.265 session keeps the ffmpeg serve (see `AIDOT_DIRECT_PUBLISH_H265`). Live-validated with H.264 on A000088, A001064 and A001513 (see `docs/DESIGN-direct-publish.md`). Truthy (`1`/`true`/`yes`/`on`) enables. | unset (off) |
+| `AIDOT_DIRECT_PUBLISH` | **Experimental, opt-in.** Publish a live `rtsp://` push into go2rtc from the library itself instead of through ffmpeg, for both transports: SDES hands the bridge's plain RTP straight to an RTSP publisher, DTLS packetizes the tapped H.264 and A-law directly. No ffmpeg process per stream, audio is PCMA plus an in-process AAC track, packets put back in order before publishing, and audio attached from the camera's negotiated answer rather than waiting to observe a packet. Recordings, snapshots and `-`/`http://` serves are unchanged. Takes H.264 sessions only - an H.265 session keeps the ffmpeg serve (see `AIDOT_DIRECT_PUBLISH_H265`). Live-validated with H.264 on A000088, A001064 and A001513 (see `docs/DESIGN-direct-publish.md`). Truthy (`1`/`true`/`yes`/`on`) enables. | unset (off) |
+| `AIDOT_PUBLISH_AAC` | Whether a direct publish adds an AAC-LC 48 kHz mono track after the A-law one, encoded in-process, so an AAC-only consumer (Home Assistant's HLS player, `camera.record`) has sound; select it with go2rtc's `?audio=aac`. Costs one AAC encode per streaming camera for as long as its direct publish runs. A camera whose audio is mu-law (PCMU) gets no AAC track regardless. Off unless set: `0`/`false`/`no`/`off` (or unset) leaves it off; any other value turns it on. When an HLS view starts a cold camera session, audio can lead the picture by up to about 2 s for that recording. | `0` (off) |
 | `AIDOT_AUDIO_AGC` | Set to `0` to publish a DTLS camera's audio exactly as it arrives. On by default, where the direct publisher applies the same level tracking, noise gate and soft limiter the MPEG-TS mux used to - dropping it left quiet cameras quiet and loud ones unlimited. Tuned by `AIDOT_AUDIO_TARGET_DBFS` / `AIDOT_AUDIO_MAXGAIN_DB` / `AIDOT_AUDIO_MINGAIN_DB` / `AIDOT_AUDIO_GATE_DBFS`, documented in [`docs/CAMERAS.md`](https://github.com/cbrightly/python-aidot-cameras/blob/main/docs/CAMERAS.md#advanced-tuning-environment-variables). | enabled (on) |
 | `AIDOT_PUBLISH_GAP_WARN_S` | Seconds without a frame to publish before the direct publisher says so in the log. The line splits the gap into its causes - seconds idle waiting for a frame to arrive, seconds spent inside the publish, and how many frames were dropped over that gap (waiting for a keyframe, or a presentation time already served) - alongside the queue depth. Each session also records its largest gap. `0` disables the line. | `1.0` |
-| `AIDOT_PUBLISH_TIMESTAMPS` | How the direct publisher stamps RTP time: `hybrid` keeps the camera's frame spacing and substitutes the arrival clock only when the camera's timestamp steps backwards or jumps (the A001513 steps back ~1.7 s about every 30 s); `arrival` stamps every frame by arrival, as the ffmpeg serve does; `camera` trusts the camera. Unknown values mean `hybrid`. | `hybrid` |
+| `AIDOT_PUBLISH_TIMESTAMPS` | How the direct publisher stamps RTP time: `hybrid` keeps the camera's frame spacing and substitutes the arrival clock only when the camera's timestamp steps backwards or jumps (the A001513 steps back ~1.7 s about every 30 s); `arrival` stamps every frame by arrival, as the ffmpeg serve does; `camera` trusts the camera; `steered` keeps the camera's frame spacing but runs it at a rate learned from the least-late frames, so a cold-start backlog keeps its spacing (an SDES camera stamps video on a 15 fps clock while delivering ~16 fps, so its video otherwise runs ~7% slow). Unset, SDES video is `steered` and every other track (SDES audio, DTLS video and audio) is `hybrid`. A valid value applies to every track on both paths; an unknown value means the defaults. | `steered` for SDES video, `hybrid` otherwise |
 | `AIDOT_SERVE_RELAY` | Hold the public stream port via an internal relay that proxies to ffmpeg, so the first (cold) view connects instead of failing while ffmpeg can't pre-bind the port. Set to `0` to serve ffmpeg directly. Not involved in a direct publish, which has no port to hold. | `1` (enabled) |
 | `AIDOT_DTLS_VIDEO_GRACE_S` | How long a connected DTLS session may go without a single video frame before it is torn down and re-opened. A session that receives audio and no video passes every other check the serve loop makes - the peer connection is healthy, ffmpeg respawns for each consumer - so without this it is held open indefinitely while the viewer sees "no video". `0` disables the check. | `30` |
 | `AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S` | How long one WebRTC open attempt for a served DTLS camera may take before it is abandoned and retried. Raised from 30 s because the camera's own offer-resend fires at 30 s, so the attempt used to die at the instant its last resend went out; answers measured arriving at 30.7-99.5 s were discarded as a result. | `75` |

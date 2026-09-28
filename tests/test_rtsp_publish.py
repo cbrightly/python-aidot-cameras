@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import math
 import logging
+import random
 import re
 import socket
+import statistics
 import struct
 import subprocess
 import threading
@@ -220,6 +222,14 @@ def test_publish_sdp_rejects_dynamic_pt_without_rtpmap():
         rp.publish_sdp_from_serve_sdp("v=0\r\nm=video 6 RTP/AVP 96\r\n")
 
 
+def test_free_dynamic_pt_skips_used_payload_types():
+    t = [
+        rp.PublishTrack("video", 97, 90000, "H264", 0),
+        rp.PublishTrack("audio", 8, 8000, "PCMA", 1),
+    ]
+    assert rp._free_dynamic_pt(t) == 98
+
+
 # --------------------------------------------------------------------------- #
 # RTP                                                                          #
 # --------------------------------------------------------------------------- #
@@ -299,6 +309,509 @@ def test_timestamp_policy_env(monkeypatch):
     assert rp.timestamp_policy() == "arrival"
     monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "nonsense")
     assert rp.timestamp_policy() == "hybrid"
+
+
+# --------------------------------------------------------------------------- #
+# steered timeline: the camera's spacing, locked to real time                  #
+# --------------------------------------------------------------------------- #
+
+
+def _steer_frames(tl, frames):
+    """Stamp ``(in_ts, arrival)`` frames, two packets each (the second shares
+    the first's timestamp), and return ``(arrival, output seconds)`` for every
+    NEW output timestamp, both relative to the first frame."""
+    rows = []
+    for in_ts, arrival in frames:
+        _, out = tl.stamp(in_ts, arrival)
+        _, again = tl.stamp(in_ts, arrival + 0.0005)
+        assert again == out  # one frame, one timestamp
+        rows.append((arrival, out))
+    a0, o0 = rows[0]
+    return [(a - a0, ((o - o0) & 0xFFFFFFFF) / tl.clock_rate) for a, o in rows]
+
+
+def _camera_frames(
+    rng, fps, seconds, *, start_ts=1000, t0=100.0, step=6000, captures=None
+):
+    """Frames captured every ``1 / fps`` wall seconds from ``t0`` and delivered
+    with +-15 ms of jitter. Each capture instant is appended to ``captures``
+    when given."""
+    frames, ts = [], start_ts
+    for i in range(int(seconds * fps)):
+        frames.append((ts & 0xFFFFFFFF, t0 + i / fps + rng.uniform(-0.015, 0.015)))
+        if captures is not None:
+            captures.append(t0 + i / fps)
+        ts += step
+    return frames
+
+
+#: Seeds every fast-clock steered test must pass on, not just one.
+STEER_SEEDS = range(1, 31)
+
+
+def _vs_capture(rows, captures):
+    """``(wall, output s)`` rows with wall = each frame's capture instant, both
+    relative to the first frame. Capture, not arrival: delivery jitter is not
+    the output's wander."""
+    c0 = captures[0]
+    return [(c - c0, o) for c, (_, o) in zip(captures, rows)]
+
+
+def _locked(rows, since, *, offset_since=None):
+    """What the steered clock guarantees on a fast camera clock, over the
+    ``(wall, output s)`` rows from wall ``since``: ``(rate, wander, offset)``
+    with rate = output / wall advance, wander = max - min of output - wall,
+    and offset = the largest ``|output - wall|`` from ``offset_since`` (default
+    ``since``). A fast clock locks at a constant offset, not onto wall time."""
+    tail = [(w, o) for w, o in rows if w >= since]
+    (w1, o1), (w2, o2) = tail[0], tail[-1]
+    diff = [o - w for w, o in tail]
+    start = since if offset_since is None else offset_since
+    offset = max(abs(o - w) for w, o in rows if w >= start)
+    return (o2 - o1) / (w2 - w1), max(diff) - min(diff), offset
+
+
+def _assert_locked(seed, rate, wander, offset, *, offset_max=0.2):
+    assert 0.999 <= rate <= 1.001, f"seed {seed}: rate {rate:.5f}"
+    assert wander < 0.05, f"seed {seed}: wander {wander:.4f}"
+    assert offset < offset_max, f"seed {seed}: offset {offset:.4f}"
+
+
+def test_steered_locks_a_fast_camera_clock_to_real_time():
+    """The SDES camera case: a 15 fps clock (+6000 ticks) on ~16.1 fps of
+    delivery. hybrid runs ~7% slow; steered must run at real time and stay
+    smoother than arrival stamping."""
+    for seed in STEER_SEEDS:
+        captures = []
+        frames = _camera_frames(random.Random(seed), 16.1, 120, captures=captures)
+        rows = _steer_frames(rp.RtpTimeline(90000, policy="steered"), frames)
+        wall, out = rows[-1]
+        assert abs(out / wall - 1.0) <= 0.005, f"seed {seed}"
+        _assert_locked(seed, *_locked(_vs_capture(rows, captures), 20.0))
+        steps = [b[1] - a[1] for a, b in zip(rows, rows[1:])]
+        # steered measures ~1.5 ms of step-to-step jitter here, nearly all of
+        # it easing onto the rate first learned at 6 s (~0.01 ms after 20 s);
+        # arrival stamping on the same stream measures ~11.9 ms.
+        assert statistics.pstdev(steps) < 0.003, f"seed {seed}"
+
+
+def test_steered_keeps_an_accurate_camera_as_is():
+    rng = random.Random(1)
+    rows = _steer_frames(
+        rp.RtpTimeline(90000, policy="steered"), _camera_frames(rng, 15.0, 60)
+    )
+    steps = [b[1] - a[1] for a, b in zip(rows, rows[1:])]
+    assert abs(statistics.mean(steps) - 1 / 15) <= 0.01 / 15
+    wall, out = rows[-1]
+    assert abs(out / wall - 1.0) <= 0.005
+
+
+def test_steered_rides_through_a_stall():
+    """20 s of an accurate camera, 4 s of nothing, then the camera resumes
+    with a timestamp delta that covers the 4 s."""
+    rng = random.Random(1)
+    before = _camera_frames(rng, 15.0, 20)
+    last_ts = before[-1][0]
+    resume = 100.0 + (len(before) - 1) / 15 + 4.0 + 1 / 15
+    after = _camera_frames(
+        rng, 15.0, 10, start_ts=last_ts + 6000 + 4 * 90000, t0=resume
+    )
+    rows = _steer_frames(rp.RtpTimeline(90000, policy="steered"), before + after)
+    outs = [o for _, o in rows]
+    assert all(b > a for a, b in zip(outs, outs[1:]))
+    settled = resume - before[0][1] + 5.0
+    tail = [abs(o - w) for w, o in rows if w >= settled]
+    assert tail and max(tail) < 0.10
+
+
+def test_steered_never_steps_backward_on_a_camera_backward_jump():
+    """The A001513 case: ~1.7 s back in the camera's own timestamps."""
+    rng = random.Random(1)
+    frames = _camera_frames(rng, 15.0, 60, start_ts=500_000)
+    back = int(1.7 * 90000)
+    frames = frames[:450] + [((ts - back) & 0xFFFFFFFF, a) for ts, a in frames[450:]]
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    outs = [o for _, o in rows]
+    assert all(b > a for a, b in zip(outs, outs[1:]))
+    assert tl.repairs >= 1
+
+
+def _delivery_stall(seed, after_s=50):
+    """30 s of an accurate 15 fps camera, a 1.7 s DELIVERY stall whose backlog
+    arrives in a ~0.1 s burst, then ``after_s`` more. Delivery resumes from the
+    burst's end, so the arrival floor stays ~1/15 s later than before the
+    stall. Returns the frames, each frame's capture time and the index of the
+    first frame after the burst."""
+    rng = random.Random(seed)
+    fps = 15.0
+    step = 6000
+    t0 = 100.0
+    n1 = int(30 * fps)
+    n_stall = round(1.7 * fps)
+    n3 = int(after_s * fps)
+
+    gen_times = []
+    frames = []  # (in_ts, arrival)
+    ts = 1000
+
+    for i in range(n1):
+        gen = t0 + i / fps
+        gen_times.append(gen)
+        frames.append((ts & 0xFFFFFFFF, gen + rng.uniform(-0.015, 0.015)))
+        ts += step
+
+    stall_end_wall = frames[-1][1] + 1.7
+    for j in range(n_stall):
+        gen_times.append(t0 + (n1 + j) / fps)
+        frames.append((ts & 0xFFFFFFFF, stall_end_wall + (j / n_stall) * 0.1))
+        ts += step
+
+    wall = frames[-1][1]
+    for k in range(n3):
+        gen_times.append(t0 + (n1 + n_stall + k) / fps)
+        wall += 1 / fps
+        frames.append((ts & 0xFFFFFFFF, wall + rng.uniform(-0.015, 0.015)))
+        ts += step
+    return frames, gen_times, n1 + n_stall
+
+
+def test_steered_rides_through_a_delivery_stall_without_snapping():
+    """A 1.7 s DELIVERY stall, not a capture gap: the camera's own clock
+    stays continuous through it (every frame still steps by one normal
+    +6000 tick), but the backlog generated during the stall arrives in a
+    ~0.1 s burst once the connection catches up. The steered output must
+    keep riding the camera's spacing through this, not snap onto the late
+    burst arrival. Delivery then stays ~1/15 s later than before, which the
+    output cannot tell from a phase step: it follows it to a new constant
+    offset, so rate and wander are measured 20 s after the burst."""
+    clock_rate = 90000
+    for seed in STEER_SEEDS:
+        frames, gen_times, after = _delivery_stall(seed)
+        tl = rp.RtpTimeline(clock_rate, policy="steered")
+        outs = [tl.stamp(in_ts, arrival)[1] for in_ts, arrival in frames]
+        outs_s = [((o - outs[0]) & 0xFFFFFFFF) / clock_rate for o in outs]
+
+        assert tl.repairs == 0, f"seed {seed}"
+        assert all(b > a for a, b in zip(outs_s, outs_s[1:])), f"seed {seed}"
+        steps = [b - a for a, b in zip(outs_s, outs_s[1:])]
+        assert max(steps) < 0.2, f"seed {seed}"
+
+        gen0 = gen_times[0]
+        rows = [(g - gen0, o) for g, o in zip(gen_times, outs_s)]
+        since = gen_times[after] - gen0 + 20.0
+        _assert_locked(seed, *_locked(rows, since, offset_since=20.0), offset_max=0.1)
+
+
+def _gap_frames(
+    fps, before_s, gap_s, after_s, *, step=6000, jump=None, seed=1, captures=None
+):
+    """``before_s`` of frames, ``gap_s`` of silence, then ``after_s`` more.
+    The camera stamp advances one normal step across the gap (an uncovered
+    gap) unless ``jump`` gives the stamp's own jump in ticks. ``seed`` seeds
+    the jitter; ``captures`` is as for ``_camera_frames``. Returns the frames
+    and the index of the first frame after the gap."""
+    rng = random.Random(seed)
+    before = _camera_frames(rng, fps, before_s, step=step, captures=captures)
+    last_ts, last_arrival = before[-1]
+    after = _camera_frames(
+        rng,
+        fps,
+        after_s,
+        start_ts=(last_ts + (step if jump is None else jump)) & 0xFFFFFFFF,
+        t0=last_arrival + gap_s,
+        step=step,
+        captures=captures,
+    )
+    return before + after, len(before)
+
+
+def test_steered_snaps_across_an_uncovered_gap():
+    """An uncovered gap - the camera stamp advances only one normal step
+    across a 4 s silence - is a real phase error (capture stopped, not a
+    delivery artifact) and must snap onto wall time once the latency has
+    stayed high for the snap hold."""
+    frames, first = _gap_frames(15.0, 20, 4.0, 3)
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    held = rows[first][0] + rp.STEER_SNAP_HOLD_S
+    tail = [abs(o - w) for w, o in rows if w >= held]
+    assert tl.repairs == 1
+    assert len(tail) >= 15 and max(tail) < 0.1
+
+
+def test_steered_relearns_rate_cleanly_after_an_uncovered_gap():
+    frames, first = _gap_frames(16.1, 20, 4.0, 30)
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    tail = [abs(o - w) for w, o in rows if w >= rows[first][0] + 1.0]
+    assert tl.repairs == 1
+    assert max(tail) < 0.10
+
+
+def test_steered_snaps_a_12s_uncovered_gap():
+    """12 s of silence is longer than the floor window: the floor must come
+    from the frame before the gap, not the late frame itself."""
+    frames, first = _gap_frames(15.0, 20, 12.0, 10)
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    tail = [abs(o - w) for w, o in rows if w >= rows[first][0] + 1.5]
+    assert tl.repairs == 1
+    assert max(tail) < 0.1
+
+
+def test_steered_snaps_a_second_gap_inside_the_hold():
+    """Two 4 s uncovered gaps with three frames between them: the second gap
+    starts while the first snap is still held, and its excess must be
+    snapped as well."""
+    rng = random.Random(1)
+    frames = _camera_frames(rng, 15.0, 20)
+    for run_s in (0.25, 20.0):
+        last_ts, last_arrival = frames[-1]
+        second = len(frames)
+        frames += _camera_frames(
+            rng,
+            15.0,
+            run_s,
+            start_ts=(last_ts + 6000) & 0xFFFFFFFF,
+            t0=last_arrival + 4.0,
+        )
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    held = rows[second][0] + rp.STEER_SNAP_HOLD_S
+    tail = [abs(o - w) for w, o in rows if w >= held]
+    assert tl.repairs >= 1
+    assert max(tail) < 0.1
+
+
+def test_steered_snaps_two_short_gaps_that_add_up_in_the_floor_window():
+    """Two 1.5 s uncovered gaps 4 s apart: neither alone is over STEER_SNAP_S,
+    but the second leaves latency 3 s above the floor window's minimum, so the
+    output snaps once and lands back on wall time."""
+    rng = random.Random(1)
+    frames = _camera_frames(rng, 15.0, 20)
+    for run_s in (4.0, 20.0):
+        last_ts, last_arrival = frames[-1]
+        second = len(frames)
+        frames += _camera_frames(
+            rng,
+            15.0,
+            run_s,
+            start_ts=(last_ts + 6000) & 0xFFFFFFFF,
+            t0=last_arrival + 1.5,
+        )
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    held = rows[second][0] + rp.STEER_SNAP_HOLD_S + 0.5
+    tail = [abs(o - w) for w, o in rows if w >= held]
+    assert tl.repairs == 1
+    assert max(tail) < 0.1
+
+
+def test_steered_snap_before_learning_keeps_phase():
+    """A fast camera clock with an uncovered gap before any rate is learned:
+    the snap must not move the base the first learned rate rebases from. The
+    snap restarts learning, so the lock is measured 20 s after the gap."""
+    biases = []
+    for seed in STEER_SEEDS:
+        captures = []
+        frames, first = _gap_frames(16.1, 3, 4.0, 60, seed=seed, captures=captures)
+        rows = _vs_capture(
+            _steer_frames(rp.RtpTimeline(90000, policy="steered"), frames), captures
+        )
+        since = rows[first][0] + 20.0
+        _assert_locked(seed, *_locked(rows, since))
+        biases.append(statistics.mean(o - w for w, o in rows if w >= since))
+    # The snap jumps by the excess measured where the gap began, so its
+    # constant offset averages ~0 across seeds; measured at the snap instead
+    # (after the gap and hold ran at the provisional rate) it sat ~78 ms behind.
+    assert abs(statistics.mean(biases)) < 0.03
+
+
+def test_steered_repair_gap_on_a_fast_clock():
+    """A 20 s gap across which the camera stamp jumps more than max_step: the
+    repair must advance the target by exactly the wall gap, not the wall gap
+    times the learned rate."""
+    for seed in STEER_SEEDS:
+        captures = []
+        frames, _ = _gap_frames(
+            16.1, 30, 20.0, 20, jump=25 * 90000, seed=seed, captures=captures
+        )
+        tl = rp.RtpTimeline(90000, policy="steered")
+        rows = _vs_capture(_steer_frames(tl, frames), captures)
+        assert tl.repairs >= 1, f"seed {seed}"
+        _assert_locked(seed, *_locked(rows, 20.0))
+
+
+def test_steered_low_fps_fast_clock():
+    """A 5 fps camera clock (+18000 ticks) delivered at ~5.37 fps."""
+    for seed in STEER_SEEDS:
+        captures = []
+        frames = _camera_frames(
+            random.Random(seed), 5.367, 60, step=18000, captures=captures
+        )
+        rows = _steer_frames(rp.RtpTimeline(90000, policy="steered"), frames)
+        _assert_locked(seed, *_locked(_vs_capture(rows, captures), 20.0))
+
+
+def _covered_stall(stall_s):
+    """An accurate 15 fps camera whose DELIVERY stalls for ``stall_s`` at
+    20 s; the camera stamps stay continuous and the held frames arrive as one
+    burst. Returns the frames and each frame's capture time."""
+    rng = random.Random(1)
+    fps, t0, start = 15.0, 100.0, 20.0
+    captures = [i / fps for i in range(int(60 * fps))]
+    arrivals = []
+    for c in captures:
+        if start <= c < start + stall_s:
+            arrivals.append(t0 + start + stall_s + 0.05)  # held, released together
+        else:
+            arrivals.append(t0 + c + 0.05 + rng.uniform(-0.01, 0.01))
+    frames = [
+        ((1000 + 6000 * i) & 0xFFFFFFFF, a) for i, a in enumerate(_monotonic(arrivals))
+    ]
+    return frames, captures
+
+
+def test_steered_rides_a_covered_4s_stall_without_offset():
+    frames, captures = _covered_stall(4.0)
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    tail = [abs(o - c) for (_, o), c in zip(rows, captures) if c >= 20.0]
+    assert tl.repairs == 0
+    assert max(tail) < 0.05
+
+
+def test_steered_rides_a_covered_12s_stall_without_offset():
+    frames, captures = _covered_stall(12.0)
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    tail = [abs(o - c) for (_, o), c in zip(rows, captures) if c >= 20.0]
+    assert tl.repairs == 0
+    assert max(tail) < 0.05
+
+
+def _draining_stall(stall_s, speed):
+    """An accurate 15 fps camera whose DELIVERY stalls for ``stall_s`` at
+    20 s; the held frames then drain at ``speed`` times real time, not at
+    once, until delivery has caught up. Returns the frames, each frame's
+    capture time and the capture time at which the backlog has drained."""
+    rng = random.Random(1)
+    fps, t0, start = 15.0, 100.0, 20.0
+    captures = [i / fps for i in range(int(60 * fps))]
+    arrivals, drained = [], None
+    for c in captures:
+        on_time = t0 + c + 0.05 + rng.uniform(-0.01, 0.01)
+        if c < start:
+            arrivals.append(on_time)
+        elif drained is None:
+            queued = (
+                arrivals[-1] + 1 / (fps * speed)
+                if c > start
+                else t0 + start + stall_s + 0.05
+            )
+            if on_time >= queued:
+                drained = c
+            arrivals.append(max(on_time, queued))
+        else:
+            arrivals.append(on_time)
+    frames = [
+        ((1000 + 6000 * i) & 0xFFFFFFFF, a) for i, a in enumerate(_monotonic(arrivals))
+    ]
+    return frames, captures, drained
+
+
+def test_steered_rides_a_covered_4s_stall_draining_at_2x_and_5x():
+    """A covered 4 s stall whose backlog drains at 2x or 5x real time: the
+    excess stays over STEER_SNAP_S for longer than the snap hold, but it is
+    falling, so it is a draining backlog and must not snap."""
+    for speed in (2.0, 5.0):
+        frames, captures, drained = _draining_stall(4.0, speed)
+        tl = rp.RtpTimeline(90000, policy="steered")
+        rows = _steer_frames(tl, frames)
+        tail = [abs(o - c) for (_, o), c in zip(rows, captures) if c >= drained + 2]
+        assert tl.repairs == 0, f"{speed}x"
+        assert max(tail) < 0.1, f"{speed}x"
+
+
+def test_steered_rides_a_covered_12s_stall_draining_at_2x_and_5x():
+    for speed in (2.0, 5.0):
+        frames, captures, drained = _draining_stall(12.0, speed)
+        tl = rp.RtpTimeline(90000, policy="steered")
+        rows = _steer_frames(tl, frames)
+        tail = [abs(o - c) for (_, o), c in zip(rows, captures) if c >= drained + 2]
+        assert tl.repairs == 0, f"{speed}x"
+        assert max(tail) < 0.1, f"{speed}x"
+
+
+def _monotonic(arrivals, gap=0.001):
+    """Arrival times as a real clock reports them: never before the last."""
+    out = []
+    for a in arrivals:
+        out.append(max(a, out[-1] + gap) if out else a)
+    return out
+
+
+def test_steered_keeps_a_cold_start_backlog_at_camera_spacing():
+    """The cold-start backlog: an SDES camera sometimes delivers ~1.9 s of
+    camera time in its first ~0.1 s. Those frames were captured earlier than
+    they arrive, so their camera spacing is the truth; the steered output
+    must not compress them toward the burst's arrival times."""
+    rng = random.Random(1)
+    fps, t0 = 15.0, 100.0
+    captures = [i / fps for i in range(int(90 * fps))]
+    backlog = [c for c in captures if c < 1.9]
+    arrivals = [t0 + 1.9 + 0.1 * j / len(backlog) for j in range(len(backlog))]
+    arrivals += [
+        t0 + c + 0.05 + rng.uniform(-0.01, 0.01) for c in captures[len(backlog) :]
+    ]
+    frames = [
+        ((1000 + 6000 * i) & 0xFFFFFFFF, a) for i, a in enumerate(_monotonic(arrivals))
+    ]
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    err = max(abs(o - c) for (_, o), c in zip(rows, captures))
+    assert tl.repairs == 0
+    assert err < 0.05
+
+
+def test_steered_learns_rate_from_the_least_late_frames():
+    """An accurate camera whose delivery is held for 0.8 s every 5th second
+    and then released at once. The held frames are late, not fast: the rate
+    comes from the least-late frames, so output runs at the camera's rate
+    and on its capture times."""
+    rng = random.Random(1)
+    fps, t0 = 15.0, 100.0
+    captures = [i / fps for i in range(int(60 * fps))]
+    arrivals = []
+    for c in captures:
+        sec = int(c + 1e-9)
+        if sec and sec % 5 == 0 and c - sec < 0.8 - 1e-9:
+            arrivals.append(t0 + sec + 0.8)  # held, released together
+        else:
+            arrivals.append(t0 + c + 0.05 + rng.uniform(-0.01, 0.01))
+    frames = [
+        ((1000 + 6000 * i) & 0xFFFFFFFF, a) for i, a in enumerate(_monotonic(arrivals))
+    ]
+    rows = _steer_frames(rp.RtpTimeline(90000, policy="steered"), frames)
+    out = [o for _, o in rows]
+    assert 0.999 <= out[-1] / captures[-1] <= 1.001
+    tail = [abs(o - c) for o, c in zip(out, captures) if c >= 10.0]
+    assert max(tail) < 0.05
+
+
+def test_video_timestamp_policy(monkeypatch):
+    monkeypatch.delenv(rp.ENV_PUBLISH_TIMESTAMPS, raising=False)
+    assert rp.video_timestamp_policy() == "steered"
+    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "hybrid")
+    assert rp.video_timestamp_policy() == "hybrid"
+    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "arrival")
+    assert rp.video_timestamp_policy() == "arrival"
+    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "garbage")
+    assert rp.video_timestamp_policy() == "steered"
+    assert rp.timestamp_policy() == "hybrid"
+    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "steered")
+    assert rp.timestamp_policy() == "steered"
 
 
 def test_direct_publish_flag_defaults_off(monkeypatch):
@@ -493,7 +1006,8 @@ def _udp_port_bound(port):
         s.close()
 
 
-def test_loopback_publisher_forwards_and_rewrites(go2rtc):
+def test_loopback_publisher_forwards_and_rewrites(go2rtc, monkeypatch):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
     a_port, v_port = _free_udp_ports(2)
     proc = rp.LoopbackRtpPublisher(
         _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", audio_gain_db=0
@@ -537,9 +1051,14 @@ def test_loopback_publisher_forwards_and_rewrites(go2rtc):
     assert not _udp_port_bound(a_port) and not _udp_port_bound(v_port)
     assert _wait(lambda: "TEARDOWN" in go2rtc.requests)
     assert proc.stderr.read().decode().count("publish ended") == 1
+    stats = proc.publish_stats()
+    for key in ("aac_silence_samples", "aac_trimmed_samples", "aac_reanchors"):
+        assert stats[key] == 0
+    assert "AAC" not in proc.stderr.read().decode()
 
 
-def test_loopback_publisher_applies_audio_gain(go2rtc):
+def test_loopback_publisher_applies_audio_gain(go2rtc, monkeypatch):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
     a_port, v_port = _free_udp_ports(2)
     proc = rp.LoopbackRtpPublisher(
         _serve_sdp(a_port, v_port), go2rtc.url(), audio_gain_db=-8.0
@@ -559,6 +1078,192 @@ def test_loopback_publisher_applies_audio_gain(go2rtc):
     finally:
         proc.kill()
     assert proc.poll() == rp.EXIT_KILLED
+
+
+def test_loopback_publish_adds_aac_after_pcma(go2rtc, monkeypatch):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", audio_gain_db=0
+    )
+    try:
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for i in range(50):
+            tx.sendto(
+                rp.build_rtp(8, False, 1 + i, 160 * (i + 1), 0xBBBB, b"\xd5" * 160),
+                ("127.0.0.1", a_port),
+            )
+            if i < 10:  # video flows too, so tick() actually runs on this test
+                tx.sendto(
+                    rp.build_rtp(96, True, 1 + i, 1800 * i, 0xAAAA, b"\x41pic"),
+                    ("127.0.0.1", v_port),
+                )
+            time.sleep(0.02)
+        sdp_ok = _wait(
+            lambda: go2rtc.announced and "MPEG4-GENERIC/48000" in go2rtc.announced[0]
+        )
+        assert sdp_ok
+        sdp = go2rtc.announced[0]
+        assert sdp.index("PCMA/8000") < sdp.index("MPEG4-GENERIC")
+        assert _wait(lambda: sum(1 for ch, _ in go2rtc.frames if ch == 4) >= 20)
+        # The camera's timestamps are contiguous (160 samples/packet, no gaps),
+        # so a working feed() never asks the pacer to fill silence. Video also
+        # flows here, so tick() runs on every pass (see `_video_forwarded`):
+        # if the AAC packets above came from tick()'s idle-fill instead of
+        # feed() actually consuming the A-law, this would be in the thousands
+        # by now.
+        assert proc._aac.pacer.silence_samples == 0
+        tx.close()
+    finally:
+        proc.terminate()
+        proc.wait(3)
+    stats = proc.publish_stats()
+    assert stats["aac_frames"] >= 20
+    assert stats["aac_seconds"] > 0
+    assert "audio:MPEG4-GENERIC/" in str(stats["tracks"])
+    # Contiguous audio stamps: nothing filled, trimmed or re-anchored.
+    assert stats["aac_silence_samples"] == 0
+    assert stats["aac_trimmed_samples"] == 0
+    assert stats["aac_reanchors"] == 0
+    ended = [ln for ln in proc.stderr.tail() if "publish ended" in ln]
+    assert len(ended) == 1
+    assert f"AAC {stats['aac_frames']} frames" in ended[0]
+    assert "0 silence-filled / 0 trimmed / 0 re-anchors" in ended[0]
+    # No video was sent in this test, so the re-sent-frame filter never ran.
+    assert "0 re-sent frames dropped, 0 filter resets" in ended[0]
+
+
+def test_loopback_publish_builds_the_aac_track_off_the_constructing_thread(
+    go2rtc, monkeypatch
+):
+    # The constructor runs on Home Assistant's event loop, and the first AAC
+    # track imports numpy and av and opens a codec: that belongs on the worker.
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
+    calls = []
+    real_make = rp.make_aac_track
+
+    def _make(device_id="?"):
+        calls.append(threading.current_thread())
+        return real_make(device_id)
+
+    monkeypatch.setattr(rp, "make_aac_track", _make)
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam"
+    )
+    try:
+        assert _wait(lambda: bool(go2rtc.announced))
+        assert calls, "make_aac_track was never called"
+        assert threading.current_thread() not in calls
+        sdp = go2rtc.announced[0]
+        assert sdp.index("PCMA/8000") < sdp.index("a=rtpmap:97 MPEG4-GENERIC/48000")
+        assert "audio:MPEG4-GENERIC/97" in proc.publish_stats()["tracks"]
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_fills_aac_silence_only_while_video_flows(go2rtc, monkeypatch):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", audio_gain_db=0
+    )
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for i in range(10):
+            tx.sendto(
+                rp.build_rtp(8, False, 1 + i, 160 * (i + 1), 0xBBBB, b"\x01" * 160),
+                ("127.0.0.1", a_port),
+            )
+            time.sleep(0.02)
+        assert _wait(lambda: proc._aac.frames > 0)
+        # The camera goes quiet - no audio, no video. Silence is generated to
+        # keep the track alive BESIDE video, so none is generated now.
+        time.sleep(1.2)
+        assert proc._aac.pacer.silence_samples == 0
+        for i in range(40):  # video resumes, audio does not: fill beside it
+            tx.sendto(
+                rp.build_rtp(96, True, 1 + i, 1800 * i, 0xAAAA, b"\x41pic"),
+                ("127.0.0.1", v_port),
+            )
+            time.sleep(0.02)
+        assert _wait(lambda: proc._aac.pacer.silence_samples > 0)
+        tx.close()
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_without_audio_has_no_aac(go2rtc, monkeypatch):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", include_audio=False
+    )
+    try:
+        assert _wait(lambda: bool(go2rtc.announced))
+        assert "MPEG4-GENERIC" not in go2rtc.announced[0]
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_pcmu_camera_gets_no_aac(go2rtc, monkeypatch):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
+    a_port, v_port = _free_udp_ports(2)
+    pcmu_sdp = _serve_sdp(a_port, v_port).replace("RTP/AVP 8", "RTP/AVP 0")
+    pcmu_sdp = pcmu_sdp.replace("a=rtpmap:8 PCMA/8000", "a=rtpmap:0 PCMU/8000")
+    proc = rp.LoopbackRtpPublisher(pcmu_sdp, go2rtc.url(), device_id="cam")
+    try:
+        assert _wait(lambda: bool(go2rtc.announced))
+        assert "MPEG4-GENERIC" not in go2rtc.announced[0]
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publisher_steers_video_and_not_audio(go2rtc, monkeypatch):
+    """SDES video is stamped on a camera clock that runs fast, so it is
+    steered to real time; the camera's audio clock is exact and stays hybrid.
+    An explicit policy still applies to every track."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    monkeypatch.delenv(rp.ENV_PUBLISH_TIMESTAMPS, raising=False)
+    for policy, want_video, want_audio in (
+        (None, "steered", "hybrid"),
+        ("arrival", "arrival", "arrival"),
+    ):
+        a_port, v_port = _free_udp_ports(2)
+        proc = rp.LoopbackRtpPublisher(
+            _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", policy=policy
+        )
+        try:
+            by_kind = {
+                t.kind: tl.policy for t, tl in zip(proc._tracks, proc._timelines)
+            }
+            assert by_kind == {"video": want_video, "audio": want_audio}
+        finally:
+            proc.terminate()
+            proc.wait(3)
+
+
+def test_loopback_publisher_env_arrival_applies_to_both_tracks(go2rtc, monkeypatch):
+    """AIDOT_PUBLISH_TIMESTAMPS=arrival with no explicit policy= applies to
+    every track, video and audio alike, the same as an explicit policy=
+    does."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "arrival")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam"
+    )
+    try:
+        by_kind = {t.kind: tl.policy for t, tl in zip(proc._tracks, proc._timelines)}
+        assert by_kind == {"video": "arrival", "audio": "arrival"}
+    finally:
+        proc.terminate()
+        proc.wait(3)
 
 
 def test_loopback_publisher_exits_1_when_the_stream_is_missing():
@@ -648,7 +1353,10 @@ def test_sdes_bridge_classifies_publisher_teardown_as_expected():
 # --------------------------------------------------------------------------- #
 
 
-def test_dtls_runner_starts_on_a_keyframe_and_publishes_both_tracks(go2rtc):
+def test_dtls_runner_starts_on_a_keyframe_and_publishes_both_tracks(
+    go2rtc, monkeypatch
+):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
     import queue
 
     vq, aq = queue.Queue(), queue.Queue()
@@ -680,6 +1388,105 @@ def test_dtls_runner_starts_on_a_keyframe_and_publishes_both_tracks(go2rtc):
     assert nals[-1] == b"\x41" + b"d" * 40
     assert sum(1 for v in video if v[1]) == 2  # one marker per access unit
     assert _wait(lambda: "TEARDOWN" in go2rtc.requests)
+
+
+def _run_dtls(go2rtc, feed, *, secs=1.2):
+    import queue
+
+    vq, aq = queue.Queue(), queue.Queue()
+    sps_pps = b"\0\0\0\1\x67" + b"s" * 8 + b"\0\0\0\1\x68" + b"p" * 3
+    vq.put((sps_pps + b"\0\0\0\1\x65" + b"k" * 3000, 3000, True))
+    progress, stop, res = [0.0], threading.Event(), {}
+    t = threading.Thread(
+        target=rp.dtls_rtp_publish_run,
+        args=(vq, aq, go2rtc.url(), progress, stop),
+        kwargs={"result": res},
+        daemon=True,
+    )
+    t.start()
+    assert _wait(lambda: progress[0] > 0)
+    feed(vq, aq)
+    time.sleep(secs)
+    stop.set()
+    t.join(3)
+    return res
+
+
+def test_dtls_publish_announces_and_sends_an_aac_track(go2rtc, monkeypatch, caplog):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
+    caplog.set_level(logging.INFO, logger="aidot_cameras.camera.rtsp_publish")
+
+    def feed(vq, aq):
+        for i in range(50):  # 1 s of A-law
+            aq.put((b"\xd5" * 160, 160 + 160 * i))
+            vq.put((b"\0\0\0\1\x41" + b"d" * 40, 6000 + 1800 * i, False))
+
+    res = _run_dtls(go2rtc, feed)
+    sdp = go2rtc.announced[0]
+    assert "m=audio 0 RTP/AVP 8" in sdp
+    assert sdp.index("RTP/AVP 8") < sdp.index("RTP/AVP 97")  # PCMA stays first
+    assert "a=rtpmap:97 MPEG4-GENERIC/48000" in sdp
+    assert "config=1188" in sdp
+    aac = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 4]
+    assert len(aac) >= 20
+    ts = [a[3] for a in aac]
+    assert all(((b - a) & 0xFFFFFFFF) == 1024 for a, b in zip(ts, ts[1:]))
+    assert res["aac_frames"] == len(aac)
+    assert res["aac_seconds"] > 0
+    # The audio is contiguous: nothing is filled, trimmed, or re-anchored.
+    assert res["aac_silence_samples"] == 0
+    assert res["aac_trimmed_samples"] == 0
+    assert res["aac_reanchors"] == 0
+    ended = [
+        r.getMessage()
+        for r in caplog.records
+        if "DTLS direct publish: AAC" in r.getMessage()
+    ]
+    assert len(ended) == 1
+    assert f"AAC {res['aac_frames']} frames" in ended[0]
+    assert f"{res['aac_silence_samples']} samples silence-filled" in ended[0]
+
+
+def test_dtls_publish_feeds_queued_audio_before_the_idle_fill(go2rtc, monkeypatch):
+    # After a loop stall, audio and video are queued together. The audio is
+    # real and continuous; the idle fill must not run ahead of it and have it
+    # trimmed away as already covered.
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
+    made = []
+
+    def _make(device_id="?"):
+        made.append(real_make(device_id))
+        return made[-1]
+
+    real_make = rp.make_aac_track
+    monkeypatch.setattr(rp, "make_aac_track", _make)
+
+    def feed(vq, aq):
+        for i in range(10):
+            aq.put((b"\x01" * 160, 160 + 160 * i))
+            vq.put((b"\0\0\0\1\x41" + b"d" * 40, 6000 + 1800 * i, False))
+        time.sleep(0.8)  # the stall: nothing is drained
+        for i in range(10, 20):  # audio queued first, as it arrived first
+            aq.put((b"\x01" * 160, 160 + 160 * i))
+        for i in range(10, 20):
+            vq.put((b"\0\0\0\1\x41" + b"d" * 40, 6000 + 1800 * i, False))
+
+    _run_dtls(go2rtc, feed, secs=0.5)
+    assert made and made[0] is not None
+    assert made[0].pacer.trimmed_samples == 0
+
+
+def test_dtls_publish_kill_switch_keeps_todays_sdp(go2rtc, monkeypatch, caplog):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    caplog.set_level(logging.INFO, logger="aidot_cameras.camera.rtsp_publish")
+    res = _run_dtls(go2rtc, lambda vq, aq: None, secs=0.2)
+    assert "RTP/AVP 97" not in go2rtc.announced[0]
+    assert not any(ch == 4 for ch, _ in go2rtc.frames)
+    assert res["aac_frames"] == 0
+    assert res["aac_seconds"] == 0.0
+    for key in ("aac_silence_samples", "aac_trimmed_samples", "aac_reanchors"):
+        assert res[key] == 0
+    assert not any("AAC" in r.getMessage() for r in caplog.records)
 
 
 def test_dtls_runner_reports_a_failed_publish():
@@ -817,7 +1624,11 @@ def test_reorder_bounds_what_it_holds():
     assert b.push(6, 6, 0.0) == [3, 4, 5, 6]
 
 
-def test_loopback_publisher_reorders_before_publishing(go2rtc):
+def test_loopback_publisher_reorders_before_publishing(go2rtc, monkeypatch):
+    # Video-only assertions on go2rtc.frames, not filtered by channel: an AAC
+    # idle-fill packet landing on channel 4 before the check would break the
+    # exact count, same reason as the two tests above.
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
     a_port, v_port = _free_udp_ports(2)
     proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
     try:
@@ -832,6 +1643,419 @@ def test_loopback_publisher_reorders_before_publishing(go2rtc):
         got = [rp.parse_rtp(p) for _, p in go2rtc.frames]
         assert [g[4] for g in got] == [b"A", b"B", b"C"]
         assert len({g[3] for g in got}) == 1  # one frame, one timestamp
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_drops_resent_video_frames(go2rtc, monkeypatch):
+    """The A001064 family re-sends runs of video frames it has already sent,
+    after a periodic backward jump of its own timestamps. Forwarding a resend
+    duplicates picture content and, worse, RtpTimeline gives the repeat a
+    fresh forward output timestamp - so its time is counted twice."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        seq = 100
+        for ts in (0, 6000, 12000, 18000, 6000, 12000, 24000):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xAAAA, b"pic"), ("127.0.0.1", v_port)
+            )
+            seq += 1
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 5)
+        time.sleep(0.1)  # nothing more should arrive
+        assert len(go2rtc.frames) == 5
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert len(video) == 5
+        ts_out = [v[3] for v in video]
+        assert ts_out == sorted(set(ts_out)) and len(set(ts_out)) == 5
+        assert proc.publish_stats()["dropped_resent"] == 2
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_never_splits_an_accepted_frame(go2rtc, monkeypatch):
+    """A frame that is accepted must be forwarded whole, even when the resend
+    filter is judging it: the decision is made once, on the frame's first
+    packet, and every later packet of that same frame follows it."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        packets = [
+            (100, 0, True, b"a"),
+            (101, 6000, True, b"b"),
+            (102, 12000, False, b"c1"),
+            (103, 12000, False, b"c2"),
+            (104, 12000, True, b"c3"),
+        ]
+        for seq, ts, mk, body in packets:
+            tx.sendto(
+                rp.build_rtp(96, mk, seq, ts, 0xAAAA, body), ("127.0.0.1", v_port)
+            )
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 5)
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert [v[4] for v in video] == [b"a", b"b", b"c1", b"c2", b"c3"]
+        assert len({v[3] for v in video[2:]}) == 1  # the 3 pkts share one ts
+        assert proc.publish_stats()["dropped_resent"] == 0
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_does_not_filter_audio(go2rtc, monkeypatch):
+    """The resend filter is video-only: an audio track whose timestamp goes
+    backward is still forwarded (the DTLS path never applies it to audio
+    either)."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        tx.sendto(
+            rp.build_rtp(8, False, 1, 1000, 0xBBBB, b"\xd5" * 160),
+            ("127.0.0.1", a_port),
+        )
+        tx.sendto(
+            rp.build_rtp(8, False, 2, 500, 0xBBBB, b"\xd5" * 160),  # backward
+            ("127.0.0.1", a_port),
+        )
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 2)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 2
+        audio = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 0]
+        assert len(audio) == 2
+        assert proc.publish_stats()["dropped_resent"] == 0
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_resets_the_resent_filter_on_a_new_timestamp_base(
+    go2rtc, monkeypatch
+):
+    """A backward step bigger than any genuine re-send (the camera's own
+    re-sends go back about 1.7 s) is a new timestamp base, not a re-send -
+    dropping video until the old high-water mark is caught back up to would
+    black it out for hours instead of the fraction of a second this camera
+    family's real re-sends cost."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        seq = 100
+        # ~10 s jump back (912000 -> 1000 at 90 kHz), far past RESENT_MAX_BACK_S.
+        for ts in (900000, 906000, 912000, 1000, 7000, 13000):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xAAAA, b"pic"), ("127.0.0.1", v_port)
+            )
+            seq += 1
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 6)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 6
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert len(video) == 6
+        ts_out = [v[3] for v in video]
+        assert ts_out == sorted(ts_out)
+        assert len(set(ts_out)) == 6  # strictly increasing
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 0
+        assert stats["resent_filter_resets"] == 1
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_resets_the_resent_filter_on_a_new_ssrc(go2rtc, monkeypatch):
+    """The bridge re-syncs its reorder buffer's own sequence numbering when a
+    TUTK-framed camera switches from TUTK SFrames to real SRTP mid-session -
+    on the SAME loopback port, with a new SSRC (RtpReorderBuffer.push already
+    takes an ssrc and resyncs on it; this is the same signal). The old
+    unwrapped position and high-water mark do not apply to the new sender, so
+    its frames must not be judged against them."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for seq, ts in ((100, 0), (101, 6000), (102, 12000)):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xAAAA, b"pic"), ("127.0.0.1", v_port)
+            )
+            time.sleep(0.02)
+        # A new sender on the same port: different SSRC, its own timestamps.
+        for seq, ts in ((10, 3000), (11, 9000)):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xCCCC, b"pic"), ("127.0.0.1", v_port)
+            )
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 5)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 5
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert len(video) == 5
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 0
+        assert stats["resent_filter_resets"] == 1
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_drops_a_real_resend_within_the_boundary(go2rtc, monkeypatch):
+    """A re-send run landing within RESENT_MAX_BACK_S of the high-water mark
+    (the camera's genuine re-sends go back about 1.7 s = 153000 ticks at
+    90 kHz) must still be DROPPED, not treated as a new timestamp base. This
+    pins the boundary from the drop side: a too-small limit (e.g. 0.5 s, or
+    computing it with 8000 instead of the track's clock rate) would instead
+    reset the filter here."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        seq = 100
+        # 200000 -> 353000 (+153000, hw climbs to 153000) -> 200000 again (a
+        # real re-send run landing exactly 153000 below the high-water mark).
+        for ts in (200000, 353000, 200000, 359000):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xAAAA, b"pic"), ("127.0.0.1", v_port)
+            )
+            seq += 1
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 3)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 3  # the re-sent 200000 frame is dropped
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 1
+        assert stats["resent_filter_resets"] == 0
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_resets_on_a_backward_step_past_the_boundary(
+    go2rtc, monkeypatch
+):
+    """A backward step bigger than RESENT_MAX_BACK_S (~6 s = 540000 ticks at
+    90 kHz, comfortably past the boundary) must RESET the filter and be
+    forwarded - the companion of the drop-side test above, pinning the
+    boundary from the other side."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        seq = 100
+        # 600000 -> 606000 -> 612000 (hw climbs to 12000 unwrapped), then
+        # 72000 (612000 - 540000: a ~6 s step back, past the boundary).
+        for ts in (600000, 606000, 612000, 72000):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xAAAA, b"pic"), ("127.0.0.1", v_port)
+            )
+            seq += 1
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 4)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 4  # all forwarded, including the reset frame
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 0
+        assert stats["resent_filter_resets"] == 1
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_never_splits_a_frame_a_stray_packet_interrupts(
+    go2rtc, monkeypatch
+):
+    """Reproduces the reviewer's finding: the reorder buffer's resync (a run
+    of late packets) can deliver A1, B1, A_late, B2 in that order - a stray
+    packet carrying A's already-served timestamp landing BETWEEN B's two
+    packets. The filter must judge a new frame only against the last
+    ACCEPTED timestamp, not the last packet seen, or the stray flips the
+    verdict and splits B."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        video_idx = 1  # SERVE_SDP: audio then video
+        pub = proc._publisher
+        ssrc = 0xAAAA
+        now = time.monotonic()
+        proc._send(pub, video_idx, (True, 1000, b"A1", now, ssrc))
+        proc._send(pub, video_idx, (False, 7000, b"B1", now, ssrc))
+        proc._video_forwarded = False
+        proc._send(pub, video_idx, (False, 1000, b"Alate", now, ssrc))
+        assert proc._video_forwarded is False
+        proc._send(pub, video_idx, (True, 7000, b"B2", now, ssrc))
+        assert _wait(lambda: len(go2rtc.frames) == 3)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 3
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert [v[4] for v in video] == [b"A1", b"B1", b"B2"]
+        assert video[1][3] == video[2][3]  # B1 and B2 share one output ts
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 1  # A_late, once - not per packet
+        assert stats["resent_filter_resets"] == 0
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_does_not_leak_a_resend_run_that_ends_on_the_last_frame(
+    go2rtc, monkeypatch
+):
+    """Regression: a re-send run that replays the last N accepted frames ends
+    ON the last accepted frame's timestamp by construction (it is replaying
+    everything since the high-water mark, and the mark IS that timestamp).
+    The `ts == last_accepted_ts` continuation shortcut used to forward that
+    final replayed frame unconditionally, because nothing had ever closed the
+    window after the frame's own marker packet: frames 0, 6000, 12000, 18000,
+    then a re-send run 6000, 12000, 18000 (new sequence numbers), then 24000
+    must forward only F0..F4 and drop all three re-sent frames."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        seq = 100
+        payloads = [b"F0", b"F1", b"F2", b"F3", b"R1", b"R2", b"R3", b"F4"]
+        for ts, body in zip(
+            (0, 6000, 12000, 18000, 6000, 12000, 18000, 24000), payloads
+        ):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xAAAA, body), ("127.0.0.1", v_port)
+            )
+            seq += 1
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 5)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 5  # the three re-sent frames are dropped
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert [v[4] for v in video] == [b"F0", b"F1", b"F2", b"F3", b"F4"]
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 3
+        assert stats["resent_filter_resets"] == 0
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_drops_a_single_frame_resend_run_immediately_after(
+    go2rtc, monkeypatch
+):
+    """The degenerate N=1 case of the regression above: the re-send run is a
+    single frame, and it arrives with NO other distinct timestamp judged in
+    between - so `ts == last_raw` exactly, right after the frame's own
+    acceptance closed its window. This must still be re-judged and dropped,
+    not forwarded as a cached-verdict continuation."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        seq = 100
+        payloads = [b"F0", b"F1", b"F2", b"F3", b"R3", b"F4"]
+        for ts, body in zip((0, 6000, 12000, 18000, 18000, 24000), payloads):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xAAAA, body), ("127.0.0.1", v_port)
+            )
+            seq += 1
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 5)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 5
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert [v[4] for v in video] == [b"F0", b"F1", b"F2", b"F3", b"F4"]
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 1
+        assert stats["resent_filter_resets"] == 0
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_does_not_leak_a_resend_run_that_ends_on_a_multi_packet_frame(
+    go2rtc, monkeypatch
+):
+    """The companion of the two regressions above, for a MULTI-packet
+    accepted frame: F2 (F2a/F2b) closes on its own marker packet, and a
+    re-send run that later replays it (R1/R2a/R2b) must not leak R2a/R2b a
+    second time."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        packets = [
+            (100, 0, True, b"F0"),
+            (101, 6000, True, b"F1"),
+            (102, 12000, False, b"F2a"),
+            (103, 12000, True, b"F2b"),
+            (104, 6000, True, b"R1"),
+            (105, 12000, False, b"R2a"),
+            (106, 12000, True, b"R2b"),
+            (107, 18000, True, b"F3"),
+        ]
+        for seq, ts, mk, body in packets:
+            tx.sendto(
+                rp.build_rtp(96, mk, seq, ts, 0xAAAA, body), ("127.0.0.1", v_port)
+            )
+            time.sleep(0.02)
+        tx.close()
+
+        def _f3_arrived():
+            video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+            return any(v[4] == b"F3" for v in video)
+
+        assert _wait(_f3_arrived)
+        time.sleep(0.1)
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert [v[4] for v in video] == [b"F0", b"F1", b"F2a", b"F2b", b"F3"]
+        assert video[2][3] == video[3][3]  # F2a and F2b share one output ts
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 2
+        assert stats["resent_filter_resets"] == 0
     finally:
         proc.terminate()
         proc.wait(3)
@@ -1156,8 +2380,12 @@ def _gap_fields(caplog):
     for rec in caplog.records:
         m = rx.search(rec.getMessage())
         if m:
-            return (float(m.group(1)), float(m.group(2)),
-                    int(m.group(3)), int(m.group(4)))
+            return (
+                float(m.group(1)),
+                float(m.group(2)),
+                int(m.group(3)),
+                int(m.group(4)),
+            )
     return None
 
 

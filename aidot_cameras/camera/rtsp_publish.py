@@ -42,12 +42,18 @@ import time
 from typing import Callable, Deque, List, Optional, Tuple
 from urllib.parse import unquote, urlsplit, urlunsplit
 
+from .aac_track import AAC_CLOCK_RATE, AacTrack, aac_fmtp, make_aac_track
+from .protocol import is_resent_video_frame
+
 _LOGGER = logging.getLogger(__name__)
 
 #: Env switch for the whole feature. Default OFF until it has soaked live.
 ENV_DIRECT_PUBLISH = "AIDOT_DIRECT_PUBLISH"
-#: Timestamp policy: ``hybrid`` (default), ``arrival`` or ``camera``.
+#: Timestamp policy: ``hybrid``, ``arrival``, ``camera`` or ``steered``. Unset,
+#: SDES video is ``steered`` and every other track is ``hybrid``.
 ENV_PUBLISH_TIMESTAMPS = "AIDOT_PUBLISH_TIMESTAMPS"
+#: Every accepted value of ``AIDOT_PUBLISH_TIMESTAMPS``.
+TIMESTAMP_POLICIES = ("hybrid", "arrival", "camera", "steered")
 
 _TRUTHY = ("1", "true", "yes", "on")
 
@@ -60,6 +66,33 @@ REQUEST_TIMEOUT_S = 5.0
 PREROLL_MAX_PACKETS = 1500
 #: RTP payload budget for the DTLS H.264 packetizer.
 H264_MTU = 1200
+#: The largest backward step of a video track's unwrapped position treated as
+#: a genuine re-send; a bigger one is a new timestamp base, not a re-send.
+RESENT_MAX_BACK_S = 5.0
+
+#: Wall-time window of (arrival, camera time) samples the steered clock keeps.
+STEER_RATE_WINDOW_S = 20.0
+#: Window span (wall seconds) needed before the steered clock learns a rate.
+STEER_RATE_MIN_S = 6.0
+#: Camera-time separation needed between the two least-late envelope points.
+STEER_RATE_MIN_CAM_S = 1.0
+#: Clamp for the learned rate (wall seconds per camera second). A camera clock
+#: outside these bounds is not tracked; real cameras measure 0.9998-1.0002
+#: once re-sent frames are dropped.
+STEER_RATE_BOUNDS = (0.8, 1.25)
+#: Wall-time window over which the steered clock takes its latency floor.
+STEER_FLOOR_WINDOW_S = 10.0
+#: Time constant (wall seconds) for easing the steered output onto its target.
+STEER_PHASE_TAU_S = 3.0
+#: Latency above the floor that counts as an uncovered gap (a steered snap).
+STEER_SNAP_S = 2.5
+#: How long latency must stay above the floor by more than STEER_SNAP_S before
+#: it counts as an uncovered gap (a covered stall's backlog drains sooner, or
+#: keeps falling and restarts the hold).
+STEER_SNAP_HOLD_S = 1.0
+#: A fall in latency this large while a snap is pending means a covered backlog
+#: is draining; it restarts the snap hold.
+STEER_DRAIN_S = 0.1
 
 #: Exit codes this module reports through the Popen-compatible surface.
 #: A requested stop reports like a signal death (negative), which is what
@@ -90,7 +123,16 @@ def _publish_gap_warn_s() -> float:
 def timestamp_policy() -> str:
     """The configured timestamp policy; unknown values fall back to hybrid."""
     val = os.environ.get(ENV_PUBLISH_TIMESTAMPS, "hybrid").strip().lower()
-    return val if val in ("hybrid", "arrival", "camera") else "hybrid"
+    return val if val in TIMESTAMP_POLICIES else "hybrid"
+
+
+def video_timestamp_policy() -> str:
+    """The SDES video policy: an explicit, valid ``AIDOT_PUBLISH_TIMESTAMPS``
+    wins (as for every track); otherwise ``steered``. The SDES camera stamps
+    video on a 15 fps clock while delivering ~16.1 fps, so its timestamps run
+    ~7% fast; steering keeps its even spacing at real-time rate."""
+    val = os.environ.get(ENV_PUBLISH_TIMESTAMPS, "").strip().lower()
+    return val if val in TIMESTAMP_POLICIES else "steered"
 
 
 class RtspPublishError(RuntimeError):
@@ -217,6 +259,22 @@ def publish_sdp_from_serve_sdp(
     return "\r\n".join(out) + "\r\n", tracks, ports
 
 
+def _free_dynamic_pt(tracks: List[PublishTrack]) -> int:
+    """The first dynamic payload type from 97 that no track uses."""
+    used = {t.pt for t in tracks}
+    return next(pt for pt in range(97, 128) if pt not in used)
+
+
+def append_aac_media(sdp: str, track: PublishTrack) -> str:
+    """Append the AAC track's media section to an ANNOUNCE body."""
+    return sdp + (
+        f"m=audio 0 RTP/AVP {track.pt}\r\n"
+        f"a=rtpmap:{track.pt} MPEG4-GENERIC/{AAC_CLOCK_RATE}\r\n"
+        f"a=fmtp:{track.pt} {aac_fmtp()}\r\n"
+        f"a=control:trackID={track.index}\r\n"
+    )
+
+
 def build_publish_sdp(tracks: List[PublishTrack], fmtp: Optional[dict] = None) -> str:
     """ANNOUNCE body for tracks built in-process (the DTLS path)."""
     fmtp = fmtp or {}
@@ -291,9 +349,25 @@ class RtpTimeline:
       else by the arrival-clock delta.  This keeps the camera's even frame
       spacing and still absorbs the A001513's ~1.7 s backward step every
       ~30 s (the reason the ffmpeg serve stamps by arrival today).
+    * ``steered`` - camera time (the camera step as hybrid picks it) times a
+      rate learned from the least-late frames: over ``STEER_RATE_WINDOW_S``
+      the frame with the smallest latency in each half of the window gives
+      one envelope point, and the rate is the wall/camera slope between the
+      two.  A frame that arrives late (a delivery stall, a cold-start
+      backlog) was captured earlier than it arrived, so it keeps its camera
+      spacing and never moves the rate.  The output eases onto that target
+      with time constant ``STEER_PHASE_TAU_S``.  Latency more than
+      ``STEER_SNAP_S`` above the recent floor that persists for
+      ``STEER_SNAP_HOLD_S`` is an uncovered gap and snaps; a backlog that
+      drains sooner, or keeps draining (latency falling by more than
+      ``STEER_DRAIN_S`` restarts the hold), was a covered stall and keeps its
+      camera spacing.
+      This keeps the camera's even spacing while the output runs at real
+      time, for a camera whose clock does not.
 
     The output never steps backward and always advances by at least one tick
-    on a new input timestamp. ``repairs`` counts arrival substitutions.
+    on a new input timestamp. ``repairs`` counts arrival substitutions (and
+    steered snaps).
     """
 
     def __init__(
@@ -313,6 +387,25 @@ class RtpTimeline:
         self._out_ts = random.getrandbits(31)
         self._last_in: Optional[int] = None
         self._last_arrival = 0.0
+        # steered state: arrival anchor, output and camera position (s since
+        # the anchor), learned rate, the target the output eases onto, the
+        # base the first learned rate rebases from, (arrival, camera s,
+        # latency) samples, the previous frame's latency, and a pending snap
+        # (when its hold began, the floor latency went over, by how much it
+        # went over, and the latency the hold last restarted from).
+        self._anchor = 0.0
+        self._out_s = 0.0
+        self._cam_s = 0.0
+        self._rate = 1.0
+        self._learned = False
+        self._target_s = 0.0
+        self._base_target = 0.0
+        self._window: Deque[Tuple[float, float, float]] = collections.deque()
+        self._last_lat = 0.0
+        self._pend_since: Optional[float] = None
+        self._pend_floor: Optional[float] = None
+        self._pend_jump = 0.0
+        self._pend_min = 0.0
         self.repairs = 0
         self.packets = 0
 
@@ -322,12 +415,16 @@ class RtpTimeline:
         in_ts &= 0xFFFFFFFF
         if self._last_in is None:
             self._last_in, self._last_arrival = in_ts, now
+            self._anchor = now
+            self._window.append((now, 0.0, 0.0))
         elif in_ts != self._last_in:
             d = (in_ts - self._last_in) & 0xFFFFFFFF
             if d >= 0x80000000:
                 d -= 0x100000000
             by_arrival = max(1, round((now - self._last_arrival) * self.clock_rate))
-            if self.policy == "camera":
+            if self.policy == "steered":
+                step = self._steer(d, now)
+            elif self.policy == "camera":
                 step = d if d > 0 else 1
             elif self.policy == "arrival":
                 step = by_arrival
@@ -341,6 +438,94 @@ class RtpTimeline:
         self._seq = (self._seq + 1) & 0xFFFF
         self.packets += 1
         return self._seq, self._out_ts
+
+    def _steer(self, d: int, now: float) -> int:
+        """The steered output step, in ticks, for a new input timestamp that
+        moved by ``d`` ticks and arrived at ``now``."""
+        if 0 < d <= self.max_step:
+            cam_step = d / self.clock_rate
+        else:
+            # A repair advances the target by exactly the wall gap.
+            cam_step = (now - self._last_arrival) / self._rate
+            self.repairs += 1
+        dt = now - self._last_arrival
+        self._cam_s += cam_step
+        window = self._window
+        while window and now - window[0][0] > STEER_RATE_WINDOW_S:
+            window.popleft()
+        if (
+            self._pend_since is None
+            and window
+            and now - window[0][0] >= STEER_RATE_MIN_S
+        ):
+            self._learn_rate(now, cam_step)
+        self._target_s += cam_step * self._rate
+        lat_now = (now - self._anchor) - self._target_s
+        floor = min(
+            (lat for a, _, lat in window if now - a <= STEER_FLOOR_WINDOW_S),
+            default=self._last_lat,
+        )
+        floor_used = self._pend_floor if self._pend_since is not None else floor
+        over = lat_now - floor_used > STEER_SNAP_S
+        if over and self._pend_since is None:
+            self._pend_since, self._pend_floor = now, floor
+            self._pend_jump = lat_now - floor
+            self._pend_min = lat_now
+        elif over and lat_now - self._last_lat > STEER_SNAP_S:
+            # Another gap while the snap is pending: add its own excess.
+            self._pend_jump += lat_now - self._last_lat
+        elif over and lat_now < self._pend_min - STEER_DRAIN_S:
+            # Latency is still falling: a covered backlog is draining, so
+            # restart the hold. After an uncovered gap latency stays flat.
+            self._pend_since, self._pend_min = now, lat_now
+        if over and now - self._pend_since >= STEER_SNAP_HOLD_S:
+            # An uncovered gap: capture stopped, so move onto the floor by the
+            # excess measured at the gap itself. Latency measured later has
+            # been advanced at the provisional rate across the gap and hold.
+            jump = self._pend_jump
+            self._target_s += jump
+            self._base_target += jump
+            self.repairs += 1
+            step_s = self._target_s - self._out_s
+            window.clear()
+            self._pend_since = None
+            self._pend_floor = None
+        else:
+            if not over and self._pend_since is not None:
+                # The backlog drained: it was a covered stall.
+                self._pend_since = None
+                self._pend_floor = None
+                window.clear()
+            paced = cam_step * self._rate
+            ease = min(1.0, dt / STEER_PHASE_TAU_S)
+            step_s = paced + (self._target_s - paced - self._out_s) * ease
+        step = max(1, round(step_s * self.clock_rate))
+        self._out_s += step / self.clock_rate
+        self._last_lat = (now - self._anchor) - self._target_s
+        window.append((now, self._cam_s, self._last_lat))
+        return step
+
+    def _learn_rate(self, now: float, cam_step: float) -> None:
+        """Re-derive the steered rate from the least-late sample in each half
+        of the window; the first rate learned rebases the target."""
+        window = self._window
+        mid = window[0][0] + (now - window[0][0]) / 2
+        rate = self._rate
+        a = b = None
+        for s in window:
+            key = s[0] - s[1] * rate
+            if s[0] < mid:
+                if a is None or key < a[0] - a[1] * rate:
+                    a = s
+            elif b is None or key < b[0] - b[1] * rate:
+                b = s
+        if a is None or b is None or b[1] - a[1] <= STEER_RATE_MIN_CAM_S:
+            return
+        lo, hi = STEER_RATE_BOUNDS
+        self._rate = min(max((b[0] - a[0]) / (b[1] - a[1]), lo), hi)
+        if not self._learned:
+            self._learned = True
+            self._target_s = self._base_target + (self._cam_s - cam_step) * self._rate
 
 
 # --------------------------------------------------------------------------- #
@@ -979,8 +1164,32 @@ class LoopbackRtpPublisher:
         self._reorder = [RtpReorderBuffer() for _ in self._tracks]
         self._input_timeout = input_timeout_s
         self._gain = alaw_gain_table(audio_gain_db)
-        pol = policy or timestamp_policy()
-        self._timelines = [RtpTimeline(t.clock_rate, policy=pol) for t in self._tracks]
+        # An explicit policy applies to every track. Otherwise video is
+        # steered (the SDES camera's video clock runs ~7% fast) and audio,
+        # whose clock is exact, keeps the configured policy.
+        video_pol = policy or video_timestamp_policy()
+        audio_pol = policy or timestamp_policy()
+        self._timelines = [
+            RtpTimeline(
+                t.clock_rate, policy=video_pol if t.kind == "video" else audio_pol
+            )
+            for t in self._tracks
+        ]
+        # AAC after A-law for Home Assistant's HLS (see aac_track). Only for an
+        # A-law track: the encoder decodes A-law, and a PCMU camera is published
+        # exactly as before. self._tracks stays the media tracks - the reorder
+        # buffers and timelines index it - and the publisher gets the full list.
+        # The track itself is built on the worker (_setup_aac): this runs on
+        # the caller's event loop, and the first one imports av and numpy and
+        # opens a codec.
+        self._pcma_idx = next(
+            (i for i, t in enumerate(self._tracks) if t.codec == "PCMA"), None
+        )
+        self._aac: Optional[AacTrack] = None
+        self._aac_track: Optional[PublishTrack] = None
+        self._aac_seconds = 0.0
+        self._video_forwarded = False
+        self._publish_tracks = list(self._tracks)
         self._publisher_factory = publisher_factory
         self._publisher: Optional[RtspPublisher] = None
         self._stop = threading.Event()
@@ -989,6 +1198,39 @@ class LoopbackRtpPublisher:
         self._connect_done = threading.Event()
         self.dropped_pt = 0
         self.preroll_dropped = 0
+        self.dropped_resent = 0
+        self.resent_filter_resets = 0
+        # Per video track: the camera's own presentation time, unwrapped past
+        # its 32-bit rollover, and the high-water state `is_resent_video_frame`
+        # keeps over it - the same filter the DTLS path already applies. Never
+        # built for an audio track: this loopback path forwards audio as-is.
+        # `last_ssrc` is the SSRC last seen on this track: the bridge re-syncs
+        # its reorder buffer on a new SSRC (TUTK SFrames switching to the
+        # camera's real SRTP on this port), and the old unwrapped position
+        # means nothing in the new domain. `last_accepted_ts` is the raw
+        # timestamp of the last frame actually forwarded - a stray packet
+        # that gets dropped (`last_raw`) must never replace it, or a later
+        # packet of the still-current accepted frame gets re-judged and can
+        # flip to dropped, splitting the frame. `accepted_closed` is True
+        # once that same frame's marker packet has been forwarded - a
+        # re-send run that later replays this exact timestamp (it ends there
+        # by construction: the high-water mark IS that timestamp) must not
+        # reuse the continuation path, or the replay leaks; it belongs only
+        # to `last_accepted_ts`'s own frame, never to an unrelated one a
+        # dropped stray packet in between happened to be judged against.
+        self._video_dedup: dict = {
+            i: {
+                "last_raw": None,
+                "unwrapped": 0,
+                "drop": False,
+                "state": {},
+                "last_ssrc": None,
+                "last_accepted_ts": None,
+                "accepted_closed": False,
+            }
+            for i, t in enumerate(self._tracks)
+            if t.kind == "video"
+        }
         self.last_media = 0.0
         self._aidot_stderr_tail: List[str] = []
         self._aidot_stderr_notable: List[str] = []
@@ -1039,15 +1281,23 @@ class LoopbackRtpPublisher:
 
     def publish_stats(self) -> dict:
         pub = self._publisher
+        aac = self._aac
         return {
             "packets": pub.packets_sent if pub else 0,
             "bytes": pub.bytes_sent if pub else 0,
             "timestamp_repairs": sum(t.repairs for t in self._timelines),
             "dropped_pt": self.dropped_pt,
             "preroll_dropped": self.preroll_dropped,
+            "dropped_resent": self.dropped_resent,
+            "resent_filter_resets": self.resent_filter_resets,
             "reorder_late": sum(b.late for b in self._reorder),
             "reorder_skipped": sum(b.skipped for b in self._reorder),
-            "tracks": [f"{t.kind}:{t.codec}/{t.pt}" for t in self._tracks],
+            "tracks": [f"{t.kind}:{t.codec}/{t.pt}" for t in self._publish_tracks],
+            "aac_frames": aac.frames if aac is not None else 0,
+            "aac_seconds": round(self._aac_seconds, 3),
+            "aac_silence_samples": aac.pacer.silence_samples if aac is not None else 0,
+            "aac_trimmed_samples": aac.pacer.trimmed_samples if aac is not None else 0,
+            "aac_reanchors": aac.pacer.reanchors if aac is not None else 0,
         }
 
     def _log(self, level: int, msg: str, *args) -> None:
@@ -1060,12 +1310,32 @@ class LoopbackRtpPublisher:
 
     # -- worker -------------------------------------------------------------- #
 
+    def _setup_aac(self) -> None:
+        """Build the AAC track and announce it (worker thread, before connect)."""
+        if self._pcma_idx is None:
+            return
+        aac = make_aac_track(self.device_id)
+        if aac is None:
+            return
+        track = PublishTrack(
+            "audio",
+            _free_dynamic_pt(self._tracks),
+            AAC_CLOCK_RATE,
+            "MPEG4-GENERIC",
+            len(self._tracks),
+        )
+        self._sdp = append_aac_media(self._sdp, track)
+        self._publish_tracks.append(track)
+        self._aac_track = track
+        self._aac = aac
+
     def _run(self) -> None:
         code = EXIT_FAILED
         preroll: Deque[Tuple[int, bytes, float]] = collections.deque()
         started = time.monotonic()
         try:
-            pub = self._publisher_factory(self._url, self._sdp, self._tracks)
+            self._setup_aac()
+            pub = self._publisher_factory(self._url, self._sdp, self._publish_tracks)
             self._publisher = pub
             connector = threading.Thread(
                 target=self._connect,
@@ -1093,7 +1363,9 @@ class LoopbackRtpPublisher:
                         self._log(
                             logging.INFO,
                             "publishing %s to %s",
-                            ", ".join(f"{t.kind} {t.codec}" for t in self._tracks),
+                            ", ".join(
+                                f"{t.kind} {t.codec}" for t in self._publish_tracks
+                            ),
                             redact_url(self._url),
                         )
                         while preroll:
@@ -1120,6 +1392,14 @@ class LoopbackRtpPublisher:
                             preroll.append((idx, pkt, now))
                 if connected:
                     self._expire(pub, now)
+                if connected and self._aac is not None and self._video_forwarded:
+                    # Idle fill runs beside video, as on the DTLS path: a
+                    # camera that has gone quiet gets no silent AAC either.
+                    self._video_forwarded = False
+                    _aac_started = time.monotonic()
+                    for aseq, ats_, apl in self._aac.tick(now):
+                        self._send_aac(pub, aseq, ats_, apl)
+                    self._aac_seconds += time.monotonic() - _aac_started
                 if connected and pub.keepalive_due(now):
                     try:
                         pub.send_keepalive()
@@ -1144,16 +1424,33 @@ class LoopbackRtpPublisher:
                 pub.close(teardown=True)
             self._close_socks()
             stats = self.publish_stats()
+            aac_part = ""
+            if self._aac is not None:
+                aac_part = (
+                    ", AAC %d frames / %.3f s / %d silence-filled / %d trimmed"
+                    " / %d re-anchors"
+                    % (
+                        stats["aac_frames"],
+                        stats["aac_seconds"],
+                        stats["aac_silence_samples"],
+                        stats["aac_trimmed_samples"],
+                        stats["aac_reanchors"],
+                    )
+                )
             self._log(
                 logging.INFO,
                 "publish ended: %d packets, %d timestamp repair(s), %d dropped"
-                " (payload type), %d dropped (pre-roll), %d late, %d lost",
+                " (payload type), %d dropped (pre-roll), %d late, %d lost, %d"
+                " re-sent frames dropped, %d filter resets%s",
                 stats["packets"],
                 stats["timestamp_repairs"],
                 stats["dropped_pt"],
                 stats["preroll_dropped"],
                 stats["reorder_late"],
                 stats["reorder_skipped"],
+                stats["dropped_resent"],
+                stats["resent_filter_resets"],
+                aac_part,
             )
             self.returncode = code
             self._done.set()
@@ -1186,7 +1483,7 @@ class LoopbackRtpPublisher:
             return
         self.last_media = arrival
         for item in self._reorder[idx].push(
-            in_seq, (marker, ts, payload, arrival), arrival, ssrc
+            in_seq, (marker, ts, payload, arrival, ssrc), arrival, ssrc
         ):
             self._send(pub, idx, item)
 
@@ -1196,9 +1493,92 @@ class LoopbackRtpPublisher:
             for item in buf.expire(now):
                 self._send(pub, idx, item)
 
+    def _reset_resent_filter(self, dedup: dict) -> None:
+        """Start a video track's re-sent-frame filter fresh from the next
+        frame: the unwrapped position, high-water mark, last-accepted
+        timestamp and its closed flag all belong to a domain that no longer
+        applies."""
+        dedup["state"] = {}
+        dedup["unwrapped"] = 0
+        dedup["last_raw"] = None
+        dedup["last_accepted_ts"] = None
+        dedup["accepted_closed"] = False
+        self.resent_filter_resets += 1
+
     def _send(self, pub: RtspPublisher, idx: int, item) -> None:
-        marker, ts, payload, arrival = item
+        marker, ts, payload, arrival, ssrc = item
         track = self._tracks[idx]
+        dedup = self._video_dedup.get(idx)
+        if dedup is not None:
+            if dedup["last_ssrc"] is not None and ssrc != dedup["last_ssrc"]:
+                # The bridge re-syncs its reorder buffer on a new SSRC too
+                # (TUTK SFrames switching to the camera's real SRTP on this
+                # port) - the old unwrapped position means nothing here.
+                self._reset_resent_filter(dedup)
+            dedup["last_ssrc"] = ssrc
+            if (
+                dedup["last_accepted_ts"] is not None
+                and ts == dedup["last_accepted_ts"]
+                and not dedup["accepted_closed"]
+            ):
+                # A continuation of the still-open accepted frame - judge it
+                # only against that anchor, never against merely the last
+                # packet seen: a stray packet carrying an already-served
+                # timestamp, landing between two packets of the current
+                # accepted frame, must not itself become the anchor and
+                # flip the next packet's verdict (that split the frame and
+                # inflated dropped_resent per stray packet instead of once).
+                # Its marker closes the window: a re-send run that later
+                # replays this exact timestamp (it ends there by
+                # construction - the high-water mark IS that timestamp)
+                # must not take this path again, or the replay leaks.
+                if marker:
+                    dedup["accepted_closed"] = True
+            else:
+                if (
+                    dedup["last_raw"] is None
+                    or ts != dedup["last_raw"]
+                    or not dedup["drop"]
+                ):
+                    # A distinct timestamp not yet judged, or an exact
+                    # repeat of one that was ACCEPTED (`drop` is False):
+                    # only an accepted frame's window can have been closed
+                    # above, so a repeat reaching here with `ts == last_raw`
+                    # can only be that closed frame replayed - re-judging it
+                    # computes a zero delta, landing back on the high-water
+                    # mark its own acceptance set, correctly caught as
+                    # already served. A repeat of a still-open DROPPED
+                    # group's timestamp (`drop` is True) instead reuses the
+                    # cached verdict, so a multi-packet re-send run is
+                    # counted once, not per packet.
+                    if dedup["last_raw"] is not None and ts != dedup["last_raw"]:
+                        d = (ts - dedup["last_raw"]) & 0xFFFFFFFF
+                        if d >= 0x80000000:
+                            d -= 0x100000000
+                        new_pos = dedup["unwrapped"] + d
+                    else:
+                        new_pos = dedup["unwrapped"]
+                    hw = dedup["state"].get("hw")
+                    back_limit = RESENT_MAX_BACK_S * track.clock_rate
+                    if hw is not None and new_pos < hw - back_limit:
+                        # Bigger than any genuine re-send: a new timestamp
+                        # base, not a re-send run. Start fresh from this
+                        # frame instead of blacking out video until the old
+                        # high-water mark is caught back up to - which could
+                        # take hours.
+                        self._reset_resent_filter(dedup)
+                        new_pos = 0
+                    dedup["unwrapped"] = new_pos
+                    dedup["last_raw"] = ts
+                    dedup["drop"] = is_resent_video_frame(
+                        dedup["state"], dedup["unwrapped"]
+                    )
+                    if dedup["drop"]:
+                        self.dropped_resent += 1
+                if dedup["drop"]:
+                    return  # already served: not forwarded, not timelined
+                dedup["last_accepted_ts"] = ts
+                dedup["accepted_closed"] = marker
         if self._gain is not None and track.codec == "PCMA":
             payload = payload.translate(self._gain)
         seq, out_ts = self._timelines[idx].stamp(ts, arrival)
@@ -1208,6 +1588,23 @@ class LoopbackRtpPublisher:
                 build_rtp(
                     track.pt, marker, seq, out_ts, self._timelines[idx].ssrc, payload
                 ),
+            )
+        except RtspPublishError:
+            pass  # the loop's alive check ends the publish with the reason
+        if track.kind == "video":
+            self._video_forwarded = True
+        if idx == self._pcma_idx and self._aac is not None:
+            _aac_started = time.monotonic()
+            for aseq, ats_, apl in self._aac.feed(payload, out_ts, arrival):
+                self._send_aac(pub, aseq, ats_, apl)
+            self._aac_seconds += time.monotonic() - _aac_started
+
+    def _send_aac(self, pub: RtspPublisher, seq: int, ts: int, payload: bytes) -> None:
+        track = self._aac_track
+        assert track is not None and self._aac is not None
+        try:
+            pub.send_rtp(
+                track, build_rtp(track.pt, True, seq, ts, self._aac.ssrc, payload)
             )
         except RtspPublishError:
             pass  # the loop's alive check ends the publish with the reason
@@ -1301,13 +1698,20 @@ def dtls_rtp_publish_run(
     ``progress[0]`` on every frame written; exits on ``stop_flag`` or on a
     publish failure (recorded in ``result['error']``).
     """
-    from .protocol import is_resent_video_frame
-
     res = result if result is not None else {}
     video = PublishTrack("video", 96, 90000, "H264", 0)
     audio = PublishTrack("audio", 8, 8000, "PCMA", 1)
-    tracks = [video, audio]
-    sdp = build_publish_sdp(tracks, {96: "packetization-mode=1"})
+    # AAC after A-law: Home Assistant's HLS keeps only AAC/MP3 and asks for it by
+    # name; everything reading the first audio track keeps A-law. See aac_track.
+    aac = make_aac_track(device_id)
+    aac_t = (
+        PublishTrack("audio", 97, AAC_CLOCK_RATE, "MPEG4-GENERIC", 2) if aac else None
+    )
+    tracks = [video, audio] + ([aac_t] if aac_t else [])
+    fmtp = {96: "packetization-mode=1"}
+    if aac_t:
+        fmtp[97] = aac_fmtp()
+    sdp = build_publish_sdp(tracks, fmtp)
     pol = timestamp_policy()
     vtl = RtpTimeline(90000, policy=pol)
     atl = RtpTimeline(8000, policy=pol)
@@ -1321,6 +1725,11 @@ def dtls_rtp_publish_run(
     res.setdefault("dropped_resent", 0)
     res.setdefault("max_frame_gap_s", 0.0)
     res.setdefault("packets", 0)
+    res.setdefault("aac_frames", 0)
+    res.setdefault("aac_seconds", 0.0)
+    res.setdefault("aac_silence_samples", 0)
+    res.setdefault("aac_trimmed_samples", 0)
+    res.setdefault("aac_reanchors", 0)
     pub = publisher_factory(url, sdp, tracks)
     try:
         pub.connect()
@@ -1329,7 +1738,10 @@ def dtls_rtp_publish_run(
         _LOGGER.warning("camera %s: DTLS direct publish: %s", device_id, res["error"])
         return
     _LOGGER.info(
-        "camera %s: DTLS direct publish: H264+PCMA to %s", device_id, redact_url(url)
+        "camera %s: DTLS direct publish: %s to %s",
+        device_id,
+        "H264+PCMA+AAC" if aac else "H264+PCMA",
+        redact_url(url),
     )
     vstarted = False
     v0 = None
@@ -1365,6 +1777,7 @@ def dtls_rtp_publish_run(
     dropped_resent = 0
     first_arrival = None
     send_blocked = 0.0
+    aac_seconds = 0.0
     gap_skipped = 0
     gap_dropped = 0
     try:
@@ -1376,6 +1789,7 @@ def dtls_rtp_publish_run(
                 )
                 return
             moved = False
+            vpublished = False
             while True:
                 try:
                     data, ts, kf = vq.get_nowait()
@@ -1428,6 +1842,7 @@ def dtls_rtp_publish_run(
                             )
                     last_frame = now
                     progress[0] = now
+                    vpublished = True
                     # This frame's own send belongs to the NEXT gap: the gap
                     # above is measured to `now`, which precedes it.
                     first_arrival = None
@@ -1444,13 +1859,31 @@ def dtls_rtp_publish_run(
                     continue  # no audio ahead of the first picture
                 seq, out_ts = atl.stamp(ats)
                 _a_started = time.monotonic()
+                conditioned = agc.process(adata)
                 pub.send_rtp(
-                    audio,
-                    build_rtp(8, False, seq, out_ts, atl.ssrc, agc.process(adata)),
+                    audio, build_rtp(8, False, seq, out_ts, atl.ssrc, conditioned)
                 )
                 # Audio shares the publisher's lock, so a blocked audio send
-                # holds up the next picture just as a video one does.
+                # holds up the next picture just as a video one does. Charge
+                # only the PCMA send here - the AAC encode/send below is
+                # timed separately, into aac_seconds, so it does not skew
+                # this diagnostic between the audio and video paths.
                 send_blocked += time.monotonic() - _a_started
+                if aac:
+                    _aac_started = time.monotonic()
+                    for aseq, ats_, apl in aac.feed(conditioned, out_ts, _a_started):
+                        pub.send_rtp(
+                            aac_t, build_rtp(97, True, aseq, ats_, aac.ssrc, apl)
+                        )
+                    aac_seconds += time.monotonic() - _aac_started
+            if aac and vpublished:
+                # Idle fill beside video, once per pass and AFTER the audio
+                # drain: after a stall, audio queued behind the video is real
+                # and must be fed first, not trimmed as covered by silence.
+                _aac_started = time.monotonic()
+                for aseq, ats_, apl in aac.tick(_aac_started):
+                    pub.send_rtp(aac_t, build_rtp(97, True, aseq, ats_, aac.ssrc, apl))
+                aac_seconds += time.monotonic() - _aac_started
             if pub.keepalive_due():
                 pub.send_keepalive()
             if not moved:
@@ -1464,4 +1897,21 @@ def dtls_rtp_publish_run(
         res["max_frame_gap_s"] = round(max_gap, 2)
         res["skipped_pre_keyframe"] = skipped_pre_keyframe
         res["dropped_resent"] = dropped_resent
+        res["aac_frames"] = aac.frames if aac else 0
+        res["aac_seconds"] = round(aac_seconds, 3)
+        res["aac_silence_samples"] = aac.pacer.silence_samples if aac else 0
+        res["aac_trimmed_samples"] = aac.pacer.trimmed_samples if aac else 0
+        res["aac_reanchors"] = aac.pacer.reanchors if aac else 0
+        if aac:
+            _LOGGER.info(
+                "camera %s: DTLS direct publish: AAC %d frames, %.3f s"
+                " encoding+sending, %d samples silence-filled, %d trimmed,"
+                " %d re-anchors",
+                device_id,
+                res["aac_frames"],
+                res["aac_seconds"],
+                res["aac_silence_samples"],
+                res["aac_trimmed_samples"],
+                res["aac_reanchors"],
+            )
         pub.close(teardown=True)

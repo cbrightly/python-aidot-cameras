@@ -6,6 +6,50 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- **The direct publish can carry an AAC track, so Home Assistant's HLS player and
+  recordings can have sound (opt-in).** Home Assistant's stream component keeps AAC and MP3
+  audio and drops G.711, and the direct publish sent the camera's A-law only,
+  so the HLS dialog and `camera.record` were silent. It can now also publish an
+  AAC-LC 48 kHz mono track, after the A-law one, encoded in-process. Its
+  timestamps follow the camera's own audio clock and do not drift against the
+  picture; when an HLS view starts a cold camera session, audio can lead the
+  picture by up to about 2 s for that recording, because the camera's
+  buffered first keyframe is older than the first audio. Gaps are filled with
+  silence, and a camera that sends no audio still gets a continuous silent
+  track. Everything that reads the first audio track - WebRTC included -
+  still gets A-law, unchanged. A consumer selects the track with go2rtc's
+  `audio=aac` (the Home Assistant integration does this on its HLS path
+  only). **Off by default**: set `AIDOT_PUBLISH_AAC=1` to publish it; unset,
+  the publish is exactly as before. When on, it costs one AAC encode per
+  streaming camera for as long as its direct publish runs, watched or not.
+  A camera whose audio is mu-law (PCMU) gets no AAC track. It absorbs small
+  camera audio timestamp jitter (up to 40 ms ahead, or up to one packet
+  behind) instead of filling or trimming it.
+
+### Changed
+
+- **`AIDOT_PUBLISH_TIMESTAMPS` accepts `steered`, and SDES video defaults to
+  it.** Other tracks stay `hybrid`. Setting the variable applies to every
+  track, as before.
+- **`publish_stats()` and the direct-publish `result` dict report the AAC
+  track and the SDES re-send filter.** New keys: `dropped_resent` (SDES),
+  `resent_filter_resets`, `aac_frames`, `aac_seconds`, `aac_silence_samples`,
+  `aac_trimmed_samples`, `aac_reanchors`. `packets` and `tracks` now include
+  the AAC track where one is publishing.
+
+### Fixed
+
+- **SDES video now runs at real time in HLS and recordings.** The direct
+  publish of an SDES camera republished video frames the camera re-sends (it
+  now drops them, as the DTLS path already did) and trusted a video clock
+  that runs ~7% fast; it now steers that clock to real time, with a rate
+  learned from the least-late frames so a cold-start backlog (up to ~1.9 s of
+  camera time delivered in the first second) keeps its camera spacing.
+  Two-minute recordings measured video 121.8 s after (was 130.9 s) on the
+  kitchen L2 and 120.7 s after (was 129.7 s) on the PTZ.
+
 ## [1.0.0rc31]
 
 ### Security
