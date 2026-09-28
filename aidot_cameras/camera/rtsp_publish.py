@@ -385,7 +385,8 @@ class RtpTimeline:
         # the anchor), learned rate, the target the output eases onto, the
         # base the first learned rate rebases from, (arrival, camera s,
         # latency) samples, the previous frame's latency, and a pending snap
-        # (when latency first went over, and the floor it went over).
+        # (when latency first went over, the floor it went over, and by how
+        # much it went over then).
         self._anchor = 0.0
         self._out_s = 0.0
         self._cam_s = 0.0
@@ -398,6 +399,7 @@ class RtpTimeline:
         self._last_lat = 0.0
         self._pend_since: Optional[float] = None
         self._pend_floor: Optional[float] = None
+        self._pend_jump = 0.0
         self.repairs = 0
         self.packets = 0
 
@@ -461,9 +463,12 @@ class RtpTimeline:
         over = lat_now - floor_used > STEER_SNAP_S
         if over and self._pend_since is None:
             self._pend_since, self._pend_floor = now, floor
+            self._pend_jump = lat_now - floor
         if over and now - self._pend_since >= STEER_SNAP_HOLD_S:
-            # An uncovered gap: capture stopped, so move onto the floor.
-            jump = lat_now - self._pend_floor
+            # An uncovered gap: capture stopped, so move onto the floor by the
+            # excess measured at the gap itself. Latency measured later has
+            # been advanced at the provisional rate across the gap and hold.
+            jump = self._pend_jump
             self._target_s += jump
             self._base_target += jump
             self.repairs += 1

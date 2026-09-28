@@ -330,30 +330,69 @@ def _steer_frames(tl, frames):
     return [(a - a0, ((o - o0) & 0xFFFFFFFF) / tl.clock_rate) for a, o in rows]
 
 
-def _camera_frames(rng, fps, seconds, *, start_ts=1000, t0=100.0, step=6000):
+def _camera_frames(
+    rng, fps, seconds, *, start_ts=1000, t0=100.0, step=6000, captures=None
+):
+    """Frames captured every ``1 / fps`` wall seconds from ``t0`` and delivered
+    with +-15 ms of jitter. Each capture instant is appended to ``captures``
+    when given."""
     frames, ts = [], start_ts
     for i in range(int(seconds * fps)):
         frames.append((ts & 0xFFFFFFFF, t0 + i / fps + rng.uniform(-0.015, 0.015)))
+        if captures is not None:
+            captures.append(t0 + i / fps)
         ts += step
     return frames
+
+
+#: Seeds every fast-clock steered test must pass on, not just one.
+STEER_SEEDS = range(1, 31)
+
+
+def _vs_capture(rows, captures):
+    """``(wall, output s)`` rows with wall = each frame's capture instant, both
+    relative to the first frame. Capture, not arrival: delivery jitter is not
+    the output's wander."""
+    c0 = captures[0]
+    return [(c - c0, o) for c, (_, o) in zip(captures, rows)]
+
+
+def _locked(rows, since, *, offset_since=None):
+    """What the steered clock guarantees on a fast camera clock, over the
+    ``(wall, output s)`` rows from wall ``since``: ``(rate, wander, offset)``
+    with rate = output / wall advance, wander = max - min of output - wall,
+    and offset = the largest ``|output - wall|`` from ``offset_since`` (default
+    ``since``). A fast clock locks at a constant offset, not onto wall time."""
+    tail = [(w, o) for w, o in rows if w >= since]
+    (w1, o1), (w2, o2) = tail[0], tail[-1]
+    diff = [o - w for w, o in tail]
+    start = since if offset_since is None else offset_since
+    offset = max(abs(o - w) for w, o in rows if w >= start)
+    return (o2 - o1) / (w2 - w1), max(diff) - min(diff), offset
+
+
+def _assert_locked(seed, rate, wander, offset):
+    assert 0.999 <= rate <= 1.001, f"seed {seed}: rate {rate:.5f}"
+    assert wander < 0.05, f"seed {seed}: wander {wander:.4f}"
+    assert offset < 0.2, f"seed {seed}: offset {offset:.4f}"
 
 
 def test_steered_locks_a_fast_camera_clock_to_real_time():
     """The SDES camera case: a 15 fps clock (+6000 ticks) on ~16.1 fps of
     delivery. hybrid runs ~7% slow; steered must run at real time and stay
     smoother than arrival stamping."""
-    rng = random.Random(1)
-    rows = _steer_frames(
-        rp.RtpTimeline(90000, policy="steered"), _camera_frames(rng, 16.1, 120)
-    )
-    wall, out = rows[-1]
-    assert abs(out / wall - 1.0) <= 0.005
-    assert max(abs(o - w) for w, o in rows if w >= 10.0) < 0.10
-    steps = [b[1] - a[1] for a, b in zip(rows, rows[1:])]
-    # steered measures ~1.5 ms of step-to-step jitter here, nearly all of it
-    # easing onto the rate first learned at 6 s (~0.01 ms after 20 s);
-    # arrival stamping on the same stream measures ~11.9 ms.
-    assert statistics.pstdev(steps) < 0.003
+    for seed in STEER_SEEDS:
+        captures = []
+        frames = _camera_frames(random.Random(seed), 16.1, 120, captures=captures)
+        rows = _steer_frames(rp.RtpTimeline(90000, policy="steered"), frames)
+        wall, out = rows[-1]
+        assert abs(out / wall - 1.0) <= 0.005, f"seed {seed}"
+        _assert_locked(seed, *_locked(_vs_capture(rows, captures), 20.0))
+        steps = [b[1] - a[1] for a, b in zip(rows, rows[1:])]
+        # steered measures ~1.5 ms of step-to-step jitter here, nearly all of
+        # it easing onto the rate first learned at 6 s (~0.01 ms after 20 s);
+        # arrival stamping on the same stream measures ~11.9 ms.
+        assert statistics.pstdev(steps) < 0.003, f"seed {seed}"
 
 
 def test_steered_keeps_an_accurate_camera_as_is():
@@ -398,21 +437,19 @@ def test_steered_never_steps_backward_on_a_camera_backward_jump():
     assert tl.repairs >= 1
 
 
-def test_steered_rides_through_a_delivery_stall_without_snapping():
-    """A 1.7 s DELIVERY stall, not a capture gap: the camera's own clock
-    stays continuous through it (every frame still steps by one normal
-    +6000 tick), but the backlog generated during the stall arrives in a
-    ~0.1 s burst once the connection catches up. The steered output must
-    keep riding the camera's spacing through this, not snap onto the late
-    burst arrival."""
-    rng = random.Random(1)
+def _delivery_stall(seed, after_s=50):
+    """30 s of an accurate 15 fps camera, a 1.7 s DELIVERY stall whose backlog
+    arrives in a ~0.1 s burst, then ``after_s`` more. Delivery resumes from the
+    burst's end, so the arrival floor stays ~1/15 s later than before the
+    stall. Returns the frames, each frame's capture time and the index of the
+    first frame after the burst."""
+    rng = random.Random(seed)
     fps = 15.0
     step = 6000
-    clock_rate = 90000
     t0 = 100.0
     n1 = int(30 * fps)
     n_stall = round(1.7 * fps)
-    n3 = int(30 * fps)
+    n3 = int(after_s * fps)
 
     gen_times = []
     frames = []  # (in_ts, arrival)
@@ -436,31 +473,46 @@ def test_steered_rides_through_a_delivery_stall_without_snapping():
         wall += 1 / fps
         frames.append((ts & 0xFFFFFFFF, wall + rng.uniform(-0.015, 0.015)))
         ts += step
-
-    tl = rp.RtpTimeline(clock_rate, policy="steered")
-    outs = [tl.stamp(in_ts, arrival)[1] for in_ts, arrival in frames]
-    outs_s = [((o - outs[0]) & 0xFFFFFFFF) / clock_rate for o in outs]
-
-    assert tl.repairs == 0
-    assert all(b > a for a, b in zip(outs_s, outs_s[1:]))
-    steps = [b - a for a, b in zip(outs_s, outs_s[1:])]
-    assert max(steps) < 0.2
-
-    gen0 = gen_times[0]
-    tail_start = n1 + n_stall
-    tail = [
-        abs(o - (g - gen0)) for o, g in zip(outs_s[tail_start:], gen_times[tail_start:])
-    ]
-    assert tail and max(tail) < 0.05
+    return frames, gen_times, n1 + n_stall
 
 
-def _gap_frames(fps, before_s, gap_s, after_s, *, step=6000, jump=None):
+def test_steered_rides_through_a_delivery_stall_without_snapping():
+    """A 1.7 s DELIVERY stall, not a capture gap: the camera's own clock
+    stays continuous through it (every frame still steps by one normal
+    +6000 tick), but the backlog generated during the stall arrives in a
+    ~0.1 s burst once the connection catches up. The steered output must
+    keep riding the camera's spacing through this, not snap onto the late
+    burst arrival. Delivery then stays ~1/15 s later than before, which the
+    output cannot tell from a phase step: it follows it to a new constant
+    offset, so rate and wander are measured 20 s after the burst."""
+    clock_rate = 90000
+    for seed in STEER_SEEDS:
+        frames, gen_times, after = _delivery_stall(seed)
+        tl = rp.RtpTimeline(clock_rate, policy="steered")
+        outs = [tl.stamp(in_ts, arrival)[1] for in_ts, arrival in frames]
+        outs_s = [((o - outs[0]) & 0xFFFFFFFF) / clock_rate for o in outs]
+
+        assert tl.repairs == 0, f"seed {seed}"
+        assert all(b > a for a, b in zip(outs_s, outs_s[1:])), f"seed {seed}"
+        steps = [b - a for a, b in zip(outs_s, outs_s[1:])]
+        assert max(steps) < 0.2, f"seed {seed}"
+
+        gen0 = gen_times[0]
+        rows = [(g - gen0, o) for g, o in zip(gen_times, outs_s)]
+        since = gen_times[after] - gen0 + 20.0
+        _assert_locked(seed, *_locked(rows, since, offset_since=20.0))
+
+
+def _gap_frames(
+    fps, before_s, gap_s, after_s, *, step=6000, jump=None, seed=1, captures=None
+):
     """``before_s`` of frames, ``gap_s`` of silence, then ``after_s`` more.
     The camera stamp advances one normal step across the gap (an uncovered
-    gap) unless ``jump`` gives the stamp's own jump in ticks. Returns the
-    frames and the index of the first frame after the gap."""
-    rng = random.Random(1)
-    before = _camera_frames(rng, fps, before_s, step=step)
+    gap) unless ``jump`` gives the stamp's own jump in ticks. ``seed`` seeds
+    the jitter; ``captures`` is as for ``_camera_frames``. Returns the frames
+    and the index of the first frame after the gap."""
+    rng = random.Random(seed)
+    before = _camera_frames(rng, fps, before_s, step=step, captures=captures)
     last_ts, last_arrival = before[-1]
     after = _camera_frames(
         rng,
@@ -469,6 +521,7 @@ def _gap_frames(fps, before_s, gap_s, after_s, *, step=6000, jump=None):
         start_ts=(last_ts + (step if jump is None else jump)) & 0xFFFFFFFF,
         t0=last_arrival + gap_s,
         step=step,
+        captures=captures,
     )
     return before + after, len(before)
 
@@ -509,29 +562,41 @@ def test_steered_snaps_a_12s_uncovered_gap():
 
 def test_steered_snap_before_learning_keeps_phase():
     """A fast camera clock with an uncovered gap before any rate is learned:
-    the snap must not move the base the first learned rate rebases from."""
-    frames, _ = _gap_frames(16.1, 3, 4.0, 60)
-    rows = _steer_frames(rp.RtpTimeline(90000, policy="steered"), frames)
-    assert max(abs(o - w) for w, o in rows if w >= 30.0) < 0.06
+    the snap must not move the base the first learned rate rebases from. The
+    snap restarts learning, so the lock is measured 20 s after the gap."""
+    for seed in STEER_SEEDS:
+        captures = []
+        frames, first = _gap_frames(16.1, 3, 4.0, 60, seed=seed, captures=captures)
+        rows = _vs_capture(
+            _steer_frames(rp.RtpTimeline(90000, policy="steered"), frames), captures
+        )
+        _assert_locked(seed, *_locked(rows, rows[first][0] + 20.0))
 
 
 def test_steered_repair_gap_on_a_fast_clock():
     """A 20 s gap across which the camera stamp jumps more than max_step: the
     repair must advance the target by exactly the wall gap, not the wall gap
     times the learned rate."""
-    frames, first = _gap_frames(16.1, 30, 20.0, 20, jump=25 * 90000)
-    tl = rp.RtpTimeline(90000, policy="steered")
-    rows = _steer_frames(tl, frames)
-    assert tl.repairs >= 1
-    assert max(abs(o - w) for w, o in rows[first:]) < 0.1
+    for seed in STEER_SEEDS:
+        captures = []
+        frames, _ = _gap_frames(
+            16.1, 30, 20.0, 20, jump=25 * 90000, seed=seed, captures=captures
+        )
+        tl = rp.RtpTimeline(90000, policy="steered")
+        rows = _vs_capture(_steer_frames(tl, frames), captures)
+        assert tl.repairs >= 1, f"seed {seed}"
+        _assert_locked(seed, *_locked(rows, 20.0))
 
 
 def test_steered_low_fps_fast_clock():
     """A 5 fps camera clock (+18000 ticks) delivered at ~5.37 fps."""
-    rng = random.Random(1)
-    frames = _camera_frames(rng, 5.367, 60, step=18000)
-    rows = _steer_frames(rp.RtpTimeline(90000, policy="steered"), frames)
-    assert max(abs(o - w) for w, o in rows if w >= 15.0) < 0.06
+    for seed in STEER_SEEDS:
+        captures = []
+        frames = _camera_frames(
+            random.Random(seed), 5.367, 60, step=18000, captures=captures
+        )
+        rows = _steer_frames(rp.RtpTimeline(90000, policy="steered"), frames)
+        _assert_locked(seed, *_locked(_vs_capture(rows, captures), 20.0))
 
 
 def _covered_stall(stall_s):
