@@ -316,7 +316,7 @@ What go2rtc needs, and what goes wrong without it:
 | Traffic at least every 15 s | go2rtc drops the publisher; the publisher sends `OPTIONS` every 5 s |
 
 Useful log lines (logger `aidot_cameras.camera.rtsp_publish`):
-`direct publish: publishing audio PCMA, audio MPEG4-GENERIC, video H264 to ...`
+`direct publish: publishing audio PCMA, video H264, audio MPEG4-GENERIC to ...`
 when it attaches, and
 `publish ended: N packets, N timestamp repair(s), ..., N late, N lost, N
 re-sent frames dropped, N filter resets, AAC N frames / N s / N

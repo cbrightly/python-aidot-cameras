@@ -1121,7 +1121,7 @@ def test_loopback_publish_adds_aac_after_pcma(go2rtc, monkeypatch):
     assert stats["aac_frames"] >= 20
     assert stats["aac_seconds"] > 0
     assert "audio:MPEG4-GENERIC/" in str(stats["tracks"])
-    # Audio only, contiguous stamps: nothing filled, trimmed or re-anchored.
+    # Contiguous audio stamps: nothing filled, trimmed or re-anchored.
     assert stats["aac_silence_samples"] == 0
     assert stats["aac_trimmed_samples"] == 0
     assert stats["aac_reanchors"] == 0
