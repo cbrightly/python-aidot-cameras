@@ -36,9 +36,11 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 - **SDES video now runs at real time in HLS and recordings.** The direct
   publish of an SDES camera republished video frames the camera re-sends (it
   now drops them, as the DTLS path already did) and trusted a video clock
-  that runs ~7% fast; it now steers that clock to real time. Two-minute
-  recordings measured video 130.9 s / audio 117.0 s before; 119.8 / 119.8 s
-  after.
+  that runs ~7% fast; it now steers that clock to real time, with a rate
+  learned from the least-late frames so a cold-start backlog (up to ~1.9 s of
+  camera time delivered in the first second) keeps its camera spacing.
+  Two-minute recordings measured video 130.9 s / audio 117.0 s before;
+  119.8 / 119.8 s after.
 
 ## [1.0.0rc31]
 

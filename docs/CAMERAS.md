@@ -284,7 +284,9 @@ and `http://` serves are unchanged). Design, measurements and rollout:
 - **Timestamps.** `AIDOT_PUBLISH_TIMESTAMPS` (unset: SDES video `steered` -
   the camera's spacing at real-time rate - and every other track `hybrid`)
   keeps the camera's frame spacing and substitutes the arrival clock for a
-  backward step or a jump.
+  backward step or a jump. `steered` stamps camera time times a rate learned
+  from the least-late frames, so a backlog the camera delivers at cold start
+  keeps its camera spacing instead of being squeezed toward its arrival.
 - **H.264 only.** The publisher is measured on H.264; a camera's H.265 has
   never gone through it (the A001064 picks its own codec and answered H.264 in
   9 of 9 sessions, 4 of them offered H.265 first). A session narrowed to H.265

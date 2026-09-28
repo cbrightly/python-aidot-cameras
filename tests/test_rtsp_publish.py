@@ -350,8 +350,9 @@ def test_steered_locks_a_fast_camera_clock_to_real_time():
     assert abs(out / wall - 1.0) <= 0.005
     assert max(abs(o - w) for w, o in rows if w >= 10.0) < 0.10
     steps = [b[1] - a[1] for a, b in zip(rows, rows[1:])]
-    # steered measures ~0.6 ms of step-to-step jitter here; arrival stamping
-    # on the same stream measures ~11.9 ms.
+    # steered measures ~1.5 ms of step-to-step jitter here, nearly all of it
+    # easing onto the rate first learned at 6 s (~0.01 ms after 20 s);
+    # arrival stamping on the same stream measures ~11.9 ms.
     assert statistics.pstdev(steps) < 0.003
 
 
@@ -480,6 +481,62 @@ def test_steered_relearns_rate_cleanly_after_an_uncovered_gap():
     tail = [abs(o - w) for w, o in rows[len(before) :]]
     assert tl.repairs == 1
     assert max(tail) < 0.10
+
+
+def _monotonic(arrivals, gap=0.001):
+    """Arrival times as a real clock reports them: never before the last."""
+    out = []
+    for a in arrivals:
+        out.append(max(a, out[-1] + gap) if out else a)
+    return out
+
+
+def test_steered_keeps_a_cold_start_backlog_at_camera_spacing():
+    """The cold-start backlog: an SDES camera sometimes delivers ~1.9 s of
+    camera time in its first ~0.1 s. Those frames were captured earlier than
+    they arrive, so their camera spacing is the truth; the steered output
+    must not compress them toward the burst's arrival times."""
+    rng = random.Random(1)
+    fps, t0 = 15.0, 100.0
+    captures = [i / fps for i in range(int(90 * fps))]
+    backlog = [c for c in captures if c < 1.9]
+    arrivals = [t0 + 1.9 + 0.1 * j / len(backlog) for j in range(len(backlog))]
+    arrivals += [
+        t0 + c + 0.05 + rng.uniform(-0.01, 0.01) for c in captures[len(backlog) :]
+    ]
+    frames = [
+        ((1000 + 6000 * i) & 0xFFFFFFFF, a) for i, a in enumerate(_monotonic(arrivals))
+    ]
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    err = max(abs(o - c) for (_, o), c in zip(rows, captures))
+    assert tl.repairs == 0
+    assert err < 0.05
+
+
+def test_steered_learns_rate_from_the_least_late_frames():
+    """An accurate camera whose delivery is held for 0.4 s every 5th second
+    and then released at once. The held frames are late, not fast: the rate
+    comes from the least-late frames, so output runs at the camera's rate
+    and on its capture times."""
+    rng = random.Random(1)
+    fps, t0 = 15.0, 100.0
+    captures = [i / fps for i in range(int(60 * fps))]
+    arrivals = []
+    for c in captures:
+        sec = int(c + 1e-9)
+        if sec and sec % 5 == 0 and c - sec < 0.4 - 1e-9:
+            arrivals.append(t0 + sec + 0.4)  # held, released together
+        else:
+            arrivals.append(t0 + c + 0.05 + rng.uniform(-0.01, 0.01))
+    frames = [
+        ((1000 + 6000 * i) & 0xFFFFFFFF, a) for i, a in enumerate(_monotonic(arrivals))
+    ]
+    rows = _steer_frames(rp.RtpTimeline(90000, policy="steered"), frames)
+    out = [o for _, o in rows]
+    assert 0.999 <= out[-1] / captures[-1] <= 1.001
+    tail = [abs(o - c) for o, c in zip(out, captures) if c >= 10.0]
+    assert max(tail) < 0.05
 
 
 def test_video_timestamp_policy(monkeypatch):

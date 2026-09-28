@@ -70,16 +70,19 @@ H264_MTU = 1200
 #: a genuine re-send; a bigger one is a new timestamp base, not a re-send.
 RESENT_MAX_BACK_S = 5.0
 
-#: Wall-time window over which the steered clock learns the camera's rate.
+#: Wall-time window of (arrival, camera time) samples the steered clock keeps.
 STEER_RATE_WINDOW_S = 20.0
-#: Wall time needed in the window before the learned rate is used.
-STEER_RATE_MIN_S = 2.0
+#: Window span (wall seconds) needed before the steered clock learns a rate.
+STEER_RATE_MIN_S = 6.0
+#: Camera-time separation needed between the two least-late envelope points.
+STEER_RATE_MIN_CAM_S = 1.0
 #: Clamp for the learned rate (wall seconds per camera second).
 STEER_RATE_BOUNDS = (0.8, 1.25)
-#: Fraction of the remaining phase error the steered clock corrects per
-#: frame (0.02 per frame at ~16 fps is a ~3 s time constant).
-STEER_PHASE_GAIN = 0.02
-#: A phase error larger than this snaps the steered output to wall time.
+#: Wall-time window over which the steered clock takes its latency floor.
+STEER_FLOOR_WINDOW_S = 10.0
+#: Time constant (wall seconds) for easing the steered output onto its target.
+STEER_PHASE_TAU_S = 3.0
+#: Latency above the floor that counts as an uncovered gap (a steered snap).
 STEER_SNAP_S = 2.5
 
 #: Exit codes this module reports through the Popen-compatible surface.
@@ -337,12 +340,17 @@ class RtpTimeline:
       else by the arrival-clock delta.  This keeps the camera's even frame
       spacing and still absorbs the A001513's ~1.7 s backward step every
       ~30 s (the reason the ffmpeg serve stamps by arrival today).
-    * ``steered`` - by the camera step (as hybrid picks it) scaled by the
-      camera's rate learned against wall time over ``STEER_RATE_WINDOW_S``,
-      plus ``STEER_PHASE_GAIN`` of the remaining phase error to wall time; a
-      phase error over ``STEER_SNAP_S`` snaps to wall time.  This keeps the
-      camera's even spacing while the output runs at real time, for a camera
-      whose clock does not.
+    * ``steered`` - camera time (the camera step as hybrid picks it) times a
+      rate learned from the least-late frames: over ``STEER_RATE_WINDOW_S``
+      the frame with the smallest latency in each half of the window gives
+      one envelope point, and the rate is the wall/camera slope between the
+      two.  A frame that arrives late (a delivery stall, a cold-start
+      backlog) was captured earlier than it arrived, so it keeps its camera
+      spacing and never moves the rate.  The output eases onto that target
+      with time constant ``STEER_PHASE_TAU_S``; latency more than
+      ``STEER_SNAP_S`` above the recent floor is an uncovered gap and snaps.
+      This keeps the camera's even spacing while the output runs at real
+      time, for a camera whose clock does not.
 
     The output never steps backward and always advances by at least one tick
     on a new input timestamp. ``repairs`` counts arrival substitutions (and
@@ -366,13 +374,19 @@ class RtpTimeline:
         self._out_ts = random.getrandbits(31)
         self._last_in: Optional[int] = None
         self._last_arrival = 0.0
-        # steered state: wall anchor, output position (s since the anchor),
-        # learned rate, and (arrival, camera elapsed s) samples for the rate.
+        # steered state: arrival anchor, output and camera position (s since
+        # the anchor), learned rate, the target the output eases onto, the
+        # base the first learned rate rebases from, and (arrival, camera s,
+        # latency) samples.
         self._anchor = 0.0
         self._out_s = 0.0
+        self._cam_s = 0.0
         self._rate = 1.0
-        self._cam_elapsed = 0.0
-        self._rate_window: Deque[Tuple[float, float]] = collections.deque()
+        self._learned = False
+        self._target_s = 0.0
+        self._base_target = 0.0
+        self._base_cam = 0.0
+        self._window: Deque[Tuple[float, float, float]] = collections.deque()
         self.repairs = 0
         self.packets = 0
 
@@ -383,7 +397,7 @@ class RtpTimeline:
         if self._last_in is None:
             self._last_in, self._last_arrival = in_ts, now
             self._anchor = now
-            self._rate_window.append((now, 0.0))
+            self._window.append((now, 0.0, 0.0))
         elif in_ts != self._last_in:
             d = (in_ts - self._last_in) & 0xFFFFFFFF
             if d >= 0x80000000:
@@ -410,35 +424,64 @@ class RtpTimeline:
         """The steered output step, in ticks, for a new input timestamp that
         moved by ``d`` ticks and arrived at ``now``."""
         if 0 < d <= self.max_step:
-            cam_step_s = d / self.clock_rate
+            cam_step = d / self.clock_rate
         else:
-            cam_step_s = now - self._last_arrival
+            cam_step = now - self._last_arrival
             self.repairs += 1
-        self._cam_elapsed += cam_step_s
-        window = self._rate_window
-        window.append((now, self._cam_elapsed))
-        while now - window[0][0] > STEER_RATE_WINDOW_S:
+        dt = now - self._last_arrival
+        self._cam_s += cam_step
+        window = self._window
+        while window and now - window[0][0] > STEER_RATE_WINDOW_S:
             window.popleft()
-        prev_rate = self._rate
-        wall_span = window[-1][0] - window[0][0]
-        if wall_span >= STEER_RATE_MIN_S:
-            cam_span = window[-1][1] - window[0][1]
-            if cam_span > 0:
-                lo, hi = STEER_RATE_BOUNDS
-                self._rate = min(max(wall_span / cam_span, lo), hi)
-        wall_s = now - self._anchor
-        err = wall_s - (self._out_s + cam_step_s * self._rate)
-        if abs(err) > STEER_SNAP_S:
-            step_s = wall_s - self._out_s
+        if window and now - window[0][0] >= STEER_RATE_MIN_S:
+            self._learn_rate(now, cam_step)
+        self._target_s += cam_step * self._rate
+        lat_now = (now - self._anchor) - self._target_s
+        floor = min(
+            (lat for a, _, lat in window if now - a <= STEER_FLOOR_WINDOW_S),
+            default=lat_now,
+        )
+        if lat_now - floor > STEER_SNAP_S:
+            # An uncovered gap: capture stopped, so move onto the floor.
+            self._target_s += lat_now - floor
             self.repairs += 1
-            self._rate = prev_rate
+            step_s = self._target_s - self._out_s
             window.clear()
-            window.append((now, self._cam_elapsed))
+            self._base_target = self._target_s
+            self._base_cam = self._cam_s
         else:
-            step_s = cam_step_s * self._rate + STEER_PHASE_GAIN * err
+            paced = cam_step * self._rate
+            ease = min(1.0, dt / STEER_PHASE_TAU_S)
+            step_s = paced + (self._target_s - paced - self._out_s) * ease
         step = max(1, round(step_s * self.clock_rate))
         self._out_s += step / self.clock_rate
+        window.append((now, self._cam_s, (now - self._anchor) - self._target_s))
         return step
+
+    def _learn_rate(self, now: float, cam_step: float) -> None:
+        """Re-derive the steered rate from the least-late sample in each half
+        of the window; the first rate learned rebases the target."""
+        window = self._window
+        mid = window[0][0] + (now - window[0][0]) / 2
+        rate = self._rate
+        a = b = None
+        for s in window:
+            key = s[0] - s[1] * rate
+            if s[0] < mid:
+                if a is None or key < a[0] - a[1] * rate:
+                    a = s
+            elif b is None or key < b[0] - b[1] * rate:
+                b = s
+        if a is None or b is None or b[1] - a[1] <= STEER_RATE_MIN_CAM_S:
+            return
+        lo, hi = STEER_RATE_BOUNDS
+        self._rate = min(max((b[0] - a[0]) / (b[1] - a[1]), lo), hi)
+        if not self._learned:
+            self._learned = True
+            self._target_s = (
+                self._base_target
+                + (self._cam_s - cam_step - self._base_cam) * self._rate
+            )
 
 
 # --------------------------------------------------------------------------- #
