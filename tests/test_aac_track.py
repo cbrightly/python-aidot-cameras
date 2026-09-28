@@ -342,6 +342,7 @@ def test_make_aac_track_honours_the_kill_switch(monkeypatch):
 
 def test_make_aac_track_returns_none_when_the_encoder_cannot_open(monkeypatch, caplog):
     monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
+
     def _fail(*a, **k):
         raise ImportError("no av")
 
@@ -353,6 +354,7 @@ def test_make_aac_track_returns_none_when_the_encoder_cannot_open(monkeypatch, c
 
 def test_encoder_open_failure_warns_once_then_only_debug(monkeypatch, caplog):
     monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
+
     def _fail(*a, **k):
         raise ImportError("no aac encoder")
 
