@@ -1377,6 +1377,85 @@ def test_loopback_publish_never_splits_a_frame_a_stray_packet_interrupts(
         proc.wait(3)
 
 
+def test_loopback_publish_does_not_leak_a_resend_run_that_ends_on_the_last_frame(
+    go2rtc, monkeypatch
+):
+    """Regression: a re-send run that replays the last N accepted frames ends
+    ON the last accepted frame's timestamp by construction (it is replaying
+    everything since the high-water mark, and the mark IS that timestamp).
+    The `ts == last_accepted_ts` continuation shortcut used to forward that
+    final replayed frame unconditionally, because nothing had ever closed the
+    window after the frame's own marker packet: frames 0, 6000, 12000, 18000,
+    then a re-send run 6000, 12000, 18000 (new sequence numbers), then 24000
+    must forward only F0..F4 and drop all three re-sent frames."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        seq = 100
+        payloads = [b"F0", b"F1", b"F2", b"F3", b"R1", b"R2", b"R3", b"F4"]
+        for ts, body in zip(
+            (0, 6000, 12000, 18000, 6000, 12000, 18000, 24000), payloads
+        ):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xAAAA, body), ("127.0.0.1", v_port)
+            )
+            seq += 1
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 5)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 5  # the three re-sent frames are dropped
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert [v[4] for v in video] == [b"F0", b"F1", b"F2", b"F3", b"F4"]
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 3
+        assert stats["resent_filter_resets"] == 0
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_drops_a_single_frame_resend_run_immediately_after(
+    go2rtc, monkeypatch
+):
+    """The degenerate N=1 case of the regression above: the re-send run is a
+    single frame, and it arrives with NO other distinct timestamp judged in
+    between - so `ts == last_raw` exactly, right after the frame's own
+    acceptance closed its window. This must still be re-judged and dropped,
+    not forwarded as a cached-verdict continuation."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        seq = 100
+        payloads = [b"F0", b"F1", b"F2", b"F3", b"R3", b"F4"]
+        for ts, body in zip((0, 6000, 12000, 18000, 18000, 24000), payloads):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xAAAA, body), ("127.0.0.1", v_port)
+            )
+            seq += 1
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 5)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 5
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert [v[4] for v in video] == [b"F0", b"F1", b"F2", b"F3", b"F4"]
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 1
+        assert stats["resent_filter_resets"] == 0
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
 def test_video_only_publish_still_binds_the_audio_port(go2rtc):
     """The SDES open waits for BOTH loopback ports before signalling; binding
     only the announced one cost every video-only open the 3 s wait plus 1.5 s."""

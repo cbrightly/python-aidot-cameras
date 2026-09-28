@@ -305,10 +305,12 @@ re-sent frames dropped, N filter resets` when it stops. On a healthy LAN
 `late` and `lost` are 0; the repair count is a few per 30 s on an A001513 and
 0 on a camera with a clean clock. `re-sent frames dropped` counts the
 camera's own already-served video frames (SDES mirrors the DTLS path's
-`is_resent_video_frame`); `filter resets` counts the rarer cases where a
-backward step is too big to be one of those re-sends (a new timestamp base)
-or the video SSRC changed (a TUTK-framed camera switching to real SRTP
-mid-session) - both are followed by 0.
+`is_resent_video_frame`); expect a small, steady trickle of these on a camera
+that periodically re-sends, not zero. `filter resets` counts the rarer cases
+where a backward step is too big to be one of those re-sends (a new
+timestamp base) or the video SSRC changed (a TUTK-framed camera switching to
+real SRTP mid-session); this is normally 0, and a session that keeps
+accumulating them is worth a closer look.
 
 ### A failed go2rtc registration silently downgrades to HLS
 
