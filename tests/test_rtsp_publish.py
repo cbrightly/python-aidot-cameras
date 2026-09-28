@@ -1189,6 +1189,85 @@ def test_loopback_publish_does_not_filter_audio(go2rtc, monkeypatch):
         proc.wait(3)
 
 
+def test_loopback_publish_resets_the_resent_filter_on_a_new_timestamp_base(
+    go2rtc, monkeypatch
+):
+    """A backward step bigger than any genuine re-send (the camera's own
+    re-sends go back about 1.7 s) is a new timestamp base, not a re-send -
+    dropping video until the old high-water mark is caught back up to would
+    black it out for hours instead of the fraction of a second this camera
+    family's real re-sends cost."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        seq = 100
+        # ~10 s jump back (912000 -> 1000 at 90 kHz), far past RESENT_MAX_BACK_S.
+        for ts in (900000, 906000, 912000, 1000, 7000, 13000):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xAAAA, b"pic"), ("127.0.0.1", v_port)
+            )
+            seq += 1
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 6)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 6
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert len(video) == 6
+        ts_out = [v[3] for v in video]
+        assert ts_out == sorted(ts_out)
+        assert len(set(ts_out)) == 6  # strictly increasing
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 0
+        assert stats["resent_filter_resets"] == 1
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_resets_the_resent_filter_on_a_new_ssrc(go2rtc, monkeypatch):
+    """The bridge re-syncs its reorder buffer's own sequence numbering when a
+    TUTK-framed camera switches from TUTK SFrames to real SRTP mid-session -
+    on the SAME loopback port, with a new SSRC (RtpReorderBuffer.push already
+    takes an ssrc and resyncs on it; this is the same signal). The old
+    unwrapped position and high-water mark do not apply to the new sender, so
+    its frames must not be judged against them."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for seq, ts in ((100, 0), (101, 6000), (102, 12000)):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xAAAA, b"pic"), ("127.0.0.1", v_port)
+            )
+            time.sleep(0.02)
+        # A new sender on the same port: different SSRC, its own timestamps.
+        for seq, ts in ((10, 3000), (11, 9000)):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xCCCC, b"pic"), ("127.0.0.1", v_port)
+            )
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 5)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 5
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert len(video) == 5
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 0
+        assert stats["resent_filter_resets"] == 1
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
 def test_video_only_publish_still_binds_the_audio_port(go2rtc):
     """The SDES open waits for BOTH loopback ports before signalling; binding
     only the announced one cost every video-only open the 3 s wait plus 1.5 s."""

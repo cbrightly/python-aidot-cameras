@@ -63,6 +63,9 @@ REQUEST_TIMEOUT_S = 5.0
 PREROLL_MAX_PACKETS = 1500
 #: RTP payload budget for the DTLS H.264 packetizer.
 H264_MTU = 1200
+#: The largest backward step of a video track's unwrapped position treated as
+#: a genuine re-send; a bigger one is a new timestamp base, not a re-send.
+RESENT_MAX_BACK_S = 5.0
 
 #: Exit codes this module reports through the Popen-compatible surface.
 #: A requested stop reports like a signal death (negative), which is what
@@ -1024,12 +1027,23 @@ class LoopbackRtpPublisher:
         self.dropped_pt = 0
         self.preroll_dropped = 0
         self.dropped_resent = 0
+        self.resent_filter_resets = 0
         # Per video track: the camera's own presentation time, unwrapped past
         # its 32-bit rollover, and the high-water state `is_resent_video_frame`
         # keeps over it - the same filter the DTLS path already applies. Never
         # built for an audio track: this loopback path forwards audio as-is.
+        # `last_ssrc` is the SSRC last seen on this track: the bridge re-syncs
+        # its reorder buffer on a new SSRC (TUTK SFrames switching to the
+        # camera's real SRTP on this port), and the old unwrapped position
+        # means nothing in the new domain.
         self._video_dedup: dict = {
-            i: {"last_raw": None, "unwrapped": 0, "drop": False, "state": {}}
+            i: {
+                "last_raw": None,
+                "unwrapped": 0,
+                "drop": False,
+                "state": {},
+                "last_ssrc": None,
+            }
             for i, t in enumerate(self._tracks)
             if t.kind == "video"
         }
@@ -1091,6 +1105,7 @@ class LoopbackRtpPublisher:
             "dropped_pt": self.dropped_pt,
             "preroll_dropped": self.preroll_dropped,
             "dropped_resent": self.dropped_resent,
+            "resent_filter_resets": self.resent_filter_resets,
             "reorder_late": sum(b.late for b in self._reorder),
             "reorder_skipped": sum(b.skipped for b in self._reorder),
             "tracks": [f"{t.kind}:{t.codec}/{t.pt}" for t in self._publish_tracks],
@@ -1242,7 +1257,7 @@ class LoopbackRtpPublisher:
                 logging.INFO,
                 "publish ended: %d packets, %d timestamp repair(s), %d dropped"
                 " (payload type), %d dropped (pre-roll), %d late, %d lost, %d"
-                " re-sent frames dropped%s",
+                " re-sent frames dropped, %d filter resets%s",
                 stats["packets"],
                 stats["timestamp_repairs"],
                 stats["dropped_pt"],
@@ -1250,6 +1265,7 @@ class LoopbackRtpPublisher:
                 stats["reorder_late"],
                 stats["reorder_skipped"],
                 stats["dropped_resent"],
+                stats["resent_filter_resets"],
                 aac_part,
             )
             self.returncode = code
@@ -1283,7 +1299,7 @@ class LoopbackRtpPublisher:
             return
         self.last_media = arrival
         for item in self._reorder[idx].push(
-            in_seq, (marker, ts, payload, arrival), arrival, ssrc
+            in_seq, (marker, ts, payload, arrival, ssrc), arrival, ssrc
         ):
             self._send(pub, idx, item)
 
@@ -1293,11 +1309,26 @@ class LoopbackRtpPublisher:
             for item in buf.expire(now):
                 self._send(pub, idx, item)
 
+    def _reset_resent_filter(self, dedup: dict) -> None:
+        """Start a video track's re-sent-frame filter fresh from the next
+        frame: the unwrapped position and high-water mark it carried belong
+        to a domain that no longer applies."""
+        dedup["state"] = {}
+        dedup["unwrapped"] = 0
+        dedup["last_raw"] = None
+        self.resent_filter_resets += 1
+
     def _send(self, pub: RtspPublisher, idx: int, item) -> None:
-        marker, ts, payload, arrival = item
+        marker, ts, payload, arrival, ssrc = item
         track = self._tracks[idx]
         dedup = self._video_dedup.get(idx)
         if dedup is not None:
+            if dedup["last_ssrc"] is not None and ssrc != dedup["last_ssrc"]:
+                # The bridge re-syncs its reorder buffer on a new SSRC too
+                # (TUTK SFrames switching to the camera's real SRTP on this
+                # port) - the old unwrapped position means nothing here.
+                self._reset_resent_filter(dedup)
+            dedup["last_ssrc"] = ssrc
             if dedup["last_raw"] is None or ts != dedup["last_raw"]:
                 # A new frame (by RTP timestamp change): judge it once, here,
                 # on its first packet. Every later packet carrying this same
@@ -1306,7 +1337,19 @@ class LoopbackRtpPublisher:
                     d = (ts - dedup["last_raw"]) & 0xFFFFFFFF
                     if d >= 0x80000000:
                         d -= 0x100000000
-                    dedup["unwrapped"] += d
+                    new_pos = dedup["unwrapped"] + d
+                else:
+                    new_pos = dedup["unwrapped"]
+                hw = dedup["state"].get("hw")
+                back_limit = RESENT_MAX_BACK_S * track.clock_rate
+                if hw is not None and new_pos < hw - back_limit:
+                    # Bigger than any genuine re-send: a new timestamp base,
+                    # not a re-send run. Start fresh from this frame instead
+                    # of blacking out video until the old high-water mark is
+                    # caught back up to - which could take hours.
+                    self._reset_resent_filter(dedup)
+                    new_pos = 0
+                dedup["unwrapped"] = new_pos
                 dedup["last_raw"] = ts
                 dedup["drop"] = is_resent_video_frame(
                     dedup["state"], dedup["unwrapped"]
