@@ -182,6 +182,14 @@ of `stream_source()` is unchanged. Verified against go2rtc 1.9.14:
 `?audio=aac` yields `aac + h264` and `?audio=pcma` yields `pcm_alaw + h264`
 from the same publish (`tests/test_rtsp_publish_go2rtc.py`).
 
+**Superseded.** The `ffmpeg:...#audio=aac` transcode source above was
+removed: some go2rtc builds stamp that transcode's RTP on a 90 kHz clock
+while advertising `MPEG4-GENERIC/8000`, which plays about eleven times too
+slow (see `docs/CAMERAS.md`, "An AAC transcoding source makes every player
+crawl"). The publish now carries its own AAC-LC 48 kHz mono track, encoded
+in-process after the A-law one, with timestamps it owns - see
+`aac_track.py`.
+
 ## Integration (hass-aidot-cameras)
 
 - Option in the "streaming" options step: **Direct publish (no ffmpeg)**,

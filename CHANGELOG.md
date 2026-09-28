@@ -13,23 +13,31 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   audio and drops G.711, and the direct publish sent the camera's A-law only,
   so the HLS dialog and `camera.record` were silent. It now also publishes an
   AAC-LC 48 kHz mono track, after the A-law one, encoded in-process. Its
-  timestamps follow the camera's own audio clock, gaps are filled with silence,
-  and a camera that sends no audio still gets a continuous silent track, so
-  sound stays in step with the picture. Everything that reads the first audio
-  track - WebRTC included - still gets A-law, unchanged. A consumer selects
-  the track with go2rtc's `audio=aac` (the Home Assistant integration does
-  this on its HLS path only). The encode is always on: it costs one AAC encode
-  per streaming camera for as long as its direct publish runs, watched or not.
-  A camera whose audio is mu-law (PCMU) gets no AAC track. Set
-  `AIDOT_PUBLISH_AAC=0` to publish exactly as before. It absorbs small camera
-  audio timestamp jitter (up to 40 ms ahead, or up to one packet behind)
-  instead of filling or trimming it.
+  timestamps follow the camera's own audio clock and do not drift against the
+  picture; when an HLS view starts a cold camera session, audio can lead the
+  picture by up to about 2 s for that recording, because the camera's
+  buffered first keyframe is older than the first audio. Gaps are filled with
+  silence, and a camera that sends no audio still gets a continuous silent
+  track. Everything that reads the first audio track - WebRTC included -
+  still gets A-law, unchanged. A consumer selects the track with go2rtc's
+  `audio=aac` (the Home Assistant integration does this on its HLS path
+  only). **On by default** (`AIDOT_PUBLISH_AAC=1`); set it to `0` to publish
+  exactly as before. The encode is always on: it costs one AAC encode per
+  streaming camera for as long as its direct publish runs, watched or not.
+  A camera whose audio is mu-law (PCMU) gets no AAC track. It absorbs small
+  camera audio timestamp jitter (up to 40 ms ahead, or up to one packet
+  behind) instead of filling or trimming it.
 
 ### Changed
 
 - **`AIDOT_PUBLISH_TIMESTAMPS` accepts `steered`, and SDES video defaults to
   it.** Other tracks stay `hybrid`. Setting the variable applies to every
   track, as before.
+- **`publish_stats()` and the direct-publish `result` dict report the AAC
+  track and the SDES re-send filter.** New keys: `dropped_resent` (SDES),
+  `resent_filter_resets`, `aac_frames`, `aac_seconds`, `aac_silence_samples`,
+  `aac_trimmed_samples`, `aac_reanchors`. `packets` and `tracks` now include
+  the AAC track where one is publishing.
 
 ### Fixed
 
@@ -39,8 +47,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   that runs ~7% fast; it now steers that clock to real time, with a rate
   learned from the least-late frames so a cold-start backlog (up to ~1.9 s of
   camera time delivered in the first second) keeps its camera spacing.
-  Two-minute recordings measured video 130.9 s / audio 117.0 s before;
-  119.8 / 119.8 s after.
+  Two-minute recordings measured video 121.8 s after (was 130.9 s) on the
+  kitchen L2 and 120.7 s after (was 129.7 s) on the PTZ.
 
 ## [1.0.0rc31]
 

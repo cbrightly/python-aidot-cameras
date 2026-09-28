@@ -272,7 +272,8 @@ and `http://` serves are unchanged). Design, measurements and rollout:
   bridge itself decrypts (`_PLAIN_RTP_MODELS`); any other SDES model keeps
   ffmpeg, which decrypts SRTP from the SDP's `a=crypto` keys.
 - **DTLS.** The tapped access units are packetized (RFC 6184, FU-A) and the
-  tapped A-law published as-is, in place of the MPEG-TS mux.
+  tapped A-law published as-is, in place of the MPEG-TS mux; the AAC track
+  below is added on this transport too.
 - **Ordering.** go2rtc does not reorder a publisher's packets, so the publisher
   does - the same 500-packet / 0.5 s window the ffmpeg serve used - and
   resynchronises on a new SSRC (the bridge switches from TUTK framing to the
@@ -281,6 +282,16 @@ and `http://` serves are unchanged). Design, measurements and rollout:
   not from an observed packet, because go2rtc accepts an announced track whose
   first packet arrives late. That removes the 1 s audio grace and the
   video-only fallback it caused when a camera's audio trailed its video.
+- **AAC.** After the A-law track, the publish also carries an AAC-LC 48 kHz
+  mono track encoded in-process from the same audio (`aac_track.py`), on both
+  transports, so an AAC-only consumer such as Home Assistant's HLS player and
+  `camera.record` has sound; everything reading the first audio track keeps
+  A-law. `AIDOT_PUBLISH_AAC=0` turns it off. A camera whose audio is mu-law
+  (PCMU) gets no AAC track. Its timestamps follow the camera's own audio
+  clock and do not drift against the picture; when an HLS view starts a cold
+  camera session, audio can lead the picture by up to about 2 s for that
+  recording, because the camera's buffered first keyframe is older than the
+  first audio.
 - **Timestamps.** `AIDOT_PUBLISH_TIMESTAMPS` (unset: SDES video `steered` -
   the camera's spacing at real-time rate - and every other track `hybrid`)
   keeps the camera's frame spacing and substitutes the arrival clock for a
@@ -305,9 +316,12 @@ What go2rtc needs, and what goes wrong without it:
 | Traffic at least every 15 s | go2rtc drops the publisher; the publisher sends `OPTIONS` every 5 s |
 
 Useful log lines (logger `aidot_cameras.camera.rtsp_publish`):
-`direct publish: publishing audio PCMA, video H264 to ...` when it attaches, and
+`direct publish: publishing audio PCMA, audio MPEG4-GENERIC, video H264 to ...`
+when it attaches, and
 `publish ended: N packets, N timestamp repair(s), ..., N late, N lost, N
-re-sent frames dropped, N filter resets` when it stops. On a healthy LAN
+re-sent frames dropped, N filter resets, AAC N frames / N s / N
+silence-filled / N trimmed / N re-anchors` when it stops (the AAC suffix is
+omitted when the track is off or unavailable). On a healthy LAN
 `late` and `lost` are 0; the repair count is normally 0 or near it; a steered
 snap or a filter reset adds one. `re-sent frames dropped` counts the
 camera's own already-served video frames (SDES mirrors the DTLS path's
@@ -384,7 +398,8 @@ fit an unintended HLS downgrade (above). They are different faults: check
 whether the stream's source list contains an `#audio=aac` entry, and compare
 `?audio=pcma` against `?audio=aac` on the same stream over the same wall-clock
 window. The fix is to stop offering the source; the cost is that AAC-only
-players get no audio.
+players get no audio (a direct publish carries its own AAC track instead -
+see "Direct publish: no ffmpeg in the live path" above).
 
 ### What a cold SDES open costs
 
