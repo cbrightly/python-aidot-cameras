@@ -300,9 +300,15 @@ What go2rtc needs, and what goes wrong without it:
 
 Useful log lines (logger `aidot_cameras.camera.rtsp_publish`):
 `direct publish: publishing audio PCMA, video H264 to ...` when it attaches, and
-`publish ended: N packets, N timestamp repair(s), ..., N late, N lost` when it
-stops. On a healthy LAN `late` and `lost` are 0; the repair count is a few per
-30 s on an A001513 and 0 on a camera with a clean clock.
+`publish ended: N packets, N timestamp repair(s), ..., N late, N lost, N
+re-sent frames dropped, N filter resets` when it stops. On a healthy LAN
+`late` and `lost` are 0; the repair count is a few per 30 s on an A001513 and
+0 on a camera with a clean clock. `re-sent frames dropped` counts the
+camera's own already-served video frames (SDES mirrors the DTLS path's
+`is_resent_video_frame`); `filter resets` counts the rarer cases where a
+backward step is too big to be one of those re-sends (a new timestamp base)
+or the video SSRC changed (a TUTK-framed camera switching to real SRTP
+mid-session) - both are followed by 0.
 
 ### A failed go2rtc registration silently downgrades to HLS
 

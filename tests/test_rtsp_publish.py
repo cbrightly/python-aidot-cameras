@@ -617,6 +617,8 @@ def test_loopback_publish_adds_aac_after_pcma(go2rtc, monkeypatch):
     assert len(ended) == 1
     assert f"AAC {stats['aac_frames']} frames" in ended[0]
     assert "0 silence-filled / 0 trimmed / 0 re-anchors" in ended[0]
+    # No video was sent in this test, so the re-sent-frame filter never ran.
+    assert "0 re-sent frames dropped, 0 filter resets" in ended[0]
 
 
 def test_loopback_publish_builds_the_aac_track_off_the_constructing_thread(
@@ -1263,6 +1265,113 @@ def test_loopback_publish_resets_the_resent_filter_on_a_new_ssrc(go2rtc, monkeyp
         stats = proc.publish_stats()
         assert stats["dropped_resent"] == 0
         assert stats["resent_filter_resets"] == 1
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_drops_a_real_resend_within_the_boundary(go2rtc, monkeypatch):
+    """A re-send run landing within RESENT_MAX_BACK_S of the high-water mark
+    (the camera's genuine re-sends go back about 1.7 s = 153000 ticks at
+    90 kHz) must still be DROPPED, not treated as a new timestamp base. This
+    pins the boundary from the drop side: a too-small limit (e.g. 0.5 s, or
+    computing it with 8000 instead of the track's clock rate) would instead
+    reset the filter here."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        seq = 100
+        # 200000 -> 353000 (+153000, hw climbs to 153000) -> 200000 again (a
+        # real re-send run landing exactly 153000 below the high-water mark).
+        for ts in (200000, 353000, 200000, 359000):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xAAAA, b"pic"), ("127.0.0.1", v_port)
+            )
+            seq += 1
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 3)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 3  # the re-sent 200000 frame is dropped
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 1
+        assert stats["resent_filter_resets"] == 0
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_resets_on_a_backward_step_past_the_boundary(
+    go2rtc, monkeypatch
+):
+    """A backward step bigger than RESENT_MAX_BACK_S (~6 s = 540000 ticks at
+    90 kHz, comfortably past the boundary) must RESET the filter and be
+    forwarded - the companion of the drop-side test above, pinning the
+    boundary from the other side."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        seq = 100
+        # 600000 -> 606000 -> 612000 (hw climbs to 12000 unwrapped), then
+        # 72000 (612000 - 540000: a ~6 s step back, past the boundary).
+        for ts in (600000, 606000, 612000, 72000):
+            tx.sendto(
+                rp.build_rtp(96, True, seq, ts, 0xAAAA, b"pic"), ("127.0.0.1", v_port)
+            )
+            seq += 1
+            time.sleep(0.02)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) == 4)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 4  # all forwarded, including the reset frame
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 0
+        assert stats["resent_filter_resets"] == 1
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_never_splits_a_frame_a_stray_packet_interrupts(
+    go2rtc, monkeypatch
+):
+    """Reproduces the reviewer's finding: the reorder buffer's resync (a run
+    of late packets) can deliver A1, B1, A_late, B2 in that order - a stray
+    packet carrying A's already-served timestamp landing BETWEEN B's two
+    packets. The filter must judge a new frame only against the last
+    ACCEPTED timestamp, not the last packet seen, or the stray flips the
+    verdict and splits B."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        video_idx = 1  # SERVE_SDP: audio then video
+        pub = proc._publisher
+        ssrc = 0xAAAA
+        now = time.monotonic()
+        proc._send(pub, video_idx, (True, 1000, b"A1", now, ssrc))
+        proc._send(pub, video_idx, (False, 7000, b"B1", now, ssrc))
+        proc._send(pub, video_idx, (False, 1000, b"Alate", now, ssrc))
+        proc._send(pub, video_idx, (True, 7000, b"B2", now, ssrc))
+        assert _wait(lambda: len(go2rtc.frames) == 3)
+        time.sleep(0.1)
+        assert len(go2rtc.frames) == 3
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert [v[4] for v in video] == [b"A1", b"B1", b"B2"]
+        assert video[1][3] == video[2][3]  # B1 and B2 share one output ts
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 1  # A_late, once - not per packet
+        assert stats["resent_filter_resets"] == 0
     finally:
         proc.terminate()
         proc.wait(3)

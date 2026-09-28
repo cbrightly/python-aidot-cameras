@@ -1035,7 +1035,11 @@ class LoopbackRtpPublisher:
         # `last_ssrc` is the SSRC last seen on this track: the bridge re-syncs
         # its reorder buffer on a new SSRC (TUTK SFrames switching to the
         # camera's real SRTP on this port), and the old unwrapped position
-        # means nothing in the new domain.
+        # means nothing in the new domain. `last_accepted_ts` is the raw
+        # timestamp of the last frame actually forwarded - a stray packet
+        # that gets dropped (`last_raw`) must never replace it, or a later
+        # packet of the still-current accepted frame gets re-judged and can
+        # flip to dropped, splitting the frame.
         self._video_dedup: dict = {
             i: {
                 "last_raw": None,
@@ -1043,6 +1047,7 @@ class LoopbackRtpPublisher:
                 "drop": False,
                 "state": {},
                 "last_ssrc": None,
+                "last_accepted_ts": None,
             }
             for i, t in enumerate(self._tracks)
             if t.kind == "video"
@@ -1311,11 +1316,12 @@ class LoopbackRtpPublisher:
 
     def _reset_resent_filter(self, dedup: dict) -> None:
         """Start a video track's re-sent-frame filter fresh from the next
-        frame: the unwrapped position and high-water mark it carried belong
-        to a domain that no longer applies."""
+        frame: the unwrapped position, high-water mark and last-accepted
+        timestamp it carried belong to a domain that no longer applies."""
         dedup["state"] = {}
         dedup["unwrapped"] = 0
         dedup["last_raw"] = None
+        dedup["last_accepted_ts"] = None
         self.resent_filter_resets += 1
 
     def _send(self, pub: RtspPublisher, idx: int, item) -> None:
@@ -1329,35 +1335,46 @@ class LoopbackRtpPublisher:
                 # port) - the old unwrapped position means nothing here.
                 self._reset_resent_filter(dedup)
             dedup["last_ssrc"] = ssrc
-            if dedup["last_raw"] is None or ts != dedup["last_raw"]:
-                # A new frame (by RTP timestamp change): judge it once, here,
-                # on its first packet. Every later packet carrying this same
-                # timestamp follows the same decision.
-                if dedup["last_raw"] is not None:
-                    d = (ts - dedup["last_raw"]) & 0xFFFFFFFF
-                    if d >= 0x80000000:
-                        d -= 0x100000000
-                    new_pos = dedup["unwrapped"] + d
-                else:
-                    new_pos = dedup["unwrapped"]
-                hw = dedup["state"].get("hw")
-                back_limit = RESENT_MAX_BACK_S * track.clock_rate
-                if hw is not None and new_pos < hw - back_limit:
-                    # Bigger than any genuine re-send: a new timestamp base,
-                    # not a re-send run. Start fresh from this frame instead
-                    # of blacking out video until the old high-water mark is
-                    # caught back up to - which could take hours.
-                    self._reset_resent_filter(dedup)
-                    new_pos = 0
-                dedup["unwrapped"] = new_pos
-                dedup["last_raw"] = ts
-                dedup["drop"] = is_resent_video_frame(
-                    dedup["state"], dedup["unwrapped"]
-                )
+            if dedup["last_accepted_ts"] is None or ts != dedup["last_accepted_ts"]:
+                # Not a continuation of the last ACCEPTED frame - judge it
+                # only against that anchor, never against merely the last
+                # packet seen: a stray packet carrying an already-served
+                # timestamp, landing between two packets of the current
+                # accepted frame, must not itself become the anchor and
+                # flip the next packet's verdict (that split the frame and
+                # inflated dropped_resent per stray packet instead of once).
+                if dedup["last_raw"] is None or ts != dedup["last_raw"]:
+                    # A distinct timestamp not yet judged: judge it once, on
+                    # its first packet. Every later packet carrying this same
+                    # timestamp - accepted or not - reuses this verdict
+                    # without re-judging or double-counting it.
+                    if dedup["last_raw"] is not None:
+                        d = (ts - dedup["last_raw"]) & 0xFFFFFFFF
+                        if d >= 0x80000000:
+                            d -= 0x100000000
+                        new_pos = dedup["unwrapped"] + d
+                    else:
+                        new_pos = dedup["unwrapped"]
+                    hw = dedup["state"].get("hw")
+                    back_limit = RESENT_MAX_BACK_S * track.clock_rate
+                    if hw is not None and new_pos < hw - back_limit:
+                        # Bigger than any genuine re-send: a new timestamp
+                        # base, not a re-send run. Start fresh from this
+                        # frame instead of blacking out video until the old
+                        # high-water mark is caught back up to - which could
+                        # take hours.
+                        self._reset_resent_filter(dedup)
+                        new_pos = 0
+                    dedup["unwrapped"] = new_pos
+                    dedup["last_raw"] = ts
+                    dedup["drop"] = is_resent_video_frame(
+                        dedup["state"], dedup["unwrapped"]
+                    )
+                    if dedup["drop"]:
+                        self.dropped_resent += 1
                 if dedup["drop"]:
-                    self.dropped_resent += 1
-            if dedup["drop"]:
-                return  # already served: not forwarded, not timelined, no AAC
+                    return  # already served: not forwarded, not timelined
+                dedup["last_accepted_ts"] = ts
         if self._gain is not None and track.codec == "PCMA":
             payload = payload.translate(self._gain)
         seq, out_ts = self._timelines[idx].stamp(ts, arrival)
@@ -1477,8 +1494,6 @@ def dtls_rtp_publish_run(
     ``progress[0]`` on every frame written; exits on ``stop_flag`` or on a
     publish failure (recorded in ``result['error']``).
     """
-    from .protocol import is_resent_video_frame
-
     res = result if result is not None else {}
     video = PublishTrack("video", 96, 90000, "H264", 0)
     audio = PublishTrack("audio", 8, 8000, "PCMA", 1)
