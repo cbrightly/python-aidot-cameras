@@ -468,6 +468,20 @@ def test_steered_snaps_across_an_uncovered_gap():
     assert tl.repairs >= 1
 
 
+def test_steered_relearns_rate_cleanly_after_an_uncovered_gap():
+    rng = random.Random(1)
+    before = _camera_frames(rng, 16.1, 20)
+    last_ts, last_arrival = before[-1]
+    after = _camera_frames(
+        rng, 16.1, 30, start_ts=(last_ts + 6000) & 0xFFFFFFFF, t0=last_arrival + 4.0
+    )
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, before + after)
+    tail = [abs(o - w) for w, o in rows[len(before) :]]
+    assert tl.repairs == 1
+    assert max(tail) < 0.10
+
+
 def test_video_timestamp_policy(monkeypatch):
     monkeypatch.delenv(rp.ENV_PUBLISH_TIMESTAMPS, raising=False)
     assert rp.video_timestamp_policy() == "steered"
@@ -1576,7 +1590,9 @@ def test_loopback_publish_never_splits_a_frame_a_stray_packet_interrupts(
         now = time.monotonic()
         proc._send(pub, video_idx, (True, 1000, b"A1", now, ssrc))
         proc._send(pub, video_idx, (False, 7000, b"B1", now, ssrc))
+        proc._video_forwarded = False
         proc._send(pub, video_idx, (False, 1000, b"Alate", now, ssrc))
+        assert proc._video_forwarded is False
         proc._send(pub, video_idx, (True, 7000, b"B2", now, ssrc))
         assert _wait(lambda: len(go2rtc.frames) == 3)
         time.sleep(0.1)
@@ -1665,6 +1681,54 @@ def test_loopback_publish_drops_a_single_frame_resend_run_immediately_after(
         assert [v[4] for v in video] == [b"F0", b"F1", b"F2", b"F3", b"F4"]
         stats = proc.publish_stats()
         assert stats["dropped_resent"] == 1
+        assert stats["resent_filter_resets"] == 0
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_does_not_leak_a_resend_run_that_ends_on_a_multi_packet_frame(
+    go2rtc, monkeypatch
+):
+    """The companion of the two regressions above, for a MULTI-packet
+    accepted frame: F2 (F2a/F2b) closes on its own marker packet, and a
+    re-send run that later replays it (R1/R2a/R2b) must not leak R2a/R2b a
+    second time."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(_serve_sdp(a_port, v_port), go2rtc.url())
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        time.sleep(0.1)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        packets = [
+            (100, 0, True, b"F0"),
+            (101, 6000, True, b"F1"),
+            (102, 12000, False, b"F2a"),
+            (103, 12000, True, b"F2b"),
+            (104, 6000, True, b"R1"),
+            (105, 12000, False, b"R2a"),
+            (106, 12000, True, b"R2b"),
+            (107, 18000, True, b"F3"),
+        ]
+        for seq, ts, mk, body in packets:
+            tx.sendto(
+                rp.build_rtp(96, mk, seq, ts, 0xAAAA, body), ("127.0.0.1", v_port)
+            )
+            time.sleep(0.02)
+        tx.close()
+
+        def _f3_arrived():
+            video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+            return any(v[4] == b"F3" for v in video)
+
+        assert _wait(_f3_arrived)
+        time.sleep(0.1)
+        video = [rp.parse_rtp(p) for ch, p in go2rtc.frames if ch == 2]
+        assert [v[4] for v in video] == [b"F0", b"F1", b"F2a", b"F2b", b"F3"]
+        assert video[2][3] == video[3][3]  # F2a and F2b share one output ts
+        stats = proc.publish_stats()
+        assert stats["dropped_resent"] == 2
         assert stats["resent_filter_resets"] == 0
     finally:
         proc.terminate()

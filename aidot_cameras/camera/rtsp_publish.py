@@ -419,6 +419,7 @@ class RtpTimeline:
         window.append((now, self._cam_elapsed))
         while now - window[0][0] > STEER_RATE_WINDOW_S:
             window.popleft()
+        prev_rate = self._rate
         wall_span = window[-1][0] - window[0][0]
         if wall_span >= STEER_RATE_MIN_S:
             cam_span = window[-1][1] - window[0][1]
@@ -430,6 +431,9 @@ class RtpTimeline:
         if abs(err) > STEER_SNAP_S:
             step_s = wall_s - self._out_s
             self.repairs += 1
+            self._rate = prev_rate
+            window.clear()
+            window.append((now, self._cam_elapsed))
         else:
             step_s = cam_step_s * self._rate + STEER_PHASE_GAIN * err
         step = max(1, round(step_s * self.clock_rate))
