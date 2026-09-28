@@ -49,8 +49,11 @@ _LOGGER = logging.getLogger(__name__)
 
 #: Env switch for the whole feature. Default OFF until it has soaked live.
 ENV_DIRECT_PUBLISH = "AIDOT_DIRECT_PUBLISH"
-#: Timestamp policy: ``hybrid`` (default), ``arrival`` or ``camera``.
+#: Timestamp policy: ``hybrid``, ``arrival``, ``camera`` or ``steered``. Unset,
+#: SDES video is ``steered`` and every other track is ``hybrid``.
 ENV_PUBLISH_TIMESTAMPS = "AIDOT_PUBLISH_TIMESTAMPS"
+#: Every accepted value of ``AIDOT_PUBLISH_TIMESTAMPS``.
+TIMESTAMP_POLICIES = ("hybrid", "arrival", "camera", "steered")
 
 _TRUTHY = ("1", "true", "yes", "on")
 
@@ -66,6 +69,17 @@ H264_MTU = 1200
 #: The largest backward step of a video track's unwrapped position treated as
 #: a genuine re-send; a bigger one is a new timestamp base, not a re-send.
 RESENT_MAX_BACK_S = 5.0
+
+#: Wall-time window over which the steered clock learns the camera's rate.
+STEER_RATE_WINDOW_S = 20.0
+#: Wall time needed in the window before the learned rate is used.
+STEER_RATE_MIN_S = 2.0
+#: Clamp for the learned rate (wall seconds per camera second).
+STEER_RATE_BOUNDS = (0.8, 1.25)
+#: Fraction of the remaining phase error the steered clock corrects per frame.
+STEER_PHASE_GAIN = 0.05
+#: A phase error larger than this snaps the steered output to wall time.
+STEER_SNAP_S = 1.0
 
 #: Exit codes this module reports through the Popen-compatible surface.
 #: A requested stop reports like a signal death (negative), which is what
@@ -96,7 +110,16 @@ def _publish_gap_warn_s() -> float:
 def timestamp_policy() -> str:
     """The configured timestamp policy; unknown values fall back to hybrid."""
     val = os.environ.get(ENV_PUBLISH_TIMESTAMPS, "hybrid").strip().lower()
-    return val if val in ("hybrid", "arrival", "camera") else "hybrid"
+    return val if val in TIMESTAMP_POLICIES else "hybrid"
+
+
+def video_timestamp_policy() -> str:
+    """The SDES video policy: an explicit, valid ``AIDOT_PUBLISH_TIMESTAMPS``
+    wins (as for every track); otherwise ``steered``. The SDES camera stamps
+    video on a 15 fps clock while delivering ~16.1 fps, so its timestamps run
+    ~7% fast; steering keeps its even spacing at real-time rate."""
+    val = os.environ.get(ENV_PUBLISH_TIMESTAMPS, "").strip().lower()
+    return val if val in TIMESTAMP_POLICIES else "steered"
 
 
 class RtspPublishError(RuntimeError):
@@ -313,9 +336,16 @@ class RtpTimeline:
       else by the arrival-clock delta.  This keeps the camera's even frame
       spacing and still absorbs the A001513's ~1.7 s backward step every
       ~30 s (the reason the ffmpeg serve stamps by arrival today).
+    * ``steered`` - by the camera step (as hybrid picks it) scaled by the
+      camera's rate learned against wall time over ``STEER_RATE_WINDOW_S``,
+      plus ``STEER_PHASE_GAIN`` of the remaining phase error to wall time; a
+      phase error over ``STEER_SNAP_S`` snaps to wall time.  This keeps the
+      camera's even spacing while the output runs at real time, for a camera
+      whose clock does not.
 
     The output never steps backward and always advances by at least one tick
-    on a new input timestamp. ``repairs`` counts arrival substitutions.
+    on a new input timestamp. ``repairs`` counts arrival substitutions (and
+    steered snaps).
     """
 
     def __init__(
@@ -335,6 +365,13 @@ class RtpTimeline:
         self._out_ts = random.getrandbits(31)
         self._last_in: Optional[int] = None
         self._last_arrival = 0.0
+        # steered state: wall anchor, output position (s since the anchor),
+        # learned rate, and (arrival, camera elapsed s) samples for the rate.
+        self._anchor = 0.0
+        self._out_s = 0.0
+        self._rate = 1.0
+        self._cam_elapsed = 0.0
+        self._rate_window: Deque[Tuple[float, float]] = collections.deque()
         self.repairs = 0
         self.packets = 0
 
@@ -344,12 +381,16 @@ class RtpTimeline:
         in_ts &= 0xFFFFFFFF
         if self._last_in is None:
             self._last_in, self._last_arrival = in_ts, now
+            self._anchor = now
+            self._rate_window.append((now, 0.0))
         elif in_ts != self._last_in:
             d = (in_ts - self._last_in) & 0xFFFFFFFF
             if d >= 0x80000000:
                 d -= 0x100000000
             by_arrival = max(1, round((now - self._last_arrival) * self.clock_rate))
-            if self.policy == "camera":
+            if self.policy == "steered":
+                step = self._steer(d, now)
+            elif self.policy == "camera":
                 step = d if d > 0 else 1
             elif self.policy == "arrival":
                 step = by_arrival
@@ -363,6 +404,36 @@ class RtpTimeline:
         self._seq = (self._seq + 1) & 0xFFFF
         self.packets += 1
         return self._seq, self._out_ts
+
+    def _steer(self, d: int, now: float) -> int:
+        """The steered output step, in ticks, for a new input timestamp that
+        moved by ``d`` ticks and arrived at ``now``."""
+        if 0 < d <= self.max_step:
+            cam_step_s = d / self.clock_rate
+        else:
+            cam_step_s = now - self._last_arrival
+            self.repairs += 1
+        self._cam_elapsed += cam_step_s
+        window = self._rate_window
+        window.append((now, self._cam_elapsed))
+        while now - window[0][0] > STEER_RATE_WINDOW_S:
+            window.popleft()
+        wall_span = window[-1][0] - window[0][0]
+        if wall_span >= STEER_RATE_MIN_S:
+            cam_span = window[-1][1] - window[0][1]
+            if cam_span > 0:
+                lo, hi = STEER_RATE_BOUNDS
+                self._rate = min(max(wall_span / cam_span, lo), hi)
+        wall_s = now - self._anchor
+        err = wall_s - (self._out_s + cam_step_s * self._rate)
+        if abs(err) > STEER_SNAP_S:
+            step_s = wall_s - self._out_s
+            self.repairs += 1
+        else:
+            step_s = cam_step_s * self._rate + STEER_PHASE_GAIN * err
+        step = max(1, round(step_s * self.clock_rate))
+        self._out_s += step / self.clock_rate
+        return step
 
 
 # --------------------------------------------------------------------------- #
@@ -1001,8 +1072,17 @@ class LoopbackRtpPublisher:
         self._reorder = [RtpReorderBuffer() for _ in self._tracks]
         self._input_timeout = input_timeout_s
         self._gain = alaw_gain_table(audio_gain_db)
-        pol = policy or timestamp_policy()
-        self._timelines = [RtpTimeline(t.clock_rate, policy=pol) for t in self._tracks]
+        # An explicit policy applies to every track. Otherwise video is
+        # steered (the SDES camera's video clock runs ~7% fast) and audio,
+        # whose clock is exact, keeps the configured policy.
+        video_pol = policy or video_timestamp_policy()
+        audio_pol = policy or timestamp_policy()
+        self._timelines = [
+            RtpTimeline(
+                t.clock_rate, policy=video_pol if t.kind == "video" else audio_pol
+            )
+            for t in self._tracks
+        ]
         # AAC after A-law for Home Assistant's HLS (see aac_track). Only for an
         # A-law track: the encoder decodes A-law, and a PCMU camera is published
         # exactly as before. self._tracks stays the media tracks - the reorder

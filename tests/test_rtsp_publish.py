@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import math
 import logging
+import random
 import re
 import socket
+import statistics
 import struct
 import subprocess
 import threading
@@ -307,6 +309,104 @@ def test_timestamp_policy_env(monkeypatch):
     assert rp.timestamp_policy() == "arrival"
     monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "nonsense")
     assert rp.timestamp_policy() == "hybrid"
+
+
+# --------------------------------------------------------------------------- #
+# steered timeline: the camera's spacing, locked to real time                  #
+# --------------------------------------------------------------------------- #
+
+
+def _steer_frames(tl, frames):
+    """Stamp ``(in_ts, arrival)`` frames, two packets each (the second shares
+    the first's timestamp), and return ``(arrival, output seconds)`` for every
+    NEW output timestamp, both relative to the first frame."""
+    rows = []
+    for in_ts, arrival in frames:
+        _, out = tl.stamp(in_ts, arrival)
+        _, again = tl.stamp(in_ts, arrival + 0.0005)
+        assert again == out  # one frame, one timestamp
+        rows.append((arrival, out))
+    a0, o0 = rows[0]
+    return [(a - a0, ((o - o0) & 0xFFFFFFFF) / tl.clock_rate) for a, o in rows]
+
+
+def _camera_frames(rng, fps, seconds, *, start_ts=1000, t0=100.0, step=6000):
+    frames, ts = [], start_ts
+    for i in range(int(seconds * fps)):
+        frames.append((ts & 0xFFFFFFFF, t0 + i / fps + rng.uniform(-0.015, 0.015)))
+        ts += step
+    return frames
+
+
+def test_steered_locks_a_fast_camera_clock_to_real_time():
+    """The SDES camera case: a 15 fps clock (+6000 ticks) on ~16.1 fps of
+    delivery. hybrid runs ~7% slow; steered must run at real time and stay
+    smoother than arrival stamping."""
+    rng = random.Random(1)
+    rows = _steer_frames(
+        rp.RtpTimeline(90000, policy="steered"), _camera_frames(rng, 16.1, 120)
+    )
+    wall, out = rows[-1]
+    assert abs(out / wall - 1.0) <= 0.005
+    assert max(abs(o - w) for w, o in rows if w >= 10.0) < 0.10
+    steps = [b[1] - a[1] for a, b in zip(rows, rows[1:])]
+    assert statistics.pstdev(steps) < 0.020
+
+
+def test_steered_keeps_an_accurate_camera_as_is():
+    rng = random.Random(1)
+    rows = _steer_frames(
+        rp.RtpTimeline(90000, policy="steered"), _camera_frames(rng, 15.0, 60)
+    )
+    steps = [b[1] - a[1] for a, b in zip(rows, rows[1:])]
+    assert abs(statistics.mean(steps) - 1 / 15) <= 0.01 / 15
+    wall, out = rows[-1]
+    assert abs(out / wall - 1.0) <= 0.005
+
+
+def test_steered_rides_through_a_stall():
+    """20 s of an accurate camera, 4 s of nothing, then the camera resumes
+    with a timestamp delta that covers the 4 s."""
+    rng = random.Random(1)
+    before = _camera_frames(rng, 15.0, 20)
+    last_ts = before[-1][0]
+    resume = 100.0 + (len(before) - 1) / 15 + 4.0 + 1 / 15
+    after = _camera_frames(
+        rng, 15.0, 10, start_ts=last_ts + 6000 + 4 * 90000, t0=resume
+    )
+    rows = _steer_frames(rp.RtpTimeline(90000, policy="steered"), before + after)
+    outs = [o for _, o in rows]
+    assert all(b > a for a, b in zip(outs, outs[1:]))
+    settled = resume - before[0][1] + 5.0
+    tail = [abs(o - w) for w, o in rows if w >= settled]
+    assert tail and max(tail) < 0.10
+
+
+def test_steered_never_steps_backward_on_a_camera_backward_jump():
+    """The A001513 case: ~1.7 s back in the camera's own timestamps."""
+    rng = random.Random(1)
+    frames = _camera_frames(rng, 15.0, 60, start_ts=500_000)
+    back = int(1.7 * 90000)
+    frames = frames[:450] + [((ts - back) & 0xFFFFFFFF, a) for ts, a in frames[450:]]
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    outs = [o for _, o in rows]
+    assert all(b > a for a, b in zip(outs, outs[1:]))
+    assert tl.repairs >= 1
+
+
+def test_video_timestamp_policy(monkeypatch):
+    monkeypatch.delenv(rp.ENV_PUBLISH_TIMESTAMPS, raising=False)
+    assert rp.video_timestamp_policy() == "steered"
+    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "hybrid")
+    assert rp.video_timestamp_policy() == "hybrid"
+    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "arrival")
+    assert rp.video_timestamp_policy() == "arrival"
+    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "garbage")
+    assert rp.video_timestamp_policy() == "steered"
+    assert rp.timestamp_policy() == "hybrid"
+    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "steered")
+    assert rp.timestamp_policy() == "steered"
 
 
 def test_direct_publish_flag_defaults_off(monkeypatch):
@@ -710,6 +810,30 @@ def test_loopback_publish_pcmu_camera_gets_no_aac(go2rtc, monkeypatch):
     finally:
         proc.terminate()
         proc.wait(3)
+
+
+def test_loopback_publisher_steers_video_and_not_audio(go2rtc, monkeypatch):
+    """SDES video is stamped on a camera clock that runs fast, so it is
+    steered to real time; the camera's audio clock is exact and stays hybrid.
+    An explicit policy still applies to every track."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    monkeypatch.delenv(rp.ENV_PUBLISH_TIMESTAMPS, raising=False)
+    for policy, want_video, want_audio in (
+        (None, "steered", "hybrid"),
+        ("arrival", "arrival", "arrival"),
+    ):
+        a_port, v_port = _free_udp_ports(2)
+        proc = rp.LoopbackRtpPublisher(
+            _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", policy=policy
+        )
+        try:
+            by_kind = {
+                t.kind: tl.policy for t, tl in zip(proc._tracks, proc._timelines)
+            }
+            assert by_kind == {"video": want_video, "audio": want_audio}
+        finally:
+            proc.terminate()
+            proc.wait(3)
 
 
 def test_loopback_publisher_exits_1_when_the_stream_is_missing():
