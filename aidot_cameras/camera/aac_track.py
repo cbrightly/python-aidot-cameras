@@ -111,7 +111,8 @@ class AacPacer:
     silence is never more than one tick behind the picture.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, device_id: str = "?") -> None:
+        self._device_id = device_id
         self._pos: Optional[int] = None  # next PCMA timestamp expected (8 kHz)
         self._last: Optional[float] = None  # wall time the position describes
         self._heard: Optional[float] = None  # wall time of the last A-law packet
@@ -147,7 +148,8 @@ class AacPacer:
             else:
                 self.reanchors += 1
                 _LOGGER.info(
-                    "AAC track: camera audio jumped %.1f s - re-anchoring",
+                    "camera %s: AAC track: camera audio jumped %.1f s - re-anchoring",
+                    self._device_id,
                     d / PCMA_RATE,
                 )
             self._pos = ts
@@ -234,9 +236,15 @@ class AacEncoder:
 class AacTrack:
     """Pacer + encoder + RTP numbering for the AAC track of one publish."""
 
-    def __init__(self, encoder=None, pacer: Optional[AacPacer] = None) -> None:
+    def __init__(
+        self,
+        encoder=None,
+        pacer: Optional[AacPacer] = None,
+        device_id: str = "?",
+    ) -> None:
+        self._device_id = device_id
         self._enc = encoder if encoder is not None else AacEncoder()
-        self.pacer = pacer if pacer is not None else AacPacer()
+        self.pacer = pacer if pacer is not None else AacPacer(device_id)
         self.ssrc = random.getrandbits(32)
         self._seq = random.getrandbits(16)
         self._ts = random.getrandbits(31)
@@ -271,19 +279,33 @@ class AacTrack:
                     self.frames += 1
         except Exception as exc:
             self.failed = True
-            _LOGGER.warning("AAC track stopped (%r) - video and A-law continue", exc)
+            _LOGGER.warning(
+                "camera %s: AAC track stopped (%r) - video and A-law continue",
+                self._device_id,
+                exc,
+            )
             return []
         return out
 
 
+#: Set once the encoder has been seen to fail to open, so a camera that
+#: republishes (or a fleet of them) logs it at WARNING only the first time
+#: and at DEBUG after that.
+_ENCODER_WARNED = False
+
+
 def make_aac_track(device_id: str = "?") -> Optional[AacTrack]:
     """An ``AacTrack`` for one publish, or None (disabled, or cannot encode)."""
+    global _ENCODER_WARNED
     if not publish_aac_enabled():
         return None
     try:
-        return AacTrack()
+        return AacTrack(device_id=device_id)
     except Exception as exc:
-        _LOGGER.warning(
+        level = logging.DEBUG if _ENCODER_WARNED else logging.WARNING
+        _ENCODER_WARNED = True
+        _LOGGER.log(
+            level,
             "camera %s: AAC track unavailable (%r) - publishing without it",
             device_id,
             exc,

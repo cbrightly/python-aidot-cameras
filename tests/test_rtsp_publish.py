@@ -1093,6 +1093,11 @@ def test_loopback_publish_adds_aac_after_pcma(go2rtc, monkeypatch):
                 rp.build_rtp(8, False, 1 + i, 160 * (i + 1), 0xBBBB, b"\xd5" * 160),
                 ("127.0.0.1", a_port),
             )
+            if i < 10:  # video flows too, so tick() actually runs on this test
+                tx.sendto(
+                    rp.build_rtp(96, True, 1 + i, 1800 * i, 0xAAAA, b"\x41pic"),
+                    ("127.0.0.1", v_port),
+                )
             time.sleep(0.02)
         sdp_ok = _wait(
             lambda: go2rtc.announced and "MPEG4-GENERIC/48000" in go2rtc.announced[0]
@@ -1102,9 +1107,11 @@ def test_loopback_publish_adds_aac_after_pcma(go2rtc, monkeypatch):
         assert sdp.index("PCMA/8000") < sdp.index("MPEG4-GENERIC")
         assert _wait(lambda: sum(1 for ch, _ in go2rtc.frames if ch == 4) >= 20)
         # The camera's timestamps are contiguous (160 samples/packet, no gaps),
-        # so a working feed() never asks the pacer to fill silence. If the AAC
-        # packets above came from tick()'s idle-fill instead of feed() actually
-        # consuming the A-law, this would be in the thousands by now.
+        # so a working feed() never asks the pacer to fill silence. Video also
+        # flows here, so tick() runs on every pass (see `_video_forwarded`):
+        # if the AAC packets above came from tick()'s idle-fill instead of
+        # feed() actually consuming the A-law, this would be in the thousands
+        # by now.
         assert proc._aac.pacer.silence_samples == 0
         tx.close()
     finally:

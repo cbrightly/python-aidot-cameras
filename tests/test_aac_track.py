@@ -289,11 +289,14 @@ def test_an_encoder_failure_stops_only_the_aac_track(caplog):
         def encode(self, alaw):
             raise RuntimeError("boom")
 
-    trk = at.AacTrack(encoder=Broken())
+    trk = at.AacTrack(encoder=Broken(), device_id="cam7")
     assert trk.feed(b"\x01" * 160, 0, 0.0) == []
     assert trk.failed
     assert trk.feed(b"\x01" * 160, 160, 0.02) == []
     assert sum("AAC track stopped" in r.message for r in caplog.records) == 1
+    assert (
+        sum("camera cam7: AAC track stopped" in r.message for r in caplog.records) == 1
+    )
 
 
 def test_a_pacer_failure_also_stops_only_the_aac_track(caplog):
@@ -308,11 +311,26 @@ def test_a_pacer_failure_also_stops_only_the_aac_track(caplog):
         def encode(self, alaw):
             return []
 
-    trk = at.AacTrack(encoder=Encoder(), pacer=BrokenPacer())
+    trk = at.AacTrack(encoder=Encoder(), pacer=BrokenPacer(), device_id="cam8")
     assert trk.feed(b"\x01" * 160, 0, 0.0) == []
     assert trk.failed
     assert trk.tick(1.0) == []
     assert sum("AAC track stopped" in r.message for r in caplog.records) == 1
+    assert (
+        sum("camera cam8: AAC track stopped" in r.message for r in caplog.records) == 1
+    )
+
+
+def test_a_reanchor_names_the_camera(caplog):
+    p = at.AacPacer(device_id="cam9")
+    with caplog.at_level("INFO"):
+        p.feed(b"\x01" * 160, 1000, 0.0)
+        p.feed(b"\x02" * 160, 1160 + 8000 * 60, 0.02)  # 60 s jump: re-anchors
+    assert p.reanchors == 1
+    assert any(
+        "camera cam9: AAC track: camera audio jumped" in r.message
+        for r in caplog.records
+    )
 
 
 def test_make_aac_track_honours_the_kill_switch(monkeypatch):
@@ -327,8 +345,24 @@ def test_make_aac_track_returns_none_when_the_encoder_cannot_open(monkeypatch, c
         raise ImportError("no av")
 
     monkeypatch.setattr(at, "AacEncoder", _fail)
+    monkeypatch.setattr(at, "_ENCODER_WARNED", False)
     assert at.make_aac_track("cam1") is None
     assert "publishing without it" in caplog.text
+
+
+def test_encoder_open_failure_warns_once_then_only_debug(monkeypatch, caplog):
+    def _fail(*a, **k):
+        raise ImportError("no aac encoder")
+
+    monkeypatch.setattr(at, "AacEncoder", _fail)
+    monkeypatch.setattr(at, "_ENCODER_WARNED", False)
+    with caplog.at_level("DEBUG"):
+        assert at.make_aac_track("cam1") is None
+        assert at.make_aac_track("cam2") is None
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    debugs = [r for r in caplog.records if r.levelname == "DEBUG"]
+    assert len(warnings) == 1 and "cam1" in warnings[0].message
+    assert len(debugs) == 1 and "cam2" in debugs[0].message
 
 
 def _distinct(i, n):
@@ -395,6 +429,20 @@ def test_dead_band_edges():
     out = _flat(p.feed(payload, 1160 - 321, 0.02))
     assert out == payload[321:]
     assert p.trimmed_samples == 321
+
+
+def test_gap_tolerance_boundary_is_a_real_gap_not_a_reanchor():
+    # AAC_GAP_TOLERANCE_S is an inclusive bound on the disagreement between
+    # the stamp jump and the wall clock: exactly on the bound must still be
+    # judged a real gap and filled, not treated as unexplained and
+    # re-anchored. A `<=` -> `<` mutant of that check fails this.
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 0, 10.0)  # anchored at wall time 10.0
+    jump = 6 * at.PCMA_RATE  # a 6 s stamp jump; the wall clock only shows 5 s
+    out = _flat(p.feed(b"\x02" * 160, 160 + jump, 15.0))
+    assert out == S * jump + b"\x02" * 160
+    assert p.silence_samples == jump
+    assert p.reanchors == 0
 
 
 def test_a_gap_beyond_the_dead_band_is_still_filled():
