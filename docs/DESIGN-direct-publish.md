@@ -186,7 +186,7 @@ from the same publish (`tests/test_rtsp_publish_go2rtc.py`).
 removed: some go2rtc builds stamp that transcode's RTP on a 90 kHz clock
 while advertising `MPEG4-GENERIC/8000`, which plays about eleven times too
 slow (see `docs/CAMERAS.md`, "An AAC transcoding source makes every player
-crawl"). The publish now carries its own AAC-LC 48 kHz mono track, encoded
+crawl"). The publish can now carry its own AAC-LC 48 kHz mono track (opt-in, `AIDOT_PUBLISH_AAC=1`), encoded
 in-process after the A-law one, with timestamps it owns - see
 `aac_track.py`.
 

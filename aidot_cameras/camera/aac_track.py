@@ -57,8 +57,8 @@ _OFF = ("0", "false", "no", "off")
 
 
 def publish_aac_enabled() -> bool:
-    """Whether the direct publish adds the AAC track (default on)."""
-    return os.environ.get(ENV_PUBLISH_AAC, "1").strip().lower() not in _OFF
+    """Whether the direct publish adds the AAC track (default off: opt in)."""
+    return os.environ.get(ENV_PUBLISH_AAC, "0").strip().lower() not in _OFF
 
 
 def audio_specific_config(

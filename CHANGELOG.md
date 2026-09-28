@@ -8,10 +8,10 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ### Added
 
-- **The direct publish carries an AAC track, so Home Assistant's HLS player and
-  recordings have sound.** Home Assistant's stream component keeps AAC and MP3
+- **The direct publish can carry an AAC track, so Home Assistant's HLS player and
+  recordings can have sound (opt-in).** Home Assistant's stream component keeps AAC and MP3
   audio and drops G.711, and the direct publish sent the camera's A-law only,
-  so the HLS dialog and `camera.record` were silent. It now also publishes an
+  so the HLS dialog and `camera.record` were silent. It can now also publish an
   AAC-LC 48 kHz mono track, after the A-law one, encoded in-process. Its
   timestamps follow the camera's own audio clock and do not drift against the
   picture; when an HLS view starts a cold camera session, audio can lead the
@@ -21,8 +21,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   track. Everything that reads the first audio track - WebRTC included -
   still gets A-law, unchanged. A consumer selects the track with go2rtc's
   `audio=aac` (the Home Assistant integration does this on its HLS path
-  only). **On by default** (`AIDOT_PUBLISH_AAC=1`); set it to `0` to publish
-  exactly as before. The encode is always on: it costs one AAC encode per
+  only). **Off by default**: set `AIDOT_PUBLISH_AAC=1` to publish it; unset,
+  the publish is exactly as before. When on, it costs one AAC encode per
   streaming camera for as long as its direct publish runs, watched or not.
   A camera whose audio is mu-law (PCMU) gets no AAC track. It absorbs small
   camera audio timestamp jitter (up to 40 ms ahead, or up to one packet

@@ -1081,7 +1081,7 @@ def test_loopback_publisher_applies_audio_gain(go2rtc, monkeypatch):
 
 
 def test_loopback_publish_adds_aac_after_pcma(go2rtc, monkeypatch):
-    monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
     a_port, v_port = _free_udp_ports(2)
     proc = rp.LoopbackRtpPublisher(
         _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", audio_gain_db=0
@@ -1138,7 +1138,7 @@ def test_loopback_publish_builds_the_aac_track_off_the_constructing_thread(
 ):
     # The constructor runs on Home Assistant's event loop, and the first AAC
     # track imports numpy and av and opens a codec: that belongs on the worker.
-    monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
     calls = []
     real_make = rp.make_aac_track
 
@@ -1164,7 +1164,7 @@ def test_loopback_publish_builds_the_aac_track_off_the_constructing_thread(
 
 
 def test_loopback_publish_fills_aac_silence_only_while_video_flows(go2rtc, monkeypatch):
-    monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
     a_port, v_port = _free_udp_ports(2)
     proc = rp.LoopbackRtpPublisher(
         _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", audio_gain_db=0
@@ -1197,7 +1197,7 @@ def test_loopback_publish_fills_aac_silence_only_while_video_flows(go2rtc, monke
 
 
 def test_loopback_publish_without_audio_has_no_aac(go2rtc, monkeypatch):
-    monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
     a_port, v_port = _free_udp_ports(2)
     proc = rp.LoopbackRtpPublisher(
         _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", include_audio=False
@@ -1211,7 +1211,7 @@ def test_loopback_publish_without_audio_has_no_aac(go2rtc, monkeypatch):
 
 
 def test_loopback_publish_pcmu_camera_gets_no_aac(go2rtc, monkeypatch):
-    monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
     a_port, v_port = _free_udp_ports(2)
     pcmu_sdp = _serve_sdp(a_port, v_port).replace("RTP/AVP 8", "RTP/AVP 0")
     pcmu_sdp = pcmu_sdp.replace("a=rtpmap:8 PCMA/8000", "a=rtpmap:0 PCMU/8000")
@@ -1413,7 +1413,7 @@ def _run_dtls(go2rtc, feed, *, secs=1.2):
 
 
 def test_dtls_publish_announces_and_sends_an_aac_track(go2rtc, monkeypatch, caplog):
-    monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
     caplog.set_level(logging.INFO, logger="aidot_cameras.camera.rtsp_publish")
 
     def feed(vq, aq):
@@ -1451,7 +1451,7 @@ def test_dtls_publish_feeds_queued_audio_before_the_idle_fill(go2rtc, monkeypatc
     # After a loop stall, audio and video are queued together. The audio is
     # real and continuous; the idle fill must not run ahead of it and have it
     # trimmed away as already covered.
-    monkeypatch.delenv("AIDOT_PUBLISH_AAC", raising=False)
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
     made = []
 
     def _make(device_id="?"):

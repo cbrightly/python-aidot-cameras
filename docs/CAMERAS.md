@@ -282,11 +282,11 @@ and `http://` serves are unchanged). Design, measurements and rollout:
   not from an observed packet, because go2rtc accepts an announced track whose
   first packet arrives late. That removes the 1 s audio grace and the
   video-only fallback it caused when a camera's audio trailed its video.
-- **AAC.** After the A-law track, the publish also carries an AAC-LC 48 kHz
+- **AAC (opt-in, `AIDOT_PUBLISH_AAC=1`).** After the A-law track, the publish can also carry an AAC-LC 48 kHz
   mono track encoded in-process from the same audio (`aac_track.py`), on both
   transports, so an AAC-only consumer such as Home Assistant's HLS player and
   `camera.record` has sound; everything reading the first audio track keeps
-  A-law. `AIDOT_PUBLISH_AAC=0` turns it off. A camera whose audio is mu-law
+  A-law. It is off by default. A camera whose audio is mu-law
   (PCMU) gets no AAC track. Its timestamps follow the camera's own audio
   clock and do not drift against the picture; when an HLS view starts a cold
   camera session, audio can lead the picture by up to about 2 s for that
@@ -398,7 +398,7 @@ fit an unintended HLS downgrade (above). They are different faults: check
 whether the stream's source list contains an `#audio=aac` entry, and compare
 `?audio=pcma` against `?audio=aac` on the same stream over the same wall-clock
 window. The fix is to stop offering the source; the cost is that AAC-only
-players get no audio (a direct publish carries its own AAC track instead -
+players get no audio (a direct publish can carry its own AAC track instead -
 see "Direct publish: no ffmpeg in the live path" above).
 
 ### What a cold SDES open costs
