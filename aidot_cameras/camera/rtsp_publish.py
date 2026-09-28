@@ -76,10 +76,11 @@ STEER_RATE_WINDOW_S = 20.0
 STEER_RATE_MIN_S = 2.0
 #: Clamp for the learned rate (wall seconds per camera second).
 STEER_RATE_BOUNDS = (0.8, 1.25)
-#: Fraction of the remaining phase error the steered clock corrects per frame.
-STEER_PHASE_GAIN = 0.05
+#: Fraction of the remaining phase error the steered clock corrects per
+#: frame (0.02 per frame at ~16 fps is a ~3 s time constant).
+STEER_PHASE_GAIN = 0.02
 #: A phase error larger than this snaps the steered output to wall time.
-STEER_SNAP_S = 1.0
+STEER_SNAP_S = 2.5
 
 #: Exit codes this module reports through the Popen-compatible surface.
 #: A requested stop reports like a signal death (negative), which is what

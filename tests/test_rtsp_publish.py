@@ -350,7 +350,9 @@ def test_steered_locks_a_fast_camera_clock_to_real_time():
     assert abs(out / wall - 1.0) <= 0.005
     assert max(abs(o - w) for w, o in rows if w >= 10.0) < 0.10
     steps = [b[1] - a[1] for a, b in zip(rows, rows[1:])]
-    assert statistics.pstdev(steps) < 0.020
+    # steered measures ~0.6 ms of step-to-step jitter here; arrival stamping
+    # on the same stream measures ~11.9 ms.
+    assert statistics.pstdev(steps) < 0.003
 
 
 def test_steered_keeps_an_accurate_camera_as_is():
@@ -392,6 +394,77 @@ def test_steered_never_steps_backward_on_a_camera_backward_jump():
     rows = _steer_frames(tl, frames)
     outs = [o for _, o in rows]
     assert all(b > a for a, b in zip(outs, outs[1:]))
+    assert tl.repairs >= 1
+
+
+def test_steered_rides_through_a_delivery_stall_without_snapping():
+    """A 1.7 s DELIVERY stall, not a capture gap: the camera's own clock
+    stays continuous through it (every frame still steps by one normal
+    +6000 tick), but the backlog generated during the stall arrives in a
+    ~0.1 s burst once the connection catches up. The steered output must
+    keep riding the camera's spacing through this, not snap onto the late
+    burst arrival."""
+    rng = random.Random(1)
+    fps = 15.0
+    step = 6000
+    clock_rate = 90000
+    t0 = 100.0
+    n1 = int(30 * fps)
+    n_stall = round(1.7 * fps)
+    n3 = int(30 * fps)
+
+    gen_times = []
+    frames = []  # (in_ts, arrival)
+    ts = 1000
+
+    for i in range(n1):
+        gen = t0 + i / fps
+        gen_times.append(gen)
+        frames.append((ts & 0xFFFFFFFF, gen + rng.uniform(-0.015, 0.015)))
+        ts += step
+
+    stall_end_wall = frames[-1][1] + 1.7
+    for j in range(n_stall):
+        gen_times.append(t0 + (n1 + j) / fps)
+        frames.append((ts & 0xFFFFFFFF, stall_end_wall + (j / n_stall) * 0.1))
+        ts += step
+
+    wall = frames[-1][1]
+    for k in range(n3):
+        gen_times.append(t0 + (n1 + n_stall + k) / fps)
+        wall += 1 / fps
+        frames.append((ts & 0xFFFFFFFF, wall + rng.uniform(-0.015, 0.015)))
+        ts += step
+
+    tl = rp.RtpTimeline(clock_rate, policy="steered")
+    outs = [tl.stamp(in_ts, arrival)[1] for in_ts, arrival in frames]
+    outs_s = [((o - outs[0]) & 0xFFFFFFFF) / clock_rate for o in outs]
+
+    assert tl.repairs == 0
+    assert all(b > a for a, b in zip(outs_s, outs_s[1:]))
+    steps = [b - a for a, b in zip(outs_s, outs_s[1:])]
+    assert max(steps) < 0.2
+
+    gen0 = gen_times[0]
+    tail_start = n1 + n_stall
+    tail = [
+        abs(o - (g - gen0)) for o, g in zip(outs_s[tail_start:], gen_times[tail_start:])
+    ]
+    assert tail and max(tail) < 0.5
+
+
+def test_steered_snaps_across_an_uncovered_gap():
+    """An uncovered gap - the camera stamp advances only one normal step
+    across a 4 s silence - is a real phase error (capture stopped, not a
+    delivery artifact) and must still snap onto wall time immediately."""
+    rng = random.Random(1)
+    before = _camera_frames(rng, 15.0, 20)
+    last_ts, last_arrival = before[-1]
+    frames = before + [((last_ts + 6000) & 0xFFFFFFFF, last_arrival + 4.0)]
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    wall, out = rows[-1]
+    assert abs(out - wall) < 0.1
     assert tl.repairs >= 1
 
 
@@ -834,6 +907,24 @@ def test_loopback_publisher_steers_video_and_not_audio(go2rtc, monkeypatch):
         finally:
             proc.terminate()
             proc.wait(3)
+
+
+def test_loopback_publisher_env_arrival_applies_to_both_tracks(go2rtc, monkeypatch):
+    """AIDOT_PUBLISH_TIMESTAMPS=arrival with no explicit policy= applies to
+    every track, video and audio alike, the same as an explicit policy=
+    does."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "arrival")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam"
+    )
+    try:
+        by_kind = {t.kind: tl.policy for t, tl in zip(proc._tracks, proc._timelines)}
+        assert by_kind == {"video": "arrival", "audio": "arrival"}
+    finally:
+        proc.terminate()
+        proc.wait(3)
 
 
 def test_loopback_publisher_exits_1_when_the_stream_is_missing():
@@ -1899,8 +1990,12 @@ def _gap_fields(caplog):
     for rec in caplog.records:
         m = rx.search(rec.getMessage())
         if m:
-            return (float(m.group(1)), float(m.group(2)),
-                    int(m.group(3)), int(m.group(4)))
+            return (
+                float(m.group(1)),
+                float(m.group(2)),
+                int(m.group(3)),
+                int(m.group(4)),
+            )
     return None
 
 
