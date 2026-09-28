@@ -76,7 +76,9 @@ STEER_RATE_WINDOW_S = 20.0
 STEER_RATE_MIN_S = 6.0
 #: Camera-time separation needed between the two least-late envelope points.
 STEER_RATE_MIN_CAM_S = 1.0
-#: Clamp for the learned rate (wall seconds per camera second).
+#: Clamp for the learned rate (wall seconds per camera second). A camera clock
+#: outside these bounds is not tracked; real cameras measure 0.9998-1.0002
+#: once re-sent frames are dropped.
 STEER_RATE_BOUNDS = (0.8, 1.25)
 #: Wall-time window over which the steered clock takes its latency floor.
 STEER_FLOOR_WINDOW_S = 10.0
@@ -84,6 +86,9 @@ STEER_FLOOR_WINDOW_S = 10.0
 STEER_PHASE_TAU_S = 3.0
 #: Latency above the floor that counts as an uncovered gap (a steered snap).
 STEER_SNAP_S = 2.5
+#: How long latency must stay above the floor by more than STEER_SNAP_S before
+#: it counts as an uncovered gap (a covered stall's backlog drains sooner).
+STEER_SNAP_HOLD_S = 1.0
 
 #: Exit codes this module reports through the Popen-compatible surface.
 #: A requested stop reports like a signal death (negative), which is what
@@ -347,8 +352,10 @@ class RtpTimeline:
       two.  A frame that arrives late (a delivery stall, a cold-start
       backlog) was captured earlier than it arrived, so it keeps its camera
       spacing and never moves the rate.  The output eases onto that target
-      with time constant ``STEER_PHASE_TAU_S``; latency more than
-      ``STEER_SNAP_S`` above the recent floor is an uncovered gap and snaps.
+      with time constant ``STEER_PHASE_TAU_S``.  Latency more than
+      ``STEER_SNAP_S`` above the recent floor that persists for
+      ``STEER_SNAP_HOLD_S`` is an uncovered gap and snaps; a backlog that
+      drains sooner was a covered stall and keeps its camera spacing.
       This keeps the camera's even spacing while the output runs at real
       time, for a camera whose clock does not.
 
@@ -376,8 +383,9 @@ class RtpTimeline:
         self._last_arrival = 0.0
         # steered state: arrival anchor, output and camera position (s since
         # the anchor), learned rate, the target the output eases onto, the
-        # base the first learned rate rebases from, and (arrival, camera s,
-        # latency) samples.
+        # base the first learned rate rebases from, (arrival, camera s,
+        # latency) samples, the previous frame's latency, and a pending snap
+        # (when latency first went over, and the floor it went over).
         self._anchor = 0.0
         self._out_s = 0.0
         self._cam_s = 0.0
@@ -387,6 +395,9 @@ class RtpTimeline:
         self._base_target = 0.0
         self._base_cam = 0.0
         self._window: Deque[Tuple[float, float, float]] = collections.deque()
+        self._last_lat = 0.0
+        self._pend_since: Optional[float] = None
+        self._pend_floor: Optional[float] = None
         self.repairs = 0
         self.packets = 0
 
@@ -426,36 +437,53 @@ class RtpTimeline:
         if 0 < d <= self.max_step:
             cam_step = d / self.clock_rate
         else:
-            cam_step = now - self._last_arrival
+            # A repair advances the target by exactly the wall gap.
+            cam_step = (now - self._last_arrival) / self._rate
             self.repairs += 1
         dt = now - self._last_arrival
         self._cam_s += cam_step
         window = self._window
         while window and now - window[0][0] > STEER_RATE_WINDOW_S:
             window.popleft()
-        if window and now - window[0][0] >= STEER_RATE_MIN_S:
+        if (
+            self._pend_since is None
+            and window
+            and now - window[0][0] >= STEER_RATE_MIN_S
+        ):
             self._learn_rate(now, cam_step)
         self._target_s += cam_step * self._rate
         lat_now = (now - self._anchor) - self._target_s
         floor = min(
             (lat for a, _, lat in window if now - a <= STEER_FLOOR_WINDOW_S),
-            default=lat_now,
+            default=self._last_lat,
         )
-        if lat_now - floor > STEER_SNAP_S:
+        floor_used = self._pend_floor if self._pend_since is not None else floor
+        over = lat_now - floor_used > STEER_SNAP_S
+        if over and self._pend_since is None:
+            self._pend_since, self._pend_floor = now, floor
+        if over and now - self._pend_since >= STEER_SNAP_HOLD_S:
             # An uncovered gap: capture stopped, so move onto the floor.
-            self._target_s += lat_now - floor
+            jump = lat_now - self._pend_floor
+            self._target_s += jump
+            self._base_target += jump
             self.repairs += 1
             step_s = self._target_s - self._out_s
             window.clear()
-            self._base_target = self._target_s
-            self._base_cam = self._cam_s
+            self._pend_since = None
+            self._pend_floor = None
         else:
+            if not over and self._pend_since is not None:
+                # The backlog drained: it was a covered stall.
+                self._pend_since = None
+                self._pend_floor = None
+                window.clear()
             paced = cam_step * self._rate
             ease = min(1.0, dt / STEER_PHASE_TAU_S)
             step_s = paced + (self._target_s - paced - self._out_s) * ease
         step = max(1, round(step_s * self.clock_rate))
         self._out_s += step / self.clock_rate
-        window.append((now, self._cam_s, (now - self._anchor) - self._target_s))
+        self._last_lat = (now - self._anchor) - self._target_s
+        window.append((now, self._cam_s, self._last_lat))
         return step
 
     def _learn_rate(self, now: float, cam_step: float) -> None:

@@ -287,6 +287,9 @@ and `http://` serves are unchanged). Design, measurements and rollout:
   backward step or a jump. `steered` stamps camera time times a rate learned
   from the least-late frames, so a backlog the camera delivers at cold start
   keeps its camera spacing instead of being squeezed toward its arrival.
+  A camera clock whose rate falls outside the steered bounds (0.8 to 1.25
+  wall seconds per camera second) is not tracked; the cameras measured so far
+  sit within 0.9998-1.0002 once re-sent frames are dropped.
 - **H.264 only.** The publisher is measured on H.264; a camera's H.265 has
   never gone through it (the A001064 picks its own codec and answered H.264 in
   9 of 9 sessions, 4 of them offered H.265 first). A session narrowed to H.265

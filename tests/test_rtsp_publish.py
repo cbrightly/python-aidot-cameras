@@ -451,36 +451,124 @@ def test_steered_rides_through_a_delivery_stall_without_snapping():
     tail = [
         abs(o - (g - gen0)) for o, g in zip(outs_s[tail_start:], gen_times[tail_start:])
     ]
-    assert tail and max(tail) < 0.5
+    assert tail and max(tail) < 0.05
+
+
+def _gap_frames(fps, before_s, gap_s, after_s, *, step=6000, jump=None):
+    """``before_s`` of frames, ``gap_s`` of silence, then ``after_s`` more.
+    The camera stamp advances one normal step across the gap (an uncovered
+    gap) unless ``jump`` gives the stamp's own jump in ticks. Returns the
+    frames and the index of the first frame after the gap."""
+    rng = random.Random(1)
+    before = _camera_frames(rng, fps, before_s, step=step)
+    last_ts, last_arrival = before[-1]
+    after = _camera_frames(
+        rng,
+        fps,
+        after_s,
+        start_ts=(last_ts + (step if jump is None else jump)) & 0xFFFFFFFF,
+        t0=last_arrival + gap_s,
+        step=step,
+    )
+    return before + after, len(before)
 
 
 def test_steered_snaps_across_an_uncovered_gap():
     """An uncovered gap - the camera stamp advances only one normal step
     across a 4 s silence - is a real phase error (capture stopped, not a
-    delivery artifact) and must still snap onto wall time immediately."""
-    rng = random.Random(1)
-    before = _camera_frames(rng, 15.0, 20)
-    last_ts, last_arrival = before[-1]
-    frames = before + [((last_ts + 6000) & 0xFFFFFFFF, last_arrival + 4.0)]
+    delivery artifact) and must snap onto wall time once the latency has
+    stayed high for the snap hold."""
+    frames, first = _gap_frames(15.0, 20, 4.0, 3)
     tl = rp.RtpTimeline(90000, policy="steered")
     rows = _steer_frames(tl, frames)
-    wall, out = rows[-1]
-    assert abs(out - wall) < 0.1
-    assert tl.repairs >= 1
+    held = rows[first][0] + rp.STEER_SNAP_HOLD_S
+    tail = [abs(o - w) for w, o in rows if w >= held]
+    assert tl.repairs == 1
+    assert len(tail) >= 15 and max(tail) < 0.1
 
 
 def test_steered_relearns_rate_cleanly_after_an_uncovered_gap():
-    rng = random.Random(1)
-    before = _camera_frames(rng, 16.1, 20)
-    last_ts, last_arrival = before[-1]
-    after = _camera_frames(
-        rng, 16.1, 30, start_ts=(last_ts + 6000) & 0xFFFFFFFF, t0=last_arrival + 4.0
-    )
+    frames, first = _gap_frames(16.1, 20, 4.0, 30)
     tl = rp.RtpTimeline(90000, policy="steered")
-    rows = _steer_frames(tl, before + after)
-    tail = [abs(o - w) for w, o in rows[len(before) :]]
+    rows = _steer_frames(tl, frames)
+    tail = [abs(o - w) for w, o in rows if w >= rows[first][0] + 1.0]
     assert tl.repairs == 1
     assert max(tail) < 0.10
+
+
+def test_steered_snaps_a_12s_uncovered_gap():
+    """12 s of silence is longer than the floor window: the floor must come
+    from the frame before the gap, not the late frame itself."""
+    frames, first = _gap_frames(15.0, 20, 12.0, 10)
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    tail = [abs(o - w) for w, o in rows if w >= rows[first][0] + 1.5]
+    assert tl.repairs == 1
+    assert max(tail) < 0.1
+
+
+def test_steered_snap_before_learning_keeps_phase():
+    """A fast camera clock with an uncovered gap before any rate is learned:
+    the snap must not move the base the first learned rate rebases from."""
+    frames, _ = _gap_frames(16.1, 3, 4.0, 60)
+    rows = _steer_frames(rp.RtpTimeline(90000, policy="steered"), frames)
+    assert max(abs(o - w) for w, o in rows if w >= 30.0) < 0.06
+
+
+def test_steered_repair_gap_on_a_fast_clock():
+    """A 20 s gap across which the camera stamp jumps more than max_step: the
+    repair must advance the target by exactly the wall gap, not the wall gap
+    times the learned rate."""
+    frames, first = _gap_frames(16.1, 30, 20.0, 20, jump=25 * 90000)
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    assert tl.repairs >= 1
+    assert max(abs(o - w) for w, o in rows[first:]) < 0.1
+
+
+def test_steered_low_fps_fast_clock():
+    """A 5 fps camera clock (+18000 ticks) delivered at ~5.37 fps."""
+    rng = random.Random(1)
+    frames = _camera_frames(rng, 5.367, 60, step=18000)
+    rows = _steer_frames(rp.RtpTimeline(90000, policy="steered"), frames)
+    assert max(abs(o - w) for w, o in rows if w >= 15.0) < 0.06
+
+
+def _covered_stall(stall_s):
+    """An accurate 15 fps camera whose DELIVERY stalls for ``stall_s`` at
+    20 s; the camera stamps stay continuous and the held frames arrive as one
+    burst. Returns the frames and each frame's capture time."""
+    rng = random.Random(1)
+    fps, t0, start = 15.0, 100.0, 20.0
+    captures = [i / fps for i in range(int(60 * fps))]
+    arrivals = []
+    for c in captures:
+        if start <= c < start + stall_s:
+            arrivals.append(t0 + start + stall_s + 0.05)  # held, released together
+        else:
+            arrivals.append(t0 + c + 0.05 + rng.uniform(-0.01, 0.01))
+    frames = [
+        ((1000 + 6000 * i) & 0xFFFFFFFF, a) for i, a in enumerate(_monotonic(arrivals))
+    ]
+    return frames, captures
+
+
+def test_steered_rides_a_covered_4s_stall_without_offset():
+    frames, captures = _covered_stall(4.0)
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    tail = [abs(o - c) for (_, o), c in zip(rows, captures) if c >= 20.0]
+    assert tl.repairs == 0
+    assert max(tail) < 0.05
+
+
+def test_steered_rides_a_covered_12s_stall_without_offset():
+    frames, captures = _covered_stall(12.0)
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    tail = [abs(o - c) for (_, o), c in zip(rows, captures) if c >= 20.0]
+    assert tl.repairs == 0
+    assert max(tail) < 0.05
 
 
 def _monotonic(arrivals, gap=0.001):
@@ -515,7 +603,7 @@ def test_steered_keeps_a_cold_start_backlog_at_camera_spacing():
 
 
 def test_steered_learns_rate_from_the_least_late_frames():
-    """An accurate camera whose delivery is held for 0.4 s every 5th second
+    """An accurate camera whose delivery is held for 0.8 s every 5th second
     and then released at once. The held frames are late, not fast: the rate
     comes from the least-late frames, so output runs at the camera's rate
     and on its capture times."""
@@ -525,8 +613,8 @@ def test_steered_learns_rate_from_the_least_late_frames():
     arrivals = []
     for c in captures:
         sec = int(c + 1e-9)
-        if sec and sec % 5 == 0 and c - sec < 0.4 - 1e-9:
-            arrivals.append(t0 + sec + 0.4)  # held, released together
+        if sec and sec % 5 == 0 and c - sec < 0.8 - 1e-9:
+            arrivals.append(t0 + sec + 0.8)  # held, released together
         else:
             arrivals.append(t0 + c + 0.05 + rng.uniform(-0.01, 0.01))
     frames = [
