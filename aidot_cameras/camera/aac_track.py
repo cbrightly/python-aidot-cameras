@@ -34,6 +34,9 @@ AAC_IDLE_FILL_S = 0.5
 AAC_MAX_FILL_S = 5.0
 #: How far a forward stamp jump may disagree with the wall clock and still be a real gap.
 AAC_GAP_TOLERANCE_S = 1.0
+#: Timestamp jitter the pacer absorbs - a packet stamped within this of where
+#: the audio already is gets appended contiguously instead of filled or trimmed.
+AAC_JITTER_TOL_S = 0.04
 
 _SR_INDEX = {
     96000: 0,
@@ -122,6 +125,14 @@ class AacPacer:
         if self._pos is None:
             self._pos = ts
         d = _signed32(ts - self._pos)
+        tol = round(AAC_JITTER_TOL_S * PCMA_RATE)
+        if -min(tol, len(alaw) - 1) <= d <= tol:
+            # Within the jitter tolerance and not wholly old: absorb it -
+            # append contiguously, no fill, no trim, no counters.
+            out.append(alaw)
+            self._pos = (self._pos + len(alaw)) & _MASK
+            self._last = now
+            return out
         if d > AAC_MAX_FILL_S * PCMA_RATE:
             if (
                 self._last is not None

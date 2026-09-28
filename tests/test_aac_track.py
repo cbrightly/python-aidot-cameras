@@ -75,12 +75,13 @@ def test_a_gap_in_the_camera_stamps_is_filled_with_silence():
 
 def test_an_overlapping_packet_is_trimmed_never_stepped_back():
     p = at.AacPacer()
-    p.feed(b"\x01" * 160, 1000, 0.0)
-    out = p.feed(b"\x02" * 160, 1080, 0.02)  # overlaps 80 samples
-    assert _flat(out) == b"\x02" * 80
-    assert p.trimmed_samples == 80
+    p.feed(b"\x01" * 320, 1000, 0.0)  # pos -> 1320
+    # Overlaps by 400 samples: beyond the jitter tolerance, so still trimmed.
+    out = p.feed(b"\x02" * 640, 920, 0.02)
+    assert _flat(out) == b"\x02" * 240
+    assert p.trimmed_samples == 400
     assert p.feed(b"\x03" * 160, 1000, 0.03) == []  # entirely old: dropped
-    assert p.trimmed_samples == 80 + 160
+    assert p.trimmed_samples == 400 + 160
 
 
 def test_the_32_bit_timestamp_wraps():
@@ -167,10 +168,11 @@ def test_resume_after_a_continuous_fill_never_steps_backward():
     for k in range(1, 26):  # 1 s of ticks, the fill tracking every one
         p.tick(k * 0.04)
     pos = 1000 + 160 + p.silence_samples
-    # The camera resumes 80 samples behind the filled position: only its tail
-    # is new, and the position keeps moving forward from there.
-    assert _flat(p.feed(b"\x02" * 160, pos - 80, 1.02)) == b"\x02" * 80
-    assert _flat(p.feed(b"\x02" * 160, pos + 80, 1.04)) == b"\x02" * 160
+    # The camera resumes 400 samples behind the filled position (beyond the
+    # jitter tolerance): only its tail is new, and the position keeps moving
+    # forward from there.
+    assert _flat(p.feed(b"\x02" * 800, pos - 400, 1.02)) == b"\x02" * 400
+    assert _flat(p.feed(b"\x02" * 160, pos + 400, 1.04)) == b"\x02" * 160
     assert p.tick(1.05) == []  # audio is flowing again: no fill
 
 
@@ -182,11 +184,12 @@ def test_idle_fill_after_audio_stops_then_resumes_without_a_backward_step():
     # The camera resumes; its first packet lies wholly inside the filled silence.
     out = _flat(p.feed(b"\x02" * 160, 1000 + 160 + 7800, 1.00))
     assert out == b""
-    # The next packet overlaps the fill by 40 samples: only its tail is kept.
-    out = _flat(p.feed(b"\x02" * 160, 1000 + 160 + 7960, 1.02))
-    assert out == b"\x02" * 120
+    # The next packet overlaps the fill by 400 samples (beyond the jitter
+    # tolerance): only its tail is kept.
+    out = _flat(p.feed(b"\x02" * 800, 1000 + 160 + 8000 - 400, 1.02))
+    assert out == b"\x02" * 400
     # From here on the camera's stamps are exactly continuous.
-    out = _flat(p.feed(b"\x02" * 160, 1000 + 160 + 8120, 1.04))
+    out = _flat(p.feed(b"\x02" * 160, 1000 + 160 + 8000 + 400, 1.04))
     assert out == b"\x02" * 160
 
 
@@ -326,3 +329,84 @@ def test_make_aac_track_returns_none_when_the_encoder_cannot_open(monkeypatch, c
     monkeypatch.setattr(at, "AacEncoder", _fail)
     assert at.make_aac_track("cam1") is None
     assert "publishing without it" in caplog.text
+
+
+def _distinct(i, n):
+    """`n` bytes of content that vary by packet index and are never 0xD5."""
+    return bytes([(i % 200) + 1]) * n
+
+
+def test_timestamp_jitter_inside_the_dead_band_is_absorbed():
+    # The M3 Pro: 320-sample (40 ms) PCMA packets whose stamps step alternately
+    # +256 and +384 (mean 320). Every step disagrees with the position by only
+    # 64 samples, well inside AAC_JITTER_TOL_S, so nothing is filled or trimmed.
+    p = at.AacPacer()
+    n = 250
+    content_len = 320
+    packets = [_distinct(i, content_len) for i in range(n)]
+    ts = 1000
+    out = []
+    for i, content in enumerate(packets):
+        out += p.feed(content, ts, i * 0.04)
+        ts += 256 if i % 2 == 0 else 384
+    assert _flat(out) == _flat(packets)
+    assert p.silence_samples == 0
+    assert p.trimmed_samples == 0
+
+
+def test_a_gap_beyond_the_dead_band_is_still_filled():
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 1000, 0.0)  # pos -> 1160
+    out = _flat(p.feed(b"\x02" * 160, 1000 + 160 + 800, 0.1))  # 800 samples late
+    assert out == S * 800 + b"\x02" * 160
+    assert p.silence_samples == 800
+
+
+def test_an_overlap_beyond_the_dead_band_is_still_trimmed():
+    p = at.AacPacer()
+    p.feed(b"\x01" * 160, 1000, 0.0)  # pos -> 1160
+    out = _flat(p.feed(b"\x02" * 640, 1160 - 480, 0.02))  # 480 samples early
+    assert out == b"\x02" * 160
+    assert p.trimmed_samples == 480
+
+
+def test_a_duplicate_packet_is_still_dropped():
+    p = at.AacPacer()
+    p.feed(b"\x01" * 320, 1000, 0.0)  # pos -> 1320
+    out = p.feed(b"\x01" * 320, 1000, 0.02)  # the exact same packet again
+    assert out == []
+    assert p.trimmed_samples == 320
+
+
+def test_slow_clock_drift_is_resynced_when_it_passes_the_tolerance():
+    # 320-sample packets stamped +330 each: 3% fast, 10 samples of drift a
+    # packet. Nothing is filled until the accumulated drift passes the 320
+    # sample tolerance; once it does, the position resyncs in one fill.
+    p = at.AacPacer()
+    n = 100
+    step_ts = 330
+    content_len = 320
+    ts = 1000
+    appended = 0
+    resynced_at = None
+    max_abs_d = 0
+    for i in range(n):
+        content = _distinct(i, content_len)
+        pos_before = p._pos if p._pos is not None else ts
+        max_abs_d = max(max_abs_d, abs(ts - pos_before))
+        before_silence = p.silence_samples
+        blocks = p.feed(content, ts, i * (step_ts / at.PCMA_RATE))
+        out_len = sum(len(b) for b in blocks)
+        added_silence = p.silence_samples - before_silence
+        appended += out_len - added_silence
+        if added_silence:
+            if resynced_at is None:
+                resynced_at = i
+        elif resynced_at is None:
+            assert added_silence == 0  # nothing filled until the drift resyncs
+        ts += step_ts
+    assert resynced_at is not None, "the drift never resynced"
+    assert max_abs_d <= step_ts + content_len
+    # The position always accounts for every sample: what was appended plus
+    # what was filled equals how far the position has moved from the start.
+    assert abs(p._pos - (1000 + appended + p.silence_samples)) <= step_ts

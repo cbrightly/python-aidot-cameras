@@ -38,6 +38,10 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   recordings measured video 130.9 s / audio 117.0 s before; 119.8 / 119.8 s
   after.
 
+- **HLS audio no longer crackles on cameras whose audio timestamps jitter.**
+  The M3 Pro steps 32/48 ms for 40 ms packets; the AAC track absorbs up to
+  40 ms of timestamp jitter.
+
 ## [1.0.0rc31]
 
 ### Security

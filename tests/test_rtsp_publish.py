@@ -1108,7 +1108,8 @@ def test_dtls_publish_announces_and_sends_an_aac_track(go2rtc, monkeypatch, capl
     assert all(((b - a) & 0xFFFFFFFF) == 1024 for a, b in zip(ts, ts[1:]))
     assert res["aac_frames"] == len(aac)
     assert res["aac_seconds"] > 0
-    # The audio is contiguous: nothing is trimmed and nothing re-anchors.
+    # The audio is contiguous: nothing is filled, trimmed, or re-anchored.
+    assert res["aac_silence_samples"] == 0
     assert res["aac_trimmed_samples"] == 0
     assert res["aac_reanchors"] == 0
     ended = [
