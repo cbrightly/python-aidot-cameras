@@ -371,10 +371,10 @@ def _locked(rows, since, *, offset_since=None):
     return (o2 - o1) / (w2 - w1), max(diff) - min(diff), offset
 
 
-def _assert_locked(seed, rate, wander, offset):
+def _assert_locked(seed, rate, wander, offset, *, offset_max=0.2):
     assert 0.999 <= rate <= 1.001, f"seed {seed}: rate {rate:.5f}"
     assert wander < 0.05, f"seed {seed}: wander {wander:.4f}"
-    assert offset < 0.2, f"seed {seed}: offset {offset:.4f}"
+    assert offset < offset_max, f"seed {seed}: offset {offset:.4f}"
 
 
 def test_steered_locks_a_fast_camera_clock_to_real_time():
@@ -500,7 +500,7 @@ def test_steered_rides_through_a_delivery_stall_without_snapping():
         gen0 = gen_times[0]
         rows = [(g - gen0, o) for g, o in zip(gen_times, outs_s)]
         since = gen_times[after] - gen0 + 20.0
-        _assert_locked(seed, *_locked(rows, since, offset_since=20.0))
+        _assert_locked(seed, *_locked(rows, since, offset_since=20.0), offset_max=0.1)
 
 
 def _gap_frames(
@@ -560,17 +560,72 @@ def test_steered_snaps_a_12s_uncovered_gap():
     assert max(tail) < 0.1
 
 
+def test_steered_snaps_a_second_gap_inside_the_hold():
+    """Two 4 s uncovered gaps with three frames between them: the second gap
+    starts while the first snap is still held, and its excess must be
+    snapped as well."""
+    rng = random.Random(1)
+    frames = _camera_frames(rng, 15.0, 20)
+    for run_s in (0.25, 20.0):
+        last_ts, last_arrival = frames[-1]
+        second = len(frames)
+        frames += _camera_frames(
+            rng,
+            15.0,
+            run_s,
+            start_ts=(last_ts + 6000) & 0xFFFFFFFF,
+            t0=last_arrival + 4.0,
+        )
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    held = rows[second][0] + rp.STEER_SNAP_HOLD_S
+    tail = [abs(o - w) for w, o in rows if w >= held]
+    assert tl.repairs >= 1
+    assert max(tail) < 0.1
+
+
+def test_steered_snaps_two_short_gaps_that_add_up_in_the_floor_window():
+    """Two 1.5 s uncovered gaps 4 s apart: neither alone is over STEER_SNAP_S,
+    but the second leaves latency 3 s above the floor window's minimum, so the
+    output snaps once and lands back on wall time."""
+    rng = random.Random(1)
+    frames = _camera_frames(rng, 15.0, 20)
+    for run_s in (4.0, 20.0):
+        last_ts, last_arrival = frames[-1]
+        second = len(frames)
+        frames += _camera_frames(
+            rng,
+            15.0,
+            run_s,
+            start_ts=(last_ts + 6000) & 0xFFFFFFFF,
+            t0=last_arrival + 1.5,
+        )
+    tl = rp.RtpTimeline(90000, policy="steered")
+    rows = _steer_frames(tl, frames)
+    held = rows[second][0] + rp.STEER_SNAP_HOLD_S + 0.5
+    tail = [abs(o - w) for w, o in rows if w >= held]
+    assert tl.repairs == 1
+    assert max(tail) < 0.1
+
+
 def test_steered_snap_before_learning_keeps_phase():
     """A fast camera clock with an uncovered gap before any rate is learned:
     the snap must not move the base the first learned rate rebases from. The
     snap restarts learning, so the lock is measured 20 s after the gap."""
+    biases = []
     for seed in STEER_SEEDS:
         captures = []
         frames, first = _gap_frames(16.1, 3, 4.0, 60, seed=seed, captures=captures)
         rows = _vs_capture(
             _steer_frames(rp.RtpTimeline(90000, policy="steered"), frames), captures
         )
-        _assert_locked(seed, *_locked(rows, rows[first][0] + 20.0))
+        since = rows[first][0] + 20.0
+        _assert_locked(seed, *_locked(rows, since))
+        biases.append(statistics.mean(o - w for w, o in rows if w >= since))
+    # The snap jumps by the excess measured where the gap began, so its
+    # constant offset averages ~0 across seeds; measured at the snap instead
+    # (after the gap and hold ran at the provisional rate) it sat ~78 ms behind.
+    assert abs(statistics.mean(biases)) < 0.03
 
 
 def test_steered_repair_gap_on_a_fast_clock():
@@ -634,6 +689,59 @@ def test_steered_rides_a_covered_12s_stall_without_offset():
     tail = [abs(o - c) for (_, o), c in zip(rows, captures) if c >= 20.0]
     assert tl.repairs == 0
     assert max(tail) < 0.05
+
+
+def _draining_stall(stall_s, speed):
+    """An accurate 15 fps camera whose DELIVERY stalls for ``stall_s`` at
+    20 s; the held frames then drain at ``speed`` times real time, not at
+    once, until delivery has caught up. Returns the frames, each frame's
+    capture time and the capture time at which the backlog has drained."""
+    rng = random.Random(1)
+    fps, t0, start = 15.0, 100.0, 20.0
+    captures = [i / fps for i in range(int(60 * fps))]
+    arrivals, drained = [], None
+    for c in captures:
+        on_time = t0 + c + 0.05 + rng.uniform(-0.01, 0.01)
+        if c < start:
+            arrivals.append(on_time)
+        elif drained is None:
+            queued = (
+                arrivals[-1] + 1 / (fps * speed)
+                if c > start
+                else t0 + start + stall_s + 0.05
+            )
+            if on_time >= queued:
+                drained = c
+            arrivals.append(max(on_time, queued))
+        else:
+            arrivals.append(on_time)
+    frames = [
+        ((1000 + 6000 * i) & 0xFFFFFFFF, a) for i, a in enumerate(_monotonic(arrivals))
+    ]
+    return frames, captures, drained
+
+
+def test_steered_rides_a_covered_4s_stall_draining_at_2x_and_5x():
+    """A covered 4 s stall whose backlog drains at 2x or 5x real time: the
+    excess stays over STEER_SNAP_S for longer than the snap hold, but it is
+    falling, so it is a draining backlog and must not snap."""
+    for speed in (2.0, 5.0):
+        frames, captures, drained = _draining_stall(4.0, speed)
+        tl = rp.RtpTimeline(90000, policy="steered")
+        rows = _steer_frames(tl, frames)
+        tail = [abs(o - c) for (_, o), c in zip(rows, captures) if c >= drained + 2]
+        assert tl.repairs == 0, f"{speed}x"
+        assert max(tail) < 0.1, f"{speed}x"
+
+
+def test_steered_rides_a_covered_12s_stall_draining_at_2x_and_5x():
+    for speed in (2.0, 5.0):
+        frames, captures, drained = _draining_stall(12.0, speed)
+        tl = rp.RtpTimeline(90000, policy="steered")
+        rows = _steer_frames(tl, frames)
+        tail = [abs(o - c) for (_, o), c in zip(rows, captures) if c >= drained + 2]
+        assert tl.repairs == 0, f"{speed}x"
+        assert max(tail) < 0.1, f"{speed}x"
 
 
 def _monotonic(arrivals, gap=0.001):

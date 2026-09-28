@@ -87,8 +87,12 @@ STEER_PHASE_TAU_S = 3.0
 #: Latency above the floor that counts as an uncovered gap (a steered snap).
 STEER_SNAP_S = 2.5
 #: How long latency must stay above the floor by more than STEER_SNAP_S before
-#: it counts as an uncovered gap (a covered stall's backlog drains sooner).
+#: it counts as an uncovered gap (a covered stall's backlog drains sooner, or
+#: keeps falling and restarts the hold).
 STEER_SNAP_HOLD_S = 1.0
+#: A fall in latency this large while a snap is pending means a covered backlog
+#: is draining; it restarts the snap hold.
+STEER_DRAIN_S = 0.1
 
 #: Exit codes this module reports through the Popen-compatible surface.
 #: A requested stop reports like a signal death (negative), which is what
@@ -355,7 +359,9 @@ class RtpTimeline:
       with time constant ``STEER_PHASE_TAU_S``.  Latency more than
       ``STEER_SNAP_S`` above the recent floor that persists for
       ``STEER_SNAP_HOLD_S`` is an uncovered gap and snaps; a backlog that
-      drains sooner was a covered stall and keeps its camera spacing.
+      drains sooner, or keeps draining (latency falling by more than
+      ``STEER_DRAIN_S`` restarts the hold), was a covered stall and keeps its
+      camera spacing.
       This keeps the camera's even spacing while the output runs at real
       time, for a camera whose clock does not.
 
@@ -385,8 +391,8 @@ class RtpTimeline:
         # the anchor), learned rate, the target the output eases onto, the
         # base the first learned rate rebases from, (arrival, camera s,
         # latency) samples, the previous frame's latency, and a pending snap
-        # (when latency first went over, the floor it went over, and by how
-        # much it went over then).
+        # (when its hold began, the floor latency went over, by how much it
+        # went over, and the latency the hold last restarted from).
         self._anchor = 0.0
         self._out_s = 0.0
         self._cam_s = 0.0
@@ -394,12 +400,12 @@ class RtpTimeline:
         self._learned = False
         self._target_s = 0.0
         self._base_target = 0.0
-        self._base_cam = 0.0
         self._window: Deque[Tuple[float, float, float]] = collections.deque()
         self._last_lat = 0.0
         self._pend_since: Optional[float] = None
         self._pend_floor: Optional[float] = None
         self._pend_jump = 0.0
+        self._pend_min = 0.0
         self.repairs = 0
         self.packets = 0
 
@@ -464,6 +470,14 @@ class RtpTimeline:
         if over and self._pend_since is None:
             self._pend_since, self._pend_floor = now, floor
             self._pend_jump = lat_now - floor
+            self._pend_min = lat_now
+        elif over and lat_now - self._last_lat > STEER_SNAP_S:
+            # Another gap while the snap is pending: add its own excess.
+            self._pend_jump += lat_now - self._last_lat
+        elif over and lat_now < self._pend_min - STEER_DRAIN_S:
+            # Latency is still falling: a covered backlog is draining, so
+            # restart the hold. After an uncovered gap latency stays flat.
+            self._pend_since, self._pend_min = now, lat_now
         if over and now - self._pend_since >= STEER_SNAP_HOLD_S:
             # An uncovered gap: capture stopped, so move onto the floor by the
             # excess measured at the gap itself. Latency measured later has
@@ -511,10 +525,7 @@ class RtpTimeline:
         self._rate = min(max((b[0] - a[0]) / (b[1] - a[1]), lo), hi)
         if not self._learned:
             self._learned = True
-            self._target_s = (
-                self._base_target
-                + (self._cam_s - cam_step - self._base_cam) * self._rate
-            )
+            self._target_s = self._base_target + (self._cam_s - cam_step) * self._rate
 
 
 # --------------------------------------------------------------------------- #
