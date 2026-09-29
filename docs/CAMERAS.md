@@ -338,9 +338,11 @@ the rarer cases where a backward step is too big to be one of those re-sends
 switching to real SRTP mid-session); this is normally 0, and a session that
 keeps accumulating them is worth a closer look. The AAC pacer itself (logger
 `aidot_cameras.camera.aac_track`) logs one INFO `AAC track: start aligned
-with video, +N ms` per session when it applies the cold-start correction
-(further corrections in the same session log at DEBUG), and one INFO `AAC
-track: start correction of N ms skipped (over 4 s)` if a later wanted
+with video, +N ms (video lead N ms, audio lead N ms, audio started +N ms after
+video, N ms of silence before audio)` per session when it applies the
+cold-start correction - the parts in parentheses are the inputs it was
+computed from - (further corrections in the same session log at DEBUG), and
+one INFO `AAC track: start correction of N ms skipped (over 4 s)` if a wanted
 correction is too large to apply - which also ends alignment for that
 session.
 

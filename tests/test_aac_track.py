@@ -688,16 +688,31 @@ def test_non_monotonic_video_media_is_ignored():
 
 
 def test_callers_without_video_media_behave_as_before():
-    old, new = at.AacPacer(), at.AacPacer()
+    # Block sizes recorded from the pacer before video media time existed
+    # (7a7e10d): omitting video_media_s must reproduce them exactly.
+    new = at.AacPacer()
     seq = [("t", 0.0), ("t", 0.3), ("t", 0.8), ("f", 0.85), ("t", 1.0), ("t", 2.0)]
-    for i, (kind, t) in enumerate(seq):
+    sizes = []
+    for kind, t in seq:
         if kind == "t":
-            assert new.tick(100.0 + t) == old.tick(100.0 + t)
+            out = new.tick(100.0 + t)
         else:
-            assert new.feed(b"\x11" * 320, 1000, 100.0 + t) == old.feed(
-                b"\x11" * 320, 1000, 100.0 + t
-            )
+            out = new.feed(b"\x11" * 320, 1000, 100.0 + t)
+        sizes.append([len(b) for b in out])
+    assert sizes == [[], [2400], [4000], [320], [], [9200]]
+    assert new.silence_samples == 15600
     assert new.align_samples == 0
+
+
+def test_the_start_correction_log_line_names_its_inputs(caplog):
+    caplog.set_level(logging.INFO)
+    _cold_start(1.35, 0.0, 0.06)
+    lines = [
+        r.getMessage() for r in caplog.records if "start aligned" in r.getMessage()
+    ]
+    assert len(lines) == 1
+    for field in ("video lead", "audio lead", "after video", "silence before audio"):
+        assert field in lines[0]
 
 
 def test_a_skipped_correction_ends_alignment(caplog):

@@ -14,8 +14,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   from "now", so its sound led the picture by that much for the whole
   recording. Until the camera's audio arrives, the AAC track now follows
   the video's media time, and for its first seconds it lines its start up
-  with the video's once. `publish_stats()` reports the correction as
-  `aac_align_ms`.
+  with the video's (normally one correction). `publish_stats()` and the DTLS
+  direct-publish result report the correction as `aac_align_ms`.
 
 ## [1.0.0rc32]
 

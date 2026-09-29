@@ -259,9 +259,15 @@ class AacPacer:
         self.align_corrections += 1
         _LOGGER.log(
             logging.DEBUG if self._align_logged else logging.INFO,
-            "camera %s: AAC track: start aligned with video, %+d ms",
+            "camera %s: AAC track: start aligned with video, %+d ms (video lead %d ms,"
+            " audio lead %d ms, audio started %+d ms after video, %d ms of silence"
+            " before audio)",
             self._device_id,
             round(want * 1000 / PCMA_RATE),
+            round(self._lead_v * 1000),
+            round((self._lead_a or 0.0) * 1000),
+            round((self._a0 - self._v0) * 1000),
+            round(self._pre_samples * 1000 / PCMA_RATE),
         )
         self._align_logged = True
 
