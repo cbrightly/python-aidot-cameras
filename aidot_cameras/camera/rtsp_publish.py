@@ -42,7 +42,7 @@ import time
 from typing import Callable, Deque, List, Optional, Tuple
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-from .aac_track import AAC_CLOCK_RATE, AacTrack, aac_fmtp, make_aac_track
+from .aac_track import AAC_CLOCK_RATE, AacTrack, _signed32, aac_fmtp, make_aac_track
 from .protocol import is_resent_video_frame
 
 _LOGGER = logging.getLogger(__name__)
@@ -1189,6 +1189,23 @@ class LoopbackRtpPublisher:
         self._aac_track: Optional[PublishTrack] = None
         self._aac_seconds = 0.0
         self._video_forwarded = False
+        # The video track's own media time, for the AAC pacer's cold-start
+        # alignment: `_video_out_prev` is the last out_ts stamped for a video
+        # frame, and `_video_media_ticks` the unwrapped sum of its steps since
+        # the first one - so it advances with the published (not the camera's
+        # raw) timestamps. `_video_clock_rate` comes from the video timeline
+        # itself rather than a literal 90000, in case a future SDP ever names
+        # a different one.
+        self._video_out_prev: Optional[int] = None
+        self._video_media_ticks = 0
+        self._video_clock_rate = next(
+            (
+                tl.clock_rate
+                for t, tl in zip(self._tracks, self._timelines, strict=True)
+                if t.kind == "video"
+            ),
+            90000,
+        )
         self._publish_tracks = list(self._tracks)
         self._publisher_factory = publisher_factory
         self._publisher: Optional[RtspPublisher] = None
@@ -1298,6 +1315,9 @@ class LoopbackRtpPublisher:
             "aac_silence_samples": aac.pacer.silence_samples if aac is not None else 0,
             "aac_trimmed_samples": aac.pacer.trimmed_samples if aac is not None else 0,
             "aac_reanchors": aac.pacer.reanchors if aac is not None else 0,
+            "aac_align_ms": round(aac.pacer.align_samples * 1000 / 8000)
+            if aac is not None
+            else 0,
         }
 
     def _log(self, level: int, msg: str, *args) -> None:
@@ -1371,6 +1391,11 @@ class LoopbackRtpPublisher:
                         while preroll:
                             idx, pkt, arr = preroll.popleft()
                             self._forward(pub, idx, pkt, arr)
+                        # The preroll IS a cold start's video backlog: tick now,
+                        # before the next blocking select(), so the AAC pacer
+                        # sees it as soon as it is forwarded rather than merged
+                        # with whatever arrives while select() is waiting.
+                        self._tick_aac(pub)
                 if connected and not pub.alive:
                     self._log(logging.WARNING, "%s", pub.error or "publish ended")
                     return
@@ -1392,14 +1417,7 @@ class LoopbackRtpPublisher:
                             preroll.append((idx, pkt, now))
                 if connected:
                     self._expire(pub, now)
-                if connected and self._aac is not None and self._video_forwarded:
-                    # Idle fill runs beside video, as on the DTLS path: a
-                    # camera that has gone quiet gets no silent AAC either.
-                    self._video_forwarded = False
-                    _aac_started = time.monotonic()
-                    for aseq, ats_, apl in self._aac.tick(now):
-                        self._send_aac(pub, aseq, ats_, apl)
-                    self._aac_seconds += time.monotonic() - _aac_started
+                self._tick_aac(pub)
                 if connected and pub.keepalive_due(now):
                     try:
                         pub.send_keepalive()
@@ -1428,13 +1446,14 @@ class LoopbackRtpPublisher:
             if self._aac is not None:
                 aac_part = (
                     ", AAC %d frames / %.3f s / %d silence-filled / %d trimmed"
-                    " / %d re-anchors"
+                    " / %d re-anchors, AAC start aligned %+d ms"
                     % (
                         stats["aac_frames"],
                         stats["aac_seconds"],
                         stats["aac_silence_samples"],
                         stats["aac_trimmed_samples"],
                         stats["aac_reanchors"],
+                        stats["aac_align_ms"],
                     )
                 )
             self._log(
@@ -1492,6 +1511,25 @@ class LoopbackRtpPublisher:
         for idx, buf in enumerate(self._reorder):
             for item in buf.expire(now):
                 self._send(pub, idx, item)
+
+    def _tick_aac(self, pub: RtspPublisher) -> None:
+        """One AAC pacer tick, if AAC is on and video moved since the last one.
+
+        Idle fill runs beside video, as on the DTLS path: a camera that has
+        gone quiet gets no silent AAC either. Called right after any batch of
+        video packets is forwarded - including a preroll flush - so a cold
+        start's video backlog reaches the pacer as soon as it lands, instead
+        of being merged with whatever arrives while the loop is next blocked
+        in select().
+        """
+        if self._aac is None or not self._video_forwarded:
+            return
+        self._video_forwarded = False
+        started = time.monotonic()
+        video_media_s = self._video_media_ticks / self._video_clock_rate
+        for aseq, ats_, apl in self._aac.tick(started, video_media_s):
+            self._send_aac(pub, aseq, ats_, apl)
+        self._aac_seconds += time.monotonic() - started
 
     def _reset_resent_filter(self, dedup: dict) -> None:
         """Start a video track's re-sent-frame filter fresh from the next
@@ -1593,6 +1631,11 @@ class LoopbackRtpPublisher:
             pass  # the loop's alive check ends the publish with the reason
         if track.kind == "video":
             self._video_forwarded = True
+            if self._video_out_prev is None:
+                self._video_out_prev = out_ts
+            else:
+                self._video_media_ticks += _signed32(out_ts - self._video_out_prev)
+                self._video_out_prev = out_ts
         if idx == self._pcma_idx and self._aac is not None:
             _aac_started = time.monotonic()
             for aseq, ats_, apl in self._aac.feed(payload, out_ts, arrival):
@@ -1715,6 +1758,12 @@ def dtls_rtp_publish_run(
     pol = timestamp_policy()
     vtl = RtpTimeline(90000, policy=pol)
     atl = RtpTimeline(8000, policy=pol)
+    # The AAC pacer's cold-start alignment needs the video's own media time:
+    # the last out_ts stamped for a video frame, and the unwrapped sum of its
+    # steps since the first one. The clock rate comes from the video
+    # timeline itself rather than a literal 90000.
+    v_out_prev: Optional[int] = None
+    v_media_ticks = 0
     # The mux this replaces conditioned the camera's audio; keep that.
     agc = AlawAgc()
     # Set before anything can return: a failed connect leaves through an early
@@ -1730,6 +1779,7 @@ def dtls_rtp_publish_run(
     res.setdefault("aac_silence_samples", 0)
     res.setdefault("aac_trimmed_samples", 0)
     res.setdefault("aac_reanchors", 0)
+    res.setdefault("aac_align_ms", 0)
     pub = publisher_factory(url, sdp, tracks)
     try:
         pub.connect()
@@ -1819,6 +1869,11 @@ def dtls_rtp_publish_run(
                     )
                 _sent_in = time.monotonic() - _send_started
                 if seq_ts is not None:
+                    if v_out_prev is None:
+                        v_out_prev = seq_ts
+                    else:
+                        v_media_ticks += _signed32(seq_ts - v_out_prev)
+                        v_out_prev = seq_ts
                     if last_frame is not None:
                         gap = now - last_frame
                         if gap > max_gap:
@@ -1881,7 +1936,8 @@ def dtls_rtp_publish_run(
                 # drain: after a stall, audio queued behind the video is real
                 # and must be fed first, not trimmed as covered by silence.
                 _aac_started = time.monotonic()
-                for aseq, ats_, apl in aac.tick(_aac_started):
+                video_media_s = v_media_ticks / vtl.clock_rate
+                for aseq, ats_, apl in aac.tick(_aac_started, video_media_s):
                     pub.send_rtp(aac_t, build_rtp(97, True, aseq, ats_, aac.ssrc, apl))
                 aac_seconds += time.monotonic() - _aac_started
             if pub.keepalive_due():
@@ -1902,16 +1958,18 @@ def dtls_rtp_publish_run(
         res["aac_silence_samples"] = aac.pacer.silence_samples if aac else 0
         res["aac_trimmed_samples"] = aac.pacer.trimmed_samples if aac else 0
         res["aac_reanchors"] = aac.pacer.reanchors if aac else 0
+        res["aac_align_ms"] = round(aac.pacer.align_samples * 1000 / 8000) if aac else 0
         if aac:
             _LOGGER.info(
                 "camera %s: DTLS direct publish: AAC %d frames, %.3f s"
                 " encoding+sending, %d samples silence-filled, %d trimmed,"
-                " %d re-anchors",
+                " %d re-anchors, AAC start aligned %+d ms",
                 device_id,
                 res["aac_frames"],
                 res["aac_seconds"],
                 res["aac_silence_samples"],
                 res["aac_trimmed_samples"],
                 res["aac_reanchors"],
+                res["aac_align_ms"],
             )
         pub.close(teardown=True)

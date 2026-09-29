@@ -1080,6 +1080,85 @@ def test_loopback_publisher_applies_audio_gain(go2rtc, monkeypatch):
     assert proc.poll() == rp.EXIT_KILLED
 
 
+def _spy_aac_ticks(monkeypatch):
+    import aidot_cameras.camera.aac_track as at
+
+    seen = []
+    orig = at.AacTrack.tick
+
+    def spy(self, now, video_media_s=None):
+        seen.append(video_media_s)
+        return orig(self, now, video_media_s)
+
+    monkeypatch.setattr(at.AacTrack, "tick", spy)
+    return seen
+
+
+def test_loopback_publish_passes_the_video_media_time_to_the_aac_tick(
+    go2rtc, monkeypatch
+):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
+    seen = _spy_aac_ticks(monkeypatch)
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", audio_gain_db=0
+    )
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for i in range(20):
+            tx.sendto(
+                rp.build_rtp(96, True, 1 + i, 1000 + 6000 * i, 0xAAAA, b"\x41pic"),
+                ("127.0.0.1", v_port),
+            )
+            time.sleep(0.03)
+        assert _wait(lambda: len([v for v in seen if v is not None]) >= 5)
+        tx.close()
+        vals = [v for v in seen if v is not None]
+        assert vals == sorted(vals)
+        assert vals[0] == pytest.approx(0.0, abs=1e-6)
+        assert vals[-1] <= 19 * 6000 / 90000 + 0.2
+        assert isinstance(proc.publish_stats()["aac_align_ms"], int)
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_loopback_publish_sends_aac_among_the_first_packets_of_a_backlog(
+    go2rtc, monkeypatch
+):
+    # A cold start delivers a backlog: 1 s of video (15 frames) within 0.1 s,
+    # audio only afterwards. Home Assistant drops an audio track it does not
+    # see among its first 20 packets, so AAC must already be flowing.
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", audio_gain_db=0
+    )
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for i in range(15):
+            tx.sendto(
+                rp.build_rtp(96, True, 1 + i, 1000 + 6000 * i, 0xAAAA, b"\x41pic"),
+                ("127.0.0.1", v_port),
+            )
+            time.sleep(0.007)
+        for i in range(10):
+            tx.sendto(
+                rp.build_rtp(8, False, 1 + i, 160 * (i + 1), 0xBBBB, b"\x01" * 160),
+                ("127.0.0.1", a_port),
+            )
+            time.sleep(0.02)
+        assert _wait(lambda: len(go2rtc.frames) >= 20)
+        tx.close()
+        first = [ch for ch, _ in go2rtc.frames[:20]]
+        assert 4 in first
+    finally:
+        proc.terminate()
+        proc.wait(3)
+
+
 def test_loopback_publish_adds_aac_after_pcma(go2rtc, monkeypatch):
     monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
     a_port, v_port = _free_udp_ports(2)
@@ -1474,6 +1553,23 @@ def test_dtls_publish_feeds_queued_audio_before_the_idle_fill(go2rtc, monkeypatc
     _run_dtls(go2rtc, feed, secs=0.5)
     assert made and made[0] is not None
     assert made[0].pacer.trimmed_samples == 0
+
+
+def test_dtls_publish_passes_the_video_media_time(go2rtc, monkeypatch):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
+    seen = _spy_aac_ticks(monkeypatch)
+
+    def feed(vq, aq):
+        for i in range(50):
+            aq.put((b"\xd5" * 160, 160 + 160 * i))
+            vq.put((b"\0\0\0\1\x41" + b"d" * 40, 6000 + 1800 * i, False))
+
+    res = _run_dtls(go2rtc, feed)
+    vals = [v for v in seen if v is not None]
+    assert vals and vals == sorted(vals)
+    assert vals[0] == pytest.approx(0.0, abs=1e-6)
+    assert vals[-1] == pytest.approx(49 * 1800 / 90000, abs=0.05)
+    assert isinstance(res["aac_align_ms"], int)
 
 
 def test_dtls_publish_kill_switch_keeps_todays_sdp(go2rtc, monkeypatch, caplog):
