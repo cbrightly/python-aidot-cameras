@@ -513,6 +513,8 @@ def _cold_start(
     audio=True,
     jitter=None,
     tick_first=True,
+    drain=None,
+    burst=None,
 ):
     """Drive a pacer through a synthetic cold start on one capture clock.
 
@@ -524,17 +526,31 @@ def _cold_start(
     the audio backlog arrives together a_after seconds after the video's first
     frame, later packets at capture + latency but never before the backlog. Returns (pacer, rows) with one row per audio packet:
     (capture time, AAC output time of the packet's first sample).
+
+    When `drain` is given (a real-time multiple, e.g. 1.2), the video backlog
+    does not arrive entirely as a burst: the first `burst` seconds of it
+    (default 0) still burst within 0.1 s of `v_backlog + latency`, but the
+    rest drains at `drain` times real time - continuing from where the burst
+    left off - until that catches up with the live edge (`cap + latency`).
     """
     p = at.AacPacer()
     events = []
     for j in range(int(secs * fps)):
         cap = j / fps
-        start = v_backlog + latency
-        arr = (
-            start + cap / max(v_backlog, 1e-9) * 0.1
-            if cap < v_backlog
-            else cap + latency
-        )
+        if drain is not None:
+            b = burst if burst is not None else 0.0
+            start = v_backlog + latency
+            if cap < b:
+                arr = start + cap / max(b, 1e-9) * 0.1
+            else:
+                arr = max(start + 0.1 + (cap - b) / drain, cap + latency)
+        else:
+            start = v_backlog + latency
+            arr = (
+                start + cap / max(v_backlog, 1e-9) * 0.1
+                if cap < v_backlog
+                else cap + latency
+            )
         events.append((arr, 0 if tick_first else 1, "v", j / fps, None))
     if audio:
         a_start = v_backlog - a_backlog
@@ -583,6 +599,18 @@ def test_cold_start_backlog_ends_aligned_with_video(v_backlog, a_backlog, a_afte
     assert mis and max(abs(m) for m in mis) <= 0.04
     # One correction, after the backlogs have settled - not a string of them.
     assert p.align_corrections == 1
+
+
+def test_a_slowly_draining_backlog_gets_one_correction():
+    # The L2, measured on the box: a 1.66 s burst, then the rest of a 2.3 s
+    # backlog drains at 1.2x real time over several seconds (the pacer's
+    # video lead kept rising 1.66 -> 2.32 s). The pacer must wait for that
+    # rise to stop before correcting once - not chase the growing lead with
+    # a string of small corrections.
+    p, rows = _cold_start(2.3, 0.0, 0.03, drain=1.2, burst=1.66, secs=16.0)
+    mis = _misalignment(rows, after=12.0)  # the drain is over by then
+    assert p.align_corrections == 1
+    assert mis and max(abs(m) for m in mis) <= 0.04
 
 
 def test_warm_start_gets_no_correction():
@@ -639,9 +667,11 @@ def test_nothing_realigns_after_the_window():
     p.tick(100.0, video_media_s=0.0)
     p.feed(b"\x11" * 320, 1000, 100.05)
     before = p.align_samples
-    # 4 s later video's media clock claims a 1 s lead it never had at the start.
-    p.tick(104.1, video_media_s=5.1)
-    p.feed(b"\x11" * 320, 1000 + 320 * 100, 104.1)
+    # Well after the window, video's media clock claims a lead it never had
+    # at the start.
+    later = 100.0 + at.AAC_ALIGN_WINDOW_S + 1.1
+    p.tick(later, video_media_s=later - 100.0 + 1.0)
+    p.feed(b"\x11" * 320, 1000 + 320 * 100, later)
     assert p.align_samples == before
 
 
@@ -668,17 +698,29 @@ def test_callers_without_video_media_behave_as_before():
     assert new.align_samples == 0
 
 
-def test_a_skipped_correction_ends_alignment():
+def test_a_skipped_correction_ends_alignment(caplog):
+    caplog.set_level(logging.INFO)
     p = at.AacPacer()
     p.tick(100.0, video_media_s=0.0)
     p.feed(b"\x11" * 320, 1000, 100.0)
     # An audio backlog 5 s deep: the correction it asks for is over the maximum.
     p.feed(b"\x11" * 320, 1000 + 5 * 8000, 100.6)
     assert p.align_corrections == 0
+    # The audio lead has stopped rising: once settled, the oversized
+    # correction is actually evaluated (and skipped).
+    p.feed(b"\x11" * 320, 1000 + 5 * 8000 + 320, 101.2)
+    assert p.align_samples == 0 and p.align_corrections == 0
+    assert (
+        sum(
+            "start correction" in r.getMessage() and "skipped" in r.getMessage()
+            for r in caplog.records
+        )
+        == 1
+    )
     # A video backlog then brings the wanted correction back under the
     # maximum, still inside the window - but a skipped correction is final.
-    p.tick(100.7, video_media_s=2.0)
-    p.feed(b"\x11" * 320, 1000 + 5 * 8000 + 320, 100.7)
+    p.tick(101.3, video_media_s=2.0)
+    p.feed(b"\x11" * 320, 1000 + 5 * 8000 + 320 + 320, 101.3)
     assert p.align_samples == 0 and p.align_corrections == 0
 
 

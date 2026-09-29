@@ -38,12 +38,13 @@ AAC_GAP_TOLERANCE_S = 1.0
 #: the audio already is gets appended contiguously instead of filled or trimmed.
 AAC_JITTER_TOL_S = 0.04
 #: For this long after the camera's first audio, the pacer may line the AAC
-#: track's start up with the video's (a cold start's backlogs settle in ~1 s).
-AAC_ALIGN_WINDOW_S = 3.0
+#: track's start up with the video's (long enough for a backlog that drains
+#: over several seconds to finish).
+AAC_ALIGN_WINDOW_S = 8.0
 #: A start correction larger than this is not applied (logged once instead).
 AAC_ALIGN_MAX_S = 4.0
-#: No correction until both tracks have run this long: a backlog arrives in a
-#: burst, so correcting earlier would chase it with several small glitches.
+#: How long both leads must stay put before the start is corrected (a backlog
+#: can arrive as a burst or drain over seconds).
 AAC_ALIGN_SETTLE_S = 0.5
 
 _SR_INDEX = {
@@ -121,9 +122,10 @@ class AacPacer:
     Before any camera audio, the silence follows the video's media time
     instead of the wall clock when the publisher gives it (falling back to
     the wall clock otherwise), so a cold start's video backlog is matched.
-    For ``AAC_ALIGN_WINDOW_S`` after the first audio, the track's start is
-    lined up with video's (normally one correction), so a cold start's live
-    edges agree.
+    Once both tracks' leads have stopped growing (a backlog can arrive as a
+    burst or drain over several seconds) and for up to ``AAC_ALIGN_WINDOW_S``
+    after the first audio, the track's start is lined up with video's
+    (normally one correction), so a cold start's live edges agree.
     """
 
     def __init__(self, device_id: str = "?") -> None:
@@ -138,10 +140,14 @@ class AacPacer:
         self._v0: Optional[float] = None  # wall time of the first video tick
         self._v_media: Optional[float] = None  # last video media time accepted
         self._lead_v: Optional[float] = None  # video media ahead of wall, max
+        self._lead_v_ref: Optional[float] = None  # video lead at its last rise
+        self._lead_v_at: Optional[float] = None  # wall time of that rise
         self._a0: Optional[float] = None  # wall time of the first A-law packet
         self._a_prev: Optional[int] = None  # previous A-law stamp
         self._a_media = 0  # A-law samples since the first stamp, unwrapped
         self._lead_a: Optional[float] = None  # audio media ahead of wall, max
+        self._lead_a_ref: Optional[float] = None  # audio lead at its last rise
+        self._lead_a_at: Optional[float] = None  # wall time of that rise
         self._applied = 0  # start correction applied so far, samples
         self._align_skipped = False
         self._align_logged = False
@@ -161,6 +167,9 @@ class AacPacer:
             self._a_prev = ts
         lead = self._a_media / PCMA_RATE - (now - self._a0)
         self._lead_a = lead if self._lead_a is None else max(self._lead_a, lead)
+        half = AAC_JITTER_TOL_S / 2
+        if self._lead_a_ref is None or lead > self._lead_a_ref + half:
+            self._lead_a_ref, self._lead_a_at = lead, now
         if self._pos is None:
             self._pos = ts
         self._align(now)
@@ -225,7 +234,9 @@ class AacPacer:
             or self._lead_v is None
             or self._align_skipped  # a skipped correction ends alignment
             or now - self._a0 > AAC_ALIGN_WINDOW_S
-            or now - max(self._a0, self._v0) < AAC_ALIGN_SETTLE_S
+            or self._lead_v_at is None
+            or self._lead_a_at is None
+            or now - max(self._lead_v_at, self._lead_a_at) < AAC_ALIGN_SETTLE_S
         ):
             return
         target = self._lead_v - (self._lead_a or 0.0) + (self._a0 - self._v0)
@@ -263,6 +274,9 @@ class AacPacer:
             self._v_media = video_media_s
             lead = video_media_s - (now - self._v0)
             self._lead_v = lead if self._lead_v is None else max(self._lead_v, lead)
+            half = AAC_JITTER_TOL_S / 2
+            if self._lead_v_ref is None or lead > self._lead_v_ref + half:
+                self._lead_v_ref, self._lead_v_at = lead, now
             if self._heard is None:
                 # No camera audio yet: silence follows the video's media clock,
                 # so a cold start's video backlog is matched sample for sample.
