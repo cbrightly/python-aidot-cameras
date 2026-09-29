@@ -122,7 +122,8 @@ class AacPacer:
     instead of the wall clock when the publisher gives it (falling back to
     the wall clock otherwise), so a cold start's video backlog is matched.
     For ``AAC_ALIGN_WINDOW_S`` after the first audio, the track's start is
-    lined up with video's once, so a cold start's live edges agree.
+    lined up with video's (normally one correction), so a cold start's live
+    edges agree.
     """
 
     def __init__(self, device_id: str = "?") -> None:

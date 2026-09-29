@@ -652,7 +652,7 @@ def test_non_monotonic_video_media_is_ignored():
     assert len(first) == 4000
     # a smaller value is ignored (wall-clock fallback), never an exception
     back = b"".join(p.tick(100.6, video_media_s=0.1))
-    assert len(back) >= 0
+    assert len(back) == 800  # ignored: 0.1 s of silence by the wall clock instead
 
 
 def test_callers_without_video_media_behave_as_before():
@@ -666,3 +666,71 @@ def test_callers_without_video_media_behave_as_before():
                 b"\x11" * 320, 1000, 100.0 + t
             )
     assert new.align_samples == 0
+
+
+def test_a_skipped_correction_ends_alignment():
+    p = at.AacPacer()
+    p.tick(100.0, video_media_s=0.0)
+    p.feed(b"\x11" * 320, 1000, 100.0)
+    # An audio backlog 5 s deep: the correction it asks for is over the maximum.
+    p.feed(b"\x11" * 320, 1000 + 5 * 8000, 100.6)
+    assert p.align_corrections == 0
+    # A video backlog then brings the wanted correction back under the
+    # maximum, still inside the window - but a skipped correction is final.
+    p.tick(100.7, video_media_s=2.0)
+    p.feed(b"\x11" * 320, 1000 + 5 * 8000 + 320, 100.7)
+    assert p.align_samples == 0 and p.align_corrections == 0
+
+
+def test_the_correction_lands_on_audio_when_video_stalls():
+    # Video delivers its backlog and then stalls: only the audio packets can
+    # carry the correction.
+    p = at.AacPacer()
+    p.tick(100.0, video_media_s=0.0)
+    p.tick(100.1, video_media_s=1.35)  # the backlog: 1.35 s of silence
+    ts, now = 1000, 100.5
+    while now < 101.5:
+        p.feed(b"\x11" * 320, ts, now)
+        ts += 320
+        now += 0.04
+    # lead_v 1.25 s + audio 0.5 s after video = 1.75 s before the first
+    # sample; 1.35 s was carried, so 0.4 s is added once.
+    assert p.align_corrections == 1
+    assert p.align_samples == 3200
+
+
+def test_the_correction_lands_on_video_when_audio_goes_quiet():
+    # One audio packet, then nothing (a battery camera sends audio sparsely):
+    # only the video ticks inside the window can carry the correction.
+    p = at.AacPacer()
+    p.tick(100.0, video_media_s=0.0)
+    p.tick(100.1, video_media_s=1.35)
+    p.feed(b"\x11" * 320, 1000, 100.2)
+    now, media = 100.1, 1.35
+    while now < 104.0:
+        now += 1 / 15
+        media += 1 / 15
+        p.tick(now, video_media_s=media)
+    # lead_v 1.25 s + audio 0.2 s after video = 1.45 s; 1.35 s was carried.
+    assert p.align_corrections == 1
+    assert p.align_samples == 800
+
+
+def test_the_pre_audio_fill_is_capped_per_tick():
+    p = at.AacPacer()
+    p.tick(100.0, video_media_s=0.0)
+    sizes = [
+        len(b"".join(p.tick(t, video_media_s=12.0))) for t in (100.1, 100.2, 100.3)
+    ]
+    assert sizes == [40000, 40000, 16000]
+
+
+def test_a_late_video_frame_does_not_lower_the_video_lead():
+    p = at.AacPacer()
+    p.tick(100.0, video_media_s=0.0)
+    p.tick(100.1, video_media_s=1.35)  # lead_v 1.25 s
+    p.feed(b"\x11" * 320, 1000, 100.15)
+    # The frame due at 100.6 arrives 0.2 s late: its lead reads 0.95 s.
+    p.tick(100.8, video_media_s=1.85)
+    # 1.25 + 0.15 = 1.40 s wanted, 1.35 s carried: +50 ms, not -250 ms.
+    assert p.align_samples == 400
