@@ -6,6 +6,17 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The opt-in AAC track starts in step with the picture on a cold start.**
+  When a view started an idle camera, the camera's first video was a
+  buffered backlog (about 0.8-2.5 s, by model) and the AAC track started
+  from "now", so its sound led the picture by that much for the whole
+  recording. Until the camera's audio arrives, the AAC track now follows
+  the video's media time, and for its first seconds it lines its start up
+  with the video's once. `publish_stats()` reports the correction as
+  `aac_align_ms`.
+
 ## [1.0.0rc32]
 
 ### Added
