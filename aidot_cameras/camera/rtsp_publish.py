@@ -42,7 +42,14 @@ import time
 from typing import Callable, Deque, List, Optional, Tuple
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-from .aac_track import AAC_CLOCK_RATE, AacTrack, _signed32, aac_fmtp, make_aac_track
+from .aac_track import (
+    AAC_CLOCK_RATE,
+    PCMA_RATE,
+    AacTrack,
+    _signed32,
+    aac_fmtp,
+    make_aac_track,
+)
 from .protocol import is_resent_video_frame
 
 _LOGGER = logging.getLogger(__name__)
@@ -1315,7 +1322,7 @@ class LoopbackRtpPublisher:
             "aac_silence_samples": aac.pacer.silence_samples if aac is not None else 0,
             "aac_trimmed_samples": aac.pacer.trimmed_samples if aac is not None else 0,
             "aac_reanchors": aac.pacer.reanchors if aac is not None else 0,
-            "aac_align_ms": round(aac.pacer.align_samples * 1000 / 8000)
+            "aac_align_ms": round(aac.pacer.align_samples * 1000 / PCMA_RATE)
             if aac is not None
             else 0,
         }
@@ -1392,9 +1399,10 @@ class LoopbackRtpPublisher:
                             idx, pkt, arr = preroll.popleft()
                             self._forward(pub, idx, pkt, arr)
                         # The preroll IS a cold start's video backlog: tick now,
-                        # before the next blocking select(), so the AAC pacer
-                        # sees it as soon as it is forwarded rather than merged
-                        # with whatever arrives while select() is waiting.
+                        # so the AAC track starts with the flush instead of one
+                        # select() later. (Alignment does not depend on when
+                        # the first tick lands - every lead is measured on the
+                        # same tick clock.)
                         self._tick_aac(pub)
                 if connected and not pub.alive:
                     self._log(logging.WARNING, "%s", pub.error or "publish ended")
@@ -1517,10 +1525,9 @@ class LoopbackRtpPublisher:
 
         Idle fill runs beside video, as on the DTLS path: a camera that has
         gone quiet gets no silent AAC either. Called right after any batch of
-        video packets is forwarded - including a preroll flush - so a cold
-        start's video backlog reaches the pacer as soon as it lands, instead
-        of being merged with whatever arrives while the loop is next blocked
-        in select().
+        video packets is forwarded - including a preroll flush - so the AAC
+        track starts together with a cold start's video backlog rather than
+        one select() later. Timed with time.monotonic(), as the DTLS path is.
         """
         if self._aac is None or not self._video_forwarded:
             return
@@ -1958,7 +1965,9 @@ def dtls_rtp_publish_run(
         res["aac_silence_samples"] = aac.pacer.silence_samples if aac else 0
         res["aac_trimmed_samples"] = aac.pacer.trimmed_samples if aac else 0
         res["aac_reanchors"] = aac.pacer.reanchors if aac else 0
-        res["aac_align_ms"] = round(aac.pacer.align_samples * 1000 / 8000) if aac else 0
+        res["aac_align_ms"] = (
+            round(aac.pacer.align_samples * 1000 / PCMA_RATE) if aac else 0
+        )
         if aac:
             _LOGGER.info(
                 "camera %s: DTLS direct publish: AAC %d frames, %.3f s"

@@ -1154,6 +1154,13 @@ def test_loopback_publish_sends_aac_among_the_first_packets_of_a_backlog(
         tx.close()
         first = [ch for ch, _ in go2rtc.frames[:20]]
         assert 4 in first
+        assert _wait(lambda: any(ch == 0 for ch, _ in go2rtc.frames))
+        frames = list(go2rtc.frames)
+        k = next(i for i, (ch, _) in enumerate(frames) if ch == 0)
+        aac_ts = [rp.parse_rtp(p)[3] for ch, p in frames[:k] if ch == 4]
+        # Silence before the first audio follows the 14-step video backlog
+        # (0.93 s of media), not the ~0.1 s of wall clock it arrived in.
+        assert aac_ts and (aac_ts[-1] - aac_ts[0] + 1024) / 48000 >= 0.7
     finally:
         proc.terminate()
         proc.wait(3)
