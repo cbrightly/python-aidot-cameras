@@ -672,6 +672,8 @@ def test_nothing_realigns_after_the_window():
     later = 100.0 + at.AAC_ALIGN_WINDOW_S + 1.1
     p.tick(later, video_media_s=later - 100.0 + 1.0)
     p.feed(b"\x11" * 320, 1000 + 320 * 100, later)
+    # ... and has settled by the next packet: only the window stops it.
+    p.feed(b"\x11" * 320, 1000 + 320 * 101, later + at.AAC_ALIGN_SETTLE_S + 0.1)
     assert p.align_samples == before
 
 
@@ -721,6 +723,10 @@ def test_a_skipped_correction_ends_alignment(caplog):
     # maximum, still inside the window - but a skipped correction is final.
     p.tick(101.3, video_media_s=2.0)
     p.feed(b"\x11" * 320, 1000 + 5 * 8000 + 320 + 320, 101.3)
+    # ... and has settled by the next packet: only the skip stops it.
+    p.feed(
+        b"\x11" * 320, 1000 + 5 * 8000 + 3 * 320, 101.3 + at.AAC_ALIGN_SETTLE_S + 0.1
+    )
     assert p.align_samples == 0 and p.align_corrections == 0
 
 
@@ -776,3 +782,17 @@ def test_a_late_video_frame_does_not_lower_the_video_lead():
     p.tick(100.8, video_media_s=1.85)
     # 1.25 + 0.15 = 1.40 s wanted, 1.35 s carried: +50 ms, not -250 ms.
     assert p.align_samples == 400
+
+
+def test_a_draining_audio_backlog_gets_one_correction():
+    p = at.AacPacer()
+    p.tick(100.0, video_media_s=0.0)
+    p.tick(100.1, video_media_s=1.5)
+    ts, media, now = 1000, 1.5, 100.1
+    for i in range(150):
+        p.feed(b"\x11" * 320, ts, now)
+        ts += 640 if i < 25 else 320
+        now += 0.04
+        media += 0.04
+        p.tick(now, video_media_s=media)
+    assert p.align_corrections == 1 and p.align_samples == -8000
