@@ -190,7 +190,7 @@ crawl"). The publish can now carry its own AAC-LC 48 kHz mono track (opt-in, `AI
 in-process after the A-law one, with timestamps it owns - see
 `aac_track.py`. Until the camera's first audio arrives the track's silence
 follows the video's media time instead of the wall clock, and it then
-lines its start up with the video's once, so a cold start's buffered video
+lines its start up with the video's (normally one correction), so a cold start's buffered video
 backlog no longer leaves the sound ahead of the picture.
 
 ## Integration (hass-aidot-cameras)
