@@ -1,5 +1,6 @@
 """The AAC track the direct publish adds so Home Assistant's HLS has audio."""
 
+import logging
 import struct
 
 import pytest
@@ -499,3 +500,169 @@ def test_slow_clock_drift_is_resynced_when_it_passes_the_tolerance():
     assert [i for i, _ in fills] == [33, 66, 99]
     assert all(silence == 330 for _, silence in fills)
     assert p.silence_samples == (last_ts + content_len - 1000) - appended
+
+
+def _cold_start(
+    v_backlog,
+    a_backlog,
+    a_after,
+    *,
+    secs=12.0,
+    fps=15.0,
+    latency=0.05,
+    audio=True,
+    jitter=None,
+    tick_first=True,
+):
+    """Drive a pacer through a synthetic cold start on one capture clock.
+
+    The viewer starts the camera at capture time v_backlog; every packet has
+    the same network latency. Video frames are captured every 1/fps from
+    capture time 0: the backlog (captured before the start) arrives within
+    0.1 s after start + latency, later frames at capture + latency. Audio
+    packets (320 samples, 40 ms) are captured from v_backlog - a_backlog on:
+    the audio backlog arrives together a_after seconds after the video's first
+    frame, later packets at capture + latency but never before the backlog. Returns (pacer, rows) with one row per audio packet:
+    (capture time, AAC output time of the packet's first sample).
+    """
+    p = at.AacPacer()
+    events = []
+    for j in range(int(secs * fps)):
+        cap = j / fps
+        start = v_backlog + latency
+        arr = (
+            start + cap / max(v_backlog, 1e-9) * 0.1
+            if cap < v_backlog
+            else cap + latency
+        )
+        events.append((arr, 0 if tick_first else 1, "v", j / fps, None))
+    if audio:
+        a_start = v_backlog - a_backlog
+        k = 0
+        while a_start + k * 0.04 < secs:
+            cap = a_start + k * 0.04
+            first = v_backlog + latency + a_after
+            arr = first if cap < v_backlog else max(cap + latency, first)
+            ts = 1000 + 320 * k + (jitter[k % len(jitter)] if jitter else 0)
+            events.append((arr, 1 if tick_first else 0, "a", cap, ts))
+            k += 1
+    events.sort(key=lambda e: (e[0], e[1]))
+    emitted = 0
+    rows = []
+    t0 = events[0][0]
+    for arr, _, kind, value, ts in events:
+        now = 100.0 + arr - t0
+        if kind == "v":
+            for blk in p.tick(now, video_media_s=value):
+                emitted += len(blk)
+        else:
+            out = p.feed(b"\x11" * 320, ts, now)
+            before = emitted
+            for blk in out:
+                emitted += len(blk)
+            if out and out[-1] and out[-1][0:1] == b"\x11":
+                rows.append((value, (before + sum(len(b) for b in out[:-1])) / 8000))
+    return p, rows
+
+
+def _misalignment(rows, after=5.0):
+    """Output time minus capture time for packets captured after `after` s -
+    constant when aligned; aligned with video means it equals 0 (the video's
+    first frame is capture 0 and output 0)."""
+    return [out - cap for cap, out in rows if cap >= after]
+
+
+@pytest.mark.parametrize(
+    "v_backlog,a_backlog,a_after",
+    [(1.35, 0.0, 0.06), (2.4, 0.15, 0.18), (0.77, 0.18, 0.05)],
+    ids=["m3", "l2", "ptz"],
+)
+def test_cold_start_backlog_ends_aligned_with_video(v_backlog, a_backlog, a_after):
+    p, rows = _cold_start(v_backlog, a_backlog, a_after)
+    mis = _misalignment(rows)
+    assert mis and max(abs(m) for m in mis) <= 0.04
+    # One correction, after the backlogs have settled - not a string of them.
+    assert p.align_corrections == 1
+
+
+def test_warm_start_gets_no_correction():
+    p, rows = _cold_start(0.0001, 0.0, 0.0)
+    assert p.align_samples == 0 and p.align_corrections == 0
+    assert max(abs(m) for m in _misalignment(rows)) <= 0.04
+
+
+def test_jitter_inside_the_tolerance_is_not_realigned():
+    p, _ = _cold_start(0.0001, 0.0, 0.0, jitter=[-64, 64])
+    assert p.align_samples == 0
+
+
+def test_audio_before_video_still_ends_aligned():
+    # The audio backlog arrives before the first video frame does.
+    p, rows = _cold_start(1.35, 0.1, -0.05)
+    assert max(abs(m) for m in _misalignment(rows)) <= 0.04
+
+
+def test_tick_after_feed_order_ends_aligned():
+    p, rows = _cold_start(1.35, 0.0, 0.06, tick_first=False)
+    assert max(abs(m) for m in _misalignment(rows)) <= 0.04
+
+
+def test_no_audio_silence_follows_the_video_media_clock():
+    p = at.AacPacer()
+    emitted = 0
+    for j in range(150):  # 10 s at 15 fps, first 1.35 s delivered in a burst
+        cap = j / 15
+        arr = 1.40 + cap / 1.35 * 0.1 if cap < 1.35 else cap + 0.05
+        for blk in p.tick(100.0 + arr, video_media_s=cap):
+            emitted += len(blk)
+        assert abs(emitted / 8000 - cap) <= 1 / 15
+    assert p.align_samples == 0
+
+
+def test_a_correction_beyond_the_maximum_is_skipped(caplog):
+    caplog.set_level(logging.INFO)
+    # Silence already follows the video before audio, so only audio arriving
+    # BEFORE a huge video backlog can need a correction beyond the maximum.
+    p, _ = _cold_start(at.AAC_ALIGN_MAX_S + 1.0, 0.1, -0.08, secs=14.0)
+    assert p.align_samples == 0
+    assert (
+        sum(
+            "start correction" in r.getMessage() and "skipped" in r.getMessage()
+            for r in caplog.records
+        )
+        == 1
+    )
+
+
+def test_nothing_realigns_after_the_window():
+    p = at.AacPacer()
+    p.tick(100.0, video_media_s=0.0)
+    p.feed(b"\x11" * 320, 1000, 100.05)
+    before = p.align_samples
+    # 4 s later video's media clock claims a 1 s lead it never had at the start.
+    p.tick(104.1, video_media_s=5.1)
+    p.feed(b"\x11" * 320, 1000 + 320 * 100, 104.1)
+    assert p.align_samples == before
+
+
+def test_non_monotonic_video_media_is_ignored():
+    p = at.AacPacer()
+    assert p.tick(100.0, video_media_s=0.0) == []
+    first = b"".join(p.tick(100.5, video_media_s=0.5))
+    assert len(first) == 4000
+    # a smaller value is ignored (wall-clock fallback), never an exception
+    back = b"".join(p.tick(100.6, video_media_s=0.1))
+    assert len(back) >= 0
+
+
+def test_callers_without_video_media_behave_as_before():
+    old, new = at.AacPacer(), at.AacPacer()
+    seq = [("t", 0.0), ("t", 0.3), ("t", 0.8), ("f", 0.85), ("t", 1.0), ("t", 2.0)]
+    for i, (kind, t) in enumerate(seq):
+        if kind == "t":
+            assert new.tick(100.0 + t) == old.tick(100.0 + t)
+        else:
+            assert new.feed(b"\x11" * 320, 1000, 100.0 + t) == old.feed(
+                b"\x11" * 320, 1000, 100.0 + t
+            )
+    assert new.align_samples == 0

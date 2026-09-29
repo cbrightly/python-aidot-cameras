@@ -37,6 +37,14 @@ AAC_GAP_TOLERANCE_S = 1.0
 #: Timestamp jitter the pacer absorbs - a packet stamped within this of where
 #: the audio already is gets appended contiguously instead of filled or trimmed.
 AAC_JITTER_TOL_S = 0.04
+#: For this long after the camera's first audio, the pacer may line the AAC
+#: track's start up with the video's (a cold start's backlogs settle in ~1 s).
+AAC_ALIGN_WINDOW_S = 3.0
+#: A start correction larger than this is not applied (logged once instead).
+AAC_ALIGN_MAX_S = 4.0
+#: No correction until both tracks have run this long: a backlog arrives in a
+#: burst, so correcting earlier would chase it with several small glitches.
+AAC_ALIGN_SETTLE_S = 0.5
 
 _SR_INDEX = {
     96000: 0,
@@ -109,6 +117,12 @@ class AacPacer:
     goes quiet: Home Assistant's stream worker drops an audio track that sends
     nothing early. Once filling, every tick fills up to its own time, so the
     silence is never more than one tick behind the picture.
+
+    Before any camera audio, the silence follows the video's media time
+    instead of the wall clock when the publisher gives it (falling back to
+    the wall clock otherwise), so a cold start's video backlog is matched.
+    For ``AAC_ALIGN_WINDOW_S`` after the first audio, the track's start is
+    lined up with video's once, so a cold start's live edges agree.
     """
 
     def __init__(self, device_id: str = "?") -> None:
@@ -119,6 +133,19 @@ class AacPacer:
         self.silence_samples = 0
         self.trimmed_samples = 0
         self.reanchors = 0
+        self._pre_samples = 0  # silence emitted before the first A-law packet
+        self._v0: Optional[float] = None  # wall time of the first video tick
+        self._v_media: Optional[float] = None  # last video media time accepted
+        self._lead_v: Optional[float] = None  # video media ahead of wall, max
+        self._a0: Optional[float] = None  # wall time of the first A-law packet
+        self._a_prev: Optional[int] = None  # previous A-law stamp
+        self._a_media = 0  # A-law samples since the first stamp, unwrapped
+        self._lead_a: Optional[float] = None  # audio media ahead of wall, max
+        self._applied = 0  # start correction applied so far, samples
+        self._align_skipped = False
+        self._align_logged = False
+        self.align_samples = 0
+        self.align_corrections = 0
 
     def feed(self, alaw: bytes, pcma_ts: int, now: float) -> List[bytes]:
         out: List[bytes] = []
@@ -126,8 +153,16 @@ class AacPacer:
             return out
         ts = pcma_ts & _MASK
         self._heard = now
+        if self._a0 is None:
+            self._a0, self._a_prev = now, ts
+        else:
+            self._a_media += _signed32(ts - self._a_prev)
+            self._a_prev = ts
+        lead = self._a_media / PCMA_RATE - (now - self._a0)
+        self._lead_a = lead if self._lead_a is None else max(self._lead_a, lead)
         if self._pos is None:
             self._pos = ts
+        self._align(now)
         d = _signed32(ts - self._pos)
         tol = round(AAC_JITTER_TOL_S * PCMA_RATE)
         if -min(tol, len(alaw) - 1) <= d <= tol:
@@ -173,7 +208,74 @@ class AacPacer:
         self._last = now
         return out
 
-    def tick(self, now: float) -> List[bytes]:
+    def _align(self, now: float) -> None:
+        """Line the AAC track's start up with the video's, during the window.
+
+        Both tracks' live edges are "now", so the track is aligned when the
+        silence carried before the first audio sample equals
+        lead_v - lead_a + (a0 - v0). Moving the expected position by the
+        difference lets the ordinary rules insert that silence or trim that
+        sound on the next packet.
+        """
+        if (
+            self._pos is None
+            or self._a0 is None
+            or self._v0 is None
+            or self._lead_v is None
+            or self._align_skipped  # a skipped correction ends alignment
+            or now - self._a0 > AAC_ALIGN_WINDOW_S
+            or now - max(self._a0, self._v0) < AAC_ALIGN_SETTLE_S
+        ):
+            return
+        target = self._lead_v - (self._lead_a or 0.0) + (self._a0 - self._v0)
+        want = round(target * PCMA_RATE) - self._pre_samples - self._applied
+        if abs(want) <= round(AAC_JITTER_TOL_S * PCMA_RATE):
+            return
+        if abs(want) > AAC_ALIGN_MAX_S * PCMA_RATE:
+            if not self._align_skipped:
+                self._align_skipped = True
+                _LOGGER.info(
+                    "camera %s: AAC track: start correction of %d ms skipped (over %.0f s)",
+                    self._device_id,
+                    round(want * 1000 / PCMA_RATE),
+                    AAC_ALIGN_MAX_S,
+                )
+            return
+        self._pos = (self._pos - want) & _MASK
+        self._applied += want
+        self.align_samples += want
+        self.align_corrections += 1
+        _LOGGER.log(
+            logging.DEBUG if self._align_logged else logging.INFO,
+            "camera %s: AAC track: start aligned with video, %+d ms",
+            self._device_id,
+            round(want * 1000 / PCMA_RATE),
+        )
+        self._align_logged = True
+
+    def tick(self, now: float, video_media_s: Optional[float] = None) -> List[bytes]:
+        if video_media_s is not None and (
+            self._v_media is None or video_media_s >= self._v_media
+        ):
+            if self._v0 is None:
+                self._v0 = now
+            self._v_media = video_media_s
+            lead = video_media_s - (now - self._v0)
+            self._lead_v = lead if self._lead_v is None else max(self._lead_v, lead)
+            if self._heard is None:
+                # No camera audio yet: silence follows the video's media clock,
+                # so a cold start's video backlog is matched sample for sample.
+                self._last = now
+                n = min(
+                    round(video_media_s * PCMA_RATE) - self._pre_samples,
+                    round(AAC_MAX_FILL_S * PCMA_RATE),
+                )
+                if n <= 0:
+                    return []
+                self._pre_samples += n
+                self.silence_samples += n
+                return [ALAW_SILENCE * n]
+            self._align(now)
         if self._last is None:
             self._last = now  # no audio yet: the first tick starts the clock
             return []
@@ -187,6 +289,8 @@ class AacPacer:
         self._last += n / PCMA_RATE
         if self._pos is not None:
             self._pos = (self._pos + n) & _MASK
+        if self._heard is None:
+            self._pre_samples += n
         self.silence_samples += n
         return [ALAW_SILENCE * n]
 
@@ -258,10 +362,12 @@ class AacTrack:
             return []
         return self._run(lambda: self.pacer.feed(alaw, pcma_ts, now))
 
-    def tick(self, now: float) -> List[Tuple[int, int, bytes]]:
+    def tick(
+        self, now: float, video_media_s: Optional[float] = None
+    ) -> List[Tuple[int, int, bytes]]:
         if self.failed:
             return []
-        return self._run(lambda: self.pacer.tick(now))
+        return self._run(lambda: self.pacer.tick(now, video_media_s=video_media_s))
 
     def _run(self, pace) -> List[Tuple[int, int, bytes]]:
         # The pacer call and the encode loop share one try: either can raise
