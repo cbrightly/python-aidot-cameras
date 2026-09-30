@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc33]
+
 ### Fixed
 
 - **The opt-in AAC track starts in step with the picture on a cold start.**
