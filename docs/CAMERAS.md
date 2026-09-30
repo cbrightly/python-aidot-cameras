@@ -288,10 +288,11 @@ and `http://` serves are unchanged). Design, measurements and rollout:
   `camera.record` has sound; everything reading the first audio track keeps
   A-law. It is off by default. A camera whose audio is mu-law
   (PCMU) gets no AAC track. Its timestamps follow the camera's own audio
-  clock and do not drift against the picture; when an HLS view starts a cold
-  camera session, audio can lead the picture by up to about 2 s for that
-  recording, because the camera's buffered first keyframe is older than the
-  first audio.
+  clock and do not drift against the picture; on a cold start, until the
+  camera's first audio arrives the track's silence follows the video's
+  media time instead of the wall clock, and it then lines its start up
+  with the video's (normally one correction), so the live edges agree
+  instead of the sound leading the picture.
 - **Timestamps.** `AIDOT_PUBLISH_TIMESTAMPS` (unset: SDES video `steered` -
   the camera's spacing at real-time rate - and every other track `hybrid`)
   keeps the camera's frame spacing and substitutes the arrival clock for a
@@ -320,8 +321,12 @@ Useful log lines (logger `aidot_cameras.camera.rtsp_publish`):
 when it attaches, and
 `publish ended: N packets, N timestamp repair(s), ..., N late, N lost, N
 re-sent frames dropped, N filter resets, AAC N frames / N s / N
-silence-filled / N trimmed / N re-anchors` when it stops (the AAC suffix is
-omitted when the track is off or unavailable). On a healthy LAN
+silence-filled / N trimmed / N re-anchors, AAC start aligned +N ms` when it
+stops (the AAC suffix is omitted when the track is off or unavailable). The
+aligned figure is `aac_align_ms` in `publish_stats()` (signed ms); the DTLS
+path puts the same key in its result and ends its own `DTLS direct
+publish: AAC ...` line with the same `AAC start aligned +N ms`. On a
+healthy LAN
 `late` and `lost` are 0; the repair count is normally 0 or near it; a steered
 snap or a filter reset adds one. `re-sent frames dropped` counts the
 camera's own already-served video frames (SDES mirrors the DTLS path's
@@ -331,7 +336,15 @@ video timestamps (one 23.5 s capture: 128), not zero. `filter resets` counts
 the rarer cases where a backward step is too big to be one of those re-sends
 (a new timestamp base) or the video SSRC changed (a TUTK-framed camera
 switching to real SRTP mid-session); this is normally 0, and a session that
-keeps accumulating them is worth a closer look.
+keeps accumulating them is worth a closer look. The AAC pacer itself (logger
+`aidot_cameras.camera.aac_track`) logs one INFO `AAC track: start aligned
+with video, +N ms (video lead N ms, audio lead N ms, audio started +N ms after
+video, N ms of silence before audio)` per session when it applies the
+cold-start correction - the parts in parentheses are the inputs it was
+computed from - (further corrections in the same session log at DEBUG), and
+one INFO `AAC track: start correction of N ms skipped (over 4 s)` if a wanted
+correction is too large to apply - which also ends alignment for that
+session.
 
 ### A failed go2rtc registration silently downgrades to HLS
 

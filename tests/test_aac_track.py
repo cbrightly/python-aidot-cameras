@@ -1,5 +1,6 @@
 """The AAC track the direct publish adds so Home Assistant's HLS has audio."""
 
+import logging
 import struct
 
 import pytest
@@ -499,3 +500,314 @@ def test_slow_clock_drift_is_resynced_when_it_passes_the_tolerance():
     assert [i for i, _ in fills] == [33, 66, 99]
     assert all(silence == 330 for _, silence in fills)
     assert p.silence_samples == (last_ts + content_len - 1000) - appended
+
+
+def _cold_start(
+    v_backlog,
+    a_backlog,
+    a_after,
+    *,
+    secs=12.0,
+    fps=15.0,
+    latency=0.05,
+    audio=True,
+    jitter=None,
+    tick_first=True,
+    drain=None,
+    burst=None,
+):
+    """Drive a pacer through a synthetic cold start on one capture clock.
+
+    The viewer starts the camera at capture time v_backlog; every packet has
+    the same network latency. Video frames are captured every 1/fps from
+    capture time 0: the backlog (captured before the start) arrives within
+    0.1 s after start + latency, later frames at capture + latency. Audio
+    packets (320 samples, 40 ms) are captured from v_backlog - a_backlog on:
+    the audio backlog arrives together a_after seconds after the video's first
+    frame, later packets at capture + latency but never before the backlog. Returns (pacer, rows) with one row per audio packet:
+    (capture time, AAC output time of the packet's first sample).
+
+    When `drain` is given (a real-time multiple, e.g. 1.2), the video backlog
+    does not arrive entirely as a burst: the first `burst` seconds of it
+    (default 0) still burst within 0.1 s of `v_backlog + latency`, but the
+    rest drains at `drain` times real time - continuing from where the burst
+    left off - until that catches up with the live edge (`cap + latency`).
+    """
+    p = at.AacPacer()
+    events = []
+    for j in range(int(secs * fps)):
+        cap = j / fps
+        if drain is not None:
+            b = burst if burst is not None else 0.0
+            start = v_backlog + latency
+            if cap < b:
+                arr = start + cap / max(b, 1e-9) * 0.1
+            else:
+                arr = max(start + 0.1 + (cap - b) / drain, cap + latency)
+        else:
+            start = v_backlog + latency
+            arr = (
+                start + cap / max(v_backlog, 1e-9) * 0.1
+                if cap < v_backlog
+                else cap + latency
+            )
+        events.append((arr, 0 if tick_first else 1, "v", j / fps, None))
+    if audio:
+        a_start = v_backlog - a_backlog
+        k = 0
+        while a_start + k * 0.04 < secs:
+            cap = a_start + k * 0.04
+            first = v_backlog + latency + a_after
+            arr = first if cap < v_backlog else max(cap + latency, first)
+            ts = 1000 + 320 * k + (jitter[k % len(jitter)] if jitter else 0)
+            events.append((arr, 1 if tick_first else 0, "a", cap, ts))
+            k += 1
+    events.sort(key=lambda e: (e[0], e[1]))
+    emitted = 0
+    rows = []
+    t0 = events[0][0]
+    for arr, _, kind, value, ts in events:
+        now = 100.0 + arr - t0
+        if kind == "v":
+            for blk in p.tick(now, video_media_s=value):
+                emitted += len(blk)
+        else:
+            out = p.feed(b"\x11" * 320, ts, now)
+            before = emitted
+            for blk in out:
+                emitted += len(blk)
+            if out and out[-1] and out[-1][0:1] == b"\x11":
+                rows.append((value, (before + sum(len(b) for b in out[:-1])) / 8000))
+    return p, rows
+
+
+def _misalignment(rows, after=5.0):
+    """Output time minus capture time for packets captured after `after` s -
+    constant when aligned; aligned with video means it equals 0 (the video's
+    first frame is capture 0 and output 0)."""
+    return [out - cap for cap, out in rows if cap >= after]
+
+
+@pytest.mark.parametrize(
+    "v_backlog,a_backlog,a_after",
+    [(1.35, 0.0, 0.06), (2.4, 0.15, 0.18), (0.77, 0.18, 0.05)],
+    ids=["m3", "l2", "ptz"],
+)
+def test_cold_start_backlog_ends_aligned_with_video(v_backlog, a_backlog, a_after):
+    p, rows = _cold_start(v_backlog, a_backlog, a_after)
+    mis = _misalignment(rows)
+    assert mis and max(abs(m) for m in mis) <= 0.04
+    # One correction, after the backlogs have settled - not a string of them.
+    assert p.align_corrections == 1
+
+
+def test_a_slowly_draining_backlog_gets_one_correction():
+    # The L2, measured on the box: a 1.66 s burst, then the rest of a 2.3 s
+    # backlog drains at 1.2x real time over several seconds (the pacer's
+    # video lead kept rising 1.66 -> 2.32 s). The pacer must wait for that
+    # rise to stop before correcting once - not chase the growing lead with
+    # a string of small corrections.
+    p, rows = _cold_start(2.3, 0.0, 0.03, drain=1.2, burst=1.66, secs=16.0)
+    mis = _misalignment(rows, after=12.0)  # the drain is over by then
+    assert p.align_corrections == 1
+    assert mis and max(abs(m) for m in mis) <= 0.04
+
+
+def test_warm_start_gets_no_correction():
+    p, rows = _cold_start(0.0001, 0.0, 0.0)
+    assert p.align_samples == 0 and p.align_corrections == 0
+    assert max(abs(m) for m in _misalignment(rows)) <= 0.04
+
+
+def test_jitter_inside_the_tolerance_is_not_realigned():
+    p, _ = _cold_start(0.0001, 0.0, 0.0, jitter=[-64, 64])
+    assert p.align_samples == 0
+
+
+def test_audio_before_video_still_ends_aligned():
+    # The audio backlog arrives before the first video frame does.
+    p, rows = _cold_start(1.35, 0.1, -0.05)
+    assert max(abs(m) for m in _misalignment(rows)) <= 0.04
+
+
+def test_tick_after_feed_order_ends_aligned():
+    p, rows = _cold_start(1.35, 0.0, 0.06, tick_first=False)
+    assert max(abs(m) for m in _misalignment(rows)) <= 0.04
+
+
+def test_no_audio_silence_follows_the_video_media_clock():
+    p = at.AacPacer()
+    emitted = 0
+    for j in range(150):  # 10 s at 15 fps, first 1.35 s delivered in a burst
+        cap = j / 15
+        arr = 1.40 + cap / 1.35 * 0.1 if cap < 1.35 else cap + 0.05
+        for blk in p.tick(100.0 + arr, video_media_s=cap):
+            emitted += len(blk)
+        assert abs(emitted / 8000 - cap) <= 1 / 15
+    assert p.align_samples == 0
+
+
+def test_a_correction_beyond_the_maximum_is_skipped(caplog):
+    caplog.set_level(logging.INFO)
+    # Silence already follows the video before audio, so only audio arriving
+    # BEFORE a huge video backlog can need a correction beyond the maximum.
+    p, _ = _cold_start(at.AAC_ALIGN_MAX_S + 1.0, 0.1, -0.08, secs=14.0)
+    assert p.align_samples == 0
+    assert (
+        sum(
+            "start correction" in r.getMessage() and "skipped" in r.getMessage()
+            for r in caplog.records
+        )
+        == 1
+    )
+
+
+def test_nothing_realigns_after_the_window():
+    p = at.AacPacer()
+    p.tick(100.0, video_media_s=0.0)
+    p.feed(b"\x11" * 320, 1000, 100.05)
+    before = p.align_samples
+    # Well after the window, video's media clock claims a lead it never had
+    # at the start.
+    later = 100.0 + at.AAC_ALIGN_WINDOW_S + 1.1
+    p.tick(later, video_media_s=later - 100.0 + 1.0)
+    p.feed(b"\x11" * 320, 1000 + 320 * 100, later)
+    # ... and has settled by the next packet: only the window stops it.
+    p.feed(b"\x11" * 320, 1000 + 320 * 101, later + at.AAC_ALIGN_SETTLE_S + 0.1)
+    assert p.align_samples == before
+
+
+def test_non_monotonic_video_media_is_ignored():
+    p = at.AacPacer()
+    assert p.tick(100.0, video_media_s=0.0) == []
+    first = b"".join(p.tick(100.5, video_media_s=0.5))
+    assert len(first) == 4000
+    # a smaller value is ignored (wall-clock fallback), never an exception
+    back = b"".join(p.tick(100.6, video_media_s=0.1))
+    assert len(back) == 800  # ignored: 0.1 s of silence by the wall clock instead
+
+
+def test_callers_without_video_media_behave_as_before():
+    # Block sizes recorded from the pacer before video media time existed
+    # (7a7e10d): omitting video_media_s must reproduce them exactly.
+    new = at.AacPacer()
+    seq = [("t", 0.0), ("t", 0.3), ("t", 0.8), ("f", 0.85), ("t", 1.0), ("t", 2.0)]
+    sizes = []
+    for kind, t in seq:
+        if kind == "t":
+            out = new.tick(100.0 + t)
+        else:
+            out = new.feed(b"\x11" * 320, 1000, 100.0 + t)
+        sizes.append([len(b) for b in out])
+    assert sizes == [[], [2400], [4000], [320], [], [9200]]
+    assert new.silence_samples == 15600
+    assert new.align_samples == 0
+
+
+def test_the_start_correction_log_line_names_its_inputs(caplog):
+    caplog.set_level(logging.INFO)
+    _cold_start(1.35, 0.0, 0.06)
+    lines = [
+        r.getMessage() for r in caplog.records if "start aligned" in r.getMessage()
+    ]
+    assert len(lines) == 1
+    for field in ("video lead", "audio lead", "after video", "silence before audio"):
+        assert field in lines[0]
+
+
+def test_a_skipped_correction_ends_alignment(caplog):
+    caplog.set_level(logging.INFO)
+    p = at.AacPacer()
+    p.tick(100.0, video_media_s=0.0)
+    p.feed(b"\x11" * 320, 1000, 100.0)
+    # An audio backlog 5 s deep: the correction it asks for is over the maximum.
+    p.feed(b"\x11" * 320, 1000 + 5 * 8000, 100.6)
+    assert p.align_corrections == 0
+    # The audio lead has stopped rising: once settled, the oversized
+    # correction is actually evaluated (and skipped).
+    p.feed(b"\x11" * 320, 1000 + 5 * 8000 + 320, 101.2)
+    assert p.align_samples == 0 and p.align_corrections == 0
+    assert (
+        sum(
+            "start correction" in r.getMessage() and "skipped" in r.getMessage()
+            for r in caplog.records
+        )
+        == 1
+    )
+    # A video backlog then brings the wanted correction back under the
+    # maximum, still inside the window - but a skipped correction is final.
+    p.tick(101.3, video_media_s=2.0)
+    p.feed(b"\x11" * 320, 1000 + 5 * 8000 + 320 + 320, 101.3)
+    # ... and has settled by the next packet: only the skip stops it.
+    p.feed(
+        b"\x11" * 320, 1000 + 5 * 8000 + 3 * 320, 101.3 + at.AAC_ALIGN_SETTLE_S + 0.1
+    )
+    assert p.align_samples == 0 and p.align_corrections == 0
+
+
+def test_the_correction_lands_on_audio_when_video_stalls():
+    # Video delivers its backlog and then stalls: only the audio packets can
+    # carry the correction.
+    p = at.AacPacer()
+    p.tick(100.0, video_media_s=0.0)
+    p.tick(100.1, video_media_s=1.35)  # the backlog: 1.35 s of silence
+    ts, now = 1000, 100.5
+    while now < 101.5:
+        p.feed(b"\x11" * 320, ts, now)
+        ts += 320
+        now += 0.04
+    # lead_v 1.25 s + audio 0.5 s after video = 1.75 s before the first
+    # sample; 1.35 s was carried, so 0.4 s is added once.
+    assert p.align_corrections == 1
+    assert p.align_samples == 3200
+
+
+def test_the_correction_lands_on_video_when_audio_goes_quiet():
+    # One audio packet, then nothing (a battery camera sends audio sparsely):
+    # only the video ticks inside the window can carry the correction.
+    p = at.AacPacer()
+    p.tick(100.0, video_media_s=0.0)
+    p.tick(100.1, video_media_s=1.35)
+    p.feed(b"\x11" * 320, 1000, 100.2)
+    now, media = 100.1, 1.35
+    while now < 104.0:
+        now += 1 / 15
+        media += 1 / 15
+        p.tick(now, video_media_s=media)
+    # lead_v 1.25 s + audio 0.2 s after video = 1.45 s; 1.35 s was carried.
+    assert p.align_corrections == 1
+    assert p.align_samples == 800
+
+
+def test_the_pre_audio_fill_is_capped_per_tick():
+    p = at.AacPacer()
+    p.tick(100.0, video_media_s=0.0)
+    sizes = [
+        len(b"".join(p.tick(t, video_media_s=12.0))) for t in (100.1, 100.2, 100.3)
+    ]
+    assert sizes == [40000, 40000, 16000]
+
+
+def test_a_late_video_frame_does_not_lower_the_video_lead():
+    p = at.AacPacer()
+    p.tick(100.0, video_media_s=0.0)
+    p.tick(100.1, video_media_s=1.35)  # lead_v 1.25 s
+    p.feed(b"\x11" * 320, 1000, 100.15)
+    # The frame due at 100.6 arrives 0.2 s late: its lead reads 0.95 s.
+    p.tick(100.8, video_media_s=1.85)
+    # 1.25 + 0.15 = 1.40 s wanted, 1.35 s carried: +50 ms, not -250 ms.
+    assert p.align_samples == 400
+
+
+def test_a_draining_audio_backlog_gets_one_correction():
+    p = at.AacPacer()
+    p.tick(100.0, video_media_s=0.0)
+    p.tick(100.1, video_media_s=1.5)
+    ts, media, now = 1000, 1.5, 100.1
+    for i in range(150):
+        p.feed(b"\x11" * 320, ts, now)
+        ts += 640 if i < 25 else 320
+        now += 0.04
+        media += 0.04
+        p.tick(now, video_media_s=media)
+    assert p.align_corrections == 1 and p.align_samples == -8000
