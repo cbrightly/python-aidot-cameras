@@ -6,6 +6,16 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Recording a DTLS camera to a file (`output_path`) writes as it goes, and
+  works on small hosts.** The recording re-encodes the video in process, and
+  the encoder's default settings held dozens of frames before writing
+  anything; on a Raspberry Pi Zero 2 W (about 1.6 frames a second at 1080p) a
+  20-second recording could end with nothing written. It now encodes with
+  x264's `ultrafast` preset and `zerolatency` tuning, so each frame is written
+  as it arrives, at a fraction of the CPU.
+
 ## [1.0.0rc34]
 
 ### Fixed

@@ -1139,6 +1139,16 @@ async def _attempt(
             finally:
                 dc._stream_session = _prev_session
 
+        # Judge the recording only once the session has stopped. On a DTLS camera
+        # the library re-encodes in process and the file grows only as its encoder
+        # emits; a slow runner (a Pi Zero 2 W) had not written one block 20 s into
+        # a hold, so a camera whose video decoded fine read as NO_MEDIA. Stopping
+        # flushes the encoder (and ends ffmpeg's file on SDES). The counters read
+        # below survive a stop; the `finally` stop is then a no-op.
+        try:
+            await _stop(session)
+        except Exception:
+            pass
         ok, evidence = _media_seen(session, frames["n"], out)
         result.update(evidence)
         result.update(await _decode_probe(out))
