@@ -149,7 +149,7 @@ def test_after_audio_stops_the_fill_starts_at_the_threshold_then_tracks_now():
         p.feed(b"\x01" * 160, 1000 + 160 * i, i * 0.02)
     last_audio = 49 * 0.02
     filled_at = []
-    for k in range(1, 40):
+    for k in range(1, 80):  # out to ~3 s: past AAC_IDLE_FILL_S
         now = last_audio + k * 0.04
         out = _flat(p.tick(now))
         if now - last_audio < at.AAC_IDLE_FILL_S - 1e-9:
@@ -180,17 +180,17 @@ def test_resume_after_a_continuous_fill_never_steps_backward():
 def test_idle_fill_after_audio_stops_then_resumes_without_a_backward_step():
     p = at.AacPacer()
     p.feed(b"\x01" * 160, 1000, 0.00)
-    filled = _flat(p.tick(1.00))  # 1 s of silence since the last packet
-    assert filled == S * 8000
+    filled = _flat(p.tick(3.00))  # 3 s of silence since the last packet
+    assert filled == S * 24000
     # The camera resumes; its first packet lies wholly inside the filled silence.
-    out = _flat(p.feed(b"\x02" * 160, 1000 + 160 + 7800, 1.00))
+    out = _flat(p.feed(b"\x02" * 160, 1000 + 160 + 23800, 3.00))
     assert out == b""
     # The next packet overlaps the fill by 400 samples (beyond the jitter
     # tolerance): only its tail is kept.
-    out = _flat(p.feed(b"\x02" * 800, 1000 + 160 + 8000 - 400, 1.02))
+    out = _flat(p.feed(b"\x02" * 800, 1000 + 160 + 24000 - 400, 3.02))
     assert out == b"\x02" * 400
     # From here on the camera's stamps are exactly continuous.
-    out = _flat(p.feed(b"\x02" * 160, 1000 + 160 + 8000 + 400, 1.04))
+    out = _flat(p.feed(b"\x02" * 160, 1000 + 160 + 24000 + 400, 3.04))
     assert out == b"\x02" * 160
 
 
@@ -688,10 +688,11 @@ def test_non_monotonic_video_media_is_ignored():
 
 
 def test_callers_without_video_media_behave_as_before():
-    # Block sizes recorded from the pacer before video media time existed
-    # (7a7e10d): omitting video_media_s must reproduce them exactly.
+    # Omitting video_media_s takes the wall-clock path: silence by wall time
+    # before audio, nothing while audio is recent, an idle fill once the camera
+    # has sent nothing for AAC_IDLE_FILL_S (2 s; the sizes below follow from it).
     new = at.AacPacer()
-    seq = [("t", 0.0), ("t", 0.3), ("t", 0.8), ("f", 0.85), ("t", 1.0), ("t", 2.0)]
+    seq = [("t", 0.0), ("t", 0.3), ("t", 0.8), ("f", 0.85), ("t", 1.0), ("t", 3.0)]
     sizes = []
     for kind, t in seq:
         if kind == "t":
@@ -699,8 +700,8 @@ def test_callers_without_video_media_behave_as_before():
         else:
             out = new.feed(b"\x11" * 320, 1000, 100.0 + t)
         sizes.append([len(b) for b in out])
-    assert sizes == [[], [2400], [4000], [320], [], [9200]]
-    assert new.silence_samples == 15600
+    assert sizes == [[], [2400], [4000], [320], [], [17200]]
+    assert new.silence_samples == 23600
     assert new.align_samples == 0
 
 
@@ -811,3 +812,43 @@ def test_a_draining_audio_backlog_gets_one_correction():
         media += 0.04
         p.tick(now, video_media_s=media)
     assert p.align_corrections == 1 and p.align_samples == -8000
+
+
+def test_a_delivery_pause_loses_no_audio():
+    # Battery cameras send their audio complete but sometimes late: a pause in
+    # delivery, then the held packets in a burst with continuous stamps.
+    # Measured on an L2: pauses of 0.3-0.5 s are routine and longer ones occur.
+    # Filling the pause with silence would make the late audio look old, and
+    # it would be trimmed - real sound lost.
+    p = at.AacPacer()
+    sent, ts, now = [], 1000, 100.0
+    out = []
+
+    def feed(k):
+        nonlocal ts
+        payload = bytes([0x20 + (k % 64)]) * 320
+        sent.append(payload)
+        out.extend(p.feed(payload, ts, now))
+        ts += 320
+
+    k = 0
+    for _ in range(50):  # 2 s of steady audio, video ticking beside it
+        feed(k)
+        k += 1
+        now += 0.04
+        out.extend(p.tick(now))
+    pause_end = now + 1.0
+    while now < pause_end:  # 1 s with no audio delivered; video keeps ticking
+        now += 1 / 15
+        out.extend(p.tick(now))
+    for _ in range(25):  # the held second of audio arrives at once
+        feed(k)
+        k += 1
+    for _ in range(50):  # then steady again
+        now += 0.04
+        feed(k)
+        k += 1
+        out.extend(p.tick(now))
+    assert p.trimmed_samples == 0
+    assert p.silence_samples == 0
+    assert b"".join(out) == b"".join(sent)
