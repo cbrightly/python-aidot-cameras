@@ -6,6 +6,16 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The AAC track no longer drops real sound when a camera's audio arrives
+  late.** A battery camera with motion in view often holds its audio for
+  0.5-0.9 s and then sends all of it at once. The AAC track treated 0.5 s
+  without audio as a quiet camera and filled silence, so the late audio that
+  followed looked old and was cut - up to about 10 s of sound per 2-minute
+  recording. It now waits 2 s before treating a camera as quiet, so a late
+  burst is played in full.
+
 ## [1.0.0rc33]
 
 ### Fixed
