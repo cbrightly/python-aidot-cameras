@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc34]
+
 ### Fixed
 
 - **The AAC track no longer drops real sound when a camera's audio arrives
