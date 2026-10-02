@@ -544,3 +544,56 @@ async def test_the_retry_cooldown_still_shortens_after_a_slotless_error(
     await lv._validate_camera(client, devices["a"], _run_args(), {})
 
     assert slept == [lv.SLOTLESS_COOLDOWN_S]
+
+
+def test_a_dtls_recording_is_read_after_the_session_is_stopped(
+    lv, tmp_path, monkeypatch
+):
+    # The DTLS recorder re-encodes in process and flushes its encoder when the
+    # session stops. A slow runner (measured: a Pi Zero 2 W had not written one
+    # packet 20 s into a hold) has nothing on disk until then, so reading the
+    # file while the session is still open failed a camera whose video decoded
+    # fine. The recording must be judged after the stop.
+    import asyncio
+
+    class _Session:
+        stopped = 0
+
+        def __init__(self, out):
+            self.out = out
+            open(out, "wb").close()  # the recorder creates the file at open
+
+        async def stop(self):
+            if not self.stopped:
+                with open(self.out, "ab") as f:
+                    f.write(b"\x47" * 188 * 200)  # the encoder flush
+            self.stopped += 1
+
+    class _Dc:
+        device_id = "0123456789abcdef0123456789abcdef"
+        is_sdes_camera = False
+
+        async def async_open_webrtc_stream(self, on_frame=None, output_path=None, **kw):
+            for _ in range(30):
+                on_frame(object())  # frames decoded in process, as on the real path
+            return _Session(output_path)
+
+    async def _probe(path, timeout=60.0):
+        if os.path.getsize(path) > 0:
+            return {"decoded_frames": 25, "decode_errors": 0}
+        return {"decoded_frames": 0, "decode_errors": 3}
+
+    async def _no_features(*a, **k):
+        return {}
+
+    async def _no_seconds(path, timeout=30.0):
+        return None
+
+    monkeypatch.setattr(lv, "_decode_probe", _probe)
+    monkeypatch.setattr(lv, "probe_features", _no_features)
+    monkeypatch.setattr(lv, "_recording_seconds", _no_seconds)
+
+    result = asyncio.run(lv._attempt(_Dc(), 0, str(tmp_path), 1))
+
+    assert result["verdict"] == "PASS", result
+    assert result["recorded_bytes"] > 0
