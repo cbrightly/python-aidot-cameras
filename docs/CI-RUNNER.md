@@ -244,8 +244,8 @@ ffprobe -v error -show_entries stream=codec_name,codec_type -of csv=p=0 /tmp/x.t
 
 ## Direct publish is not gated by `live_validate.py` either
 
-`live_validate.py` records through `output_path`, and a recording keeps ffmpeg
-by design, so a green gate says nothing about `AIDOT_DIRECT_PUBLISH`. Until the
+`live_validate.py` records through `output_path` (ffmpeg `-c copy` on SDES, the
+PyAV copy mux on DTLS), so a green gate says nothing about `AIDOT_DIRECT_PUBLISH`. Until the
 gate covers it, run the A/B harness on the runner host before a release that
 touches `camera/rtsp_publish.py` or the serve launch sites - with Home
 Assistant's AiDot entry disabled, exactly as for a gate run:

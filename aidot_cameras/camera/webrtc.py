@@ -21,6 +21,9 @@ from .protocol import (
 
 _LOGGER = logging.getLogger(__name__)
 
+#: How long stop() waits for the MQTT signaling session to finish.
+_STOP_MQTT_WAIT_S = 5.0
+
 
 class WebRTCSession(AvioRequestMixin):
     """Active WebRTC live-stream session for a liveType=2 AiDot camera.
@@ -203,7 +206,22 @@ class WebRTCSession(AvioRequestMixin):
         return out
 
     async def stop(self) -> None:
-        """Tear down the stream: close peer connection and MQTT session."""
+        """Tear down the stream: close peer connection and MQTT session.
+
+        Safe to call more than once, and from several callers at once: the
+        teardown runs a single time and every call waits for that one run. A
+        second teardown used to re-await a future the first had cancelled (and
+        raise CancelledError), re-close a half-closed peer connection (and hang),
+        or re-log ffmpeg's stderr.
+        """
+        task = getattr(self, "_stop_task", None)
+        if task is None:
+            task = self._stop_task = asyncio.ensure_future(self._stop_once())
+        # Shielded: one caller being cancelled must not abort the teardown the
+        # others are waiting on.
+        await asyncio.shield(task)
+
+    async def _stop_once(self) -> None:
         # If two-way talk was active this session, RELEASE the camera speaker
         # before closing the PeerConnection: send SPEAKERSTOP(849), idle the track,
         # and give the SCTP DataChannel a brief flush window so the camera actually
@@ -229,8 +247,13 @@ class WebRTCSession(AvioRequestMixin):
                 _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
         # Send None sentinel to stop the MQTT session in its thread
         self._outgoing_q.put_nowait(None)
-        await self._pc.close()
         try:
-            await asyncio.wait_for(self._mqtt_fut, timeout=5.0)
+            await self._pc.close()
+        except Exception:
+            # aiortc's close can raise part-way (an SSL write the peer refuses);
+            # the MQTT session still has to be shut down below.
+            _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
+        try:
+            await asyncio.wait_for(self._mqtt_fut, timeout=_STOP_MQTT_WAIT_S)
         except Exception:
             _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)

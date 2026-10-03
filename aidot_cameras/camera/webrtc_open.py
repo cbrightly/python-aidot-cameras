@@ -390,6 +390,87 @@ async def _drain_outgoing_queue(loop, outgoing_q, publish, poll_s: float = 1.0) 
 
 
 class _WebRTCOpenMixin:
+    def _attach_file_recorder(self, pc, output_path, on_frame):
+        """The recorder for a DTLS ``output_path``, wired to ``pc``'s tracks.
+
+        MPEG-TS paths copy the camera's own streams (``TsCopyRecorder``): the
+        encoded frames are teed before decode, so the recording takes nothing
+        from the ``on_frame`` consumer or the audio drain, and nothing is
+        re-encoded. Video is only decoded when ``on_frame`` will read it. Other
+        containers keep aiortc's MediaRecorder, which re-encodes and keeps its
+        known defects (it shares the track queues, so it records about half
+        the frames when ``on_frame`` is set); record to ``.ts`` to avoid them.
+        ``None`` when there is nothing to record or no recorder can be built.
+        """
+        if not output_path:
+            return None
+        from .recording import TsCopyRecorder, is_ts_path
+
+        if is_ts_path(output_path):
+            try:
+                recorder = TsCopyRecorder(
+                    output_path, device_id=getattr(self, "device_id", None)
+                )
+            except OSError as exc:
+                _LOGGER.warning(
+                    "camera %s: cannot write %s (%s) - the stream will not be recorded",
+                    getattr(self, "device_id", "?"),
+                    output_path,
+                    exc,
+                )
+                return None
+            _decode_video = on_frame is not None
+            _video_tapped = [False]
+
+            @pc.on("track")
+            def _on_track_tap(track) -> None:
+                is_video = track.kind == "video"
+                if is_video and _video_tapped[0]:
+                    return
+                receiver = next(
+                    (r for r in pc.getReceivers() if r.track is track), None
+                )
+                if receiver is None:
+                    _LOGGER.warning(
+                        "camera %s: no receiver for the %s track - it will not"
+                        " be recorded",
+                        getattr(self, "device_id", "?"),
+                        track.kind,
+                    )
+                    return
+                tapped = self._install_encoded_tap(
+                    receiver,
+                    recorder.vq if is_video else recorder.aq,
+                    is_video,
+                    serve=is_video and not _decode_video,
+                    device_id=getattr(self, "device_id", None),
+                )
+                if is_video and tapped:
+                    _video_tapped[0] = True
+
+            return recorder
+        try:
+            from aidot_cameras._vendor.aiortc.contrib.media import MediaRecorder
+
+            recorder = MediaRecorder(output_path)
+        except Exception as exc:
+            _LOGGER.warning(
+                "async_open_webrtc_stream: MediaRecorder not available: %s", exc
+            )
+            return None
+        _video_recorded = [False]
+
+        @pc.on("track")
+        def _on_track_rec(track) -> None:
+            if track.kind == "video":
+                if not _video_recorded[0]:
+                    recorder.addTrack(track)
+                    _video_recorded[0] = True
+            else:
+                recorder.addTrack(track)
+
+        return recorder
+
     async def _async_open_webrtc_stream_impl(
         self,
         on_frame: Optional[Callable[["AvVideoFrame"], None]] = None,
@@ -458,9 +539,14 @@ class _WebRTCOpenMixin:
             Separate budget for the ICE wait, clamped to ``timeout``. ``None``
             (default) makes ICE inherit ``timeout``, the historical behaviour.
         output_path : str or None
-            Record the stream to this file (e.g. ``/tmp/live.ts``) via
-            aiortc MediaRecorder (DTLS) or ffmpeg (SDES).  Supports any
-            container ffmpeg can write; ``.ts`` is streamable via vlc/ffplay.
+            Record the stream to this file (e.g. ``/tmp/live.ts``).  SDES
+            cameras record with ffmpeg ``-c copy``.  DTLS cameras recording to
+            MPEG-TS (``.ts``/``.m2ts``/``.mts``) copy the camera's H.264 as-is,
+            with its audio as 48 kHz AAC - the same mux Home Assistant's DTLS
+            path uses; other containers go through aiortc's MediaRecorder,
+            which re-encodes and, sharing the track queues, keeps only about
+            half the frames when ``on_frame`` is also set - prefer ``.ts``.
+            ``.ts`` is streamable via vlc/ffplay.
         max_seconds : float or None
             Stop recording after this many seconds (SDES path: passed as
             ``-t`` to ffmpeg so it exits cleanly).  For DTLS, the caller is
@@ -2547,27 +2633,7 @@ class _WebRTCOpenMixin:
                     )
                     track_tasks.append(t)
 
-        recorder = None
-        if output_path:
-            try:
-                from aidot_cameras._vendor.aiortc.contrib.media import MediaRecorder
-
-                recorder = MediaRecorder(output_path)
-
-                _video_recorded = [False]
-
-                @pc.on("track")
-                def _on_track_rec(track) -> None:
-                    if track.kind == "video":
-                        if not _video_recorded[0]:
-                            recorder.addTrack(track)
-                            _video_recorded[0] = True
-                    else:
-                        recorder.addTrack(track)
-            except Exception as exc:
-                _LOGGER.warning(
-                    "async_open_webrtc_stream: MediaRecorder not available: %s", exc
-                )
+        recorder = self._attach_file_recorder(pc, output_path, on_frame)
 
         # ------------------------------------------------------------------ #
         # Create SDP offer and publish webrtcReq

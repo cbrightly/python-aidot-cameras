@@ -5558,6 +5558,14 @@ class CameraMixin(
         # receiver that's already tapped must not be wrapped again (that would
         # layer the tap N times and flood the queue).
         if getattr(_qd, "_aidot_tapped", False):
+            if getattr(_qd, "_aidot_tap_out_q", out_q) is not out_q:
+                # One receiver feeds one mux. A second consumer (a recording
+                # and a serve on the same session) would silently get nothing.
+                _LOGGER.warning(
+                    "camera %s: receiver already tapped for another consumer;"
+                    " this one will get no frames",
+                    device_id or "?",
+                )
             return True
         _orig_put = _qd.put
         _skip_decode = bool(serve and is_video)
@@ -5569,10 +5577,11 @@ class CameraMixin(
         )
         if _canary is not None:
             _qd._aidot_serve_canary = _canary
-        # Serve path only: this is the stream we timestamp by hand. The
-        # live-view path hands frames to aiortc's own decoder, which does not
-        # use these values the same way.
-        _unwrap = _unwrap_state() if _skip_decode else None
+        # Every video tap feeds a copy mux (the serve, or a file recording),
+        # which writes these timestamps straight into the container, so every
+        # one must undo aiortc's false unwraps. Only the copy sent to the mux is
+        # corrected; the decoder still receives the frame untouched.
+        _unwrap = _unwrap_state() if is_video else None
         _CANARY_LOG_EVERY = 300  # frames (~10-20s of H.264); DEBUG summary cadence
 
         def _tap_put(task, *a, **k):
@@ -5620,6 +5629,7 @@ class CameraMixin(
 
         _qd.put = _tap_put
         _qd._aidot_tapped = True
+        _qd._aidot_tap_out_q = out_q
         return True
 
     def _install_av_taps(self, pc, vq, aq) -> bool:

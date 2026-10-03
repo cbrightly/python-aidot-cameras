@@ -19,6 +19,9 @@ from .protocol import (
 
 _LOGGER = logging.getLogger(__name__)
 
+#: How long stop() waits for the MQTT signaling session to finish.
+_STOP_MQTT_WAIT_S = 5.0
+
 #: The bridge does not send SPEAKERSTART the moment talk starts - it waits
 #: SDES_SPEAKERSTART_DELAY after the command channel is up, because a
 #: SPEAKERSTART sent too early is ignored and never acked.  The ack budget
@@ -329,7 +332,22 @@ class SdesSession(AvioRequestMixin):
         return self._proc.returncode
 
     async def stop(self) -> None:
-        """Tear down the stream: terminate ffmpeg and stop MQTT."""
+        """Tear down the stream: terminate ffmpeg and stop MQTT.
+
+        Safe to call more than once, and from several callers at once: the
+        teardown runs a single time and every call waits for that one run. A
+        second teardown used to re-await a future the first had cancelled (and
+        raise CancelledError), re-close a half-closed peer connection (and hang),
+        or re-log ffmpeg's stderr.
+        """
+        task = getattr(self, "_stop_task", None)
+        if task is None:
+            task = self._stop_task = asyncio.ensure_future(self._stop_once())
+        # Shielded: one caller being cancelled must not abort the teardown the
+        # others are waiting on.
+        await asyncio.shield(task)
+
+    async def _stop_once(self) -> None:
         if self._talk_state is not None:
             # Ask the bridge to close the camera speaker, then give it a brief
             # window to emit SPEAKERSTOP(849) on the still-live SCTP channel BEFORE
@@ -425,7 +443,7 @@ class SdesSession(AvioRequestMixin):
                     _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
         self._outgoing_q.put_nowait(None)
         try:
-            await asyncio.wait_for(self._mqtt_fut, timeout=5.0)
+            await asyncio.wait_for(self._mqtt_fut, timeout=_STOP_MQTT_WAIT_S)
         except Exception:
             _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
 
