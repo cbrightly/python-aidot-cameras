@@ -2625,10 +2625,33 @@ def test_dtls_publish_hands_the_hls_tee_frames_and_aac_on_one_origin(
     published = [pl for ch, pl in go2rtc.frames if ch == 4]
     assert published and published[0][12 + 4 :] == spy.aac[0][0]
     # One origin: AAC media time keeps up with video media time.
-    assert abs(len(spy.aac) * 1024 / 48000 - media[-1] / 90000) < 0.2
+    assert abs(len(spy.aac) * 1024 / 48000 - media[-1] / 90000) <= 0.1  # the sync gate
 
 
-def test_dtls_publish_without_a_tee_is_unchanged(go2rtc, monkeypatch):
-    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
-    res = _run_dtls(go2rtc, lambda vq, aq: None, secs=0.2)
-    assert "error" not in res
+def test_dtls_publish_sends_go2rtc_the_same_media_with_or_without_a_tee(
+    go2rtc, monkeypatch
+):
+    # The tee only reads: what go2rtc receives must not change when it is on.
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")  # AAC timing is wall-clock paced
+
+    def feed(vq, aq):
+        for i in range(30):
+            aq.put((bytes([0xD5 ^ (i & 0x0F)]) * 160, 160 + 160 * i))
+            vq.put((b"\0\0\0\1\x41" + bytes([i]) * 40, 6000 + 1800 * i, False))
+
+    def payloads(frames):
+        out = {0: [], 2: []}  # RTP on interleaved channel 0 (video), 2 (A-law)
+        for ch, pkt in frames:
+            if ch in out:
+                out[ch].append(pkt[12:])
+        return out
+
+    _run_dtls(go2rtc, feed)
+    without = payloads(go2rtc.frames)
+    assert without[0]  # go2rtc got video to compare
+    go2rtc.frames.clear()
+    spy = _SpySession()
+    sess = type("S", (), {"video": spy.video_, "aac": spy.aac_})()
+    _run_dtls(go2rtc, feed, ts_session=sess)
+    assert spy.video  # the tee was fed...
+    assert payloads(go2rtc.frames) == without  # ...and go2rtc saw no difference

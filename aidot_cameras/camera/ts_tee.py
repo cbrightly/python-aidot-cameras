@@ -16,6 +16,11 @@ session's origin is placed just after the last timestamp written, so a consumer
 that stays connected through a camera reconnect never sees time go backwards
 (Home Assistant's worker drops backward timestamps for up to 30 s). Nothing is
 re-encoded. AAC's 1024-sample encoder priming is taken off its timestamps.
+A session that starts with nobody connected starts the timeline over instead.
+
+Known limit: MPEG-TS timestamps are 33 bits (26.5 h at 90 kHz). Only a consumer
+that stays connected that long through back-to-back sessions reaches the wrap;
+what Home Assistant's worker does then is untested.
 
 Input never blocks: when the mux thread falls behind, everything is dropped
 until the next video keyframe - never single AAC frames, which would put audio
@@ -181,7 +186,8 @@ class TsTee:
             self._stats["failed"] = True
             return
         sink = _Sink(self._channel)
-        try:
+
+        def open_mux():
             out = av.open(
                 sink,
                 "w",
@@ -195,6 +201,10 @@ class TsTee:
             vs.time_base = _TB90
             as_ = out.add_stream("aac", rate=48000)
             as_.layout = "mono"
+            return out, vs, as_
+
+        try:
+            out, vs, as_ = open_mux()
         except Exception as exc:
             _LOGGER.warning(
                 "camera %s: HLS TS: mux open failed: %r", self._device_id, exc
@@ -214,9 +224,25 @@ class TsTee:
                 if item is None:
                     break
                 isid, kind, data, t, kf = item
+                if sid is not None and isid < sid:
+                    # An older session still writing during a reconnect: the
+                    # newer one owns the timeline now. Switching back and forth
+                    # re-based it each time and ran it away.
+                    continue
                 if isid != sid:
-                    # A new session: continue the timeline after the last write.
-                    if sid is not None and (last_v is not None or last_a is not None):
+                    if sid is not None and self.stats()["consumers"] == 0:
+                        # Nobody is reading, so nobody can see time go back:
+                        # start over in a new mux (the muxer itself refuses
+                        # to go back), which keeps the timeline far from the
+                        # 33-bit PTS wrap unless one consumer stays a day.
+                        try:
+                            out.close()
+                        except Exception:
+                            _LOGGER.debug("TsTee: closing the old mux", exc_info=True)
+                        out, vs, as_ = open_mux()
+                        base, last_v, last_a = _FIRST_BASE_90K, None, None
+                    elif sid is not None and (last_v is not None or last_a is not None):
+                        # A consumer is connected: continue after the last write.
                         last = max(x for x in (last_v, last_a) if x is not None)
                         base = last + _SESSION_GAP_90K + _AAC_PRIMING_90K
                     sid = isid

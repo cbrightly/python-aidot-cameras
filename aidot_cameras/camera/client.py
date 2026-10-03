@@ -4834,6 +4834,11 @@ class CameraMixin(
 
         if not hls_ts.enabled() or self.is_sdes_camera:
             return None
+        # Only a camera that publishes to go2rtc feeds the TS: one pulled from
+        # its local serve (go2rtc unreachable) never runs the direct publisher,
+        # and a URL for it would be a stream that nothing writes.
+        if not is_publishable_url(getattr(self, "_keepalive_rtsp_url", None)):
+            return None
         try:
             name = self._go2rtc_stream_name()
             hls_ts.tee_for(name, str(getattr(self, "device_id", "?")))
@@ -4895,7 +4900,7 @@ class CameraMixin(
         # cheap, so asked before the throttle.
         from . import hls_ts
 
-        if hls_ts.consumers(self._go2rtc_stream_name()) > 0:
+        if hls_ts.enabled() and hls_ts.consumers(self._go2rtc_stream_name()) > 0:
             self._viewer_cache = (time.monotonic(), True)
             return True
 

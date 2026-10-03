@@ -261,3 +261,48 @@ def test_an_unknown_path_gets_404_and_never_another_cameras_media():
         s.close()
     finally:
         router.close()
+
+
+def test_a_consumer_that_leaves_while_nothing_is_written_is_noticed():
+    # A dead consumer used to be found only by a failed send: with no writes it
+    # stayed counted - a "viewer" that pinned the camera awake - with its thread.
+    srv = _server()
+    try:
+        a, b = _connect(srv), _connect(srv)
+        assert _wait(lambda: srv.consumer_count() == 2)
+        a.close()
+        b.close()
+        assert _wait(lambda: srv.consumer_count() == 0, timeout=3.0)
+    finally:
+        srv.close()
+
+
+def test_the_listener_survives_an_accept_error():
+    # EMFILE or ECONNABORTED used to end the accept loop for good: no camera
+    # could be joined again until a restart.
+    router = TsRouter(0)
+    router.start()
+    try:
+        router.channel("/cam.ts")
+        real = router._listen
+        failed = []
+
+        class _Flaky:
+            def accept(self):
+                if not failed:
+                    failed.append(1)
+                    raise OSError(24, "Too many open files")
+                return real.accept()
+
+            def close(self):
+                real.close()
+
+        router._listen = _Flaky()
+        time.sleep(0.7)  # let the loop hit the error
+        srv = type("S", (), {"port": router.port})()
+        s = _connect(srv, "/cam.ts")
+        s.settimeout(3)
+        assert s.recv(64).startswith(b"HTTP/1.0 200")
+        s.close()
+    finally:
+        router.close()

@@ -38,10 +38,11 @@ class _Cam(CameraMixin):
     is_sdes_camera = property(lambda self: self._sdes)
 
 
-def _cam(sdes=False):
+def _cam(sdes=False, push_url="rtsp://127.0.0.1:8554/aidot_0123456789ab"):
     c = _Cam.__new__(_Cam)
     c.device_id = "0123456789abcdef0123456789abcdef"
     c._sdes = sdes
+    c._keepalive_rtsp_url = push_url  # set by start_keepalive
     return c
 
 
@@ -112,3 +113,35 @@ async def test_a_ts_consumer_counts_as_a_viewer_even_when_go2rtc_sees_none(monke
     cam._keepalive_rtsp_url = "rtsp://127.0.0.1:8554/x"
     assert await cam._viewer_present(0) is True
     s.close()
+
+
+@pytest.mark.parametrize("push_url", [None, "http://127.0.0.1:18765/serve.ts"])
+def test_no_ts_url_unless_the_camera_publishes_to_go2rtc(monkeypatch, push_url):
+    # With go2rtc unreachable a DTLS camera is pulled from its local serve and
+    # the direct publisher - the only thing that feeds the TS - never runs. A TS
+    # URL then would give Home Assistant a stream nothing writes: no video at all.
+    _on(monkeypatch)
+    assert _cam(push_url=push_url).hls_ts_url() is None
+
+
+async def test_ts_consumers_are_not_viewers_while_the_option_is_off(monkeypatch):
+    cam = _cam()
+    monkeypatch.setattr(hls_ts, "consumers", lambda name: 3)  # left over from before
+    cam._viewer_cache = (0.0, None)
+    cam._go2rtc_url = None
+    assert await cam._viewer_present(0) is not True
+
+
+def test_a_stopped_tee_is_replaced_and_the_url_is_kept(monkeypatch):
+    # A mux thread that died used to stay dead for the life of the process,
+    # with Home Assistant still pointed at its (now silent) URL.
+    _on(monkeypatch)
+    cam = _cam()
+    url = cam.hls_ts_url()
+    name = cam._go2rtc_stream_name()
+    first = hls_ts.tee_for(name)
+    first.close()  # the mux thread is gone
+    assert not first.is_running()
+    second = hls_ts.tee_for(name)
+    assert second is not first and second.is_running()
+    assert cam.hls_ts_url() == url

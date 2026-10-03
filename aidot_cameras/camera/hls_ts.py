@@ -73,6 +73,13 @@ def tee_for(name: str, device_id: str = "?") -> TsTee:
     """The camera's tee (and channel), created and started on first use."""
     with _lock:
         tee = _tees.get(name)
+        if tee is not None and not tee.is_running():
+            # Its mux thread stopped (a failed write, a PyAV error): replace it
+            # on the same channel, so the camera's URL - which Home Assistant
+            # holds - starts carrying media again.
+            _LOGGER.warning("camera %s: restarting its in-sync HLS mux", device_id)
+            tee.close()
+            tee = None
         if tee is None:
             tee = TsTee(_get_router().channel(_path(name)), device_id=device_id)
             tee.start()

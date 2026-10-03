@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import select
 import socket
 import threading
 from typing import Deque, List, Optional
@@ -93,13 +94,23 @@ class TsChannel:
 
     def _send_loop(self, c: _Consumer) -> None:
         while True:
+            chunk = None
             with c.cv:
-                while not c.chunks and not c.dead:
+                if not c.chunks and not c.dead:
                     c.cv.wait(0.5)
                 if c.dead:
                     break
-                chunk = c.chunks.popleft()
-                c.queued -= len(chunk)
+                if c.chunks:
+                    chunk = c.chunks.popleft()
+                    c.queued -= len(chunk)
+            if chunk is None:
+                # Nothing to send: is the consumer still there? A send failure
+                # used to be the only sign it had gone, so with no writes a
+                # departed consumer stayed counted - a "viewer" keeping the
+                # camera awake - for as long as the stream was quiet.
+                if _peer_gone(c.sock):
+                    break
+                continue
             try:
                 c.sock.sendall(chunk)
             except OSError:
@@ -264,7 +275,13 @@ class TsRouter:
             except TimeoutError:
                 continue
             except OSError:
-                return
+                if self._closed.is_set():
+                    return
+                # EMFILE, ECONNABORTED, ...: transient. Returning here used to
+                # stop every camera's TS for the life of the process.
+                _LOGGER.debug("ts-router: accept failed", exc_info=True)
+                self._closed.wait(0.1)
+                continue
             threading.Thread(
                 target=self._handshake, args=(cli,), name="ts-router-hs", daemon=True
             ).start()
@@ -300,6 +317,21 @@ class TsRouter:
             channels = list(self._channels.values())
         for ch in channels:
             ch.close()
+
+
+def _peer_gone(sock: socket.socket) -> bool:
+    """True when the consumer has closed its end (or the socket has failed).
+
+    Consumers send nothing after their request, so a readable socket means EOF;
+    anything it does send is read and ignored.
+    """
+    try:
+        readable, _, _ = select.select([sock], [], [], 0)
+        if not readable:
+            return False
+        return sock.recv(4096) == b""
+    except (OSError, ValueError):
+        return True
 
 
 def _close(sock: socket.socket) -> None:

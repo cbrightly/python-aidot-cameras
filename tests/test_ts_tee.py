@@ -218,3 +218,96 @@ def test_close_stops_the_mux_thread():
     tee.close()
     assert not tee.is_running()
     srv.close()
+
+
+def test_an_old_session_still_writing_cannot_drag_the_timeline(tmp_path):
+    # During a reconnect the old publisher can still be writing when the new one
+    # starts. Each switch between them used to re-base the timeline, and 1.3 s
+    # of interleaved media came out spanning 27.5 s.
+    srv, tee = _tee()
+    try:
+        video, aac = _media(6, flash_every=3)
+        out = str(tmp_path / "o.mp4")
+        joiner = threading.Thread(target=_join, args=(srv.port, 8.0, out), daemon=True)
+        joiner.start()
+        time.sleep(0.3)
+        old, new = tee.session(), tee.session()
+        half = 2 * GOP  # the new session starts on a real keyframe, as publishers do
+        t0, ai = time.monotonic(), 0
+        for i, (au, kf) in enumerate(video):
+            while ai < len(aac) and ai * 1024 <= i * 48000 // FPS:
+                old.aac(aac[ai], ai * 1024)
+                if i >= half:
+                    new.aac(aac[ai], ai * 1024 - half * 3200)
+                ai += 1
+            old.video(au, i * 6000, kf)  # the old session never stops
+            if i >= half:
+                new.video(au, (i - half) * 6000, kf)
+            time.sleep(max(0.0, t0 + (i + 1) / FPS - time.monotonic()))
+        joiner.join(15)
+        c = av.open(out)
+        vts = [
+            float(p.pts * p.time_base) for p in c.demux(video=0) if p.pts is not None
+        ]
+        c.close()
+        assert all(b > a for a, b in zip(vts, vts[1:]))
+        assert max(vts) - min(vts) < 8.0, (min(vts), max(vts))
+        # The newer session owns the timeline: nothing it sends is lost to the
+        # old one (measured: 89 of 90 frames; switching back and forth kept 61).
+        assert len(vts) >= len(video) - 5, len(vts)
+    finally:
+        tee.close()
+        srv.close()
+
+
+class _Capture:
+    """A channel that keeps the TS bytes and reports a chosen consumer count."""
+
+    def __init__(self, consumers):
+        self.buf, self.consumers = bytearray(), consumers
+
+    def write(self, b):
+        self.buf += bytes(b)
+        return len(b)
+
+    def mark_keyframe(self):
+        pass
+
+    def consumer_count(self):
+        return self.consumers
+
+
+def _session_starts(consumers):
+    import io
+
+    def drained():
+        end = time.monotonic() + 10
+        while not tee._q.empty():
+            assert tee.is_running() and time.monotonic() < end, tee.stats()
+            time.sleep(0.02)
+        time.sleep(0.2)  # the last item is muxed
+
+    ch = _Capture(consumers)
+    tee = TsTee(ch)
+    tee.start()
+    video, aac = _media(2)
+    _feed(tee.session(), video, aac, realtime=False)
+    drained()
+    _feed(tee.session(), video, aac, realtime=False)
+    drained()
+    tee.close()
+    c = av.open(io.BytesIO(bytes(ch.buf)), format="mpegts")
+    vts = [p.pts for p in c.demux(video=0) if p.pts is not None]
+    c.close()
+    assert len(vts) == 2 * len(video)
+    return vts[0], vts[len(video)]  # each session's first frame
+
+
+@pytest.mark.parametrize(("consumers", "restarts"), [(0, True), (1, False)])
+def test_with_nobody_reading_a_new_session_restarts_the_timeline(consumers, restarts):
+    # The timeline only ever grew: across a day of sessions it would reach
+    # MPEG-TS's 33-bit PTS wrap (26.5 h). With nobody connected no one can see
+    # time go back, so a new session starts it over.
+    first, second = _session_starts(consumers)
+    assert first == 90000
+    assert (second == 90000) is restarts, (first, second)
