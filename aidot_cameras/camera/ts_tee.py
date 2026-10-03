@@ -262,7 +262,13 @@ class TsTee:
                     last_v = pts
                     pkt = av.Packet(data)
                     pkt.stream = vs
-                    pkt.pts = pkt.dts = pts
+                    # DTS one tick before PTS: the muxer then writes both, so
+                    # no reader guesses DTS. The cameras' High-profile SPS
+                    # states no reorder limit, so libav assumes a frame of
+                    # reordering and derives DTS from the jittery frame times,
+                    # which shifted Home Assistant's segments by up to 170 ms
+                    # and once sent a recording's DTS backwards (2026-10-03).
+                    pkt.pts, pkt.dts = pts, pts - 1
                     pkt.time_base = _TB90
                     if kf:
                         pkt.is_keyframe = True

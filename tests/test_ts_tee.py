@@ -323,3 +323,28 @@ def test_with_nobody_reading_a_new_session_restarts_the_timeline(
     first, second = _session_starts(consumers, started)
     assert first == 90000
     assert (second == 90000) is restarts, (first, second)
+
+
+def test_video_decode_times_are_stated_not_left_to_the_reader():
+    # The cameras' High-profile SPS carries no reorder limit, so a demuxer given
+    # only PTS assumes one frame of reordering and derives DTS from the jittery
+    # frame times. Home Assistant's segments then shifted picture against sound
+    # by up to 170 ms per segment, and a recording failed outright on a DTS that
+    # went backwards (live, 2026-10-03). With DTS stated, nothing is guessed.
+    import io
+
+    ch = _Capture(0)
+    tee = TsTee(ch)
+    tee.start()
+    video, aac = _media(2)
+    _feed(tee.session(), video, aac, realtime=False)
+    end = time.monotonic() + 10
+    while not tee._q.empty() and time.monotonic() < end:
+        time.sleep(0.02)
+    time.sleep(0.2)
+    tee.close()
+    c = av.open(io.BytesIO(bytes(ch.buf)), format="mpegts")
+    pd = [(p.pts, p.dts) for p in c.demux(video=0) if p.pts is not None]
+    c.close()
+    assert len(pd) == len(video)
+    assert all(pts - dts == 1 for pts, dts in pd), pd[:5]
