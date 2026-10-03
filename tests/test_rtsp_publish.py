@@ -1476,17 +1476,20 @@ def test_dtls_runner_starts_on_a_keyframe_and_publishes_both_tracks(
     assert _wait(lambda: "TEARDOWN" in go2rtc.requests)
 
 
-def _run_dtls(go2rtc, feed, *, secs=1.2):
+def _run_dtls(go2rtc, feed, *, secs=1.2, ts_session=None):
     import queue
 
     vq, aq = queue.Queue(), queue.Queue()
     sps_pps = b"\0\0\0\1\x67" + b"s" * 8 + b"\0\0\0\1\x68" + b"p" * 3
     vq.put((sps_pps + b"\0\0\0\1\x65" + b"k" * 3000, 3000, True))
     progress, stop, res = [0.0], threading.Event(), {}
+    kwargs = {"result": res}
+    if ts_session is not None:
+        kwargs["ts_session"] = ts_session
     t = threading.Thread(
         target=rp.dtls_rtp_publish_run,
         args=(vq, aq, go2rtc.url(), progress, stop),
-        kwargs={"result": res},
+        kwargs=kwargs,
         daemon=True,
     )
     t.start()
@@ -2581,3 +2584,50 @@ def test_agc_ignores_a_non_finite_gain_setting():
         agc = rp.AlawAgc(env={"AIDOT_AUDIO_TARGET_DBFS": bad})
         assert math.isfinite(agc.target), bad
         assert len(agc.process(b"\xd5" * 160)) == 160
+
+
+
+class _SpySession:
+    def __init__(self):
+        self.video, self.aac = [], []
+
+    def video_(self, au, media90, keyframe):
+        self.video.append((au, media90, keyframe))
+
+    def aac_(self, au, media48):
+        self.aac.append((au, media48))
+
+
+def test_dtls_publish_hands_the_hls_tee_frames_and_aac_on_one_origin(go2rtc, monkeypatch):
+    # The TS tee for Home Assistant's HLS takes each published frame with its
+    # media time, and each AAC frame with its sample count, both from 0 at the
+    # first published frame - the origin the AAC pacer aligns to.
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
+    spy = _SpySession()
+    sess = type("S", (), {"video": spy.video_, "aac": spy.aac_})()
+
+    def feed(vq, aq):
+        for i in range(50):  # 1 s
+            aq.put((b"\xd5" * 160, 160 + 160 * i))
+            vq.put((b"\0\0\0\1\x41" + b"d" * 40, 6000 + 1800 * i, False))
+
+    _run_dtls(go2rtc, feed, ts_session=sess)
+    assert spy.video and spy.video[0][2] is True  # starts on the keyframe
+    assert spy.video[0][1] == 0
+    media = [m for _, m, _ in spy.video]
+    assert media == sorted(media) and media[-1] > 0
+    assert spy.video[1][0] == b"\0\0\0\1\x41" + b"d" * 40  # the frame as published
+    assert spy.aac
+    assert [m for _, m in spy.aac] == [k * 1024 for k in range(len(spy.aac))]
+    # The AAC payloads are raw frames: the published RFC 3640 payload minus its
+    # 4-byte AU header.
+    published = [pl for ch, pl in go2rtc.frames if ch == 4]
+    assert published and published[0][12 + 4:] == spy.aac[0][0]
+    # One origin: AAC media time keeps up with video media time.
+    assert abs(len(spy.aac) * 1024 / 48000 - media[-1] / 90000) < 0.2
+
+
+def test_dtls_publish_without_a_tee_is_unchanged(go2rtc, monkeypatch):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
+    res = _run_dtls(go2rtc, lambda vq, aq: None, secs=0.2)
+    assert "error" not in res
