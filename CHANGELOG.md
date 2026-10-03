@@ -8,13 +8,24 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ### Fixed
 
-- **Recording a DTLS camera to a file (`output_path`) writes as it goes, and
-  works on small hosts.** The recording re-encodes the video in process, and
-  the encoder's default settings held dozens of frames before writing
-  anything; on a Raspberry Pi Zero 2 W (about 1.6 frames a second at 1080p) a
-  20-second recording could end with nothing written. It now encodes with
-  x264's `ultrafast` preset and `zerolatency` tuning, so each frame is written
-  as it arrives, at a fraction of the CPU.
+- **Recording a DTLS camera to an MPEG-TS file (`output_path`) keeps every
+  frame and the camera's own picture.** The recording decoded the camera's
+  video and re-encoded it, reading the same frame queues as the live-view
+  consumer and the audio drain, so it kept only about half the video frames
+  when `on_frame` was also set, and about half the audio. It could also write a
+  640x480 crop of the picture when audio reached it first, turn one late frame
+  into a 13-hour jump in the file's timeline, and hold video back for 10 s
+  while the camera sent no audio. A `.ts` recording (also `.m2ts`, `.mts`) now
+  copies the camera's H.264 as-is, with its audio as 48 kHz AAC, through the
+  mux Home Assistant's DTLS path already uses: nothing is re-encoded and
+  nothing competes for the frames. Other containers still go through aiortc's
+  MediaRecorder, which re-encodes. Home Assistant never records this way.
+- **Stopping a session twice is harmless.** `WebRTCSession.stop()` and
+  `SdesSession.stop()` run their teardown once, and any further or concurrent
+  call waits for that run. A second stop could raise `CancelledError` after a
+  slow MQTT teardown, hang after a peer-connection close that failed, or log
+  ffmpeg's stderr a second time. A failing peer-connection close no longer
+  escapes `WebRTCSession.stop()`.
 
 ## [1.0.0rc34]
 

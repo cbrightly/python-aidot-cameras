@@ -5569,10 +5569,11 @@ class CameraMixin(
         )
         if _canary is not None:
             _qd._aidot_serve_canary = _canary
-        # Serve path only: this is the stream we timestamp by hand. The
-        # live-view path hands frames to aiortc's own decoder, which does not
-        # use these values the same way.
-        _unwrap = _unwrap_state() if _skip_decode else None
+        # Every video tap feeds a copy mux (the serve, or a file recording),
+        # which writes these timestamps straight into the container, so every
+        # one must undo aiortc's false unwraps. Only the copy sent to the mux is
+        # corrected; the decoder still receives the frame untouched.
+        _unwrap = _unwrap_state() if is_video else None
         _CANARY_LOG_EVERY = 300  # frames (~10-20s of H.264); DEBUG summary cadence
 
         def _tap_put(task, *a, **k):

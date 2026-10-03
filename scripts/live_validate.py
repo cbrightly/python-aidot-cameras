@@ -1036,6 +1036,7 @@ async def _attempt(
     _RECEIPTS.drain()
     t0 = time.time()
     session = None
+    stopped = False
     result: dict = {"attempt": attempt}
     if result_arm is not None:
         result["pt_order_arm"] = result_arm
@@ -1067,17 +1068,6 @@ async def _attempt(
             result["quality"] = await _quality_probe(
                 dc, session, quality_arm, frames, quality_window
             )
-            # Close the session before reading the recording. Everything the
-            # campaign measures is already in hand (the counter is sampled on
-            # the wall clock, in session), and the per-second video series is
-            # read from a file ffmpeg would otherwise still be writing - so
-            # without this the last seconds of window B, the ones that carry
-            # the effect, are the ones most likely to be missing from the
-            # cross-check. Stopping here also hands the camera back sooner.
-            try:
-                await _stop(session)
-            except Exception:
-                pass
 
         if hasattr(session, "get_stats"):
             try:
@@ -1139,16 +1129,21 @@ async def _attempt(
             finally:
                 dc._stream_session = _prev_session
 
-        # Judge the recording only once the session has stopped. On a DTLS camera
-        # the library re-encodes in process and the file grows only as its encoder
-        # emits; a slow runner (a Pi Zero 2 W) had not written one block 20 s into
-        # a hold, so a camera whose video decoded fine read as NO_MEDIA. Stopping
-        # flushes the encoder (and ends ffmpeg's file on SDES). The counters read
-        # below survive a stop; the `finally` stop is then a no-op.
+        # Judge the recording only once the session has stopped: the stop is
+        # what finishes the file (the DTLS copy mux writes its tail and closes
+        # it; ffmpeg ends its file on SDES), and a slow runner may have written
+        # nothing mid-session. For a quality campaign it also keeps the last
+        # seconds of window B, the ones that carry the effect, in the per-second
+        # series read below. Everything else measured is already in hand, and the
+        # counters read below survive a stop.
+        #
+        # Exactly one stop per session: the `finally` below only stops a session
+        # this point was never reached for. A failed stop is recorded, not hidden.
+        stopped = True
         try:
             await _stop(session)
-        except Exception:
-            pass
+        except Exception as exc:
+            result["stop_error"] = f"{type(exc).__name__}: {exc}"[:200]
         ok, evidence = _media_seen(session, frames["n"], out)
         result.update(evidence)
         result.update(await _decode_probe(out))
@@ -1183,7 +1178,7 @@ async def _attempt(
             # The offer's own account of the order it sent. Without it a null
             # campaign result cannot be told from a campaign that never varied.
             result["offer_pt_order"] = _receipts[-1]
-        if session is not None:
+        if session is not None and not stopped:
             try:
                 await _stop(session)
             except Exception:

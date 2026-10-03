@@ -180,3 +180,25 @@ def test_serve_audio_still_feeds_decoder():
     assert not hasattr(qd, "_aidot_serve_canary")
     # Audio is teed as (bytes, ts) with no keyframe field.
     assert out_q.items == [(b"\x00\x01\x02\x03", 2000)]
+
+
+def test_non_serve_video_tap_also_corrects_false_unwraps():
+    # aiortc reports a frame that steps back a few thousand ticks as the 32-bit
+    # counter wrapping (+2**32, about 13 hours at 90 kHz). Only the serve tap
+    # used to undo that, so a recording tapped without serve=True carried the
+    # jump into its file. Every video tap feeds a copy mux, so every one must
+    # correct it - while the decoder still gets the frame untouched.
+    qd = _FakeQueue()
+    out_q = _OutQ()
+    rcv = _FakeReceiver(qd)
+    assert CameraMixin._install_encoded_tap(rcv, out_q, True)
+
+    qd.put((0, _Enc(_KEYFRAME, 100_000)))
+    qd.put((0, _Enc(_DELTA, 106_000)))
+    # One frame 6000 ticks behind, as aiortc presents it: 2**32 too high.
+    qd.put((0, _Enc(_DELTA, 100_000 + 2**32)))
+    qd.put((0, _Enc(_DELTA, 112_000 + 2**32)))
+
+    stamps = [item[1] for item in out_q.items]
+    assert stamps == [100_000, 106_000, 100_000, 112_000]
+    assert len(qd.puts) == 4  # the decoder still saw every frame

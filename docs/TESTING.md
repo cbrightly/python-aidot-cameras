@@ -93,8 +93,8 @@ See [`CI-RUNNER.md`](CI-RUNNER.md). `scripts/live_validate.py` is the harness;
 it gates PyPI publishes through the private repo's `live-validate.yml` + `publish.yml`'s
 `live-gate`.
 
-`live_validate.py` records through `output_path`, which keeps ffmpeg by design,
-so it never runs the direct publisher. `scripts/live_publish_ab.py` is the live
+`live_validate.py` records through `output_path` (ffmpeg `-c copy` on SDES, the
+PyAV copy mux on DTLS), so it never runs the direct publisher. `scripts/live_publish_ab.py` is the live
 check for that: it opens each camera with `AIDOT_DIRECT_PUBLISH` off and on,
 pushing into a go2rtc the way the integration does, and reads the result back.
 See "Direct publish" in [`CI-RUNNER.md`](CI-RUNNER.md).

@@ -272,8 +272,8 @@ camera stay sequential and slot-hold apart); it needs a single `--arms`
 value, because the direct/ffmpeg switch is process-wide.
 
 `live_validate.py` (the release gate) is not enough on its own: it records
-through `output_path`, which keeps ffmpeg by design, so it never runs the
-direct publisher. Then, with the integration's option on, check HA itself
+through `output_path` (ffmpeg `-c copy` on SDES, the PyAV copy mux on DTLS),
+so it never runs the direct publisher. Then, with the integration's option on, check HA itself
 (WebRTC view with audio, HLS fallback with video).
 
 Measured against the same box with the flag off:

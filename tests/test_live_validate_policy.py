@@ -546,28 +546,28 @@ async def test_the_retry_cooldown_still_shortens_after_a_slotless_error(
     assert slept == [lv.SLOTLESS_COOLDOWN_S]
 
 
-def test_a_dtls_recording_is_read_after_the_session_is_stopped(
-    lv, tmp_path, monkeypatch
-):
-    # The DTLS recorder re-encodes in process and flushes its encoder when the
-    # session stops. A slow runner (measured: a Pi Zero 2 W had not written one
-    # packet 20 s into a hold) has nothing on disk until then, so reading the
-    # file while the session is still open failed a camera whose video decoded
-    # fine. The recording must be judged after the stop.
-    import asyncio
+class _GateSession:
+    """A session as strict as the real ones: every stop() is counted, a stop
+    flushes the recording once, and the order of events is logged. (The fake
+    this replaces ignored a second stop, which hid a crash and a hang.)"""
 
-    class _Session:
-        stopped = 0
+    def __init__(self, out, events, fail_stop=None):
+        self.out, self.events, self.stops, self._fail = out, events, 0, fail_stop
+        open(out, "wb").close()  # the copy recorder creates its file at start
 
-        def __init__(self, out):
-            self.out = out
-            open(out, "wb").close()  # the recorder creates the file at open
+    async def stop(self):
+        self.stops += 1
+        self.events.append("stop")
+        if self._fail is not None:
+            raise self._fail
+        if self.stops == 1:
+            with open(self.out, "ab") as f:
+                f.write(b"\x47" * 188 * 200)  # the mux flush
 
-        async def stop(self):
-            if not self.stopped:
-                with open(self.out, "ab") as f:
-                    f.write(b"\x47" * 188 * 200)  # the encoder flush
-            self.stopped += 1
+
+def _gate(lv, monkeypatch, fail_stop=None):
+    events = []
+    made = {}
 
     class _Dc:
         device_id = "0123456789abcdef0123456789abcdef"
@@ -575,25 +575,63 @@ def test_a_dtls_recording_is_read_after_the_session_is_stopped(
 
         async def async_open_webrtc_stream(self, on_frame=None, output_path=None, **kw):
             for _ in range(30):
-                on_frame(object())  # frames decoded in process, as on the real path
-            return _Session(output_path)
+                on_frame(object())
+            made["s"] = _GateSession(output_path, events, fail_stop)
+            return made["s"]
 
     async def _probe(path, timeout=60.0):
+        events.append("read")
         if os.path.getsize(path) > 0:
             return {"decoded_frames": 25, "decode_errors": 0}
         return {"decoded_frames": 0, "decode_errors": 3}
 
-    async def _no_features(*a, **k):
+    async def _features(dc, device, session):
+        events.append("features")
+        assert made["s"].stops == 0, "features probed on a stopped session"
         return {}
 
-    async def _no_seconds(path, timeout=30.0):
+    async def _quality(dc, session, arm, frames, window):
+        events.append("quality")
+        return {}
+
+    async def _none(*a, **k):
         return None
 
+    async def _series(path, timeout=60.0):
+        return {}
+
     monkeypatch.setattr(lv, "_decode_probe", _probe)
-    monkeypatch.setattr(lv, "probe_features", _no_features)
-    monkeypatch.setattr(lv, "_recording_seconds", _no_seconds)
+    monkeypatch.setattr(lv, "probe_features", _features)
+    monkeypatch.setattr(lv, "_quality_probe", _quality)
+    monkeypatch.setattr(lv, "_recording_seconds", _none)
+    monkeypatch.setattr(lv, "_video_bitrate_series", _series)
+    return _Dc(), events, made
 
-    result = asyncio.run(lv._attempt(_Dc(), 0, str(tmp_path), 1))
 
+async def test_an_attempt_stops_once_after_the_probes_and_before_the_read(
+    lv, tmp_path, monkeypatch
+):
+    # The recording is judged after the stop flushes it - a slow runner had
+    # written nothing mid-session - and the session is stopped exactly once: a
+    # second stop of a real session could raise CancelledError or hang.
+    dc, events, made = _gate(lv, monkeypatch)
+    result = await lv._attempt(dc, 0, str(tmp_path), 1)
     assert result["verdict"] == "PASS", result
     assert result["recorded_bytes"] > 0
+    assert made["s"].stops == 1
+    assert events == ["features", "stop", "read"]
+
+
+async def test_a_quality_attempt_also_stops_once(lv, tmp_path, monkeypatch):
+    dc, events, made = _gate(lv, monkeypatch)
+    result = await lv._attempt(dc, 0, str(tmp_path), 1, quality_arm="sd")
+    assert result["verdict"] == "PASS", result
+    assert made["s"].stops == 1
+    assert events == ["quality", "stop", "read"]
+
+
+async def test_a_failed_stop_is_reported_not_swallowed(lv, tmp_path, monkeypatch):
+    dc, events, made = _gate(lv, monkeypatch, fail_stop=RuntimeError("teardown broke"))
+    result = await lv._attempt(dc, 0, str(tmp_path), 1)
+    assert made["s"].stops == 1
+    assert "teardown broke" in result.get("stop_error", "")

@@ -465,12 +465,6 @@ class MediaRecorder:
             else:
                 stream = self.__container.add_stream("libx264", rate=30)
                 stream.pix_fmt = "yuv420p"
-                # Local change (not upstream): x264's defaults hold dozens of
-                # frames of lookahead before the first packet, and a small host
-                # encodes so slowly (a Pi Zero 2 W: 32 frames of 1080p in 20 s)
-                # that a recording can end with nothing written. A live
-                # recording wants each frame out as it arrives, cheaply.
-                stream.options = {"preset": "ultrafast", "tune": "zerolatency"}
         self.__tracks[track] = MediaRecorderContext(stream)
 
     async def start(self) -> None:
