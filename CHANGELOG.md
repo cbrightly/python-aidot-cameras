@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc35]
+
 ### Fixed
 
 - **Recording a DTLS camera to an MPEG-TS file (`output_path`) keeps every
