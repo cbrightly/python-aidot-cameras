@@ -16,7 +16,7 @@ session's origin is placed just after the last timestamp written, so a consumer
 that stays connected through a camera reconnect never sees time go backwards
 (Home Assistant's worker drops backward timestamps for up to 30 s). Nothing is
 re-encoded. AAC's 1024-sample encoder priming is taken off its timestamps.
-A session that starts with nobody connected starts the timeline over instead.
+A session that starts with nobody yet sent media starts the timeline over.
 
 Known limit: MPEG-TS timestamps are 33 bits (26.5 h at 90 kHz). Only a consumer
 that stays connected that long through back-to-back sessions reaches the wrap;
@@ -165,6 +165,10 @@ class TsTee:
         out["consumers"] = count() if callable(count) else 0
         return out
 
+    def _started_consumers(self) -> int:
+        count = getattr(self._channel, "started_count", None)
+        return count() if callable(count) else self.stats()["consumers"]
+
     def close(self) -> None:
         self._stop.set()
         try:
@@ -230,8 +234,8 @@ class TsTee:
                     # re-based it each time and ran it away.
                     continue
                 if isid != sid:
-                    if sid is not None and self.stats()["consumers"] == 0:
-                        # Nobody is reading, so nobody can see time go back:
+                    if sid is not None and self._started_consumers() == 0:
+                        # Nobody has been sent media, so nobody can see time go back:
                         # start over in a new mux (the muxer itself refuses
                         # to go back), which keeps the timeline far from the
                         # 33-bit PTS wrap unless one consumer stays a day.

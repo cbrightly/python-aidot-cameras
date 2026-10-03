@@ -43,6 +43,7 @@ class _Consumer:
     def __init__(self, sock: socket.socket) -> None:
         self.sock = sock
         self.synced = False
+        self.started = False  # ever sent media (synced can be reset; this is not)
         self.chunks: Deque[bytes] = collections.deque()
         self.queued = 0
         self.dead = False
@@ -72,6 +73,11 @@ class TsChannel:
     def consumer_count(self) -> int:
         with self._lock:
             return sum(1 for c in self._consumers if not c.dead)
+
+    def started_count(self) -> int:
+        """Consumers that have been sent media (not still waiting to start)."""
+        with self._lock:
+            return sum(1 for c in self._consumers if not c.dead and c.started)
 
     def pending_bytes(self) -> int:
         with self._lock:
@@ -205,7 +211,7 @@ class TsChannel:
             c.chunks.append(chunk)
             c.queued += len(chunk)
             if start:
-                c.synced = True
+                c.synced = c.started = True
             c.cv.notify()
 
     def flush(self) -> None:

@@ -263,8 +263,9 @@ def test_an_old_session_still_writing_cannot_drag_the_timeline(tmp_path):
 class _Capture:
     """A channel that keeps the TS bytes and reports a chosen consumer count."""
 
-    def __init__(self, consumers):
+    def __init__(self, consumers, started=None):
         self.buf, self.consumers = bytearray(), consumers
+        self.started = consumers if started is None else started
 
     def write(self, b):
         self.buf += bytes(b)
@@ -276,8 +277,11 @@ class _Capture:
     def consumer_count(self):
         return self.consumers
 
+    def started_count(self):
+        return self.started
 
-def _session_starts(consumers):
+
+def _session_starts(consumers, started=None):
     import io
 
     def drained():
@@ -287,7 +291,7 @@ def _session_starts(consumers):
             time.sleep(0.02)
         time.sleep(0.2)  # the last item is muxed
 
-    ch = _Capture(consumers)
+    ch = _Capture(consumers, started)
     tee = TsTee(ch)
     tee.start()
     video, aac = _media(2)
@@ -303,11 +307,19 @@ def _session_starts(consumers):
     return vts[0], vts[len(video)]  # each session's first frame
 
 
-@pytest.mark.parametrize(("consumers", "restarts"), [(0, True), (1, False)])
-def test_with_nobody_reading_a_new_session_restarts_the_timeline(consumers, restarts):
+@pytest.mark.parametrize(
+    ("consumers", "started", "restarts"),
+    [(0, 0, True), (1, 1, False), (1, 0, True)],
+)
+def test_with_nobody_reading_a_new_session_restarts_the_timeline(
+    consumers, started, restarts
+):
     # The timeline only ever grew: across a day of sessions it would reach
-    # MPEG-TS's 33-bit PTS wrap (26.5 h). With nobody connected no one can see
-    # time go back, so a new session starts it over.
-    first, second = _session_starts(consumers)
+    # MPEG-TS's 33-bit PTS wrap (26.5 h). With nobody reading no one can see
+    # time go back, so a new session starts it over. A consumer still waiting
+    # for its first keyframe has seen nothing: Home Assistant connects before
+    # the camera session it asked for exists (measured live 2026-10-03, the
+    # timeline kept growing through every cold start).
+    first, second = _session_starts(consumers, started)
     assert first == 90000
     assert (second == 90000) is restarts, (first, second)

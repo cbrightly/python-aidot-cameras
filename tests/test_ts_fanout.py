@@ -306,3 +306,20 @@ def test_the_listener_survives_an_accept_error():
         s.close()
     finally:
         router.close()
+
+
+def test_only_consumers_that_were_sent_media_count_as_started():
+    # A consumer still waiting for its first keyframe has seen no timestamps;
+    # the tee may start its timeline over under it, but not under one that has.
+    srv = _server()
+    try:
+        a = _connect(srv)
+        assert _wait(lambda: srv.consumer_count() == 1)
+        srv.write(_ts(VIDEO, pusi=1, tag=b"MID"))
+        assert srv.started_count() == 0
+        _send_gop(srv, 1)
+        assert srv.started_count() == 1
+        a.close()
+        assert _wait(lambda: srv.started_count() == 0)
+    finally:
+        srv.close()
