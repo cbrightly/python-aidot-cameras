@@ -1,44 +1,45 @@
-"""Mux a direct publisher's video and AAC into MPEG-TS on one clock.
+"""Mux a direct publisher's video and AAC into one camera's MPEG-TS, on one clock.
 
 Home Assistant's HLS stream worker keeps whatever relation between audio and
 video its input demuxer gives it. Through go2rtc's RTSP that relation is
 re-based per consumer, so a recording or HLS view that joins a running stream
 gets its sound 0.1-0.75 s late, differently each time (measured 2026-10-03,
 synthetic and with claps). Here the publisher hands over each video access unit
-and each AAC frame with the timestamps it already publishes, and they are muxed
-on a single clock, so every consumer of the ``TsFanoutServer`` gets them in step
+and each AAC frame with its media time - video ticks and AAC samples since the
+session's first frame, the origin the publisher already aligns (the AAC pacer
+follows video media time until audio arrives, rc33) - and both are muxed on a
+single clock, so every consumer of the camera's ``TsChannel`` gets them in step
 whenever it joins.
 
-Both tracks start from their first frame, the origin the publishers already
-align for Home Assistant's first-packet semantics (the AAC pacer follows video
-media time until audio arrives, and lines its start up with the video backlog -
-rc33). Nothing is re-encoded. The reorder slack ``video_pts_dts`` adds to video
-presentation is added to audio too - forgetting that put audio 2 s ahead of the
-picture in rc35's recordings until it was caught.
+One ``TsTee`` lives as long as the camera's channel, across sessions: each new
+session's origin is placed just after the last timestamp written, so a consumer
+that stays connected through a camera reconnect never sees time go backwards
+(Home Assistant's worker drops backward timestamps for up to 30 s). Nothing is
+re-encoded. AAC's 1024-sample encoder priming is taken off its timestamps.
 
-Input never blocks: ``video()`` and ``aac()`` queue and return, dropping (and
-counting) when the mux thread falls behind.
+Input never blocks: when the mux thread falls behind, everything is dropped
+until the next video keyframe - never single AAC frames, which would put audio
+out of step for the rest of the session.
 """
 
 from __future__ import annotations
 
+import itertools
 import logging
 import queue
 import threading
 from fractions import Fraction
 from typing import Optional
 
-from .protocol import _reorder_slack, video_pts_dts
-
 _LOGGER = logging.getLogger(__name__)
 
-_MASK32 = 0xFFFFFFFF
 _TB90 = Fraction(1, 90000)
-
-
-def _signed32(d: int) -> int:
-    d &= _MASK32
-    return d - (1 << 32) if d >= 1 << 31 else d
+#: AAC-LC's encoder delay: its first 1024 decoded samples are priming.
+_AAC_PRIMING_90K = 1024 * 90000 // 48000
+#: Where the first session starts (keeps the primed AAC timestamps positive).
+_FIRST_BASE_90K = 90000
+#: Gap left between one session's last timestamp and the next one's first.
+_SESSION_GAP_90K = 3000
 
 
 def adts_header(
@@ -62,34 +63,16 @@ def adts_header(
     )
 
 
-class _Unwrap:
-    """32-bit RTP timestamps -> a monotonic count from the first one."""
-
-    def __init__(self) -> None:
-        self._first: Optional[int] = None
-        self._last = 0
-        self._acc = 0
-
-    def __call__(self, ts: int) -> int:
-        ts &= _MASK32
-        if self._first is None:
-            self._first = self._last = ts
-            return 0
-        self._acc += _signed32(ts - self._last)
-        self._last = ts
-        return self._acc
-
-
 class _Sink:
-    """The container's file object: forwards to the server, remembers failure."""
+    """The container's file object: forwards to the channel, remembers failure."""
 
-    def __init__(self, server) -> None:
-        self._server = server
+    def __init__(self, channel) -> None:
+        self._channel = channel
         self.failed = False
 
     def write(self, b) -> int:
         try:
-            return self._server.write(b)
+            return self._channel.write(b)
         except Exception:
             self.failed = True
             raise
@@ -98,35 +81,65 @@ class _Sink:
         return None
 
     def mark_keyframe(self) -> None:
-        self._server.mark_keyframe()
+        self._channel.mark_keyframe()
+
+
+class TsSession:
+    """One camera session's input to the tee. Media times start at 0."""
+
+    def __init__(self, tee: "TsTee", sid: int) -> None:
+        self._tee, self._sid = tee, sid
+
+    def video(self, au: bytes, media90: int, keyframe: bool) -> None:
+        """One H.264 access unit; ``media90``: 90 kHz ticks since the first frame."""
+        self._tee._put((self._sid, "v", bytes(au), int(media90), bool(keyframe)))
+
+    def aac(self, au: bytes, media48: int) -> None:
+        """One raw AAC frame; ``media48``: samples since the track's first frame."""
+        self._tee._put((self._sid, "a", bytes(au), int(media48), False))
 
 
 class TsTee:
-    """Video access units and AAC frames in, MPEG-TS out to ``server``."""
+    """One camera's video and AAC in, MPEG-TS out to its ``TsChannel``."""
 
-    def __init__(self, server, device_id: str = "?", queue_max: int = 600) -> None:
-        self._server = server
+    def __init__(self, channel, device_id: str = "?", queue_max: int = 600) -> None:
+        self._channel = channel
         self._device_id = device_id
         self._q: "queue.Queue" = queue.Queue(maxsize=queue_max)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._stats = {"video_in": 0, "aac_in": 0, "dropped": 0, "failed": False}
+        self._sids = itertools.count(1)
+        self._resync = False
+        self._stats = {
+            "video_in": 0,
+            "aac_in": 0,
+            "dropped": 0,
+            "overflows": 0,
+            "sessions": 0,
+            "failed": False,
+        }
 
-    # -- input (publisher threads) ---------------------------------------- #
+    def session(self) -> TsSession:
+        """Start a new session's input (a camera (re)connect)."""
+        self._stats["sessions"] += 1
+        return TsSession(self, next(self._sids))
 
-    def video(self, au: bytes, pts90: int, keyframe: bool) -> None:
-        self._put(("v", bytes(au), int(pts90), bool(keyframe)), "video_in")
-
-    def aac(self, au: bytes, pts48: int) -> None:
-        self._put(("a", bytes(au), int(pts48), False), "aac_in")
-
-    def _put(self, item, counter: str) -> None:
+    def _put(self, item) -> None:
         if self._stop.is_set():
             return
-        self._stats[counter] += 1
+        _sid, kind, _d, _t, kf = item
+        self._stats["video_in" if kind == "v" else "aac_in"] += 1
+        if self._resync and not (kind == "v" and kf):
+            self._stats["dropped"] += 1
+            return
         try:
             self._q.put_nowait(item)
+            self._resync = False
         except queue.Full:
+            # Never drop one AAC frame and keep going: start over at a keyframe.
+            if not self._resync:
+                self._stats["overflows"] += 1
+            self._resync = True
             self._stats["dropped"] += 1
 
     # -- lifecycle ---------------------------------------------------------- #
@@ -143,7 +156,7 @@ class TsTee:
 
     def stats(self) -> dict:
         out = dict(self._stats)
-        count = getattr(self._server, "consumer_count", None)
+        count = getattr(self._channel, "consumer_count", None)
         out["consumers"] = count() if callable(count) else 0
         return out
 
@@ -167,7 +180,7 @@ class TsTee:
             )
             self._stats["failed"] = True
             return
-        sink = _Sink(self._server)
+        sink = _Sink(self._channel)
         try:
             out = av.open(
                 sink,
@@ -188,11 +201,10 @@ class TsTee:
             )
             self._stats["failed"] = True
             return
-        slack = _reorder_slack()
-        vts, ats = _Unwrap(), _Unwrap()
-        vstate: dict = {}
+        sid = None
+        base = _FIRST_BASE_90K
         started = False
-        last_apts = None
+        last_v = last_a = None  # last PTS written per track (90 kHz)
         try:
             while not self._stop.is_set():
                 try:
@@ -201,28 +213,38 @@ class TsTee:
                     continue
                 if item is None:
                     break
-                kind, data, ts, kf = item
+                isid, kind, data, t, kf = item
+                if isid != sid:
+                    # A new session: continue the timeline after the last write.
+                    if sid is not None and (last_v is not None or last_a is not None):
+                        last = max(x for x in (last_v, last_a) if x is not None)
+                        base = last + _SESSION_GAP_90K + _AAC_PRIMING_90K
+                    sid = isid
+                    started = False
                 if kind == "v":
-                    rel = vts(ts)  # origin: the first frame, keyframe or not
                     if not started:
                         if not kf:
                             continue  # a consumer must be able to decode from here
                         started = True
+                    pts = base + t
+                    if last_v is not None and pts <= last_v:
+                        pts = last_v + 1  # never backwards on one track
+                    last_v = pts
                     pkt = av.Packet(data)
                     pkt.stream = vs
-                    pkt.pts, pkt.dts = video_pts_dts(vstate, rel, slack)
+                    pkt.pts = pkt.dts = pts
                     pkt.time_base = _TB90
                     if kf:
+                        pkt.is_keyframe = True
                         sink.mark_keyframe()
                     out.mux(pkt)
                 else:
-                    rel = ats(ts)
                     if not started:
                         continue  # no picture yet for this sound
-                    pts = rel * 90000 // 48000 + slack
-                    if last_apts is not None and pts <= last_apts:
+                    pts = base + t * 90000 // 48000 - _AAC_PRIMING_90K
+                    if last_a is not None and pts <= last_a:
                         continue
-                    last_apts = pts
+                    last_a = pts
                     pkt = av.Packet(adts_header(len(data)) + data)
                     pkt.stream = as_
                     pkt.pts = pkt.dts = pts
@@ -232,11 +254,7 @@ class TsTee:
                     raise OSError("TS sink write failed")
         except Exception as exc:
             self._stats["failed"] = True
-            _LOGGER.warning(
-                "camera %s: HLS TS mux stopped (%r) - HLS falls back to go2rtc",
-                self._device_id,
-                exc,
-            )
+            _LOGGER.warning("camera %s: HLS TS mux stopped (%r)", self._device_id, exc)
         finally:
             try:
                 out.close()

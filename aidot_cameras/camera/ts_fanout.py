@@ -1,4 +1,4 @@
-"""Serve one muxed MPEG-TS to any number of HTTP consumers, each joined cleanly.
+"""Serve each camera's muxed MPEG-TS to any number of HTTP consumers.
 
 Home Assistant's HLS stream worker reads a camera from here (see ``ts_tee``)
 instead of from go2rtc's RTSP: go2rtc re-bases every track for every consumer,
@@ -49,17 +49,15 @@ class _Consumer:
         self.thread: Optional[threading.Thread] = None
 
 
-class TsFanoutServer:
-    """MPEG-TS over HTTP to many consumers. ``write``/``flush``/``mark_keyframe``
-    make it a drop-in sink for the TS muxers in this package."""
+class TsChannel:
+    """One camera's MPEG-TS, fanned out to every consumer of its path.
+    ``write``/``flush``/``mark_keyframe`` make it the muxer's sink."""
 
     #: Bytes a consumer may fall behind before it is resynced at a keyframe.
     MAX_BUFFER = 4 * 1024 * 1024
 
-    def __init__(self, public_port: int = 0, *, host: str = "127.0.0.1") -> None:
-        self._port = public_port
-        self._host = host
-        self._listen: Optional[socket.socket] = None
+    def __init__(self, path: str) -> None:
+        self.path = path
         self._lock = threading.Lock()
         self._consumers: List[_Consumer] = []
         self._closed = threading.Event()
@@ -70,22 +68,6 @@ class TsFanoutServer:
         self._kf_pending = False
         self.resyncs = 0
 
-    @property
-    def port(self) -> int:
-        return self._port
-
-    def start(self) -> None:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((self._host, self._port))
-        s.listen(8)
-        s.settimeout(0.5)
-        self._port = s.getsockname()[1]
-        self._listen = s
-        threading.Thread(
-            target=self._accept_loop, name="ts-fanout-accept", daemon=True
-        ).start()
-
     def consumer_count(self) -> int:
         with self._lock:
             return sum(1 for c in self._consumers if not c.dead)
@@ -94,34 +76,20 @@ class TsFanoutServer:
         with self._lock:
             return sum(c.queued for c in self._consumers)
 
-    # -- accepting ---------------------------------------------------------- #
+    # -- consumers ---------------------------------------------------------- #
 
-    def _accept_loop(self) -> None:
-        while not self._closed.is_set():
-            try:
-                cli, _ = self._listen.accept()
-            except TimeoutError:
-                continue
-            except OSError:
+    def add_consumer(self, sock: socket.socket) -> None:
+        """Take over an accepted connection whose HTTP response is already sent."""
+        c = _Consumer(sock)
+        c.thread = threading.Thread(
+            target=self._send_loop, args=(c,), name="ts-fanout-send", daemon=True
+        )
+        with self._lock:
+            if self._closed.is_set():
+                _close(sock)
                 return
-            try:
-                cli.settimeout(5.0)
-                cli.recv(4096)  # the request line and headers
-                cli.sendall(_HTTP_OK)
-                cli.settimeout(None)
-            except OSError:
-                _close(cli)
-                continue
-            c = _Consumer(cli)
-            c.thread = threading.Thread(
-                target=self._send_loop, args=(c,), name="ts-fanout-send", daemon=True
-            )
-            with self._lock:
-                if self._closed.is_set():
-                    _close(cli)
-                    return
-                self._consumers.append(c)
-            c.thread.start()
+            self._consumers.append(c)
+        c.thread.start()
 
     def _send_loop(self, c: _Consumer) -> None:
         while True:
@@ -233,9 +201,8 @@ class TsFanoutServer:
         return None
 
     def close(self) -> None:
+        """Disconnect every consumer; the channel accepts no more."""
         self._closed.set()
-        if self._listen is not None:
-            _close(self._listen)
         with self._lock:
             consumers = list(self._consumers)
         for c in consumers:
@@ -244,6 +211,95 @@ class TsFanoutServer:
             except OSError:
                 pass
             self._drop(c)
+
+
+class TsRouter:
+    """One loopback listener for every camera, routed by request path.
+
+    A per-camera port could collide (two cameras hashing to one port served one
+    camera's media to the other's viewer). One listener has no collisions, and a
+    camera's URL stays the same across its sessions, which matters because Home
+    Assistant fixes a stream's source URL when it creates the stream.
+    """
+
+    def __init__(self, port: int = 0, *, host: str = "127.0.0.1") -> None:
+        self._port = port
+        self._host = host
+        self._listen: Optional[socket.socket] = None
+        self._lock = threading.Lock()
+        self._channels: dict = {}
+        self._closed = threading.Event()
+
+    @property
+    def port(self) -> int:
+        return self._port
+
+    def url(self, path: str) -> str:
+        return "http://%s:%d%s" % (self._host, self._port, path)
+
+    def start(self) -> None:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind((self._host, self._port))
+        s.listen(16)
+        s.settimeout(0.5)
+        self._port = s.getsockname()[1]
+        self._listen = s
+        threading.Thread(
+            target=self._accept_loop, name="ts-router-accept", daemon=True
+        ).start()
+
+    def channel(self, path: str) -> TsChannel:
+        """The channel for ``path`` (``/<name>.ts``), created on first use."""
+        with self._lock:
+            ch = self._channels.get(path)
+            if ch is None:
+                ch = self._channels[path] = TsChannel(path)
+            return ch
+
+    def _accept_loop(self) -> None:
+        while not self._closed.is_set():
+            try:
+                cli, _ = self._listen.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            threading.Thread(
+                target=self._handshake, args=(cli,), name="ts-router-hs", daemon=True
+            ).start()
+
+    def _handshake(self, cli: socket.socket) -> None:
+        try:
+            cli.settimeout(5.0)
+            req = cli.recv(4096)
+            parts = req.split(b"\r\n", 1)[0].split()
+            path = (
+                parts[1].decode("ascii", "replace").split("?", 1)[0]
+                if len(parts) > 1
+                else ""
+            )
+            with self._lock:
+                ch = self._channels.get(path)
+            if ch is None:
+                cli.sendall(b"HTTP/1.0 404 Not Found\r\nConnection: close\r\n\r\n")
+                _close(cli)
+                return
+            cli.sendall(_HTTP_OK)
+            cli.settimeout(None)
+        except OSError:
+            _close(cli)
+            return
+        ch.add_consumer(cli)
+
+    def close(self) -> None:
+        self._closed.set()
+        if self._listen is not None:
+            _close(self._listen)
+        with self._lock:
+            channels = list(self._channels.values())
+        for ch in channels:
+            ch.close()
 
 
 def _close(sock: socket.socket) -> None:

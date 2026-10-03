@@ -16,7 +16,7 @@ import pytest
 av = pytest.importorskip("av")
 np = pytest.importorskip("numpy")
 
-from aidot_cameras.camera.ts_fanout import TsFanoutServer  # noqa: E402
+from aidot_cameras.camera.ts_fanout import TsRouter  # noqa: E402
 from aidot_cameras.camera.ts_tee import TsTee  # noqa: E402
 
 FPS, GOP = 15, 30
@@ -62,13 +62,14 @@ def _media(seconds, flash_every=2):
     return video, aac
 
 
-def _feed(tee, video, aac, vbase=0, abase=0, realtime=True):
+def _feed(sess, video, aac, realtime=True):
+    """Feed one session in real time: media times from 0, as the publisher does."""
     t0, ai = time.monotonic(), 0
     for i, (au, kf) in enumerate(video):
         while ai < len(aac) and ai * 1024 <= i * 48000 // FPS:
-            tee.aac(aac[ai], (abase + ai * 1024) & 0xFFFFFFFF)
+            sess.aac(aac[ai], ai * 1024)
             ai += 1
-        tee.video(au, (vbase + i * (90000 // FPS)) & 0xFFFFFFFF, kf)
+        sess.video(au, i * (90000 // FPS), kf)
         if realtime:
             time.sleep(max(0.0, t0 + (i + 1) / FPS - time.monotonic()))
 
@@ -76,7 +77,9 @@ def _feed(tee, video, aac, vbase=0, abase=0, realtime=True):
 def _join(port, seconds, path):
     # rw_timeout: once the feed ends the server sends nothing more; without it
     # the read would wait forever and the recording would never be closed.
-    src = av.open("http://127.0.0.1:%d/" % port, options={"rw_timeout": "5000000"})
+    src = av.open(
+        "http://127.0.0.1:%d/cam.ts" % port, options={"rw_timeout": "5000000"}
+    )
     dst = av.open(path, "w")
     vin, ain = src.streams.video[0], src.streams.audio[0]
     vo, ao = dst.add_stream_from_template(vin), dst.add_stream_from_template(ain)
@@ -122,9 +125,9 @@ def _offsets(path):
 
 
 def _tee():
-    srv = TsFanoutServer(0)
+    srv = TsRouter(0)
     srv.start()
-    tee = TsTee(srv)
+    tee = TsTee(srv.channel("/cam.ts"))
     tee.start()
     return srv, tee
 
@@ -133,7 +136,9 @@ def test_any_join_gets_sound_and_picture_in_step(tmp_path):
     srv, tee = _tee()
     try:
         video, aac = _media(24, flash_every=3)  # not 2 s: the reorder slack is 2 s
-        feeder = threading.Thread(target=_feed, args=(tee, video, aac), daemon=True)
+        feeder = threading.Thread(
+            target=_feed, args=(tee.session(), video, aac), daemon=True
+        )
         feeder.start()
         found = []
         # At the start, then twice mid-GOP; every join ends well before the feed.
@@ -151,39 +156,57 @@ def test_any_join_gets_sound_and_picture_in_step(tmp_path):
         srv.close()
 
 
-def test_rtp_timestamps_that_wrap_do_not_stretch_the_stream(tmp_path):
+def test_a_consumer_stays_through_a_camera_reconnect_without_time_going_back(tmp_path):
+    # Each session's media times restart at 0; the tee continues its timeline.
     srv, tee = _tee()
     try:
-        video, aac = _media(6)
-        out = str(tmp_path / "w.mp4")
-        joiner = threading.Thread(target=_join, args=(srv.port, 8.0, out), daemon=True)
+        video, aac = _media(7, flash_every=3)
+        out = str(tmp_path / "r.mp4")
+        joiner = threading.Thread(target=_join, args=(srv.port, 13.0, out), daemon=True)
         joiner.start()
         time.sleep(0.3)
-        # Both clocks cross 2**32 about a second in.
-        _feed(tee, video, aac, vbase=2**32 - 6000 * 15, abase=2**32 - 1024 * 47)
-        joiner.join(15)
+        _feed(tee.session(), video, aac)
+        _feed(tee.session(), video, aac)  # the camera reconnected
+        joiner.join(20)
         c = av.open(out)
         vts = [
             float(p.pts * p.time_base) for p in c.demux(video=0) if p.pts is not None
         ]
         c.close()
-        assert 4.0 < max(vts) - min(vts) < 7.0, (min(vts), max(vts))
+        assert all(b > a for a, b in zip(vts, vts[1:])), "video time went backwards"
+        assert 12.0 < max(vts) - min(vts) < 15.0, (min(vts), max(vts))
+        offs = _offsets(out)
+        assert len(offs) >= 3 and all(abs(o) <= 0.07 for o in offs), offs
     finally:
         tee.close()
         srv.close()
 
 
-def test_a_full_queue_drops_and_counts_but_never_blocks():
-    srv = TsFanoutServer(0)
+def test_a_full_queue_drops_to_the_next_keyframe_never_single_audio_frames():
+    srv = TsRouter(0)
     srv.start()
-    tee = TsTee(srv, queue_max=10)  # not started: nothing drains the queue
+    tee = TsTee(srv.channel("/cam.ts"), queue_max=4)  # not started: nothing drains
     try:
+        sess = tee.session()
         t0 = time.monotonic()
-        for i in range(100):
-            tee.video(b"\x00\x00\x01\x65" + b"x" * 100, i * 6000, True)
-            tee.aac(b"y" * 10, i * 1024)
+        sess.video(b"K", 0, True)
+        for i in range(3):
+            sess.aac(b"a", i * 1024)  # queue now full (4)
+        sess.aac(b"a", 3 * 1024)  # overflow: resync
+        sess.video(b"P", 6000, False)  # dropped: not a keyframe
+        sess.aac(b"a", 4 * 1024)  # dropped
         assert time.monotonic() - t0 < 1.0
-        assert tee.stats()["dropped"] == 190
+        st = tee.stats()
+        assert st["overflows"] == 1 and st["dropped"] == 3
+        # Space again, but only a keyframe may restart the flow.
+        while not tee._q.empty():
+            tee._q.get_nowait()
+        sess.aac(b"a", 5 * 1024)
+        assert tee._q.empty()
+        sess.video(b"K", 12000, True)
+        assert tee._q.qsize() == 1
+        sess.aac(b"a", 6 * 1024)
+        assert tee._q.qsize() == 2
     finally:
         tee.close()
         srv.close()
