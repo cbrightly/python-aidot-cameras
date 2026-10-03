@@ -2586,7 +2586,6 @@ def test_agc_ignores_a_non_finite_gain_setting():
         assert len(agc.process(b"\xd5" * 160)) == 160
 
 
-
 class _SpySession:
     def __init__(self):
         self.video, self.aac = [], []
@@ -2598,7 +2597,9 @@ class _SpySession:
         self.aac.append((au, media48))
 
 
-def test_dtls_publish_hands_the_hls_tee_frames_and_aac_on_one_origin(go2rtc, monkeypatch):
+def test_dtls_publish_hands_the_hls_tee_frames_and_aac_on_one_origin(
+    go2rtc, monkeypatch
+):
     # The TS tee for Home Assistant's HLS takes each published frame with its
     # media time, and each AAC frame with its sample count, both from 0 at the
     # first published frame - the origin the AAC pacer aligns to.
@@ -2622,7 +2623,7 @@ def test_dtls_publish_hands_the_hls_tee_frames_and_aac_on_one_origin(go2rtc, mon
     # The AAC payloads are raw frames: the published RFC 3640 payload minus its
     # 4-byte AU header.
     published = [pl for ch, pl in go2rtc.frames if ch == 4]
-    assert published and published[0][12 + 4:] == spy.aac[0][0]
+    assert published and published[0][12 + 4 :] == spy.aac[0][0]
     # One origin: AAC media time keeps up with video media time.
     assert abs(len(spy.aac) * 1024 / 48000 - media[-1] / 90000) < 0.2
 

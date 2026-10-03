@@ -4820,6 +4820,57 @@ class CameraMixin(
         register, deregister and viewer-count paths cannot drift apart."""
         return f"aidot_{self.device_id[:12]}"
 
+    def hls_ts_url(self) -> Optional[str]:
+        """The camera's in-sync MPEG-TS URL for Home Assistant's HLS, or None.
+
+        Set when ``AIDOT_HLS_DIRECT_TS`` (with direct publish and the AAC track)
+        is on, for DTLS cameras. Unlike go2rtc's RTSP, a consumer joining this
+        stream at any moment gets sound and picture in step. The URL exists
+        before the camera's session does and stays the same for the process, so
+        it can be handed to Home Assistant once; a consumer that connects early
+        waits for the first keyframe. See ``hls_ts``.
+        """
+        from . import hls_ts
+
+        if not hls_ts.enabled() or self.is_sdes_camera:
+            return None
+        try:
+            name = self._go2rtc_stream_name()
+            hls_ts.tee_for(name, str(getattr(self, "device_id", "?")))
+            return hls_ts.url_for(name)
+        except Exception:
+            _LOGGER.warning(
+                "camera %s: in-sync HLS unavailable - using go2rtc",
+                getattr(self, "device_id", "?"),
+                exc_info=True,
+            )
+            return None
+
+    def _dtls_publish_kwargs(self, result: dict) -> dict:
+        """Keyword arguments for this camera's ``dtls_rtp_publish_run`` thread.
+
+        With in-sync HLS on, each serve cycle gets a fresh tee session: a new
+        origin that the camera's tee places after the last timestamp it wrote.
+        """
+        from . import hls_ts
+
+        kwargs = {
+            "device_id": str(getattr(self, "device_id", "?")),
+            "result": result,
+        }
+        if hls_ts.enabled() and not self.is_sdes_camera:
+            try:
+                kwargs["ts_session"] = hls_ts.session_for(
+                    self._go2rtc_stream_name(), kwargs["device_id"]
+                )
+            except Exception:
+                _LOGGER.warning(
+                    "camera %s: in-sync HLS unavailable for this session",
+                    kwargs["device_id"],
+                    exc_info=True,
+                )
+        return kwargs
+
     # Cached answer to "is anyone watching", so the watchdog loops can ask on
     # every tick without hammering go2rtc.
     _viewer_cache: "tuple[float, Optional[bool]]" = (0.0, None)
@@ -4839,6 +4890,15 @@ class CameraMixin(
         Falls back to the TCP-table check when go2rtc is not in use, and returns
         None (never release) if neither can answer.
         """
+        # A consumer of the camera's in-sync HLS TS is a viewer that go2rtc
+        # never sees (it reads from the library, not from go2rtc). Local and
+        # cheap, so asked before the throttle.
+        from . import hls_ts
+
+        if hls_ts.consumers(self._go2rtc_stream_name()) > 0:
+            self._viewer_cache = (time.monotonic(), True)
+            return True
+
         # THROTTLE FIRST.  The DTLS watchdog calls this every 0.5s and the SDES
         # one on a similar cadence, and the go2rtc query below opens a fresh HTTP
         # session each time - so an unthrottled check is two requests per second
@@ -6522,10 +6582,7 @@ class CameraMixin(
                         mux_thread = _threading.Thread(
                             target=dtls_rtp_publish_run,
                             args=(vq, aq, serve_url, progress, stop_flag),
-                            kwargs={
-                                "device_id": str(getattr(self, "device_id", "?")),
-                                "result": _publish_result,
-                            },
+                            kwargs=self._dtls_publish_kwargs(_publish_result),
                             name="aidot-dtls-publish",
                             daemon=True,
                         )
