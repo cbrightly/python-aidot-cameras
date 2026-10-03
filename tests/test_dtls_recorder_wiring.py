@@ -100,3 +100,25 @@ def test_other_containers_keep_the_re_encoding_recorder():
 
 def test_no_output_path_no_recorder():
     assert _client()._attach_file_recorder(_PC(), None, on_frame=None) is None
+
+
+def test_an_unwritable_ts_path_records_nothing_and_says_so(caplog, tmp_path):
+    # Failing late - once the session is connected - leaked the connected peer
+    # and the camera's viewer slot. Fail before the offer, and keep the session.
+    with caplog.at_level("WARNING"):
+        rec = _client()._attach_file_recorder(
+            _PC(), str(tmp_path / "no-such-dir" / "x.ts"), on_frame=None
+        )
+    assert rec is None
+    assert any("will not be recorded" in r.getMessage() for r in caplog.records)
+
+
+def test_tapping_a_receiver_twice_for_different_queues_is_flagged(caplog):
+    import queue
+
+    rcv = SimpleNamespace(_RTCRtpReceiver__decoder_queue=_DecoderQueue())
+    first, second = queue.Queue(), queue.Queue()
+    assert CameraMixin._install_encoded_tap(rcv, first, True)
+    with caplog.at_level("WARNING"):
+        CameraMixin._install_encoded_tap(rcv, second, True, serve=True)
+    assert any("already tapped" in r.getMessage() for r in caplog.records)

@@ -1735,7 +1735,9 @@ def video_pts_dts(state: dict, pts: int, slack: int) -> tuple:
     return pts, _dts
 
 
-def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
+def _dtls_av_mux_run(
+    vq, aq, out_fileobj, progress, stop_flag, *, align_audio_start=False, state=None
+) -> None:
     """Mux tapped video (H.264 copy) + audio (PCMA->AAC) to ``out_fileobj`` as
     RTP-timestamped MPEG-TS.  Runs in a worker thread; the serve's ffmpeg reads
     the other end of the pipe and serves it over HTTP-listen.
@@ -1746,6 +1748,14 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
       at 8 kHz mono).
     - ``progress[0]`` is bumped on every successful mux so the serve loop can
       detect "no consumer pulling" (the pipe fills and mux blocks -> stale).
+    - ``align_audio_start`` (file recordings): video is presented from the
+      first keyframe, ``_reorder_slack`` after zero, while audio would otherwise
+      start at zero from its first packet - about 2 s ahead of the picture.
+      With it set, audio waiting before the first keyframe is dropped (it has
+      no picture) and the rest starts on video's timeline. Off by default, so
+      the serve's timing is unchanged.
+    - ``state``, if given, gets ``state["failed"] = True`` when a write failed
+      and the mux ended early.
     """
     import time as _t
     import queue as _q
@@ -1866,7 +1876,9 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
     v0 = [None]
     _ts_state = {}
     _slack = _reorder_slack()
-    a_pts = [0]
+    # Audio starts where video does: video presentation is shifted by the
+    # slack (90 kHz), so shift audio (48 kHz) by the same time.
+    a_pts = [_slack * 48000 // 90000 if align_audio_start else 0]
     a_rtp0 = [None]  # first audio RTP timestamp (8 kHz units), for gap detection
     a_in = [0]  # 8 kHz samples emitted to the resampler so far (incl. concealed)
     vstarted = [False]
@@ -1916,6 +1928,14 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
                 return
 
     def _flush_audio(drain=False):
+        if align_audio_start and not vstarted[0]:
+            # No picture yet: this audio has nothing to line up with.
+            try:
+                while True:
+                    aq.get_nowait()
+            except _q.Empty:
+                pass
+            return
         if not have_audio:
             try:
                 while True:
@@ -2077,6 +2097,8 @@ def _dtls_av_mux_run(vq, aq, out_fileobj, progress, stop_flag) -> None:
             wsink.close()
         except Exception:
             pass
+    if state is not None:
+        state["failed"] = _dead()
     try:
         out.close()
     except Exception:

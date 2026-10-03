@@ -58,18 +58,20 @@ class TsCopyRecorder:
         self._stop_flag = threading.Event()
         self._progress = [0.0]
         self._thread: Optional[threading.Thread] = None
-        self._file = None
+        self._state: dict = {}
         self._stopped = False
+        # Opened here, before the session connects, so an unwritable path fails
+        # while there is nothing to clean up. Held open until the mux thread is
+        # done with it - no single block encloses that, so no context manager.
+        self._file = open(self._path, "wb")  # noqa: SIM115
 
     async def start(self) -> None:
         if self._thread is not None or self._stopped:
             return
-        # Held open from start() to stop(), across the mux thread's life - no
-        # single block encloses that, so no context manager.
-        self._file = open(self._path, "wb")  # noqa: SIM115
         self._thread = threading.Thread(
             target=_dtls_av_mux_run,
             args=(self.vq, self.aq, self._file, self._progress, self._stop_flag),
+            kwargs={"align_audio_start": True, "state": self._state},
             name="aidot-dtls-record",
             daemon=True,
         )
@@ -81,18 +83,35 @@ class TsCopyRecorder:
             return
         self._stopped = True
         if self._thread is None:
+            self._close()
             return
         self._stop_flag.set()
-        await asyncio.get_running_loop().run_in_executor(
-            None, self._thread.join, _JOIN_S
-        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._thread.join, _JOIN_S)
         if self._thread.is_alive():
+            # Still writing its tail: closing the file under it would truncate
+            # the recording. Let it finish, then close.
             _LOGGER.warning(
-                "camera %s: recording to %s did not finish within %.0f s;"
-                " the file may be incomplete",
+                "camera %s: recording to %s is taking more than %.0f s to"
+                " finish; it will be closed when it does",
                 self._device_id,
                 self._path,
                 _JOIN_S,
+            )
+            loop.run_in_executor(None, self._finish_late)
+            return
+        self._close()
+
+    def _finish_late(self) -> None:
+        self._thread.join()
+        self._close()
+
+    def _close(self) -> None:
+        if self._state.get("failed"):
+            _LOGGER.warning(
+                "camera %s: recording to %s did not complete - a write failed",
+                self._device_id,
+                self._path,
             )
         try:
             self._file.close()

@@ -397,17 +397,28 @@ class _WebRTCOpenMixin:
         encoded frames are teed before decode, so the recording takes nothing
         from the ``on_frame`` consumer or the audio drain, and nothing is
         re-encoded. Video is only decoded when ``on_frame`` will read it. Other
-        containers keep aiortc's MediaRecorder, which re-encodes. ``None`` when
-        there is nothing to record or no recorder can be built.
+        containers keep aiortc's MediaRecorder, which re-encodes and keeps its
+        known defects (it shares the track queues, so it records about half
+        the frames when ``on_frame`` is set); record to ``.ts`` to avoid them.
+        ``None`` when there is nothing to record or no recorder can be built.
         """
         if not output_path:
             return None
         from .recording import TsCopyRecorder, is_ts_path
 
         if is_ts_path(output_path):
-            recorder = TsCopyRecorder(
-                output_path, device_id=getattr(self, "device_id", None)
-            )
+            try:
+                recorder = TsCopyRecorder(
+                    output_path, device_id=getattr(self, "device_id", None)
+                )
+            except OSError as exc:
+                _LOGGER.warning(
+                    "camera %s: cannot write %s (%s) - the stream will not be recorded",
+                    getattr(self, "device_id", "?"),
+                    output_path,
+                    exc,
+                )
+                return None
             _decode_video = on_frame is not None
             _video_tapped = [False]
 
@@ -533,7 +544,9 @@ class _WebRTCOpenMixin:
             MPEG-TS (``.ts``/``.m2ts``/``.mts``) copy the camera's H.264 as-is,
             with its audio as 48 kHz AAC - the same mux Home Assistant's DTLS
             path uses; other containers go through aiortc's MediaRecorder,
-            which re-encodes.  ``.ts`` is streamable via vlc/ffplay.
+            which re-encodes and, sharing the track queues, keeps only about
+            half the frames when ``on_frame`` is also set - prefer ``.ts``.
+            ``.ts`` is streamable via vlc/ffplay.
         max_seconds : float or None
             Stop recording after this many seconds (SDES path: passed as
             ``-t`` to ffmpeg so it exits cleanly).  For DTLS, the caller is

@@ -83,9 +83,11 @@ def _alaw_packets(seconds):
     return out
 
 
-async def _record(path, *, decode_video, audio_first=0, audio=True, backward_at=None):
+async def _record(
+    path, *, decode_video, audio_first=0, audio=True, backward_at=None, rec=None
+):
     """Drive the recorder the way a DTLS session does and return the decoder log."""
-    rec = TsCopyRecorder(str(path))
+    rec = rec if rec is not None else TsCopyRecorder(str(path))
     vr, ar = _Receiver(), _Receiver()
     assert CameraMixin._install_encoded_tap(vr, rec.vq, True, serve=not decode_video)
     assert CameraMixin._install_encoded_tap(ar, rec.aq, False)
@@ -185,3 +187,161 @@ async def test_stop_twice_and_stop_without_start_are_harmless(tmp_path):
     await rec2.start()
     await rec2.stop()
     await rec2.stop()
+
+
+def _starts(path):
+    """First video and first audio presentation time in the file, seconds."""
+    c = av.open(str(path))
+    first = {}
+    for pkt in c.demux():
+        if pkt.pts is not None and pkt.stream.type not in first:
+            first[pkt.stream.type] = float(pkt.pts * pkt.time_base)
+    c.close()
+    return first["video"], first["audio"]
+
+
+@pytest.mark.parametrize("audio_first", [0, 25, 50])
+async def test_audio_and_picture_start_together(tmp_path, audio_first):
+    # The copy mux delays video by its 2 s reorder slack and used to start audio
+    # at 0, so audio led the picture by 2 s minus the wait for the first
+    # keyframe. Audio from before that keyframe has no picture to go with.
+    out = tmp_path / "r.ts"
+    await _record(out, decode_video=False, audio_first=audio_first)
+    v0, a0 = _starts(out)
+    assert abs(a0 - v0) < 0.1, (v0, a0)
+
+
+async def test_a_failed_write_is_reported(tmp_path, caplog):
+    class _Broken:
+        def write(self, b):
+            raise OSError("No space left on device")
+
+        def flush(self):
+            pass
+
+        def close(self):
+            pass
+
+    rec = TsCopyRecorder(str(tmp_path / "r.ts"))
+    rec._file.close()
+    rec._file = _Broken()
+    with caplog.at_level("WARNING"):
+        await _record(tmp_path / "r.ts", decode_video=False, rec=rec)
+    assert any("did not complete" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_slow_finish_is_not_cut_off(tmp_path, monkeypatch):
+    # If the mux outlives stop()'s wait, the file must stay open for it: closing
+    # it under a live writer truncates the recording.
+    import time
+
+    import aidot_cameras.camera.recording as recording
+
+    wrote = {}
+
+    def _slow_mux(vq, aq, f, progress, stop_flag, **kw):
+        stop_flag.wait()
+        time.sleep(0.3)
+        try:
+            f.write(b"tail")
+            wrote["ok"] = True
+        except ValueError:
+            wrote["ok"] = False
+
+    monkeypatch.setattr(recording, "_dtls_av_mux_run", _slow_mux)
+    monkeypatch.setattr(recording, "_JOIN_S", 0.05)
+    rec = TsCopyRecorder(str(tmp_path / "r.ts"))
+    await rec.start()
+    await rec.stop()
+    for _ in range(50):
+        if "ok" in wrote and rec._file.closed:
+            break
+        await asyncio.sleep(0.02)
+    assert wrote.get("ok") is True
+    assert rec._file.closed  # closed once the writer finished
+
+
+def test_an_unwritable_path_fails_when_the_recorder_is_built(tmp_path):
+    with pytest.raises(OSError):
+        TsCopyRecorder(str(tmp_path / "no-such-dir" / "r.ts"))
+
+
+async def test_a_sound_and_its_picture_line_up_in_the_file(tmp_path):
+    # Real-time feed, joining mid-GOP so the first keyframe arrives 1 s in: a
+    # click in the audio and a white frame captured at the same moment (2 s)
+    # must land at the same time in the file. Before alignment the click came
+    # out about 1 s ahead of its picture.
+    import time
+
+    gop, start, white = 30, 15, 45  # keyframes at 0/30/60; join at 15; white at 45
+    enc = av.CodecContext.create("libx264", "w")
+    enc.width, enc.height, enc.pix_fmt = 320, 240, "yuv420p"
+    enc.time_base = fractions.Fraction(1, FPS)
+    enc.options = {
+        "preset": "ultrafast",
+        "tune": "zerolatency",
+        "g": str(gop),
+        "keyint_min": str(gop),
+        "sc_threshold": "0",
+    }
+    frames = []
+    for i in range(75):
+        lum = 235 if i == white else 16 + (i * 3) % 120
+        img = np.vstack(
+            [np.full((240, 320), lum, np.uint8), np.full((120, 320), 128, np.uint8)]
+        )
+        f = av.VideoFrame.from_ndarray(img, format="yuv420p")
+        f.pts = i
+        frames += [bytes(p) for p in enc.encode(f)]
+    frames += [bytes(p) for p in enc.encode(None)]
+    frames = frames[start:]
+    aenc = av.CodecContext.create("pcm_alaw", "w")
+    aenc.sample_rate, aenc.layout, aenc.format = 8000, "mono", "s16"
+    n = int(8000 * (len(frames) / FPS + 0.5))
+    pcm = np.zeros(n, np.int16)
+    click = int(8000 * (white - start) / FPS)
+    pcm[click : click + 160] = 20000
+    pkts = []
+    for k in range(0, n, 160):
+        fr = av.AudioFrame.from_ndarray(
+            pcm[None, k : k + 160], format="s16", layout="mono"
+        )
+        fr.sample_rate, fr.pts = 8000, k
+        pkts.append((b"".join(bytes(p) for p in aenc.encode(fr)), k))
+
+    out = tmp_path / "sync.ts"
+    rec = TsCopyRecorder(str(out))
+    vr, ar = _Receiver(), _Receiver()
+    assert CameraMixin._install_encoded_tap(vr, rec.vq, True, serve=True)
+    assert CameraMixin._install_encoded_tap(ar, rec.aq, False)
+    vput, aput = (
+        vr._RTCRtpReceiver__decoder_queue.put,
+        ar._RTCRtpReceiver__decoder_queue.put,
+    )
+    await rec.start()
+    t0, ai = time.monotonic(), 0
+    for i, d in enumerate(frames):
+        while ai < len(pkts) and pkts[ai][1] <= i * 8000 // FPS:
+            aput((0, _Enc(*pkts[ai])))
+            ai += 1
+        vput((0, _Enc(d, i * (90000 // FPS))))
+        await asyncio.sleep(max(0.0, t0 + (i + 1) / FPS - time.monotonic()))
+    await rec.stop()
+
+    c = av.open(str(out))
+    t_white = next(
+        float(f.pts * f.time_base)
+        for f in c.decode(video=0)
+        if f.to_ndarray(format="gray").mean() > 200
+    )
+    c.close()
+    c = av.open(str(out))
+    best, t_click = 0.0, None
+    for f in c.decode(audio=0):
+        a = np.abs(f.to_ndarray()).max(axis=0)
+        k = int(a.argmax())
+        if a[k] > best:
+            best, t_click = float(a[k]), float(f.pts * f.time_base) + k / f.sample_rate
+    c.close()
+    assert t_click is not None and best > 0.1
+    assert abs(t_click - t_white) < 0.1, (t_click, t_white)

@@ -16,10 +16,12 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   640x480 crop of the picture when audio reached it first, turn one late frame
   into a 13-hour jump in the file's timeline, and hold video back for 10 s
   while the camera sent no audio. A `.ts` recording (also `.m2ts`, `.mts`) now
-  copies the camera's H.264 as-is, with its audio as 48 kHz AAC, through the
-  mux Home Assistant's DTLS path already uses: nothing is re-encoded and
-  nothing competes for the frames. Other containers still go through aiortc's
-  MediaRecorder, which re-encodes. Home Assistant never records this way.
+  copies the camera's H.264 as-is, with its audio as 48 kHz AAC in step with
+  the picture, through the mux Home Assistant's DTLS path already uses: nothing
+  is re-encoded and nothing competes for the frames. An unwritable path is
+  reported before the session connects, and the session still opens. Other
+  containers still go through aiortc's MediaRecorder, which re-encodes and
+  keeps those defects - record to `.ts`. Home Assistant never records this way.
 - **Stopping a session twice is harmless.** `WebRTCSession.stop()` and
   `SdesSession.stop()` run their teardown once, and any further or concurrent
   call waits for that run. A second stop could raise `CancelledError` after a
