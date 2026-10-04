@@ -38,10 +38,11 @@ class _Cam(CameraMixin):
     is_sdes_camera = property(lambda self: self._sdes)
 
 
-def _cam(sdes=False, push_url="rtsp://127.0.0.1:8554/aidot_0123456789ab"):
+def _cam(sdes=False, push_url="rtsp://127.0.0.1:8554/aidot_0123456789ab", model=""):
     c = _Cam.__new__(_Cam)
     c.device_id = "0123456789abcdef0123456789abcdef"
     c._sdes = sdes
+    c.info = type("Info", (), {"model_id": model})()
     c._keepalive_rtsp_url = push_url  # set by start_keepalive
     return c
 
@@ -82,9 +83,30 @@ def test_a_dtls_camera_gets_a_stable_url_before_its_session_exists(monkeypatch):
     s.close()
 
 
-def test_sdes_cameras_stay_on_go2rtc_in_this_phase(monkeypatch):
+@pytest.mark.parametrize(
+    ("model", "pin", "eligible"),
+    [
+        ("LK.IPC.A001064", "96", True),
+        ("LK.IPC.A001513", "96", True),
+        ("LK.IPC.A001064", None, False),  # might answer H.265: ffmpeg serve
+        ("LK.IPC.A001064", "97", False),
+        ("LK.IPC.A009999", "96", False),  # media reaches the serve encrypted
+    ],
+)
+def test_an_sdes_camera_gets_the_ts_only_when_every_session_feeds_it(
+    monkeypatch, model, pin, eligible
+):
+    # Home Assistant keeps the URL it is given. A TS that a session never
+    # writes (the ffmpeg serve: an H.265 answer, or a model whose media the
+    # bridge cannot decrypt) would be no video at all, not just late sound.
     _on(monkeypatch)
-    assert _cam(sdes=True).hls_ts_url() is None
+    if pin is None:
+        monkeypatch.delenv("AIDOT_SDES_VIDEO_PT", raising=False)
+    else:
+        monkeypatch.setenv("AIDOT_SDES_VIDEO_PT", pin)
+    cam = _cam(sdes=True, model=model)
+    assert (cam.hls_ts_url() is not None) is eligible
+    assert (cam._hls_ts_session() is not None) is eligible
 
 
 def test_the_dtls_publisher_gets_a_fresh_session_only_when_on(monkeypatch):

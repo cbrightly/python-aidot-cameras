@@ -70,9 +70,11 @@ webrtc = [
     # aidot_cameras/_vendor/aiortc/VENDOR.md; vendored so Home Assistant 2026.7's pinned av==17 is
     # satisfiable - stock aiortc caps av<17, which makes [webrtc] uninstallable
     # there). These are aiortc's own runtime deps; the PyAV ceiling is widened to
-    # <18 (av 17 verified compatible: import + H.264 encode round-trip). Drop the
-    # vendor and depend on stock aiortc again once upstream widens the pin.
-    "av>=14.0.0,<18.0.0",
+    # <20: Home Assistant's dev branch (2026.11) pins av==19.0.0, which the old
+    # <18 made unresolvable. The full suite including e2e passes on av 19.0.0
+    # and the unit suite on 18.1.0 (2026-10-04); av 17 is what HA 2026.9/10 pin.
+    # Drop the vendor and depend on stock aiortc again once upstream widens the pin.
+    "av>=14.0.0,<20.0.0",
     # aioice stays external: we monkeypatch its private internals
     # (Connection.build_request / _check_list / _nominated) for the A000088
     # high-port nomination fix and read them for stream diagnostics. Pin the

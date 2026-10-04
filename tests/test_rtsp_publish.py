@@ -2655,3 +2655,115 @@ def test_dtls_publish_sends_go2rtc_the_same_media_with_or_without_a_tee(
     _run_dtls(go2rtc, feed, ts_session=sess)
     assert spy.video  # the tee was fed...
     assert payloads(go2rtc.frames) == without  # ...and go2rtc saw no difference
+
+
+# -- SDES: the in-sync HLS TS tee --------------------------------------------- #
+
+_T_SPS = bytes.fromhex("674d001fe900a00b742000007d20000daf8080")
+_T_PPS = b"\x68\xee\x3c\xb0"
+
+
+def _t_stap(*nals):
+    return b"\x18" + b"".join(struct.pack(">H", len(n)) + n for n in nals)
+
+
+def _sdes_tee(go2rtc, monkeypatch, aac="1"):
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", aac)
+    spy = _SpySession()
+    sess = type("S", (), {"video": spy.video_, "aac": spy.aac_})()
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", ts_session=sess
+    )
+    assert _wait(lambda: "RECORD" in go2rtc.requests)
+    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    return proc, spy, tx, a_port, v_port
+
+
+def _send_frames(tx, v_port, frames, seq=100):
+    """frames: (ts, [payloads]); one RTP packet per payload, marker on the last."""
+    for ts, payloads in frames:
+        for k, pl in enumerate(payloads):
+            tx.sendto(
+                rp.build_rtp(96, k == len(payloads) - 1, seq, ts, 0xAAAA, pl),
+                ("127.0.0.1", v_port),
+            )
+            seq += 1
+        time.sleep(0.02)
+    return seq
+
+
+def test_sdes_publish_hands_the_tee_whole_frames_and_aac(go2rtc, monkeypatch):
+    proc, spy, tx, a_port, v_port = _sdes_tee(go2rtc, monkeypatch)
+    try:
+        idr = b"\x65" + b"I" * 300
+        # an IDR in FU-A fragments, then P frames as single NAL units
+        fu_s = bytes([0x7C, 0x85]) + idr[1:150]
+        fu_e = bytes([0x7C, 0x45]) + idr[150:]
+        frames = [(5000, [_t_stap(_T_SPS, _T_PPS), fu_s, fu_e])]
+        frames += [(5000 + 6000 * i, [b"\x41" + bytes([i]) * 30]) for i in range(1, 6)]
+        _send_frames(tx, v_port, frames)
+        for i in range(20):
+            tx.sendto(
+                rp.build_rtp(8, False, 1 + i, 160 * (i + 1), 0xBBBB, b"\xd5" * 160),
+                ("127.0.0.1", a_port),
+            )
+            time.sleep(0.01)
+        assert _wait(lambda: len(spy.video) >= 5)
+        first = spy.video[0]
+        sc = b"\x00\x00\x00\x01"
+        assert first[0] == sc + _T_SPS + sc + _T_PPS + sc + idr and first[2] is True
+        assert [v[2] for v in spy.video[1:5]] == [False] * 4
+        media = [v[1] for v in spy.video]
+        assert media[0] == 0 and all(b > a for a, b in zip(media, media[1:]))
+        assert _wait(lambda: len(spy.aac) >= 2)
+        assert spy.aac[0][1] == 0 and spy.aac[1][1] == 1024  # samples since the first
+    finally:
+        tx.close()
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_sdes_tee_waits_for_a_keyframe_after_a_lost_packet(go2rtc, monkeypatch):
+    proc, spy, tx, _a, v_port = _sdes_tee(go2rtc, monkeypatch, aac="0")
+    try:
+        key = [_t_stap(_T_SPS, _T_PPS), b"\x65" + b"I" * 40]
+        seq = _send_frames(tx, v_port, [(1000, key), (7000, [b"\x41P1"])])
+        seq += 1  # this packet never arrives
+        seq = _send_frames(
+            tx, v_port, [(19000, [b"\x41P3"]), (25000, [b"\x41P4"])], seq
+        )
+        _send_frames(tx, v_port, [(31000, key), (37000, [b"\x41P6"])], seq)
+        assert _wait(lambda: len(spy.video) >= 4, timeout=5)
+        time.sleep(0.3)
+        assert [v[0][-2:] for v in spy.video] == [b"II", b"P1", b"II", b"P6"]
+    finally:
+        tx.close()
+        proc.terminate()
+        proc.wait(3)
+
+
+def test_sdes_tee_is_not_held_up_by_dropped_re_sent_frames(go2rtc, monkeypatch):
+    # The re-sent-frame filter drops whole frames by design; their sequence
+    # numbers still arrived, so the TS keeps every frame actually published.
+    proc, spy, tx, _a, v_port = _sdes_tee(go2rtc, monkeypatch, aac="0")
+    try:
+        key = [_t_stap(_T_SPS, _T_PPS), b"\x65" + b"I" * 40]
+        _send_frames(
+            tx,
+            v_port,
+            [
+                (1000, key),
+                (7000, [b"\x41P1"]),
+                (7000, [b"\x41P1"]),
+                (13000, [b"\x41P2"]),
+            ],
+        )
+        assert _wait(lambda: len(spy.video) >= 3, timeout=5)
+        time.sleep(0.3)
+        assert [v[0][-2:] for v in spy.video] == [b"II", b"P1", b"P2"]
+        assert proc.publish_stats()["dropped_resent"] == 1
+    finally:
+        tx.close()
+        proc.terminate()
+        proc.wait(3)

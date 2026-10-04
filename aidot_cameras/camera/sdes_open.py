@@ -9024,6 +9024,8 @@ class _SdesOpenMixin:
                     audio_gain_db=_direct_gain_db,
                     device_id=str(getattr(self, "device_id", "?")),
                     include_audio=_direct_audio,
+                    # The in-sync HLS TS, when on: a new session per spawn.
+                    ts_session=self._hls_ts_session(),
                 )
             _p = subprocess.Popen(
                 cmd,

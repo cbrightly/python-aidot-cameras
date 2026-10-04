@@ -8,9 +8,10 @@ every time (measured 2026-10-03); this TS carries one clock, so any joiner is in
 step. WebRTC is unchanged.
 
 It is fed by the direct publisher (so ``AIDOT_DIRECT_PUBLISH`` must be on) and
-carries the publisher's AAC track (so ``AIDOT_PUBLISH_AAC`` must be on). SDES
-cameras stay on go2rtc for now: their publisher's AAC start alignment can lock
-onto the steered video clock's learning-phase lead (design review 2026-10-03).
+carries the publisher's AAC track (so ``AIDOT_PUBLISH_AAC`` must be on). DTLS
+cameras hand it access units; SDES cameras' RTP is rebuilt into access units
+(``rtp_h264``). An SDES camera gets a URL only when every session is sure to
+feed it - see ``CameraMixin._hls_ts_eligible``.
 
 One router serves every camera from one port, picked at random unless
 ``AIDOT_HLS_TS_PORT`` sets it: Home Assistant gets the URL in-process, so any

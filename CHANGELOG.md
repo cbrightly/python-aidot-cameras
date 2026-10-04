@@ -6,6 +6,34 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- **SDES cameras on the in-sync HLS TS (`AIDOT_HLS_DIRECT_TS`).** The SDES
+  direct publisher now rebuilds the camera's RTP (single NAL units, STAP-A,
+  FU-A) into whole access units for the camera's TS, alongside its AAC track.
+  Loss is judged by sequence number before the re-sent-frame filter (whose
+  dropped frames are not loss), and after any loss nothing reaches the TS
+  until a whole keyframe, so a damaged frame is never recorded. An SDES camera
+  gets a TS URL only when every session is sure to feed it: a model whose
+  media the bridge decrypts (A001064, A001513) with its offer pinned to H.264
+  (`AIDOT_SDES_VIDEO_PT=96`). Measured on the A001064: two Home Assistant
+  recordings, one that started the camera and one that joined it running,
+  kept the TS's sound-to-picture timing on every packet, and 16 pan steps put
+  the motor's sound -0.03 to +0.08 s from the picture's movement.
+
+### Changed
+
+- **PyAV up to 19 is accepted** (`av>=14,<20`, was `<18`). Home Assistant's
+  development branch now pins `av==19.0.0`, which made `[webrtc]`
+  uninstallable there: Home Assistant 2026.11 would not have been able to
+  install this library at all. The full test suite including end to end
+  passes on PyAV 19.0.0, and the unit suite on 18.1.0.
+- **A new SPS disconnects the TS's readers.** A reader keeps the decoder setup
+  it built from the first SPS it saw (Home Assistant's HLS init segment), and
+  the A001064 changes its SPS between sessions, so a reader carried across
+  would get undecodable inter frames. The readers are dropped and reconnect,
+  and the timeline starts over.
+
 ## [1.0.0rc37]
 
 ### Fixed

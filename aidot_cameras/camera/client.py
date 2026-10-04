@@ -4825,7 +4825,8 @@ class CameraMixin(
         """The camera's in-sync MPEG-TS URL for Home Assistant's HLS, or None.
 
         Set when ``AIDOT_HLS_DIRECT_TS`` (with direct publish and the AAC track)
-        is on, for DTLS cameras. Unlike go2rtc's RTSP, a consumer joining this
+        is on, for cameras whose session is sure to feed it (``_hls_ts_eligible``).
+        Unlike go2rtc's RTSP, a consumer joining this
         stream at any moment gets sound and picture in step. The URL exists
         before the camera's session does and stays the same for the process, so
         it can be handed to Home Assistant once; a consumer that connects early
@@ -4833,7 +4834,7 @@ class CameraMixin(
         """
         from . import hls_ts
 
-        if not hls_ts.enabled() or self.is_sdes_camera:
+        if not hls_ts.enabled() or not self._hls_ts_eligible():
             return None
         # Only a camera that publishes to go2rtc feeds the TS: one pulled from
         # its local serve (go2rtc unreachable) never runs the direct publisher,
@@ -4852,29 +4853,55 @@ class CameraMixin(
             )
             return None
 
-    def _dtls_publish_kwargs(self, result: dict) -> dict:
-        """Keyword arguments for this camera's ``dtls_rtp_publish_run`` thread.
+    def _hls_ts_eligible(self) -> bool:
+        """Whether every session of this camera feeds the in-sync TS.
 
-        With in-sync HLS on, each serve cycle gets a fresh tee session: a new
-        origin that the camera's tee places after the last timestamp it wrote.
+        Decided from what is known before any session exists, because Home
+        Assistant keeps the URL it is given and a TS that nothing writes is no
+        video at all. A DTLS camera always direct-publishes when the option is
+        on. An SDES camera does only on a model whose media the bridge decrypts
+        (``_PLAIN_RTP_MODELS``) and with its offer pinned to H.264
+        (``AIDOT_SDES_VIDEO_PT=96``): an H.265 session keeps the ffmpeg serve.
+        """
+        if not self.is_sdes_camera:
+            return True
+        model = getattr(getattr(self, "info", None), "model_id", None) or ""
+        if not any(m in model for m in self._PLAIN_RTP_MODELS):
+            return False
+        from .sdes_open import _DIRECT_PUBLISH_VIDEO_PT, _resolve_sdes_video_pt
+
+        return _resolve_sdes_video_pt() == _DIRECT_PUBLISH_VIDEO_PT
+
+    def _hls_ts_session(self):
+        """A fresh in-sync TS session for one serve cycle, or None.
+
+        Each cycle is a new origin, which the camera's tee places after the
+        last timestamp it wrote (or starts over when nobody is reading).
         """
         from . import hls_ts
 
+        if not hls_ts.enabled() or not self._hls_ts_eligible():
+            return None
+        device_id = str(getattr(self, "device_id", "?"))
+        try:
+            return hls_ts.session_for(self._go2rtc_stream_name(), device_id)
+        except Exception:
+            _LOGGER.warning(
+                "camera %s: in-sync HLS unavailable for this session",
+                device_id,
+                exc_info=True,
+            )
+            return None
+
+    def _dtls_publish_kwargs(self, result: dict) -> dict:
+        """Keyword arguments for this camera's ``dtls_rtp_publish_run`` thread."""
         kwargs = {
             "device_id": str(getattr(self, "device_id", "?")),
             "result": result,
         }
-        if hls_ts.enabled() and not self.is_sdes_camera:
-            try:
-                kwargs["ts_session"] = hls_ts.session_for(
-                    self._go2rtc_stream_name(), kwargs["device_id"]
-                )
-            except Exception:
-                _LOGGER.warning(
-                    "camera %s: in-sync HLS unavailable for this session",
-                    kwargs["device_id"],
-                    exc_info=True,
-                )
+        session = self._hls_ts_session()
+        if session is not None:
+            kwargs["ts_session"] = session
         return kwargs
 
     # Cached answer to "is anyone watching", so the watchdog loops can ask on
