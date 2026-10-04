@@ -51,6 +51,7 @@ from .aac_track import (
     make_aac_track,
 )
 from .protocol import is_resent_video_frame
+from .rtp_h264 import H264Depacketizer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1148,6 +1149,7 @@ class LoopbackRtpPublisher:
         policy: Optional[str] = None,
         include_audio: bool = True,
         publisher_factory=RtspPublisher,
+        ts_session=None,
     ):
         self.args = ["<direct-publish>", redact_url(url)]
         self.pid = os.getpid()
@@ -1255,6 +1257,24 @@ class LoopbackRtpPublisher:
             for i, t in enumerate(self._tracks)
             if t.kind == "video"
         }
+        # The in-sync HLS TS (``ts_tee``): whole H.264 access units, rebuilt
+        # from the RTP this forwards, and the AAC frames, each with its media
+        # time. Loss is judged on the reorder buffer's output, by sequence
+        # number, BEFORE the re-sent-frame filter: the filter drops whole
+        # frames on purpose (tens per session), which is not loss.
+        self._ts_session = ts_session
+        self._depack: dict = (
+            {
+                i: H264Depacketizer()
+                for i, t in enumerate(self._tracks)
+                if t.kind == "video" and t.codec == "H264"
+            }
+            if ts_session is not None
+            else {}
+        )
+        self._tee_seq: dict = {}
+        self._tee_aac_prev: Optional[int] = None
+        self._tee_aac_media = 0
         self.last_media = 0.0
         self._aidot_stderr_tail: List[str] = []
         self._aidot_stderr_notable: List[str] = []
@@ -1510,7 +1530,7 @@ class LoopbackRtpPublisher:
             return
         self.last_media = arrival
         for item in self._reorder[idx].push(
-            in_seq, (marker, ts, payload, arrival, ssrc), arrival, ssrc
+            in_seq, (marker, ts, payload, arrival, ssrc, in_seq), arrival, ssrc
         ):
             self._send(pub, idx, item)
 
@@ -1551,8 +1571,16 @@ class LoopbackRtpPublisher:
         self.resent_filter_resets += 1
 
     def _send(self, pub: RtspPublisher, idx: int, item) -> None:
-        marker, ts, payload, arrival, ssrc = item
+        marker, ts, payload, arrival, ssrc = item[:5]
         track = self._tracks[idx]
+        depack = self._depack.get(idx)
+        if depack is not None and len(item) > 5:
+            prev = self._tee_seq.get(idx)
+            if prev is not None and (
+                ssrc != prev[1] or item[5] != (prev[0] + 1) & 0xFFFF
+            ):
+                depack.loss()
+            self._tee_seq[idx] = (item[5], ssrc)
         dedup = self._video_dedup.get(idx)
         if dedup is not None:
             if dedup["last_ssrc"] is not None and ssrc != dedup["last_ssrc"]:
@@ -1643,6 +1671,16 @@ class LoopbackRtpPublisher:
             else:
                 self._video_media_ticks += _signed32(out_ts - self._video_out_prev)
                 self._video_out_prev = out_ts
+            if depack is not None:
+                try:
+                    for au, media, kf in depack.push(
+                        payload, ts, marker, self._video_media_ticks
+                    ):
+                        self._ts_session.video(au, media, kf)
+                except Exception:  # the TS must never cost the publish
+                    _LOGGER.debug(
+                        "camera %s: HLS TS tee", self.device_id, exc_info=True
+                    )
         if idx == self._pcma_idx and self._aac is not None:
             _aac_started = time.monotonic()
             for aseq, ats_, apl in self._aac.feed(payload, out_ts, arrival):
@@ -1658,6 +1696,16 @@ class LoopbackRtpPublisher:
             )
         except RtspPublishError:
             pass  # the loop's alive check ends the publish with the reason
+        if self._ts_session is not None:
+            # Samples since the track's first frame, unwrapped (its first
+            # timestamp is random), minus the 4-byte RFC 3640 AU header.
+            if self._tee_aac_prev is not None:
+                self._tee_aac_media += _signed32(ts - self._tee_aac_prev)
+            self._tee_aac_prev = ts
+            try:
+                self._ts_session.aac(payload[4:], self._tee_aac_media)
+            except Exception:
+                _LOGGER.debug("camera %s: HLS TS tee", self.device_id, exc_info=True)
 
     def _close_socks(self) -> None:
         for s in self._socks:
@@ -1787,6 +1835,7 @@ def dtls_rtp_publish_run(
             aac_media += _signed32(ats_ - aac_prev)
         aac_prev = ats_
         ts_session.aac(apl[4:], aac_media)  # minus the 4-byte RFC 3640 AU header
+
     # The mux this replaces conditioned the camera's audio; keep that.
     agc = AlawAgc()
     # Set before anything can return: a failed connect leaves through an early

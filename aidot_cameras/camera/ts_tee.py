@@ -68,6 +68,14 @@ def adts_header(
     )
 
 
+def _sps_of(au: bytes) -> Optional[bytes]:
+    """The SPS NAL unit of an Annex B access unit, if it carries one."""
+    for part in au.replace(b"\0\0\0\1", b"\0\0\1").split(b"\0\0\1"):
+        if part and (part[0] & 0x1F) == 7:
+            return part.rstrip(b"\0")
+    return None
+
+
 class _Sink:
     """The container's file object: forwards to the channel, remembers failure."""
 
@@ -219,6 +227,7 @@ class TsTee:
         base = _FIRST_BASE_90K
         started = False
         last_v = last_a = None  # last PTS written per track (90 kHz)
+        last_sps: Optional[bytes] = None  # the SPS the readers have
         try:
             while not self._stop.is_set():
                 try:
@@ -256,6 +265,27 @@ class TsTee:
                         if not kf:
                             continue  # a consumer must be able to decode from here
                         started = True
+                    sps = _sps_of(data) if kf else None
+                    if sps is not None and last_sps is not None and sps != last_sps:
+                        # A reader keeps the decoder setup it built from the
+                        # first SPS it saw (Home Assistant's HLS init segment),
+                        # so a new one would leave its inter frames undecodable:
+                        # drop the readers (they reconnect) and start over.
+                        dropped = self._channel.disconnect_all()
+                        _LOGGER.info(
+                            "camera %s: in-sync HLS: new SPS, %d reader(s)"
+                            " reconnect",
+                            self._device_id,
+                            dropped,
+                        )
+                        try:
+                            out.close()
+                        except Exception:
+                            _LOGGER.debug("TsTee: closing the old mux", exc_info=True)
+                        out, vs, as_ = open_mux()
+                        base, last_v, last_a = _FIRST_BASE_90K - t, None, None
+                    if sps is not None:
+                        last_sps = sps
                     pts = base + t
                     if last_v is not None and pts <= last_v:
                         pts = last_v + 1  # never backwards on one track

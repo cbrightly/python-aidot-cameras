@@ -217,6 +217,19 @@ class TsChannel:
     def flush(self) -> None:
         return None
 
+    def disconnect_all(self) -> int:
+        """Disconnect every consumer now; new ones are still accepted. Returns
+        how many were connected."""
+        with self._lock:
+            consumers = list(self._consumers)
+        for c in consumers:
+            try:
+                c.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            self._drop(c)
+        return len(consumers)
+
     def close(self) -> None:
         """Disconnect every consumer; the channel accepts no more."""
         self._closed.set()

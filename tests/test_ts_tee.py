@@ -22,11 +22,14 @@ from aidot_cameras.camera.ts_tee import TsTee  # noqa: E402
 FPS, GOP = 15, 30
 
 
-def _media(seconds, flash_every=2):
-    """(video [(au, keyframe)], aac [au]) with a flash and a click every flash_every s."""
+def _media(seconds, flash_every=2, sps_rate=FPS):
+    """(video [(au, keyframe)], aac [au]) with a flash and a click every flash_every s.
+
+    ``sps_rate`` is the frame rate the SPS declares (a camera that changes it,
+    as the A001064 does in night mode, changes its SPS)."""
     enc = av.CodecContext.create("libx264", "w")
     enc.width, enc.height, enc.pix_fmt = 320, 240, "yuv420p"
-    enc.time_base = fractions.Fraction(1, FPS)
+    enc.time_base = fractions.Fraction(1, sps_rate)
     enc.options = {
         "preset": "ultrafast",
         "tune": "zerolatency",
@@ -348,3 +351,54 @@ def test_video_decode_times_are_stated_not_left_to_the_reader():
     c.close()
     assert len(pd) == len(video)
     assert all(pts - dts == 1 for pts, dts in pd), pd[:5]
+
+
+
+def _sps(video):
+    au = video[0][0]
+    for part in au.replace(b"\0\0\0\1", b"\0\0\1").split(b"\0\0\1"):
+        if part and (part[0] & 0x1F) == 7:
+            return part
+    return None
+
+
+def _reader(port):
+    s = __import__("socket").create_connection(("127.0.0.1", port), timeout=5)
+    s.sendall(b"GET /cam.ts HTTP/1.1\r\n\r\n")
+    s.settimeout(0.5)
+    return s
+
+
+def _open_after(s, seconds):
+    """Whether the consumer's connection is still open after reading for a while."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        try:
+            if s.recv(65536) == b"":
+                return False
+        except TimeoutError:
+            pass
+    return True
+
+
+@pytest.mark.parametrize("changes", [True, False])
+def test_a_new_sps_disconnects_the_readers_so_they_rebuild_their_decoder(changes):
+    # A reader keeps the decoder setup it built from the first SPS it saw (Home
+    # Assistant's HLS init segment; an MSE player's avcC). A camera that sends a
+    # different SPS - the A001064 changes it between sessions - would leave
+    # every later inter frame undecodable for that reader, so the readers are
+    # dropped and reconnect.
+    srv, tee = _tee()
+    try:
+        video, aac = _media(2)
+        later, _ = _media(2, sps_rate=FPS * 2) if changes else (video, aac)
+        assert (_sps(later) != _sps(video)) is changes
+        s = _reader(srv.port)
+        _feed(tee.session(), video, aac, realtime=False)
+        assert _open_after(s, 0.5)
+        _feed(tee.session(), later, aac, realtime=False)
+        assert _open_after(s, 1.0) is not changes
+        s.close()
+    finally:
+        tee.close()
+        srv.close()
