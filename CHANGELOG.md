@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc37]
+
 ### Fixed
 
 - **Home Assistant recordings and HLS of DTLS cameras keep picture and sound
