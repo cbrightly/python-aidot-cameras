@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc38]
+
 ### Added
 
 - **SDES cameras on the in-sync HLS TS (`AIDOT_HLS_DIRECT_TS`).** The SDES
