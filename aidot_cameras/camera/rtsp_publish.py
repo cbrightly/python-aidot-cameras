@@ -1738,8 +1738,13 @@ def dtls_rtp_publish_run(
     device_id: str = "?",
     publisher_factory=RtspPublisher,
     result: Optional[dict] = None,
+    ts_session=None,
 ) -> None:
     """Publish the DTLS tap's queues to ``url``. Thread target.
+
+    ``ts_session`` (a ``ts_tee.TsSession``), when given, also receives every
+    published video frame and AAC frame with its media time, for the MPEG-TS
+    that Home Assistant's HLS reads in step whenever it joins.
 
     Same contract as ``_dtls_av_mux_run``: consumes ``vq`` items
     ``(annexb_bytes, ts90k, is_keyframe)`` and ``aq`` items
@@ -1771,6 +1776,17 @@ def dtls_rtp_publish_run(
     # timeline itself rather than a literal 90000.
     v_out_prev: Optional[int] = None
     v_media_ticks = 0
+    # The HLS TS tee's AAC media time: samples since the AAC track's first
+    # frame. The track's first timestamp is random; count from it, unwrapped.
+    aac_prev: Optional[int] = None
+    aac_media = 0
+
+    def _tee_aac(ats_: int, apl: bytes) -> None:
+        nonlocal aac_prev, aac_media
+        if aac_prev is not None:
+            aac_media += _signed32(ats_ - aac_prev)
+        aac_prev = ats_
+        ts_session.aac(apl[4:], aac_media)  # minus the 4-byte RFC 3640 AU header
     # The mux this replaces conditioned the camera's audio; keep that.
     agc = AlawAgc()
     # Set before anything can return: a failed connect leaves through an early
@@ -1881,6 +1897,8 @@ def dtls_rtp_publish_run(
                     else:
                         v_media_ticks += _signed32(seq_ts - v_out_prev)
                         v_out_prev = seq_ts
+                    if ts_session is not None:
+                        ts_session.video(data, v_media_ticks, kf)
                     if last_frame is not None:
                         gap = now - last_frame
                         if gap > max_gap:
@@ -1937,6 +1955,8 @@ def dtls_rtp_publish_run(
                         pub.send_rtp(
                             aac_t, build_rtp(97, True, aseq, ats_, aac.ssrc, apl)
                         )
+                        if ts_session is not None:
+                            _tee_aac(ats_, apl)
                     aac_seconds += time.monotonic() - _aac_started
             if aac and vpublished:
                 # Idle fill beside video, once per pass and AFTER the audio
@@ -1946,6 +1966,8 @@ def dtls_rtp_publish_run(
                 video_media_s = v_media_ticks / vtl.clock_rate
                 for aseq, ats_, apl in aac.tick(_aac_started, video_media_s):
                     pub.send_rtp(aac_t, build_rtp(97, True, aseq, ats_, aac.ssrc, apl))
+                    if ts_session is not None:
+                        _tee_aac(ats_, apl)
                 aac_seconds += time.monotonic() - _aac_started
             if pub.keepalive_due():
                 pub.send_keepalive()

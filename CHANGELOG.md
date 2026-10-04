@@ -6,6 +6,22 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- **In-sync sound for Home Assistant's HLS view and recordings (opt-in,
+  `AIDOT_HLS_DIRECT_TS`).** Through go2rtc, a recording or HLS view that
+  joined a running stream had its sound late by 0.1-0.75 s, differently on
+  each join, because go2rtc re-bases each track for each consumer. With this
+  option a DTLS camera that direct-publishes also gets its own MPEG-TS on one
+  loopback listener (`CameraMixin.hls_ts_url()`): the published H.264 and AAC,
+  muxed on one clock with stated decode times, so every reader gets sound and
+  picture in the same step whenever it joins. A reader that stays connected
+  through a camera reconnect never sees time go backwards. Measured on real
+  cameras: six recordings (two cold, four joining a running stream) matched
+  the stream's own sound-to-picture timing on every packet, and with claps the
+  sound landed 0.02-0.08 s after the picture. Needs `AIDOT_DIRECT_PUBLISH` and
+  `AIDOT_PUBLISH_AAC`; SDES cameras are not covered yet. Off by default.
+
 ## [1.0.0rc35]
 
 ### Fixed
