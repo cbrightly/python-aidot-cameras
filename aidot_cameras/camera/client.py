@@ -49,6 +49,7 @@ from .playback import (  # re-exported (split into playback.py)
     LiveStreamSession,  # noqa: F401 - back-compat re-export (unused in-module)
 )
 from .webrtc import WebRTCSession  # re-exported (split into webrtc.py)
+from . import h264_sps as _h264_sps
 from .rtsp_publish import (
     direct_publish_enabled,
     dtls_rtp_publish_run,
@@ -5648,6 +5649,7 @@ class CameraMixin(
         # corrected; the decoder still receives the frame untouched.
         _unwrap = _unwrap_state() if is_video else None
         _CANARY_LOG_EVERY = 300  # frames (~10-20s of H.264); DEBUG summary cadence
+        _fix_sps = is_video and _h264_sps.enabled()
 
         def _tap_put(task, *a, **k):
             try:
@@ -5667,6 +5669,11 @@ class CameraMixin(
                                 _canary["unwrapped"] = _canary.get("unwrapped", 0) + 1
                         _b = bytes(_d)
                         _kf = _h264_has_keyframe(_b) if is_video else False
+                        if _kf and _fix_sps:
+                            # Copy consumers only: state that the stream never
+                            # reorders, or libav derives DTS from jittery frame
+                            # times (h264_sps). The decoder keeps the original.
+                            _b = _h264_sps.fix_access_unit(_b)
                         _item = (_b, int(_ts), _kf) if is_video else (_b, int(_ts))
                         try:
                             out_q.put_nowait(_item)

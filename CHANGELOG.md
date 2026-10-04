@@ -6,6 +6,22 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Home Assistant recordings and HLS of DTLS cameras keep picture and sound
+  in step at every segment, and no longer fail on a backwards decode time.**
+  The A000088's H.264 states one frame of reordering though it never
+  reorders, so libav - Home Assistant's stream worker, through go2rtc or the
+  in-sync TS alike - derived each frame's decode time from the jittery frame
+  times. Each HLS segment then started with its picture shifted by a varying
+  amount, and a recording could fail with `non monotonically increasing dts`.
+  The copies this library serves, publishes and records now state no
+  reordering. Measured through Home Assistant's own stream worker on the
+  default path: 12 segments from 1.0.0rc36 began with picture offsets of up to
+  3 ms and frames carried offsets up to one frame; with the fix, every frame's
+  offset is 0, with and without direct publish. SDES cameras state nothing and
+  were not affected. `AIDOT_PUBLISH_SPS_FIX=0` turns it off.
+
 ## [1.0.0rc36]
 
 ### Added
