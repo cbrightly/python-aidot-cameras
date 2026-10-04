@@ -23,6 +23,11 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ### Changed
 
+- **PyAV up to 19 is accepted** (`av>=14,<20`, was `<18`). Home Assistant's
+  development branch now pins `av==19.0.0`, which made `[webrtc]`
+  uninstallable there: Home Assistant 2026.11 would not have been able to
+  install this library at all. The full test suite including end to end
+  passes on PyAV 19.0.0, and the unit suite on 18.1.0.
 - **A new SPS disconnects the TS's readers.** A reader keeps the decoder setup
   it built from the first SPS it saw (Home Assistant's HLS init segment), and
   the A001064 changes its SPS between sessions, so a reader carried across
