@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc36]
+
 ### Added
 
 - **In-sync sound for Home Assistant's HLS view and recordings (opt-in,
