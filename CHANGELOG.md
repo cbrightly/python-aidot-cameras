@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc39]
+
 ### Changed
 
 - **The in-sync HLS TS is served under a secret path.** Each listener makes a
