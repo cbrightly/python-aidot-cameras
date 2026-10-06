@@ -6,6 +6,15 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- **The in-sync TS's base URL is left for the owner's tools** in `hls-ts-base`
+  in the library's state directory (`AIDOT_SPROP_DIR`), owner-readable only,
+  removed when the listener stops. A raw capture of a camera's TS is the
+  reference clock for checking that recordings keep sound and picture in step;
+  the secret path from 1.0.0rc39 had hidden it from everything but Home
+  Assistant.
+
 ## [1.0.0rc39]
 
 ### Changed

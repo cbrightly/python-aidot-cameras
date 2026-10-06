@@ -36,6 +36,10 @@ _LOGGER = logging.getLogger(__name__)
 
 ENV_HLS_DIRECT_TS = "AIDOT_HLS_DIRECT_TS"
 ENV_HLS_TS_PORT = "AIDOT_HLS_TS_PORT"
+#: In the library's state directory (``AIDOT_SPROP_DIR``): the listener's base
+#: URL, ``http://127.0.0.1:<port>/<secret>/``; a camera's stream is that plus
+#: ``aidot_<first 12 of its device id>.ts``.
+BASE_FILE = "hls-ts-base"
 
 _lock = threading.Lock()
 _router: Optional[TsRouter] = None
@@ -69,7 +73,41 @@ def _get_router() -> TsRouter:
         r.start()
         _router = r
         _LOGGER.info("in-sync HLS: serving camera TS on 127.0.0.1:%d", r.port)
+        _write_base(r.url("/%s/" % r.token))
     return _router
+
+
+def _base_file() -> str:
+    from .protocol import _sprop_dir
+
+    return os.path.join(_sprop_dir(), BASE_FILE)
+
+
+def _write_base(base: str) -> None:
+    """Leave the listener's base URL (with its secret) for the owner's tools.
+
+    A raw capture of a camera's TS is the reference clock for checking that a
+    recording kept its sound and picture in step; the secret path otherwise
+    hides it from everything but Home Assistant. Written beside the library's
+    other state, owner-only, and removed when the listener stops. Never fatal.
+    """
+    path = _base_file()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd = os.open(path + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(base)
+        os.chmod(path + ".tmp", 0o600)
+        os.replace(path + ".tmp", path)
+    except OSError:
+        _LOGGER.debug("in-sync HLS: could not leave the base URL", exc_info=True)
+
+
+def _remove_base() -> None:
+    try:
+        os.remove(_base_file())
+    except OSError:
+        pass
 
 
 def tee_for(name: str, device_id: str = "?") -> TsTee:
@@ -118,3 +156,4 @@ def shutdown() -> None:
         tee.close()
     if router is not None:
         router.close()
+        _remove_base()

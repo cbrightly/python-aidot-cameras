@@ -198,3 +198,25 @@ def test_the_url_carries_a_secret_only_the_process_knows(monkeypatch):
     )
     hls_ts.shutdown()  # a new listener gets a new secret
     assert _path_of(_cam().hls_ts_url()).split("/")[1] != token
+
+
+def test_the_listener_base_url_is_left_for_the_owners_tools(monkeypatch, tmp_path):
+    # Test tooling on the host (a raw capture of a camera's TS, as reference
+    # clock) needs the secret path. It is written beside the library's other
+    # state, readable by the owner only, and removed when the listener stops.
+    monkeypatch.setenv("AIDOT_SPROP_DIR", str(tmp_path))
+    _on(monkeypatch)
+    url = _cam().hls_ts_url()
+    f = tmp_path / "hls-ts-base"
+    assert f.read_text() == url.rsplit("/", 1)[0] + "/"
+    assert (f.stat().st_mode & 0o777) == 0o600
+    hls_ts.shutdown()
+    assert not f.exists()
+
+
+def test_an_unwritable_state_dir_does_not_stop_the_stream(monkeypatch, tmp_path):
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x")
+    monkeypatch.setenv("AIDOT_SPROP_DIR", str(blocker))
+    _on(monkeypatch)
+    assert _cam().hls_ts_url() is not None
