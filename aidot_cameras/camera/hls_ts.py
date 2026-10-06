@@ -14,7 +14,8 @@ cameras hand it access units; SDES cameras' RTP is rebuilt into access units
 feed it - see ``CameraMixin._hls_ts_eligible``.
 
 One router serves every camera from one port, picked at random unless
-``AIDOT_HLS_TS_PORT`` sets it: Home Assistant gets the URL in-process, so any
+``AIDOT_HLS_TS_PORT`` sets it, under a secret path prefix made for that router
+(so another process on the host cannot read a camera from its port and name): Home Assistant gets the URL in-process, so any
 free port does, and a camera's URL then stays the same for the whole process -
 which matters because Home Assistant fixes a stream's source when it creates it.
 """
@@ -53,7 +54,8 @@ def enabled() -> bool:
 
 
 def _path(name: str) -> str:
-    return "/%s.ts" % name
+    """The camera's path on the listener: the listener's secret, then its name."""
+    return "/%s/%s.ts" % (_get_router().token, name)
 
 
 def _get_router() -> TsRouter:
