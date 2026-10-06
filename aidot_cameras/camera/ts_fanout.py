@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import secrets
 import select
 import socket
 import threading
@@ -255,6 +256,11 @@ class TsRouter:
     def __init__(self, port: int = 0, *, host: str = "127.0.0.1") -> None:
         self._port = port
         self._host = host
+        #: A secret for this listener's paths. The listener is loopback-only,
+        #: but anything else on the host (an add-on sharing the host network)
+        #: could otherwise read a camera's video from its port and its
+        #: well-known stream name. Never logged.
+        self.token = secrets.token_urlsafe(18)
         self._listen: Optional[socket.socket] = None
         self._lock = threading.Lock()
         self._channels: dict = {}

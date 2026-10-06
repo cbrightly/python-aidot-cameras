@@ -6,6 +6,16 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Changed
+
+- **The in-sync HLS TS is served under a secret path.** Each listener makes a
+  random token and every camera's path starts with it
+  (`/<token>/aidot_<id>.ts`); any other path gets 404. The listener was
+  already loopback-only, but another process on the host - a Home Assistant
+  add-on sharing the host network, say - could read a camera's video knowing
+  only the port and the camera's well-known stream name. The token is never
+  logged, and a new listener (after the integration unloads) makes a new one.
+
 ## [1.0.0rc38]
 
 ### Added

@@ -26,6 +26,20 @@ def _fresh(monkeypatch):
     hls_ts.shutdown()
 
 
+def _path_of(url):
+    return "/" + url.split("/", 3)[3]
+
+
+def _get(url, path):
+    port = int(url.split(":")[2].split("/")[0])
+    s = socket.create_connection(("127.0.0.1", port), timeout=3)
+    s.sendall(b"GET %s HTTP/1.1\r\n\r\n" % path.encode())
+    s.settimeout(3)
+    head = s.recv(64)
+    s.close()
+    return head
+
+
 def _on(monkeypatch):
     monkeypatch.setenv("AIDOT_HLS_DIRECT_TS", "1")
     monkeypatch.setenv("AIDOT_DIRECT_PUBLISH", "1")
@@ -77,7 +91,7 @@ def test_a_dtls_camera_gets_a_stable_url_before_its_session_exists(monkeypatch):
     # The channel already exists: a consumer can connect and wait for media.
     port = int(url.split(":")[2].split("/")[0])
     s = socket.create_connection(("127.0.0.1", port), timeout=3)
-    s.sendall(b"GET /aidot_0123456789ab.ts HTTP/1.1\r\n\r\n")
+    s.sendall(b"GET %s HTTP/1.1\r\n\r\n" % _path_of(url).encode())
     s.settimeout(3)
     assert s.recv(64).startswith(b"HTTP/1.0 200")
     s.close()
@@ -124,7 +138,7 @@ async def test_a_ts_consumer_counts_as_a_viewer_even_when_go2rtc_sees_none(monke
     url = cam.hls_ts_url()
     port = int(url.split(":")[2].split("/")[0])
     s = socket.create_connection(("127.0.0.1", port), timeout=3)
-    s.sendall(b"GET /aidot_0123456789ab.ts HTTP/1.1\r\n\r\n")
+    s.sendall(b"GET %s HTTP/1.1\r\n\r\n" % _path_of(url).encode())
     s.settimeout(3)
     s.recv(64)
     end = time.time() + 3
@@ -167,3 +181,20 @@ def test_a_stopped_tee_is_replaced_and_the_url_is_kept(monkeypatch):
     second = hls_ts.tee_for(name)
     assert second is not first and second.is_running()
     assert cam.hls_ts_url() == url
+
+
+def test_the_url_carries_a_secret_only_the_process_knows(monkeypatch):
+    # The listener is loopback-only, but anything else on the host (an add-on
+    # sharing the host network, say) could otherwise read a camera's video by
+    # guessing the port and the camera's well-known stream name.
+    _on(monkeypatch)
+    url = _cam().hls_ts_url()
+    token = _path_of(url).split("/")[1]
+    assert len(token) >= 20 and token not in ("aidot_0123456789ab.ts",)
+    assert _get(url, _path_of(url)).startswith(b"HTTP/1.0 200")
+    assert _get(url, "/aidot_0123456789ab.ts").startswith(b"HTTP/1.0 404")
+    assert _get(url, "/x" + token[1:] + "/aidot_0123456789ab.ts").startswith(
+        b"HTTP/1.0 404"
+    )
+    hls_ts.shutdown()  # a new listener gets a new secret
+    assert _path_of(_cam().hls_ts_url()).split("/")[1] != token
