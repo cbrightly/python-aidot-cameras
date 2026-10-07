@@ -8,8 +8,11 @@ phase only DTLS cameras: the SDES publishers' AAC alignment is not yet good
 enough to hand to every joiner (design review, 2026-10-03).
 """
 
+import os
 import socket
 import time
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -27,7 +30,25 @@ def _fresh(monkeypatch):
 
 
 def _path_of(url):
+    """The request target: path and query."""
     return "/" + url.split("/", 3)[3]
+
+
+def _token_of(url):
+    return parse_qs(urlsplit(url).query)["auth"][0]
+
+
+def _wait_for(cond, timeout=3.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return cond()
+
+
+def _url_file():
+    return Path(os.environ["AIDOT_SPROP_DIR"]) / "hls-ts-url"
 
 
 def _get(url, path):
@@ -85,7 +106,7 @@ def test_a_dtls_camera_gets_a_stable_url_before_its_session_exists(monkeypatch):
     assert (
         url
         and url.startswith("http://127.0.0.1:")
-        and url.endswith("/aidot_0123456789ab.ts")
+        and urlsplit(url).path == "/aidot_0123456789ab.ts"
     )
     assert cam.hls_ts_url() == url  # same URL every call
     # The channel already exists: a consumer can connect and wait for media.
@@ -189,29 +210,73 @@ def test_the_url_carries_a_secret_only_the_process_knows(monkeypatch):
     # guessing the port and the camera's well-known stream name.
     _on(monkeypatch)
     url = _cam().hls_ts_url()
-    token = _path_of(url).split("/")[1]
-    assert len(token) >= 20 and token not in ("aidot_0123456789ab.ts",)
+    token = _token_of(url)
+    wrong = ("A" if token[0] != "A" else "B") + token[1:]
+    assert len(token) >= 20
     assert _get(url, _path_of(url)).startswith(b"HTTP/1.0 200")
-    assert _get(url, "/aidot_0123456789ab.ts").startswith(b"HTTP/1.0 404")
-    assert _get(url, "/x" + token[1:] + "/aidot_0123456789ab.ts").startswith(
-        b"HTTP/1.0 404"
-    )
+    for probe in (
+        "/aidot_0123456789ab.ts",
+        "/aidot_0123456789ab.ts?auth=",
+        "/aidot_0123456789ab.ts?auth=" + wrong,
+        "/%s/aidot_0123456789ab.ts" % token,  # rc39's form
+        "/aidot_0123456789ab.ts?user=" + token,
+    ):
+        assert _get(url, probe).startswith(b"HTTP/1.0 404"), probe
     hls_ts.shutdown()  # a new listener gets a new secret
-    assert _path_of(_cam().hls_ts_url()).split("/")[1] != token
+    assert _token_of(_cam().hls_ts_url()) != token
 
 
-def test_the_listener_base_url_is_left_for_the_owners_tools(monkeypatch, tmp_path):
+def test_the_secret_is_where_home_assistant_masks_it_in_its_logs(monkeypatch):
+    # Home Assistant logs a stream's URL (at ERROR when it cannot open it),
+    # through stream.redact_credentials: that masks the URL's user and password
+    # and the query parameters auth, user and password - nothing in the path.
+    # rc39 put the secret in the path, so it reached the log in the clear.
+    _on(monkeypatch)
+    parts = urlsplit(_cam().hls_ts_url())
+    token = parse_qs(parts.query)["auth"][0]
+    assert list(parse_qs(parts.query)) == ["auth"]
+    assert token not in parts.path and token not in parts.netloc
+
+
+def test_the_listener_url_is_left_for_the_owners_tools(monkeypatch):
     # Test tooling on the host (a raw capture of a camera's TS, as reference
-    # clock) needs the secret path. It is written beside the library's other
-    # state, readable by the owner only, and removed when the listener stops.
-    monkeypatch.setenv("AIDOT_SPROP_DIR", str(tmp_path))
+    # clock) needs the secret. It is written beside the library's other state
+    # (conftest gives every test its own AIDOT_SPROP_DIR), readable by the owner
+    # only, as a template for any camera, and removed when the listener stops.
     _on(monkeypatch)
     url = _cam().hls_ts_url()
-    f = tmp_path / "hls-ts-base"
-    assert f.read_text() == url.rsplit("/", 1)[0] + "/"
+    f = _url_file()
+    assert _wait_for(f.exists)
+    assert f.read_text().replace("{name}", "aidot_0123456789ab") == url
     assert (f.stat().st_mode & 0o777) == 0o600
     hls_ts.shutdown()
     assert not f.exists()
+    assert list(f.parent.iterdir()) == []  # no temporary file left behind
+
+
+def test_the_url_file_is_written_off_the_callers_thread(monkeypatch):
+    # Home Assistant asks for the URL on its event loop, which must not wait on
+    # the disk; and a listener stopped before its file was written leaves none.
+    spawned = []
+    monkeypatch.setattr(hls_ts, "_spawn", spawned.append)
+    _on(monkeypatch)
+    assert _cam().hls_ts_url() is not None
+    assert len(spawned) == 1 and not _url_file().exists()
+    hls_ts.shutdown()
+    spawned[0]()  # the writer runs only now
+    assert not _url_file().exists()
+
+
+def test_a_listener_stopping_leaves_another_listeners_file_alone(monkeypatch):
+    # A listener started after this one stopped (a reload) writes its own file,
+    # possibly before this one's removal runs: that file must survive.
+    _on(monkeypatch)
+    _cam().hls_ts_url()
+    f = _url_file()
+    assert _wait_for(f.exists)
+    f.write_text("http://127.0.0.1:1/{name}.ts?auth=someone-else")
+    hls_ts.shutdown()
+    assert f.read_text() == "http://127.0.0.1:1/{name}.ts?auth=someone-else"
 
 
 def test_an_unwritable_state_dir_does_not_stop_the_stream(monkeypatch, tmp_path):

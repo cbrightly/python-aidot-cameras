@@ -77,12 +77,10 @@ def _feed(sess, video, aac, realtime=True):
             time.sleep(max(0.0, t0 + (i + 1) / FPS - time.monotonic()))
 
 
-def _join(port, seconds, path):
+def _join(router, seconds, path):
     # rw_timeout: once the feed ends the server sends nothing more; without it
     # the read would wait forever and the recording would never be closed.
-    src = av.open(
-        "http://127.0.0.1:%d/cam.ts" % port, options={"rw_timeout": "5000000"}
-    )
+    src = av.open(router.url("/cam.ts"), options={"rw_timeout": "5000000"})
     dst = av.open(path, "w")
     vin, ain = src.streams.video[0], src.streams.audio[0]
     vo, ao = dst.add_stream_from_template(vin), dst.add_stream_from_template(ain)
@@ -148,7 +146,7 @@ def test_any_join_gets_sound_and_picture_in_step(tmp_path):
         for k, wait in enumerate((0.2, 1.1, 1.7)):
             time.sleep(wait)
             out = str(tmp_path / ("j%d.mp4" % k))
-            _join(srv.port, 4.5, out)
+            _join(srv, 4.5, out)
             offs = _offsets(out)
             assert offs, "join %d saw no flash/click pair" % k
             found += offs
@@ -165,7 +163,7 @@ def test_a_consumer_stays_through_a_camera_reconnect_without_time_going_back(tmp
     try:
         video, aac = _media(7, flash_every=3)
         out = str(tmp_path / "r.mp4")
-        joiner = threading.Thread(target=_join, args=(srv.port, 13.0, out), daemon=True)
+        joiner = threading.Thread(target=_join, args=(srv, 13.0, out), daemon=True)
         joiner.start()
         time.sleep(0.3)
         _feed(tee.session(), video, aac)
@@ -231,7 +229,7 @@ def test_an_old_session_still_writing_cannot_drag_the_timeline(tmp_path):
     try:
         video, aac = _media(6, flash_every=3)
         out = str(tmp_path / "o.mp4")
-        joiner = threading.Thread(target=_join, args=(srv.port, 8.0, out), daemon=True)
+        joiner = threading.Thread(target=_join, args=(srv, 8.0, out), daemon=True)
         joiner.start()
         time.sleep(0.3)
         old, new = tee.session(), tee.session()
@@ -353,7 +351,6 @@ def test_video_decode_times_are_stated_not_left_to_the_reader():
     assert all(pts - dts == 1 for pts, dts in pd), pd[:5]
 
 
-
 def _sps(video):
     au = video[0][0]
     for part in au.replace(b"\0\0\0\1", b"\0\0\1").split(b"\0\0\1"):
@@ -362,9 +359,9 @@ def _sps(video):
     return None
 
 
-def _reader(port):
-    s = __import__("socket").create_connection(("127.0.0.1", port), timeout=5)
-    s.sendall(b"GET /cam.ts HTTP/1.1\r\n\r\n")
+def _reader(router):
+    s = __import__("socket").create_connection(("127.0.0.1", router.port), timeout=5)
+    s.sendall(b"GET /cam.ts?auth=%s HTTP/1.1\r\n\r\n" % router.token.encode())
     s.settimeout(0.5)
     return s
 
@@ -393,7 +390,7 @@ def test_a_new_sps_disconnects_the_readers_so_they_rebuild_their_decoder(changes
         video, aac = _media(2)
         later, _ = _media(2, sps_rate=FPS * 2) if changes else (video, aac)
         assert (_sps(later) != _sps(video)) is changes
-        s = _reader(srv.port)
+        s = _reader(srv)
         _feed(tee.session(), video, aac, realtime=False)
         assert _open_after(s, 0.5)
         _feed(tee.session(), later, aac, realtime=False)

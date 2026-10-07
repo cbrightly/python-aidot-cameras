@@ -141,6 +141,7 @@ def _is_transient_cloud_error(exc: BaseException) -> bool:
     ]
     return isinstance(exc, tuple(transient))
 
+
 # Offline keepalive pause (see CameraMixin._backoff_or_offline_pause): while the
 # cloud explicitly reports a device offline, failed-open retries re-check the
 # flag every RECHECK seconds and only probe a real open every PROBE seconds,
@@ -4828,9 +4829,11 @@ class CameraMixin(
         is on, for cameras whose session is sure to feed it (``_hls_ts_eligible``).
         Unlike go2rtc's RTSP, a consumer joining this
         stream at any moment gets sound and picture in step. The URL exists
-        before the camera's session does and stays the same for the process, so
-        it can be handed to Home Assistant once; a consumer that connects early
-        waits for the first keyframe. See ``hls_ts``.
+        before the camera's session does and stays the same while the listener
+        runs (until ``hls_ts.shutdown``), so it can be handed to Home Assistant
+        once; a consumer that connects early waits for the first keyframe. It
+        carries the listener's secret as ``?auth=``, which Home Assistant masks
+        when it logs the URL. See ``hls_ts``.
         """
         from . import hls_ts
 
