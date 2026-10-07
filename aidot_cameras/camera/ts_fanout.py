@@ -21,12 +21,14 @@ to "wait for the next keyframe" rather than slowing anything down.
 from __future__ import annotations
 
 import collections
+import hmac
 import logging
 import secrets
 import select
 import socket
 import threading
 from typing import Deque, List, Optional
+from urllib.parse import parse_qs
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -251,15 +253,20 @@ class TsRouter:
     camera's media to the other's viewer). One listener has no collisions, and a
     camera's URL stays the same across its sessions, which matters because Home
     Assistant fixes a stream's source URL when it creates the stream.
+
+    Every request must carry the listener's secret as ``?auth=<token>`` (see
+    ``url``); anything else gets the same 404 as an unknown path.
     """
 
     def __init__(self, port: int = 0, *, host: str = "127.0.0.1") -> None:
         self._port = port
         self._host = host
-        #: A secret for this listener's paths. The listener is loopback-only,
-        #: but anything else on the host (an add-on sharing the host network)
-        #: could otherwise read a camera's video from its port and its
-        #: well-known stream name. Never logged.
+        #: A secret for this listener. It is loopback-only, but anything else on
+        #: the host (an add-on sharing the host network) could otherwise read a
+        #: camera's video from its port and its well-known stream name. It goes
+        #: in the query, not the path: Home Assistant logs a stream's URL (at
+        #: ERROR when it cannot open it) and masks an ``auth`` query parameter
+        #: there, but nothing in the path. Never logged here.
         self.token = secrets.token_urlsafe(18)
         self._listen: Optional[socket.socket] = None
         self._lock = threading.Lock()
@@ -271,7 +278,12 @@ class TsRouter:
         return self._port
 
     def url(self, path: str) -> str:
-        return "http://%s:%d%s" % (self._host, self._port, path)
+        """The URL a consumer reads ``path`` from, with the listener's secret."""
+        return "http://%s:%d%s?auth=%s" % (self._host, self._port, path, self.token)
+
+    def _authorized(self, query: str) -> bool:
+        given = parse_qs(query).get("auth", [""])[0]
+        return hmac.compare_digest(given.encode(), self.token.encode())
 
     def start(self) -> None:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -316,14 +328,11 @@ class TsRouter:
             cli.settimeout(5.0)
             req = cli.recv(4096)
             parts = req.split(b"\r\n", 1)[0].split()
-            path = (
-                parts[1].decode("ascii", "replace").split("?", 1)[0]
-                if len(parts) > 1
-                else ""
-            )
+            target = parts[1].decode("ascii", "replace") if len(parts) > 1 else ""
+            path, _, query = target.partition("?")
             with self._lock:
                 ch = self._channels.get(path)
-            if ch is None:
+            if ch is None or not self._authorized(query):
                 cli.sendall(b"HTTP/1.0 404 Not Found\r\nConnection: close\r\n\r\n")
                 _close(cli)
                 return

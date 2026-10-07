@@ -101,7 +101,7 @@ def test_a_mid_stream_join_through_the_real_publisher_is_in_step(
         for k, wait in enumerate((5.4, 1.3)):  # mid-stream, mid-GOP
             time.sleep(wait)
             out = str(tmp_path / ("j%d.mp4" % k))
-            _join(router.port, 6.5, out)
+            _join(router, 6.5, out)
             offs = _offsets(out)
             assert offs, "join %d: no flash/click pair" % k
             found += offs

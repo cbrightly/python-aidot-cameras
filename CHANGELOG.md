@@ -6,14 +6,27 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The in-sync TS's secret no longer reaches Home Assistant's log.** rc39 put
+  it in the URL's path, and Home Assistant logs a stream's URL - at ERROR when
+  it cannot open it - masking only its credentials and the `auth`, `user` and
+  `password` query parameters. The secret is now the `auth` query parameter
+  (`/aidot_<id>.ts?auth=<secret>`); a request without it, or with a wrong one,
+  still gets 404. A recording or view of the old URL ends at the upgrade's
+  restart, as any does.
+
 ### Added
 
-- **The in-sync TS's base URL is left for the owner's tools** in `hls-ts-base`
-  in the library's state directory (`AIDOT_SPROP_DIR`), owner-readable only,
-  removed when the listener stops. A raw capture of a camera's TS is the
-  reference clock for checking that recordings keep sound and picture in step;
-  the secret path from 1.0.0rc39 had hidden it from everything but Home
-  Assistant.
+- **The in-sync TS's URL is left for the owner's tools** in `hls-ts-url` in
+  the library's state directory (`AIDOT_SPROP_DIR`), owner-readable only, as a
+  template (`http://127.0.0.1:<port>/{name}.ts?auth=<secret>`). A raw capture
+  of a camera's TS is the reference clock for checking that recordings keep
+  sound and picture in step; the secret from 1.0.0rc39 had hidden it from
+  everything but Home Assistant. It is written off the caller's thread (Home
+  Assistant asks on its event loop), not at all if the listener stops first,
+  and removed when the listener stops - unless a newer listener's file has
+  replaced it.
 
 ## [1.0.0rc39]
 

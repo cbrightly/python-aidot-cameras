@@ -19,6 +19,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _own_state_dir(monkeypatch, tmp_path_factory):
+    """Every test gets its own library state directory (AIDOT_SPROP_DIR).
+
+    The library writes its state there (sprop caches, the in-sync HLS URL file);
+    without this a test wrote into the developer's real ~/.config/aidot/sprop.
+    Tests that need a particular directory still set their own.
+    """
+    monkeypatch.setenv("AIDOT_SPROP_DIR", str(tmp_path_factory.mktemp("state")))
+
+
 # (model_id, properties) per profile.  Transport selection is driven by the
 # cloud device-dict `properties` (enableSdes / isDTLS), NOT the model id; the
 # model id drives per-model behavior (battery wake, role reversal, plain RTP).

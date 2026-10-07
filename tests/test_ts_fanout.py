@@ -11,6 +11,8 @@ consumer can hold up the muxer or another consumer.
 import socket
 import time
 
+import pytest
+
 from aidot_cameras.camera.ts_fanout import TsRouter
 
 VIDEO, AUDIO, PMT = 0x0100, 0x0101, 0x1000
@@ -38,9 +40,11 @@ def _pat(pmt_pid=PMT):
 PATP, PMTP = _pat(), _ts(PMT, pusi=1, tag=b"PMT")
 
 
-def _connect(srv, path="/cam.ts"):
+def _connect(srv, path="/cam.ts", auth=None):
+    """A consumer's request for ``path``, with the listener's secret unless given."""
+    target = "%s?auth=%s" % (path, srv.token if auth is None else auth)
     s = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
-    s.sendall(b"GET %s HTTP/1.1\r\nHost: x\r\n\r\n" % path.encode())
+    s.sendall(b"GET %s HTTP/1.1\r\nHost: x\r\n\r\n" % target.encode())
     return s
 
 
@@ -79,6 +83,7 @@ class _Srv:
         self.router.start()
         self.ch = self.router.channel("/cam.ts")
         self.port = self.router.port
+        self.token = self.router.token
 
     def __getattr__(self, name):
         return getattr(self.ch, name)
@@ -233,7 +238,7 @@ def test_cameras_share_one_listener_and_each_gets_only_its_own_media():
     router.start()
     try:
         a_ch, b_ch = router.channel("/a.ts"), router.channel("/b.ts")
-        srv = type("S", (), {"port": router.port})()
+        srv = router
         a, b = _connect(srv, "/a.ts"), _connect(srv, "/b.ts")
         assert _wait(lambda: a_ch.consumer_count() == 1 and b_ch.consumer_count() == 1)
         for ch, tag in ((a_ch, b"AAA"), (b_ch, b"BBB")):
@@ -243,7 +248,10 @@ def test_cameras_share_one_listener_and_each_gets_only_its_own_media():
         body_a, body_b = _read_body(a, 3 * 188), _read_body(b, 3 * 188)
         assert b"AAA" in body_a and b"BBB" not in body_a
         assert b"BBB" in body_b and b"AAA" not in body_b
-        assert router.url("/a.ts") == "http://127.0.0.1:%d/a.ts" % router.port
+        assert router.url("/a.ts") == "http://127.0.0.1:%d/a.ts?auth=%s" % (
+            router.port,
+            router.token,
+        )
         a.close(), b.close()
     finally:
         router.close()
@@ -254,11 +262,39 @@ def test_an_unknown_path_gets_404_and_never_another_cameras_media():
     router.start()
     try:
         router.channel("/a.ts")
-        srv = type("S", (), {"port": router.port})()
+        srv = router
         s = _connect(srv, "/nope.ts")
         s.settimeout(3)
         assert s.recv(200).startswith(b"HTTP/1.0 404")
         s.close()
+    finally:
+        router.close()
+
+
+@pytest.mark.parametrize(
+    "auth",
+    ["", "wrong", "first-char"],
+)
+def test_a_request_without_the_listeners_secret_gets_404(auth):
+    # The listener is loopback-only, but anything else on the host (an add-on
+    # sharing the host network) could otherwise read a camera's video from its
+    # port and its well-known stream name.
+    router = TsRouter(0)
+    router.start()
+    try:
+        ch = router.channel("/a.ts")
+        if auth == "first-char":  # all but one character right
+            auth = ("A" if router.token[0] != "A" else "B") + router.token[1:]
+        s = _connect(router, "/a.ts", auth=auth)
+        s.settimeout(3)
+        assert s.recv(200).startswith(b"HTTP/1.0 404")
+        s.close()
+        bare = socket.create_connection(("127.0.0.1", router.port), timeout=5)
+        bare.sendall(b"GET /a.ts HTTP/1.1\r\n\r\n")  # no query at all
+        bare.settimeout(3)
+        assert bare.recv(200).startswith(b"HTTP/1.0 404")
+        bare.close()
+        assert ch.consumer_count() == 0
     finally:
         router.close()
 
@@ -299,7 +335,7 @@ def test_the_listener_survives_an_accept_error():
 
         router._listen = _Flaky()
         time.sleep(0.7)  # let the loop hit the error
-        srv = type("S", (), {"port": router.port})()
+        srv = router
         s = _connect(srv, "/cam.ts")
         s.settimeout(3)
         assert s.recv(64).startswith(b"HTTP/1.0 200")
