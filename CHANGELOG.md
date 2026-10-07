@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc40]
+
 ### Fixed
 
 - **The in-sync TS's secret no longer reaches Home Assistant's log.** rc39 put
