@@ -6,7 +6,7 @@ The pieces existed but did not compose into a choice a user could make:
   srflx 1694498815 > relay 16777215), and the fleet behaves that way - in the
   2026-08-24 full-fleet run six of seven cameras streamed direct and only the
   one unit with no route to us rode the TURN relay;
-* ``sdes_skip_turn`` / ``AIDOT_SDES_SKIP_TURN_PREALLOC`` already implement
+* the TURN pre-allocation skip (``_resolve_sdes_skip_turn``) already implements
   "LAN only" (no relay pre-allocation at all);
 * nothing could FORCE the relay, and nothing reported which path a session
   actually took.
@@ -96,17 +96,15 @@ def test_nonsense_is_auto_not_an_error(monkeypatch):
 
 def test_lan_mode_skips_the_relay_via_the_existing_resolver(monkeypatch):
     # Composition, not a parallel code path: lan must produce the same skip
-    # the sdes_skip_turn lever produces, so every behaviour hanging off that
-    # resolver (instrumentation, adaptive interplay) stays consistent.
+    # resolver every behaviour hangs off (instrumentation included).
     cam = _client_with(mode="lan", monkeypatch=monkeypatch)
     assert cam._resolve_sdes_skip_turn() is True
 
 
 def test_relay_mode_forces_the_preallocation_on(monkeypatch):
     # Forcing the relay while skipping its allocation would offer nothing at
-    # all; relay mode must defeat even an explicit skip_turn=True.
+    # all.
     cam = _client_with(mode="relay", monkeypatch=monkeypatch)
-    cam._sdes_skip_turn_opt = True
     assert cam._resolve_sdes_skip_turn() is False
 
 

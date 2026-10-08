@@ -43,11 +43,7 @@ class _Out:
         self.items.append(item)
 
 
-def _tap(monkeypatch, serve, env=None):
-    if env is None:
-        monkeypatch.delenv(h264_sps.ENV_SPS_FIX, raising=False)
-    else:
-        monkeypatch.setenv(h264_sps.ENV_SPS_FIX, env)
+def _tap(serve):
     qd, out = _Q(), _Out()
     assert CameraMixin._install_encoded_tap(_Rcv(qd), out, True, serve=serve)
     qd.put((0, _Enc(_KEY, 1000)))
@@ -55,19 +51,14 @@ def _tap(monkeypatch, serve, env=None):
     return qd, out
 
 
-def test_the_copy_consumers_get_the_fixed_sps(monkeypatch):
+def test_the_copy_consumers_get_the_fixed_sps():
     for serve in (True, False):
-        _qd, out = _tap(monkeypatch, serve)
+        _qd, out = _tap(serve)
         assert out.items[0] == (h264_sps.fix_access_unit(_KEY), 1000, True)
         assert h264_sps.fix_access_unit(_KEY) != _KEY
         assert out.items[1] == (_DELTA, 4000, False)
 
 
-def test_the_decoder_still_gets_the_cameras_bytes(monkeypatch):
-    qd, _out = _tap(monkeypatch, serve=False)
+def test_the_decoder_still_gets_the_cameras_bytes():
+    qd, _out = _tap(serve=False)
     assert qd.puts[0][1].data == _KEY
-
-
-def test_the_fix_can_be_turned_off(monkeypatch):
-    _qd, out = _tap(monkeypatch, serve=True, env="0")
-    assert out.items[0] == (_KEY, 1000, True)

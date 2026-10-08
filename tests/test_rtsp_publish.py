@@ -290,32 +290,6 @@ def test_timeline_repairs_a_forward_jump_and_handles_wrap():
     assert (t2 - t1) & 0xFFFFFFFF == round(0.033 * 90000) and tl.repairs == 1
 
 
-def test_timeline_never_stalls_on_zero_arrival_delta():
-    tl = _tl("arrival")
-    _, t0 = tl.stamp(1, 5.0)
-    _, t1 = tl.stamp(2, 5.0)
-    assert (t1 - t0) & 0xFFFFFFFF == 1
-
-
-def test_timeline_camera_policy_trusts_the_camera():
-    tl = _tl("camera")
-    _, t0 = tl.stamp(100_000, 0.0)
-    _, t1 = tl.stamp(100_000 + 90000 * 10, 0.1)
-    assert (t1 - t0) & 0xFFFFFFFF == 900_000 and tl.repairs == 0
-
-
-def test_timestamp_policy_env(monkeypatch):
-    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "ARRIVAL")
-    assert rp.timestamp_policy() == "arrival"
-    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "nonsense")
-    assert rp.timestamp_policy() == "hybrid"
-
-
-# --------------------------------------------------------------------------- #
-# steered timeline: the camera's spacing, locked to real time                  #
-# --------------------------------------------------------------------------- #
-
-
 def _steer_frames(tl, frames):
     """Stamp ``(in_ts, arrival)`` frames, two packets each (the second shares
     the first's timestamp), and return ``(arrival, output seconds)`` for every
@@ -800,23 +774,15 @@ def test_steered_learns_rate_from_the_least_late_frames():
     assert max(tail) < 0.05
 
 
-def test_video_timestamp_policy(monkeypatch):
-    monkeypatch.delenv(rp.ENV_PUBLISH_TIMESTAMPS, raising=False)
-    assert rp.video_timestamp_policy() == "steered"
-    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "hybrid")
-    assert rp.video_timestamp_policy() == "hybrid"
-    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "arrival")
-    assert rp.video_timestamp_policy() == "arrival"
-    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "garbage")
-    assert rp.video_timestamp_policy() == "steered"
-    assert rp.timestamp_policy() == "hybrid"
-    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "steered")
-    assert rp.timestamp_policy() == "steered"
-
-
-def test_direct_publish_flag_defaults_off(monkeypatch):
+def test_direct_publish_is_on_unless_turned_off(monkeypatch):
+    # The default since 1.0.0rc44: validated on every model since rc28 and the
+    # soak since 2026-10-04 ran it; the AAC track and the in-sync HLS stream
+    # are built on it.
     monkeypatch.delenv(rp.ENV_DIRECT_PUBLISH, raising=False)
-    assert rp.direct_publish_enabled() is False
+    assert rp.direct_publish_enabled() is True
+    for off in ("0", "false", "no", "off", "OFF"):
+        monkeypatch.setenv(rp.ENV_DIRECT_PUBLISH, off)
+        assert rp.direct_publish_enabled() is False, off
     monkeypatch.setenv(rp.ENV_DIRECT_PUBLISH, "on")
     assert rp.direct_publish_enabled() is True
     assert rp.is_publishable_url("rtsp://127.0.0.1:8554/x")
@@ -1315,10 +1281,9 @@ def test_loopback_publisher_steers_video_and_not_audio(go2rtc, monkeypatch):
     steered to real time; the camera's audio clock is exact and stays hybrid.
     An explicit policy still applies to every track."""
     monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
-    monkeypatch.delenv(rp.ENV_PUBLISH_TIMESTAMPS, raising=False)
     for policy, want_video, want_audio in (
         (None, "steered", "hybrid"),
-        ("arrival", "arrival", "arrival"),
+        ("hybrid", "hybrid", "hybrid"),
     ):
         a_port, v_port = _free_udp_ports(2)
         proc = rp.LoopbackRtpPublisher(
@@ -1332,24 +1297,6 @@ def test_loopback_publisher_steers_video_and_not_audio(go2rtc, monkeypatch):
         finally:
             proc.terminate()
             proc.wait(3)
-
-
-def test_loopback_publisher_env_arrival_applies_to_both_tracks(go2rtc, monkeypatch):
-    """AIDOT_PUBLISH_TIMESTAMPS=arrival with no explicit policy= applies to
-    every track, video and audio alike, the same as an explicit policy=
-    does."""
-    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
-    monkeypatch.setenv(rp.ENV_PUBLISH_TIMESTAMPS, "arrival")
-    a_port, v_port = _free_udp_ports(2)
-    proc = rp.LoopbackRtpPublisher(
-        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam"
-    )
-    try:
-        by_kind = {t.kind: tl.policy for t, tl in zip(proc._tracks, proc._timelines)}
-        assert by_kind == {"video": "arrival", "audio": "arrival"}
-    finally:
-        proc.terminate()
-        proc.wait(3)
 
 
 def test_loopback_publisher_exits_1_when_the_stream_is_missing():
@@ -1623,10 +1570,10 @@ def test_sdes_direct_publish_decision(monkeypatch):
     from aidot_cameras.camera.sdes_open import _should_direct_publish
 
     url = "rtsp://127.0.0.1:8554/aidot_x"
+    monkeypatch.setenv(rp.ENV_DIRECT_PUBLISH, "0")
+    assert not _should_direct_publish(url, None, None, True)  # turned off
     monkeypatch.delenv(rp.ENV_DIRECT_PUBLISH, raising=False)
-    assert not _should_direct_publish(url, None, None, True)  # default off
-    monkeypatch.setenv(rp.ENV_DIRECT_PUBLISH, "1")
-    assert _should_direct_publish(url, None, None, True)
+    assert _should_direct_publish(url, None, None, True)  # the default
     assert not _should_direct_publish("http://127.0.0.1:18600/x.ts", None, None, True)
     assert not _should_direct_publish(None, None, None, True)  # decode drain
     assert not _should_direct_publish(url, "/tmp/clip.ts", None, True)  # recording
@@ -1678,7 +1625,7 @@ def test_dtls_serve_loop_checks_publish_before_the_direct_ts_serve():
 
     src = inspect.getsource(client)
     i_pub = src.index("_publishing = direct_publish_enabled() and is_publishable_url(")
-    i_ts = src.index("elif _direct_serve_enabled()")
+    i_ts = src.index("elif _is_http_serve_url(serve_url):")
     assert i_pub < i_ts
     assert "target=dtls_rtp_publish_run" in src
 
@@ -2301,14 +2248,10 @@ def test_direct_publish_is_gated_to_the_validated_codec(monkeypatch):
 
     url = "rtsp://127.0.0.1:8554/aidot_x"
     monkeypatch.setenv(rp.ENV_DIRECT_PUBLISH, "1")
-    monkeypatch.delenv("AIDOT_DIRECT_PUBLISH_H265", raising=False)
     assert _should_direct_publish(url, None, None, True, 96)  # H.264
     assert not _should_direct_publish(url, None, None, True, 97)  # H.265
     # Codec not known yet (no narrowing): the caller decides later.
     assert _should_direct_publish(url, None, None, True, None)
-    # An escape hatch for whoever validates H.265 on real hardware.
-    monkeypatch.setenv("AIDOT_DIRECT_PUBLISH_H265", "1")
-    assert _should_direct_publish(url, None, None, True, 97)
 
 
 def test_the_open_passes_the_narrowed_codec_to_the_decision():
@@ -2371,12 +2314,6 @@ def test_agc_gate_does_not_amplify_near_silence():
     for _ in range(40):
         out = agc.process(silence)
     assert _alaw_rms(out) < 200
-
-
-def test_agc_can_be_turned_off_and_passes_bytes_through():
-    agc = rp.AlawAgc(env={"AIDOT_AUDIO_AGC": "0"})
-    payload = _alaw_tone(600)
-    assert agc.process(payload) is payload
 
 
 def test_agc_reads_the_same_knobs_as_the_mux():

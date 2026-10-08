@@ -57,11 +57,10 @@ _LOGGER = logging.getLogger(__name__)
 
 #: Env switch for the whole feature. Default OFF until it has soaked live.
 ENV_DIRECT_PUBLISH = "AIDOT_DIRECT_PUBLISH"
-#: Timestamp policy: ``hybrid``, ``arrival``, ``camera`` or ``steered``. Unset,
-#: SDES video is ``steered`` and every other track is ``hybrid``.
-ENV_PUBLISH_TIMESTAMPS = "AIDOT_PUBLISH_TIMESTAMPS"
-#: Every accepted value of ``AIDOT_PUBLISH_TIMESTAMPS``.
-TIMESTAMP_POLICIES = ("hybrid", "arrival", "camera", "steered")
+#: Timestamp policies: SDES video is ``steered`` (its clock runs ~7% fast and
+#: steering keeps its even spacing at real-time rate), every other track is
+#: ``hybrid`` (the camera's own deltas, with an arrival-time repair for a gap).
+TIMESTAMP_POLICIES = ("hybrid", "steered")
 
 _TRUTHY = ("1", "true", "yes", "on")
 
@@ -110,9 +109,18 @@ EXIT_KILLED = -9
 EXIT_FAILED = 1
 
 
+_OFF = ("0", "false", "no", "off")
+
+
 def direct_publish_enabled() -> bool:
-    """True when ``AIDOT_DIRECT_PUBLISH`` is truthy (default off)."""
-    return os.environ.get(ENV_DIRECT_PUBLISH, "").strip().lower() in _TRUTHY
+    """On unless ``AIDOT_DIRECT_PUBLISH`` turns it off.
+
+    The default since 1.0.0rc44: validated on every model since rc28, the soak
+    since 2026-10-04 ran it, and the AAC track and the in-sync HLS stream are
+    built on it. An ``rtsp://`` push still needs a server that accepts an
+    ANNOUNCE (go2rtc); anything else keeps the ffmpeg serve regardless.
+    """
+    return os.environ.get(ENV_DIRECT_PUBLISH, "1").strip().lower() not in _OFF
 
 
 def is_publishable_url(url: Optional[str]) -> bool:
@@ -136,21 +144,6 @@ def _publish_gap_warn_s() -> float:
         return max(0.0, float(os.environ.get("AIDOT_PUBLISH_GAP_WARN_S", "1.0")))
     except (TypeError, ValueError):
         return 1.0
-
-
-def timestamp_policy() -> str:
-    """The configured timestamp policy; unknown values fall back to hybrid."""
-    val = os.environ.get(ENV_PUBLISH_TIMESTAMPS, "hybrid").strip().lower()
-    return val if val in TIMESTAMP_POLICIES else "hybrid"
-
-
-def video_timestamp_policy() -> str:
-    """The SDES video policy: an explicit, valid ``AIDOT_PUBLISH_TIMESTAMPS``
-    wins (as for every track); otherwise ``steered``. The SDES camera stamps
-    video on a 15 fps clock while delivering ~16.1 fps, so its timestamps run
-    ~7% fast; steering keeps its even spacing at real-time rate."""
-    val = os.environ.get(ENV_PUBLISH_TIMESTAMPS, "").strip().lower()
-    return val if val in TIMESTAMP_POLICIES else "steered"
 
 
 class RtspPublishError(RuntimeError):
@@ -442,10 +435,6 @@ class RtpTimeline:
             by_arrival = max(1, round((now - self._last_arrival) * self.clock_rate))
             if self.policy == "steered":
                 step = self._steer(d, now)
-            elif self.policy == "camera":
-                step = d if d > 0 else 1
-            elif self.policy == "arrival":
-                step = by_arrival
             elif 0 < d <= self.max_step:
                 step = d
             else:
@@ -1015,7 +1004,6 @@ class AlawAgc:
 
     ``AIDOT_AUDIO_TARGET_DBFS`` (-15), ``AIDOT_AUDIO_MAXGAIN_DB`` (30),
     ``AIDOT_AUDIO_MINGAIN_DB`` (-12), ``AIDOT_AUDIO_GATE_DBFS`` (-45).
-    ``AIDOT_AUDIO_AGC=0`` turns it off and sends the camera's bytes unchanged.
 
     The gate matters: below it the gain is scaled down quadratically rather
     than cranked toward maximum, which is what stops a quiet camera's A-law
@@ -1036,12 +1024,7 @@ class AlawAgc:
             # down. The per-sample path this replaced merely saturated.
             return val if math.isfinite(val) else float(default)
 
-        self.enabled = str(env.get("AIDOT_AUDIO_AGC", "1")).strip().lower() not in (
-            "0",
-            "false",
-            "no",
-            "off",
-        )
+        self.enabled = True
         self.target = _db2amp(_f("AIDOT_AUDIO_TARGET_DBFS", -15)) * 32767.0
         self.maxg = _db2amp(_f("AIDOT_AUDIO_MAXGAIN_DB", 30))
         self.ming = _db2amp(_f("AIDOT_AUDIO_MINGAIN_DB", -12))
@@ -1189,9 +1172,9 @@ class LoopbackRtpPublisher:
         self._gain = alaw_gain_table(audio_gain_db)
         # An explicit policy applies to every track. Otherwise video is
         # steered (the SDES camera's video clock runs ~7% fast) and audio,
-        # whose clock is exact, keeps the configured policy.
-        video_pol = policy or video_timestamp_policy()
-        audio_pol = policy or timestamp_policy()
+        # whose clock is exact, is hybrid.
+        video_pol = policy or "steered"
+        audio_pol = policy or "hybrid"
         self._timelines = [
             RtpTimeline(
                 t.clock_rate, policy=video_pol if t.kind == "video" else audio_pol
@@ -1829,9 +1812,8 @@ def dtls_rtp_publish_run(
     if aac_t:
         fmtp[97] = aac_fmtp()
     sdp = build_publish_sdp(tracks, fmtp)
-    pol = timestamp_policy()
-    vtl = RtpTimeline(90000, policy=pol)
-    atl = RtpTimeline(8000, policy=pol)
+    vtl = RtpTimeline(90000, policy="hybrid")
+    atl = RtpTimeline(8000, policy="hybrid")
     # The AAC pacer's cold-start alignment needs the video's own media time:
     # the last out_ts stamped for a video frame, and the unwrapped sum of its
     # steps since the first one. The clock rate comes from the video

@@ -594,7 +594,7 @@ class _WebRTCOpenMixin:
             self._open_profile_logged = True
             _LOGGER.info(
                 "camera %s: model=%s transport=%s battery=%s (cloud-reported=%s) "
-                "powerType=%d turn-prealloc=%s adaptive=%s",
+                "powerType=%d turn-prealloc=%s",
                 self.device_id,
                 getattr(getattr(self, "info", None), "model_id", None) or "?",
                 "SDES" if use_sdes else "DTLS",
@@ -602,7 +602,6 @@ class _WebRTCOpenMixin:
                 bool(self._battery_evidence()),
                 self.live_power_type,
                 "skipped" if self._resolve_sdes_skip_turn() else "kept",
-                self._resolve_sdes_adaptive(),
             )
 
         # The cloud liveStreamParam pre-connect (app parity:

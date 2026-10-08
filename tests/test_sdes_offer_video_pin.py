@@ -56,8 +56,19 @@ _OFFER = (
 )
 
 
-def test_unset_means_unpinned(monkeypatch):
+def test_unset_means_pinned_to_h264(monkeypatch):
+    # The default since 1.0.0rc44: the A001064 answered H.265 in one open in
+    # seven, flipping to 2560x1440 mid-session for players that cannot decode
+    # it, and only an H.264 session feeds the in-sync HLS stream.
     monkeypatch.delenv(_ENV, raising=False)
+    assert _resolve_sdes_video_pt() == 96
+    monkeypatch.setenv(_ENV, "")
+    assert _resolve_sdes_video_pt() == 96
+
+
+@pytest.mark.parametrize("raw", ["none", "off", "0", "NONE", " off "])
+def test_an_explicit_opt_out_leaves_the_camera_its_choice(monkeypatch, raw):
+    monkeypatch.setenv(_ENV, raw)
     assert _resolve_sdes_video_pt() is None
 
 
@@ -67,12 +78,12 @@ def test_a_payload_number_is_read(monkeypatch, raw, want):
     assert _resolve_sdes_video_pt() == want
 
 
-@pytest.mark.parametrize("raw", ["", "h265", "abc", "-1", "0", "9.5", "999"])
-def test_anything_unusable_falls_back_to_unpinned(monkeypatch, raw):
-    """Failing closed to a pinned-but-wrong payload type would cost the picture
-    on every SDES camera; falling back to today's behaviour cannot."""
+@pytest.mark.parametrize("raw", ["h265", "abc", "-1", "9.5", "999"])
+def test_anything_unusable_falls_back_to_the_default(monkeypatch, raw):
+    """Pinning to a payload type the offer does not carry would cost the
+    picture on every SDES camera; the default cannot."""
     monkeypatch.setenv(_ENV, raw)
-    assert _resolve_sdes_video_pt() is None
+    assert _resolve_sdes_video_pt() == 96
 
 
 def test_unpinned_leaves_the_offer_byte_identical():

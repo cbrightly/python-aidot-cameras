@@ -109,5 +109,5 @@ def test_the_camera_knows_whether_a_ts_reader_is_expected(monkeypatch):
         monkeypatch.setenv(k, "1")
     monkeypatch.setenv("AIDOT_SDES_VIDEO_PT", "96")
     assert cam._hls_ts_expected() is True
-    monkeypatch.delenv("AIDOT_HLS_DIRECT_TS")
+    monkeypatch.setenv("AIDOT_HLS_DIRECT_TS", "0")
     assert cam._hls_ts_expected() is False

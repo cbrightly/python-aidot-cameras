@@ -37,7 +37,6 @@ from .protocol import (
     NackTracker,
     build_nack,
     build_remb,
-    build_tmmbr,
     _build_sprop,
     parse_avio_response,
     _build_stun_binding_success_response,
@@ -485,25 +484,6 @@ def _widen_media_rcvbuf(sock, kind: str, device_id: str = "?") -> int:
     return got
 
 
-def _env_positive(name: str, cast=int, off=None):
-    """Parse ``name`` as a positive number; anything else means ``off``.
-
-    One body for the experiment knobs below - the third copy of this parser
-    was the rule-of-three moment.  ``off`` is the knob's disabled value (None
-    for the ints, 0.0 for the delay), and unparseable input is disabled rather
-    than an error: these are read while sessions are being built, and a typo
-    must not take a camera off the air.
-    """
-    raw = os.environ.get(name)
-    if raw is None:
-        return off
-    try:
-        value = cast(raw.strip())
-    except ValueError:
-        return off
-    return value if value > 0 else off
-
-
 def _turn_entry_ips(entries) -> set:
     """The server addresses named by ICE entries' ``Uris`` lists.
 
@@ -602,32 +582,6 @@ def _sdes_offer_candidate_lines(
     if mode == "lan":
         return host + srflx
     return host + srflx + relay
-
-
-def _sdes_offer_bandwidth_kbps():
-    """A receive-bandwidth ceiling for the offer, in kbps, or None for none."""
-    return _env_positive("AIDOT_SDES_OFFER_BANDWIDTH_KBPS")
-
-
-def _offer_bandwidth_line(kbps) -> str:
-    """``b=AS:<kbps>`` (RFC 4566 s5.8) for the offer, or "" for no ceiling.
-
-    A receiver telling a sender how much it is willing to accept. This is the
-    last standards-defined bitrate control left after the others were killed
-    on evidence, and the only one we emit ourselves rather than mirror from
-    the app -- the app sends no ``b=`` line at all.
-
-    Anything that is not a positive integer count of kilobits yields no line.
-    ``b=AS:0`` is NOT "unlimited" in RFC 4566; it asks for zero bandwidth, so
-    the off case must omit the line entirely.
-    """
-    try:
-        value = int(kbps)
-    except (TypeError, ValueError):
-        return ""
-    if value <= 0:
-        return ""
-    return f"b=AS:{value}\r\n"
 
 
 def _sdes_nack_enabled() -> bool:
@@ -763,28 +717,6 @@ def _send_video_nack(
     )
 
 
-def _sdes_tmmbr_bps():
-    """The bitrate bound to ask the camera for, in bits/s, or None for none.
-
-    Off unless ``AIDOT_SDES_TMMBR_BPS`` names a positive integer.  Unparseable
-    is off rather than an error: this is read while a session is running.
-    """
-    return _env_positive("AIDOT_SDES_TMMBR_BPS")
-
-
-def _sdes_tmmbr_after_s() -> float:
-    """Seconds of MEDIA to let pass before the first TMMBR.  0 = immediately.
-
-    Exists so the bound can be measured within a session -- window A before it,
-    window B after -- instead of between sessions.  On this camera a
-    between-session comparison has twice produced a wrong answer: it read a
-    codec split as a bandwidth-cap effect, and the encoder's own drift as a
-    working SD control.  Both windows of one session share the codec and the
-    scene, so neither can confound it.
-    """
-    return _env_positive("AIDOT_SDES_TMMBR_AFTER_S", cast=float, off=0.0)
-
-
 #: Measurement scaffolding, OFF unless an operator names a file.
 #:
 #: This used to be the hardcoded string "/config/aidot_expt_cap", which meant a
@@ -885,17 +817,6 @@ def _session_cap_reached(first_media_ts, now: float, cap_s: float) -> bool:
     return (now - first_media_ts) >= cap_s
 
 
-def _tmmbr_ready(first_video_ts, now: float, after_s: float) -> bool:
-    """Whether enough MEDIA has passed to start asking for the bound.
-
-    Measured from the first video packet, not from the open: a camera that
-    takes twelve seconds to wake would otherwise spend all of window A capped.
-    """
-    if first_video_ts is None:
-        return False
-    return (now - first_video_ts) >= after_s
-
-
 def _send_rtcp_fb(send, srtcp_sess, raw: bytes) -> bool:
     """Protect-and-send tail shared by the NACK, TMMBR and REMB helpers.
 
@@ -930,27 +851,6 @@ def _send_video_remb(
     )
 
 
-def _send_video_tmmbr(
-    send, srtcp_sess, sender_ssrc: int, media_ssrc: int, bitrate_bps
-) -> bool:
-    """Put one TMMBR on the camera's RTCP path.  True if it went out.
-
-    ``send`` is the bridge's relay-aware sender, NOT a raw socket, for the
-    reason spelled out on :func:`_send_video_nack`: via TURN the address media
-    arrived from is the relay, and a raw write there is dropped as a malformed
-    STUN message while still reporting success.  (``REMB`` still writes to the
-    socket directly and is inert on a relayed session for exactly that reason;
-    it is latent only because its target defaults to 0.)
-
-    Never raises: this runs inside the bridge's packet loop.
-    """
-    if not bitrate_bps or bitrate_bps <= 0:
-        return False
-    return _send_rtcp_fb(
-        send, srtcp_sess, build_tmmbr(sender_ssrc, media_ssrc, bitrate_bps)
-    )
-
-
 #: Sender SSRC on every RTCP we send the camera.  Load-bearing, not cosmetic:
 #: the SRTP TX policy is keyed `ssrc_value=_CAM_RTCP_SENDER_SSRC`, so the PLI,
 #: REMB, RR and NACK must all agree or the camera drops the packet.
@@ -972,19 +872,8 @@ _SERVE_STDERR_NOISE = (
 
 
 #: Codec the direct publisher is validated for. H.265 sessions keep the ffmpeg
-#: serve unless AIDOT_DIRECT_PUBLISH_H265 says otherwise - see
-#: _should_direct_publish.
+#: serve - see _should_direct_publish.
 _DIRECT_PUBLISH_VIDEO_PT = 96
-
-
-def _direct_publish_h265_allowed() -> bool:
-    """Whether a session that negotiated H.265 may be direct-published."""
-    return os.environ.get("AIDOT_DIRECT_PUBLISH_H265", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
 
 
 def _should_direct_publish(
@@ -1006,14 +895,9 @@ def _should_direct_publish(
     while H.265 has only ever been published synthetically - the A001064
     chooses its own codec and answered H.264 every time it was asked. An H.265
     session therefore keeps the ffmpeg serve, which has carried H.265 in the
-    field all along. ``AIDOT_DIRECT_PUBLISH_H265=1`` lifts that for anyone
-    validating it, and ``video_pt=None`` (codec not yet known) does not gate.
+    field all along; ``video_pt=None`` (codec not yet known) does not gate.
     """
-    if (
-        video_pt is not None
-        and video_pt != _DIRECT_PUBLISH_VIDEO_PT
-        and not _direct_publish_h265_allowed()
-    ):
+    if video_pt is not None and video_pt != _DIRECT_PUBLISH_VIDEO_PT:
         return False
     return (
         plain_rtp
@@ -1228,42 +1112,6 @@ _BATTERY_STALE_OFFER_GRACE_S = float(
 _UNREACHABLE_NOMINEE_GRACE_S = float(
     os.environ.get("AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S", "20")
 )
-
-
-# How long a BATTERY camera's offer waits for the camera to answer first.
-#
-# **Measured on hardware and shipped OFF.** This is the app's own shape - its
-# live view fires keepAliveHandle(), sends the wake, and renders
-# IPC.Status.Sleep rather than opening a session until the device reports
-# itself awake - and on this camera family it is self-defeating, because the
-# live-play signalling is what wakes the camera.  Withholding the offer
-# withholds the wake.
-#
-# Two runs say so.  At 30 s the camera produced no message for the whole gate,
-# the offer went out at +32.1 s and the open ended at +116.8 s against a 75 s
-# failure without it.  At 20 s, on a camera settled for ten minutes: gate
-# elapsed 20044 ms answered=False, webrtcReq at +20.9 s, the camera's own
-# wakeupStatus at +23.6 s - AFTER the offer - and first media at +27.0 s,
-# against 5.4-10.0 s on the same camera with no gate.
-#
-# So the wake evidence follows the offer rather than preceding it, and the
-# useful order is the one we already had: offer immediately, re-assert the
-# keep-alive the moment the camera answers, and abandon an attempt that has
-# stalled (see _BATTERY_STALE_OFFER_GRACE_S).
-#
-# Kept, off, as a lever for anyone re-testing this on other firmware - set
-# AIDOT_BATTERY_WAKE_GATE_S to a number of seconds to enable it.
-_BATTERY_WAKE_GATE_S = float(os.environ.get("AIDOT_BATTERY_WAKE_GATE_S", "0"))
-
-
-def _battery_wake_gate_s(battery: bool, budget: float) -> float:
-    """Seconds to wait for the camera's own answer before offering; 0 = no gate.
-
-    Mains cameras never sleep, so there is nothing to wait for - and the A001064
-    PTZ is mains, which keeps this away from the role-reversal path, whose
-    timing is delicate.
-    """
-    return budget if (battery and budget > 0) else 0.0
 
 
 def _stale_offer_abandon_due(
@@ -1490,18 +1338,10 @@ def _should_skip_doomed_serve(
     the ICE nomination are already up. Aborting those because no video arrived
     would break the siren on exactly the cameras this was written to help.
 
-    ``AIDOT_SKIP_DOOMED_SERVE=0`` restores the old behaviour on the timeout
-    path without a release; the backstop case it always covered is unchanged.
-    A malformed value is ignored rather than allowed to alter a media path.
     """
     if not serving:
         return False
     if have_video:
-        return False
-    if abandoned:
-        return True
-    raw = _os.environ.get("AIDOT_SKIP_DOOMED_SERVE")
-    if raw is not None and raw.strip().lower() in ("0", "false", "no", "off"):
         return False
     return True
 
@@ -1868,7 +1708,7 @@ def _should_count_media(decrypted: bool, plain_rtp: bool) -> bool:
 
 
 def _resolve_sdes_video_pt() -> Optional[int]:
-    """EXPERIMENTAL (opt-in, default off): pin the OFFER to one video codec.
+    """Pin the OFFER to one video codec: H.264 (96) unless told otherwise.
 
     The offer sent in webrtcReq advertises BOTH 96 (H264) and 97 (H265) and
     expresses no preference, so the camera chooses which to send in its answer.
@@ -1876,9 +1716,10 @@ def _resolve_sdes_video_pt() -> Optional[int]:
     nine times and H265 twice for an otherwise identical request, and the codec
     it chose determined the resolution (H264 -> 1280x720, H265 -> 2560x1440, 11
     of 11).  A consumer that cannot decode a sudden 2560x1440 H265 stream, or
-    cannot absorb the bitrate change either way, has no means today of
-    preventing the flip.  Pinning removes the choice: measured 2026-08-07, an
-    offer pinned to 96 produced h264 1280x720 in 4 of 4 sessions.
+    cannot absorb the bitrate change either way, has no means of preventing the
+    flip - and only an H.264 session feeds the in-sync HLS stream.  Pinning
+    removes the choice: measured 2026-08-07, an offer pinned to 96 produced
+    h264 1280x720 in 4 of 4 sessions.  The pin is the default since 1.0.0rc44.
 
     It is the OFFER that matters, not the answer.  Traced live with every status
     line printed: this path sends webrtcReq carrying our offer and then reports
@@ -1886,24 +1727,20 @@ def _resolve_sdes_video_pt() -> Optional[int]:
     An earlier version of this pinned the answer builder instead and changed
     nothing at all, while the arms still came out looking like it had worked.
 
-    **Do not set this to 97.**  An H265-only offer returned NO VIDEO - audio
-    only, no video stream in the recording - in 3 of 3 interleaved rounds
-    against 3 of 3 successes for 96 in the same run.  The efficient H265 profile
-    is real and reproducible, but only when BOTH codecs are offered; narrowing
-    to it removes the option rather than selecting it.
-
-    Left unset this returns None and the offer is byte-identical to today.  The
-    SDES offer path is shared by every SDES camera, and this project's CHANGELOG
-    records fleet-wide blackouts caused by changes to shared paths, so the
-    default has to be inert.  Anything unparseable, or a payload type the
-    template does not advertise, also returns None: narrowing to a payload type
-    the camera was never offered would leave it nothing to send.
+    ``AIDOT_SDES_VIDEO_PT``: unset or empty pins 96; ``97`` pins H.265 - **do
+    not**: an H265-only offer returned NO VIDEO (audio only, no video stream in
+    the recording) in 3 of 3 interleaved rounds against 3 of 3 successes for 96
+    in the same run; ``none``/``off``/``0`` leaves the camera its choice (the
+    offer is then byte-identical to the unpinned one); anything else is the
+    default.  A payload type the offer does not advertise would leave the
+    camera nothing to send, so it is never pinned to.
     """
-    raw = (os.environ.get("AIDOT_SDES_VIDEO_PT", "") or "").strip()
-    if not raw.isdigit():
+    raw = (os.environ.get("AIDOT_SDES_VIDEO_PT", "") or "").strip().lower()
+    if raw in ("none", "off", "0"):
         return None
-    pt = int(raw)
-    return pt if pt in _SDES_ANSWER_VIDEO_PTS else None
+    if raw.isdigit() and int(raw) in _SDES_ANSWER_VIDEO_PTS:
+        return int(raw)
+    return _DIRECT_PUBLISH_VIDEO_PT
 
 
 def _serve_video_pt(observed, answer, pinned) -> "Optional[int]":
@@ -1961,79 +1798,16 @@ _SDES_OFFER_VIDEO_CODECS = {
 _SDES_OFFER_VIDEO_PT_ORDER = (96, 97)
 
 
-def _resolve_sdes_video_pt_order() -> tuple:
-    """EXPERIMENTAL (opt-in, default off): reorder the OFFER's video codec list.
-
-    RFC 3264 section 5.1 makes the ``m=video`` payload-type list a *preference*
-    list, most-preferred first.  The offer this module sends carries ``96 97``,
-    i.e. it already states a preference for H264 -- so the often-repeated
-    shorthand that our offer "expresses no preference" is not what the SDP says.
-    What is true is that nothing here ever *chose* that order: the line arrived
-    verbatim when this path was extracted from ``client.py`` and has never been
-    varied.
-
-    Measured on an A001064, the camera answers H264 most of the time and H265
-    occasionally for an otherwise identical request (nine and two across eleven
-    sessions one afternoon).  Read against the offer, that is a camera which
-    honours our stated first choice most of the time and disregards it some of
-    the time -- which is a reason to expect *less* of reordering than of the
-    pin, and is recorded here so nobody reads this knob as established.
-
-    Why it is worth having anyway: the efficient profile (hevc 2560x1440 at
-    ~1.1 Mbps against h264 1280x720 at 2.5-4.0 Mbps) has only ever appeared when
-    BOTH codecs are on the wire.  ``AIDOT_SDES_VIDEO_PT=97`` narrows to H265 and
-    returns no video at all, 3 of 3 rounds -- narrowing removes the option
-    rather than selecting it.  Reordering is the only untried lever that leaves
-    both codecs offered, so the camera can still fall back to H264.
-
-    Accepts a comma- or space-separated payload-type list (``97,96``, ``97``).
-    Whatever is named goes first, in the order named; every advertised codec not
-    named is appended in the default order.  So this can express a preference
-    and can never narrow the offer: the result is always a permutation of the
-    full advertised set, and an empty or entirely unusable value yields exactly
-    today's order.  Narrowing already has its own variable, and the one time it
-    was measured it cost the picture.
-
-    Unknown payload types and duplicates are dropped rather than honoured: a
-    payload type this offer does not advertise has no rtpmap to go with it, and
-    listing one on the m-line would name a codec the camera was never given the
-    parameters for.
-    """
-    raw = os.environ.get("AIDOT_SDES_VIDEO_PT_ORDER", "") or ""
-    named: list = []
-    for tok in raw.replace(",", " ").split():
-        if not tok.isdigit():
-            continue
-        pt = int(tok)
-        if pt in _SDES_OFFER_VIDEO_CODECS and pt not in named:
-            named.append(pt)
-    return tuple(named) + tuple(
-        pt for pt in _SDES_OFFER_VIDEO_PT_ORDER if pt not in named
-    )
-
-
-def _sdes_offer_video_codec_lines(order=None) -> tuple:
-    """Build the offer's video codec list and its rtpmap/fmtp block.
+def _sdes_offer_video_codec_lines() -> tuple:
+    """The offer's video codec list and its rtpmap/fmtp block.
 
     Returns ``(pt_list, attrs)`` where ``pt_list`` is the payload-type list for
     the ``m=video`` line ("96 97") and ``attrs`` is the rtpmap/fmtp lines for
-    those payload types, in the same order.  Both have to move together: an
-    m-line naming a payload type whose rtpmap was left behind is an offer the
-    camera cannot act on.
-
-    ``order`` of None is today's shipped order, so the default output is
-    byte-identical to the literal this replaced.  Anything not advertised is
-    dropped, and an order that ends up empty falls back to the default -- an
-    ``m=video`` line with no payload type at all leaves the camera nothing to
-    send, which is the one outcome worse than an unpinned choice.
+    those payload types, in the same order.  Both move together: an m-line
+    naming a payload type whose rtpmap was left behind is an offer the camera
+    cannot act on.
     """
-    pts = tuple(
-        pt
-        for pt in (order if order is not None else _SDES_OFFER_VIDEO_PT_ORDER)
-        if pt in _SDES_OFFER_VIDEO_CODECS
-    )
-    if not pts:
-        pts = _SDES_OFFER_VIDEO_PT_ORDER
+    pts = _SDES_OFFER_VIDEO_PT_ORDER
     return (
         " ".join(str(pt) for pt in pts),
         "".join(_SDES_OFFER_VIDEO_CODECS[pt] for pt in pts),
@@ -3240,10 +3014,10 @@ class _SdesOpenMixin:
         # AIDOT_FAST_CONNECT skips this blocking pre-allocation (LAN-direct mode):
         # the offer goes out immediately with host/srflx candidates and the LAN
         # path connects without waiting on a cloud TURN Allocate round-trip.
-        # AIDOT_SDES_SKIP_TURN_PREALLOC (experimental, opt-in) does the same skip
-        # for SDES specifically, where _fast_connect is force-off (see
-        # _resolve_sdes_skip_turn).  Either way the cost is instrumented below so
-        # the saving is measurable: grep ``signaling-wait[`` for sdes-turn-prealloc.
+        # Connection mode "lan" does the same skip for SDES specifically, where
+        # _fast_connect is force-off (see _resolve_sdes_skip_turn).  Either way
+        # the cost is instrumented below so the saving is measurable: grep
+        # ``signaling-wait[`` for sdes-turn-prealloc.
         _skip_turn_prealloc = self._resolve_sdes_skip_turn()
         # Which media path to offer (auto | lan | relay).  Resolved once per
         # open; the candidate blocks below are built from it.  A receipt goes
@@ -3314,8 +3088,8 @@ class _SdesOpenMixin:
                 _LOGGER.warning("TURN pre-allocation error: %s", _pre_exc)
         if _skip_turn_prealloc and _sdes_turn_entries:
             _status(
-                "AIDOT_SDES_SKIP_TURN_PREALLOC: skipping TURN relay"
-                " pre-allocation (~2-3s) - host/srflx candidates only, LAN-direct"
+                "connection mode lan: skipping TURN relay pre-allocation (~2-3s)"
+                " - host/srflx candidates only"
             )
         _LOGGER.info(
             "signaling-wait[%s] sdes-turn-prealloc elapsed=%dms allocated=%d skipped=%s",
@@ -3474,19 +3248,11 @@ class _SdesOpenMixin:
             if _talk_offer
             else None
         )
-        # Video codec preference, expressed by m-line order (RFC 3264 5.1).
-        # Default is today's 96 97 and the bytes are identical to the literal
-        # this replaced; AIDOT_SDES_VIDEO_PT_ORDER reorders it without ever
-        # narrowing it.
-        _video_pt_order = _resolve_sdes_video_pt_order()
-        # Read ONCE and feed both the SDP line and the status receipt below:
-        # two independent env reads let the receipt name a value that never
-        # reached the wire, which is the false-receipt trap the receipt
-        # exists to close.
-        _bw_kbps = _sdes_offer_bandwidth_kbps()
-        _video_pt_list, _video_codec_attrs = _sdes_offer_video_codec_lines(
-            _video_pt_order
-        )
+        # Video codec preference, expressed by m-line order (RFC 3264 5.1):
+        # 96 (H.264) first, 97 (H.265) second. The order was an experiment knob
+        # once; the camera answers from its own template whatever the order,
+        # and the bitrate question it served is closed (2026-08-24).
+        _video_pt_list, _video_codec_attrs = _sdes_offer_video_codec_lines()
         sdes_offer_sdp = (
             "v=0\r\n"
             f"o=- {ts} {ts} IN IP4 {local_ip}\r\n"
@@ -3519,9 +3285,7 @@ class _SdesOpenMixin:
             )
             # video m-section
             + f"m=video {_offer_video_port} RTP/SAVPF {_video_pt_list}\r\n"
-            f"c=IN IP4 {_offer_video_ip}\r\n"
-            + _offer_bandwidth_line(_bw_kbps)
-            + "a=recvonly\r\n"
+            f"c=IN IP4 {_offer_video_ip}\r\n" + "a=recvonly\r\n"
             "a=mid:1\r\n"
             f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
             + _video_codec_attrs
@@ -3561,16 +3325,12 @@ class _SdesOpenMixin:
         # showed the pin had never reached the SDP at all.  Ordering happens
         # before the pin below, so with both set the pin wins and the order is
         # moot - which is why both lines print rather than one.
-        if _video_pt_order != _SDES_OFFER_VIDEO_PT_ORDER and _status:
-            _status(f"SDES: offer video codec order={_video_pt_list}")
 
         # Same receipt, same reason, for the receive-bandwidth ceiling: the log
         # carries the camera's ANSWER, not our offer, so "the env var was set"
         # is not evidence the line reached the wire.  Measured 2026-08-23: a
         # b=AS arm scored identically to its control and the only available
         # check for the knob was reading the env back out of the harness.
-        if _bw_kbps and _status:
-            _status(f"SDES: offer receive-bandwidth ceiling b=AS:{_bw_kbps}")
 
         # Opt-in: NARROW the OFFER to one video codec rather than advertising
         # both 96/97 and letting the camera decide in its answer.  Distinct from
@@ -3671,36 +3431,6 @@ class _SdesOpenMixin:
             int((time.monotonic() - _echo_t0) * 1000),
             _echo_timeout,
         )
-        # App parity: do not offer to a battery camera until the camera itself
-        # has said something.  See _battery_wake_gate_s.  Mains cameras skip
-        # this entirely, so the PTZ's role-reversal timing is untouched.
-        _wake_gate_s = _battery_wake_gate_s(
-            bool(getattr(self, "is_battery_camera", False)), _BATTERY_WAKE_GATE_S
-        )
-        if _wake_gate_s > 0:
-            _wg_t0 = time.monotonic()
-            while (
-                getattr(self, "_camera_device_seen_ts", None) is None
-                and time.monotonic() - _wg_t0 < _wake_gate_s
-            ):
-                await _asyncio.sleep(0.05)
-            _wg_seen = getattr(self, "_camera_device_seen_ts", None) is not None
-            _LOGGER.info(
-                "signaling-wait[%s] battery-wake-gate elapsed=%dms answered=%s"
-                " (budget=%.0fs)",
-                self.device_id,
-                int((time.monotonic() - _wg_t0) * 1000),
-                _wg_seen,
-                _wake_gate_s,
-            )
-            if _wg_seen:
-                _status(
-                    "camera answered after %.1fs - offering now"
-                    % (time.monotonic() - _wg_t0)
-                )
-            else:
-                _status("camera said nothing in %.0fs - offering anyway" % _wake_gate_s)
-
         # livePlayResp: explicit camera accept/reject before SDP/ICE.
         if _skip_lp:
             _LOGGER.info(
@@ -6148,50 +5878,6 @@ class _SdesOpenMixin:
                                 f" 0x{_bridge_fn._cam_video_ssrc:08x}"
                             )
 
-                    # TMMBR: a BOUND, where REMB above is an ESTIMATE.  Two
-                    # different RFC 5104 / 4585 messages, and this firmware can
-                    # honour one without the other -- it already acts on NACKs
-                    # it never negotiated (our SDES offer carries no a=rtcp-fb
-                    # line at all), so "the answer does not advertise ccm
-                    # tmmbr" is not a reason to withhold it.  Off by default;
-                    # every bitrate control tried on this camera so far has
-                    # been acked and ignored, and an unmeasured one must not
-                    # reach the four cameras that stream fine today.
-                    # Same cost ordering: the per-session bps attr is the
-                    # one cheap read the off-default pays; the cadence gate
-                    # runs before _tmmbr_ready so the readiness math and the
-                    # sender lookup happen at most once a second, not per
-                    # packet, and one time.time() serves both checks.
-                    _tmmbr_bps = getattr(_bridge_fn, "_tmmbr_bps", None)
-                    if (
-                        _tmmbr_bps
-                        and hasattr(_bridge_fn, "_cam_video_ssrc")
-                        and (_tmmbr_now := _time_br.time())
-                        - getattr(_bridge_fn, "_last_tmmbr_ts", 0.0)
-                        >= 1.0
-                        and _tmmbr_ready(
-                            getattr(_bridge_fn, "_first_video_ts", None),
-                            _tmmbr_now,
-                            getattr(_bridge_fn, "_tmmbr_after_s", 0.0),
-                        )
-                        and (_tmmbr_send := getattr(_bridge_fn, "_send_to_cam", None))
-                        is not None
-                    ):
-                        _bridge_fn._last_tmmbr_ts = _tmmbr_now
-                        if _send_video_tmmbr(
-                            _tmmbr_send,
-                            getattr(_bridge_fn, "_pli_tx_sess", None),
-                            _CAM_RTCP_SENDER_SSRC,
-                            _bridge_fn._cam_video_ssrc,
-                            _tmmbr_bps,
-                        ) and not getattr(_bridge_fn, "_tmmbr_logged", False):
-                            _bridge_fn._tmmbr_logged = True
-                            _status(
-                                f"SDES: sent TMMBR {_tmmbr_bps // 1000} kbps"
-                                f" for video SSRC"
-                                f" 0x{_bridge_fn._cam_video_ssrc:08x}"
-                            )
-
                     _pli_done = getattr(_bridge_fn, "_pli_count", 0)
                     _pli_interval = (
                         _pli_gaps[_pli_done] if _pli_done < len(_pli_gaps) else 30.0
@@ -8000,13 +7686,6 @@ class _SdesOpenMixin:
                                 # os.environ.get costs ~250ns of it.  A flip
                                 # now takes effect on the next stream open.
                                 _bridge_fn._nack_on = _sdes_nack_enabled()
-                                # Same reason, same place: the RTCP cadence
-                                # below sits on this loop, so its switches are
-                                # resolved once here rather than read from the
-                                # environment ~300x/s.  A flip takes effect on
-                                # the next stream open, as the NACK switch does.
-                                _bridge_fn._tmmbr_bps = _sdes_tmmbr_bps()
-                                _bridge_fn._tmmbr_after_s = _sdes_tmmbr_after_s()
                             # For TUTK cameras (_use_plain_rtp) the ffmpeg SDP uses
                             # RTP/AVP (no crypto). After LIVING the camera switches
                             # from TUTK SFrames to standard SRTP, so we decrypt here
@@ -9081,7 +8760,7 @@ class _SdesOpenMixin:
             _LOGGER.info(
                 "camera %s: this session negotiated video pt=%s, which the"
                 " direct publisher is not validated for; keeping the ffmpeg"
-                " serve (AIDOT_DIRECT_PUBLISH_H265=1 to publish it anyway)",
+                " serve",
                 getattr(self, "device_id", "?"),
                 _keep_v,
             )

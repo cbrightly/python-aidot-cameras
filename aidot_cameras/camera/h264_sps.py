@@ -18,27 +18,14 @@ so decode order is presentation order by construction. Every other bit is
 copied. An SPS that states nothing, already states 0, or that this parser
 cannot read to its end, is returned unchanged.
 
-Off with ``AIDOT_PUBLISH_SPS_FIX=0``.
 """
 
 from __future__ import annotations
 
 import functools
-import os
 from typing import List, Optional
 
-ENV_SPS_FIX = "AIDOT_PUBLISH_SPS_FIX"
-
 _HIGH_PROFILES = {100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135}
-
-
-def enabled() -> bool:
-    return os.environ.get(ENV_SPS_FIX, "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
 
 
 # -- RBSP <-> EBSP ----------------------------------------------------------- #

@@ -6,6 +6,31 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Changed
+
+- **Three fixes that were opt-in are the default.** Direct publish into go2rtc
+  (`AIDOT_DIRECT_PUBLISH`), the AAC track (`AIDOT_PUBLISH_AAC`) and the
+  in-sync HLS stream (`AIDOT_HLS_DIRECT_TS`) are on unless set to `0`; the
+  SDES offer is pinned to H.264 unless `AIDOT_SDES_VIDEO_PT=none`. Each was
+  validated on every model and has run on the reference installation since
+  2026-10-04; direct publish is what the other two are built on, and the pin
+  is what keeps a camera from flipping to H.265 mid-session.
+- **Fourteen experiment knobs are gone, with the code behind them** - the
+  closed bitrate and quality levers (`AIDOT_SDES_VIDEO_PT_ORDER`,
+  `AIDOT_SDES_OFFER_BANDWIDTH_KBPS`, `AIDOT_SDES_TMMBR_BPS`,
+  `AIDOT_SDES_TMMBR_AFTER_S`, `AIDOT_SDES_ADAPTIVE`), the switches that only
+  turned a fix off (`AIDOT_SKIP_DOOMED_SERVE`, `AIDOT_PUBLISH_SPS_FIX`,
+  `AIDOT_AUDIO_AGC`, `AIDOT_DTLS_DIRECT_SERVE`, `AIDOT_PUBLISH_TIMESTAMPS`, the
+  no-op `AIDOT_LIVESTREAM_PARAM`) and the unfinished experiments
+  (`AIDOT_SDES_SKIP_TURN_PREALLOC`, `AIDOT_BATTERY_WAKE_GATE_S`,
+  `AIDOT_DIRECT_PUBLISH_H265`). Setting any of them now does nothing, and the
+  `start_keepalive` arguments `sdes_skip_turn` and `sdes_adaptive` are
+  accepted and ignored, so a caller built against an older release still
+  works.
+  The TURN pre-allocation skip lives on as connection mode `lan`. The RTP
+  timestamp policies `arrival` and `camera` are gone with their switch; SDES
+  video is `steered` and every other track `hybrid`, as before by default.
+
 ## [1.0.0rc43]
 
 ### Changed

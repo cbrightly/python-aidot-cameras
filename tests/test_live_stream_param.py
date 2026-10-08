@@ -99,26 +99,18 @@ def _cam(model_id="LK.IPC.A001513", **attrs):
     return c
 
 
-def test_gate_closed_by_default(monkeypatch):
-    monkeypatch.delenv("AIDOT_LIVESTREAM_PARAM", raising=False)
-    assert _cam()._resolve_live_stream_param() is False
-
-
-def test_gate_stays_closed_for_the_env(monkeypatch):
-    monkeypatch.setenv("AIDOT_LIVESTREAM_PARAM", "1")
+def test_gate_closed_by_default():
     assert _cam()._resolve_live_stream_param() is False
 
 
 def test_gate_stays_closed_for_an_explicit_opt(monkeypatch):
     # start_keepalive(live_stream_param=True) - what a consumer that surfaces the
     # setting passes. It must not be able to re-break a battery camera's video.
-    monkeypatch.delenv("AIDOT_LIVESTREAM_PARAM", raising=False)
     c = _cam(_live_stream_param_opt=True)
     assert c._resolve_live_stream_param() is False
 
 
 def test_gate_closed_for_every_battery_model(monkeypatch):
-    monkeypatch.setenv("AIDOT_LIVESTREAM_PARAM", "1")
     for _m in (
         "LK.IPC.A001513",
         "LK.IPC.A001513-1",
@@ -131,7 +123,6 @@ def test_gate_closed_for_every_battery_model(monkeypatch):
 
 def test_gate_closed_for_a_mains_camera(monkeypatch):
     # The call was never made for a mains camera; the gate agrees.
-    monkeypatch.setenv("AIDOT_LIVESTREAM_PARAM", "1")
     c = _cam("LK.IPC.A000088", _live_stream_param_opt=True)
     assert c._resolve_live_stream_param() is False
 
@@ -150,7 +141,6 @@ def test_ignored_request_is_warned_once(caplog):
 
 
 def test_no_warning_when_nobody_asked(monkeypatch, caplog):
-    monkeypatch.delenv("AIDOT_LIVESTREAM_PARAM", raising=False)
     with caplog.at_level("WARNING"):
         _cam()._resolve_live_stream_param()
     assert not [r for r in caplog.records if "liveStreamParam" in r.getMessage()]
