@@ -19,6 +19,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   no-media accounting that stops a battery camera's keepalive; after that it
   is served as it came, with a warning. Only when the in-sync option is on
   and the camera is eligible for it; otherwise nothing changes.
+- **The LAN discovery sweep runs only for an account that has a light.** It
+  started on the first device of any kind and then broadcast on every IPv4
+  interface every two minutes for the life of the process; cameras ignore
+  the broadcast (their LAN address comes from WebRTC signalling), and the
+  sweep's only consumers are light clients. An account of cameras alone -
+  this integration's usual one - no longer broadcasts at all.
+
 
 ## [1.0.0rc41]
 
