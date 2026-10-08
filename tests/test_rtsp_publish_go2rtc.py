@@ -475,6 +475,16 @@ def bundled_go2rtc(tmp_path):
     log.close()
 
 
+def _wait_in_log(path, text, timeout):
+    """True once ``text`` appears in the log file at ``path``."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if text in path.read_text(errors="replace"):
+            return True
+        time.sleep(0.05)
+    return False
+
+
 def test_bundled_go2rtc_exposes_no_tcp_api(bundled_go2rtc):
     """The integration's reachability probe must come back False here: there
     is no TCP API to answer it, which is why a camera that CAN be pulled has
@@ -539,6 +549,15 @@ def test_publishing_works_when_aimed_at_the_bundled_rtsp_port(bundled_go2rtc):
 
     threading.Thread(target=feed, daemon=True).start()
     try:
+        # Read back only once the publish has landed. A reader that arrives
+        # first makes go2rtc dial the placeholder source and answer 404 (or
+        # hand out a stream with no codec parameters yet): reproduced in CI and
+        # in a Linux container 2026-10-08, where the reader beat the publisher's
+        # ANNOUNCE by 3 ms. The log line is the only sign this go2rtc gives,
+        # having no TCP API to ask.
+        assert _wait_in_log(
+            bundled_go2rtc["log"], "new producer stream=aidot_cam", 10.0
+        ), "the publish never landed:\n" + bundled_go2rtc["log"].read_text()[-3000:]
         out = _read_back(url, want_frames=10)
     finally:
         stop.set()
