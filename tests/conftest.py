@@ -19,6 +19,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+# CI sets AIDOT_FAIL_ON_SKIP so a test that skips for a missing tool fails the
+# run instead of passing silently; see skip_guard.py.
+pytest_plugins = ["skip_guard"]
+
 
 @pytest.fixture(autouse=True)
 def _own_state_dir(monkeypatch, tmp_path_factory):

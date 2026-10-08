@@ -102,6 +102,15 @@ jobs:
       # all have them).
       - name: System deps
         run: apk add --no-cache git ffmpeg gcc musl-dev libffi-dev
+      - name: go2rtc (the publish tests run against a real one)
+        # Without it tests/test_rtsp_publish_go2rtc.py skipped - nine tests of
+        # the direct publish path that never ran in CI until 2026-10-08. The
+        # release binary is static, so it runs on musl; pinned by checksum.
+        run: |
+          curl -sSfL -o /usr/local/bin/go2rtc https://github.com/AlexxIT/go2rtc/releases/download/v1.9.14/go2rtc_linux_amd64
+          echo "32d616af226bd731678ffde328b94cfb94e30339bfefc469cfb76323144615a6  /usr/local/bin/go2rtc" | sha256sum -c -
+          chmod +x /usr/local/bin/go2rtc
+          go2rtc --version
       - name: Install package + test deps
         # pytest-asyncio is needed even though this job skips the e2e tier: the
         # asyncio_mode / asyncio_default_fixture_loop_scope settings live in
@@ -139,6 +148,10 @@ jobs:
       # only guard - it keeps the job from importing the tier at all.
       # The e2e job below is what actually runs it.
       - name: Run unit tests
+        # AIDOT_FAIL_ON_SKIP: a test that skips for a missing tool fails the
+        # run instead of passing silently (tests/skip_guard.py).
+        env:
+          AIDOT_FAIL_ON_SKIP: "1"
         run: pytest tests/ -q -m "not e2e and not live" --ignore=tests/e2e --cov=aidot_cameras --cov-report=term-missing
 
   # End-to-end against a FAKE environment: the real client stack (real paho over
@@ -217,6 +230,8 @@ jobs:
           python -c "import aidot_cameras; print('library under test:', aidot_cameras.__file__)"
       - name: Run the integration's test suite
         working-directory: integration
+        env:
+          AIDOT_FAIL_ON_SKIP: "1"
         run: pytest tests/ -q --timeout=60
 
   # Home Assistant pins its whole dependency tree in package_constraints.txt.
