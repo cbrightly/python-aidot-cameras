@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc41]
+
 ### Fixed
 
 - **`Go2rtcClient` queues its writes to one server.** go2rtc 1.9.9 saves each
