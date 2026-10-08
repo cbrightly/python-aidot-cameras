@@ -6,6 +6,20 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Go2rtcClient` queues its writes to one server.** go2rtc 1.9.9 saves each
+  `PUT` and `DELETE /api/streams` by reading its config file, patching it and
+  writing it back, with nothing guarding that cycle; two overlapping writes
+  for any two streams can tear the file (keys lost, or one duplicated, after
+  which go2rtc rejects every later write with 400 until the file is fixed by
+  hand). Reproduced 2026-10-08: 18 of 40 bursts of 15 PUTs corrupted the
+  file. Writes to one server now wait their turn, across client objects.
+- **A rejected registration logs what go2rtc said.** The warning for a
+  `PUT /api/streams` that failed carries the response body on one line, so
+  a duplicate key in go2rtc's own config - which names itself there - is
+  read from the log instead of guessed.
+
 ## [1.0.0rc40]
 
 ### Fixed

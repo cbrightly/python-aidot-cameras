@@ -16,12 +16,18 @@ go2rtc REST API (v1.x), verified against go2rtc 1.9.9:
 ==========================  ============================================
 """
 
+import asyncio
 import logging
-from typing import Optional
+import weakref
+from typing import Dict, Optional
 
 import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
+
+#: One write lock per go2rtc server, per event loop (a lock belongs to the
+#: loop that first waits on it). See ``Go2rtcClient._write_lock``.
+_WRITE_LOCKS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, asyncio.Lock]]" = weakref.WeakKeyDictionary()
 
 # go2rtc is co-located with Home Assistant by default; HA exposes its API here.
 DEFAULT_BASE_URL = "http://127.0.0.1:1984"
@@ -44,6 +50,27 @@ class Go2rtcClient:
     @property
     def base_url(self) -> str:
         return self._base
+
+    def _write_lock(self) -> asyncio.Lock:
+        """The lock every PUT and DELETE to this server holds.
+
+        go2rtc 1.9.9 saves each PUT and DELETE by reading its config file,
+        patching the stream and writing the file back (truncate, then write),
+        with nothing guarding that cycle. Two overlapping writes - for any two
+        streams - can read an empty or half-written file and write back what
+        they made of it: sections gone, a key lost, or a key duplicated, after
+        which go2rtc rejects every later write with 400 until the file is fixed
+        by hand (18 of 40 bursts of 15 PUTs over 5 names corrupted the file,
+        2026-10-08). So writes to one server are queued, across client objects.
+        """
+        loop = asyncio.get_running_loop()
+        locks = _WRITE_LOCKS.get(loop)
+        if locks is None:
+            locks = _WRITE_LOCKS[loop] = {}
+        lock = locks.get(self._base)
+        if lock is None:
+            lock = locks[self._base] = asyncio.Lock()
+        return lock
 
     async def available(self) -> bool:
         """True if the go2rtc API answers ``GET /api`` with 200."""
@@ -120,16 +147,24 @@ class Go2rtcClient:
         """
         sources = [source, *extra_sources]
         try:
-            async with self._session.put(
-                f"{self._base}/api/streams",
-                params=[("name", name), *(("src", s) for s in sources)],
-                timeout=self._timeout,
-            ) as resp:
+            async with (
+                self._write_lock(),
+                self._session.put(
+                    f"{self._base}/api/streams",
+                    params=[("name", name), *(("src", s) for s in sources)],
+                    timeout=self._timeout,
+                ) as resp,
+            ):
                 if resp.status == 200:
                     _LOGGER.info("go2rtc: registered stream %r -> %s", name, sources)
                     return True
+                # The body is the one line that explains a wall of these: a
+                # duplicate key in go2rtc's own config names itself here.
                 _LOGGER.warning(
-                    "go2rtc: add stream %r failed http=%s", name, resp.status
+                    "go2rtc: add stream %r failed http=%s%s",
+                    name,
+                    resp.status,
+                    await _said(resp),
                 )
         except Exception as exc:
             _LOGGER.warning("go2rtc: add stream %r error: %s", name, exc)
@@ -138,11 +173,14 @@ class Go2rtcClient:
     async def remove_stream(self, name: str) -> bool:
         """Remove ``name`` from go2rtc. Returns True on 200."""
         try:
-            async with self._session.delete(
-                f"{self._base}/api/streams",
-                params={"src": name},
-                timeout=self._timeout,
-            ) as resp:
+            async with (
+                self._write_lock(),
+                self._session.delete(
+                    f"{self._base}/api/streams",
+                    params={"src": name},
+                    timeout=self._timeout,
+                ) as resp,
+            ):
                 return resp.status == 200
         except Exception as exc:
             _LOGGER.debug("go2rtc: remove stream %r error: %s", name, exc)
@@ -152,6 +190,15 @@ class Go2rtcClient:
         """The RTSP pull URL go2rtc serves a registered stream at."""
         host = self._base.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
         return f"rtsp://{host}:{rtsp_port}/{name}"
+
+
+async def _said(resp) -> str:
+    """go2rtc's answer to a rejected write, as one short line (or nothing)."""
+    try:
+        text = " ".join((await resp.text()).split())
+    except Exception:
+        return ""
+    return ": " + text[:160] if text else ""
 
 
 async def prefer_go2rtc(
