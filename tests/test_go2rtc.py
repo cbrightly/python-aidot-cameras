@@ -14,9 +14,10 @@ from aidot_cameras.camera.go2rtc import Go2rtcClient, prefer_go2rtc
 
 
 class _Resp:
-    def __init__(self, status, json_data=None):
+    def __init__(self, status, json_data=None, text=""):
         self.status = status
         self._json = json_data if json_data is not None else {}
+        self._text = text
 
     async def __aenter__(self):
         return self
@@ -27,6 +28,9 @@ class _Resp:
     async def json(self):
         return self._json
 
+    async def text(self):
+        return self._text
+
 
 class _FakeSession:
     def __init__(
@@ -35,12 +39,18 @@ class _FakeSession:
         api_status=200,
         streams=None,
         put_status=200,
+        put_text="",
         delete_status=200,
         raise_on=(),
+        write_delay=0.0,
     ):
         self.api_status = api_status
         self.streams = streams if streams is not None else {}
         self.put_status = put_status
+        self.put_text = put_text
+        self.write_delay = write_delay
+        self.writes_in_flight = 0
+        self.max_writes_in_flight = 0
         self.delete_status = delete_status
         self.raise_on = set(raise_on)
         self.calls = []
@@ -59,11 +69,30 @@ class _FakeSession:
         self.calls.append(("PUT", url, kw.get("params")))
         if "put" in self.raise_on:
             raise OSError("connection refused")
-        return _Resp(self.put_status)
+        return self._write(_Resp(self.put_status, text=self.put_text))
 
     def delete(self, url, **kw):
         self.calls.append(("DELETE", url, kw.get("params")))
-        return _Resp(self.delete_status)
+        return self._write(_Resp(self.delete_status))
+
+    def _write(self, resp):
+        """A write that takes ``write_delay`` and counts how many overlap."""
+        session = self
+
+        class _Timed:
+            async def __aenter__(self_):
+                session.writes_in_flight += 1
+                session.max_writes_in_flight = max(
+                    session.max_writes_in_flight, session.writes_in_flight
+                )
+                await asyncio.sleep(session.write_delay)
+                return resp
+
+            async def __aexit__(self_, *a):
+                session.writes_in_flight -= 1
+                return False
+
+        return _Timed()
 
 
 def test_available():
@@ -193,3 +222,63 @@ if __name__ == "__main__":
                 _fail += 1
                 print(f"FAIL {_k}: {_e}")
     raise SystemExit(1 if _fail else 0)
+
+
+def test_a_rejected_register_call_logs_what_go2rtc_said(caplog):
+    # go2rtc 1.9.9 answers every PUT with 400 once its own config file holds a
+    # duplicate key, and the body names the key: the one line that explains a
+    # wall of "failed http=400" warnings. Logged on one line, cut short.
+    s = _FakeSession(
+        put_status=400,
+        put_text='yaml: unmarshal errors:\n  line 4: mapping key "aidot_x" already defined at line 2\n'
+        + "x" * 300,
+    )
+    with caplog.at_level("WARNING"):
+        assert asyncio.run(Go2rtcClient(s).ensure_stream("cam", "rtsp://x/y")) is False
+    (rec,) = [r for r in caplog.records if "failed http=400" in r.getMessage()]
+    msg = rec.getMessage()
+    assert 'mapping key "aidot_x" already defined' in msg
+    assert "\n" not in msg and len(msg) < 260
+
+
+def test_writes_to_one_go2rtc_never_overlap_even_from_two_clients():
+    # go2rtc 1.9.9 saves every PUT and DELETE by reading its config file,
+    # patching it and writing it back with nothing guarding the read-modify-
+    # write. Two overlapping writes - for any two streams - can tear the file:
+    # keys lost, or one duplicated, after which go2rtc rejects every later
+    # write with 400 until the file is fixed by hand (reproduced 2026-10-08).
+    # So the client queues every write to one server, across client objects.
+    s = _FakeSession(write_delay=0.02)
+
+    async def run():
+        a, b = (
+            Go2rtcClient(s, "http://127.0.0.1:1984"),
+            Go2rtcClient(s, "http://127.0.0.1:1984/"),
+        )
+        await asyncio.gather(
+            a.ensure_stream("cam_a", "rtsp://x/a"),
+            b.ensure_stream("cam_b", "rtsp://x/b"),
+            a.remove_stream("cam_c"),
+            b.ensure_stream("cam_d", "rtsp://x/d"),
+        )
+
+    asyncio.run(run())
+    assert len(s.calls) == 4
+    assert s.max_writes_in_flight == 1
+
+
+def test_writes_to_different_go2rtc_servers_do_not_queue_on_each_other():
+    s = _FakeSession(write_delay=0.02)
+
+    async def run():
+        a, b = (
+            Go2rtcClient(s, "http://127.0.0.1:1984"),
+            Go2rtcClient(s, "http://127.0.0.1:1985"),
+        )
+        await asyncio.gather(
+            a.ensure_stream("cam_a", "rtsp://x/a"),
+            b.ensure_stream("cam_b", "rtsp://x/b"),
+        )
+
+    asyncio.run(run())
+    assert s.max_writes_in_flight == 2
