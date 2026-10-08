@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc44]
+
 ### Changed
 
 - **Three fixes that were opt-in are the default.** Direct publish into go2rtc
