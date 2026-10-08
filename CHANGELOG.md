@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc42]
+
 ### Fixed
 
 - **A pinned SDES camera that sends H.265 is re-opened instead of leaving the
@@ -25,7 +27,6 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   the broadcast (their LAN address comes from WebRTC signalling), and the
   sweep's only consumers are light clients. An account of cameras alone -
   this integration's usual one - no longer broadcasts at all.
-
 
 ## [1.0.0rc41]
 
