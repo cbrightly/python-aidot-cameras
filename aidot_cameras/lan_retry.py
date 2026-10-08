@@ -135,6 +135,7 @@ class LanRetryMixin:
         await super().async_login()
         if getattr(self, "_connect_and_login", False):
             self._login_attempt = 0
+            self._connect_failures = 0
 
     async def connect(self, ip_address) -> None:
         """Bound the attempt, so a silent device cannot park it forever.
@@ -157,6 +158,44 @@ class LanRetryMixin:
             # reset() cleared it, but the parked attempt never ran connect()'s
             # own finally, so make the in-flight flag honest either way.
             self._connecting = False
+        if getattr(self, "_connect_and_login", False):
+            self._connect_failures = 0
+            return
+        # Upstream's connect() swallows its own failure (one WARNING per try)
+        # and schedules nothing, so nothing counted these: a light whose
+        # discovered address was on another subnet was kicked by every poll,
+        # 230 warnings a day. Count them here; update_ip_address stops kicking
+        # at the ceiling until the address changes or a login gets through.
+        failures = getattr(self, "_connect_failures", 0) + 1
+        self._connect_failures = failures
+        if failures == _LOGIN_RETRY_LIMIT:
+            _LOGGER.warning(
+                "%s: LAN login failed %d times in a row at %s; not trying again "
+                "until its address changes. Set AIDOT_LOGIN_RETRY_LIMIT to change "
+                "the ceiling.",
+                getattr(self, "device_id", "?"),
+                failures,
+                ip_address,
+            )
+
+    def update_ip_address(self, ip) -> None:
+        """Push a (re)discovered address, unless it is the one that keeps failing."""
+        if ip is None:
+            return
+        current = getattr(self, "_ip_address", None)
+        if ip != current:
+            self._connect_failures = 0
+        elif getattr(
+            self, "_connect_failures", 0
+        ) >= _LOGIN_RETRY_LIMIT and not getattr(self, "_connect_and_login", False):
+            _LOGGER.debug(
+                "%s: not trying the LAN login at %s again (failed %d times)",
+                getattr(self, "device_id", "?"),
+                ip,
+                self._connect_failures,
+            )
+            return
+        super().update_ip_address(ip)
 
     def _schedule_reconnect(self) -> None:
         """Back off between failed logins, and eventually stop.

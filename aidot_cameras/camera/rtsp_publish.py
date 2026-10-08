@@ -120,6 +120,16 @@ def is_publishable_url(url: Optional[str]) -> bool:
     return bool(url) and str(url).lower().startswith("rtsp://")
 
 
+def _gap_log_level(gaps_before: int) -> int:
+    """WARNING for a session's first gap, DEBUG for the rest.
+
+    A camera that sends gappy video (the A000088 family does, fleet-wide and
+    not fixable here) produced about a hundred of these a day. One per session
+    says the same thing; the rest are for a DEBUG log.
+    """
+    return logging.WARNING if gaps_before == 0 else logging.DEBUG
+
+
 def _publish_gap_warn_s() -> float:
     """Seconds without a frame to publish before saying so; 0 disables."""
     try:
@@ -1138,6 +1148,10 @@ class LoopbackRtpPublisher:
     ``1``; ``terminate()``/``kill()`` exit negative like a signal death.
     """
 
+    #: Lets the SDES teardown log tell this process's own report from ffmpeg's
+    #: stderr (see ``SdesSession._log_ffmpeg_stderr``).
+    is_direct_publisher = True
+
     def __init__(
         self,
         serve_sdp: str,
@@ -1875,6 +1889,7 @@ def dtls_rtp_publish_run(
     gap_warn_s = _publish_gap_warn_s()
     last_frame = None
     max_gap = 0.0
+    gap_count = 0
     # A gap has three quite different causes and the warning could not tell
     # them apart: nothing arrived from the camera, what arrived was dropped
     # (the wait for a decodable keyframe, or a presentation time already
@@ -1954,7 +1969,9 @@ def dtls_rtp_publish_run(
                             max_gap = gap
                         if gap_warn_s and gap >= gap_warn_s:
                             idle = max(0.0, (first_arrival or now) - last_frame)
-                            _LOGGER.warning(
+                            gap_count += 1
+                            _LOGGER.log(
+                                _gap_log_level(gap_count - 1),
                                 "camera %s: DTLS direct publish: %.2f s without a"
                                 " frame to publish (queue %d; %.2f s idle waiting"
                                 " for one to arrive, %.2f s inside the publish,"
