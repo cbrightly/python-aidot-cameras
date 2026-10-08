@@ -6,6 +6,26 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Changed
+
+- **Four log lines that said nothing was wrong no longer say it at WARNING or
+  ERROR** (counted over one day on one installation):
+  - The direct publisher's end-of-session report was logged as a WARNING
+    headed "ffmpeg SDES stderr" on every SDES session (20 a day). It is now
+    "direct publish report" at INFO after a requested stop; a failed exit
+    still warns.
+  - A light whose discovered LAN address cannot be reached was retried by
+    every poll, at WARNING each time (230 a day). After
+    `AIDOT_LOGIN_RETRY_LIMIT` failures in a row it is left alone, with one
+    warning, until its address changes or a login gets through.
+  - "DTLS direct publish: N s without a frame to publish" is a WARNING for a
+    session's first gap and DEBUG after that (about 100 a day from a camera
+    whose video is gappy by nature).
+  - A cloud call that failed while the network was coming up after a restart
+    logged an ERROR per camera. It is now one WARNING ("retried on the next
+    use") and then DEBUG until a fetch gets through; an unexpected failure is
+    still an ERROR.
+
 ## [1.0.0rc42]
 
 ### Fixed

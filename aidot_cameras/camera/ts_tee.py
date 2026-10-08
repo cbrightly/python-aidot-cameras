@@ -273,8 +273,7 @@ class TsTee:
                         # drop the readers (they reconnect) and start over.
                         dropped = self._channel.disconnect_all()
                         _LOGGER.info(
-                            "camera %s: in-sync HLS: new SPS, %d reader(s)"
-                            " reconnect",
+                            "camera %s: in-sync HLS: new SPS, %d reader(s) reconnect",
                             self._device_id,
                             dropped,
                         )

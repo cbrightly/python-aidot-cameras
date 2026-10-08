@@ -2480,6 +2480,7 @@ class CameraMixin(
                 ) as resp:
                     body = await resp.json(content_type=None)
                     status = resp.status
+            self._device_user_info_unreachable_logged = False
 
             # Server may return a bare JSON array OR {"data": [...]} / {"data": {}}
             if isinstance(body, list):
@@ -2558,10 +2559,27 @@ class CameraMixin(
                     _found_ids,
                 )
                 return self._store_device_user_info(data[0] if data else None)
+        except (aiohttp.ClientError, TimeoutError, OSError) as exc:
+            # The cloud could not be reached - routine while the network comes
+            # up after a restart (three of these at ERROR on every start). The
+            # next use fetches again, so say it once and then at DEBUG until a
+            # fetch gets through.
+            if not getattr(self, "_device_user_info_unreachable_logged", False):
+                self._device_user_info_unreachable_logged = True
+                _LOGGER.warning(
+                    "device user info for %s: cloud unreachable (%r) - retried on "
+                    "the next use",
+                    self.device_id,
+                    exc,
+                )
+            else:
+                _LOGGER.debug(
+                    "device user info for %s: cloud still unreachable (%r)",
+                    self.device_id,
+                    exc,
+                )
         except Exception as exc:
-            _LOGGER.error(
-                "async_get_device_user_info failed for %s: %r", self.device_id, exc
-            )
+            _LOGGER.error("device user info for %s failed: %r", self.device_id, exc)
         return None
 
     async def async_get_p2p_uid(self) -> Optional[str]:

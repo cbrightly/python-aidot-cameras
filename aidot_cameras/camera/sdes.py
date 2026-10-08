@@ -299,6 +299,21 @@ class SdesSession(AvioRequestMixin):
         if not stderr_bytes:
             return
         text = stderr_bytes.decode(errors="replace")
+        proc = getattr(self, "_proc", None)
+        if getattr(proc, "is_direct_publisher", False) is True:
+            # Not ffmpeg: the direct publisher's own end-of-session report
+            # ("publishing ... / publish ended: N packets ..."), which arrives
+            # through the same stderr seam. After a requested stop (a signal
+            # exit, or 0) it is information; only its failure exit is a warning.
+            rc = getattr(proc, "returncode", None)
+            level = logging.WARNING if isinstance(rc, int) and rc > 0 else logging.INFO
+            _LOGGER.log(
+                level,
+                "camera %s: direct publish report:\n%s",
+                getattr(self, "_device_id", "?"),
+                text,
+            )
+            return
         expected_no_media = self.last_media_monotonic == 0.0 and (
             "Output file is empty" in text or "Could not find codec parameters" in text
         )
