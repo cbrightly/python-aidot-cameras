@@ -69,3 +69,27 @@ class AidotCameraNoMedia(AidotError):
             f"camera sent no media in {waited_s:.0f}s after answering - "
             "abandoning this attempt to the retry"
         )
+
+
+class AidotCameraWrongCodec(AidotCameraNoMedia):
+    """A pinned camera sent the other codec - abandon this attempt, retry now.
+
+    The in-sync HLS TS is promised to Home Assistant on the strength of the
+    H.264 pin, and only an H.264 session feeds it. The A001064 answers from
+    its own template and sent H.265 in 15 of 107 pinned opens (2026-08-26);
+    served as it came, that session left Home Assistant reading a stream
+    nothing wrote. A camera that keeps its promise most of the time will on a
+    retry. A no-media abandon for callers that pace retries, but the camera
+    DID send media: the keepalive loop retries it without the no-media
+    accounting that stops a battery camera's keepalive.
+    """
+
+    def __init__(self, observed_pt: int, pinned_pt: int) -> None:
+        AidotError.__init__(
+            self,
+            "camera sent video payload type %d against an offer pinned to %d"
+            % (observed_pt, pinned_pt),
+        )
+        self.waited_s = 0.0  # what a no-media abandon reports; media did come
+        self.observed_pt = observed_pt
+        self.pinned_pt = pinned_pt

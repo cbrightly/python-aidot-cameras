@@ -17,7 +17,7 @@ import secrets as _secrets_mod
 import time
 from typing import Callable, Optional  # noqa: F401 - method annotations
 
-from ..exceptions import AidotCameraBusy, AidotCameraNoMedia
+from ..exceptions import AidotCameraBusy, AidotCameraNoMedia, AidotCameraWrongCodec
 from .constants import (
     _LIVE_PLAY_NOT_READY,
     SDES_SPEAKERSTART_DELAY,
@@ -1376,6 +1376,55 @@ _AUDIO_PT_GRACE_S = 1.0
 #
 # Set AIDOT_ABANDONED_MEDIA_GRACE_S=0 to disable.
 _ABANDONED_MEDIA_GRACE_DEFAULT_S = 8.0
+
+
+_PINNED_CODEC_RETRIES_DEFAULT = 2
+
+
+def _pinned_codec_retry_limit() -> int:
+    """How many times in a row a pinned camera's wrong codec is retried.
+
+    ``AIDOT_PINNED_CODEC_RETRIES``, read per call and guarded like the other
+    tunables; 0 serves every session as it comes. The default of 2 (three
+    tries) turns a 14% chance of an H.265 session into about 0.3%.
+    """
+    raw = _os.environ.get("AIDOT_PINNED_CODEC_RETRIES")
+    if raw is not None:
+        try:
+            val = int(raw)
+        except (TypeError, ValueError):
+            val = None
+        if val is not None and val >= 0:
+            return val
+    return _PINNED_CODEC_RETRIES_DEFAULT
+
+
+def _should_retry_pinned_codec(
+    observed_pt: Optional[int],
+    pinned_pt: Optional[int],
+    *,
+    ts_expected: bool,
+    mismatches: int,
+    limit: Optional[int] = None,
+) -> bool:
+    """Abandon this attempt because the camera sent the codec the pin ruled out?
+
+    Only when a reader of the in-sync TS is expected (``ts_expected``): that TS
+    was promised on the strength of the pin, and only a session of the pinned
+    codec feeds it. Without the pin either codec was offered, and without the
+    TS the ffmpeg serve carries whatever came, as it always has. Bounded by
+    ``limit`` consecutive mismatches, after which the session is served as it
+    came rather than retried forever against a camera that insists.
+    """
+    if pinned_pt is None or not ts_expected:
+        return False
+    if observed_pt is None or observed_pt not in _SDP_VIDEO_PTS:
+        return False
+    if observed_pt == pinned_pt:
+        return False
+    if limit is None:
+        limit = _pinned_codec_retry_limit()
+    return mismatches < limit
 
 
 def _abandoned_media_grace_s() -> float:
@@ -8830,6 +8879,43 @@ class _SdesOpenMixin:
             while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:
                 await asyncio.sleep(0.1)
         _vpt = _first_video_pt[0]
+        _pinned = _resolve_sdes_video_pt()
+        _mismatches = getattr(self, "_pinned_codec_mismatches", 0)
+        if _should_retry_pinned_codec(
+            _vpt,
+            _pinned,
+            ts_expected=self._hls_ts_expected(),
+            mismatches=_mismatches,
+        ):
+            # The in-sync TS was promised to Home Assistant on the strength of
+            # the pin, and only a session of the pinned codec feeds it; served
+            # as it came, this one would leave that reader with nothing for
+            # the whole session. The camera keeps its promise most of the time,
+            # so give it another try (bounded). The cleanup stack closes the
+            # reserved sockets and stops the signalling thread on the way out.
+            self._pinned_codec_mismatches = _mismatches + 1
+            _LOGGER.warning(
+                "camera %s: sent video payload type %d against an offer pinned "
+                "to %d, which the in-sync HLS stream cannot carry - re-opening "
+                "[%d of %d]",
+                getattr(self, "device_id", "?"),
+                _vpt,
+                _pinned,
+                _mismatches + 1,
+                _pinned_codec_retry_limit(),
+            )
+            raise AidotCameraWrongCodec(observed_pt=_vpt, pinned_pt=_pinned)
+        if _pinned is not None and _vpt == _pinned:
+            self._pinned_codec_mismatches = 0
+        elif _mismatches and _pinned is not None:
+            _LOGGER.warning(
+                "camera %s: still sending video payload type %s against the pin "
+                "after %d re-opens - serving it as it came; the in-sync HLS "
+                "stream gets no video this session",
+                getattr(self, "device_id", "?"),
+                _vpt,
+                _mismatches,
+            )
         _apt = _first_audio_pt[0] if _first_audio_pt[0] is not None else _answer_apt
         # Which single payload type (if any) each line can be narrowed to. Audio
         # is usable only when its type was actually observed; otherwise the "0 8"

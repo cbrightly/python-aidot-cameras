@@ -6,6 +6,20 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A pinned SDES camera that sends H.265 is re-opened instead of leaving the
+  in-sync HLS stream empty.** The in-sync TS is promised to Home Assistant on
+  the strength of the H.264 pin, and only an H.264 session feeds it; the
+  A001064 answers from its own template and sent H.265 in 15 of 107 pinned
+  opens (2026-08-26). Such a session kept the ffmpeg serve, so Home
+  Assistant's HLS view and recordings read a stream nothing wrote, for the
+  whole session. The attempt is now abandoned to a fresh open, up to
+  `AIDOT_PINNED_CODEC_RETRIES` (default 2) times in a row, without the
+  no-media accounting that stops a battery camera's keepalive; after that it
+  is served as it came, with a warning. Only when the in-sync option is on
+  and the camera is eligible for it; otherwise nothing changes.
+
 ## [1.0.0rc41]
 
 ### Fixed
