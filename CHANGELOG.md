@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc43]
+
 ### Changed
 
 - **Four log lines that said nothing was wrong no longer say it at WARNING or
