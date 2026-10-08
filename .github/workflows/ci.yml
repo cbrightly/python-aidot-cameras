@@ -101,7 +101,7 @@ jobs:
       # safety net for any transitive dep that lacks a musllinux wheel (the heavy ones
       # all have them).
       - name: System deps
-        run: apk add --no-cache git ffmpeg gcc musl-dev libffi-dev
+        run: apk add --no-cache git curl ffmpeg gcc musl-dev libffi-dev
       - name: go2rtc (the publish tests run against a real one)
         # Without it tests/test_rtsp_publish_go2rtc.py skipped - nine tests of
         # the direct publish path that never ran in CI until 2026-10-08. The
@@ -175,7 +175,7 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24, mandatory in a musl container)
       - name: System deps
-        run: apk add --no-cache git ffmpeg gcc musl-dev libffi-dev
+        run: apk add --no-cache git curl ffmpeg gcc musl-dev libffi-dev
       - name: Install package + test deps
         run: |
           python -m pip install --upgrade pip
