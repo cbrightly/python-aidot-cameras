@@ -544,7 +544,11 @@ def test_publishing_works_when_aimed_at_the_bundled_rtsp_port(bundled_go2rtc):
         stop.set()
         proc.terminate()
         proc.wait(5)
-    assert "error" not in out, (out, bundled_go2rtc["log"].read_text()[-2000:])
+    if "error" in out:
+        # The whole tail, printed: an assertion message is elided in the
+        # middle by pytest's repr, and the go2rtc panic sits exactly there.
+        print("go2rtc log tail:\n" + bundled_go2rtc["log"].read_text()[-6000:])
+    assert "error" not in out, out
     assert "h264" in out["codecs"] and out["frames"] >= 10
 
 
