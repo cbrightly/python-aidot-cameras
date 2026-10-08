@@ -6,6 +6,15 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The LAN discovery sweep runs only for an account that has a light.** It
+  started on the first device of any kind and then broadcast on every IPv4
+  interface every two minutes for the life of the process; cameras ignore
+  the broadcast (their LAN address comes from WebRTC signalling), and the
+  sweep's only consumers are light clients. An account of cameras alone -
+  this integration's usual one - no longer broadcasts at all.
+
 ## [1.0.0rc41]
 
 ### Fixed

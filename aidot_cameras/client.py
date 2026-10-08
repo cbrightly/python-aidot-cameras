@@ -842,6 +842,13 @@ class CameraClient(_UpstreamAidotClient):
                     *light_device_client_args(self, device)
                 )
                 self._device_clients[device_id] = device_client
+            # The sweep exists for lights, so it starts with the first one -
+            # lazily, because __init__ runs outside a loop on the stored-token
+            # path. Cameras never start it: they ignore the broadcast, and an
+            # account of cameras alone used to broadcast on every interface
+            # every two minutes for nothing.
+            if self._discover is None:
+                self.setup_discover()
             if self._discover is not None:
                 device_client.update_ip_address(
                     self._discover.discovered_device.get(device_id)
@@ -887,12 +894,8 @@ class CameraClient(_UpstreamAidotClient):
             # Pre-warm the ICE config cache so stream open does not block on it.
             _spawn_bg(_prefetch_ice_config(device_client))
 
-        # Started lazily here as well: __init__ cannot start discovery when the
-        # client is constructed outside a running event loop (stored-token path).
-        if self._discover is None:
-            self.setup_discover()
-
-        # Deliberately NO update_ip_address() here, which is the one thing this
+        # No discovery sweep for a camera (the light branch above starts it),
+        # and deliberately NO update_ip_address() here, which is the one thing this
         # branch drops from upstream's version.  Cameras do not answer the
         # broadcast sweep; their LAN IP comes from the WebRTC signaling host
         # candidate (iceCandidateReq).  Pushing a swept IP would make the
@@ -942,7 +945,10 @@ class CameraClient(_UpstreamAidotClient):
     # ---------------------------------------------------------------- #
 
     def setup_discover(self) -> None:
-        """Start the LAN discovery sweep once login info is available.
+        """Start the LAN discovery sweep (for lights) once login info is available.
+
+        Called from the light branch of ``get_device_client``: the sweep's only
+        consumers are light clients, and cameras ignore the broadcast.
 
         Replaces upstream's body rather than extending it: upstream drives
         discovery through ``Discover.set_user_info``, which starts a
