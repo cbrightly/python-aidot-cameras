@@ -8,12 +8,15 @@ the upstream lights-only library.
 
 The transport is auto-selected per camera from its model id (`LK.IPC.*`):
 
-| Model (`LK.IPC.*`) | Type | Transport | Power | Notes |
-| --- | --- | --- | --- | --- |
-| A000088 | M3 Pro (incl. A000088-1) | DTLS-SRTP | Wired/mains | Advertises two consecutive ICE ports; the high-port nomination fix applies. |
-| A001513 | "L2" battery cam | SDES-SRTP | Battery | AVIO keepalive + cloud keep-alive renew; woken on demand. Must **not** get the `liveStreamParam` pre-connect (see below). Validated end-to-end. |
-| A001064 | PTZ | SDES-SRTP | Wired/mains | Role-reversal handshake; excluded from SDES fast-liveplay for correctness. |
-| A001108, A001360 | battery cams | SDES-SRTP | Battery | Same battery handling as A001513 (recognized in code; not validated on the reference account). |
+This is the one table for both projects; the two READMEs link here.
+
+| Model (`LK.IPC.*`) | Type | Transport | Power | Tested | Notes |
+| --- | --- | --- | --- | --- | --- |
+| A000088 | M3 Pro (incl. A000088-1) | DTLS-SRTP | Wired/mains | **Live, daily** (three units on the reference account; every release is validated against them) | Advertises two consecutive ICE ports; the high-port nomination fix applies. |
+| A001513 | "L2" battery cam | SDES-SRTP | Battery | **Live, daily** (one unit; validated end-to-end, including wake and release) | AVIO keepalive + cloud keep-alive renew; woken on demand. Must **not** get the `liveStreamParam` pre-connect (see below). |
+| A001064 | PTZ | SDES-SRTP | Wired/mains | **Live, daily** (one unit) | Role-reversal handshake; excluded from SDES fast-liveplay for correctness. Answers H.265 in about one pinned open in seven; see "A pinned camera that sends H.265" below. |
+| A001108, A001360 | battery cams | SDES-SRTP | Battery | Recognised only (cloud profile; no unit on the reference account) | Same battery handling as A001513. |
+| other `LK.IPC.*` | - | SDES-SRTP | - | Untested | Falls through to the generic SDES path. Reports welcome. |
 
 Model ids are matched by **substring**, so a firmware/hardware revision suffix
 (`LK.IPC.A001513-1`, the way `A000088-1` exists on the DTLS side) resolves to the
@@ -346,6 +349,18 @@ one INFO `AAC track: start correction of N ms skipped (over 4 s)` if a wanted
 correction is too large to apply - which also ends alignment for that
 session.
 
+### A pinned camera that sends H.265 (in-sync HLS)
+
+With `AIDOT_HLS_DIRECT_TS` on and the offer pinned to H.264
+(`AIDOT_SDES_VIDEO_PT=96`), the in-sync TS is promised to the consumer before
+a session exists, and only an H.264 session feeds it. The A001064 answers from
+its own template and sent H.265 in 15 of 107 pinned opens (2026-08-26). Since
+1.0.0rc42 such a session is abandoned to a fresh open - `sent video payload
+type 97 against an offer pinned to 96 ... re-opening [n of 2]` at WARNING -
+up to `AIDOT_PINNED_CODEC_RETRIES` times in a row, then served as it came with
+a warning that the in-sync stream gets no video that session. Without the pin,
+or without the in-sync option, nothing changes.
+
 ### A failed go2rtc registration silently downgrades to HLS
 
 `prefer_go2rtc()` registers the stream with `ensure_stream()`
@@ -364,15 +379,24 @@ suspect go2rtc's own config rather than the cameras:
   `yaml: unmarshal errors: mapping key "<name>" already defined`, because it
   cannot re-serialize a config it cannot parse. One bad key therefore drops
   *every* camera to HLS, not just the camera that owns the key.
-- Older go2rtc builds can create that duplicate themselves: a `PUT` for a name
-  already present appends a second entry instead of replacing it when two
-  registrations race - for example the mass re-registration that follows a
-  go2rtc restart or a config-entry reload. A later non-racing `PUT` rewrites the
-  entry and repairs the file.
+- go2rtc 1.9.9 creates that duplicate itself. It saves every `PUT` and
+  `DELETE` by reading `go2rtc.yaml`, patching it and writing it back
+  (`os.ReadFile` / `os.WriteFile`, which truncates then writes), with nothing
+  guarding the cycle. Two overlapping writes **for any two streams** can read an
+  empty or half-written file and write back what they made of it: sections
+  gone, a key lost, or a key duplicated. Reproduced 2026-10-08 against a
+  private go2rtc 1.9.9: 18 of 40 bursts of 15 concurrent `PUT`s over 5 names
+  corrupted the file, 0 of 40 with one write at a time. The mass registration
+  after a restart is exactly such a burst.
+- Since 1.0.0rc41 `Go2rtcClient` queues its writes to one server (one lock per
+  server, across client objects), and the Home Assistant integration (2.34.3)
+  holds one lock for every write it makes. A later non-racing `PUT` does
+  **not** repair a duplicate - go2rtc cannot parse the file to patch it.
 
-To recover, delete the duplicate key from `go2rtc.yaml` and restart go2rtc
-(`POST /api/restart`); the next `PUT` answers 200 and the camera returns to the
-go2rtc path. Note that go2rtc can also answer a register call with 400 while
+To recover, delete the second copy of the duplicated key from `go2rtc.yaml`
+and restart go2rtc (`POST /api/restart`); the next `PUT` answers 200 and the
+camera returns to the go2rtc path. The `failed http=400` warning quotes
+go2rtc's reason since 1.0.0rc41, so the duplicate names itself in the log. Note that go2rtc can also answer a register call with 400 while
 still holding the stream registered, so a caller that treats any non-200 as
 "go2rtc is unavailable" falls back further than it needs to; `GET /api/streams`
 tells the two apart.
