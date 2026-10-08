@@ -19,4 +19,4 @@ def test_only_http_urls_are_direct_ts_serves():
 
 def test_the_serve_loop_gates_the_direct_ts_serve_on_http():
     src = inspect.getsource(client)
-    assert "elif _direct_serve_enabled() and _is_http_serve_url(serve_url):" in src
+    assert "elif _is_http_serve_url(serve_url):" in src

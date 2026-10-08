@@ -82,17 +82,23 @@ def _cam(sdes=False, push_url="rtsp://127.0.0.1:8554/aidot_0123456789ab", model=
     return c
 
 
+def test_on_by_default_with_direct_publish_and_the_aac_track(monkeypatch):
+    # Since 1.0.0rc44 the three are on unless turned off: the in-sync stream
+    # is what makes a recording's sound and picture agree.
+    assert hls_ts.enabled()
+    assert _cam().hls_ts_url() is not None
+
+
 @pytest.mark.parametrize(
     "env",
     [
-        {},
-        {"AIDOT_HLS_DIRECT_TS": "1"},
-        {"AIDOT_HLS_DIRECT_TS": "1", "AIDOT_DIRECT_PUBLISH": "1"},
-        {"AIDOT_HLS_DIRECT_TS": "1", "AIDOT_PUBLISH_AAC": "1"},
-        {"AIDOT_DIRECT_PUBLISH": "1", "AIDOT_PUBLISH_AAC": "1"},
+        {"AIDOT_HLS_DIRECT_TS": "0"},
+        {"AIDOT_DIRECT_PUBLISH": "0"},
+        {"AIDOT_PUBLISH_AAC": "0"},
+        {"AIDOT_HLS_DIRECT_TS": "1", "AIDOT_DIRECT_PUBLISH": "off"},
     ],
 )
-def test_off_unless_the_option_direct_publish_and_aac_are_all_on(monkeypatch, env):
+def test_off_when_the_option_or_either_thing_it_is_built_on_is_off(monkeypatch, env):
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     assert not hls_ts.enabled()
@@ -123,7 +129,7 @@ def test_a_dtls_camera_gets_a_stable_url_before_its_session_exists(monkeypatch):
     [
         ("LK.IPC.A001064", "96", True),
         ("LK.IPC.A001513", "96", True),
-        ("LK.IPC.A001064", None, False),  # might answer H.265: ffmpeg serve
+        ("LK.IPC.A001064", "none", False),  # unpinned: might answer H.265
         ("LK.IPC.A001064", "97", False),
         ("LK.IPC.A009999", "96", False),  # media reaches the serve encrypted
     ],
@@ -135,10 +141,7 @@ def test_an_sdes_camera_gets_the_ts_only_when_every_session_feeds_it(
     # writes (the ffmpeg serve: an H.265 answer, or a model whose media the
     # bridge cannot decrypt) would be no video at all, not just late sound.
     _on(monkeypatch)
-    if pin is None:
-        monkeypatch.delenv("AIDOT_SDES_VIDEO_PT", raising=False)
-    else:
-        monkeypatch.setenv("AIDOT_SDES_VIDEO_PT", pin)
+    monkeypatch.setenv("AIDOT_SDES_VIDEO_PT", pin)
     cam = _cam(sdes=True, model=model)
     assert (cam.hls_ts_url() is not None) is eligible
     assert (cam._hls_ts_session() is not None) is eligible
@@ -146,6 +149,7 @@ def test_an_sdes_camera_gets_the_ts_only_when_every_session_feeds_it(
 
 def test_the_dtls_publisher_gets_a_fresh_session_only_when_on(monkeypatch):
     cam = _cam()
+    monkeypatch.setenv("AIDOT_HLS_DIRECT_TS", "0")
     assert "ts_session" not in cam._dtls_publish_kwargs({})
     _on(monkeypatch)
     a = cam._dtls_publish_kwargs({})["ts_session"]
@@ -182,6 +186,7 @@ def test_no_ts_url_unless_the_camera_publishes_to_go2rtc(monkeypatch, push_url):
 
 
 async def test_ts_consumers_are_not_viewers_while_the_option_is_off(monkeypatch):
+    monkeypatch.setenv("AIDOT_HLS_DIRECT_TS", "0")
     cam = _cam()
     monkeypatch.setattr(hls_ts, "consumers", lambda name: 3)  # left over from before
     cam._viewer_cache = (0.0, None)

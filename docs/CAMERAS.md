@@ -58,8 +58,8 @@ on an A001513 - with the call it serves nothing, without it h264 1280x960 + PCMA
 
 Because the call was only ever made for battery cameras, the set of cameras it can
 affect is exactly the set it breaks. So it is not a tunable: the decision lives in
-`_resolve_live_stream_param` and is always "no". `AIDOT_LIVESTREAM_PARAM` and
-`start_keepalive(live_stream_param=...)` are accepted and ignored (one warning if
+`_resolve_live_stream_param` and is always "no".
+`start_keepalive(live_stream_param=...)` is accepted and ignored (one warning if
 set) so an existing caller doesn't break. Re-enabling needs a code change plus
 fresh on-hardware evidence that some camera actually requires it.
 
@@ -124,9 +124,9 @@ keep-alive on mount, sends the wake, and shows a sleeping placeholder instead of
 opening a session until the device reports itself awake.
 
 - **Offer immediately; do not wait for the camera.** The app's live view waits
-  for the device to report itself awake before opening a session, and
-  `AIDOT_BATTERY_WAKE_GATE_S` implements that - but it is **shipped off**,
-  because measuring it showed the live-play signalling is itself what wakes the
+  for the device to report itself awake before opening a session. A gate that
+  did the same was built and measured, and removed (1.0.0rc44), because the
+  measurement showed the live-play signalling is itself what wakes the
   camera. At a 20 s budget, on a camera settled for ten minutes, the gate ran
   its whole budget with the camera silent, the offer went out at +20.9 s, the
   camera's own `wakeupStatus` arrived at +23.6 s (after the offer) and first
@@ -167,32 +167,19 @@ the ~2 s `iceConfig` fetch on a re-open after the warm session lapses.
   time-to-first-frame, per-second fps timeline + gaps, nominated ICE path, RTP
   health, RSSI. `python scripts/camera_diag.py --name <substr>`.
 
-### Adaptive fast-with-fallback (SDES keepalive, opt-in)
+### The TURN relay pre-allocation, and connection mode `lan`
 
-For SDES cameras the keepalive loop can run an **adaptive** strategy
-(`AIDOT_SDES_ADAPTIVE`, opt-in, default off; set `=1` to enable): the first open
-tries the fast path (skip the livePlay waits + the TURN relay pre-allocation) with
-a short 45 s open timeout / 40 s media grace. If that attempt delivers no media it
-**falls back** to the full, patient relay path for the rest of the loop. It is
-off by default because a fast *failure* costs ~40 s (the grace) before fallback
-while a fast *success* saves only ~7 s - the real-world failure rate should be
-characterised before making it a default. This makes fast-by-default safe regardless of
-reachability - a LAN-direct camera gets the fast connect; a strict-NAT / non-LAN
-camera loses one fast attempt then connects over the relay. A per-device cache
-(`_fast_path_unavailable`) remembers a camera whose fast attempt failed so later
-views skip straight to the full path, bounding the fast-timeout cost to once per
-camera per session. The relay pre-allocation itself is also separately skippable on
-the fast path via `AIDOT_SDES_SKIP_TURN_PREALLOC` (it does two synchronous TURN
-Allocate round-trips, ~2-3 s, unused on a LAN).
+Before building the offer the SDES path does two synchronous TURN Allocate
+round-trips (audio + video), ~2-3 s, so the offer can carry a relay address.
+On a LAN the camera's host candidate wins and that relay is never used, so
+`AIDOT_SDES_CONNECTION_MODE=lan` skips the pre-allocation. **Never for a
+battery camera**, whatever the mode says: it is woken through the cloud and
+the relay is its only return path (validated live on an A001513: with the
+relay it streams h264 1280x960, with the skip it serves nothing).
 
-**Never applied to battery cameras**, whatever the option/env say. The saving
-adaptive chases is the TURN pre-allocation, which is force-kept for a battery
-camera (its only return path), and fast-liveplay is already on by default - so a
-battery "fast" attempt runs the very same handshake as the patient one and differs
-only in being given 45 s to open and a 40 s media grace, *inside* the documented
-25-70 s battery cold-start window. A slow-but-healthy wake would then be scored as
-a fast-path failure: it latches `_fast_path_unavailable`, escalates the backoff,
-and burns a camera-side session on a device that frees them slowly.
+An adaptive "fast first, then patient" keepalive strategy and a separate
+skip-TURN switch were tried here and removed in 1.0.0rc44: the fast failure
+cost ~40 s against a ~7 s saving, and the connection mode covers the LAN case.
 
 ### Connection reuse (`AIDOT_PERSISTENT_MQTT`, on by default)
 
@@ -261,7 +248,7 @@ every watchdog cycle, so it stayed broken until the process restarted. The
 `SDES: narrowed ffmpeg SDP to ...` status line is the signal that narrowing ran;
 its absence is the fault.
 
-### Direct publish: no ffmpeg in the live path (opt-in)
+### Direct publish: no ffmpeg in the live path (on by default since 1.0.0rc44)
 
 `AIDOT_DIRECT_PUBLISH=1` replaces the serve's ffmpeg with an RTSP publisher
 inside the library, for a live `rtsp://` push only (recordings, snapshots, `-`
@@ -285,21 +272,20 @@ and `http://` serves are unchanged). Design, measurements and rollout:
   not from an observed packet, because go2rtc accepts an announced track whose
   first packet arrives late. That removes the 1 s audio grace and the
   video-only fallback it caused when a camera's audio trailed its video.
-- **AAC (opt-in, `AIDOT_PUBLISH_AAC=1`).** After the A-law track, the publish can also carry an AAC-LC 48 kHz
+- **AAC (on by default since 1.0.0rc44; `AIDOT_PUBLISH_AAC=0` drops it).** After the A-law track, the publish can also carry an AAC-LC 48 kHz
   mono track encoded in-process from the same audio (`aac_track.py`), on both
   transports, so an AAC-only consumer such as Home Assistant's HLS player and
   `camera.record` has sound; everything reading the first audio track keeps
-  A-law. It is off by default. A camera whose audio is mu-law
+  A-law. A camera whose audio is mu-law
   (PCMU) gets no AAC track. Its timestamps follow the camera's own audio
   clock and do not drift against the picture; on a cold start, until the
   camera's first audio arrives the track's silence follows the video's
   media time instead of the wall clock, and it then lines its start up
   with the video's (normally one correction), so the live edges agree
   instead of the sound leading the picture.
-- **Timestamps.** `AIDOT_PUBLISH_TIMESTAMPS` (unset: SDES video `steered` -
-  the camera's spacing at real-time rate - and every other track `hybrid`)
-  keeps the camera's frame spacing and substitutes the arrival clock for a
-  backward step or a jump. `steered` stamps camera time times a rate learned
+- **Timestamps.** SDES video is `steered` (the camera's spacing at real-time
+  rate) and every other track is `hybrid`, which keeps the camera's frame
+  spacing and substitutes the arrival clock for a backward step or a jump. `steered` stamps camera time times a rate learned
   from the least-late frames, so a backlog the camera delivers at cold start
   keeps its camera spacing instead of being squeezed toward its arrival.
   A camera clock whose rate falls outside the steered bounds (0.8 to 1.25
@@ -309,7 +295,6 @@ and `http://` serves are unchanged). Design, measurements and rollout:
   never gone through it (the A001064 picks its own codec and answered H.264 in
   9 of 9 sessions, 4 of them offered H.265 first). A session narrowed to H.265
   keeps the ffmpeg serve and says so in the log.
-  `AIDOT_DIRECT_PUBLISH_H265=1` lifts that for anyone validating it.
 
 What go2rtc needs, and what goes wrong without it:
 
@@ -764,6 +749,3 @@ internals.
 | `AIDOT_SPROP_DIR` | Directory where captured SPS/PPS (sprop) parameter sets are cached. Set to a writable path if the default location is read-only. | `<package dir>` |
 | `AIDOT_SDES_NACK` | Ask the camera to resend video RTP packets that never arrived (RTCP Generic NACK). Loss on a weak link otherwise reaches the player as a truncated H.264 slice, which WebRTC conceals and MSE treats as fatal. **On by default**; `0`/`false`/`no`/`off` disables. | enabled (on) |
 | `AIDOT_SDES_CONNECTION_MODE` | Which media path the SDES offer proposes: `auto` (default - every reachable candidate, and ICE priority prefers the LAN with the relay as last resort; measured on the full fleet, six of seven cameras stream direct and only the unit with no route to us rides the relay), `lan` (no relay at all - same lever as `AIDOT_SDES_SKIP_TURN_PREALLOC`, and battery cameras keep the relay regardless because a cloud-woken camera has no other path back), or `relay` (EXPERIMENTAL, and on the reference fleet it does not steer: even with `c=`/`m=` moved to the relay allocation and the WAN permission pre-installed, an A001064 and an A001513 both dialed our host address directly, learning it from our own ICE probes - forcing the relay for real would mean suppressing every direct-path outbound, which is unbuilt). Per-open `sdes_connection_mode` beats the env. Every session reports the path its media actually took as `media_stats().media_path` (`direct`/`relay`). | unset (`auto`) |
-| `AIDOT_SDES_OFFER_BANDWIDTH_KBPS` | Add a `b=AS:<kbps>` receive-bandwidth ceiling (RFC 4566) to the video section of the SDES offer. **Measured to do nothing** on an A001064 over ten sessions; kept, off, alongside `AIDOT_REMB_TARGET_BPS` for the same reason. Run as a strict ABAB campaign it appeared to give a decisive 2.1x reduction - that was a codec split, not the knob. | unset (no `b=` line) |
-| `AIDOT_SDES_TMMBR_BPS` | Ask the camera not to exceed a bitrate, in bits per second, via RTCP TMMBR (RFC 5104). Distinct from `AIDOT_REMB_TARGET_BPS`: REMB reports an *estimate* of available bandwidth, TMMBR states a *bound*, and firmware can honour one without the other. This camera acts on RTCP feedback it never negotiated (our offer advertises no `a=rtcp-fb` at all, yet NACK recovers 98.4% of losses), so the absence of `ccm tmmbr` from its answer is not a reason to assume it is ignored. **Measured on an A001064 and it does nothing** - within-session, 0.748 against a control of 0.705, i.e. marginally higher. Shipped off. | unset (off) |
-| `AIDOT_SDES_TMMBR_AFTER_S` | Seconds of media to let pass before the first TMMBR, so a bound can be measured *within* one session - window A before it, window B after - instead of between sessions. Measured from the first video packet, not from the open, so a slow-waking camera does not spend window A already capped. | `0` (send from the first video packet) |

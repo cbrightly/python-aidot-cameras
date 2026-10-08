@@ -392,7 +392,8 @@ never takes the cold path.
 2. Should the DTLS runner keep the mux's AGC? Needs a listening test.
 3. H.265 from a CAMERA is still unexercised, and direct publish is gated to
    H.264 because of it (`_should_direct_publish`'s `video_pt`; an H.265
-   session keeps the ffmpeg serve, `AIDOT_DIRECT_PUBLISH_H265=1` lifts it).
+   session keeps the ffmpeg serve; the switch that lifted it was removed in
+   1.0.0rc44 - the depacketizer carries H.264 only).
    Across 9 sessions on 2026-09-19 - 4 of them with H.265 offered first - the
    A001064 answered H.264 every time, and the HD/SD control that might have
    moved it is acked and inert on that model. What IS proven is the publisher

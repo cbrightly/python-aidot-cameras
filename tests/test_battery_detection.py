@@ -212,50 +212,14 @@ def test_plain_rtp_models_match_by_substring():
         assert not any(k in _m for k in _models), _m
 
 
-# --- adaptive mode is refused for battery cameras ---------------------------- #
-
-
-def test_adaptive_never_on_for_a_battery_camera(monkeypatch):
-    # Adaptive chases the TURN pre-allocation saving, which is force-kept for a
-    # battery camera - so the "fast" attempt runs the same handshake and differs
-    # only in getting 45 s to open and a 40 s media grace, inside the documented
-    # 25-70 s battery cold-start window. A slow-but-healthy wake would then be
-    # scored as a fast-path failure.
-    monkeypatch.setenv("AIDOT_SDES_ADAPTIVE", "1")
-    assert _cam("LK.IPC.A001513")._resolve_sdes_adaptive() is False
-    assert (
-        _cam("LK.IPC.A001513", _sdes_adaptive_opt=True)._resolve_sdes_adaptive()
-        is False
-    )
-    # Detected-by-evidence battery cameras get the same guard.
-    c = _cam("LK.IPC.A009999", props={"Battery_remaining": 60}, _sdes_adaptive_opt=True)
-    assert c._resolve_sdes_adaptive() is False
-
-
-def test_adaptive_still_available_for_mains(monkeypatch):
-    monkeypatch.delenv("AIDOT_SDES_ADAPTIVE", raising=False)
-    assert (
-        _cam("LK.IPC.A001064", _sdes_adaptive_opt=True)._resolve_sdes_adaptive() is True
-    )
-    assert _cam("LK.IPC.A001064")._resolve_sdes_adaptive() is False
-    monkeypatch.setenv("AIDOT_SDES_ADAPTIVE", "1")
-    assert _cam("LK.IPC.A001064")._resolve_sdes_adaptive() is True
-
-
-# --- the guards an evidence-detected battery camera now gets ----------------- #
-
-
 def test_evidence_detected_battery_keeps_the_turn_relay(monkeypatch):
     # The headline consequence: HA's LAN-direct mode can no longer strip the only
     # return path to a battery camera it hadn't been taught to recognize.
-    monkeypatch.setenv("AIDOT_SDES_SKIP_TURN_PREALLOC", "1")
-    c = _cam(
-        "LK.IPC.A009999", props={"Battery_remaining": 41}, _sdes_skip_turn_opt=True
-    )
+    c = _cam("LK.IPC.A009999", props={"Battery_remaining": 41})
+    c._resolve_sdes_connection_mode = lambda: "lan"
     assert c._resolve_sdes_skip_turn() is False
 
 
 def test_evidence_detected_battery_closes_the_livestreamparam_gate(monkeypatch):
-    monkeypatch.setenv("AIDOT_LIVESTREAM_PARAM", "1")
-    c = _cam("LK.IPC.A009999", props={"batteryMode": 2})
+    c = _cam("LK.IPC.A009999", props={"batteryMode": 2}, _live_stream_param_opt=True)
     assert c._resolve_live_stream_param() is False

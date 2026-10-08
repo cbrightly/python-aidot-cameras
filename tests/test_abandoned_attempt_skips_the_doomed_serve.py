@@ -216,23 +216,21 @@ def test_the_no_media_branch_retries_rather_than_giving_up():
 # what makes a serve doomed is that no media was observed, not which wait ended.
 
 
-def test_a_timed_out_attempt_with_nothing_observed_also_skips(monkeypatch):
+def test_a_timed_out_attempt_with_nothing_observed_also_skips():
     """The 2026-09-05 case: not abandoned by the backstop, just silent.
 
     Env cleared, because this pins the SHIPPED default and the knob is read
     from the ambient environment - an operator who set the documented escape
     hatch would otherwise get a red suite that has nothing to do with them."""
-    monkeypatch.delenv("AIDOT_SKIP_DOOMED_SERVE", raising=False)
     assert _should_skip_doomed_serve(abandoned=False, have_video=False) is True
 
 
-def test_a_talk_or_snapshot_open_is_never_abandoned(monkeypatch):
+def test_a_talk_or_snapshot_open_is_never_abandoned():
     """The open path is shared. async_speak (siren, announce) and
     async_snapshot run the same first-media wait with no serve to build, and
     outbound talk does not need inbound media at all - the SRTP session and the
     ICE nomination are already up. Aborting those because no video arrived would
     break the siren on exactly the cameras this was written to help."""
-    monkeypatch.delenv("AIDOT_SKIP_DOOMED_SERVE", raising=False)
     assert (
         _should_skip_doomed_serve(abandoned=False, have_video=False, serving=False)
         is False
@@ -263,26 +261,3 @@ def test_an_attempt_that_saw_video_still_serves():
     whichever way the wait ended."""
     assert _should_skip_doomed_serve(abandoned=True, have_video=True) is False
     assert _should_skip_doomed_serve(abandoned=False, have_video=True) is False
-
-
-def test_the_skip_can_be_turned_off_without_a_release():
-    """This changes behaviour on the commonest failure path, so it needs an
-    escape hatch that does not require shipping a build."""
-    import inspect
-
-    from aidot_cameras.camera import sdes_open as so
-
-    assert "AIDOT_SKIP_DOOMED_SERVE" in inspect.getsource(so)
-
-
-def test_the_escape_hatch_restores_the_old_behaviour(monkeypatch):
-    monkeypatch.setenv("AIDOT_SKIP_DOOMED_SERVE", "0")
-    assert _should_skip_doomed_serve(abandoned=False, have_video=False) is False
-    # The backstop case is what the old behaviour already skipped, so it stays.
-    assert _should_skip_doomed_serve(abandoned=True, have_video=False) is True
-
-
-def test_a_malformed_escape_hatch_does_not_change_anything(monkeypatch):
-    """An unparseable knob must not be able to alter a media path."""
-    monkeypatch.setenv("AIDOT_SKIP_DOOMED_SERVE", "banana")
-    assert _should_skip_doomed_serve(abandoned=False, have_video=False) is True

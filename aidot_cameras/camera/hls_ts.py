@@ -1,7 +1,7 @@
 """In-sync HLS: a library-muxed MPEG-TS per camera for Home Assistant's stream worker.
 
-When ``AIDOT_HLS_DIRECT_TS`` is on, Home Assistant's HLS view and recordings of
-a DTLS camera read the camera's MPEG-TS from a loopback ``TsRouter`` instead of
+Unless ``AIDOT_HLS_DIRECT_TS`` is turned off, Home Assistant's HLS view and
+recordings of a DTLS camera read the camera's MPEG-TS from a loopback ``TsRouter`` instead of
 go2rtc's RTSP. go2rtc re-bases each track for each consumer, so a recording or
 view that joins a running stream had its sound 0.1-0.75 s late, differently
 every time (measured 2026-10-03); this TS carries one clock, so any joiner is in
@@ -51,12 +51,16 @@ _tees: Dict[str, TsTee] = {}
 
 
 def enabled() -> bool:
-    """The option, and both things it is built on, are on."""
-    on = os.environ.get(ENV_HLS_DIRECT_TS, "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    """The option, and both things it is built on, are on.
+
+    All three are on unless turned off (since 1.0.0rc44): the in-sync stream
+    is what makes a recording's sound and picture agree whenever it joins.
+    """
+    on = os.environ.get(ENV_HLS_DIRECT_TS, "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
     return on and direct_publish_enabled() and publish_aac_enabled()
 

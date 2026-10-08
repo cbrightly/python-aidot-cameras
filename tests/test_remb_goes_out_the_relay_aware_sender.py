@@ -64,7 +64,7 @@ def _remb_block() -> str:
     """
     src = _SRC.read_text()
     start = src.index("REMB_TARGET_BPS > 0")
-    end = src.index("_tmmbr_bps = getattr(", start)
+    end = src.index('_pli_done = getattr(_bridge_fn, "_pli_count", 0)', start)
     return src[start:end]
 
 

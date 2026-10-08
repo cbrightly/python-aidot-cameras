@@ -21,10 +21,9 @@ Rewriting timestamps was tried twice and is NOT the fix - `+genpts` made it
 about 10x worse and `-avoid_negative_ts make_zero` about 9x worse plus an
 unstable stream. The bytes are right; the hop drops them.
 
-Opt-in via AIDOT_DTLS_DIRECT_SERVE while it earns trust on real hardware; the
-default path is unchanged.
-
-VALIDATED 2026-08-21 and now ON BY DEFAULT. Four cameras, ~20 minutes each,
+VALIDATED 2026-08-21, on by default since, and the only path since 1.0.0rc44
+(the ffmpeg hop remains as the automatic fallback when the serve port cannot
+be bound). Four cameras, ~20 minutes each,
 about 64,500 packets: **0 negative DTS**, and **0 Home Assistant "Timestamp
 discontinuity" errors** in the window, against a baseline of ~0.91/min on
 a member of the reference fleet alone. Audio intact at aac/48000 - no G.711 downgrade. Frame rate
@@ -56,7 +55,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot_cameras.camera.protocol import _DirectTsServer, _direct_serve_enabled
+from aidot_cameras.camera.protocol import _DirectTsServer
 
 
 def _ts(pid, *, pusi=0, rai=0, payload=b"\x00"):
@@ -201,21 +200,6 @@ def test_close_is_idempotent():
     srv.start()
     srv.close()
     srv.close()
-
-
-def test_it_is_on_by_default(monkeypatch):
-    monkeypatch.delenv("AIDOT_DTLS_DIRECT_SERVE", raising=False)
-    assert _direct_serve_enabled() is True
-
-
-def test_it_can_be_turned_off(monkeypatch):
-    """An operator escape hatch, and the fallback the serve loop takes anyway
-    when the port cannot be bound."""
-    monkeypatch.setenv("AIDOT_DTLS_DIRECT_SERVE", "0")
-    assert _direct_serve_enabled() is False
-
-
-# --- join-awareness: what the ffmpeg hop was actually contributing ---------- #
 
 
 def _drain(sock, n=8, timeout=3.0):

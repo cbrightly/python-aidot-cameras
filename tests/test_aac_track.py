@@ -33,7 +33,7 @@ def test_packetize_writes_one_au_header():
 @pytest.mark.parametrize(
     "val,on",
     [
-        (None, False),
+        (None, True),  # on unless turned off, since 1.0.0rc44
         ("1", True),
         ("yes", True),
         ("0", False),

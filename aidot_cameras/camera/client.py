@@ -98,7 +98,6 @@ from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixi
     _tcp_table_has_established_on_port,
     _idle_release_due,
     _DirectTsServer,
-    _direct_serve_enabled,
     _serve_port,
     _dtls_av_mux_run,
     _h264_has_keyframe,
@@ -4496,12 +4495,17 @@ class CameraMixin(
         serve_relay: Optional[bool] = None,
         stream_idle_s: Optional[float] = None,
         sdes_fast_liveplay: Optional[bool] = None,
-        sdes_skip_turn: Optional[bool] = None,
         sdes_connection_mode: Optional[str] = None,
-        sdes_adaptive: Optional[bool] = None,
         sdes_audio_gain_db: Optional[float] = None,
+        sdes_skip_turn: Optional[bool] = None,
+        sdes_adaptive: Optional[bool] = None,
     ) -> None:
         """Start a persistent stream that keeps the camera session alive.
+
+        ``sdes_skip_turn`` and ``sdes_adaptive`` are accepted and ignored: the
+        experiments they drove were removed in 1.0.0rc44 (connection mode
+        ``lan`` is the TURN pre-allocation skip now), and a caller built
+        against an older release must not break on upgrade.
 
         For SDES cameras (A001064/A001513): opens an indefinite ffmpeg stream and
         optionally pushes it to an RTSP server (e.g. go2rtc at rtsp://127.0.0.1:8554).
@@ -4570,14 +4574,15 @@ class CameraMixin(
             self._serve_relay_opt = serve_relay
         if stream_idle_s is not None:
             self._stream_idle_opt = stream_idle_s
+        if sdes_skip_turn is not None or sdes_adaptive is not None:
+            _LOGGER.debug(
+                "camera %s: sdes_skip_turn/sdes_adaptive are ignored since 1.0.0rc44",
+                self.device_id,
+            )
         if sdes_fast_liveplay is not None:
             self._sdes_fast_liveplay_opt = sdes_fast_liveplay
-        if sdes_skip_turn is not None:
-            self._sdes_skip_turn_opt = sdes_skip_turn
         if sdes_connection_mode is not None:
             self._sdes_connection_mode_opt = sdes_connection_mode
-        if sdes_adaptive is not None:
-            self._sdes_adaptive_opt = sdes_adaptive
         if self._stream_task is not None and not self._stream_task.done():
             return
         self._keepalive_rtsp_url = rtsp_push_url
@@ -5054,21 +5059,6 @@ class CameraMixin(
         _no_media_streak = 0
         _pacer = ReconnectPacer(_MIN_DELAY, _MAX_DELAY)
 
-        # Adaptive fast-with-fallback (default on): the first open tries the fast
-        # path (skip livePlay waits + TURN relay pre-allocation) with a SHORT
-        # timeout/grace so a non-LAN camera fails quickly; on no media we latch
-        # _fast_failed and the remaining opens this loop use the full, patient
-        # relay path.  Makes fast-by-default safe regardless of camera reachability.
-        _adaptive = self._resolve_sdes_adaptive()
-        _FAST_OPEN_TIMEOUT = 45.0
-        _FAST_GRACE = 40.0
-        # Per-device cache: once a fast attempt has failed for this camera (e.g. a
-        # strict-NAT / non-LAN camera that genuinely needs the relay), remember it
-        # so later views skip the fast attempt entirely instead of re-paying the
-        # ~40s fast timeout on every fresh keepalive loop. Latches for the client's
-        # lifetime; an integration reload / restart re-probes the fast path.
-        _fast_failed = bool(getattr(self, "_fast_path_unavailable", False))
-
         # Reuse ONE peerid across the retries of this loop instead of minting a
         # fresh one per attempt. A fresh peerid = a new camera-side session, and
         # the camera frees old ones only slowly, so mint-per-retry stacks up
@@ -5111,13 +5101,10 @@ class CameraMixin(
                 )
                 _peer_reuses = 0
             _peer_reuses += 1
-            _use_fast = self._adaptive_next_fast(_adaptive, _fast_failed)
-            if _adaptive:
-                self._fast_attempt_override = _use_fast
             try:
                 session = await self.async_open_webrtc_stream(
                     rtsp_push_url=self._keepalive_rtsp_url,
-                    timeout=(_FAST_OPEN_TIMEOUT if _use_fast else 120.0),
+                    timeout=120.0,
                     reuse_peer_id=_loop_peer_id,
                     # Ask for talk so THIS session can carry it. async_speak
                     # reuses _stream_session only when it is talk-capable, and
@@ -5137,7 +5124,6 @@ class CameraMixin(
                     talk=True,
                 )
             except asyncio.CancelledError:
-                self._fast_attempt_override = None
                 return
             except AidotCameraBusy as busy:
                 # The camera itself said it has no free session (-50002 max
@@ -5151,7 +5137,6 @@ class CameraMixin(
                 #
                 # That release window is now measured rather than assumed: 8s is
                 # enough, 2s is not. See _BUSY_BACKOFF_S.
-                self._fast_attempt_override = None
                 _LOGGER.warning(
                     "SDES keepalive: camera %s refused the stream (%s) - "
                     "backing off %.0fs so its sessions can be released",
@@ -5170,7 +5155,6 @@ class CameraMixin(
                 # was abandoned for a fresh try (sdes_open bounds how many). A
                 # camera that delivered is not one that delivered nothing: no
                 # no-media accounting, no backoff, straight to the retry.
-                self._fast_attempt_override = None
                 _LOGGER.info("camera %s: re-opening after %s", self.device_id, _wrong)
                 try:
                     await asyncio.sleep(1.0)
@@ -5196,7 +5180,6 @@ class CameraMixin(
                 # camera that never delivers should back off, not hammer; the
                 # fast not-ready burst below is what keeps a merely-slow camera
                 # responsive.
-                self._fast_attempt_override = None
                 _no_media_streak = _next_no_media_streak(_no_media_streak, False)
                 if _should_abandon_keepalive(
                     _no_media_streak, is_battery=self.is_battery_camera
@@ -5220,18 +5203,6 @@ class CameraMixin(
                             exc_info=True,
                         )
                     return
-                # An adaptive fast attempt that reaches here delivered no media,
-                # so it must latch the fallback exactly as the bottom of the
-                # loop would; otherwise every retry re-uses the fast path on a
-                # camera that needs the relay.
-                if _use_fast and not _fast_failed:
-                    _fast_failed = True
-                    self._fast_path_unavailable = True
-                    _LOGGER.info(
-                        "SDES adaptive[%s]: fast attempt delivered no media - "
-                        "falling back to the full relay path",
-                        self.device_id,
-                    )
                 _not_ready_burst = self._next_not_ready_burst(False, _not_ready_burst)
                 _delay, _fast_retry = self._not_ready_retry_delay(
                     _not_ready_burst, burst_max=_PEERID_MAX_REUSE
@@ -5251,18 +5222,6 @@ class CameraMixin(
                     return
                 continue
             except Exception as exc:
-                self._fast_attempt_override = None
-                if _use_fast:
-                    _fast_failed = self._adaptive_after_attempt(
-                        True, False, _fast_failed
-                    )
-                    self._fast_path_unavailable = True  # cache across views
-                    _LOGGER.info(
-                        "SDES adaptive[%s]: fast open failed (%.0fs) - "
-                        "falling back to full relay path",
-                        self.device_id,
-                        _FAST_OPEN_TIMEOUT,
-                    )
                 _delay = _pacer.fail_delay()
                 self._open_fail_logger()(
                     "SDES keepalive: stream open failed for %s (retry in %.0fs): %s",
@@ -5276,7 +5235,6 @@ class CameraMixin(
                     return
                 continue
 
-            self._fast_attempt_override = None
             self._stream_session = session
             # A remembered resolution is only deliverable once a session exists.
             self._apply_pending_resolution()
@@ -5322,7 +5280,7 @@ class CameraMixin(
                         session.last_media_monotonic,
                         _started_at,
                         time.monotonic(),
-                        grace=(_FAST_GRACE if _use_fast else 60.0),
+                        grace=60.0,
                     ):
                         _stalled = True
                         break
@@ -5496,17 +5454,6 @@ class CameraMixin(
                             exc_info=True,
                         )
                     return
-            if _use_fast and not _healthy and not _fast_failed:
-                _LOGGER.info(
-                    "SDES adaptive[%s]: fast attempt delivered no media - "
-                    "falling back to full relay path",
-                    self.device_id,
-                )
-            _fast_failed = self._adaptive_after_attempt(
-                _use_fast, _healthy, _fast_failed
-            )
-            if _use_fast and not _healthy:
-                self._fast_path_unavailable = True  # cache across views
 
             if self._streaming_active:
                 # Escalate backoff only when the session never delivered media
@@ -5726,7 +5673,7 @@ class CameraMixin(
         # corrected; the decoder still receives the frame untouched.
         _unwrap = _unwrap_state() if is_video else None
         _CANARY_LOG_EVERY = 300  # frames (~10-20s of H.264); DEBUG summary cadence
-        _fix_sps = is_video and _h264_sps.enabled()
+        _fix_sps = is_video
 
         def _tap_put(task, *a, **k):
             try:
@@ -6000,14 +5947,12 @@ class CameraMixin(
             # The pre-connect was never made for a mains camera in the first
             # place; nothing to decide.
             return False
-        asked = getattr(self, "_live_stream_param_opt", None)
-        if asked is None:
-            asked = os.environ.get("AIDOT_LIVESTREAM_PARAM", "0") != "0"
+        asked = bool(getattr(self, "_live_stream_param_opt", None))
         if asked and not getattr(self, "_live_stream_param_warned", False):
             self._live_stream_param_warned = True
             _LOGGER.warning(
                 "camera %s: ignoring the liveStreamParam pre-connect request "
-                "(live_stream_param / AIDOT_LIVESTREAM_PARAM).  On a battery "
+                "(live_stream_param).  On a battery "
                 "camera it provisions the session toward AWS KVS and the camera "
                 "sends its media there instead of to this library, so the live "
                 "view negotiates and then serves no video at all.  The setting "
@@ -6048,97 +5993,27 @@ class CameraMixin(
         return "auto"
 
     def _resolve_sdes_skip_turn(self) -> bool:
-        """EXPERIMENTAL (opt-in, default off): skip the blocking SDES TURN relay
-        pre-allocation, for cameras reachable LAN-direct.
+        """Skip the SDES TURN relay pre-allocation? Decided by the connection
+        mode alone (``lan`` skips it, ``relay`` and ``auto`` keep it).
 
         Before building the offer the SDES path does two synchronous RFC-5766
         Allocate round-trips (audio + video) to the cloud TURN server so the
-        offer's c=/m= can carry a relay address - ~2-3 s of pure cold-start
-        latency.  On a LAN the camera's host candidate wins and that relay is
-        never used, so skipping it shaves the latency - at the cost of no relay
-        fallback for a camera on a different segment / behind strict NAT (the
-        same trade-off ``AIDOT_FAST_CONNECT`` already makes for DTLS, and which
-        is force-disabled for SDES because it *also* skips the SCTP-arming
-        waits; this flag skips ONLY the relay pre-allocation, leaving the rest
-        of the SDES handshake intact).
+        offer's c=/m= can carry a relay address - ~2-3 s of cold-start latency
+        a LAN-direct camera never uses.
 
-        Per-camera ``sdes_skip_turn`` (set via start_keepalive) wins; else the
-        ``AIDOT_SDES_SKIP_TURN_PREALLOC`` env (truthy = 1/true/yes/on), default
-        off.  Only consulted for SDES cameras.
-
-        NEVER skipped for a battery camera, whatever the opt/env say: a battery
+        NEVER skipped for a battery camera, whatever the mode says: a battery
         camera sleeps and is woken through the cloud, so it is reached over the
-        TURN relay rather than a host-direct LAN path.  Skipping the relay
+        TURN relay rather than a host-direct LAN path. Skipping the relay
         pre-allocation there means the camera has no reachable path back and
         sends no media at all (validated live on an A001513: with the relay it
-        streams h264 1280x960, with skip_turn it serves nothing).  The LAN-direct
-        latency win only applies to a mains camera that actually has a host
-        candidate on the HA segment."""
+        streams h264 1280x960, with the skip it serves nothing)."""
         if getattr(self, "is_battery_camera", False):
             return False
         # The connection mode composes here rather than in a parallel path, so
         # everything hanging off this resolver (instrumentation, the adaptive
         # interplay) sees one answer.  relay force-keeps the pre-allocation -
         # forcing the relay while skipping its allocation would offer nothing.
-        _mode = self._resolve_sdes_connection_mode()
-        if _mode == "lan":
-            return True
-        if _mode == "relay":
-            return False
-        opt = getattr(self, "_sdes_skip_turn_opt", None)
-        if opt is not None:
-            return bool(opt)
-        ov = getattr(self, "_fast_attempt_override", None)
-        if ov is not None:
-            return bool(ov)
-        return os.environ.get("AIDOT_SDES_SKIP_TURN_PREALLOC", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
-
-    def _resolve_sdes_adaptive(self) -> bool:
-        """Whether the SDES keepalive loop drives the fast path adaptively
-        (opt-in, default OFF): try fast-first (skip the livePlay waits + TURN
-        relay pre-allocation, with a short timeout), and fall back to the full,
-        patient relay path if the fast attempt delivers no media.
-
-        This makes "fast by default" safe for cameras of unknown reachability:
-        a LAN-direct camera gets the fast connect; a remote / strict-NAT camera
-        loses one short fast attempt, then connects via the full relay path.
-
-        Default OFF pending real-world fast-failure-rate data: a fast *failure*
-        costs ~40 s (the grace) before fallback while success saves only ~7 s, so
-        until the failure rate is known on real fleets this stays opt-in.
-
-        Per-camera ``sdes_adaptive`` (via start_keepalive) wins; else the
-        ``AIDOT_SDES_ADAPTIVE`` env (truthy = 1/true/yes/on), default off. When
-        off, the per-attempt override is never set, so the explicit
-        ``sdes_fast_liveplay`` / ``sdes_skip_turn`` opts (or their envs) decide -
-        exactly the pre-adaptive behaviour.
-
-        NEVER on for a battery camera, whatever the opt/env say - for those it is
-        all cost and no benefit.  The saving adaptive chases is the TURN relay
-        pre-allocation, and [[_resolve_sdes_skip_turn]] force-KEEPS that for a
-        battery camera (it is the only return path to a cloud-woken camera), while
-        fast-liveplay is already on by default.  So a battery "fast" attempt runs
-        the very same handshake as the patient one and differs only in being given
-        45 s to open and a 40 s media grace - inside the documented 25-70 s battery
-        cold-start window.  A slow-but-healthy wake is then scored as a fast-path
-        failure: it latches ``_fast_path_unavailable``, escalates the backoff, and
-        burns a camera-side session on a device that frees them slowly."""
-        if getattr(self, "is_battery_camera", False):
-            return False
-        opt = getattr(self, "_sdes_adaptive_opt", None)
-        if opt is not None:
-            return bool(opt)
-        return os.environ.get("AIDOT_SDES_ADAPTIVE", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
+        return self._resolve_sdes_connection_mode() == "lan"
 
     def _resolve_persistent_mqtt(self) -> bool:
         """Whether commands, attribute fetches, AND stream-open signaling reuse ONE
@@ -6265,12 +6140,6 @@ class CameraMixin(
             li[LOGIN_INFO_PERSISTENT_MQTT_KEY] = pm
             return pm
 
-    @staticmethod
-    def _adaptive_next_fast(adaptive: bool, fast_failed: bool) -> bool:
-        """Whether the next SDES open attempt should use the fast path: only when
-        adaptive mode is on and the fast path has not already failed this loop."""
-        return bool(adaptive) and not bool(fast_failed)
-
     def _next_not_ready_burst(self, healthy: bool, burst: int) -> int:
         """Updated wake-readiness burst counter after a session ended.
 
@@ -6300,15 +6169,6 @@ class CameraMixin(
             return (0.0, False)
         delay, fast = _retry_policy("not_ready", burst, burst_max=burst_max)
         return (delay, bool(fast))
-
-    @staticmethod
-    def _adaptive_after_attempt(
-        use_fast: bool, healthy: bool, fast_failed: bool
-    ) -> bool:
-        """Updated ``fast_failed`` after an attempt: latch it once a fast attempt
-        delivers no media, so the loop stays on the full relay path (no
-        oscillation) until it restarts fresh on the next view."""
-        return bool(fast_failed) or (bool(use_fast) and not bool(healthy))
 
     def _maybe_start_serve_relay(
         self, serve_url: Optional[str]
@@ -6617,7 +6477,7 @@ class CameraMixin(
                     )
                     if _publishing:
                         pass
-                    elif _direct_serve_enabled() and _is_http_serve_url(serve_url):
+                    elif _is_http_serve_url(serve_url):
                         # Only an http:// serve is one go2rtc DIALS. For "-"
                         # this bound a random port and wrote nothing to stdout
                         # (so `aidot-go2rtc <dtls-id> -` produced no media),

@@ -70,8 +70,12 @@ _OFF = ("0", "false", "no", "off")
 
 
 def publish_aac_enabled() -> bool:
-    """Whether the direct publish adds the AAC track (default off: opt in)."""
-    return os.environ.get(ENV_PUBLISH_AAC, "0").strip().lower() not in _OFF
+    """Whether the direct publish adds the AAC track (on unless turned off).
+
+    On by default since 1.0.0rc44: it is what gives an AAC-only consumer
+    (Home Assistant's HLS player, ``camera.record``) sound at all.
+    """
+    return os.environ.get(ENV_PUBLISH_AAC, "1").strip().lower() not in _OFF
 
 
 def audio_specific_config(

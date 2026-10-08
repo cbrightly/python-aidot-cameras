@@ -1144,19 +1144,6 @@ def _warn_lan_serve(host: "Optional[str]", *, context: str) -> None:
     )
 
 
-def _direct_serve_enabled() -> bool:
-    """Serve the muxed TS without the `-c copy` ffmpeg hop. On by default.
-
-    Set AIDOT_DTLS_DIRECT_SERVE=0 to fall back to the ffmpeg hop. The fallback
-    also happens automatically if the serve port cannot be bound, so a clash
-    never costs a stream."""
-    return os.environ.get("AIDOT_DTLS_DIRECT_SERVE", "1").strip() not in (
-        "0",
-        "false",
-        "no",
-    )
-
-
 class _DirectTsServer:
     """Serve the muxed MPEG-TS straight to the consumer, no ffmpeg in between.
 
