@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING, Any, Callable, List, NamedTuple, Optional, Uni
 if TYPE_CHECKING:  # annotation only; keeps av off the import path
     from av import VideoFrame as AvVideoFrame
 
-from ..exceptions import AidotCameraBusy, AidotCameraNoMedia, AidotCameraNotReady
+from ..exceptions import (
+    AidotCameraBusy,
+    AidotCameraNoMedia,
+    AidotCameraNotReady,
+    AidotCameraWrongCodec,
+)
 from ..const import APP_ID as _AIDOT_APP_ID
 from ..const import (
     LOGIN_INFO_MQTT_PASSWORD_KEYS,
@@ -4875,6 +4880,17 @@ class CameraMixin(
 
         return _resolve_sdes_video_pt() == _DIRECT_PUBLISH_VIDEO_PT
 
+    def _hls_ts_expected(self) -> bool:
+        """Was this camera handed an in-sync TS URL that a session must feed?
+
+        True when the option is on and the camera is eligible: Home Assistant
+        then holds the URL, and a session that does not feed the TS is a
+        session with no video for it.
+        """
+        from . import hls_ts
+
+        return hls_ts.enabled() and self._hls_ts_eligible()
+
     def _hls_ts_session(self):
         """A fresh in-sync TS session for one serve cycle, or None.
 
@@ -5127,6 +5143,19 @@ class CameraMixin(
                 )
                 try:
                     await asyncio.sleep(_BUSY_BACKOFF_S)
+                except asyncio.CancelledError:
+                    return
+                continue
+            except AidotCameraWrongCodec as _wrong:
+                # The camera sent media - the other codec than the pin asked
+                # for, which the promised in-sync TS cannot carry - so the open
+                # was abandoned for a fresh try (sdes_open bounds how many). A
+                # camera that delivered is not one that delivered nothing: no
+                # no-media accounting, no backoff, straight to the retry.
+                self._fast_attempt_override = None
+                _LOGGER.info("camera %s: re-opening after %s", self.device_id, _wrong)
+                try:
+                    await asyncio.sleep(1.0)
                 except asyncio.CancelledError:
                     return
                 continue
