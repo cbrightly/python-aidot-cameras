@@ -1,6 +1,6 @@
 # Camera support
 
-This fork adds live streaming, snapshots, cloud recordings, real-time-ish motion
+This library adds live streaming, snapshots, cloud recordings, real-time-ish motion
 events, and two-way (push-to-talk) audio for AiDot/Leedarson cameras, on top of
 the upstream lights-only library.
 
@@ -31,8 +31,8 @@ the SDES-SRTP path.
 `is_battery_camera` gates *every* battery protection at once: the SDES TURN relay
 pre-allocation is force-kept (a camera woken through the cloud has no LAN host
 candidate, so the relay is its only return path), the cloud `setKeepAliveTime` is
-renewed mid-view, the HTTP wake fires before signaling, adaptive fast-connect is
-refused, and the camera is told `powerType=2`.
+renewed mid-view, the HTTP wake fires before signaling, and the camera is told
+`powerType=2`.
 
 It is therefore resolved from the camera's **own cloud data first** - a numeric
 `Battery_remaining` (the same signal `lan_control.is_mains_powered` inverts), or
@@ -210,8 +210,9 @@ proceed to DTLS when the client nominates the **higher** one (their live DTLS
 socket). The library forces `USE-CANDIDATE` onto the highest remote port, which
 lifts the per-attempt connect rate from ~25% to ~75-87%. The fix is **scoped to
 DTLS-camera connections only** - SDES cameras and non-camera devices are a strict
-no-op. Combined with retries (`--webrtc-retries`, default 5, jittered backoff)
-the effective connect rate is high. The fix is unconditional (it self-gates to
+no-op. Combined with the keepalive loop's retries (a jittered exponential
+backoff from 5 s to 300 s, with opens spaced at least `AIDOT_DTLS_RETRY_GATE_S`
+apart) the effective connect rate is high. The fix is unconditional (it self-gates to
 A000088 DTLS connections, so it is a strict no-op everywhere else).
 
 If a camera is already serving its maximum number of viewers it returns a
@@ -250,8 +251,8 @@ its absence is the fault.
 
 ### Direct publish: no ffmpeg in the live path (on by default since 1.0.0rc44)
 
-`AIDOT_DIRECT_PUBLISH=1` replaces the serve's ffmpeg with an RTSP publisher
-inside the library, for a live `rtsp://` push only (recordings, snapshots, `-`
+Direct publish (on unless `AIDOT_DIRECT_PUBLISH=0`) replaces the serve's ffmpeg
+with an RTSP publisher inside the library, for a live `rtsp://` push only (recordings, snapshots, `-`
 and `http://` serves are unchanged). Design, measurements and rollout:
 [`DESIGN-direct-publish.md`](DESIGN-direct-publish.md).
 
@@ -454,7 +455,7 @@ its previous behaviour, which is every relay-path battery camera measured.
 The **`webrtcReq`-echo wait** was a flat 2.0 s for role-reversal models. Across
 18 h of one deployment, of 61 SDES opens the 17 that took the wait timed out 17
 times out of 17, and the `webrtcResp` it exists to build was never sent once.
-See `AIDOT_SDES_ECHO_WAIT_S` in the README for how it is sized now and what
+See `AIDOT_SDES_ECHO_WAIT_S` in [`ENVIRONMENT.md`](ENVIRONMENT.md) for how it is sized now and what
 happens on a fleet whose echo band is not empty.
 
 Battery models take neither wait; their cold open is dominated by the camera
@@ -540,8 +541,8 @@ A-law (PCMA, PT=8) - the codec the camera negotiates.
   audibly on an A001513 (the camera ACKs `SPEAKERSTART` with `851`). Pure-streaming
   opens stay `recvonly` and are unaffected.
 
-`tools/talk_test.py` (a local developer script) plays a 440 Hz tone for a few
-seconds (validated audibly).
+A local developer script (`talk_test.py`, not shipped in the repo) plays a
+440 Hz tone for a few seconds (validated audibly).
 
 **Releasing the speaker on teardown:** when a session that used talk is stopped,
 the library sends `SPEAKERSTOP(849)` and gives the transport a brief flush window
@@ -721,31 +722,9 @@ only H.264 is ingested.
 
 ## Advanced tuning environment variables
 
-These finer-grained knobs are read by the camera client but rarely need changing
-- the defaults are tuned to work out of the box. The headline streaming knobs
-(concurrency caps, fast-connect, persistent MQTT, serve relay, etc.) are in the
-[README](../README.md#camera-streaming--tuning); the ones below are the deeper
-internals.
-
-| Variable | Purpose | Default |
-| --- | --- | --- |
-| `AIDOT_STREAM_IDLE_S` | Seconds of stream idle before an idle release. | `120` |
-| `AIDOT_SDES_IDLE_RELEASE` | Set to `0` to disable idle release for SDES streams. | `1` (enabled) |
-| `AIDOT_ICE_DISCONNECT_S` | ICE-disconnect debounce, in seconds, before tearing down. | `8` |
-| `AIDOT_DTLS_RETRY_GATE_S` | Minimum spacing, in seconds, between DTLS open retries. | `15` |
-| `AIDOT_BUSY_RETRY_S` | Delay, in seconds, before retrying when a camera reports busy. | `45` |
-| `AIDOT_OFFLINE_RECHECK_S` | While a device is cloud-offline, how often the paused keepalive retry re-checks the online flag. | `30` |
-| `AIDOT_OFFLINE_PROBE_S` | While a device is cloud-offline, how often one real open attempt still probes it (guards against a stale cloud flag). | `600` |
-| `AIDOT_GOP_PLI_S` | Interval, in seconds, between PLI (keyframe) requests. | `2.0` |
-| `AIDOT_STALL_PLI_S` | If muxed frames stall for this many seconds (a dropped GOP on a jittery link), request an IDR keyframe immediately instead of waiting out the full `AIDOT_GOP_PLI_S` cadence. Mains DTLS cameras only; `0` disables. | `1.0` |
-| `AIDOT_SDES_PLI_GAPS` | Comma-separated second offsets for the early PLI burst on SDES cameras, to pull the first keyframe in faster on cold start. | `0,1.5,2,3` |
-| `AIDOT_SDES_SERVE_AUDIO` | Serve audio on SDES cameras (a silence-base mix keeps the audio encoder fed so battery-camera audio streams smoothly). Set to `0`/`false`/`no`/`off` to disable. | on |
-| `AIDOT_SDES_AUDIO_GAIN_DB` | Gain (dB) applied when SDES audio is served. | `-8` |
-| `AIDOT_AUDIO_TARGET_DBFS` | Target loudness (dBFS) for two-way audio normalization. | `-15` |
-| `AIDOT_AUDIO_MAXGAIN_DB` | Maximum gain (dB) applied by the audio normalizer. | `30` |
-| `AIDOT_AUDIO_MINGAIN_DB` | Minimum gain (dB) applied by the audio normalizer. | `-12` |
-| `AIDOT_AUDIO_GATE_DBFS` | Noise-gate threshold (dBFS) for two-way audio. | `-45` |
-| `AIDOT_FAST_CONNECT_HOST_ONLY` | Within `AIDOT_FAST_CONNECT`, narrows only the local `RTCPeerConnection` to host candidates (skips the ~5 s srflx gather stall). **On-subnet only** - drops srflx/relay fallback. Opt-in. | unset (off) |
-| `AIDOT_SPROP_DIR` | Directory where captured SPS/PPS (sprop) parameter sets are cached. Set to a writable path if the default location is read-only. | `<package dir>` |
-| `AIDOT_SDES_NACK` | Ask the camera to resend video RTP packets that never arrived (RTCP Generic NACK). Loss on a weak link otherwise reaches the player as a truncated H.264 slice, which WebRTC conceals and MSE treats as fatal. **On by default**; `0`/`false`/`no`/`off` disables. | enabled (on) |
-| `AIDOT_SDES_CONNECTION_MODE` | Which media path the SDES offer proposes: `auto` (default - every reachable candidate, and ICE priority prefers the LAN with the relay as last resort; measured on the full fleet, six of seven cameras stream direct and only the unit with no route to us rides the relay), `lan` (no relay at all - same lever as `AIDOT_SDES_SKIP_TURN_PREALLOC`, and battery cameras keep the relay regardless because a cloud-woken camera has no other path back), or `relay` (EXPERIMENTAL, and on the reference fleet it does not steer: even with `c=`/`m=` moved to the relay allocation and the WAN permission pre-installed, an A001064 and an A001513 both dialed our host address directly, learning it from our own ICE probes - forcing the relay for real would mean suppressing every direct-path outbound, which is unbuilt). Per-open `sdes_connection_mode` beats the env. Every session reports the path its media actually took as `media_stats().media_path` (`direct`/`relay`). | unset (`auto`) |
+Every `AIDOT_*` variable the library reads that is not in the
+[README's table](../README.md#camera-streaming--tuning) is documented in one
+place, [`ENVIRONMENT.md`](ENVIRONMENT.md): the streaming knobs, the deeper
+internals (idle release, PLI cadence, retry spacing, audio normalisation), the
+ffmpeg serve's input settings, and the endpoint overrides and measurement seams.
+The table that used to sit here moved there so the two could not drift apart.

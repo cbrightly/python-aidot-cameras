@@ -200,8 +200,9 @@ read-only broker probe over a 300 s window on a real account (67 messages,
 (`LightOnOff`, `siren_level`, `strobe_*`, `warning_*`).  **No bulb ever published
 `OnOff`, `Dimming`, `CCT` or `RGBW`.**  So the cloud carries no light state on
 that account, and a cloud mode could fix availability but never on/off or colour
-- which is worse than reporting the device unreachable.  Re-run
-`tools/cloud_state_probe.py` before revisiting this conclusion.
+- which is worse than reporting the device unreachable.  Re-run the probe
+(`cloud_state_probe.py`, a local developer tool not shipped in the repo) before
+revisiting this conclusion.
 
 ## Known dual-support gaps
 

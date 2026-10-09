@@ -18,13 +18,13 @@ signatures and behaviour across minor versions:
 | `aidot_cameras.configure_stream_limits` | fleet-wide concurrency limits |
 | `DeviceClient` public methods (`async_*`, `start_keepalive`, `attach_lan_client`) | per-camera control and streaming |
 | `CameraDeviceClient.has_live_session` | whether a stream session is up right now, answered without sending anything |
-| the session objects returned by `async_open_webrtc_stream` | `stop()`, `async_start_talk`, `async_stop_talk`, `get_stats`, `talk_supported`, `is_alive` |
+| the session objects returned by `async_open_webrtc_stream` | `stop()`, `async_start_talk`, `async_stop_talk`, `talk_supported`, `is_alive`; statistics as `get_stats()` on a `WebRTCSession` and `media_stats()` on an `SdesSession` |
 | `aidot_cameras.camera.models` | `CameraDeviceInformation`, `CameraStatusData` |
 | `aidot_cameras.exceptions` | every exception type |
 | `aidot_cameras.const` | `CONF_*`, `DEFAULT_COUNTRY_CODE`, `SUPPORTED_COUNTRY_CODES` |
 | `aidot_cameras.camera.constants` | published protocol constants (`TALK_PCM_*`) |
 | `aidot_cameras.camera.hwaccel.probe_decoder` | decoder capability probe |
-| documented `AIDOT_*` environment variables | per-install tuning seams |
+| the `AIDOT_*` environment variables in the README's table | per-install tuning seams. The variables in `docs/ENVIRONMENT.md` are not part of this promise: each may go once the behaviour it tunes has settled, and the CHANGELOG says so when one does |
 
 Two of these carry a promise about what they DO NOT say, and callers depend on it:
 

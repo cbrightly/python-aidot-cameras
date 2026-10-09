@@ -182,8 +182,12 @@ Disable the integration, wait for the slots to lapse, run, then re-enable:
     # Settings -> Devices & Services -> AiDot -> three dots -> Disable
     # or, over the websocket API:
     #   {"type": "config_entries/disable", "entry_id": "<id>", "disabled_by": "user"}
-    # confirm it let go - both should be zero:
-    docker exec homeassistant sh -c 'ps -o args | grep -c "[f]fmpeg.*aidot"'
+    # confirm it let go. With direct publish on there is no ffmpeg per live
+    # stream, so an empty ffmpeg process list proves nothing; look at go2rtc's
+    # producers instead - no aidot_* stream should still list a publisher
+    # (a live one shows user_agent python-aidot-cameras/...) - and the
+    # pre-allocation count should be zero:
+    curl -s http://127.0.0.1:1984/api/streams | grep -c "python-aidot-cameras/"
     docker logs homeassistant --since 60s 2>&1 | grep -c "sdes-turn-prealloc"
     # wait ~150 s for viewer slots to lapse, then dispatch the run
     # re-enable afterwards with disabled_by: null
@@ -224,20 +228,26 @@ The durable fix is to give the runner its own cameras, so a release gate never
 depends on someone's house being quiet. Until then this step is manual and
 mandatory.
 
-## Known coverage hole: the direct-TS serve is not gated
+## Known coverage hole: the default live paths are not gated
 
 The live gate exercises the SDES path through ffmpeg (`serving (sdes ffmpeg
-bound)`) and scores DTLS cameras by counting frames. It never runs
-`_DirectTsServer` -- grep a run's log for `serving TS directly` and you get
-nothing.
+bound)`) and scores DTLS cameras by counting frames. It never runs the direct
+publisher or the in-sync MPEG-TS listener (`AIDOT_HLS_DIRECT_TS`) -- grep a
+run's log for `in-sync HLS: serving camera TS` and you get nothing -- and it
+does not run the `http://` pull serve (`_DirectTsServer`, `serving TS
+directly`) either.
 
-Home Assistant **does** use that path for DTLS cameras. So a change to the
-direct-TS serve (the keyframe splice, for one) passes a green gate without its
-code having executed. Verify those by hand on a box until the gate covers them:
-attach a consumer to the serve port and confirm bytes and a decodable stream.
+Home Assistant **does** use the first two by default: since 1.0.0rc44 its DTLS
+and SDES cameras publish directly, and its HLS view and recordings read the
+in-sync TS. So a change to those paths (the keyframe splice on the TS listener,
+for one) passes a green gate without its code having executed. Verify those by
+hand on a box until the gate covers them: attach a consumer to the TS listener
+and confirm bytes and a decodable stream. The listener's URL for a camera is
+left in `hls-ts-url` in the library's state directory (`AIDOT_SPROP_DIR`) while
+it runs.
 
 ```bash
-wget -q -O /tmp/x.ts http://127.0.0.1:<port>/<device_id>.ts
+wget -q -O /tmp/x.ts 'http://127.0.0.1:<port>/aidot_<id12>.ts?auth=<secret>'
 ffprobe -v error -show_entries stream=codec_name,codec_type -of csv=p=0 /tmp/x.ts
 # expect: h264,video and aac,audio -- zero bytes means the consumer was never spliced
 ```

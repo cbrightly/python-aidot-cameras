@@ -55,7 +55,8 @@ from .rtp_h264 import H264Depacketizer
 
 _LOGGER = logging.getLogger(__name__)
 
-#: Env switch for the whole feature. Default OFF until it has soaked live.
+#: Env switch for the whole feature. On by default since 1.0.0rc44; set it to
+#: 0 to turn the feature off (see direct_publish_enabled below).
 ENV_DIRECT_PUBLISH = "AIDOT_DIRECT_PUBLISH"
 #: Timestamp policies: SDES video is ``steered`` (its clock runs ~7% fast and
 #: steering keeps its even spacing at real-time rate), every other track is

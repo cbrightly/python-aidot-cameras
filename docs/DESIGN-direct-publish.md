@@ -1,11 +1,12 @@
 # Design: publish decrypted media straight into go2rtc (no ffmpeg hop)
 
-Status: **shipped, opt-in and off by default.** A1 (library) and A2
+Status: **shipped; default on since `1.0.0rc44` (integration `2.35.0`).** A1 (library) and A2
 (integration) released as `1.0.0rc23` / integration `2.25.0`; A3 (AAC for an
 HLS consumer) as `1.0.0rc24` / `2.26.0`; the H.264-only gate as `1.0.0rc25`;
 the restored audio conditioning as `1.0.0rc26`; and `1.0.0rc27` after the
 first run through Home Assistant rather than a harness (see Pass 4).
-A4 (default on) is not done - it waits on a soak in normal use.
+A4 (default on) shipped in `1.0.0rc44` / `2.35.0`; the soak that follows it
+is tracked in [`ROAD-TO-1.0.md`](ROAD-TO-1.0.md).
 
 Live-validated on seven cameras with H.264: A/B against the ffmpeg serve,
 30 min soaks per transport, battery soaks and idle-release timing. A camera's
@@ -168,8 +169,10 @@ Publish **PCMA as-is**. For WebRTC viewers this is strictly better than today
 (no AAC encode, no 48 kHz resample, no `anullsrc` mix; browsers take PCMA
 natively). Gain: SDES applies `AIDOT_SDES_AUDIO_GAIN_DB` today inside ffmpeg;
 the publisher applies it on the A-law bytes through a 256-entry lookup table
-(`g711` decode -> scale/clip -> encode), so the knob keeps working. DTLS AGC is
-not carried over in A1 (noted as a gap; re-evaluate after listening tests).
+(`g711` decode -> scale/clip -> encode), so the knob keeps working. DTLS AGC was
+not carried over in A1 (noted as a gap at the time); `1.0.0rc26` restored the
+audio conditioning, and `1.0.0rc44` removed the `AIDOT_AUDIO_AGC` switch that
+could turn it off, so it is simply on.
 
 Trade-off: HA's HLS fallback and recorder drop PCMA and keep video only.
 **Phase A3 (built)** restores AAC for exactly those consumers: the stream
@@ -186,7 +189,7 @@ from the same publish (`tests/test_rtsp_publish_go2rtc.py`).
 removed: some go2rtc builds stamp that transcode's RTP on a 90 kHz clock
 while advertising `MPEG4-GENERIC/8000`, which plays about eleven times too
 slow (see `docs/CAMERAS.md`, "An AAC transcoding source makes every player
-crawl"). The publish can now carry its own AAC-LC 48 kHz mono track (opt-in, `AIDOT_PUBLISH_AAC=1`), encoded
+crawl"). The publish can now carry its own AAC-LC 48 kHz mono track (on unless `AIDOT_PUBLISH_AAC=0`, since `1.0.0rc44`), encoded
 in-process after the A-law one, with timestamps it owns - see
 `aac_track.py`. Until the camera's first audio arrives the track's silence
 follows the video's media time instead of the wall clock, and it then
@@ -196,7 +199,8 @@ backlog no longer leaves the sound ahead of the picture.
 ## Integration (hass-aidot-cameras)
 
 - Option in the "streaming" options step: **Direct publish (no ffmpeg)**,
-  default off; sets `AIDOT_DIRECT_PUBLISH=1` like the other env-bridged options.
+  default on since `2.35.0`; the integration writes `AIDOT_DIRECT_PUBLISH=1` or
+  `=0` explicitly, like the other env-bridged options.
 - With it on, **DTLS cameras switch to push mode too** (`_sdes_push_enabled`
   becomes "push enabled" for both transports). That removes, for those cameras,
   the pull serve port, the CRC port hash, the `_serve_url` registration and the
@@ -221,13 +225,13 @@ backlog no longer leaves the sound ahead of the picture.
 
 | Phase | Scope | Exit criterion |
 | --- | --- | --- |
-| **A1** | Library: `rtsp_publish.py`, SDES launch-site swap, DTLS publish runner, `AIDOT_DIRECT_PUBLISH` (default off), CLI honours it. Unit tests + e2e against `FakeRtspSink` and a real go2rtc 1.9.14 binary on loopback. | Suite green; synthetic RTP round-trips through a real go2rtc to an RTSP reader with correct codecs. |
+| **A1** | Library: `rtsp_publish.py`, SDES launch-site swap, DTLS publish runner, `AIDOT_DIRECT_PUBLISH` (default off until A4), CLI honours it. Unit tests + e2e against `FakeRtspSink` and a real go2rtc 1.9.14 binary on loopback. | Suite green; synthetic RTP round-trips through a real go2rtc to an RTSP reader with correct codecs. |
 | **A2** | Integration: option, DTLS push routing when enabled, tests. | HA test suite green. |
 | **Live** | On the camera LAN box: each model (A000088, A001064, A001513) - cold start, 30 min soak, HA WebRTC view, HLS fallback, idle release, go2rtc restart, camera power-cycle. Compare against flag-off baseline. | See "Validation gate". |
-| **A3** | DONE: HLS/recorder AAC via a lazy go2rtc `ffmpeg:` source listed after the live one. DTLS AGC still undecided. | HLS has audio; WebRTC unaffected. |
-| **A4** | NOT DONE. Default on; ffmpeg push path kept one release as fallback, then removed along with `_ServeRelay`, CRC ports and the pull registration for push cameras. Note the ffmpeg serve cannot be removed outright while H.265 sessions fall back to it, and see "Stale pull sources" below. | A soak in normal use with the option on, then one release with no regressions reported. **Day zero is 2026-09-21.** It was first written as 2026-09-20, when `rc27` reached the box - and then integration 2.29.2 changed what every published camera's go2rtc definition points at, which is a behaviour change, not a cosmetic one. A window that contains a change to the path under test is not a soak of it, so the clock starts from the last such change rather than from the first version that looked finished. (2.29.3, which follows it, alters two option strings and nothing else.) |
+| **A3** | DONE: HLS/recorder AAC via a lazy go2rtc `ffmpeg:` source listed after the live one (since superseded by the in-process AAC track, above). DTLS AGC: restored in `1.0.0rc26`, its switch removed in `1.0.0rc44`. | HLS has audio; WebRTC unaffected. |
+| **A4** | DONE: default on since `1.0.0rc44` (integration `2.35.0`). The ffmpeg push stays as the `AIDOT_DIRECT_PUBLISH=0` fallback and for H.265 sessions, so it cannot be removed outright; `_ServeRelay`, CRC ports and the pull registration for push cameras go when it does. See "Stale pull sources" below. | The soak in normal use that this row scheduled is now kept, with its clock, in [`ROAD-TO-1.0.md`](ROAD-TO-1.0.md), which supersedes the dates here. For the record: day zero was first written as 2026-09-20, when `rc27` reached the box, then moved to 2026-09-21 because integration 2.29.2 changed what every published camera's go2rtc definition points at, which is a behaviour change, not a cosmetic one. A window that contains a change to the path under test is not a soak of it, so the clock starts from the last such change rather than from the first version that looked finished. (2.29.3, which follows it, alters two option strings and nothing else.) |
 
-### Stale pull sources, to clear as part of A4
+### Stale pull sources
 
 A camera that published still carries its pull-era source in `go2rtc.yaml`:
 
@@ -243,10 +247,16 @@ publisher holds the stream, so it is inert today. The publisher is the live
 producer (`format_name: rtsp`, `user_agent: python-aidot-cameras/...`, SDP
 carrying `H264/90000` + `PCMA/8000`) and A3's AAC source hangs off that.
 
-It matters at A4 because the default flips for everyone: every published
-camera would keep a source pointing at a port nothing binds, for go2rtc to
-try on a consumer attach. Clearing it belongs with "remove the pull
-registration for push cameras" in the row above.
+It mattered at A4 because the default flipped for everyone: a definition like
+the one above keeps a source pointing at a port nothing binds, for go2rtc to
+try on a consumer attach. What the library does today: a camera that publishes
+registers no pull source at all (`_register_with_go2rtc` refuses a source that
+is the stream's own publish address, since go2rtc would become its own
+producer), and it adds no `ffmpeg:` source anywhere - `Go2rtcClient.ensure_stream`
+warns against one. It does not rewrite a stream definition that already exists,
+so a definition registered before the flip is for whoever registered it (the
+integration, or the operator's `go2rtc.yaml`) to clear. The pull registration
+itself survives for the `-` and `http://` serves, and goes with the row above.
 
 ## Validation gate (run before each release that touches this path)
 
@@ -389,7 +399,9 @@ never takes the cold path.
    `127.0.0.1:1984`/`8554`, which is not HA's bundled server (unix-socket API,
    RTSP on 18554). Supporting the bundled server needs the stream-create call to
    go through HA's own go2rtc client; worth doing independently of this design.
-2. Should the DTLS runner keep the mux's AGC? Needs a listening test.
+2. Answered. Should the DTLS runner keep the mux's AGC? `1.0.0rc26` restored
+   the audio conditioning and `1.0.0rc44` removed the `AIDOT_AUDIO_AGC` switch,
+   so it is always on.
 3. H.265 from a CAMERA is still unexercised, and direct publish is gated to
    H.264 because of it (`_should_direct_publish`'s `video_pt`; an H.265
    session keeps the ffmpeg serve; the switch that lifted it was removed in
