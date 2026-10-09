@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Automated A/B validator for the experimental SDES fast-liveplay flag (P5).
+"""Automated A/B validator for the SDES fast-liveplay flag (P5).
 
+The flag is the shipped default (ON); the OFF arm is the deviation under test.
 Speeds up validation: instead of waiting hours for organic camera opens, this
 drives a few GENTLE, well-spaced opens (long holds + recovery gaps - SDES cameras
 degrade on rapid reconnects, so this never hammers), alternating the flag per

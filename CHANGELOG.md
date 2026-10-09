@@ -6,6 +6,26 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Documentation
+
+- **The docs say what 1.0.0rc44 made true.** Direct publish, the AAC track,
+  the in-sync TS and the H.264 pin are described as the default everywhere,
+  not as opt-in; the two removed knobs the README still named are gone from
+  it; `docs/ENVIRONMENT.md` now lists every `AIDOT_*` variable outside the
+  README's table (the table that lived in `docs/CAMERAS.md` moved there, and
+  28 variables the code reads had no entry anywhere); `docs/ROAD-TO-1.0.md`
+  classifies 1.0.0rc29 to 1.0.0rc44 and records the four clock resets since
+  2026-09-29; `docs/API-STABILITY.md` names which session class has
+  `get_stats()` and which `media_stats()`, and limits the environment-variable
+  promise to the README's table; stale paths, a nonexistent `--webrtc-retries`
+  option and two references to documents that never existed are corrected.
+
+### Removed
+
+- The `--pt-order-arms` campaign in `scripts/live_validate.py`: it set
+  `AIDOT_SDES_VIDEO_PT_ORDER`, which nothing has read since 1.0.0rc44, so
+  every arm was the control.
+
 ## [1.0.0rc44]
 
 ### Changed
