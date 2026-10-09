@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Passive soak monitor for SDES cold-start latency and stability.
 
-Validates the experimental P5 flag (AIDOT_SDES_FAST_LIVEPLAY) the only way that
-actually works: by watching REAL usage over time, not a synthetic A/B (rapid
-synthetic reconnects degrade SDES cameras, which is exactly the failure mode the
-library's reconnect gate guards against).
+Validates the P5 flag (AIDOT_SDES_FAST_LIVEPLAY, the shipped default: ON) the
+only way that actually works: by watching REAL usage over time, not a synthetic
+A/B (rapid synthetic reconnects degrade SDES cameras, which is exactly the
+failure mode the library's reconnect gate guards against).
 
 It reads Home Assistant logs (which carry the library's `cold-start[...]` markers
 and SDES keepalive messages), accumulates per-camera metrics, and prints a
-summary. Run it once with the flag OFF for a while, once with it ON, and compare:
+summary. Run it on the shipped default (flag ON) for a while, then once with
+the flag forced OFF - the deviation - and compare:
 
   * cold-start latency  -> did P5 shave time off?           (lower is better)
   * restarts / failures -> did P5 destabilise the session?  (higher is worse)

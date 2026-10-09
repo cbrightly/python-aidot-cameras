@@ -627,29 +627,13 @@ def _recording_path(out_dir: str, device_id: str, attempt: int) -> str:
 def _parse_arms(spec: str) -> list:
     """Split a campaign spec into arms.
 
-    "|" separates arms because a single arm is itself a comma list ("97,96").
-    An empty arm means "leave the offer alone", which is the control, so the
+    "|" separates arms rather than "," so a single arm can itself carry a
+    comma list. An empty arm is the control (no command is sent), so the
     empty string between separators is meaningful and must not be dropped.
     """
     if not spec:
         return []
     return [part.strip() for part in spec.split("|")]
-
-
-def _apply_pt_order(arm):
-    """Set the offer's codec order for this attempt, or clear it.
-
-    The library reads AIDOT_SDES_VIDEO_PT_ORDER at offer-build time on every
-    open - verified, not assumed: it is a plain os.environ.get with no cache -
-    so alternating it BETWEEN attempts gives genuinely interleaved arms rather
-    than blocked ones. That matters because this camera's bitrate varies
-    839-3698 Kbps on its own, and blocked arms would measure time of day.
-    """
-    key = "AIDOT_SDES_VIDEO_PT_ORDER"
-    if arm:
-        os.environ[key] = arm
-    else:
-        os.environ.pop(key, None)
 
 
 def _media_sample(session, frames: dict) -> dict:
@@ -1011,7 +995,6 @@ async def _attempt(
     out_dir: str,
     attempt: int,
     device: dict | None = None,
-    pt_order=None,
     sd_probe: bool = False,
     quality_arm=None,
     max_seconds: int | None = None,
@@ -1021,25 +1004,15 @@ async def _attempt(
     from aidot_cameras.exceptions import AidotCameraBusy
 
     out = _recording_path(out_dir, dc.device_id, attempt)
-    if pt_order is not None:
-        _apply_pt_order(pt_order)
-        # Recorded whether or not the receipt comes back, so an arm that failed
-        # to reach the SDP is visible as a mismatch rather than as a null result.
-        result_arm = pt_order or "default"
-    else:
-        result_arm = None
 
     frames = {"n": 0}
     # Anything left over belongs to the previous attempt; reporting it here
     # would name a failure on a session that succeeded.
     _STALLS.drain()
-    _RECEIPTS.drain()
     t0 = time.time()
     session = None
     stopped = False
     result: dict = {"attempt": attempt}
-    if result_arm is not None:
-        result["pt_order_arm"] = result_arm
     if quality_arm is not None:
         result["quality_arm"] = quality_arm or "control"
         _ACKS.drain()
@@ -1173,11 +1146,6 @@ async def _attempt(
         _stalls = _STALLS.drain()
         if _stalls:
             result["stall_reports"] = _stalls
-        _receipts = _RECEIPTS.drain()
-        if _receipts:
-            # The offer's own account of the order it sent. Without it a null
-            # campaign result cannot be told from a campaign that never varied.
-            result["offer_pt_order"] = _receipts[-1]
         if session is not None and not stopped:
             try:
                 await _stop(session)
@@ -1199,14 +1167,11 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
     is_dtls = not getattr(dc, "is_sdes_camera", False)
     # A campaign runs a fixed, balanced number of attempts and does NOT stop on
     # success: the normal loop breaks on the first PASS, so with arms alternating
-    # per attempt a passing camera would only ever see the first arm - blocked
+    # per session a passing camera would only ever see the first arm - blocked
     # arms wearing interleaved clothing, which is exactly what this design is
-    # meant to avoid.
-    arms = _parse_arms(getattr(args, "pt_order_arms", "") or "")
-    campaigning = bool(arms) and not is_dtls
-    # The quality campaign is the same design one level in: the arms alternate
-    # per SESSION, and the comparison that matters happens INSIDE each session,
-    # so this loop's job is only to run a balanced, interleaved set of them.
+    # meant to avoid. The quality campaign's arms alternate per SESSION, and the
+    # comparison that matters happens INSIDE each session, so this loop's job
+    # is only to run a balanced, interleaved set of them.
     quality_arms = _parse_arms(getattr(args, "quality_arms", "") or "")
     quality_window = float(getattr(args, "quality_window", QUALITY_WINDOW_S))
     repeats = max(1, int(getattr(args, "arm_repeats", 1)))
@@ -1215,8 +1180,6 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
     )
     if quality_arms:
         max_attempts = len(pending)
-    elif campaigning:
-        max_attempts = len(arms) * repeats
     else:
         max_attempts = ATTEMPTS_DTLS if is_dtls else ATTEMPTS_SDES
     voids = 0
@@ -1276,7 +1239,6 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
             args.out_dir,
             i,
             device,
-            pt_order=(arms[(i - 1) % len(arms)] if campaigning else None),
             sd_probe=bool(getattr(args, "sd_probe", False)),
             quality_arm=quality_arm,
             quality_window=quality_window,
@@ -1321,7 +1283,7 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
                     f"{quality_arm or 'control'} ({voids}/"
                     f"{QUALITY_VOID_BUDGET} of the void budget used)"
                 )
-        if res["verdict"] == "PASS" and not campaigning and not quality_arms:
+        if res["verdict"] == "PASS" and not quality_arms:
             break
         # A camera that has only ever failed WITHOUT opening a session is not
         # being flaky, it is absent. Stop re-asking it; the verdict cannot change
@@ -1634,37 +1596,6 @@ class _StallCollector(logging.Handler):
         return out
 
 
-#: The offer's codec-order receipt. The one time this project pinned the codec
-#: order it "looked like a confirmed result for two sessions before a missing
-#: receipt showed it had never reached the SDP at all", so a campaign that
-#: varies the order must carry proof per attempt that the variation arrived.
-_ORDER_MARKER = "offer video codec order="
-
-
-class _ReceiptCollector(_StallCollector):
-    """Same mechanism as the stall collector, different line AND level.
-
-    The stall report is a WARNING; the offer receipt is an INFO. Inheriting the
-    parent's WARNING level made this collect nothing at all, and the first real
-    campaign proved how bad that is: six receipts in the run log, None in the
-    artifact, and a null codec result that could not be told apart from a
-    campaign whose arms never reached the SDP - the exact failure the receipt
-    exists to rule out.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setLevel(logging.NOTSET)
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            message = record.getMessage()
-        except Exception:
-            return
-        if _ORDER_MARKER in message:
-            self._seen.append(message.split(_ORDER_MARKER, 1)[1].strip())
-
-
 #: The resolution setter's own account of what the camera said back. The setter
 #: returns True whether the camera acked, stayed silent, or was never asked at
 #: all (no session -> it remembers the value and reports success), so its return
@@ -1672,15 +1603,22 @@ class _ReceiptCollector(_StallCollector):
 _ACK_MARKER = "set resolution "
 
 
-class _AckCollector(_ReceiptCollector):
+class _AckCollector(_StallCollector):
     """Keeps the SETSTREAMCTRL ack lines, which are DEBUG.
 
-    Same trap as the codec receipt one level worse: those are INFO and this is
-    DEBUG, so it collects nothing unless the controls logger is actually at
-    DEBUG. `_configure_logging` lowers that one logger when a quality campaign
-    is running, rather than putting the whole library at DEBUG during a
-    measurement.
+    Same mechanism as the stall collector, different line AND level. The
+    stall report is a WARNING; inheriting that level made an earlier INFO
+    receipt collector gather nothing at all - six receipts in the run log,
+    None in the artifact - so the level is lowered here. The ack lines are
+    DEBUG, one step further down, so this still collects nothing unless the
+    controls logger is actually at DEBUG. `_configure_logging` lowers that one
+    logger when a quality campaign is running, rather than putting the whole
+    library at DEBUG during a measurement.
     """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setLevel(logging.NOTSET)
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -1693,7 +1631,6 @@ class _AckCollector(_ReceiptCollector):
 
 #: Installed by _configure_logging, read by _attempt.
 _STALLS = _StallCollector()
-_RECEIPTS = _ReceiptCollector()
 _ACKS = _AckCollector()
 
 
@@ -1728,7 +1665,6 @@ def _configure_logging(level_name: str, quality_campaign: bool = False) -> None:
     # Attached to the library logger rather than the root: this only ever wants
     # the library's own reports, and the root carries aiortc/asyncio too.
     logging.getLogger("aidot_cameras").addHandler(_STALLS)
-    logging.getLogger("aidot_cameras").addHandler(_RECEIPTS)
     logging.getLogger("aidot_cameras").addHandler(_ACKS)
     if quality_campaign:
         # One logger, not the library: the ack lines are DEBUG, and a campaign
@@ -1769,15 +1705,6 @@ def main() -> int:
         help="seconds a camera is left alone after a session before"
         f" it is opened again (default {DEFAULT_COOLDOWN_S:.0f};"
         " a camera holds its viewer slot ~120s)",
-    )
-    p.add_argument(
-        "--pt-order-arms",
-        default="",
-        help="campaign mode: '|'-separated video codec orders to "
-        "alternate per attempt on SDES cameras, e.g. "
-        "'|97,96' for default-then-H265-first. An empty arm "
-        "means leave the offer alone. Attempts do not stop on "
-        "success, so both arms are measured on every camera.",
     )
     p.add_argument(
         "--quality-arms",

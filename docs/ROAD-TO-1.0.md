@@ -720,7 +720,9 @@ does not indict the knob, and it does not clear it either.
 
 `AIDOT_SDES_VIDEO_PT_ORDER` stays: it is opt-in, inert unset, proven to reach the
 SDP, and it is the instrument any future arm would use. It should not be
-described as promising.
+described as promising. *(It went in `rc44`, 2026-10-08, with the other quality
+levers - see the entry for that release below. A future arm needs a new
+instrument.)*
 
 The bar: **explained, or documented as accepted** with the measurements.
 
@@ -1949,10 +1951,53 @@ stays 2026-09-21.
 
 **Day zero stays wherever `rc23` set it.**
 
+#### 2026-10-09: `rc29` to `rc44`, and the clock as it stands
+
+This tracker stopped at `rc28` and sixteen releases went out unclassified. The
+maintainer reset the clock four times in that span, each time on the rule this
+document already states, with one refinement he applied on 2026-09-30 and has
+kept since: **a fix to broken core behaviour resets the clock; a new opt-in
+feature does not** - and a path that is on by default is core, however it got
+there. Release dates are the tag dates.
+
+| release | date | find | resets? |
+|---|---|---|---|
+| `rc29` | 2026-09-22 | A go2rtc `PUT` rejected with 400 dropped the camera to Home Assistant's HLS path even when go2rtc was holding the stream (a duplicate key in `go2rtc.yaml` makes it reject every registration); the fallback now happens only when the stream is genuinely absent | **Yes.** The default live path. Counted in the 09-30 reset |
+| `rc30` | 2026-09-23 | `python-aidot` 0.3.57 added a third constructor argument, so every device client this package built raised `TypeError`: a fresh install could not start at all | **Yes.** Not streaming, but nothing streams from an integration that cannot load. Counted in the 09-30 reset |
+| `rc31` | 2026-09-23 | Two upstream log lines carried the device LAN password and the account tokens; masked. Floor raised to 0.3.56 | No - logging and packaging |
+| `rc32` | 2026-09-28 | SDES video ran ~7% fast in HLS and recordings (re-sent frames republished, and a camera clock steered to real time): two-minute recordings measured 130.9 s -> 121.8 s. Also the AAC track, opt-in | **Yes**, for the SDES timing fix on the default recording path; the AAC track is opt-in and does not count. Counted in the 09-30 reset |
+| `rc33` | 2026-09-30 | The AAC track starts in step with the picture on a cold start | No - opt-in path at the time |
+| `rc34` | 2026-10-01 | The AAC track treated 0.5 s without audio as a quiet camera and cut a battery camera's late audio burst - up to ~10 s of sound per two-minute recording. The integration had made HLS audio the default on 09-30 | **Yes.** On by default since integration 2.30.8, so broken core behaviour. Reset to 10-01 |
+| `rc35` | 2026-10-03 | Recording a DTLS camera to a `.ts` file copies the camera's H.264 instead of re-encoding half the frames; stopping a session twice is harmless | No - the file recorder is harness/API only; Home Assistant never records that way |
+| `rc36` | 2026-10-03 | The in-sync MPEG-TS for Home Assistant's HLS view and recordings, DTLS only, opt-in | No - opt-in |
+| `rc37` | 2026-10-03 | The A000088's H.264 states one frame of reordering it never does, so libav derived jittery decode times: every HLS segment started with a shifted picture and one recording failed with `non monotonically increasing dts`. The copies the library serves, publishes and records now state no reordering | **Yes.** The default DTLS recording/HLS path. Reset to 10-04 |
+| `rc38` | 2026-10-04 | SDES cameras on the in-sync TS (opt-in); PyAV widened to <20 so Home Assistant 2026.11 can install the library at all | No - the TS is opt-in, and the PyAV widening is packaging |
+| `rc39` | 2026-10-06 | The in-sync TS served under a secret path | No - opt-in path |
+| `rc40` | 2026-10-07 | The TS secret moved to the `auth` query parameter, which Home Assistant masks in its log; the URL left in `hls-ts-url` for the owner's tools | No - opt-in path. (Integration 2.34.2 the same day fixed the clip proxy dropping each cloud clip's first ~3 s - a default media-browser path, and part of the 10-08 reset) |
+| `rc41` | 2026-10-08 | go2rtc 1.9.9 tears its config file under any two concurrent writes; reproduced in 18 of 40 bursts. The live-view registrations on the reference installation had been answered 400 since 10-06. `Go2rtcClient` now takes one write lock per server, and the integration (2.34.3) one lock for every config write | **Yes.** The default registration path. Reset to 10-08 |
+| `rc42` | 2026-10-08 | A pinned SDES camera that answers H.265 is re-opened rather than leaving the in-sync TS empty (the A001064 does it in about one open in seven); the LAN discovery sweep runs only for an account that has a light | No - the re-open applies only with the in-sync option on, and the sweep is the light control path |
+| `rc43` | 2026-10-08 | Four log lines that said nothing was wrong no longer warn or error | No - log levels |
+| `rc44` | 2026-10-08 | Direct publish, the AAC track, the in-sync TS and the H.264 pin become the default; fourteen experiment knobs removed with their code (integration 2.35.0 flips the same three options on and writes them explicitly) | No, by the maintainer's call: on the reference installation nothing changed, because its saved options were already on. **From here on, a fix to any of those four paths is a fix to the default path and resets the clock** - the "opt-in" classification in the rows above was true when written and is not a precedent |
+
+**Day zero is 2026-10-08 (library `rc42` and integration 2.34.3 on the
+reference installation from about 10:10 UTC). Two weeks from it is
+2026-10-22.** `rc43`, `rc44` and integration 2.34.4 / 2.35.0 went out later
+the same day and are classified above as not resetting; the first full
+ordinary day is therefore 2026-10-09, and 10-08 itself - three releases and
+their restarts - counts as provocation, not soak, by the rule the 09-06 entry
+set.
+
+The earlier resets, for the record: 2026-09-29 (rc29 / 2.30.3, 2.30.4's
+eleven-times-slow HLS, 2.30.6's stale-stream reuse, rc32 / 2.30.7),
+2026-10-01 (rc34 / 2.30.9), 2026-10-04 (rc37 / 2.31.1), and 2026-10-08 (2.34.2
+and rc41 / 2.34.3).
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /
-  REMB response.** Moved here 2026-09-04 when item 7 closed. The mid-session
+  REMB response.** Moved here 2026-09-04 when item 7 closed. The TMMBR and
+  bandwidth knobs went in `rc44`; `AIDOT_REMB_TARGET_BPS` is the one
+  instrument left, and a future measurement needs new ones. The mid-session
   commands a viewer triggers were measured and do nothing above ~11 percent;
   these four are a different shape, acting over minutes rather than at a point,
   and no instrument for them exists yet - two 12-second windows around a command

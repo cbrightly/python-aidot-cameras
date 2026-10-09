@@ -1792,9 +1792,10 @@ _SDES_OFFER_VIDEO_CODECS = {
     97: ("a=rtpmap:97 H265/90000\r\na=fmtp:97 level-id=93\r\n"),
 }
 
-#: The order those codecs go on the wire today: H264 first, H265 second.  This
-#: is the shipped default and changing it changes every SDES camera's
-#: negotiation, so it is overridden per-run by env and never edited here.
+#: The order those codecs go on the wire: H264 first, H265 second.  This is
+#: the shipped order and changing it changes every SDES camera's negotiation.
+#: The per-run env override that once reordered it is gone (1.0.0rc44), so
+#: this constant is the only place the order is set.
 _SDES_OFFER_VIDEO_PT_ORDER = (96, 97)
 
 
@@ -3318,25 +3319,12 @@ class _SdesOpenMixin:
             )
         )
 
-        # Receipt for the codec order above, emitted only when it differs from
-        # the shipped one.  A run that cannot show the knob was applied cannot
-        # tell a result from a coincidence: an earlier attempt on this question
-        # read as a confirmed effect for two sessions before the missing receipt
-        # showed the pin had never reached the SDP at all.  Ordering happens
-        # before the pin below, so with both set the pin wins and the order is
-        # moot - which is why both lines print rather than one.
-
-        # Same receipt, same reason, for the receive-bandwidth ceiling: the log
-        # carries the camera's ANSWER, not our offer, so "the env var was set"
-        # is not evidence the line reached the wire.  Measured 2026-08-23: a
-        # b=AS arm scored identically to its control and the only available
-        # check for the knob was reading the env back out of the harness.
-
-        # Opt-in: NARROW the OFFER to one video codec rather than advertising
-        # both 96/97 and letting the camera decide in its answer.  Distinct from
-        # the ordering above, which only states which of the two we would
-        # rather have and always leaves both on the wire; this one takes the
-        # other away, which for 97 took the video with it.
+        # The default since 1.0.0rc44: NARROW the OFFER to one video codec
+        # (H.264) rather than advertising both 96/97 and letting the camera
+        # decide in its answer.  Distinct from the codec order above, which
+        # only states which of the two we would rather have and leaves both on
+        # the wire; this one takes the other away, which for 97 took the video
+        # with it.
         #
         # The offer is the SDP that matters here.  Traced live 2026-08-07 with
         # every status line printed: this path sends webrtcReq carrying OUR
@@ -3344,7 +3332,8 @@ class _SdesOpenMixin:
         # the camera answers, we do not.  The answer builder further down runs
         # only on the branch where the camera offers first, which this camera
         # did not take, so pinning there changed nothing at all while the
-        # arms still came out looking like the pin had worked.  Inert unless set.
+        # arms still came out looking like the pin had worked.  Only
+        # AIDOT_SDES_VIDEO_PT=none leaves the camera its choice.
         _pin_video_pt = _resolve_sdes_video_pt()
         if _pin_video_pt is not None:
             sdes_offer_sdp = narrow_sdp_payload_types(
@@ -3670,9 +3659,9 @@ class _SdesOpenMixin:
                     # app stringifies the ints it reads from the IPC device info,
                     # and its no-device-info fallback puts the literals "1" / "0".
                     # The DTLS webrtcReq has carried both for a long time
-                    # (webrtc_open.py, per docs/official_camera_network_calls.md
-                    # section 5.2) and sends them as ints; that path is fleet-proven,
-                    # so it is deliberately left alone rather than churned to match.
+                    # (webrtc_open.py) and sends them as ints; that path is
+                    # fleet-proven, so it is deliberately left alone rather than
+                    # churned to match.
                     "powerType": str(_live_power_type),
                     "p2pCache": str(_live_p2p_cache),
                     # wPayload: newer firmware parses wPayload for ICE credentials

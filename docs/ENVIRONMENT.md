@@ -1,10 +1,12 @@
 # Environment variables: internals
 
-Every `AIDOT_*` variable the library reads that is **not** on the README's list.
-These are tuning knobs added during investigations - most for one camera model,
-all with defaults that were measured. They are read per call where the README
-says so, and none is part of the 1.0 API: each may be removed in a later release
-once the behaviour it tunes has been settled, and the CHANGELOG will say so.
+Every `AIDOT_*` variable the library reads that is **not** in the README's
+table, in four groups: the streaming knobs, the deeper internals that used to
+sit in `CAMERAS.md`, the serve and retry policy, and the endpoint overrides and
+measurement seams. Most were added during an investigation of one camera model,
+and every default was measured. None is part of the 1.0 API (see
+`API-STABILITY.md`): each may be removed in a later release once the behaviour
+it tunes has settled, and the CHANGELOG will say so.
 
 Removed in 1.0.0rc44, with the code behind them: the closed bitrate and
 quality levers (`AIDOT_SDES_VIDEO_PT_ORDER`, `AIDOT_SDES_OFFER_BANDWIDTH_KBPS`,
@@ -37,7 +39,72 @@ now does nothing. The TURN pre-allocation skip lives on as connection mode
 | `AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S` | How long one WebRTC open attempt for a served DTLS camera may take before it is abandoned and retried. Raised from 30 s because the camera's own offer-resend fires at 30 s, so the attempt used to die at the instant its last resend went out; answers measured arriving at 30.7-99.5 s were discarded as a result. | `75` |
 | `AIDOT_DTLS_SERVE_ICE_WAIT_S` | Separate budget for the ICE half of that open, clamped to `AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S`. The open is two sequential waits - signalling then ICE - so without its own budget the ICE wait inherits the timeout above and doubles the worst case while holding the global open gate. | `30` |
 | `AIDOT_DTLS_FUTILE_VIDEO_LIMIT` | Consecutive video-less DTLS sessions after which the serve loop stops re-opening. Noticing alone is not enough: a video-less session is otherwise a clean open, so a loop that simply re-opened would clear its backoff each time and wake the camera every 15 s indefinitely. `0` keeps retrying forever. | `5` |
-| `AIDOT_LOGIN_RETRY_CAP_S` | Ceiling on the exponential delay between those retries. | `60` |
+| `AIDOT_LOGIN_RETRY_CAP_S` | Ceiling on the exponential delay between the LAN login retries that `AIDOT_LOGIN_RETRY_LIMIT` (README) counts. | `60` |
 | `AIDOT_LOGIN_CONNECT_TIMEOUT_S` | Ceiling on one LAN connect+login attempt. A device that completes the TCP handshake and then stops answering is abandoned and its socket closed rather than parking the attempt forever. | `20` |
 | `AIDOT_DTLS_PINNED_FP` | Pin the camera's DTLS certificate `sha-256` fingerprint (colon-separated hex). When set, a camera presenting a different cert fails the handshake instead of being accepted. The camera echoes our own fingerprint over signaling, so without a pin the media channel is **not** authenticated against an on-path MITM. | unset (accept-any + warn) |
 | `AIDOT_SDES_HOLEPUNCH_HOST` | Override the NAT hole-punch target used when the cloud supplies no TURN entry. By default a STUN packet goes to a hardcoded vendor TURN host; set this to a host of your choice, or empty (`AIDOT_SDES_HOLEPUNCH_HOST=`) to disable the hardcoded fallback entirely. | unset (hardcoded vendor host + warn) |
+
+## Deeper internals
+
+Finer-grained knobs read by the camera client; the defaults are tuned to work
+out of the box.
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `AIDOT_STREAM_IDLE_S` | Seconds of stream idle before an idle release. | `120` |
+| `AIDOT_SDES_IDLE_RELEASE` | Set to `0` to disable idle release for SDES streams. | `1` (enabled) |
+| `AIDOT_ICE_DISCONNECT_S` | ICE-disconnect debounce, in seconds, before tearing down. | `8` |
+| `AIDOT_DTLS_RETRY_GATE_S` | Minimum spacing, in seconds, between DTLS open retries. | `15` |
+| `AIDOT_BUSY_RETRY_S` | Delay, in seconds, before retrying when a camera reports busy. | `45` |
+| `AIDOT_BUSY_BACKOFF_S` | How long to wait after a camera answers an open with "no free session" (`-50002` / `-50015`) before the next attempt. Measured on an A001064: a reopen 2 s after a close is refused and one at 8 s succeeds, so the old 300 s wait was mistaking a camera that clears in seconds for one that needs a rest. Still a real wait: retrying at once would hammer a camera that genuinely has none free, and on a battery model risks a wake-then-sleep loop. | `20` |
+| `AIDOT_OFFLINE_RECHECK_S` | While a device is cloud-offline, how often the paused keepalive retry re-checks the online flag. | `30` |
+| `AIDOT_OFFLINE_PROBE_S` | While a device is cloud-offline, how often one real open attempt still probes it (guards against a stale cloud flag). | `600` |
+| `AIDOT_FUTILE_KEEPALIVE_LIMIT` | Consecutive background keepalive sessions that deliver no media before the keepalive stops reopening a battery camera. Seen on an A001513: 22 opens over about 8 hours with no media, because the loop escalated its backoff but never stopped, and a unit was drained to 5% that way. `0` disables the ceiling. The DTLS analogue is `AIDOT_DTLS_FUTILE_VIDEO_LIMIT` above. | `5` |
+| `AIDOT_DTLS_SLOW_PROBE_THRESHOLD` | After this many consecutive failed opens of a served DTLS camera (a camera gone from the network, say), the serve loop widens its retry interval and stops warning on every attempt. Resets the moment an open succeeds. | `5` |
+| `AIDOT_DTLS_SLOW_PROBE_INTERVAL_S` | The widened retry interval, in seconds. | `600` |
+| `AIDOT_DTLS_SLOW_PROBE_LOG_EVERY` | While slow-probing, one INFO summary every this many attempts instead of a WARNING per attempt. | `6` |
+| `AIDOT_DTLS_SLOW_PROBE_CHUNK_S` | Sleep increment inside the slow-probe wait, so a `stop()` is not held up by the whole interval. | `5` |
+| `AIDOT_GOP_PLI_S` | Interval, in seconds, between PLI (keyframe) requests. | `2.0` |
+| `AIDOT_STALL_PLI_S` | If muxed frames stall for this many seconds (a dropped GOP on a jittery link), request an IDR keyframe immediately instead of waiting out the full `AIDOT_GOP_PLI_S` cadence. Mains DTLS cameras only; `0` disables. | `1.0` |
+| `AIDOT_SDES_PLI_GAPS` | Comma-separated second offsets for the early PLI burst on SDES cameras, to pull the first keyframe in faster on cold start. | `0,1.5,2,3` |
+| `AIDOT_SDES_STALL_NUDGE` | Mid-session stall nudge on SDES cameras: when inbound media stops with no teardown signal, re-send the AVIO LIVING message (the one that starts media on a fresh session) on the live session, a few times, spaced out, before the input timeout and the keepalive reopen take over. The A001064 stops transmitting this way and answers at once afterwards. `0` turns it off. | `1` (on) |
+| `AIDOT_SDES_STALL_NUDGE_AFTER_S` | Seconds without media before the nudge fires. | `2.5` |
+| `AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S` | How long a nominated ICE candidate has to produce any inbound STUN Binding Success before the attempt is abandoned to the retry. The trigger arms within about a second of the answer or never, so a pair that has answered nothing for this long will not start media in this attempt; seen on an A001513 whose answer carried only an address it then dozed behind, which otherwise ran the whole 75 s budget. Timed from nomination, so a slow battery wake is never clipped. `0` restores the full-budget wait. | `20` |
+| `AIDOT_SDES_AUDIO_GAIN_DB` | Gain (dB) applied when SDES audio is served. | `-8` |
+| `AIDOT_AUDIO_TARGET_DBFS` | Target loudness (dBFS) for two-way audio normalization. | `-15` |
+| `AIDOT_AUDIO_MAXGAIN_DB` | Maximum gain (dB) applied by the audio normalizer. | `30` |
+| `AIDOT_AUDIO_MINGAIN_DB` | Minimum gain (dB) applied by the audio normalizer. | `-12` |
+| `AIDOT_AUDIO_GATE_DBFS` | Noise-gate threshold (dBFS) for two-way audio. | `-45` |
+| `AIDOT_FAST_CONNECT_HOST_ONLY` | Within `AIDOT_FAST_CONNECT`, narrows only the local `RTCPeerConnection` to host candidates (skips the ~5 s srflx gather stall). **On-subnet only** - drops srflx/relay fallback. Opt-in. | unset (off) |
+| `AIDOT_SPROP_DIR` | The library's state directory: captured SPS/PPS (sprop) parameter sets, and the `hls-ts-url` file. Set to a writable path if the default location is read-only. | `<package dir>` |
+| `AIDOT_REMB_TARGET_BPS` | Send REMB (receiver-estimated bandwidth) at this bitrate on SDES sessions. The camera advertises `goog-remb` and the sender is kept and tested as an instrument; on the reference fleet it did not change the encoder's rate. `0` sends none. | `0` (off) |
+| `AIDOT_INCLUDE_SHARED_HOUSES` | Also list houses this account does not own (the cameras a shared-home member sees). The live-validation account is such a member and sets it; unset, those houses are skipped. | `0` |
+
+## The ffmpeg serve and the recordings
+
+The ffmpeg serve carries recordings, snapshots, `-` and `http://` serves, H.265
+sessions and any camera with `AIDOT_DIRECT_PUBLISH=0`.
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `AIDOT_SERVE_REORDER_QUEUE` | Packets the serve's RTP demuxer holds to put a burst back in order. A keyframe on an A001064 is 146-190 KB, roughly 130 packets, so anything much smaller cannot ride out a burst that arrives out of order. | `500` |
+| `AIDOT_SERVE_MAX_DELAY_US` | How long, in microseconds, the demuxer waits for a missing packet before moving on. Bounded on purpose: waiting forever turns loss into a stall. The SDES publisher's reorder budget reads the same variable (capped at 0.5 s) so the two cannot drift apart. | `500000` |
+| `AIDOT_SERVE_INPUT_TIMEOUT_S` | How long the serve's input may go silent before ffmpeg gives up. Unset, a mains camera gets 30 s to ride out a transmit gap and a battery camera keeps ffmpeg's 10 s, because its stops are real sleeps that only a reopen ends; set, the value applies to every camera. | unset |
+| `AIDOT_SERVE_ARRIVAL_TS` | Stamp the serve's input by arrival time instead of trusting the camera's RTP clock. The A001513 sends in-order packets stamped about 1.7 s in the past every 30 s, which read as backward decode times (6-7 warnings per streaming minute). `0` trusts the camera's stamps again. | `1` |
+| `AIDOT_REORDER_SLACK_TICKS` | How far the DTLS A/V mux shifts video presentation ahead of decode, in 90 kHz ticks; audio is shifted by the same time so the two start together. | `180000` (2 s) |
+| `AIDOT_FFMPEG` | The ffmpeg binary the decoder-capability probe (`hwaccel.probe_decoder`) runs. | `ffmpeg` |
+
+## Endpoints, test seams and measurement scaffolding
+
+Unset in every normal installation.
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `AIDOT_API_BASE_TEMPLATE` | Override for the platform API base; `{region}` is substituted. | the vendor's `prod-{region}-api` host |
+| `AIDOT_SMARTHOME_URL_TEMPLATE` | Override for the smart-home API base; `{region}` is substituted. | the vendor's `{region}-smarthome` host |
+| `AIDOT_MQTT_URL` | Point the whole client at a local MQTT broker (`ws://127.0.0.1:PORT/mqtt`) without any cloud call. A test seam. | unset |
+| `AIDOT_STUN_SERVERS` | Comma-separated STUN URIs for ICE gathering; an empty value (`AIDOT_STUN_SERVERS=`) disables STUN. | a public STUN server |
+| `AIDOT_TURN_SERVERS` | TURN relay URIs appended when the cloud's ICE config carries none; an empty value disables the hardcoded vendor fallback. | the vendor's relay |
+| `AIDOT_EXPT_CAP_FILE` | Name a file holding `<device_id>:<seconds>` and that one SDES camera's sessions are capped at that length, so a measurement arm whose sessions would otherwise run for tens of minutes keeps producing samples. Scoped to one device on purpose and fails closed: anything it cannot attribute caps nothing. No I/O at all when unset. | unset |
+| `AIDOT_EXPT_PEERID_FILE` | Name a file holding peer-id fields to announce instead of the library's own, for a measurement arm. No I/O when unset. | unset |
+| `AIDOT_EXPT_PEERID_CLASS` | The same for the peer id's client class alone, as an environment value, because the live-validation harness can only pass environment variables. | unset |

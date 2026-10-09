@@ -60,11 +60,11 @@ not going to change in this release. Neither is a fault to report.
 records to the cloud or to its own SD card is per-camera, not per-model, and the
 device reports it as `IsSupportPlayback`. This library lists cloud recordings
 (`async_get_cloud_recordings`) and resolves a playable HLS URL for one
-(`async_get_event_video_media`); it has no SD-card equivalent, so a camera
-storing to a card records normally and
-nothing here can play it back. On the reference fleet that is four of seven
-cameras. The vendor's own commands for it are identified but their responses
-have never been decoded; see `docs/ROAD-TO-1.0.md` item 6.
+(`async_get_event_video_media`); for a camera storing to a card it lists the
+on-device recordings (`async_get_sd_recordings`) but cannot play one back, so
+such a camera records normally and nothing here can show you the video. On the
+reference fleet that is four of seven cameras. Playback from the card is closed
+as not feasible; see `docs/CAMERAS.md`, "On-device (SD card) recordings".
 
 **The A001064 (PTZ) streams at roughly 2.2 Mbps, about 24% above the vendor
 app.** Measured from a capture of the app on the same camera: it takes about
@@ -228,9 +228,9 @@ decides it:
 
 | your camera | use | why |
 | --- | --- | --- |
-| **DTLS** (mains, e.g. A000088) | `-` | keeps the mux's 48 kHz AAC. The push path has to transcode audio down to 8 kHz G.711 |
+| **DTLS** (mains, e.g. A000088) | `'{output}'` or `-` | `{output}` is published by the library itself (direct publish, on by default): the camera's 8 kHz A-law plus an in-process AAC track, no ffmpeg. `-` writes the muxed MPEG-TS with its 48 kHz AAC to stdout instead |
 | **SDES** (the A001513 and A001064 families) | `'{output}'` | these stream by pushing RTSP; there is nothing to read from stdout |
-| either, with `AIDOT_DIRECT_PUBLISH=1` | `'{output}'` | published by the library with no ffmpeg; audio stays 8 kHz A-law. An H.265 session falls back to the ffmpeg push |
+| either, with `AIDOT_DIRECT_PUBLISH=0` | `'{output}'` | the push goes through ffmpeg instead, which has to transcode audio down to 8 kHz G.711. A session that negotiates H.265 takes this path whatever the setting |
 | either, if you want to pull | an `http://` URL | the process serves there and waits for a consumer to connect |
 
 `'{output}'` is a placeholder that go2rtc substitutes with the stream's own push
@@ -261,12 +261,13 @@ go2rtc itself gets its environment: export them in the shell before starting it,
 or set them in its service unit or container definition. If a stream fails
 immediately with an authentication error, that is the thing to check first.
 
-**ffmpeg must be on PATH.** SDES cameras - two of the three validated models -
-stream entirely through an ffmpeg subprocess, and pip cannot install a system
-binary. DTLS cameras no longer serve through it: the muxed MPEG-TS goes straight
-to the consumer, because that hop was the only component in the chain that lost
-timestamps. ffmpeg is still required, both
-for the SDES path and as the DTLS fallback when the serve port cannot be bound.
+**ffmpeg must be on PATH.** pip cannot install a system binary, and the
+library still needs one: recordings, snapshots, the `-` stdout form, `http://`
+pull serves and any session that negotiates H.265 run through an ffmpeg
+subprocess, and it is the DTLS fallback when a serve port cannot be bound. A
+live `{output}` push does not use it (next paragraph), and a DTLS `-` serve
+sends the muxed MPEG-TS straight to the consumer, because that hop was the only
+component in the chain that lost timestamps.
 
 **Live pushes skip ffmpeg: direct publish is on by default** (since 1.0.0rc44;
 `AIDOT_DIRECT_PUBLISH=0` restores the ffmpeg path). An `rtsp://` / `{output}`
@@ -276,8 +277,8 @@ camera can use `{output}` too. It takes H.264 sessions only; a session that
 negotiates H.265 keeps the ffmpeg serve. Audio goes out as the camera's own
 G.711 A-law plus an in-process AAC track (see "Audio" under
 [Getting an RTSP URL](#getting-an-rtsp-url)).
-ffmpeg is still used for recordings and snapshots. Off by default while it is
-being validated; see [`docs/DESIGN-direct-publish.md`](docs/DESIGN-direct-publish.md).
+ffmpeg is still used for recordings and snapshots; see
+[`docs/DESIGN-direct-publish.md`](docs/DESIGN-direct-publish.md).
 
 ```bash
 sudo apt install ffmpeg      # Debian/Ubuntu
@@ -463,14 +464,16 @@ the last one leaves - nothing talks to your cameras while nobody is watching:
 
 ```yaml
 streams:
-  driveway:  exec:aidot-go2rtc 1a2b3c4d... -          # DTLS camera
+  driveway:  exec:aidot-go2rtc 1a2b3c4d... -          # DTLS camera (stdout form; {output} works too)
   frontdoor: exec:aidot-go2rtc 5e6f7a8b... {output}   # SDES camera
 ```
 
-Use `-` for a DTLS camera and `{output}` for an SDES one - that is the whole
-difference, and `--list` told you which is which. (`{output}` is a placeholder
-go2rtc fills in with its own publish URL. It is not something you type at a
-shell; `-` is the form for that.) go2rtc needs the same `AIDOT_*` environment
+`{output}` works for both transports: the library publishes the stream into
+go2rtc itself (direct publish, on by default since 1.0.0rc44). A DTLS camera
+can also take `-`, which hands go2rtc the muxed MPEG-TS on stdout; an SDES
+camera cannot, and `--list` told you which is which. (`{output}` is a
+placeholder go2rtc fills in with its own publish URL. It is not something you
+type at a shell; `-` is the form for that.) go2rtc needs the same `AIDOT_*` environment
 variables the CLI does, so set them wherever go2rtc starts.
 
 **3. Use the URL.** go2rtc serves every stream you named at:
@@ -492,20 +495,20 @@ Stream #0:1: Audio: aac (LC), 48000 Hz, mono
 - **Which camera is which.** `--list` reports the transport per device. DTLS is
   the mains A000088; SDES is the A001064 / A001513 family. Passing the wrong
   form is not silent - the CLI tells you which one to use and exits.
-- **Audio.** Both forms carry AAC at 48 kHz mono, resampled from the camera's
-  8 kHz A-law, because 8 kHz AAC plays silent in a lot of browsers and browsers
-  on the MSE path have no mapping for G.711 at all. Audio is on by default; see
-  `AIDOT_SDES_SERVE_AUDIO` to turn it off. With `AIDOT_DIRECT_PUBLISH=1` the
-  publish carries the camera's own **PCMA (G.711 A-law, 8 kHz)** first - WebRTC
-  viewers play it natively and nothing is transcoded. With
-  `AIDOT_PUBLISH_AAC=1` it also carries an **AAC-LC 48 kHz mono** track
-  encoded in-process; an AAC-only consumer (for example Home Assistant's HLS
-  player) selects it with `?audio=aac`. No ffmpeg transcode
-  source is needed for this - see
+- **Audio.** A `{output}` push (direct publish, the default) carries the
+  camera's own **PCMA (G.711 A-law, 8 kHz)** first - WebRTC viewers play it
+  natively and nothing is transcoded - and, unless `AIDOT_PUBLISH_AAC=0`, an
+  **AAC-LC 48 kHz mono** track encoded in-process; an AAC-only consumer (for
+  example Home Assistant's HLS player) selects it with `?audio=aac`. The `-`
+  form carries AAC at 48 kHz mono, resampled from the camera's 8 kHz A-law,
+  because 8 kHz AAC plays silent in a lot of browsers and browsers on the MSE
+  path have no mapping for G.711 at all. Audio is on by default; see
+  `AIDOT_SDES_SERVE_AUDIO` to turn it off. No ffmpeg transcode
+  source is needed for the AAC - see
   [`docs/CAMERAS.md`](https://github.com/cbrightly/python-aidot-cameras/blob/main/docs/CAMERAS.md#an-aac-transcoding-source-makes-every-player-crawl)
   for why the old `ffmpeg:<stream>#audio=aac` advice made playback crawl.
-  The AAC track is off by default. A camera whose audio is mu-law (PCMU)
-  gets no AAC track either way.
+  The AAC track is on by default since 1.0.0rc44. A camera whose audio is
+  mu-law (PCMU) gets no AAC track either way.
 - **A stream that starts with no video** and picks it up a few seconds later is
   normal: the mux waits for a keyframe so the first GOP is decodable. A stream
   that stays audio-only is a camera that never sent one - retry the view.
@@ -514,9 +517,11 @@ Stream #0:1: Audio: aac (LC), 48000 Hz, mono
   spawns. That process has to stay running to keep the port bound, so it holds
   a camera session whether or not anyone is watching. Prefer the `exec:` forms.
 - **Pushing to your own RTSP server** rather than go2rtc: `rtsp_push_url=`
-  from Python, or an `rtsp://` output on the CLI. Both transports support it.
-  A DTLS push transcodes audio to G.711 A-law, matching what SDES has always
-  sent - ffmpeg's RTSP muxer will not accept the AAC that MPEG-TS carries.
+  from Python, or an `rtsp://` output on the CLI. Both transports support it,
+  and by default the library publishes it directly, with the audio described
+  above. Only on the `AIDOT_DIRECT_PUBLISH=0` ffmpeg path does a DTLS push
+  transcode audio to G.711 A-law - ffmpeg's RTSP muxer will not accept the AAC
+  that MPEG-TS carries.
   `output_path=` records to a file. `Go2RtcClient.rtsp_url(name)` builds the
   address above, and `ensure_stream(name, source)` registers a stream with a
   running go2rtc if you would rather not edit YAML.
@@ -543,7 +548,7 @@ The library reads the following environment variables.
 
 ### Credentials
 
-Used by the credential helper (`aidot.credentials`); they take priority over any
+Used by the credential helper (`aidot_cameras.credentials`); they take priority over any
 stored credentials file. See [`aidot_cameras/credentials.py`](https://github.com/cbrightly/python-aidot-cameras/blob/main/aidot_cameras/credentials.py).
 
 | Variable | Purpose | Default |
@@ -564,11 +569,11 @@ knob is in
 | `AIDOT_VIDEO_DECODER` | Force a video decoder instead of measuring one: a decoder name (`h264_v4l2m2m`), or an acceleration method prefixed with `hwaccel:` (`hwaccel:videotoolbox`). The prefix is required because the two are not interchangeable - VideoToolbox and VAAPI have no decoder to name. | (measured) |
 | `AIDOT_DISABLE_HWACCEL` | Keep to software decoding and skip the measurement entirely. | (unset) |
 | `AIDOT_MAX_CONCURRENT_STREAMS` | Caps how many cameras stream at once. | `3` |
-| `AIDOT_SDES_CONNECTION_MODE` | Which media path the SDES offer proposes: `auto` (default - every reachable candidate, and ICE priority prefers the LAN with the relay as last resort; measured on the full fleet, six of seven cameras stream direct and only the unit with no route to us rides the relay), `lan` (no relay at all - same lever as `AIDOT_SDES_SKIP_TURN_PREALLOC`, and battery cameras keep the relay regardless because a cloud-woken camera has no other path back), or `relay` (EXPERIMENTAL, and on the reference fleet it does not steer: even with `c=`/`m=` moved to the relay allocation and the WAN permission pre-installed, an A001064 and an A001513 both dialed our host address directly, learning it from our own ICE probes - forcing the relay for real would mean suppressing every direct-path outbound, which is unbuilt). Per-open `sdes_connection_mode` beats the env. Every session reports the path its media actually took as `media_stats().media_path` (`direct`/`relay`). | unset (`auto`) |
+| `AIDOT_SDES_CONNECTION_MODE` | Which media path the SDES offer proposes: `auto` (default - every reachable candidate, and ICE priority prefers the LAN with the relay as last resort; measured on the full fleet, six of seven cameras stream direct and only the unit with no route to us rides the relay), `lan` (no relay at all, though battery cameras keep the relay regardless because a cloud-woken camera has no other path back), or `relay` (EXPERIMENTAL, and on the reference fleet it does not steer: even with `c=`/`m=` moved to the relay allocation and the WAN permission pre-installed, an A001064 and an A001513 both dialed our host address directly, learning it from our own ICE probes - forcing the relay for real would mean suppressing every direct-path outbound, which is unbuilt). Per-open `sdes_connection_mode` beats the env. Every session reports the path its media actually took as `media_stats().media_path` (`direct`/`relay`). | unset (`auto`) |
 | `AIDOT_SDES_VIDEO_PT` | Pin the SDES offer to ONE video codec by payload type, so the camera cannot choose. The offer advertises 96 (H264) and 97 (H265) and the camera decides which to send; on an A001064 that means the same request comes back h264 1280x720 most sessions and hevc 2560x1440 occasionally, at a third of the bitrate. Set to `96` for H264 only (measured h264 720p in 4 of 4 sessions). **Do not set it to `97`** - an H265-only offer returned no video at all in 3 of 3 rounds; narrowing to H265 removes the option rather than selecting it. | `96` (H.264; `none` leaves the camera its choice) |
 | `AIDOT_PERSISTENT_MQTT` | Reuse ONE account-level persistent MQTT connection for commands, attribute fetches, and stream-open signaling (matching the official app) instead of connecting per operation. **On by default** (live soaks cut SDES NO_MEDIA from ~57% to ~11-19%); set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
-| `AIDOT_DIRECT_PUBLISH` | **On by default** (since 1.0.0rc44; set `0` to turn it off). Publish a live `rtsp://` push into go2rtc from the library itself instead of through ffmpeg, for both transports: SDES hands the bridge's plain RTP straight to an RTSP publisher, DTLS packetizes the tapped H.264 and A-law directly. No ffmpeg process per stream, audio is PCMA plus an in-process AAC track, packets put back in order before publishing, and audio attached from the camera's negotiated answer rather than waiting to observe a packet. Recordings, snapshots and `-`/`http://` serves are unchanged. Takes H.264 sessions only - an H.265 session keeps the ffmpeg serve (see `AIDOT_DIRECT_PUBLISH_H265`). Live-validated with H.264 on A000088, A001064 and A001513 (see `docs/DESIGN-direct-publish.md`). Truthy (`1`/`true`/`yes`/`on`) enables. | `1` (on) |
-| `AIDOT_PUBLISH_AAC` | Whether a direct publish adds an AAC-LC 48 kHz mono track after the A-law one, encoded in-process, so an AAC-only consumer (Home Assistant's HLS player, `camera.record`) has sound; select it with go2rtc's `?audio=aac`. Costs one AAC encode per streaming camera for as long as its direct publish runs. A camera whose audio is mu-law (PCMU) gets no AAC track regardless. Off unless set: `0`/`false`/`no`/`off` (or unset) leaves it off; any other value turns it on. | `1` (on) |
+| `AIDOT_DIRECT_PUBLISH` | **On by default** (since 1.0.0rc44; set `0` to turn it off). Publish a live `rtsp://` push into go2rtc from the library itself instead of through ffmpeg, for both transports: SDES hands the bridge's plain RTP straight to an RTSP publisher, DTLS packetizes the tapped H.264 and A-law directly. No ffmpeg process per stream, audio is PCMA plus an in-process AAC track, packets put back in order before publishing, and audio attached from the camera's negotiated answer rather than waiting to observe a packet. Recordings, snapshots and `-`/`http://` serves are unchanged. Takes H.264 sessions only - an H.265 session keeps the ffmpeg serve. Live-validated with H.264 on A000088, A001064 and A001513 (see `docs/DESIGN-direct-publish.md`). Truthy (`1`/`true`/`yes`/`on`) enables. | `1` (on) |
+| `AIDOT_PUBLISH_AAC` | Whether a direct publish adds an AAC-LC 48 kHz mono track after the A-law one, encoded in-process, so an AAC-only consumer (Home Assistant's HLS player, `camera.record`) has sound; select it with go2rtc's `?audio=aac`. Costs one AAC encode per streaming camera for as long as its direct publish runs. A camera whose audio is mu-law (PCMU) gets no AAC track regardless. **On by default** (since 1.0.0rc44); set `0`/`false`/`no`/`off` to turn it off. | `1` (on) |
 | `AIDOT_HLS_DIRECT_TS` | **On by default** (since 1.0.0rc44; set `0` to turn it off). Give each DTLS camera a library-muxed MPEG-TS on a loopback listener (`CameraMixin.hls_ts_url()`), for Home Assistant's HLS view and recordings to read instead of go2rtc's RTSP. go2rtc re-bases each track for each consumer, so a reader that joins a running stream had its sound 0.1-0.75 s late, differently each time; this TS carries the publisher's video and AAC on one clock, so every reader gets them in the same step, whenever it joins. Needs `AIDOT_DIRECT_PUBLISH` and `AIDOT_PUBLISH_AAC`. An SDES camera gets a URL only on a model whose media the bridge decrypts (A001064, A001513) with its offer pinned to H.264 (`AIDOT_SDES_VIDEO_PT=96`), so that every session feeds it; pulled (non-publishing) sessions get none. When a camera's SPS changes (the A001064 changes it between sessions), the TS's readers are disconnected so they rebuild their decoder. Each camera's URL carries a secret made per listener, as `?auth=<secret>` (Home Assistant masks that query parameter when it logs a stream's URL); a request without it gets 404. For the owner's own tools, the listener's URL for any camera (`http://127.0.0.1:<port>/{name}.ts?auth=<secret>`, where `{name}` is `aidot_<first 12 of the device id>`) is left in `hls-ts-url` in the library's state directory (`AIDOT_SPROP_DIR`), owner-readable only, while the listener runs. A reader of the TS counts as a viewer. Truthy (`1`/`true`/`yes`/`on`) enables. | `1` (on) |
 | `AIDOT_LOGIN_RETRY_LIMIT` | Consecutive failed LAN logins after which a device is left alone (it is retried again the next time something asks for it). Applies to every device, camera or not - the devices that hit this are lights. | `6` |
 
@@ -583,3 +588,4 @@ the permissive default.
 | --- | --- | --- |
 | `AIDOT_ALLOW_LAN_SERVE` | Silences the warning emitted when decrypted media is served on a non-loopback bind (e.g. `0.0.0.0`), where any host on the LAN can read the unencrypted stream. Set when an exposed bind is intentional. | unset (warn on non-loopback) |
 | `AIDOT_CRED_KEY_FILE` | Path to the Fernet key file for stored credentials. Point it outside the config dir (ideally a separate secret store) so the key isn't co-located with the ciphertext. Applies to the default credentials path only (ignored when an explicit `creds_path` is passed). | `$XDG_CONFIG_HOME/aidot/.key` (falls back to `~/.config/aidot/.key`) |
+| `AIDOT_PLAYBACK_TLS_VERIFY` | Set to `1` to require full certificate and hostname verification on the TLS connection to a camera's playback server. The camera presents a self-signed certificate, so this needs a trust anchor it chains to; unset, verification is skipped and a one-time warning is logged. | unset (skip verification, warn once) |

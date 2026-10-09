@@ -6010,8 +6010,8 @@ class CameraMixin(
         if getattr(self, "is_battery_camera", False):
             return False
         # The connection mode composes here rather than in a parallel path, so
-        # everything hanging off this resolver (instrumentation, the adaptive
-        # interplay) sees one answer.  relay force-keeps the pre-allocation -
+        # everything hanging off this resolver (instrumentation included) sees
+        # one answer.  relay force-keeps the pre-allocation -
         # forcing the relay while skipping its allocation would offer nothing.
         return self._resolve_sdes_connection_mode() == "lan"
 
@@ -6459,7 +6459,8 @@ class CameraMixin(
                     else:
                         _ff_port = None
                         _ff_url = serve_url
-                    # Opt-in: serve the muxed TS straight to the consumer.
+                    # Serve the muxed TS straight to the consumer on any http://
+                    # serve URL that direct publish does not take.
                     # The `-c copy` ffmpeg hop re-packetizes MPEG-TS this mux
                     # already wrote in the form go2rtc wants, and measured
                     # 2026-08-20 it is the one component that LOSES timestamps

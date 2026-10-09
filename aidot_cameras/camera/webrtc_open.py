@@ -650,17 +650,6 @@ class _WebRTCOpenMixin:
         if self.is_sdes_camera:
             _fast_connect = False
 
-        # P5 EXPERIMENT (opt-in): skip ONLY the livePlayResp blocking wait (~2 s)
-        # for SDES, while keeping the full ICE/TURN/SCTP handshake.  Rationale: the
-        # SDES instability that forces _fast_connect off comes from skipping the
-        # ICE/TURN waits + stripping TURN (under-arming SCTP) - NOT from skipping
-        # the livePlayResp ack, which is purely a camera accept/reject we don't
-        # need to block on (the official app never waits for it).  So this targeted
-        # skip is expected to be SCTP-safe and shave ~2 s off the SDES cold start.
-        # Off by default, pending live validation.  Applied in _open_sdes_stream
-        # (the SDES path has its own livePlayResp wait); start_keepalive(
-        # sdes_fast_liveplay=...) wins, else AIDOT_SDES_FAST_LIVEPLAY env.
-
         # Wake battery cameras via the cloud HTTP low-power endpoint before the
         # handshake (matches the app, which fires the HTTP wake so a sleeping camera
         # gets the signal even with no live MQTT session; the MQTT
@@ -2787,10 +2776,10 @@ class _WebRTCOpenMixin:
                     "dstAddr": device_id,
                     "liveMqtt": 1,
                     "encOffer": 1,
-                    # powerType/p2pCache: per docs/official_camera_network_calls.md
-                    # section 5.2, both fields are present on every webrtcReq.  Defaults
-                    # used here match the fallback behaviour in the decompiled
-                    # reference app when IPC device info is unavailable.
+                    # powerType/p2pCache: both fields are present on every webrtcReq
+                    # the reference app sends.  Defaults used here match the
+                    # fallback behaviour in the decompiled reference app when IPC
+                    # device info is unavailable.
                     "powerType": _live_power_type,
                     "p2pCache": _live_p2p_cache,
                 },
@@ -3981,7 +3970,7 @@ class _WebRTCOpenMixin:
                     # crashing setRemoteDescription.  (Driving media over the
                     # datachannel was tested and ruled out: a DC-only answer is
                     # the camera declining media and always co-fails DTLS, so the
-                    # channel never opens - see docs/EXPERIMENT_DC_ONLY_HANDOFF.md.)
+                    # channel never opens.)
                     _vstub = [
                         "m=video 0 UDP/TLS/RTP/SAVPF 97",
                         "c=IN IP4 0.0.0.0",

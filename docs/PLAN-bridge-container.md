@@ -1,9 +1,9 @@
 # Plan: standalone AiDot bridge container ("Option B")
 
-Status: **later phase - not started.** Depends on the direct publisher from
-[`DESIGN-direct-publish.md`](DESIGN-direct-publish.md) reaching phase A4, and on
-1.0.0 shipping. Nothing here is scheduled until there is demand from users
-outside Home Assistant.
+Status: **later phase - not started.** The direct publisher from
+[`DESIGN-direct-publish.md`](DESIGN-direct-publish.md) reached phase A4 (default
+on) in `1.0.0rc44`; this still depends on 1.0.0 shipping. Nothing here is
+scheduled until there is demand from users outside Home Assistant.
 
 ## Goal
 
@@ -67,6 +67,6 @@ counting drives on-demand start/stop.
 
 ## Exit criteria for starting
 
-- Direct publish is default-on (A4) with a clean release behind it.
+- Direct publish is default-on (A4, met in `1.0.0rc44`) with a clean release behind it.
 - 1.0.0 shipped.
 - At least a handful of concrete non-HA user requests (Frigate/Scrypted/HomeKit).
