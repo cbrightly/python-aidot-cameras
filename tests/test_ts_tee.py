@@ -444,32 +444,33 @@ def test_a_new_sps_keeps_a_reader_that_has_not_started_and_starts_it_there():
     try:
         ch = srv.channel("/cam.ts")
         video, aac = _media(2)
+        short_video = video[:20]  # short enough that its last PAT/PMT retransmit
+        # lands on a nonzero continuity counter (ffmpeg's mpegts muxer increments
+        # it per table retransmission); the full 2 s clip happens to wrap back
+        # to 0, which would hide a stale-table bug behind a matching byte.
         later, _ = _media(2, sps_rate=FPS * 2)
         new_sps = _sps(later)
         assert new_sps != _sps(video)
         started = _reader(srv)
         assert _wait(lambda: ch.consumer_count() == 1)
-        _feed(tee.session(), video, aac, realtime=False)
+        _feed(tee.session(), short_video, aac, realtime=False)
         assert _wait(lambda: ch.started_count() == 1)
+        assert _wait(lambda: tee._q.empty())  # session 1 fully muxed
+        time.sleep(0.2)  # the last item has been muxed, not just dequeued
+        stale_pat, stale_pmt = ch._pat, ch._pmt  # session 1's last cached tables
         waiting = _reader(srv)  # joins after session 1's only keyframe
         assert _wait(lambda: ch.consumer_count() == 2)
         assert ch.started_count() == 1
         _feed(tee.session(), later, aac, realtime=False)
         assert _open_after(started, 1.0) is False  # dropped: rebuilds its decoder
-        # Read until the SPS-bearing packet has arrived: a single `want` sized
-        # just past the tables would sometimes return before it, depending on
-        # how the sender thread happens to chunk its writes.
-        body = b""
-        end = time.monotonic() + 3.0
-        while time.monotonic() < end and new_sps not in body:
-            body = _read_body(waiting, len(body) + 188, timeout=0.5)
+        body = _read_body(waiting, 32 * 188, timeout=3.0)
         assert new_sps in body  # a packet carries the new SPS
-        assert _pid(body[:188]) == 0  # PAT first
-        pmt_pid = _pid(body[188:376])
+        head_pat, head_pmt = body[:188], body[188:376]
+        assert _pid(head_pat) == 0  # PAT first
+        pmt_pid = _pid(head_pmt)
         assert pmt_pid != 0  # ... then the PMT
-        # What the waiting reader is started on matches the tables the new
-        # mux itself keeps sending through the rest of this delivery, not a
-        # leftover copy of session 1's.
+        # A PAT/PMT the new mux retransmits later in this same delivery, found
+        # the same way a demuxer would: by PID, among the rest of the bytes.
         later_pat = next(
             body[i : i + 188]
             for i in range(376, len(body) - 187, 188)
@@ -480,8 +481,11 @@ def test_a_new_sps_keeps_a_reader_that_has_not_started_and_starts_it_there():
             for i in range(376, len(body) - 187, 188)
             if _pid(body[i : i + 188]) == pmt_pid
         )
-        assert body[:188] == later_pat
-        assert body[188:376] == later_pmt
+        # The short session 1 proves this check can actually tell old tables
+        # from new ones (otherwise the equalities below would be vacuous).
+        assert stale_pat != later_pat and stale_pmt != later_pmt
+        assert head_pat == later_pat and head_pat != stale_pat
+        assert head_pmt == later_pmt and head_pmt != stale_pmt
         assert ch.consumer_count() == 1
         assert ch.started_count() == 1
         waiting.close()
