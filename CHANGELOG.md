@@ -6,6 +6,21 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A light that cannot be reached no longer logs a warning every five
+  minutes after the LAN-login ceiling has fired.** 1.0.0rc43 said such a
+  device is "left alone, with one warning", and it was - by discovery and by
+  the library's own retry loop. The Home Assistant integration asks for a
+  login on its own five-minute poll, which the ceiling never looked at, so
+  upstream's `connect device error` WARNING still arrived twelve times an
+  hour (159 a day, measured 2026-10-09 on one light whose discovered address
+  was on another subnet). The poll's attempt is kept - it is how a light that
+  comes back is noticed without a restart - and upstream's line for it is
+  dropped while the device is over the ceiling at an unchanged address; a
+  new address or a login that gets through lifts that. The one warning now
+  says so.
+
 ### Documentation
 
 - **The docs say what 1.0.0rc44 made true.** Direct publish, the AAC track,
