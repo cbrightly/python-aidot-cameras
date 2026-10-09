@@ -28,16 +28,21 @@ def _ts(pid, *, pusi=0, tag=b"\x00"):
     return bytes(b)
 
 
-def _pat(pmt_pid=PMT):
+def _pat(pmt_pid=PMT, version=0):
     sec = bytearray(13)
     sec[0], sec[1], sec[2] = 0x00, 0xB0, 0x0D
+    sec[5] = (version & 0x1F) << 1  # version_number (current_next_indicator 0)
     sec[9] = 0x01
     sec[10] = 0xE0 | ((pmt_pid >> 8) & 0x1F)
     sec[11] = pmt_pid & 0xFF
     return _ts(0, pusi=1, tag=b"\x00" + bytes(sec))
 
 
-PATP, PMTP = _pat(), _ts(PMT, pusi=1, tag=b"PMT")
+def _pmt(version=0):
+    return _ts(PMT, pusi=1, tag=b"PMT" + bytes([version]))
+
+
+PATP, PMTP = _pat(), _pmt()
 
 
 def _connect(srv, path="/cam.ts", auth=None):
@@ -357,5 +362,48 @@ def test_only_consumers_that_were_sent_media_count_as_started():
         assert srv.started_count() == 1
         a.close()
         assert _wait(lambda: srv.started_count() == 0)
+    finally:
+        srv.close()
+
+
+def test_a_new_sps_drops_started_readers_and_keeps_waiting_ones():
+    # A new SPS means every started reader must rebuild its decoder, so it is
+    # dropped and reconnects. A reader still waiting for its first keyframe has
+    # nothing to rebuild: it is kept and starts here, on the new mux's tables.
+    srv = _server()
+    try:
+        a = _connect(srv)
+        assert _wait(lambda: srv.consumer_count() == 1)
+        _send_gop(srv, 1)  # the started reader gets media
+        assert srv.started_count() == 1
+        b = _connect(srv)  # joins after that keyframe: nothing sent to it yet
+        assert _wait(lambda: srv.consumer_count() == 2)
+        assert srv.started_count() == 1
+        dropped, kept = srv.disconnect_started()
+        assert (dropped, kept) == (1, 1)
+        assert srv.consumer_count() == 1
+        a.settimeout(2)
+        got_eof = False
+        end = time.time() + 3
+        while time.time() < end:
+            try:
+                chunk = a.recv(65536)
+            except (TimeoutError, ConnectionResetError):
+                break
+            if chunk == b"":
+                got_eof = True
+                break
+        assert got_eof
+        # The waiting reader is still a consumer and starts on the next
+        # keyframe, with the tables the new mux writes first.
+        new_pat, new_pmt = _pat(version=1), _pmt(version=1)
+        srv.write(new_pat + new_pmt)
+        pkts = _send_gop(srv, 1)
+        want = 2 * 188 + len(pkts) * 188
+        body = _read_body(b, want)
+        assert body[:188] == new_pat and body[188:376] == new_pmt
+        assert body[376:564] == pkts[0]  # the keyframe
+        assert srv.started_count() == 1
+        b.close()
     finally:
         srv.close()

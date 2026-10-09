@@ -270,12 +270,20 @@ class TsTee:
                         # A reader keeps the decoder setup it built from the
                         # first SPS it saw (Home Assistant's HLS init segment),
                         # so a new one would leave its inter frames undecodable:
-                        # drop the readers (they reconnect) and start over.
-                        dropped = self._channel.disconnect_all()
+                        # drop the readers (they reconnect) and start over. A
+                        # reader that has received nothing yet has no decoder
+                        # to rebuild and starts on this keyframe instead (a
+                        # cold HLS open on a camera whose SPS differs from the
+                        # previous session's used to be cut here before its
+                        # first byte, which Home Assistant logged as an I/O
+                        # error and retried 10 s later).
+                        dropped, kept = self._channel.disconnect_started()
                         _LOGGER.info(
-                            "camera %s: in-sync HLS: new SPS, %d reader(s) reconnect",
+                            "camera %s: in-sync HLS: new SPS, %d reader(s) reconnect,"
+                            " %d waiting reader(s) start here",
                             self._device_id,
                             dropped,
+                            kept,
                         )
                         try:
                             out.close()

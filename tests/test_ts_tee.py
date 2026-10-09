@@ -378,6 +378,37 @@ def _open_after(s, seconds):
     return True
 
 
+def _wait(cond, timeout=3.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _read_body(s, want, timeout=3.0):
+    """Read until `want` media bytes (after the HTTP header) or timeout."""
+    s.settimeout(0.2)
+    buf = b""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            chunk = s.recv(65536)
+        except TimeoutError:
+            chunk = b""
+        if chunk:
+            buf += chunk
+        body = buf.split(b"\r\n\r\n", 1)[1] if b"\r\n\r\n" in buf else b""
+        if len(body) >= want:
+            return body
+    return buf.split(b"\r\n\r\n", 1)[1] if b"\r\n\r\n" in buf else b""
+
+
+def _pid(pkt):
+    return ((pkt[1] & 0x1F) << 8) | pkt[2]
+
+
 @pytest.mark.parametrize("changes", [True, False])
 def test_a_new_sps_disconnects_the_readers_so_they_rebuild_their_decoder(changes):
     # A reader keeps the decoder setup it built from the first SPS it saw (Home
@@ -387,15 +418,51 @@ def test_a_new_sps_disconnects_the_readers_so_they_rebuild_their_decoder(changes
     # dropped and reconnect.
     srv, tee = _tee()
     try:
+        ch = srv.channel("/cam.ts")
         video, aac = _media(2)
         later, _ = _media(2, sps_rate=FPS * 2) if changes else (video, aac)
         assert (_sps(later) != _sps(video)) is changes
         s = _reader(srv)
+        assert _wait(lambda: ch.consumer_count() == 1)
         _feed(tee.session(), video, aac, realtime=False)
-        assert _open_after(s, 0.5)
+        assert _wait(lambda: ch.started_count() == 1)
         _feed(tee.session(), later, aac, realtime=False)
         assert _open_after(s, 1.0) is not changes
         s.close()
+    finally:
+        tee.close()
+        srv.close()
+
+
+def test_a_new_sps_keeps_a_reader_that_has_not_started_and_starts_it_there():
+    # A reader that joined after session 1's only keyframe has received
+    # nothing yet: a camera whose SPS differs between sessions (the A001064
+    # does) used to drop it anyway, before its first byte, which Home
+    # Assistant logged as an I/O error and retried 10 s later. It is now kept
+    # and starts on session 2's keyframe, with the new mux's tables.
+    srv, tee = _tee()
+    try:
+        ch = srv.channel("/cam.ts")
+        video, aac = _media(2)
+        later, _ = _media(2, sps_rate=FPS * 2)
+        new_sps = _sps(later)
+        assert new_sps != _sps(video)
+        started = _reader(srv)
+        assert _wait(lambda: ch.consumer_count() == 1)
+        _feed(tee.session(), video, aac, realtime=False)
+        assert _wait(lambda: ch.started_count() == 1)
+        waiting = _reader(srv)  # joins after session 1's only keyframe
+        assert _wait(lambda: ch.consumer_count() == 2)
+        assert ch.started_count() == 1
+        _feed(tee.session(), later, aac, realtime=False)
+        assert _open_after(started, 1.0) is False  # dropped: rebuilds its decoder
+        body = _read_body(waiting, 3 * 188, timeout=3.0)
+        assert _pid(body[:188]) == 0  # PAT first
+        assert body[188:189] == b"\x47"  # a whole TS packet follows (PMT)
+        assert new_sps in body  # ... then a packet carrying the new SPS
+        assert ch.consumer_count() == 1
+        assert ch.started_count() == 1
+        waiting.close()
     finally:
         tee.close()
         srv.close()

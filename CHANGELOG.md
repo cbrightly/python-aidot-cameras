@@ -6,6 +6,17 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Home Assistant HLS view or recording that starts a camera whose video
+  setup changed no longer fails its first attempt.** The in-sync stream drops
+  its readers when a session's first keyframe carries a new SPS, so they
+  rebuild their decoder; it dropped a reader that had not received a byte yet
+  too, before its first byte, which Home Assistant logged as an I/O error and
+  retried ten seconds later (every cold open of the PTZ model whose SPS
+  differs between sessions). A reader still waiting for its first keyframe is
+  now kept and starts on that keyframe.
+
 ### Documentation
 
 - **The docs say what 1.0.0rc44 made true.** Direct publish, the AAC track,
