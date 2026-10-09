@@ -6,6 +6,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- **`lan_address`, `lan_login_failures` and `lan_login_over_ceiling` on every
+  device client**, so a consumer can say which device the LAN login keeps
+  failing for and where, without reading private names. The Home Assistant
+  integration uses them for a repair issue naming a light on another subnet.
+
 ### Documentation
 
 - **The docs say what 1.0.0rc44 made true.** Direct publish, the AAC track,
