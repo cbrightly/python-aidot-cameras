@@ -456,10 +456,32 @@ def test_a_new_sps_keeps_a_reader_that_has_not_started_and_starts_it_there():
         assert ch.started_count() == 1
         _feed(tee.session(), later, aac, realtime=False)
         assert _open_after(started, 1.0) is False  # dropped: rebuilds its decoder
-        body = _read_body(waiting, 3 * 188, timeout=3.0)
+        # Read until the SPS-bearing packet has arrived: a single `want` sized
+        # just past the tables would sometimes return before it, depending on
+        # how the sender thread happens to chunk its writes.
+        body = b""
+        end = time.monotonic() + 3.0
+        while time.monotonic() < end and new_sps not in body:
+            body = _read_body(waiting, len(body) + 188, timeout=0.5)
+        assert new_sps in body  # a packet carries the new SPS
         assert _pid(body[:188]) == 0  # PAT first
-        assert body[188:189] == b"\x47"  # a whole TS packet follows (PMT)
-        assert new_sps in body  # ... then a packet carrying the new SPS
+        pmt_pid = _pid(body[188:376])
+        assert pmt_pid != 0  # ... then the PMT
+        # What the waiting reader is started on matches the tables the new
+        # mux itself keeps sending through the rest of this delivery, not a
+        # leftover copy of session 1's.
+        later_pat = next(
+            body[i : i + 188]
+            for i in range(376, len(body) - 187, 188)
+            if _pid(body[i : i + 188]) == 0
+        )
+        later_pmt = next(
+            body[i : i + 188]
+            for i in range(376, len(body) - 187, 188)
+            if _pid(body[i : i + 188]) == pmt_pid
+        )
+        assert body[:188] == later_pat
+        assert body[188:376] == later_pmt
         assert ch.consumer_count() == 1
         assert ch.started_count() == 1
         waiting.close()
