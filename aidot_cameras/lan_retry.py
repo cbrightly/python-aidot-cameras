@@ -136,7 +136,10 @@ class LanRetryMixin:
 
     @property
     def lan_login_over_ceiling(self) -> bool:
-        """True once the failures reach AIDOT_LOGIN_RETRY_LIMIT at an unchanged address."""
+        """True once the consecutive failures reach AIDOT_LOGIN_RETRY_LIMIT.
+
+        An address change resets the count, see update_ip_address.
+        """
         return self.lan_login_failures >= _LOGIN_RETRY_LIMIT
 
     async def async_login(self) -> None:
