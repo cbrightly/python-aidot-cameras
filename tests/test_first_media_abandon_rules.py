@@ -16,20 +16,27 @@ from aidot_cameras.camera.sdes_open import (
 
 
 @pytest.mark.parametrize(
-    ("since", "nominated", "probes", "expect"),
+    ("since", "nominated", "probes", "bs", "expect"),
     [
         # No answer yet: a waking battery camera, never clipped.
-        (None, False, 0, False),
-        (19.9, False, 0, False),  # inside the grace
-        (20.0, False, 0, True),  # the case this exists for
-        (20.0, True, 0, False),  # nominated: the nominee rule owns it
-        (20.0, False, 1, False),  # a probe arrived: ICE is progressing
+        (None, False, 0, 0, False),
+        (19.9, False, 0, 0, False),  # inside the grace
+        (20.0, False, 0, 0, True),  # the case this exists for
+        (20.0, True, 0, 0, False),  # nominated: the nominee rule owns it
+        (20.0, False, 1, 0, False),  # a probe arrived: ICE is progressing
+        # A check was answered: something was nominated on a path no record
+        # sees (the trickle-fed tick), and the trigger rule owns it.
+        (20.0, False, 0, 2, False),
     ],
 )
-def test_no_probe_rule(since, nominated, probes, expect):
+def test_no_probe_rule(since, nominated, probes, bs, expect):
     assert (
         _no_probe_abandon_due(
-            answered_since_s=since, grace_s=20.0, nominated=nominated, probes=probes
+            answered_since_s=since,
+            grace_s=20.0,
+            nominated=nominated,
+            probes=probes,
+            binding_success=bs,
         )
         is expect
     )
@@ -38,7 +45,11 @@ def test_no_probe_rule(since, nominated, probes, expect):
 def test_no_probe_rule_disabled_by_a_zero_grace():
     assert (
         _no_probe_abandon_due(
-            answered_since_s=100.0, grace_s=0, nominated=False, probes=0
+            answered_since_s=100.0,
+            grace_s=0,
+            nominated=False,
+            probes=0,
+            binding_success=0,
         )
         is False
     )

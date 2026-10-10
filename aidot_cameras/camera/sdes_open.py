@@ -1196,7 +1196,12 @@ def _no_answer_abandon_due(
 
 
 def _no_probe_abandon_due(
-    *, answered_since_s, grace_s: float, nominated: bool, probes: int
+    *,
+    answered_since_s,
+    grace_s: float,
+    nominated: bool,
+    probes: int,
+    binding_success: int,
 ) -> bool:
     """Whether a camera that answered and then never probed should be abandoned.
 
@@ -1206,14 +1211,21 @@ def _no_probe_abandon_due(
     2026-10-08 on an A001513: `nominated=none; probes=none` for the whole 75 s,
     then the next attempt served in 5 s.  Timed from the ANSWER, never from
     the open, so a battery camera still waking is never clipped.  Fires only
-    when nothing has been nominated and no probe was seen; ``grace_s`` <= 0
-    disables it.
+    when nothing has been nominated, no probe was seen, and no connectivity
+    check was answered; ``grace_s`` <= 0 disables it.
+
+    ``binding_success`` is the backstop for nomination the caller cannot see:
+    an answer with ICE credentials and no candidates is nominated by the
+    bridge's periodic tick from trickled candidates, which records nothing, and
+    the relay-only cameras on that path send no probes.  Any Binding Success
+    means a check was answered, and the trigger rule owns the attempt from
+    there.
     """
     if grace_s <= 0 or answered_since_s is None:
         return False
     if answered_since_s < grace_s:
         return False
-    return not nominated and probes == 0
+    return not nominated and probes == 0 and binding_success == 0
 
 
 def _trigger_unacked_abandon_due(
