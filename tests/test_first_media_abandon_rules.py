@@ -84,3 +84,32 @@ def test_trigger_rule_disabled_by_a_zero_grace():
         )
         is False
     )
+
+
+def test_the_bridge_stamps_when_living_is_first_sent():
+    """The loop times the trigger rule from this stamp; it must exist and be monotonic."""
+    import inspect
+
+    from aidot_cameras.camera import sdes_open
+
+    # Whitespace-free, so the formatter's line wrapping cannot break it.
+    src = "".join(inspect.getsource(sdes_open).split())
+    assert "_bridge_fn._br_trigger_sent_ts=None" in src
+    assert "_bridge_fn._br_trigger_sent_ts=(_time_br.monotonic())" in src
+
+
+def test_tutk_framed_media_is_counted_for_the_trigger_rule():
+    """TUTK SFrame media leaves the branch before _br_media_pkts is counted.
+
+    No camera in the fleet sends it today, but if one did, the trigger rule
+    would read zero media while media flowed, so the branch keeps its own count
+    and the loop adds it in.
+    """
+    import inspect
+
+    from aidot_cameras.camera import sdes_open
+
+    src = inspect.getsource(sdes_open)
+    assert "_bridge_fn._br_tutk_media = 0" in src
+    assert 'getattr(_bridge_fn, "_br_tutk_media", 0) + 1' in src
+    assert 'int(getattr(_bridge_fn, "_br_tutk_media", 0))' in src
