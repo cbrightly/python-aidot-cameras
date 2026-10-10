@@ -101,9 +101,10 @@ def test_the_bridge_stamps_when_living_is_first_sent():
 def test_tutk_framed_media_is_counted_for_the_trigger_rule():
     """TUTK SFrame media leaves the branch before _br_media_pkts is counted.
 
-    No camera in the fleet sends it today, but if one did, the trigger rule
-    would read zero media while media flowed, so the branch keeps its own count
-    and the loop adds it in.
+    Not observed on the reference fleet (0 TUTK-framed media lines on the box
+    or in 28 live-validation runs), but if a camera did send it, the trigger
+    rule would read zero media while media flowed, so the branch keeps its own
+    count and the loop adds it in.
     """
     import inspect
 

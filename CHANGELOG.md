@@ -28,8 +28,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ### Fixed
 
-- **A battery camera's first view no longer waits 75 s on an attempt the
-  camera cannot finish.** Two shapes used to run the whole first-media budget:
+- **An SDES camera's first view (the battery and PTZ models) no longer
+  waits 75 s on an attempt the camera cannot finish.** Two shapes used to run the whole first-media budget:
   a camera that answered and then never sent a STUN probe (nothing to
   nominate, so no trigger could arm), and a camera that answered our
   connectivity checks and never acted on LIVING. Measured 2026-10-08 on one

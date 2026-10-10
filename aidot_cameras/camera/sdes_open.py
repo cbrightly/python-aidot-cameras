@@ -1115,9 +1115,10 @@ _UNREACHABLE_NOMINEE_GRACE_S = float(
 
 # The two companions of the unreachable-nominee grace, for the two first-media
 # shapes it cannot see (see _no_probe_abandon_due / _trigger_unacked_abandon_due).
-# Both are sized from the same measurement: every first media on the reference
-# installation arrived within 10 s of the answer (27 opens, 2026-10-08), and the
-# earlier finding that the trigger arms within about a second or never.
+# Both are sized from the same measurement: 165 successful first medias across
+# 28 live-validation runs (2026-09-22 to 10-09), the slowest 9.5 s after
+# webrtcReq; 29 of 30 stalls in those runs were the two shapes these rules end.
+# Also the earlier finding that the trigger arms within about a second or never.
 _ANSWER_PROBE_GRACE_S = float(os.environ.get("AIDOT_SDES_ANSWER_PROBE_GRACE_S", "20"))
 _TRIGGER_GRACE_S = float(os.environ.get("AIDOT_SDES_TRIGGER_GRACE_S", "20"))
 
@@ -1237,8 +1238,9 @@ def _trigger_unacked_abandon_due(
     reachable), LIVING went out on the channel, and neither an ack nor a media
     packet followed.  Measured 2026-10-08 on an A001513: `binding-success=2;
     trigger=sent(unacked); inbound-media=0` for 75 s.  Timed from the LIVING
-    send.  A re-send at half the grace is the bridge's job (see the pre-media
-    nudge); this rule only ends the attempt.  ``grace_s`` <= 0 disables it.
+    send.  The bridge's existing retrigger already re-sends LIVING every 2 s
+    until the camera's first probe; this rule only ends the attempt.
+    ``grace_s`` <= 0 disables it.
     """
     if grace_s <= 0 or trigger_sent_since_s is None:
         return False
