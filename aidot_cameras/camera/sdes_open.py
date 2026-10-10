@@ -1113,6 +1113,14 @@ _UNREACHABLE_NOMINEE_GRACE_S = float(
     os.environ.get("AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S", "20")
 )
 
+# The two companions of the unreachable-nominee grace, for the two first-media
+# shapes it cannot see (see _no_probe_abandon_due / _trigger_unacked_abandon_due).
+# Both are sized from the same measurement: every first media on the reference
+# installation arrived within 10 s of the answer (27 opens, 2026-10-08), and the
+# earlier finding that the trigger arms within about a second or never.
+_ANSWER_PROBE_GRACE_S = float(os.environ.get("AIDOT_SDES_ANSWER_PROBE_GRACE_S", "20"))
+_TRIGGER_GRACE_S = float(os.environ.get("AIDOT_SDES_TRIGGER_GRACE_S", "20"))
+
 
 def _stale_offer_abandon_due(
     *, battery: bool, seen_at_start, first_seen_ts, now: float, grace_s: float
@@ -1185,6 +1193,46 @@ def _no_answer_abandon_due(
     if nominated_since_s < grace_s:
         return False
     return binding_success == 0 and not prflx_learned
+
+
+def _no_probe_abandon_due(
+    *, answered_since_s, grace_s: float, nominated: bool, probes: int
+) -> bool:
+    """Whether a camera that answered and then never probed should be abandoned.
+
+    The third shape, after the stale-offer and unreachable-nominee rules: the
+    answer arrived, so the camera is awake, but no STUN probe ever came and
+    nothing was nominated - so the nominee rule never starts.  Measured
+    2026-10-08 on an A001513: `nominated=none; probes=none` for the whole 75 s,
+    then the next attempt served in 5 s.  Timed from the ANSWER, never from
+    the open, so a battery camera still waking is never clipped.  Fires only
+    when nothing has been nominated and no probe was seen; ``grace_s`` <= 0
+    disables it.
+    """
+    if grace_s <= 0 or answered_since_s is None:
+        return False
+    if answered_since_s < grace_s:
+        return False
+    return not nominated and probes == 0
+
+
+def _trigger_unacked_abandon_due(
+    *, trigger_sent_since_s, grace_s: float, trigger_acked: bool, media_pkts: int
+) -> bool:
+    """Whether a camera that never acted on LIVING should be abandoned.
+
+    The fourth shape: the camera answered our connectivity checks (so it is
+    reachable), LIVING went out on the channel, and neither an ack nor a media
+    packet followed.  Measured 2026-10-08 on an A001513: `binding-success=2;
+    trigger=sent(unacked); inbound-media=0` for 75 s.  Timed from the LIVING
+    send.  A re-send at half the grace is the bridge's job (see the pre-media
+    nudge); this rule only ends the attempt.  ``grace_s`` <= 0 disables it.
+    """
+    if grace_s <= 0 or trigger_sent_since_s is None:
+        return False
+    if trigger_sent_since_s < grace_s:
+        return False
+    return not trigger_acked and media_pkts == 0
 
 
 # How long to wait for the camera's webrtcResp before parsing it for the ICE
