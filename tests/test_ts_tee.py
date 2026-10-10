@@ -409,6 +409,41 @@ def _pid(pkt):
     return ((pkt[1] & 0x1F) << 8) | pkt[2]
 
 
+def _payload(pkt):
+    """A TS packet's payload, after the header and any adaptation field."""
+    afc = (pkt[3] >> 4) & 0x3
+    if afc == 2:
+        return b""
+    return pkt[5 + pkt[4] :] if afc == 3 else pkt[4:]
+
+
+def _first_video_pes_start(body, offset):
+    """The first packet from ``offset`` that starts a video PES, or None."""
+    for i in range(offset, len(body) - 187, 188):
+        pkt = body[i : i + 188]
+        payload = _payload(pkt)
+        if (
+            pkt[1] & 0x40  # payload_unit_start_indicator
+            and payload[:3] == b"\0\0\1"
+            and 0xE0 <= payload[3] <= 0xEF  # a video stream_id
+        ):
+            return pkt
+    return None
+
+
+def _tables_settled(ch, timeout=5.0, step=0.02):
+    """Whether the channel's cached PAT/PMT are set and stop changing across
+    two consecutive reads (``step`` apart) within ``timeout``."""
+    end, last = time.monotonic() + timeout, None
+    while time.monotonic() < end:
+        now = (ch._pat, ch._pmt)
+        if now == last and None not in now:
+            return True
+        last = now
+        time.sleep(step)
+    return False
+
+
 @pytest.mark.parametrize("changes", [True, False])
 def test_a_new_sps_disconnects_the_readers_so_they_rebuild_their_decoder(changes):
     # A reader keeps the decoder setup it built from the first SPS it saw (Home
@@ -455,8 +490,12 @@ def test_a_new_sps_keeps_a_reader_that_has_not_started_and_starts_it_there():
         assert _wait(lambda: ch.consumer_count() == 1)
         _feed(tee.session(), short_video, aac, realtime=False)
         assert _wait(lambda: ch.started_count() == 1)
-        assert _wait(lambda: tee._q.empty())  # session 1 fully muxed
-        time.sleep(0.2)  # the last item has been muxed, not just dequeued
+        assert _wait(lambda: tee._q.empty())  # session 1 fully dequeued
+        # The last item may still be muxing after the queue drains: wait until
+        # the channel's cached tables stop changing across two reads, so the
+        # "stale" pair really is session 1's last. Telling them apart from the
+        # new mux's tables relies on the TS continuity counter (see short_video).
+        assert _tables_settled(ch)
         stale_pat, stale_pmt = ch._pat, ch._pmt  # session 1's last cached tables
         waiting = _reader(srv)  # joins after session 1's only keyframe
         assert _wait(lambda: ch.consumer_count() == 2)
@@ -464,11 +503,15 @@ def test_a_new_sps_keeps_a_reader_that_has_not_started_and_starts_it_there():
         _feed(tee.session(), later, aac, realtime=False)
         assert _open_after(started, 1.0) is False  # dropped: rebuilds its decoder
         body = _read_body(waiting, 32 * 188, timeout=3.0)
-        assert new_sps in body  # a packet carries the new SPS
         head_pat, head_pmt = body[:188], body[188:376]
         assert _pid(head_pat) == 0  # PAT first
         pmt_pid = _pid(head_pmt)
         assert pmt_pid != 0  # ... then the PMT
+        # ... and the first video PES after them is session 2's keyframe: its
+        # first packet carries the new SPS.
+        first_video = _first_video_pes_start(body, 376)
+        assert first_video is not None
+        assert new_sps in _payload(first_video)
         # A PAT/PMT the new mux retransmits later in this same delivery, found
         # the same way a demuxer would: by PID, among the rest of the bytes.
         later_pat = next(
