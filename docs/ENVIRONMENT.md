@@ -54,6 +54,7 @@ out of the box.
 | `AIDOT_STREAM_IDLE_S` | Seconds of stream idle before an idle release. | `120` |
 | `AIDOT_SDES_IDLE_RELEASE` | Set to `0` to disable idle release for SDES streams. | `1` (enabled) |
 | `AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S` | On a battery camera, how long a stream may run while its viewers cannot be counted (a go2rtc the library cannot query, or one that stops answering) before it is released anyway, in seconds since the last known viewer (or since the open, if none was ever seen). Without it such a camera streamed until restart. Mains cameras are unaffected: an unknown viewer state never releases them. `0` or negative disables the cap; a malformed value falls back to the default. | `300` |
+| `AIDOT_STREAM_STARTUP_GRACE_S` | How long a session waits for its first viewer before the idle window applies, in seconds since the open. Until a viewer has been seen, the idle window is at least this long, so a short `stream_idle_s` cannot end a view that is still connecting (a stream worker or recording that retries late on a slow battery wake). Once a viewer has been seen, the idle window alone applies. A session nobody ever watches still ends on its own after this long. `0` or negative means no grace; a malformed value falls back to the default. | `60` |
 | `AIDOT_ICE_DISCONNECT_S` | ICE-disconnect debounce, in seconds, before tearing down. | `8` |
 | `AIDOT_DTLS_RETRY_GATE_S` | Minimum spacing, in seconds, between DTLS open retries. | `15` |
 | `AIDOT_BUSY_RETRY_S` | Delay, in seconds, before retrying when a camera reports busy. | `45` |

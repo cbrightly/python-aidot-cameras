@@ -237,6 +237,104 @@ def test_cap_knob_malformed_falls_back_to_the_default():
         ), _v
 
 
+# ---- AIDOT_STREAM_STARTUP_GRACE_S (wait for the first viewer) ---------------
+#
+# A late first viewer (an HLS worker or a recording that connects only after a
+# slow battery wake and back-off retries) must not find the session already
+# released by a short idle window counted from the open.
+
+_SHORT = 15.0
+_GRACE = 60.0
+
+
+def test_before_a_viewer_a_short_window_waits_the_grace():
+    kw = dict(viewer_seen=False, startup_grace_s=_GRACE)
+    assert _idle_release_due(False, 1000.0, 1016.0, _SHORT, **kw) is False
+    assert _idle_release_due(False, 1000.0, 1059.0, _SHORT, **kw) is False
+    assert _idle_release_due(False, 1000.0, 1060.0, _SHORT, **kw) is False
+    assert _idle_release_due(False, 1000.0, 1061.0, _SHORT, **kw) is True
+
+
+def test_before_a_viewer_a_longer_window_still_applies():
+    kw = dict(viewer_seen=False, startup_grace_s=_GRACE)
+    assert _idle_release_due(False, 1000.0, 1100.0, _IDLE, **kw) is False
+    assert _idle_release_due(False, 1000.0, 1121.0, _IDLE, **kw) is True
+
+
+def test_after_a_viewer_the_short_window_counts_from_the_last_viewer():
+    kw = dict(viewer_seen=True, startup_grace_s=_GRACE)
+    assert _idle_release_due(False, 1000.0, 1015.0, _SHORT, **kw) is False
+    assert _idle_release_due(False, 1000.0, 1016.0, _SHORT, **kw) is True
+
+
+def test_grace_zero_is_todays_behaviour():
+    for _seen in (False, True):
+        kw = dict(viewer_seen=_seen, startup_grace_s=0.0)
+        assert _idle_release_due(False, 1000.0, 1015.0, _SHORT, **kw) is False
+        assert _idle_release_due(False, 1000.0, 1016.0, _SHORT, **kw) is True
+
+
+def test_the_default_keywords_are_todays_behaviour():
+    assert _idle_release_due(False, 1000.0, 1016.0, _SHORT) is True
+
+
+def test_the_battery_unknown_cap_is_unchanged_by_the_grace():
+    kw = dict(battery=True, unknown_cap_s=_CAP, startup_grace_s=_GRACE)
+    for _seen in (False, True):
+        assert (
+            _idle_release_due(None, 1000.0, 1300.0, _SHORT, viewer_seen=_seen, **kw)
+            is False
+        )
+        assert (
+            _idle_release_due(None, 1000.0, 1301.0, _SHORT, viewer_seen=_seen, **kw)
+            is True
+        )
+
+
+def test_a_viewer_present_never_releases_during_the_grace():
+    kw = dict(viewer_seen=False, startup_grace_s=_GRACE)
+    assert _idle_release_due(True, 0.0, 10_000.0, _SHORT, **kw) is False
+
+
+def test_mains_unknown_never_releases_with_the_grace():
+    kw = dict(
+        viewer_seen=False, startup_grace_s=_GRACE, battery=False, unknown_cap_s=_CAP
+    )
+    assert _idle_release_due(None, 0.0, 10_000.0, _SHORT, **kw) is False
+
+
+def test_grace_knob_defaults_to_60():
+    from aidot_cameras.camera.protocol import _stream_startup_grace_s
+
+    assert _stream_startup_grace_s({}) == 60.0
+
+
+def test_grace_knob_reads_a_value():
+    from aidot_cameras.camera.protocol import _stream_startup_grace_s
+
+    assert _stream_startup_grace_s({"AIDOT_STREAM_STARTUP_GRACE_S": "90"}) == 90.0
+
+
+def test_grace_knob_zero_or_negative_means_no_grace():
+    from aidot_cameras.camera.protocol import _stream_startup_grace_s
+
+    for _v in ("0", "-5"):
+        _g = _stream_startup_grace_s({"AIDOT_STREAM_STARTUP_GRACE_S": _v})
+        assert (
+            _idle_release_due(
+                False, 1000.0, 1016.0, _SHORT, viewer_seen=False, startup_grace_s=_g
+            )
+            is True
+        )
+
+
+def test_grace_knob_malformed_falls_back_to_the_default():
+    from aidot_cameras.camera.protocol import _stream_startup_grace_s
+
+    for _v in ("abc", "", "nan", "inf"):
+        assert _stream_startup_grace_s({"AIDOT_STREAM_STARTUP_GRACE_S": _v}) == 60.0, _v
+
+
 if __name__ == "__main__":
     import traceback
 

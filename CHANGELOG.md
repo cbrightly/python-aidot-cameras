@@ -15,6 +15,12 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   restart; after `AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S` (300 s) without a
   known viewer it now goes back to sleep. Mains cameras are unchanged.
 
+### Changed
+
+- A session waits up to `AIDOT_STREAM_STARTUP_GRACE_S` (60 s) for its first
+  viewer before the idle window applies, so a short idle window cannot end a
+  view that is still connecting.
+
 ### Documentation
 
 - **The docs say what 1.0.0rc44 made true.** Direct publish, the AAC track,

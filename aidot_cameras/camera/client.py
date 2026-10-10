@@ -98,6 +98,7 @@ from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixi
     _tcp_table_has_established_on_port,
     _idle_release_due,
     _battery_unknown_release_s,
+    _stream_startup_grace_s,
     _DirectTsServer,
     _serve_port,
     _dtls_av_mux_run,
@@ -5283,6 +5284,12 @@ class CameraMixin(
             # last KNOWN viewer, so it cannot stream (and drain) until restart.
             _battery = bool(getattr(self, "is_battery_camera", False))
             _unknown_cap = _battery_unknown_release_s()
+            # Start-up grace: until a viewer has been seen, the idle window is
+            # at least AIDOT_STREAM_STARTUP_GRACE_S from the open, so a short
+            # window cannot end a view whose first viewer is still connecting
+            # (a stream worker or recording that retries late on a slow wake).
+            _viewer_seen = False
+            _startup_grace = _stream_startup_grace_s()
             try:
                 while True:
                     _fin, _ = await asyncio.wait({_done}, timeout=5.0)
@@ -5321,6 +5328,7 @@ class CameraMixin(
                         _present = await self._viewer_present(_serve_port)
                         if _present:  # True -> a viewer is pulling; stay alive
                             _last_consumer = time.monotonic()
+                            _viewer_seen = True
                         elif _idle_release_due(
                             _present,
                             _last_consumer,
@@ -5328,6 +5336,8 @@ class CameraMixin(
                             _idle_secs,
                             battery=_battery,
                             unknown_cap_s=_unknown_cap,
+                            viewer_seen=_viewer_seen,
+                            startup_grace_s=_startup_grace,
                         ):
                             if _present is None:
                                 _LOGGER.info(
@@ -6607,6 +6617,11 @@ class CameraMixin(
                     _serve_port_dtls = _sdes_serve_port(serve_url) or 0
                     _battery_dtls = bool(getattr(self, "is_battery_camera", False))
                     _unknown_cap_dtls = _battery_unknown_release_s()
+                    # Start-up grace (see the SDES loop): before the first
+                    # viewer, every release comparison below uses at least
+                    # AIDOT_STREAM_STARTUP_GRACE_S instead of the idle window.
+                    _viewer_seen_dtls = False
+                    _grace_dtls = _stream_startup_grace_s()
                     # Video-presence check.  The only other liveness test here is
                     # _pc_dead(), which reads the ICE/PC state - and a session
                     # receiving audio and no video passes it forever (measured
@@ -6688,12 +6703,18 @@ class CameraMixin(
                         # cannot answer.
                         if idle_secs > 0:
                             _watching = await self._viewer_present(_serve_port_dtls)
+                            _window_dtls = (
+                                idle_secs
+                                if _viewer_seen_dtls
+                                else max(idle_secs, _grace_dtls)
+                            )
                             if _watching:
                                 _last_viewer_dtls = _now
+                                _viewer_seen_dtls = True
                             elif _watching is False:
-                                if _now - _last_viewer_dtls > idle_secs:
+                                if _now - _last_viewer_dtls > _window_dtls:
                                     idle_release = True
-                            elif _now - progress[0] > idle_secs:
+                            elif _now - progress[0] > _window_dtls:
                                 # Unknown: keep the old staleness heuristic rather
                                 # than holding the stream open forever.
                                 idle_release = True
@@ -6704,6 +6725,8 @@ class CameraMixin(
                                 idle_secs,
                                 battery=True,
                                 unknown_cap_s=_unknown_cap_dtls,
+                                viewer_seen=_viewer_seen_dtls,
+                                startup_grace_s=_grace_dtls,
                             ):
                                 # Unknown on a battery camera, and go2rtc keeps
                                 # draining the pipe so staleness never fires:
