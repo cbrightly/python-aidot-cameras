@@ -6472,6 +6472,13 @@ class CameraMixin(
             proc = wfile = stop_flag = mux_thread = None
             cancelled = idle_release = False
             _pub_fail_n = 0
+            # Start-up grace (see the SDES loop): before the first viewer of
+            # this session, every release comparison in the serve cycle uses at
+            # least AIDOT_STREAM_STARTUP_GRACE_S instead of the idle window.
+            # Once per PC session, not per serve cycle: a cycle restarted after
+            # a viewer left must not get the full grace again.
+            _viewer_seen_dtls = False
+            _grace_dtls = _stream_startup_grace_s()
             try:
                 # (Re)start the ffmpeg serve whenever go2rtc (re)connects, while
                 # the warm WebRTC session keeps delivering encoded frames.
@@ -6617,11 +6624,6 @@ class CameraMixin(
                     _serve_port_dtls = _sdes_serve_port(serve_url) or 0
                     _battery_dtls = bool(getattr(self, "is_battery_camera", False))
                     _unknown_cap_dtls = _battery_unknown_release_s()
-                    # Start-up grace (see the SDES loop): before the first
-                    # viewer, every release comparison below uses at least
-                    # AIDOT_STREAM_STARTUP_GRACE_S instead of the idle window.
-                    _viewer_seen_dtls = False
-                    _grace_dtls = _stream_startup_grace_s()
                     # Video-presence check.  The only other liveness test here is
                     # _pc_dead(), which reads the ICE/PC state - and a session
                     # receiving audio and no video passes it forever (measured

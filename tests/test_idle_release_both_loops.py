@@ -66,7 +66,8 @@ def test_dtls_loop_releases_a_battery_camera_on_unknown_after_the_cap():
     src = _src("_dtls_serve_loop_inner")
     assert "_battery_unknown_release_s(" in src
     assert "_last_viewer_dtls" in src[src.index("unknown_cap_s=") - 400 :]
-    # Mains keeps the staleness fallback untouched.
+    # The staleness fallback remains for every camera (before the first
+    # viewer it waits the start-up grace, mains included).
     assert "progress[0] > _window_dtls" in src
 
 
@@ -96,3 +97,16 @@ def test_dtls_loop_waits_the_startup_grace_for_its_first_viewer():
     call = call[: call.index("idle_release = True")]
     assert "viewer_seen=_viewer_seen_dtls" in call
     assert "startup_grace_s=" in call
+
+
+def test_dtls_start_up_grace_is_once_per_session_not_per_serve_cycle():
+    # The serve cycle restarts inside the warm-PC loop whenever go2rtc drops
+    # and re-attaches the producer. Resetting "viewer seen" there would hand
+    # every restarted cycle the full grace after a viewer has already left.
+    src = _src("_dtls_serve_loop_inner")
+    cycle = src.index("while self._streaming_active and not _pc_dead():")
+    reset = src.index("_viewer_seen_dtls = False")
+    assert reset < cycle, "the reset must sit above the serve-cycle loop"
+    assert src.count("_viewer_seen_dtls = False") == 1
+    # The last-viewer clock still restarts per cycle, as before.
+    assert src.index("_last_viewer_dtls = loop.time()") > cycle
