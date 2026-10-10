@@ -37,7 +37,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   then the third served in 5 s. Each now abandons to the retry after 20 s
   timed from the camera's own answer or trigger (`AIDOT_SDES_ANSWER_PROBE_GRACE_S`,
   `AIDOT_SDES_TRIGGER_GRACE_S`). A camera that is still waking is never
-  clipped: nothing starts before it has answered.
+  clipped: nothing starts before it has answered. The stall warning names
+  which rule ended the attempt.
 
 ## [1.0.0rc44]
 

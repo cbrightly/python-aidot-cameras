@@ -34,6 +34,8 @@ import inspect
 import re
 import logging
 
+import pytest
+
 import aidot_cameras.camera.sdes_open as sdes_open
 from aidot_cameras.camera.sdes_open import (
     _first_media_stall_report,
@@ -251,6 +253,47 @@ def test_the_line_is_one_line():
         ],
     )
     assert "\n" not in line, "a multi-line WARNING is unreadable in a log grep"
+
+
+# An attempt one of the early-abandon rules ended writes the same WARNING as
+# one that ran the whole wait; only an INFO status line said which rule fired,
+# and INFO is not what users paste. The line names it.
+@pytest.mark.parametrize(
+    "reason", ["stale-offer", "unreachable-nominee", "no-probe", "trigger-unacked"]
+)
+def test_the_line_names_the_rule_that_abandoned_the_attempt(reason):
+    plain = _report()
+    line = _report(abandoned_by=reason)
+    assert "; abandoned: %s" % reason in line
+    assert line.isascii()
+    assert "\n" not in line
+    # Every other field is untouched: removing the one appended field gives
+    # back the plain line.
+    assert line.replace("; abandoned: %s" % reason, "") == plain
+
+
+def test_a_wait_no_rule_abandoned_leaves_the_line_unchanged():
+    assert _report(abandoned_by=None) == _report()
+    assert "abandoned" not in _report()
+
+
+@pytest.mark.parametrize(
+    "rule, reason",
+    [
+        ("_stale_offer_abandon_due(", "stale-offer"),
+        ("_no_answer_abandon_due(", "unreachable-nominee"),
+        ("_no_probe_abandon_due(", "no-probe"),
+        ("_trigger_unacked_abandon_due(", "trigger-unacked"),
+    ],
+)
+def test_each_abandon_rule_records_its_reason_for_the_report(rule, reason):
+    block = _first_media_wait_block()
+    at = block.index("if " + rule)
+    brk = block.index("break", at)
+    assert '_abandoned_by = "%s"' % reason in block[at:brk], (
+        "the %s branch must record %r before breaking out" % (rule, reason)
+    )
+    assert "abandoned_by=_abandoned_by" in block
 
 
 def test_a_truncated_probe_list_says_how_many_it_dropped():

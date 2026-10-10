@@ -2444,6 +2444,7 @@ def _first_media_stall_report(
     answer_cands=-1,
     answer_has_creds=None,
     trigger_acked=None,
+    abandoned_by=None,
 ):
     """Build the one line a first-media stall emits.
 
@@ -2460,7 +2461,10 @@ def _first_media_stall_report(
     users paste that file into public issue reports.
 
     ``probes`` is a sequence of ``(source_label, verdict)`` from
-    :func:`_probe_source_verdict`.  Pure, so the wording is testable.
+    :func:`_probe_source_verdict`.  ``abandoned_by`` names the early-abandon
+    rule that ended the wait (``stale-offer``, ``unreachable-nominee``,
+    ``no-probe`` or ``trigger-unacked``), or None when none did.  Pure, so the
+    wording is testable.
     """
     _cands = ", ".join(f"{_ip}:{_port}" for _ip, _port in (nominated or []))
     _probes = "; ".join(
@@ -2546,10 +2550,13 @@ def _first_media_stall_report(
             " our side, not silence on its side." % media_pkts
         )
     _how = " - caller cancelled the wait" if cancelled else ""
+    # Which early-abandon rule ended the wait, if one did. Only an INFO status
+    # line said so before, and that is not the level users paste.
+    _abandoned = "; abandoned: %s" % abandoned_by if abandoned_by else ""
     return (
         "camera %s: SDES first media never arrived (%.0fs%s)."
         " nominated=%s;%s use-candidate=%s; binding-success=%d; trigger=%s;"
-        " inbound-media=%d; decrypt-failed=%d; probes=%s.%s"
+        " inbound-media=%d; decrypt-failed=%d; probes=%s%s.%s"
         % (
             device_id,
             waited_s,
@@ -2562,6 +2569,7 @@ def _first_media_stall_report(
             media_pkts,
             decrypt_fails,
             _probes or "none",
+            _abandoned,
             _why,
         )
     )
@@ -8283,6 +8291,8 @@ class _SdesOpenMixin:
         _seen_at_start = getattr(self, "_camera_device_seen_ts", None)
         _first_seen_ts = None
         _stale_offer_abandoned = False
+        # Which early-abandon rule broke out of the wait, for the stall report.
+        _abandoned_by = None
         # When we first nominated a candidate, for the unreachable-nominee
         # abandon (_no_answer_abandon_due). Set now if the pre-launch answer
         # already nominated at setup; otherwise stamped in the loop when a late
@@ -8361,6 +8371,7 @@ class _SdesOpenMixin:
                         trigger_acked=bool(
                             getattr(_bridge_fn, "_br_session_mode_resp", 0)
                         ),
+                        abandoned_by=_abandoned_by,
                     ),
                 )
             except Exception:
@@ -8388,6 +8399,7 @@ class _SdesOpenMixin:
                     # not going to act on it; the retry's fresh offer will be
                     # served in seconds.  Stop paying for the rest of the window.
                     _stale_offer_abandoned = True
+                    _abandoned_by = "stale-offer"
                     _status(
                         "camera turned up %.0fs into the wait and sent no media"
                         " for the %.0fs since - abandoning this attempt to the"
@@ -8431,6 +8443,7 @@ class _SdesOpenMixin:
                     # in seconds and re-wakes a camera that dozed. Stop paying
                     # for the window.
                     _stale_offer_abandoned = True
+                    _abandoned_by = "unreachable-nominee"
                     _status(
                         "nothing answered the nominated candidate(s) in %.0fs"
                         " - no STUN binding success and no relay-learned peer,"
@@ -8465,6 +8478,7 @@ class _SdesOpenMixin:
                     ),
                 ):
                     _stale_offer_abandoned = True
+                    _abandoned_by = "no-probe"
                     _status(
                         "the camera answered %.0fs ago and has sent no STUN probe"
                         " since - nothing to nominate, so no trigger can arm;"
@@ -8486,6 +8500,7 @@ class _SdesOpenMixin:
                     + int(getattr(_bridge_fn, "_br_tutk_media", 0)),
                 ):
                     _stale_offer_abandoned = True
+                    _abandoned_by = "trigger-unacked"
                     _status(
                         "LIVING went out %.0fs ago on a path the camera answered,"
                         " and neither an ack nor a media packet followed; abandoning"
