@@ -71,3 +71,17 @@ def test_release_policy_treats_unknown_as_do_not_release():
     assert _idle_release_due(True, now - 9999, now, 300) is False  # watching
     assert _idle_release_due(False, now - 9999, now, 300) is True  # idle, elapsed
     assert _idle_release_due(False, now - 10, now, 300) is False  # idle, too soon
+
+
+def test_release_policy_battery_exception_for_unknown():
+    # A battery camera whose viewers cannot be counted must not stream until
+    # restart: unknown releases once the cap has passed since the last known
+    # viewer. Mains is unchanged.
+    from aidot_cameras.camera.protocol import _idle_release_due
+
+    now = 1000.0
+    kw = {"battery": True, "unknown_cap_s": 300}
+    assert _idle_release_due(None, now - 9999, now, 300, **kw) is True
+    assert _idle_release_due(None, now - 10, now, 300, **kw) is False
+    assert _idle_release_due(None, now - 9999, now, 300, battery=False) is False
+    assert _idle_release_due(True, now - 9999, now, 300, **kw) is False

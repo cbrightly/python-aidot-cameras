@@ -6,6 +6,15 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A battery camera whose viewers cannot be counted is released anyway.** A
+  session is released after `stream_idle_s` with no viewer, but an unknown
+  viewer state (the count could not be read) never released, so a battery
+  camera viewed through a go2rtc the library cannot query streamed until
+  restart; after `AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S` (300 s) without a
+  known viewer it now goes back to sleep. Mains cameras are unchanged.
+
 ### Documentation
 
 - **The docs say what 1.0.0rc44 made true.** Direct publish, the AAC track,

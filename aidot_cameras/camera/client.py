@@ -97,6 +97,7 @@ from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixi
     _grab_free_port,
     _tcp_table_has_established_on_port,
     _idle_release_due,
+    _battery_unknown_release_s,
     _DirectTsServer,
     _serve_port,
     _dtls_av_mux_run,
@@ -4549,8 +4550,10 @@ class CameraMixin(
         is (the serve port is go2rtc's shared RTSP port, where every camera's own
         publisher is connected, so a socket check would report a viewer for every
         camera forever).  With no signal ``_viewer_present`` answers "unknown",
-        ``_idle_release_due`` correctly never releases on unknown, and a battery
-        camera's keepalive renews forever against a camera nobody is watching.
+        and ``_idle_release_due`` never releases a mains camera on unknown; a
+        battery camera is released only after
+        ``AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S`` (300 s) without a known
+        viewer, so every view of it ends at that cap.
 
         ``stream_idle_s`` sets the no-viewer idle-release window in seconds,
         overriding the ``AIDOT_STREAM_IDLE_S`` env default (120).  ``0`` (or
@@ -4619,10 +4622,10 @@ class CameraMixin(
         # mid-flight, which was observed leaving DTLS cameras producing nothing
         # at all.  Such a consumer previously had to withhold go2rtc_url
         # entirely, which silently disabled viewer detection - and in SDES push
-        # mode that means a battery camera can never idle-release, because
-        # ``_viewer_present`` answers "unknown" and ``_idle_release_due``
-        # (correctly) never releases on unknown.  The keepalive then renews
-        # forever against a camera nobody is watching.
+        # mode that means ``_viewer_present`` answers "unknown", on which
+        # ``_idle_release_due`` never releases a mains camera and releases a
+        # battery camera only after AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S
+        # without a known viewer - cutting every view of it short at that cap.
         if go2rtc_url and go2rtc_register:
             self._go2rtc_task = asyncio.ensure_future(self._register_with_go2rtc())
 
@@ -4963,7 +4966,8 @@ class CameraMixin(
         against a 5 minute idle window.
 
         Falls back to the TCP-table check when go2rtc is not in use, and returns
-        None (never release) if neither can answer.
+        None (unknown: never releases a mains camera; a battery camera after
+        AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S) if neither can answer.
         """
         # A consumer of the camera's in-sync HLS TS is a viewer that go2rtc
         # never sees (it reads from the library, not from go2rtc). Local and
@@ -5002,7 +5006,8 @@ class CameraMixin(
         # push mode, which is why a consumer that registers its own stream
         # should still pass go2rtc_url with go2rtc_register=False rather than
         # withholding it (withholding it silently pins push-mode cameras to
-        # "unknown", and unknown never releases).
+        # "unknown", and unknown never releases a mains camera and cuts a
+        # battery camera's views short at AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S).
         if base and name:
             try:
                 import aiohttp
@@ -5262,7 +5267,9 @@ class CameraMixin(
             # pipe to watch, so detect "nobody is pulling" via an ESTABLISHED TCP
             # connection on the -listen serve port and release after the same idle
             # window as DTLS; the next view re-runs camera.stream_source().  Fail
-            # safe: unknown (non-Linux /proc) never releases.  Escape hatch:
+            # safe: unknown (non-Linux /proc) never releases a mains camera; a
+            # battery camera releases after AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S
+            # without a known viewer.  Escape hatch:
             # AIDOT_SDES_IDLE_RELEASE=0.
             # stream_idle_s / AIDOT_STREAM_IDLE_S override; <= 0 = never release.
             _idle_secs = self._resolve_idle_secs()
@@ -5271,6 +5278,11 @@ class CameraMixin(
             )
             _serve_port = _sdes_serve_port(self._keepalive_rtsp_url)
             _last_consumer = _started_at  # grace: count idle from session open
+            # Battery exception to "unknown never releases": a battery camera
+            # whose viewers cannot be counted is released this long after the
+            # last KNOWN viewer, so it cannot stream (and drain) until restart.
+            _battery = bool(getattr(self, "is_battery_camera", False))
+            _unknown_cap = _battery_unknown_release_s()
             try:
                 while True:
                     _fin, _ = await asyncio.wait({_done}, timeout=5.0)
@@ -5310,11 +5322,24 @@ class CameraMixin(
                         if _present:  # True -> a viewer is pulling; stay alive
                             _last_consumer = time.monotonic()
                         elif _idle_release_due(
-                            _present, _last_consumer, time.monotonic(), _idle_secs
+                            _present,
+                            _last_consumer,
+                            time.monotonic(),
+                            _idle_secs,
+                            battery=_battery,
+                            unknown_cap_s=_unknown_cap,
                         ):
+                            if _present is None:
+                                _LOGGER.info(
+                                    "SDES serve: %s released - viewer state "
+                                    "unknown for %.0f s on a battery camera",
+                                    self.device_id,
+                                    time.monotonic() - _last_consumer,
+                                )
                             _idle_release = True
                             break
-                        # _present is None (unreadable table) -> don't release
+                        # _present is None (unknown) -> a mains camera never
+                        # releases; a battery camera releases after the cap.
             except asyncio.CancelledError:
                 _done.cancel()
                 self._stream_session = None
@@ -6580,6 +6605,8 @@ class CameraMixin(
                     _stall_pli_armed = True
                     _last_viewer_dtls = loop.time()
                     _serve_port_dtls = _sdes_serve_port(serve_url) or 0
+                    _battery_dtls = bool(getattr(self, "is_battery_camera", False))
+                    _unknown_cap_dtls = _battery_unknown_release_s()
                     # Video-presence check.  The only other liveness test here is
                     # _pc_dead(), which reads the ICE/PC state - and a session
                     # receiving audio and no video passes it forever (measured
@@ -6669,6 +6696,25 @@ class CameraMixin(
                             elif _now - progress[0] > idle_secs:
                                 # Unknown: keep the old staleness heuristic rather
                                 # than holding the stream open forever.
+                                idle_release = True
+                            elif _battery_dtls and _idle_release_due(
+                                None,
+                                _last_viewer_dtls,
+                                _now,
+                                idle_secs,
+                                battery=True,
+                                unknown_cap_s=_unknown_cap_dtls,
+                            ):
+                                # Unknown on a battery camera, and go2rtc keeps
+                                # draining the pipe so staleness never fires:
+                                # release after the cap since the last known
+                                # viewer rather than streaming until restart.
+                                _LOGGER.info(
+                                    "DTLS serve: %s released - viewer state "
+                                    "unknown for %.0f s on a battery camera",
+                                    self.device_id,
+                                    _now - _last_viewer_dtls,
+                                )
                                 idle_release = True
                             # Only an actual idle release ends this serve cycle.
                             # (This break was unconditional - any idle_secs > 0

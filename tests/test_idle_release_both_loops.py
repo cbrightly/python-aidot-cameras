@@ -47,3 +47,24 @@ def test_teardown_does_not_join_a_thread_that_never_started():
     # join() on an unstarted thread raises and would skip the ffmpeg terminate
     # and the session stop that follow it.
     assert "mux_thread.is_alive()" in _src("_dtls_serve_loop_inner")
+
+
+def test_sdes_loop_releases_a_battery_camera_on_unknown_after_the_cap():
+    # The SDES site must hand the rule the camera's power type and the cap;
+    # without them a battery camera whose viewers cannot be counted streams
+    # until restart.
+    src = _src("_sdes_keepalive_loop_inner")
+    call = src[src.index("_idle_release_due(") :]
+    call = call[: call.index("_idle_release = True")]
+    assert "battery=_battery" in call
+    assert '_battery = bool(getattr(self, "is_battery_camera", False))' in src
+    assert "unknown_cap_s=" in call
+    assert "_battery_unknown_release_s(" in src
+
+
+def test_dtls_loop_releases_a_battery_camera_on_unknown_after_the_cap():
+    src = _src("_dtls_serve_loop_inner")
+    assert "_battery_unknown_release_s(" in src
+    assert "_last_viewer_dtls" in src[src.index("unknown_cap_s=") - 400 :]
+    # Mains keeps the staleness fallback untouched.
+    assert "progress[0] > idle_secs" in src
