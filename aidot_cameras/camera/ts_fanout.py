@@ -233,6 +233,29 @@ class TsChannel:
             self._drop(c)
         return len(consumers)
 
+    def disconnect_started(self) -> "tuple[int, int]":
+        """Disconnect the consumers that were sent media; keep the ones waiting.
+
+        A reader that has decoded from an earlier SPS must rebuild its decoder
+        and so must reconnect. One that has received nothing yet has nothing
+        to rebuild: it waits, unsynced, for the next keyframe and starts there
+        with the new mux's tables. Returns ``(dropped, kept)``.
+        """
+        with self._lock:
+            consumers = [c for c in self._consumers if not c.dead]
+        dropped = kept = 0
+        for c in consumers:
+            if not c.started:
+                kept += 1
+                continue
+            try:
+                c.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            self._drop(c)
+            dropped += 1
+        return dropped, kept
+
     def close(self) -> None:
         """Disconnect every consumer; the channel accepts no more."""
         self._closed.set()
