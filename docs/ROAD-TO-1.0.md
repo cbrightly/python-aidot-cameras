@@ -2008,8 +2008,8 @@ superseded.
 reference installation from 02:34 UTC). Two weeks from it is 2026-10-25.**
 Checked after the restart: a 20 s recording on each of the two L2 battery
 cameras ended its session 40 s after the camera served (about 150 s before
-this release), the recording was whole (20.8 s, video and audio), and the camera
-did not wake again in the five minutes after.
+this release); the one file kept was whole (20.8 s, video and audio), and the
+other camera did not wake again in the five minutes after.
 
 ## Out of scope for 1.0.0
 
