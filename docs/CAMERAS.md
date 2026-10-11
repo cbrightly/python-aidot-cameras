@@ -139,12 +139,20 @@ opening a session until the device reports itself awake.
 - **A stalled attempt is abandoned to the retry.**
   `AIDOT_BATTERY_STALE_OFFER_GRACE_S` (15 s, `0` disables) ends the first-media
   wait early when the camera turned up mid-wait and still sent nothing, rather
-  than holding the full 75 s.
+  than holding the full 75 s. `AIDOT_SDES_ANSWER_PROBE_GRACE_S` and
+  `AIDOT_SDES_TRIGGER_GRACE_S` (20 s each, 1.0.0rc45) cover two further SDES
+  shapes - the camera answered and never sent a STUN probe, or LIVING went out
+  on a path it answered and neither an ack nor media followed - both timed from
+  the answer, never the open, so a camera still waking is not clipped. See
+  [`ENVIRONMENT.md`](ENVIRONMENT.md) for the exact conditions.
 
 None of this wakes a camera that nobody is watching. Snapshots for a dashboard
-card come from a cached cloud thumbnail, the periodic attribute fetch skips
-battery cameras outright, and startup prewarm excludes them; motion prewarm does
-run, but only when the camera has already woken itself to record.
+card come from a cached cloud thumbnail, and the periodic attribute fetch skips
+battery cameras outright. Startup prewarm excludes them, and so does motion
+prewarm (Home Assistant integration 2.36.0 and later): a notification's tap
+opens the cloud clip, not a live session, so warming one nobody would watch
+bought nothing. Earlier integration releases did prewarm a battery camera on
+motion.
 
 The **DTLS** path has the targeted equivalent (0.9.0): `dtls_fast_liveplay`
 (`AIDOT_DTLS_FAST_LIVEPLAY` env / `_dtls_fast_liveplay_opt`) skips only the
