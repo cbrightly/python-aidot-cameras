@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc45]
+
 ### Added
 
 - **`lan_address`, `lan_login_failures` and `lan_login_over_ceiling` on every

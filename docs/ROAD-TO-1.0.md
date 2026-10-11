@@ -1992,6 +1992,18 @@ eleven-times-slow HLS, 2.30.6's stale-stream reuse, rc32 / 2.30.7),
 2026-10-01 (rc34 / 2.30.9), 2026-10-04 (rc37 / 2.31.1), and 2026-10-08 (2.34.2
 and rc41 / 2.34.3).
 
+#### 2026-10-10: `rc45` resets the clock
+
+| release | date | find | resets? |
+|---|---|---|---|
+| `rc45` | 2026-10-10 | A battery camera whose viewers could not be counted was never released, so one viewed through a go2rtc the library cannot query streamed until restart; it now goes back to sleep after `AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S` (300 s) without a known viewer, and a new session waits up to `AIDOT_STREAM_STARTUP_GRACE_S` (60 s) for its first viewer before any idle window applies. Also: the in-sync TS dropped a reader that had not received a byte yet when the first keyframe carried a new SPS, so every cold HLS open or recording of the PTZ model failed its first attempt and retried ten seconds later; and an SDES first view could wait the whole 75 s first-media budget on an attempt the camera's own answer or trigger showed it could not finish (2.5 minutes to a picture, measured 10-08), which now abandons to the retry after 20 s. Two non-media changes ride along: the LAN-login ceiling silences upstream's per-poll warning for a light it has given up on, and read-only accessors expose that login state | **Yes.** The battery release, the in-sync TS (default since `rc44`) and the SDES first view are all default paths. The two LAN-login changes alone would not reset it |
+
+**Day zero moves to the day `rc45` and integration 2.36.0 (which stops the
+motion pre-warm on battery cameras and needs this release) are running on the
+reference installation; the entry that dates it says so. Two weeks from it is
+the new target.** The 2026-10-08 day zero and its 2026-10-22 target are
+superseded.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /
