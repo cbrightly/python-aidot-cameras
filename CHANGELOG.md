@@ -13,6 +13,12 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   failing for and where, without reading private names. The Home Assistant
   integration uses them for a repair issue naming a light on another subnet.
 
+### Changed
+
+- A session waits up to `AIDOT_STREAM_STARTUP_GRACE_S` (60 s) for its first
+  viewer before the idle window applies, so a short idle window cannot end a
+  view that is still connecting.
+
 ### Fixed
 
 - **A light that cannot be reached no longer logs a warning every five
@@ -49,11 +55,14 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   clipped: nothing starts before it has answered. The stall warning names
   which rule ended the attempt.
 
-### Removed
+- **A battery camera whose viewers cannot be counted is released anyway.** A
+  session is released after `stream_idle_s` with no viewer, but an unknown
+  viewer state (the count could not be read) never released, so a battery
+  camera viewed through a go2rtc the library cannot query streamed until
+  restart; after `AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S` (300 s) without a
+  known viewer it now goes back to sleep. Mains cameras are unchanged.
 
-- The `--pt-order-arms` campaign in `scripts/live_validate.py`: it set
-  `AIDOT_SDES_VIDEO_PT_ORDER`, which nothing has read since 1.0.0rc44, so
-  every arm was the control.
+### Removed
 
 - The `--pt-order-arms` campaign in `scripts/live_validate.py`: it set
   `AIDOT_SDES_VIDEO_PT_ORDER`, which nothing has read since 1.0.0rc44, so

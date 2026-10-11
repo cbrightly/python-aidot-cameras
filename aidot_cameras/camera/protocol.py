@@ -1615,18 +1615,104 @@ def _tcp_table_has_established_on_port(table_text: str, port: int) -> bool:
 
 
 def _idle_release_due(
-    present, last_consumer: float, now: float, idle_secs: float
+    present,
+    last_consumer: float,
+    now: float,
+    idle_secs: float,
+    *,
+    battery: bool = False,
+    unknown_cap_s: "Optional[float]" = None,
+    viewer_seen: bool = True,
+    startup_grace_s: float = 0.0,
 ) -> bool:
-    """Whether a viewerless SDES keepalive should release.
+    """Whether a viewerless keepalive should release.
 
-    ``present``: True (a TCP consumer is connected to the serve port), False
-    (none), or None (the table was unreadable - unknown).  Release ONLY when
-    we're certain there's no consumer (False) AND the idle window has elapsed;
-    True keeps it alive and None never releases (fail-safe on non-Linux).  Pure
-    so the policy is unit-testable without a live loop."""
+    ``present``: True (a viewer is watching), False (none), or None (unknown -
+    the viewer count could not be read). ``last_consumer`` is the last time a
+    viewer was KNOWN present (or the session open, if none ever was).
+
+    Release when we're certain there's no viewer (False) AND the idle window has
+    elapsed; True keeps it alive. None never releases a mains camera
+    (fail-safe). The battery exception: for ``battery=True`` and a positive
+    ``unknown_cap_s``, None releases once ``unknown_cap_s`` has passed since the
+    last known viewer - otherwise a battery camera whose viewers cannot be
+    counted would stream, and drain, until restart.
+
+    ``viewer_seen``: whether a viewer has been known present at least once this
+    session. Until one has, ``last_consumer`` is the session open and the
+    window is ``max(idle_secs, startup_grace_s)``, so a short idle window cannot
+    end a view whose first viewer is still connecting (a slow battery wake). The
+    unknown-viewer cap is not affected. Pure so the policy is unit-testable
+    without a live loop."""
+    if present is None:
+        if not battery or not unknown_cap_s or unknown_cap_s <= 0:
+            return False
+        return (now - last_consumer) > unknown_cap_s
     if present is not False:
         return False
-    return (now - last_consumer) > idle_secs
+    _window = idle_secs
+    if not viewer_seen and startup_grace_s and startup_grace_s > _window:
+        _window = startup_grace_s
+    return (now - last_consumer) > _window
+
+
+#: Default for ``AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S``.
+_BATTERY_UNKNOWN_RELEASE_S = 300.0
+
+
+def _battery_unknown_release_s(env=None) -> float:
+    """How long a battery camera may stream with its viewers unknown, seconds.
+
+    ``AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S`` overrides the 300 s default;
+    ``<= 0`` disables the cap (unknown never releases). A malformed or
+    non-finite value falls back to the default with one debug line."""
+    _env = os.environ if env is None else env
+    _raw = _env.get("AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S")
+    if _raw is None:
+        return _BATTERY_UNKNOWN_RELEASE_S
+    try:
+        _v = float(_raw)
+    except (TypeError, ValueError):
+        _v = None
+    if _v is None or _v != _v or _v in (float("inf"), float("-inf")):
+        _LOGGER.debug(
+            "AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S=%r is not a number; using %.0f",
+            _raw,
+            _BATTERY_UNKNOWN_RELEASE_S,
+        )
+        return _BATTERY_UNKNOWN_RELEASE_S
+    return _v
+
+
+#: Default for ``AIDOT_STREAM_STARTUP_GRACE_S``.
+_STREAM_STARTUP_GRACE_S = 60.0
+
+
+def _stream_startup_grace_s(env=None) -> float:
+    """How long a session waits for its first viewer, seconds.
+
+    Until a viewer has been seen, the idle window is at least this long, so a
+    viewer that connects late (Home Assistant's stream worker backs off 10, 20,
+    30 s on a slow battery wake) does not find the session already released.
+    ``AIDOT_STREAM_STARTUP_GRACE_S`` overrides the 60 s default; ``<= 0``
+    means no grace (the idle window alone applies). A malformed or non-finite
+    value falls back to the default with one debug line."""
+    _env = os.environ if env is None else env
+    _raw = _env.get("AIDOT_STREAM_STARTUP_GRACE_S")
+    if _raw is None:
+        return _STREAM_STARTUP_GRACE_S
+    try:
+        _v = float(_raw)
+    except (TypeError, ValueError):
+        _v = None
+    if _v is None or _v != _v or _v in (float("inf"), float("-inf")):
+        _LOGGER.debug(
+            "AIDOT_STREAM_STARTUP_GRACE_S=%r is not a number; using %.0f",
+            _raw,
+            _STREAM_STARTUP_GRACE_S,
+        )
+        return _STREAM_STARTUP_GRACE_S
+    return _v
 
 
 #: How far ahead of presentation a picture is told to decode. Must exceed the
