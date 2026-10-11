@@ -1113,6 +1113,15 @@ _UNREACHABLE_NOMINEE_GRACE_S = float(
     os.environ.get("AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S", "20")
 )
 
+# The two companions of the unreachable-nominee grace, for the two first-media
+# shapes it cannot see (see _no_probe_abandon_due / _trigger_unacked_abandon_due).
+# Both are sized from the same measurement: 165 successful first medias across
+# 28 live-validation runs (2026-09-22 to 10-09), the slowest 9.5 s after
+# webrtcReq; 29 of 30 stalls in those runs were the two shapes these rules end.
+# Also the earlier finding that the trigger arms within about a second or never.
+_ANSWER_PROBE_GRACE_S = float(os.environ.get("AIDOT_SDES_ANSWER_PROBE_GRACE_S", "20"))
+_TRIGGER_GRACE_S = float(os.environ.get("AIDOT_SDES_TRIGGER_GRACE_S", "20"))
+
 
 def _stale_offer_abandon_due(
     *, battery: bool, seen_at_start, first_seen_ts, now: float, grace_s: float
@@ -1185,6 +1194,59 @@ def _no_answer_abandon_due(
     if nominated_since_s < grace_s:
         return False
     return binding_success == 0 and not prflx_learned
+
+
+def _no_probe_abandon_due(
+    *,
+    answered_since_s,
+    grace_s: float,
+    nominated: bool,
+    probes: int,
+    binding_success: int,
+) -> bool:
+    """Whether a camera that answered and then never probed should be abandoned.
+
+    The third shape, after the stale-offer and unreachable-nominee rules: the
+    answer arrived, so the camera is awake, but no STUN probe ever came and
+    nothing was nominated - so the nominee rule never starts.  Measured
+    2026-10-08 on an A001513: `nominated=none; probes=none` for the whole 75 s,
+    then the next attempt served in 5 s.  Timed from the ANSWER, never from
+    the open, so a battery camera still waking is never clipped.  Fires only
+    when nothing has been nominated, no probe was seen, and no connectivity
+    check was answered; ``grace_s`` <= 0 disables it.
+
+    ``binding_success`` is the backstop for nomination the caller cannot see:
+    an answer with ICE credentials and no candidates is nominated by the
+    bridge's periodic tick from trickled candidates, which records nothing, and
+    the relay-only cameras on that path send no probes.  Any Binding Success
+    means a check was answered, and the trigger rule owns the attempt from
+    there.
+    """
+    if grace_s <= 0 or answered_since_s is None:
+        return False
+    if answered_since_s < grace_s:
+        return False
+    return not nominated and probes == 0 and binding_success == 0
+
+
+def _trigger_unacked_abandon_due(
+    *, trigger_sent_since_s, grace_s: float, trigger_acked: bool, media_pkts: int
+) -> bool:
+    """Whether a camera that never acted on LIVING should be abandoned.
+
+    The fourth shape: the camera answered our connectivity checks (so it is
+    reachable), LIVING went out on the channel, and neither an ack nor a media
+    packet followed.  Measured 2026-10-08 on an A001513: `binding-success=2;
+    trigger=sent(unacked); inbound-media=0` for 75 s.  Timed from the LIVING
+    send.  The bridge's existing retrigger already re-sends LIVING every 2 s
+    until the camera's first probe; this rule only ends the attempt.
+    ``grace_s`` <= 0 disables it.
+    """
+    if grace_s <= 0 or trigger_sent_since_s is None:
+        return False
+    if trigger_sent_since_s < grace_s:
+        return False
+    return not trigger_acked and media_pkts == 0
 
 
 # How long to wait for the camera's webrtcResp before parsing it for the ICE
@@ -2382,6 +2444,7 @@ def _first_media_stall_report(
     answer_cands=-1,
     answer_has_creds=None,
     trigger_acked=None,
+    abandoned_by=None,
 ):
     """Build the one line a first-media stall emits.
 
@@ -2398,7 +2461,10 @@ def _first_media_stall_report(
     users paste that file into public issue reports.
 
     ``probes`` is a sequence of ``(source_label, verdict)`` from
-    :func:`_probe_source_verdict`.  Pure, so the wording is testable.
+    :func:`_probe_source_verdict`.  ``abandoned_by`` names the early-abandon
+    rule that ended the wait (``stale-offer``, ``unreachable-nominee``,
+    ``no-probe`` or ``trigger-unacked``), or None when none did.  Pure, so the
+    wording is testable.
     """
     _cands = ", ".join(f"{_ip}:{_port}" for _ip, _port in (nominated or []))
     _probes = "; ".join(
@@ -2484,10 +2550,13 @@ def _first_media_stall_report(
             " our side, not silence on its side." % media_pkts
         )
     _how = " - caller cancelled the wait" if cancelled else ""
+    # Which early-abandon rule ended the wait, if one did. Only an INFO status
+    # line said so before, and that is not the level users paste.
+    _abandoned = "; abandoned: %s" % abandoned_by if abandoned_by else ""
     return (
         "camera %s: SDES first media never arrived (%.0fs%s)."
         " nominated=%s;%s use-candidate=%s; binding-success=%d; trigger=%s;"
-        " inbound-media=%d; decrypt-failed=%d; probes=%s.%s"
+        " inbound-media=%d; decrypt-failed=%d; probes=%s%s.%s"
         % (
             device_id,
             waited_s,
@@ -2500,6 +2569,7 @@ def _first_media_stall_report(
             media_pkts,
             decrypt_fails,
             _probes or "none",
+            _abandoned,
             _why,
         )
     )
@@ -5590,6 +5660,12 @@ class _SdesOpenMixin:
             _bridge_fn._br_binding_success_count = 0
             _bridge_fn._br_probe_verdicts = {}
             _bridge_fn._br_probe_overflow = 0
+            # Read by the first-media wait's trigger rule
+            # (_trigger_unacked_abandon_due): when LIVING first went out
+            # (monotonic), and TUTK-framed media, which leaves its branch before
+            # _br_media_pkts is counted.
+            _bridge_fn._br_trigger_sent_ts = None
+            _bridge_fn._br_tutk_media = 0
             _last_trigger_ts = 0.0  # time of last AVIO LIVING send
             _trigger_bs = None  # socket used for trigger
             _trigger_bsrc = None  # camera addr for trigger
@@ -6575,6 +6651,13 @@ class _SdesOpenMixin:
                             ):
                                 _tutk_trigger_sent = True
                                 _bridge_fn._tutk_trigger_sent = True
+                                if (
+                                    getattr(_bridge_fn, "_br_trigger_sent_ts", None)
+                                    is None
+                                ):
+                                    _bridge_fn._br_trigger_sent_ts = (
+                                        _time_br.monotonic()
+                                    )
                                 import struct as _st_tk
                                 import random as _rand_tk
 
@@ -7408,6 +7491,13 @@ class _SdesOpenMixin:
                                                 "_enc_c8_sctp",
                                                 exc_info=True,
                                             )
+                                # Counted for the first-media trigger rule: this
+                                # branch leaves before _br_media_pkts is counted,
+                                # so without it a camera sending TUTK-framed
+                                # media would read as sending nothing.
+                                _bridge_fn._br_tutk_media = (
+                                    getattr(_bridge_fn, "_br_tutk_media", 0) + 1
+                                )
                                 continue
 
                             # Standard SRTP/SRTCP demux by RTP payload type.
@@ -8201,12 +8291,17 @@ class _SdesOpenMixin:
         _seen_at_start = getattr(self, "_camera_device_seen_ts", None)
         _first_seen_ts = None
         _stale_offer_abandoned = False
+        # Which early-abandon rule broke out of the wait, for the stall report.
+        _abandoned_by = None
         # When we first nominated a candidate, for the unreachable-nominee
         # abandon (_no_answer_abandon_due). Set now if the pre-launch answer
         # already nominated at setup; otherwise stamped in the loop when a late
         # answer nominates. Measured from nomination, not the open, so a battery
         # camera still waking is never clipped.
         _nominated_at = _media_wait_started if _early_nominated else None
+        # When the camera's answer was first readable, for the no-probe abandon
+        # (_no_probe_abandon_due). Timed from the answer, never the open.
+        _answered_at = None
 
         def _report_first_media_stall(_waited_s, _cancelled=False):
             """Emit the one line that says why nothing arrived.
@@ -8276,6 +8371,7 @@ class _SdesOpenMixin:
                         trigger_acked=bool(
                             getattr(_bridge_fn, "_br_session_mode_resp", 0)
                         ),
+                        abandoned_by=_abandoned_by,
                     ),
                 )
             except Exception:
@@ -8303,6 +8399,7 @@ class _SdesOpenMixin:
                     # not going to act on it; the retry's fresh offer will be
                     # served in seconds.  Stop paying for the rest of the window.
                     _stale_offer_abandoned = True
+                    _abandoned_by = "stale-offer"
                     _status(
                         "camera turned up %.0fs into the wait and sent no media"
                         " for the %.0fs since - abandoning this attempt to the"
@@ -8319,6 +8416,13 @@ class _SdesOpenMixin:
                     _bridge_uc_info["sent"] or _nominated_seen
                 ):
                     _nominated_at = time.monotonic()
+                if (
+                    _answered_at is None
+                    and answer_fut is not None
+                    and answer_fut.done()
+                    and not answer_fut.cancelled()
+                ):
+                    _answered_at = time.monotonic()
                 if _no_answer_abandon_due(
                     nominated_since_s=(
                         time.monotonic() - _nominated_at
@@ -8339,11 +8443,68 @@ class _SdesOpenMixin:
                     # in seconds and re-wakes a camera that dozed. Stop paying
                     # for the window.
                     _stale_offer_abandoned = True
+                    _abandoned_by = "unreachable-nominee"
                     _status(
                         "nothing answered the nominated candidate(s) in %.0fs"
                         " - no STUN binding success and no relay-learned peer,"
                         " so the address is not reachable; abandoning this"
                         " attempt to the retry" % _UNREACHABLE_NOMINEE_GRACE_S
+                    )
+                    break
+                # Every nomination record, not _nominated_at alone: the answer-
+                # peek path sets _early_nominated before _nominated_at is
+                # stamped, and an answer with credentials but no candidates is
+                # nominated by the bridge's tick from trickled candidates, which
+                # only _bridge_uc_info["cands"] shows.
+                _any_nominated = bool(
+                    _nominated_at is not None
+                    or _early_nominated
+                    or _nominated_seen
+                    or _bridge_uc_info["sent"]
+                    or _bridge_uc_info["prflx"]
+                    or (_cam_ice_ufrag and _cam_ice_pwd and _bridge_uc_info["cands"])
+                )
+                if _no_probe_abandon_due(
+                    answered_since_s=(
+                        time.monotonic() - _answered_at
+                        if _answered_at is not None
+                        else None
+                    ),
+                    grace_s=_ANSWER_PROBE_GRACE_S,
+                    nominated=_any_nominated,
+                    probes=len(getattr(_bridge_fn, "_br_probe_verdicts", None) or {}),
+                    binding_success=int(
+                        getattr(_bridge_fn, "_br_binding_success_count", 0)
+                    ),
+                ):
+                    _stale_offer_abandoned = True
+                    _abandoned_by = "no-probe"
+                    _status(
+                        "the camera answered %.0fs ago and has sent no STUN probe"
+                        " since - nothing to nominate, so no trigger can arm;"
+                        " abandoning this attempt to the retry" % _ANSWER_PROBE_GRACE_S
+                    )
+                    break
+                # One stamp, written by the bridge from the same time module
+                # (_time_br is `time`), so the two monotonic clocks agree.
+                _trigger_ts = getattr(_bridge_fn, "_br_trigger_sent_ts", None)
+                if _trigger_unacked_abandon_due(
+                    trigger_sent_since_s=(
+                        time.monotonic() - _trigger_ts
+                        if _trigger_ts is not None
+                        else None
+                    ),
+                    grace_s=_TRIGGER_GRACE_S,
+                    trigger_acked=bool(getattr(_bridge_fn, "_br_session_mode_resp", 0)),
+                    media_pkts=int(getattr(_bridge_fn, "_br_media_pkts", 0))
+                    + int(getattr(_bridge_fn, "_br_tutk_media", 0)),
+                ):
+                    _stale_offer_abandoned = True
+                    _abandoned_by = "trigger-unacked"
+                    _status(
+                        "LIVING went out %.0fs ago on a path the camera answered,"
+                        " and neither an ack nor a media packet followed; abandoning"
+                        " this attempt to the retry" % _TRIGGER_GRACE_S
                     )
                     break
                 if terminal_error_fut is not None and terminal_error_fut.done():

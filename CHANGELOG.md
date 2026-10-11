@@ -37,7 +37,23 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   differs between sessions). A reader still waiting for its first keyframe is
   now kept and starts on that keyframe.
 
+- **An SDES camera's first view (the battery and PTZ models) no longer
+  waits 75 s on an attempt the camera cannot finish.** Two shapes used to run the whole first-media budget:
+  a camera that answered and then never sent a STUN probe (nothing to
+  nominate, so no trigger could arm), and a camera that answered our
+  connectivity checks and never acted on LIVING. Measured 2026-10-08 on one
+  battery camera: two such attempts back to back, 2.5 minutes to a picture,
+  then the third served in 5 s. Each now abandons to the retry after 20 s
+  timed from the camera's own answer or trigger (`AIDOT_SDES_ANSWER_PROBE_GRACE_S`,
+  `AIDOT_SDES_TRIGGER_GRACE_S`). A camera that is still waking is never
+  clipped: nothing starts before it has answered. The stall warning names
+  which rule ended the attempt.
+
 ### Removed
+
+- The `--pt-order-arms` campaign in `scripts/live_validate.py`: it set
+  `AIDOT_SDES_VIDEO_PT_ORDER`, which nothing has read since 1.0.0rc44, so
+  every arm was the control.
 
 - The `--pt-order-arms` campaign in `scripts/live_validate.py`: it set
   `AIDOT_SDES_VIDEO_PT_ORDER`, which nothing has read since 1.0.0rc44, so
