@@ -171,6 +171,24 @@ class LanRetryMixin:
     #: bare module read so a subclass (or a test) can shorten it in place.
     _login_connect_timeout_s: float = _LOGIN_CONNECT_TIMEOUT_S
 
+    @property
+    def lan_address(self) -> Optional[str]:
+        """The LAN address the login is tried at, or None before discovery."""
+        return getattr(self, "_ip_address", None)
+
+    @property
+    def lan_login_failures(self) -> int:
+        """Consecutive failed LAN logins; 0 after a login that got through."""
+        return int(getattr(self, "_connect_failures", 0) or 0)
+
+    @property
+    def lan_login_over_ceiling(self) -> bool:
+        """True once the consecutive failures reach AIDOT_LOGIN_RETRY_LIMIT.
+
+        An address change resets the count, see update_ip_address.
+        """
+        return self.lan_login_failures >= _LOGIN_RETRY_LIMIT
+
     async def async_login(self) -> None:
         """Log in, and let a login that got through clear the failure count.
 

@@ -6,6 +6,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- **`lan_address`, `lan_login_failures` and `lan_login_over_ceiling` on every
+  device client**, so a consumer can say which device the LAN login keeps
+  failing for and where, without reading private names. The Home Assistant
+  integration uses them for a repair issue naming a light on another subnet.
+
 ### Fixed
 
 - **A light that cannot be reached no longer logs a warning every five
@@ -21,6 +28,12 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   new address or a login that gets through lifts that. The one warning now
   says so.
 
+### Removed
+
+- The `--pt-order-arms` campaign in `scripts/live_validate.py`: it set
+  `AIDOT_SDES_VIDEO_PT_ORDER`, which nothing has read since 1.0.0rc44, so
+  every arm was the control.
+
 ### Documentation
 
 - **The docs say what 1.0.0rc44 made true.** Direct publish, the AAC track,
@@ -34,12 +47,6 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   `get_stats()` and which `media_stats()`, and limits the environment-variable
   promise to the README's table; stale paths, a nonexistent `--webrtc-retries`
   option and two references to documents that never existed are corrected.
-
-### Removed
-
-- The `--pt-order-arms` campaign in `scripts/live_validate.py`: it set
-  `AIDOT_SDES_VIDEO_PT_ORDER`, which nothing has read since 1.0.0rc44, so
-  every arm was the control.
 
 ## [1.0.0rc44]
 

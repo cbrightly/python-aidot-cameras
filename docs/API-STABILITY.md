@@ -18,6 +18,7 @@ signatures and behaviour across minor versions:
 | `aidot_cameras.configure_stream_limits` | fleet-wide concurrency limits |
 | `DeviceClient` public methods (`async_*`, `start_keepalive`, `attach_lan_client`) | per-camera control and streaming |
 | `CameraDeviceClient.has_live_session` | whether a stream session is up right now, answered without sending anything |
+| `lan_address`, `lan_login_failures`, `lan_login_over_ceiling` on every device client (`LanRetryMixin`) | the LAN login state, read-only: the address in use, consecutive failures, and whether the retry ceiling has been reached |
 | the session objects returned by `async_open_webrtc_stream` | `stop()`, `async_start_talk`, `async_stop_talk`, `talk_supported`, `is_alive`; statistics as `get_stats()` on a `WebRTCSession` and `media_stats()` on an `SdesSession` |
 | `aidot_cameras.camera.models` | `CameraDeviceInformation`, `CameraStatusData` |
 | `aidot_cameras.exceptions` | every exception type |
