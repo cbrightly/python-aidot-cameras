@@ -2004,6 +2004,13 @@ reference installation; the entry that dates it says so. Two weeks from it is
 the new target.** The 2026-10-08 day zero and its 2026-10-22 target are
 superseded.
 
+**Day zero is 2026-10-11 (library `rc45` and integration 2.36.0 on the
+reference installation from 02:34 UTC). Two weeks from it is 2026-10-25.**
+Checked after the restart: a 20 s recording on each of the two L2 battery
+cameras ended its session 40 s after the camera served (about 150 s before
+this release), the recording was whole (20.8 s, video and audio), and the camera
+did not wake again in the five minutes after.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /
