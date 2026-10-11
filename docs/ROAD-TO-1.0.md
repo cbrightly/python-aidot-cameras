@@ -2011,6 +2011,14 @@ cameras ended its session 40 s after the camera served (about 150 s before
 this release); the one file kept was whole (20.8 s, video and audio), and the
 other camera did not wake again in the five minutes after.
 
+#### 2026-10-11: integration 2.37.0, the same day as day zero
+
+| release | date | find | resets? |
+|---|---|---|---|
+| integration 2.37.0 | 2026-10-11 | On an install with no go2rtc answering on port 1984 (HA 2025.12 or later), cameras now publish into Home Assistant's bundled go2rtc. Before, an SDES camera there was handed a push address nothing listened on, so it showed no live view; SDES battery cameras are still not streamed there (their release needs the go2rtc API on 1984) | **Yes, on the strict reading**: a fresh install without the add-on is a real default configuration and that SDES case was broken. It does not move day zero, because it reached the reference installation at 05:39 UTC on 2026-10-11, day zero's own day, which counts as provocation anyway. On the reference installation the go2rtc on 1984 answers, so its path is unchanged; the 32 installed files match the public `v2.37.0` tag |
+
+Day zero stays 2026-10-11; the target stays 2026-10-25.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /
