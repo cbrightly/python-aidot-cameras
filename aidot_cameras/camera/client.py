@@ -97,6 +97,7 @@ from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixi
     _grab_free_port,
     _tcp_table_has_established_on_port,
     _idle_release_due,
+    _battery_cap_spans_sessions_due,
     _battery_unknown_release_s,
     _stream_startup_grace_s,
     _DirectTsServer,
@@ -5097,6 +5098,13 @@ class CameraMixin(
         # burst stays on ONE peerid: a fresh peerid registers another camera-side
         # session, which is what wedged the L2 in the first place (0.12.16).
         _not_ready_burst = 0
+        # The battery unknown-viewer cap counts from the last viewer KNOWN
+        # present in any session of this keepalive, not from each session's
+        # open: a loop of sessions that end on their own (a refused publish
+        # ends the serve in seconds) re-anchored every 35-60 s and never
+        # reached it, re-waking a battery camera for as long as the cause
+        # lasted. See _battery_cap_spans_sessions_due.
+        _last_known_viewer = time.monotonic()
 
         while self._streaming_active:
             if self._serve_relay is not None:
@@ -5330,10 +5338,14 @@ class CameraMixin(
                         _present = await self._viewer_present(_serve_port)
                         if _present:  # True -> a viewer is pulling; stay alive
                             _last_consumer = time.monotonic()
+                            _last_known_viewer = _last_consumer
                             _viewer_seen = True
                         elif _idle_release_due(
                             _present,
-                            _last_consumer,
+                            # Unknown counts across reopens; a known absence
+                            # keeps its per-session window, so a viewer
+                            # re-attaching after a camera-side drop is not cut.
+                            _last_known_viewer if _present is None else _last_consumer,
                             time.monotonic(),
                             _idle_secs,
                             battery=_battery,
@@ -5346,7 +5358,7 @@ class CameraMixin(
                                     "SDES serve: %s released - viewer state "
                                     "unknown for %.0f s on a battery camera",
                                     self.device_id,
-                                    time.monotonic() - _last_consumer,
+                                    time.monotonic() - _last_known_viewer,
                                 )
                             _idle_release = True
                             break
@@ -5359,6 +5371,17 @@ class CameraMixin(
                 return
             finally:
                 self._stream_session = None
+
+            if not _idle_release and _battery_cap_spans_sessions_due(
+                _battery, _unknown_cap, _last_known_viewer, time.monotonic()
+            ):
+                _LOGGER.info(
+                    "SDES serve: %s released - no viewer known for %.0f s across"
+                    " sessions that ended on their own, on a battery camera",
+                    self.device_id,
+                    time.monotonic() - _last_known_viewer,
+                )
+                _idle_release = True
 
             if _idle_release:
                 # No HA consumer for the idle window: go dormant instead of
