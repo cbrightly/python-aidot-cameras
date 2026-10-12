@@ -2039,6 +2039,7 @@ provocation rather than soak, by the rule the 09-06 entry set.
 | release | date | find | resets? |
 |---|---|---|---|
 | `rc46` | 2026-10-12 | The battery unknown-viewer cap, the idle window and the start-up grace were counted from each SDES session's open, so a battery camera whose sessions kept ending on their own was re-woken every 35-60 s for as long as the cause lasted: a go2rtc outage, or a push address nothing listens on. Found by the 2026-10-11 code review and reproduced in a time-dilated run of the real keepalive loop. The cap now spans reopened sessions | **No, by the maintainer's call (2026-10-12):** ship it now for battery safety and keep day zero at 2026-10-11. On the strict reading it is a fix to a default path. On the reference installation its trigger had not occurred: the go2rtc on 1984 answered throughout, and the daylight check of 10-11 found no battery sessions at all |
+| integration 2.37.4 | 2026-10-12 | Requires `rc46`. Diagnostics redact unclaimed devices' ids and names; off-network light issues are cleared on unload and say where the light was last reported; a light login is no longer cancelled before the library counts it | No - diagnostics, repairs and the light login, not the media path. On the reference installation from 01:50 UTC with `rc46` in the container and the 32 files matching the public tag. A WebRTC view of an M3 played, and a battery view released about 17 s after closing |
 
 Day zero stays 2026-10-11; the target stays 2026-10-25.
 
