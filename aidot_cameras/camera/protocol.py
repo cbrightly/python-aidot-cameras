@@ -1656,6 +1656,29 @@ def _idle_release_due(
     return (now - last_consumer) > _window
 
 
+def _battery_cap_spans_sessions_due(
+    battery: bool,
+    unknown_cap_s: "Optional[float]",
+    last_known_viewer: float,
+    now: float,
+) -> bool:
+    """Whether a battery keepalive should stop instead of opening another session.
+
+    Checked when an SDES session has ended on its own. ``last_known_viewer`` is
+    the last time a viewer was KNOWN present in any session of this keepalive
+    (or the keepalive's start), so it is not reset by a reopen. The per-session
+    checks cannot see a loop of sessions that end before their first viewer
+    check - a publish the target refuses ends the serve in seconds, and a fresh
+    session opens 10 s later - so without this a battery camera was re-woken
+    every 35-60 s for as long as the cause lasted. A camera being watched keeps
+    ``last_known_viewer`` fresh from each session's checks and is not stopped.
+    Uses the same cap as the unknown-viewer release; <= 0 disables it.
+    """
+    if not battery or not unknown_cap_s or unknown_cap_s <= 0:
+        return False
+    return (now - last_known_viewer) > unknown_cap_s
+
+
 #: Default for ``AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S``.
 _BATTERY_UNKNOWN_RELEASE_S = 300.0
 

@@ -6,6 +6,24 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A battery camera whose sessions keep ending on their own is no longer
+  re-woken forever.** The unknown-viewer cap (`AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S`,
+  300 s), the idle window and the start-up grace were all counted from each
+  SDES session's open. When a session ended before its first viewer check, as
+  it does when the publish target refuses the stream (a go2rtc that is down, or
+  a push address nothing listens on), a new session opened 10 s later with
+  fresh anchors. The camera was re-woken every 35-60 s for as long as the cause
+  lasted. The cap now counts from the last viewer known present in any session
+  of the stream, and it is also checked when a session ends, so such a loop
+  stops after 300 s. A camera being watched refreshes it from every session and
+  is not stopped. A known absence keeps its per-session window, so a viewer
+  re-attaching after a camera-side drop is not cut off. Mains cameras are
+  unchanged. Found by a code review and reproduced in a time-dilated run of the
+  real keepalive loop: 40+ opens in 30 minutes before, one release at the cap
+  after.
+
 ## [1.0.0rc45]
 
 ### Added
