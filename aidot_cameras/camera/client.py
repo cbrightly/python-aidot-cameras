@@ -4834,8 +4834,10 @@ class CameraMixin(
     def _sdes_serve_consumer_present(self, port: int) -> "Optional[bool]":
         """True if a TCP client is connected to the SDES serve ``port`` (a viewer
         is pulling), False if none, None if the TCP table can't be read (non-Linux
-        / sandboxed host).  The caller MUST treat None as 'unknown' and NOT release
-        - failing safe to the current always-reconnect behaviour."""
+        / sandboxed host).  None is 'unknown': a mains camera is not released on
+        it, and since 1.0.0rc45 a battery camera is, once
+        AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S has passed without a known viewer
+        (protocol._idle_release_due)."""
         read_any = False
         found = False
         for _path in ("/proc/net/tcp", "/proc/net/tcp6"):

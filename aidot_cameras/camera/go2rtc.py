@@ -108,8 +108,10 @@ class Go2rtcClient:
         not a viewer exists.  Idle-release keyed on the socket therefore never
         fires and every camera streams forever after a single view.
 
-        None means unknown (go2rtc unreachable or the stream absent), and callers
-        must fail safe by not releasing on it.
+        None means unknown (go2rtc unreachable or the stream absent). A mains
+        camera is not released on it; since 1.0.0rc45 a battery camera is, after
+        AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S without a known viewer
+        (protocol._idle_release_due).
         """
         streams = await self.list_streams()
         entry = streams.get(name)
