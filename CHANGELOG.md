@@ -6,6 +6,29 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A light over the LAN-login ceiling is quiet whichever way its login
+  fails.** 1.0.0rc45 silenced upstream's `connect device` lines only. A login
+  that was refused, or accepted and then closed, still logged upstream's
+  `login result` / `login error` / `login read status error` lines. An attempt
+  that timed out logged this library's own "did not answer" and "giving up"
+  warnings. At a five-minute poll that is up to 576 WARNING and 288 ERROR lines
+  a day. Past the ceiling all of them are dropped or logged at DEBUG, and
+  "giving up" is logged once until a login gets through or the address
+  changes.
+- **A light whose address changes gets a fresh retry budget.** The failure
+  count was reset on a new address but the backoff count was not, so the new
+  address got no retries and the "giving up" line reported the old count.
+- **`AIDOT_LOGIN_RETRY_LIMIT` set to `0` or below no longer marks working
+  lights as over the ceiling** (`lan_login_over_ceiling` was `0 >= limit`).
+  A device that is logged in, or has no failures, is never over it.
+- **A malformed `AIDOT_SDES_ANSWER_PROBE_GRACE_S` or
+  `AIDOT_SDES_TRIGGER_GRACE_S` no longer stops the library importing.** An
+  empty or non-numeric value raised at import, which took the Home Assistant
+  integration down, lights included; `nan` made both rules fire at once. Such
+  a value now falls back to the 20 s default, like the other knobs.
+
 ## [1.0.0rc46]
 
 ### Fixed
