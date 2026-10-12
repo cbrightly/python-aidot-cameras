@@ -2034,6 +2034,14 @@ Checked on 2026-10-11 and 2026-10-12, all on the reference installation:
 That window and its two restarts fall on 2026-10-12, so that day counts as
 provocation rather than soak, by the rule the 09-06 entry set.
 
+#### 2026-10-12: `rc46`, and the soak date stays
+
+| release | date | find | resets? |
+|---|---|---|---|
+| `rc46` | 2026-10-12 | The battery unknown-viewer cap, the idle window and the start-up grace were counted from each SDES session's open, so a battery camera whose sessions kept ending on their own was re-woken every 35-60 s for as long as the cause lasted: a go2rtc outage, or a push address nothing listens on. Found by the 2026-10-11 code review and reproduced in a time-dilated run of the real keepalive loop. The cap now spans reopened sessions | **No, by the maintainer's call (2026-10-12):** ship it now for battery safety and keep day zero at 2026-10-11. On the strict reading it is a fix to a default path. On the reference installation its trigger had not occurred: the go2rtc on 1984 answered throughout, and the daylight check of 10-11 found no battery sessions at all |
+
+Day zero stays 2026-10-11; the target stays 2026-10-25.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /

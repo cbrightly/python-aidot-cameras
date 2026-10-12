@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc46]
+
 ### Fixed
 
 - **A battery camera whose sessions keep ending on their own is no longer
