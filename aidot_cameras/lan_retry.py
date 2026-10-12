@@ -49,24 +49,41 @@ UPSTREAM_DEVICE_LOGGER = "aidot.device_client"
 _OVER_CEILING: "set[str]" = set()
 
 
-class SilenceOverCeilingFilter(logging.Filter):
-    """Drops upstream's per-attempt connect lines for a device over the ceiling.
+#: Upstream's per-attempt login lines (python-aidot 0.3.56-0.3.59). A login
+#: that is refused (non-200 ack) logs the first two, a WARNING and an ERROR; a
+#: device that accepts and closes logs the last one at ERROR.
+_PER_ATTEMPT_PREFIXES = (
+    "connect device",
+    "login result",
+    "login error",
+    "login read status error",
+)
 
-    Only ``<device id>:connect device ...`` records at WARNING or below, and
-    only while the id is in `_OVER_CEILING`; anything else on the logger, and
-    every record for a device under the ceiling, passes untouched.
+
+class SilenceOverCeilingFilter(logging.Filter):
+    """Drops upstream's per-attempt login lines for a device over the ceiling.
+
+    Only records that start with ``<device id>:`` or ``<device id> `` followed
+    by one of `_PER_ATTEMPT_PREFIXES`, at ERROR or below, and only while the id
+    is in `_OVER_CEILING`; anything else on the logger, and every record for a
+    device under the ceiling, passes untouched.
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if record.levelno > logging.WARNING or not _OVER_CEILING:
+        if record.levelno > logging.ERROR or not _OVER_CEILING:
             return True
         try:
             message = record.getMessage()
         except Exception:  # a malformed record is not ours to judge
             return True
-        head, sep, rest = message.partition(":")
-        if sep and head in _OVER_CEILING and rest.lstrip().startswith("connect device"):
-            return False
+        for device_id in _OVER_CEILING:
+            if not device_id or not message.startswith(device_id):
+                continue
+            rest = message[len(device_id) :]
+            if rest[:1] in (":", " ") and rest[1:].lstrip().startswith(
+                _PER_ATTEMPT_PREFIXES
+            ):
+                return False
         return True
 
 
@@ -105,7 +122,10 @@ async def _await_connect_with_deadline(
     except asyncio.CancelledError:
         raise
     except TimeoutError:  # asyncio.TimeoutError is an alias since 3.11
-        _LOGGER.warning(
+        # Past the ceiling this is one more of the attempts the ceiling's own
+        # warning already announced; DEBUG, like upstream's lines for it.
+        _LOGGER.log(
+            logging.DEBUG if device_id in _OVER_CEILING else logging.WARNING,
             "%s: LAN connect/login did not answer within %.0fs - abandoning "
             "this attempt and closing the socket. Override with "
             "AIDOT_LOGIN_CONNECT_TIMEOUT_S.",
@@ -187,7 +207,13 @@ class LanRetryMixin:
 
         An address change resets the count, see update_ip_address.
         """
-        return self.lan_login_failures >= _LOGIN_RETRY_LIMIT
+        # A logged-in device is never over it, and a count of zero never is:
+        # with AIDOT_LOGIN_RETRY_LIMIT set to 0 or below, `0 >= limit` used to
+        # mark every working light as over the ceiling.
+        failures = self.lan_login_failures
+        if failures <= 0 or getattr(self, "_connect_and_login", False):
+            return False
+        return failures >= _LOGIN_RETRY_LIMIT
 
     async def async_login(self) -> None:
         """Log in, and let a login that got through clear the failure count.
@@ -201,6 +227,7 @@ class LanRetryMixin:
         if getattr(self, "_connect_and_login", False):
             self._login_attempt = 0
             self._connect_failures = 0
+            self._gave_up_logged = False
             _OVER_CEILING.discard(getattr(self, "device_id", None))
 
     async def connect(self, ip_address) -> None:
@@ -227,6 +254,8 @@ class LanRetryMixin:
         device_id = getattr(self, "device_id", None)
         if getattr(self, "_connect_and_login", False):
             self._connect_failures = 0
+            self._login_attempt = 0
+            self._gave_up_logged = False
             _OVER_CEILING.discard(device_id)
             return
         # Upstream's connect() swallows its own failure (one WARNING per try)
@@ -267,7 +296,12 @@ class LanRetryMixin:
             return
         current = getattr(self, "_ip_address", None)
         if ip != current:
+            # A new address is a fresh start: the failure count, the backoff
+            # (a stale _login_attempt left the new address no retries and
+            # reported the old count) and the once-only giving-up line.
             self._connect_failures = 0
+            self._login_attempt = 0
+            self._gave_up_logged = False
             _OVER_CEILING.discard(getattr(self, "device_id", None))
         elif getattr(
             self, "_connect_failures", 0
@@ -299,13 +333,20 @@ class LanRetryMixin:
         attempt = getattr(self, "_login_attempt", 0)
         delay = _next_login_retry_delay(attempt)
         if delay is None:
-            _LOGGER.warning(
+            # Once until a login gets through or the address changes: past the
+            # ceiling every failed attempt that closes through reset() lands
+            # here again, and the line said nothing new after the first time.
+            _LOGGER.log(
+                logging.DEBUG
+                if getattr(self, "_gave_up_logged", False)
+                else logging.WARNING,
                 "%s: giving up LAN login after %d consecutive failures; it will "
                 "be retried when something asks for this device again. Set "
                 "AIDOT_LOGIN_RETRY_LIMIT to change the ceiling.",
                 getattr(self, "device_id", "?"),
                 attempt,
             )
+            self._gave_up_logged = True
             return
         self._login_attempt = attempt + 1
 

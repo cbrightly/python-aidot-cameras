@@ -1113,14 +1113,32 @@ _UNREACHABLE_NOMINEE_GRACE_S = float(
     os.environ.get("AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S", "20")
 )
 
+
 # The two companions of the unreachable-nominee grace, for the two first-media
 # shapes it cannot see (see _no_probe_abandon_due / _trigger_unacked_abandon_due).
 # Both are sized from the same measurement: 165 successful first medias across
 # 28 live-validation runs (2026-09-22 to 10-09), the slowest 9.5 s after
 # webrtcReq; 29 of 30 stalls in those runs were the two shapes these rules end.
 # Also the earlier finding that the trigger arms within about a second or never.
-_ANSWER_PROBE_GRACE_S = float(os.environ.get("AIDOT_SDES_ANSWER_PROBE_GRACE_S", "20"))
-_TRIGGER_GRACE_S = float(os.environ.get("AIDOT_SDES_TRIGGER_GRACE_S", "20"))
+def _grace_env_s(name: str, default: float) -> float:
+    """A grace in seconds from ``name``; a malformed or non-finite value is the
+    default. A bare float() here stopped the library importing on an empty
+    value, and `nan` made both rules fire at once."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = None
+    if value is None or value != value or value in (float("inf"), float("-inf")):
+        _LOGGER.debug("%s=%r is not a number; using %.0f", name, raw, default)
+        return default
+    return value
+
+
+_ANSWER_PROBE_GRACE_S = _grace_env_s("AIDOT_SDES_ANSWER_PROBE_GRACE_S", 20.0)
+_TRIGGER_GRACE_S = _grace_env_s("AIDOT_SDES_TRIGGER_GRACE_S", 20.0)
 
 
 def _stale_offer_abandon_due(
