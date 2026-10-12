@@ -2022,6 +2022,18 @@ other camera did not wake again in the five minutes after.
 
 Day zero stays 2026-10-11; the target stays 2026-10-25.
 
+Checked on 2026-10-11 and 2026-10-12, all on the reference installation:
+- **Battery cameras:** between 07:20 and 23:07 UTC the two working L2s had 24
+  motion events, all in daylight, and no streaming sessions. On 10-09 there
+  were 39 motion-started sessions in 23 hours. A 10 s WebRTC view of one ended
+  14 s after it closed; it was 159 s before 2.36.0.
+- **2.37.3 with the add-on turned off** (00:17-00:22 UTC on 2026-10-12): an
+  SDES view logged one warning per camera and opened no session over 3.5
+  minutes, and an M3's WebRTC view still played.
+
+That window and its two restarts fall on 2026-10-12, so that day counts as
+provocation rather than soak, by the rule the 09-06 entry set.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /
