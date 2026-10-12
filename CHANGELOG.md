@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc47]
+
 ### Fixed
 
 - **A light over the LAN-login ceiling is quiet whichever way its login
