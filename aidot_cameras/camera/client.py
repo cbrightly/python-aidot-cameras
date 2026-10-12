@@ -6478,9 +6478,13 @@ class CameraMixin(
                     break
                 await asyncio.sleep(0.3)
 
-            # Must exceed HA's stream-worker reconnect interval (~40s) or the serve
-            # is torn down between a viewer's retries -> "Connection refused". 120s
-            # survives several retries while still releasing an unviewed camera.
+            # The release window. HA's stream worker waits 10, 20, 30 ... s
+            # between retries (+10 s each, stream/__init__.py _run_worker), and
+            # a window shorter than a wait releases the serve under a viewer
+            # that is only between retries. The 120 s default survives several;
+            # the HA integration passes 15 s for battery cameras, which covers
+            # the first wait, because an HLS output with no segment fetches for
+            # 30 s ends the view on HA's side anyway.
             # stream_idle_s / AIDOT_STREAM_IDLE_S override; <= 0 = never release
             # (keep warm for instant re-views; mains cameras only - see P1).
             idle_secs = self._resolve_idle_secs()
