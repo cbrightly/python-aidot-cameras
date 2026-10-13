@@ -2047,6 +2047,14 @@ provocation rather than soak, by the rule the 09-06 entry set.
 
 Day zero stays 2026-10-11; the target stays 2026-10-25.
 
+#### 2026-10-13: `rc48` and integration 2.37.8, and the soak date stays
+
+| release | date | find | resets? |
+|---|---|---|---|
+| `rc48` | 2026-10-13 | A delayed LAN login retry for a light outlived the client: an integration unload or reload during the backoff let it log the light back in on a closed client, leaking upstream's receive task and ping timer. Also, a discovery rebroadcast no longer orphans a pending retry, so one light no longer gets two logins | No - the light login path, not the media path |
+
+Day zero stays 2026-10-11; the target stays 2026-10-25.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /

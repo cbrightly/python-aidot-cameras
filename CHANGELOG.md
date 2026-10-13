@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc48]
+
 ### Fixed
 
 - **A light no longer logs back in after the account that owns it is closed,
