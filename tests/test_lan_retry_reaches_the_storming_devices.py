@@ -84,14 +84,14 @@ def test_a_light_that_cannot_log_in_is_eventually_left_alone():
         dc._ip_address = None
         spawned = 0
         for _ in range(_LOGIN_RETRY_LIMIT + 5):
-            dc._login_task = None
+            dc._lan_retry_task = None
             dc._schedule_reconnect()
             handle = getattr(dc, "_reconnect_handle", None)
             if handle is not None:
                 handle.cancel()
-            if dc._login_task is None:
+            if dc._lan_retry_task is None:
                 break
-            dc._login_task.cancel()
+            dc._lan_retry_task.cancel()
             spawned += 1
         return spawned
 

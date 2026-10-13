@@ -6,6 +6,35 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A light no longer logs back in after the account that owns it is closed,
+  or twice for one discovery broadcast.** `LanRetryMixin._schedule_reconnect`'s
+  delayed retry task slept out its backoff (1-60 s) and called
+  `async_login()` with no re-check of `_is_close`. `CameraClient.async_close`
+  cancelled a pending reconnect only through `cancel_pending_reconnect`, which
+  knew upstream's `_reconnect_handle` / `_reconnect_timer` but not this
+  mixin's delayed retry at all. So an integration unload/reload left a retry
+  armed before close to open a new TCP connection and log in afterward; on
+  success that leaked upstream's receive task and 30 s ping timer for the
+  life of the process. The delayed task now re-checks `_is_close` itself
+  after the sleep, and the shared cancel helper now also cancels it.
+  The retry is tracked under its own `_lan_retry_task` attribute rather than
+  upstream's `_login_task`: upstream's `update_ip_address()` overwrites
+  `_login_task` unconditionally (when not mid-connect and not logged in) with
+  a fresh in-flight login task, with no cancel of whatever was already
+  parked there, so a delayed retry sharing that name was silently orphaned -
+  unreachable to the cancel helper, but still live - rather than replaced.
+  Discovery calls `update_ip_address` on every broadcast, same address or
+  not, so this fired a second, redundant login for ordinary same-address
+  rediscovery. Scheduling a new retry, or a discovery rebroadcast, now
+  cancels an earlier one still asleep instead of leaving both able to log
+  in - except when that earlier retry has already woken and is itself
+  mid-connect: cancelling a login in flight would abandon it with its
+  socket open and nothing left to replace it until the next discovery
+  cycle, so the discovery-path cancel only fires under the exact condition
+  upstream itself uses to decide whether to start a new login.
+
 ## [1.0.0rc47]
 
 ### Fixed

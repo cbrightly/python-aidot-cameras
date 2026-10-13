@@ -191,6 +191,16 @@ class LanRetryMixin:
     #: bare module read so a subclass (or a test) can shorten it in place.
     _login_connect_timeout_s: float = _LOGIN_CONNECT_TIMEOUT_S
 
+    #: The delayed retry task armed by `_schedule_reconnect`, or None.  Its
+    #: own attribute, deliberately not upstream's `_login_task`: upstream's
+    #: `update_ip_address()` overwrites `_login_task` with a fresh in-flight
+    #: login task, without cancelling whatever was already parked there -
+    #: which would silently orphan a sleeping retry rather than cancel it.
+    #: (`connect()` itself never touches `_login_task`; only
+    #: `update_ip_address()` and upstream's own `_schedule_reconnect()` do,
+    #: and this mixin's override of the latter never calls super().)
+    _lan_retry_task: Optional[asyncio.Task] = None
+
     @property
     def lan_address(self) -> Optional[str]:
         """The LAN address the login is tried at, or None before discovery."""
@@ -313,6 +323,36 @@ class LanRetryMixin:
                 self._connect_failures,
             )
             return
+        # Upstream's own update_ip_address (below, via super()) spawns a fresh
+        # `_login_task` with a plain `asyncio.create_task`, but ONLY when it
+        # is not mid-connect and not logged in - `if self._connecting is not
+        # True and self._connect_and_login is not True`.  Discovery calls this
+        # on every broadcast, same address or not, so under that same
+        # condition a `_lan_retry_task` from _schedule_reconnect that is still
+        # asleep would be overwritten rather than cancelled: it fires anyway a
+        # few seconds later, a second login attempt for one discovery update.
+        #
+        # The gate below mirrors upstream's own condition exactly, rather than
+        # cancelling unconditionally: a sleeping retry that has already woken
+        # and is mid-`connect()` (`_connecting` True, a socket open) must NOT
+        # be cancelled here.  `task.cancel()` only schedules a CancelledError
+        # at the next suspension point - it is not visible to `_connecting`
+        # synchronously - so `super().update_ip_address(ip)` below would still
+        # see `_connecting` True and spawn no replacement login, while the
+        # cancelled task's `finally: self._connecting = False` (inside
+        # upstream's `connect()`) runs later without closing `self.writer`:
+        # a non-closed light left with no login, no retry, and a leaked
+        # socket until the next discovery cycle.  Only cancel when upstream's
+        # own check says it is about to supersede this with a fresh login.
+        pending = getattr(self, "_lan_retry_task", None)
+        if (
+            pending is not None
+            and pending is not asyncio.current_task()
+            and not pending.done()
+            and not getattr(self, "_connecting", False)
+            and not getattr(self, "_connect_and_login", False)
+        ):
+            pending.cancel()
         super().update_ip_address(ip)
 
     def _schedule_reconnect(self) -> None:
@@ -353,6 +393,13 @@ class LanRetryMixin:
         async def _retry() -> None:
             try:
                 await asyncio.sleep(delay)
+                # Close can land while this is asleep: a caller that closes
+                # without going through `_upstream.cancel_pending_reconnect`
+                # must still not log a closed client back in.  Checked AFTER
+                # the sleep, not before scheduling: a close between here and
+                # the schedule call is exactly what the cancel on close is for.
+                if getattr(self, "_is_close", False):
+                    return
                 await self.async_login()
             except asyncio.CancelledError:
                 raise
@@ -363,4 +410,29 @@ class LanRetryMixin:
                     exc_info=True,
                 )
 
-        self._login_task = asyncio.create_task(_retry())
+        # Cancel a still-pending retry from an earlier failure before
+        # replacing it: reset() can call back in here (an address change, or
+        # another dropped connection) while the previous delayed retry is
+        # still asleep, and overwriting it without cancelling would let both
+        # reach `async_login()`.  Never the currently running task though:
+        # `_retry()`'s own `async_login()` can fail and end in
+        # `reset()` -> `_schedule_reconnect()` on the SAME task (this call
+        # frame), in which case `previous` IS `asyncio.current_task()` and
+        # cancelling it would cut the retry we are in the middle of arming.
+        #
+        # Tracked under our OWN attribute, `_lan_retry_task`, rather than
+        # upstream's `_login_task`: upstream's `update_ip_address` overwrites
+        # `_login_task` with a fresh in-flight login task, with no cancel of
+        # whatever was there - a delayed retry parked under the same name
+        # would then be orphaned (unreachable to cancel) but still fire on
+        # its own a few seconds later.  See `update_ip_address` below for the
+        # matching cancel on the discovery path, and
+        # `_upstream.cancel_pending_reconnect` for the one on close.
+        previous = getattr(self, "_lan_retry_task", None)
+        if (
+            previous is not None
+            and previous is not asyncio.current_task()
+            and not previous.done()
+        ):
+            previous.cancel()
+        self._lan_retry_task = asyncio.create_task(_retry())
