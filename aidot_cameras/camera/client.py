@@ -122,6 +122,7 @@ from .protocol import (  # noqa: F401 - re-exported for device_client / back-com
     _highport_nomination_decision,
     _parse_alarm_event,
 )
+from .health import HealthReporter, dtls_snapshot as _dtls_snapshot
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -5300,9 +5301,25 @@ class CameraMixin(
             # (a stream worker or recording that retries late on a slow wake).
             _viewer_seen = False
             _startup_grace = _stream_startup_grace_s()
+            # One INFO line per AIDOT_HEALTH_LINE_S with this period's packets,
+            # bytes, stall and media path (see camera/health.py). The bridge's
+            # counters are what media_stats() already exposes; the viewer
+            # answer is the one this loop computes below.
+            _health = HealthReporter(self.device_id)
+            _health_viewer = None
             try:
                 while True:
                     _fin, _ = await asyncio.wait({_done}, timeout=5.0)
+                    _h_now = time.monotonic()
+                    if _health.due(_h_now):
+                        try:
+                            _health.tick(
+                                _h_now,
+                                {**session.media_stats(), "viewer": _health_viewer},
+                            )
+                        except Exception:  # a report must never end a session
+                            _health.skip(_h_now)
+                            _LOGGER.debug("health line failed", exc_info=True)
                     if _done in _fin:
                         break  # ffmpeg exited on its own (consumer gone, error)
                     if session.is_stalled(
@@ -5336,6 +5353,7 @@ class CameraMixin(
                         break
                     if _idle_on and _serve_port is not None:
                         _present = await self._viewer_present(_serve_port)
+                        _health_viewer = _present
                         if _present:  # True -> a viewer is pulling; stay alive
                             _last_consumer = time.monotonic()
                             _last_known_viewer = _last_consumer
@@ -6661,6 +6679,13 @@ class CameraMixin(
                     _connected_at = loop.time()
                     _first_video_at = None
                     _no_video = False
+                    # One INFO line per AIDOT_HEALTH_LINE_S (camera/health.py):
+                    # aiortc's inbound packet and loss counts, the serve
+                    # canary's frames and keyframes, and this loop's viewer
+                    # answer. getStats() is awaited only on the ticks that
+                    # report, not every half second.
+                    _health_dtls = HealthReporter(self.device_id)
+                    _watching_dtls = None
                     # Wait for ffmpeg to exit (go2rtc disconnect) or idle
                     # release. On the direct path there is no ffmpeg to exit, so
                     # the cycle runs until the peer connection dies or the view
@@ -6681,6 +6706,24 @@ class CameraMixin(
                             # republishes after a short backoff.
                             break
                         _now = loop.time()
+                        if _health_dtls.due(_now):
+                            try:
+                                _get_stats = getattr(session, "get_stats", None)
+                                _health_dtls.tick(
+                                    _now,
+                                    _dtls_snapshot(
+                                        await _get_stats() if _get_stats else {},
+                                        _live_video_canary(
+                                            pc,
+                                            getattr(self, "_serve_video_canary", None),
+                                        ),
+                                        progress[0],
+                                        _watching_dtls,
+                                    ),
+                                )
+                            except Exception:  # a report must never end a session
+                                _health_dtls.skip(_now)
+                                _LOGGER.debug("health line failed", exc_info=True)
                         if _first_video_at is None:
                             _canary_v = _live_video_canary(
                                 pc, getattr(self, "_serve_video_canary", None)
@@ -6734,6 +6777,7 @@ class CameraMixin(
                         # cannot answer.
                         if idle_secs > 0:
                             _watching = await self._viewer_present(_serve_port_dtls)
+                            _watching_dtls = _watching
                             _window_dtls = (
                                 idle_secs
                                 if _viewer_seen_dtls

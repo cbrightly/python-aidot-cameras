@@ -39,6 +39,28 @@ companion integration repo
 [`cbrightly/hass-aidot-cameras`](https://github.com/cbrightly/hass-aidot-cameras), which depends
 on this library.
 
+## How it fits together
+
+```
+  AiDot cloud                       python-aidot-cameras                      consumers
+  -----------                       --------------------                      ---------
+  MQTT signaling  <--------------->  open a session: offer, answer,
+  ICE / TURN                         ICE, keys (DTLS or SDES)
+                                              |
+  camera  ====SRTP over the LAN====>  decrypt, reorder, count   ---(RTSP push)---> go2rtc ---> WebRTC view, rtsp:// URL
+          (relay only when there is       |                                                   (Home Assistant, Frigate,
+           no route back to us)           +---(MPEG-TS, loopback)-------------------------->  HA HLS view, camera.record
+                                          +---(JPEG)----------------------------------------> snapshots
+                                          +---(.ts / .mp4 copy)-----------------------------> recordings
+                                          +<--(PCM, 20 ms)----------------------------------- two-way audio
+```
+
+The cloud brokers the handshake and never carries the media: on the same
+network the camera sends straight to this library, and only a camera with no
+route back rides the vendor's relay. The library decrypts once and fans the
+camera's own packets out without re-encoding; ffmpeg is used for recordings,
+snapshots, the CLI's stdout form and any session that negotiates H.265.
+
 ## Supported cameras
 
 The streaming transport is auto-selected per camera from its model id:
@@ -443,7 +465,10 @@ not from this library alone: **it does not run an RTSP server**, and neither do
 the cameras - they have no RTSP and no ONVIF endpoint. The only way video
 leaves them is the cloud-signalled WebRTC handshake and SRTP decrypt this
 library does. Pair it with [go2rtc](https://github.com/AlexxIT/go2rtc) and
-go2rtc publishes the RTSP URL for you.
+go2rtc publishes the RTSP URL for you. (The CLI's `{output}` form is an
+ordinary RTSP push, so a standalone setup can point it at mediamtx or any other
+RTSP server instead; go2rtc is what Home Assistant speaks to, which is why the
+steps below use it.)
 
 Three steps, about five minutes.
 
@@ -556,6 +581,7 @@ stored credentials file. See [`aidot_cameras/credentials.py`](https://github.com
 | `AIDOT_USERNAME` | AiDot account username/email. Used with `AIDOT_PASSWORD`. | (none) |
 | `AIDOT_PASSWORD` | AiDot account password. Used with `AIDOT_USERNAME`. | (none) |
 | `AIDOT_COUNTRY` | Account region/country code. | `US` |
+| `AIDOT_TOKEN_FILE` | Path of a JSON file that caches the login across restarts; token rotations are written back to it. Used by the `aidot-go2rtc` CLI (see [Installing](#installing)); one file shared by every process on the account, since a second login invalidates the first's token. | (none) |
 
 ### Camera streaming / tuning
 
