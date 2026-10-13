@@ -6,6 +6,21 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A light no longer logs back in after the account that owns it is closed.**
+  `LanRetryMixin._schedule_reconnect`'s delayed retry task slept out its
+  backoff (1-60 s) and called `async_login()` with no re-check of `_is_close`.
+  `CameraClient.async_close` cancelled a pending reconnect only through
+  `cancel_pending_reconnect`, which knew upstream's `_reconnect_handle` /
+  `_reconnect_timer` but not this mixin's own `_login_task`. So an integration
+  unload/reload left a retry armed before close to open a new TCP connection
+  and log in afterward; on success that leaked upstream's receive task and
+  30 s ping timer for the life of the process. The delayed task now re-checks
+  `_is_close` itself after the sleep, `cancel_pending_reconnect` now also
+  cancels a pending `_login_task`, and scheduling a new retry cancels an
+  earlier one still asleep instead of leaving both able to log in.
+
 ## [1.0.0rc47]
 
 ### Fixed

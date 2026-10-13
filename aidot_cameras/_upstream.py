@@ -212,13 +212,29 @@ def cancel_pending_reconnect(device_client: Any) -> bool:
     B, so on shape A it would find nothing, cancel nothing, and report success -
     the leak fix would go quiet instead of failing.  Callers that care should
     log the False case.
+
+    ``LanRetryMixin._schedule_reconnect`` (``aidot_cameras.lan_retry``) does not
+    use either handle: it replaces upstream's immediate-respawn task with a
+    delayed one, parked under ``_login_task`` same as upstream's own in-flight
+    login.  Without cancelling it here too, a pending retry armed before close
+    still sleeps out its backoff and calls ``async_login()`` on a closed
+    client - on success that leaks a socket, a receive task and a ping timer
+    for the life of the process.  ``_login_task`` is checked unconditionally,
+    not only when neither handle above was found: it is also where upstream
+    itself parks an in-flight ``async_login()`` task (``connect()``), so
+    cancelling it here is correct whichever one set it.
     """
+    cancelled = False
     for attr in RECONNECT_HANDLE_ATTRS:
         handle = getattr(device_client, attr, None)
         if handle is not None:
             handle.cancel()
-            return True
-    return False
+            cancelled = True
+    login_task = getattr(device_client, "_login_task", None)
+    if login_task is not None and not login_task.done():
+        login_task.cancel()
+        cancelled = True
+    return cancelled
 
 
 # --------------------------------------------------------------------------- #

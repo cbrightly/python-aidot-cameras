@@ -353,6 +353,13 @@ class LanRetryMixin:
         async def _retry() -> None:
             try:
                 await asyncio.sleep(delay)
+                # Close can land while this is asleep: a caller that closes
+                # without going through `_upstream.cancel_pending_reconnect`
+                # must still not log a closed client back in.  Checked AFTER
+                # the sleep, not before scheduling: a close between here and
+                # the schedule call is exactly what the cancel on close is for.
+                if getattr(self, "_is_close", False):
+                    return
                 await self.async_login()
             except asyncio.CancelledError:
                 raise
@@ -363,4 +370,20 @@ class LanRetryMixin:
                     exc_info=True,
                 )
 
+        # Cancel a still-pending retry from an earlier failure before
+        # replacing it: reset() can call back in here (an address change, or
+        # another dropped connection) while the previous delayed retry is
+        # still asleep, and overwriting `_login_task` without cancelling it
+        # would let both reach `async_login()`.  Never the currently running
+        # task though: `_retry()`'s own `async_login()` can fail and end in
+        # `reset()` -> `_schedule_reconnect()` on the SAME task (this call
+        # frame), in which case `previous` IS `asyncio.current_task()` and
+        # cancelling it would cut the retry we are in the middle of arming.
+        previous = getattr(self, "_login_task", None)
+        if (
+            previous is not None
+            and previous is not asyncio.current_task()
+            and not previous.done()
+        ):
+            previous.cancel()
         self._login_task = asyncio.create_task(_retry())
