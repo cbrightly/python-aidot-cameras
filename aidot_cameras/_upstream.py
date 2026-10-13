@@ -215,14 +215,17 @@ def cancel_pending_reconnect(device_client: Any) -> bool:
 
     ``LanRetryMixin._schedule_reconnect`` (``aidot_cameras.lan_retry``) does not
     use either handle: it replaces upstream's immediate-respawn task with a
-    delayed one, parked under ``_login_task`` same as upstream's own in-flight
-    login.  Without cancelling it here too, a pending retry armed before close
-    still sleeps out its backoff and calls ``async_login()`` on a closed
-    client - on success that leaks a socket, a receive task and a ping timer
-    for the life of the process.  ``_login_task`` is checked unconditionally,
-    not only when neither handle above was found: it is also where upstream
-    itself parks an in-flight ``async_login()`` task (``connect()``), so
-    cancelling it here is correct whichever one set it.
+    delayed one, parked under its own ``_lan_retry_task`` - not upstream's
+    ``_login_task``, because upstream's ``connect()`` and
+    ``update_ip_address()`` both overwrite ``_login_task`` unconditionally,
+    which would silently orphan a delayed retry parked under that name rather
+    than cancel it.  Without cancelling ``_lan_retry_task`` here too, a
+    pending retry armed before close still sleeps out its backoff and calls
+    ``async_login()`` on a closed client - on success that leaks a socket, a
+    receive task and a ping timer for the life of the process.  ``_login_task``
+    is also checked and cancelled: it is where upstream itself parks an
+    in-flight ``async_login()`` task, and a closed client should not be left
+    completing one of those either.
     """
     cancelled = False
     for attr in RECONNECT_HANDLE_ATTRS:
@@ -230,10 +233,11 @@ def cancel_pending_reconnect(device_client: Any) -> bool:
         if handle is not None:
             handle.cancel()
             cancelled = True
-    login_task = getattr(device_client, "_login_task", None)
-    if login_task is not None and not login_task.done():
-        login_task.cancel()
-        cancelled = True
+    for attr in ("_lan_retry_task", "_login_task"):
+        task = getattr(device_client, attr, None)
+        if task is not None and not task.done():
+            task.cancel()
+            cancelled = True
     return cancelled
 
 

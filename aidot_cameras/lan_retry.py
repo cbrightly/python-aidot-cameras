@@ -191,6 +191,14 @@ class LanRetryMixin:
     #: bare module read so a subclass (or a test) can shorten it in place.
     _login_connect_timeout_s: float = _LOGIN_CONNECT_TIMEOUT_S
 
+    #: The delayed retry task armed by `_schedule_reconnect`, or None.  Its
+    #: own attribute, deliberately not upstream's `_login_task`: upstream
+    #: overwrites `_login_task` with a fresh in-flight login task from both
+    #: `connect()` and `update_ip_address()`, unconditionally and without
+    #: cancelling whatever was already parked there - which would silently
+    #: orphan a sleeping retry rather than cancel it.
+    _lan_retry_task: Optional[asyncio.Task] = None
+
     @property
     def lan_address(self) -> Optional[str]:
         """The LAN address the login is tried at, or None before discovery."""
@@ -313,6 +321,25 @@ class LanRetryMixin:
                 self._connect_failures,
             )
             return
+        # Upstream's own update_ip_address (below, via super()) overwrites
+        # `_login_task` unconditionally whenever it is not mid-connect and not
+        # logged in - including with a fresh `asyncio.create_task`, orphaning
+        # whatever was there before.  Discovery calls this on every broadcast,
+        # same address or not, so a `_lan_retry_task` from _schedule_reconnect
+        # that is still asleep would be overwritten rather than cancelled: it
+        # fires anyway a few seconds later, a second login attempt for one
+        # discovery update.  Cancel it here, before super() gets the chance to
+        # replace `_login_task` - never the task calling this, though: nothing
+        # in this mixin calls update_ip_address from inside the retry's own
+        # call stack today, but the guard costs nothing and matches
+        # _schedule_reconnect's.
+        pending = getattr(self, "_lan_retry_task", None)
+        if (
+            pending is not None
+            and pending is not asyncio.current_task()
+            and not pending.done()
+        ):
+            pending.cancel()
         super().update_ip_address(ip)
 
     def _schedule_reconnect(self) -> None:
@@ -373,17 +400,27 @@ class LanRetryMixin:
         # Cancel a still-pending retry from an earlier failure before
         # replacing it: reset() can call back in here (an address change, or
         # another dropped connection) while the previous delayed retry is
-        # still asleep, and overwriting `_login_task` without cancelling it
-        # would let both reach `async_login()`.  Never the currently running
-        # task though: `_retry()`'s own `async_login()` can fail and end in
+        # still asleep, and overwriting it without cancelling would let both
+        # reach `async_login()`.  Never the currently running task though:
+        # `_retry()`'s own `async_login()` can fail and end in
         # `reset()` -> `_schedule_reconnect()` on the SAME task (this call
         # frame), in which case `previous` IS `asyncio.current_task()` and
         # cancelling it would cut the retry we are in the middle of arming.
-        previous = getattr(self, "_login_task", None)
+        #
+        # Tracked under our OWN attribute, `_lan_retry_task`, rather than
+        # upstream's `_login_task`: upstream's `update_ip_address` and
+        # `connect()` both overwrite `_login_task` unconditionally with a
+        # fresh in-flight login task, with no cancel of whatever was there -
+        # that includes a delayed retry parked under the same name, which
+        # would then be orphaned (unreachable to cancel) but still fire on
+        # its own a few seconds later.  See `update_ip_address` below for the
+        # matching cancel on the discovery path, and
+        # `_upstream.cancel_pending_reconnect` for the one on close.
+        previous = getattr(self, "_lan_retry_task", None)
         if (
             previous is not None
             and previous is not asyncio.current_task()
             and not previous.done()
         ):
             previous.cancel()
-        self._login_task = asyncio.create_task(_retry())
+        self._lan_retry_task = asyncio.create_task(_retry())

@@ -1,25 +1,38 @@
-"""Finding 1 of the 2026-10-13 review: a delayed retry outlives close().
+"""Finding 1 of the 2026-10-13 review, plus a follow-up review of the first fix.
 
 `LanRetryMixin._schedule_reconnect` arms a delayed `_retry` task (1-60 s
 backoff) that sleeps and then calls `self.async_login()` with no re-check of
 `_is_close`.  `CameraClient.async_close` cancels a pending reconnect only
-through `_upstream.cancel_pending_reconnect`, which (before this fix) knew
-upstream's `_reconnect_handle`/`_reconnect_timer` but not the mixin's own
-`_login_task`.  So after an integration unload/reload, a retry armed before
-close woke up afterwards and logged a light back in on a closed client; on
-success that leaked upstream's receive task and 30 s ping timer for the life
-of the process.
+through `_upstream.cancel_pending_reconnect`, which (before the first fix)
+knew upstream's `_reconnect_handle`/`_reconnect_timer` but not the mixin's
+delayed retry at all.  So after an integration unload/reload, a retry armed
+before close woke up afterwards and logged a light back in on a closed
+client; on success that leaked upstream's receive task and 30 s ping timer
+for the life of the process.
 
-Four defects, four tests: the delayed task itself must refuse to log in once
-closed (defense in depth, independent of anyone cancelling it); the shared
-cancel helper must be able to find and cancel it; arming a second retry while
-one is still pending must not leave both alive to both log in; and the
-cancel-the-previous-task logic must not cancel ITSELF when `async_login`
-fails and calls back into `_schedule_reconnect` from inside the very task
-that is about to be replaced.  A fifth test goes through the real
-`CameraClient.async_close` teardown path end to end, not the bare mixin: this
-repo has already shipped a fix that was correct code on a class the real
-construction path never built (see
+The first fix tracked the delayed retry under upstream's own `_login_task`
+attribute.  A follow-up review found that false on the discovery path:
+upstream's `connect()` and `update_ip_address()` both overwrite `_login_task`
+unconditionally with a fresh in-flight login task, with no cancel of
+whatever was already parked there.  Discovery calls `update_ip_address` on
+every broadcast, same address or not, so a delayed retry sharing that name
+was silently orphaned - unreachable to `cancel_pending_reconnect` - rather
+than cancelled, and still fired its own login a few seconds later: two
+attempts for one broadcast.  The retry is now tracked under its own
+`_lan_retry_task` attribute instead.
+
+Tests, in order: the delayed task refuses to log in once closed (defense in
+depth, independent of anyone cancelling it); the shared cancel helper finds
+and cancels it; arming a second retry while one is still pending cancels the
+first instead of leaving both to log in; that cancel-the-previous-task logic
+must not cancel ITSELF when `async_login` fails and calls back into
+`_schedule_reconnect` from inside the very task being replaced; an ordinary
+retry with nothing closing it still fires (positive control); the discovery
+path (`update_ip_address`) cancels a sleeping retry instead of orphaning it,
+and the retry that replaces it stays reachable to `cancel_pending_reconnect`;
+and the same close defect end to end through the real `CameraClient` dispatch
+and teardown, not the bare mixin - this repo has already shipped a fix that
+was correct code on a class the real construction path never built (see
 `tests/test_lan_retry_reaches_the_storming_devices.py`).
 """
 
@@ -38,7 +51,14 @@ from aidot_cameras.lan_retry import LanRetryMixin  # noqa: E402
 
 
 class _FakeUpstream:
-    """Stands in for `aidot.device_client.DeviceClient` for this mixin."""
+    """Stands in for `aidot.device_client.DeviceClient` for this mixin.
+
+    `update_ip_address` reproduces upstream's real behaviour exactly where it
+    matters here: it overwrites `_login_task` unconditionally with a fresh
+    in-flight login task whenever the client is not mid-connect and not
+    logged in, with no cancel of whatever was already parked under that
+    name.  See `aidot.device_client.DeviceClient.update_ip_address`.
+    """
 
     def __init__(self):
         self.device_id = "dev-a"
@@ -46,10 +66,18 @@ class _FakeUpstream:
         self._connecting = False
         self._connect_and_login = False
         self._is_close = False
+        self._login_task = None
         self.login_calls = 0
 
     async def async_login(self):
         self.login_calls += 1
+
+    def update_ip_address(self, ip):
+        if ip is None:
+            return
+        self._ip_address = ip
+        if self._connecting is not True and self._connect_and_login is not True:
+            self._login_task = asyncio.create_task(self.async_login())
 
 
 class _Client(LanRetryMixin, _FakeUpstream):
@@ -59,7 +87,7 @@ class _Client(LanRetryMixin, _FakeUpstream):
 def test_a_pending_retry_does_not_log_in_once_closed(monkeypatch):
     """The delayed task re-checks `_is_close` itself, after its sleep.
 
-    Closed directly (no cancel), the way a caller unaware of `_login_task`
+    Closed directly (no cancel), the way a caller unaware of `_lan_retry_task`
     would leave it: the task must still refuse to call `async_login()`.
     """
     monkeypatch.setattr(
@@ -69,7 +97,7 @@ def test_a_pending_retry_does_not_log_in_once_closed(monkeypatch):
     async def _run():
         c = _Client()
         c._schedule_reconnect()
-        task = c._login_task
+        task = c._lan_retry_task
         assert task is not None
         c._is_close = True  # close() lands while the retry is still asleep
         await asyncio.sleep(0.15)
@@ -82,7 +110,7 @@ def test_a_pending_retry_does_not_log_in_once_closed(monkeypatch):
 
 def test_cancel_pending_reconnect_finds_the_mixin_s_delayed_retry(monkeypatch):
     """`_upstream.cancel_pending_reconnect` is what `CameraClient.async_close`
-    actually calls; it has to know about `_login_task`, not only the two
+    actually calls; it has to know about `_lan_retry_task`, not only the two
     upstream timer-handle spellings."""
     monkeypatch.setattr(
         "aidot_cameras.lan_retry._next_login_retry_delay", lambda attempt: 60.0
@@ -91,7 +119,7 @@ def test_cancel_pending_reconnect_finds_the_mixin_s_delayed_retry(monkeypatch):
     async def _run():
         c = _Client()
         c._schedule_reconnect()
-        task = c._login_task
+        task = c._lan_retry_task
         assert task is not None and not task.done()
         cancelled = _upstream.cancel_pending_reconnect(c)
         c._is_close = True
@@ -107,8 +135,8 @@ def test_cancel_pending_reconnect_finds_the_mixin_s_delayed_retry(monkeypatch):
 def test_scheduling_a_new_retry_cancels_the_still_pending_one(monkeypatch):
     """`reset()` can call back into `_schedule_reconnect` (another dropped
     connection, or an address change) while an earlier delayed retry is still
-    asleep.  Overwriting `_login_task` without cancelling it would let both
-    reach `async_login()`."""
+    asleep.  Overwriting `_lan_retry_task` without cancelling it would let
+    both reach `async_login()`."""
     monkeypatch.setattr(
         "aidot_cameras.lan_retry._next_login_retry_delay", lambda attempt: 0.05
     )
@@ -117,10 +145,10 @@ def test_scheduling_a_new_retry_cancels_the_still_pending_one(monkeypatch):
         c = _Client()
         c._login_attempt = 0
         c._schedule_reconnect()
-        first = c._login_task
+        first = c._lan_retry_task
         c._login_attempt = 0  # a fresh cycle, as an address change would give it
         c._schedule_reconnect()
-        second = c._login_task
+        second = c._lan_retry_task
         assert second is not first
         await asyncio.sleep(0.15)
         return first.cancelled(), c.login_calls
@@ -150,7 +178,7 @@ def test_a_retry_whose_login_fails_can_rearm_itself(monkeypatch):
 
     A failed login ends in upstream's `reset()`, which calls
     `_schedule_reconnect()` again - from inside THIS `_retry` task, on this
-    same call stack.  At that point `self._login_task` (the "previous" one
+    same call stack.  At that point `self._lan_retry_task` (the "previous" one
     about to be replaced) IS the task currently running this code.  Cancelling
     it there would cut the retry attempt short instead of merely replacing a
     DIFFERENT, still-sleeping task.
@@ -170,9 +198,9 @@ def test_a_retry_whose_login_fails_can_rearm_itself(monkeypatch):
     async def _run():
         c = _ClientThatRearmsOnFailure()
         c._schedule_reconnect()
-        first = c._login_task
+        first = c._lan_retry_task
         await asyncio.sleep(0.15)  # first attempt's sleep + its own re-arm
-        second = c._login_task
+        second = c._lan_retry_task
         await asyncio.sleep(0.15)  # second attempt's sleep
         return first, second, c.login_calls
 
@@ -180,6 +208,66 @@ def test_a_retry_whose_login_fails_can_rearm_itself(monkeypatch):
     assert not first.cancelled(), "the retry must not cancel itself"
     assert second is not first
     assert login_calls == 2, "both the first and the re-armed retry must fire"
+
+
+def test_a_rebroadcast_cancels_the_sleeping_retry_instead_of_orphaning_it(
+    monkeypatch,
+):
+    """The discovery path, not a direct `_schedule_reconnect` call.
+
+    Discovery calls `update_ip_address` on every broadcast, same address or
+    not.  Upstream's own version (reached via `super()`) overwrites
+    `_login_task` unconditionally with a fresh in-flight login task.  Before
+    this test's fix, the mixin's delayed retry shared that same attribute
+    name, so the rebroadcast's fresh task silently replaced it in the
+    attribute - the sleeping retry coroutine kept running, unreachable to
+    `cancel_pending_reconnect`, and fired its own `async_login()` a few
+    seconds later: two login attempts for one broadcast.  Tracking the retry
+    under its own `_lan_retry_task` means `update_ip_address` has to cancel
+    it explicitly, which it now does.
+
+    The rebroadcast's own login then fails (as it would for a device that is
+    not actually there yet) and arms a new retry; that one must stay
+    reachable to `cancel_pending_reconnect`, proving the fix did not just move
+    the orphaning one step later.
+    """
+    monkeypatch.setattr(
+        "aidot_cameras.lan_retry._next_login_retry_delay", lambda attempt: 60.0
+    )
+
+    class _ClientThatFailsItsFreshLogin(_Client):
+        async def async_login(self):
+            await super().async_login()
+            if self.login_calls == 1:
+                self._schedule_reconnect()  # the rebroadcast's login fails
+
+    async def _run():
+        c = _ClientThatFailsItsFreshLogin()
+        c._schedule_reconnect()  # an earlier failure's retry, still asleep
+        sleeping_retry = c._lan_retry_task
+        assert sleeping_retry is not None and not sleeping_retry.done()
+
+        c.update_ip_address(c._ip_address)  # a same-address rebroadcast
+        await asyncio.sleep(0)  # the fresh immediate login runs and fails
+
+        new_retry = c._lan_retry_task
+        cancelled = _upstream.cancel_pending_reconnect(c)
+        await asyncio.sleep(0)
+        return sleeping_retry, new_retry, cancelled, c.login_calls
+
+    sleeping_retry, new_retry, cancelled, login_calls = asyncio.run(_run())
+    assert sleeping_retry.cancelled(), (
+        "the pre-existing retry must be cancelled by the rebroadcast, not left "
+        "to fire on its own later"
+    )
+    assert new_retry is not None and new_retry is not sleeping_retry
+    assert cancelled is True, (
+        "cancel_pending_reconnect must still find the retry the rebroadcast armed"
+    )
+    assert login_calls == 1, (
+        "exactly one login from the rebroadcast; the orphaned retry firing too "
+        "would make this two"
+    )
 
 
 def test_a_closed_light_does_not_log_back_in_through_real_account_close(
@@ -217,7 +305,7 @@ def test_a_closed_light_does_not_log_back_in_through_real_account_close(
         )
         device_client._ip_address = "127.0.0.1"
         await device_client.reset()  # a dropped connection arms the retry
-        task = device_client._login_task
+        task = device_client._lan_retry_task
         assert task is not None and not task.done()
         await client.async_close()  # the real integration-unload path
         calls.clear()
