@@ -216,15 +216,16 @@ def cancel_pending_reconnect(device_client: Any) -> bool:
     ``LanRetryMixin._schedule_reconnect`` (``aidot_cameras.lan_retry``) does not
     use either handle: it replaces upstream's immediate-respawn task with a
     delayed one, parked under its own ``_lan_retry_task`` - not upstream's
-    ``_login_task``, because upstream's ``connect()`` and
-    ``update_ip_address()`` both overwrite ``_login_task`` unconditionally,
+    ``_login_task``, because upstream's ``update_ip_address()`` overwrites
+    ``_login_task`` unconditionally (when not mid-connect and not logged in),
     which would silently orphan a delayed retry parked under that name rather
     than cancel it.  Without cancelling ``_lan_retry_task`` here too, a
     pending retry armed before close still sleeps out its backoff and calls
     ``async_login()`` on a closed client - on success that leaks a socket, a
     receive task and a ping timer for the life of the process.  ``_login_task``
     is also checked and cancelled: it is where upstream itself parks an
-    in-flight ``async_login()`` task, and a closed client should not be left
+    in-flight ``async_login()`` task (from ``update_ip_address()`` or its own
+    ``_schedule_reconnect()``), and a closed client should not be left
     completing one of those either.
     """
     cancelled = False

@@ -12,14 +12,30 @@ for the life of the process.
 
 The first fix tracked the delayed retry under upstream's own `_login_task`
 attribute.  A follow-up review found that false on the discovery path:
-upstream's `connect()` and `update_ip_address()` both overwrite `_login_task`
-unconditionally with a fresh in-flight login task, with no cancel of
-whatever was already parked there.  Discovery calls `update_ip_address` on
-every broadcast, same address or not, so a delayed retry sharing that name
-was silently orphaned - unreachable to `cancel_pending_reconnect` - rather
-than cancelled, and still fired its own login a few seconds later: two
-attempts for one broadcast.  The retry is now tracked under its own
-`_lan_retry_task` attribute instead.
+upstream's `update_ip_address()` overwrites `_login_task` unconditionally
+(whenever not mid-connect and not logged in) with a fresh in-flight login
+task, with no cancel of whatever was already parked there.  (`connect()`
+itself never touches `_login_task` - only `update_ip_address()` and
+upstream's own `_schedule_reconnect()`, which this mixin overrides and never
+calls via `super()`, do.)  Discovery calls `update_ip_address` on every
+broadcast, same address or not, so a delayed retry sharing that name was
+silently orphaned - unreachable to `cancel_pending_reconnect` - rather than
+cancelled, and still fired its own login a few seconds later: two attempts
+for one broadcast.  The retry is now tracked under its own `_lan_retry_task`
+attribute instead.
+
+A second follow-up review then found the fix for THAT regressed the mid-
+connect case: cancelling `_lan_retry_task` unconditionally in
+`update_ip_address` also cancelled a retry that had already woken up and was
+itself mid-`connect()` (socket open, `_connecting` True).  `task.cancel()`
+only schedules a `CancelledError` for the next suspension point, so
+`super().update_ip_address(ip)` - called synchronously right after - still
+saw `_connecting` True and spawned no replacement login; the device was left
+with neither the in-flight login nor a retry until the next discovery cycle,
+and the open socket was never closed.  The discovery-path cancel now fires
+only under the exact condition upstream itself uses to decide whether to
+start a new login (`not _connecting and not _connect_and_login`), so a retry
+mid-connect is left alone.
 
 Tests, in order: the delayed task refuses to log in once closed (defense in
 depth, independent of anyone cancelling it); the shared cancel helper finds
@@ -28,11 +44,13 @@ first instead of leaving both to log in; that cancel-the-previous-task logic
 must not cancel ITSELF when `async_login` fails and calls back into
 `_schedule_reconnect` from inside the very task being replaced; an ordinary
 retry with nothing closing it still fires (positive control); the discovery
-path (`update_ip_address`) cancels a sleeping retry instead of orphaning it,
+path (`update_ip_address`) cancels a SLEEPING retry instead of orphaning it,
 and the retry that replaces it stays reachable to `cancel_pending_reconnect`;
-and the same close defect end to end through the real `CameraClient` dispatch
-and teardown, not the bare mixin - this repo has already shipped a fix that
-was correct code on a class the real construction path never built (see
+the same discovery path leaves a retry that is already MID-CONNECT alone,
+with no replacement login spawned over it and no leaked socket; and the same
+close defect end to end through the real `CameraClient` dispatch and
+teardown, not the bare mixin - this repo has already shipped a fix that was
+correct code on a class the real construction path never built (see
 `tests/test_lan_retry_reaches_the_storming_devices.py`).
 """
 
@@ -268,6 +286,128 @@ def test_a_rebroadcast_cancels_the_sleeping_retry_instead_of_orphaning_it(
         "exactly one login from the rebroadcast; the orphaned retry firing too "
         "would make this two"
     )
+
+
+class _FakeUpstreamWithRealConnectGate:
+    """Mimics upstream's real `_connecting` / `_connect_and_login` dance.
+
+    `_FakeUpstream` above always calls through to `async_login` directly and
+    is enough for the other tests, but this one needs a `connect()` that can
+    actually be blocked mid-flight - the way a device that accepts the TCP
+    handshake and then stops answering parks upstream's real `connect()`
+    inside `readexactly` - so `update_ip_address` can be asked what it does
+    to a retry while it is caught in exactly that state.
+    """
+
+    def __init__(self):
+        self.device_id = "dev-a"
+        self._ip_address = "192.168.1.50"
+        self._connecting = False
+        self._connect_and_login = False
+        self._is_close = False
+        self._login_task = None
+        self.login_calls = 0
+        self.writer = None
+        self.connect_released = asyncio.Event()
+
+    async def connect(self, ip):
+        self._connecting = True
+        self.login_calls += 1
+        self.writer = object()  # stands in for the open socket
+        try:
+            await self.connect_released.wait()  # the stuck readexactly
+            self._connect_and_login = True
+        finally:
+            self._connecting = False
+
+    async def reset(self):
+        """Only ever referenced (not called) within the test's time window:
+        the mixin's `connect()` wrapper passes it as the connect-timeout
+        callback, and this test's timeout is far longer than the test."""
+
+    async def async_login(self):
+        if self._connecting is not True and self._connect_and_login is not True:
+            await self.connect(self._ip_address)
+
+    def update_ip_address(self, ip):
+        if ip is None:
+            return
+        self._ip_address = ip
+        if self._connecting is not True and self._connect_and_login is not True:
+            self._login_task = asyncio.create_task(self.async_login())
+
+
+class _ClientWithRealConnectGate(LanRetryMixin, _FakeUpstreamWithRealConnectGate):
+    pass
+
+
+def test_a_rebroadcast_leaves_a_mid_connect_retry_alone(monkeypatch):
+    """The regression in the fix for the rebroadcast-orphaning defect above.
+
+    Cancelling `_lan_retry_task` unconditionally in `update_ip_address` would
+    also cancel a retry that has already woken up and is itself mid-
+    `connect()` - socket open, `_connecting` True.  `task.cancel()` only
+    schedules a `CancelledError` for the task's next suspension point, so
+    `super().update_ip_address(ip)` - called synchronously right after -
+    would still see `_connecting` True and spawn no replacement login: a
+    device left with neither the in-flight login nor a retry until the next
+    discovery cycle, and the open socket never closed.  The rebroadcast must
+    leave a mid-connect retry alone instead.
+    """
+    monkeypatch.setattr(
+        "aidot_cameras.lan_retry._next_login_retry_delay", lambda attempt: 0.05
+    )
+
+    async def _run():
+        c = _ClientWithRealConnectGate()
+        c._schedule_reconnect()  # arms a sleeping retry
+        await asyncio.sleep(0.1)  # it wakes and blocks inside connect()
+        retry = c._lan_retry_task
+        assert retry is not None and not retry.done()
+        assert c._connecting is True
+        assert c.login_calls == 1  # the in-flight attempt; only the one so far
+
+        c.update_ip_address(c._ip_address)  # a same-address rebroadcast
+        # Synchronous, no `await` yet: if `retry` were cancelled just above,
+        # cancellation has not been delivered to it yet either, so catching
+        # `_connecting` here is what distinguishes "left alone" from "a
+        # cancel was scheduled but had not landed when super() ran" - both
+        # look identical a tick later, only this moment tells them apart.
+        connecting_right_after_rebroadcast = c._connecting
+        replacement_spawned = c._login_task is not None
+
+        c.connect_released.set()  # release the blocked connect()
+        await asyncio.sleep(0.05)
+
+        return (
+            retry,
+            connecting_right_after_rebroadcast,
+            replacement_spawned,
+            c.login_calls,
+            c._connect_and_login,
+            c.writer,
+        )
+
+    (
+        retry,
+        connecting_right_after_rebroadcast,
+        replacement_spawned,
+        login_calls,
+        connect_and_login,
+        writer,
+    ) = asyncio.run(_run())
+    assert not retry.cancelled(), (
+        "a retry already mid-connect must not be cancelled by a rebroadcast"
+    )
+    assert connecting_right_after_rebroadcast is True, (
+        "the in-flight attempt must still be running right after the rebroadcast"
+    )
+    assert not replacement_spawned, (
+        "upstream must not have been asked to start a second, competing login"
+    )
+    assert login_calls == 1, "only the one, original attempt should ever connect"
+    assert connect_and_login is True, "the in-flight attempt must get to finish"
+    assert writer is not None, "the open socket from that attempt must survive"
 
 
 def test_a_closed_light_does_not_log_back_in_through_real_account_close(

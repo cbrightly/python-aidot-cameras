@@ -20,15 +20,20 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   life of the process. The delayed task now re-checks `_is_close` itself
   after the sleep, and the shared cancel helper now also cancels it.
   The retry is tracked under its own `_lan_retry_task` attribute rather than
-  upstream's `_login_task`: upstream's `connect()` and `update_ip_address()`
-  both overwrite `_login_task` unconditionally with a fresh in-flight login
-  task, with no cancel of whatever was already parked there, so a delayed
-  retry sharing that name was silently orphaned - unreachable to the cancel
-  helper, but still live - rather than replaced. Discovery calls
-  `update_ip_address` on every broadcast, same address or not, so this fired
-  a second, redundant login for ordinary same-address rediscovery; scheduling
-  a new retry, or a discovery rebroadcast, now cancels an earlier one still
-  asleep instead of leaving both able to log in.
+  upstream's `_login_task`: upstream's `update_ip_address()` overwrites
+  `_login_task` unconditionally (when not mid-connect and not logged in) with
+  a fresh in-flight login task, with no cancel of whatever was already
+  parked there, so a delayed retry sharing that name was silently orphaned -
+  unreachable to the cancel helper, but still live - rather than replaced.
+  Discovery calls `update_ip_address` on every broadcast, same address or
+  not, so this fired a second, redundant login for ordinary same-address
+  rediscovery. Scheduling a new retry, or a discovery rebroadcast, now
+  cancels an earlier one still asleep instead of leaving both able to log
+  in - except when that earlier retry has already woken and is itself
+  mid-connect: cancelling a login in flight would abandon it with its
+  socket open and nothing left to replace it until the next discovery
+  cycle, so the discovery-path cancel only fires under the exact condition
+  upstream itself uses to decide whether to start a new login.
 
 ## [1.0.0rc47]
 
