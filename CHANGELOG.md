@@ -6,6 +6,31 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+
+- **A health line per live session, once a minute.** Each streaming camera
+  logs one INFO line every `AIDOT_HEALTH_LINE_S` seconds (default 60) with
+  that period's packets and rate, bytes where the transport counts them,
+  packets lost where it counts those (DTLS), seconds since the last media
+  packet, the path the media took (`direct` / `relay`) and whether a viewer is
+  present, plus the serve canary's frames and keyframes on DTLS. Deltas per
+  period, so a steady trickle of loss reads as a rate instead of vanishing
+  into a session total; a counter that goes backwards without the session
+  restarting reads as 0, so aiortc's loss count dropping when late packets
+  arrive is never reported as loss. `0` disables it. A report that fails for
+  any reason is dropped and never ends the session. The figures were all
+  available before, as end-of-session totals or at DEBUG; a pasted log now
+  says which of "the link is lossy", "the picture froze" and "nobody was
+  watching" it was.
+
+### Documentation
+
+- A "How it fits together" diagram at the top of the README: the cloud brokers
+  the handshake, the media crosses the LAN, the library decrypts once and fans
+  the camera's own packets out. The RTSP section says the CLI's push works
+  into mediamtx or any RTSP server, not only go2rtc. `AIDOT_TOKEN_FILE` is in
+  the README's credentials table; it was described in prose only.
+
 ## [1.0.0rc48]
 
 ### Fixed
