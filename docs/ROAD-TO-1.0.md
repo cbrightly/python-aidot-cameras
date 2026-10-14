@@ -2056,6 +2056,14 @@ Day zero stays 2026-10-11; the target stays 2026-10-25.
 
 Day zero stays 2026-10-11; the target stays 2026-10-25.
 
+#### 2026-10-14: `rc49` adds a health line and does not reset the clock
+
+| release | date | find | resets? |
+|---|---|---|---|
+| `rc49` | 2026-10-14 | One INFO line per live session every `AIDOT_HEALTH_LINE_S` seconds (60) with the period's packets and rate, bytes (SDES) or packets lost (DTLS), seconds since the last media packet, whether the media came direct or by relay, and whether a viewer is present; a how-it-fits-together diagram at the top of the README, the RTSP section's note that the CLI's push works into any RTSP server, and `AIDOT_TOKEN_FILE` in the credentials table | No - observability and documentation. The line reads counters the sessions already kept, runs from its own task, and a report that fails is dropped without touching the session; no packet, timestamp or lifecycle decision changes. Gated on real cameras before release like every rc |
+
+Day zero stays 2026-10-11; the target stays 2026-10-25.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /

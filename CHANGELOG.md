@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc49]
+
 ### Added
 
 - **A health line per live session, once a minute.** Each streaming camera
