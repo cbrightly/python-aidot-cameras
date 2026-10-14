@@ -2072,6 +2072,14 @@ Day zero stays 2026-10-11; the target stays 2026-10-25.
 
 Day zero stays 2026-10-11; the target stays 2026-10-25. The reference installation has been off the network since 2026-10-13 about 14:15 UTC; the days it is down are neither ordinary use nor provocation, and the target moves out by that outage once it is back.
 
+#### 2026-10-14: `rc51` trims the health line and supersedes `rc50`
+
+| release | date | find | resets? |
+|---|---|---|---|
+| `rc51` | 2026-10-14 | The health line's `frames`, `keyframes` and `max_keyframe_gap` came from the serve canary, which counts what the receiver hands over rather than pictures: on an A000088 captured from the LAN runner it ran at twice the picture rate and once reported four times that over a 20 s period while the capture stayed a regular 15 fps. The three fields are off the line until that counting is understood; `packets`, `lost`, `stall`, `path` and `viewers` stay. `rc50` was cut and gated but never released | No - observability only; no media, timestamp or lifecycle code changes. Gated on real cameras before release like every rc |
+
+Day zero stays 2026-10-11; the target stays 2026-10-25, subject to the outage note under `rc50`.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /

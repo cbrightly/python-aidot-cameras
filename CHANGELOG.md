@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc51]
+
 ### Changed
 
 - **The health line no longer carries the serve canary's frame figures.**
