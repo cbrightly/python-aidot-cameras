@@ -110,10 +110,11 @@ def test_absent_viewers():
 def test_optional_video_counters_are_appended_when_given():
     r = health.HealthReporter("dev1", period_s=60.0)
     r.tick(0.0, _snap(frames=0, keyframes=0))
-    line = r.tick(60.0, _snap(frames=900, keyframes=30, max_gap_s=0.4))
+    line = r.tick(60.0, _snap(frames=900, keyframes=30, max_keyframe_gap=44))
     assert "frames=900 (15.0/s)" in line
     assert "keyframes=30" in line
-    assert "max_gap=0.40s" in line
+    assert "max_keyframe_gap=44" in line
+    assert "max_gap=" not in line
 
 
 def test_a_zero_period_disables_the_line():
@@ -179,13 +180,13 @@ def test_dtls_snapshot_sums_inbound_and_reads_the_ice_path():
             },  # aiortc can go negative
         ],
     }
-    canary = {"frames": 450, "keyframes": 15, "gap": 0, "max_gap": 0.3, "unwrapped": 0}
+    canary = {"frames": 450, "keyframes": 15, "gap": 0, "max_gap": 44, "unwrapped": 0}
     snap = health.dtls_snapshot(stats, canary, 12.5, True)
     assert snap["packets"] == 1000
     assert snap["lost"] == 1
     assert snap["media_path"] == "direct"
     assert (
-        snap["frames"] == 450 and snap["keyframes"] == 15 and snap["max_gap_s"] == 0.3
+        snap["frames"] == 450 and snap["keyframes"] == 15 and snap["max_keyframe_gap"] == 44
     )
     assert snap["last_media_monotonic"] == 12.5 and snap["viewer"] is True
     assert "bytes" not in snap

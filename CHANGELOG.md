@@ -6,6 +6,15 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The health line's `max_gap` was a frame count printed as seconds.** The
+  serve canary tracks the largest run of frames between two keyframes, and
+  1.0.0rc49 formatted that count as `max_gap=44.00s` - a three-second GOP on
+  a 15 fps camera reading as a 44 s freeze. The field is now
+  `max_keyframe_gap=44`, a count, which is what the canary measures. Seen on
+  the first live session that logged the line.
+
 ## [1.0.0rc49]
 
 ### Added
