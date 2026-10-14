@@ -2712,7 +2712,7 @@ def test_the_sdes_publisher_conditions_its_audio_too():
     run the same conditioning, and the trim is an offset after it."""
     import inspect
 
-    src = inspect.getsource(rp.LoopbackRtpPublisher._forward)
+    src = inspect.getsource(rp.LoopbackRtpPublisher._send)
     assert "self._agc.process(payload)" in src
     # Conditioned first, trimmed second: a pre-trim would push a quiet room
     # further under the gate and the normalizer could never bring it back.
