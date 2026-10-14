@@ -6,6 +6,24 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Changed
+- **The live-validation harness measures audio and the picture on every
+  recording, and says what the gate is.** `scripts/live_validate.py` now
+  decodes each attempt's audio - the AAC track of a DTLS recording, or the
+  G.711 that an SDES recording carries as an unlabelled MPEG-TS data stream,
+  decoded by the law the session negotiated - and reports its duration and
+  level with a per-attempt verdict (`PASS`, `SILENT`, `NONE`,
+  `NOT_NEGOTIATED`, `NOT_RUN`). The video decode pass also reports the
+  decoded frame rate, the picture size and how many seconds were a black
+  picture. Audio is advisory (`AUDIO_GATES = False`): it is recorded in the
+  report (`audio_failed`, per-camera `audio` and `audio_detail`) and printed
+  in the summary, and is promoted to gating against recorded fleet runs the
+  way the video decode check was. The script's docstring and `docs/CI-RUNNER.md`
+  now state the gate as it has always worked: one passing camera per
+  required model, not every camera. Found by a hand check of 2026-10-14's
+  recordings: the two SDES cameras' audio was digital zero for whole holds and
+  nothing in the gate could see it.
+
 ## [1.0.0rc51]
 
 ### Changed
