@@ -59,11 +59,38 @@ release, which is the exact situation this exists to prevent.
 
 ## What gets validated
 
-`scripts/live_validate.py` streams each camera and asks one question: *did
-real media arrive?* The per-transport answer differs and both are handled -
-DTLS decodes in-process (`on_frame`), while SDES hands media to ffmpeg and
-never calls `on_frame`, so its signal is `SdesSession.media_stats()` plus
-recorded bytes.
+`scripts/live_validate.py` streams each camera, one at a time, records the
+session to a file, and judges the file. The verdict the gate reads is per
+**required model**, not per camera (next section); what makes one attempt a
+PASS is this:
+
+- **Video, gating.** The recording goes through a decoder and must yield at
+  least one frame. The arrival signals - the DTLS `on_frame` count, the SDES
+  bridge's `media_stats()` packet counter, the recorded byte count - are still
+  collected, but none of them can pass an attempt on its own: undecryptable
+  packets have the right shape, and once counted as media. The report carries
+  the decoded frame count and rate, the picture size, the decoder error count
+  and `black_seconds` (how much of the recording `blackdetect` judged a black
+  picture, half a second or longer under 10% luma; reported, not gated - a
+  camera facing a dark room is not a code defect).
+- **Audio, measured and reported, advisory.** The recording's audio is decoded
+  and its duration and level go in the report. A DTLS recording carries an
+  AAC track; an SDES recording is ffmpeg's `-c copy` into MPEG-TS, which has
+  no stream type for G.711, so the camera's audio sits in it as an unlabelled
+  data stream - the probe pulls those bytes out and decodes them as A-law or
+  mu-law according to the payload type the session negotiated. Each attempt
+  gets an audio verdict: `PASS` (at least a second decoded), `SILENT`
+  (decoded, but the peak never rose above -60 dBFS: digital zero, which every
+  counter is happy with and a listener hears nothing of), `NONE` (the session
+  negotiated audio and the recording has none that decodes), `NOT_NEGOTIATED`,
+  or `NOT_RUN` (ffmpeg or the recording missing). `AUDIO_GATES` in the script
+  says whether `NONE` fails the attempt. It ships **off**: the measurement is
+  new to the fleet, and a check is promoted to gating against recorded runs in
+  which every PASS carried it - the same way the video decode check was
+  promoted on 2026-08-09 - not by switching it on. Level is never gated: a
+  quiet room is not a defect. Cameras that streamed video with an audio verdict
+  other than PASS are listed under `audio_failed` in the report and in the
+  summary, which is the record the promotion decision will be made from.
 
 Policy, all of it learned on hardware (see `docs/CAMERAS.md`):
 

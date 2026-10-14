@@ -96,7 +96,13 @@ and no SDES camera ever streamed.
 
 See [`CI-RUNNER.md`](CI-RUNNER.md). `scripts/live_validate.py` is the harness;
 it gates PyPI publishes through the private repo's `live-validate.yml` + `publish.yml`'s
-`live-gate`.
+`live-gate`. The gate is per required model: a release passes when at least one
+camera of each of A000088, A001513 and A001064 delivered video that decodes.
+Every recording is also measured for audio (duration and level, on both the
+AAC track of a DTLS recording and the unlabelled G.711 of an SDES one) and for
+black picture; those go in the report and the summary, and audio is advisory
+until it is promoted against recorded runs. "What gets validated" in
+`CI-RUNNER.md` has the verdicts.
 
 `live_validate.py` records through `output_path` (ffmpeg `-c copy` on SDES, the
 PyAV copy mux on DTLS), so it never runs the direct publisher. `scripts/live_publish_ab.py` is the live
