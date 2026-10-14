@@ -2064,6 +2064,14 @@ Day zero stays 2026-10-11; the target stays 2026-10-25.
 
 Day zero stays 2026-10-11; the target stays 2026-10-25.
 
+#### 2026-10-14: `rc50` corrects the health line and supersedes `rc49`
+
+| release | date | find | resets? |
+|---|---|---|---|
+| `rc50` | 2026-10-14 | `rc49`'s health line printed the serve canary's largest frame count between keyframes as seconds (`max_gap=44.00s` for a three-second GOP), seen on the first live session that logged it, an A000088 streamed from the LAN runner. The field is now `max_keyframe_gap=44`. `rc49` was tagged and gated but never approved for PyPI | No - the line is observability only; no media, timestamp or lifecycle code changes. Gated on real cameras before release like every rc |
+
+Day zero stays 2026-10-11; the target stays 2026-10-25. The reference installation has been off the network since 2026-10-13 about 14:15 UTC; the days it is down are neither ordinary use nor provocation, and the target moves out by that outage once it is back.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /

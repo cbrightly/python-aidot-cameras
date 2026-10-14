@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc50]
+
 ### Fixed
 
 - **The health line's `max_gap` was a frame count printed as seconds.** The
