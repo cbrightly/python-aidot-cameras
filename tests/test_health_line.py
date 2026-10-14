@@ -107,13 +107,11 @@ def test_absent_viewers():
     assert "viewers=absent" in r.tick(60.0, _snap(viewer=False))
 
 
-def test_optional_video_counters_are_appended_when_given():
+def test_video_counters_are_accepted_but_not_appended():
     r = health.HealthReporter("dev1", period_s=60.0)
     r.tick(0.0, _snap(frames=0, keyframes=0))
     line = r.tick(60.0, _snap(frames=900, keyframes=30, max_keyframe_gap=44))
     # canary figures are deliberately absent until their counting is understood
-    assert "frames=900 (15.0/s)" in line
-    assert "keyframes=30" in line
     assert "max_keyframe_gap" not in line
     assert "frames=" not in line
     assert "keyframes=" not in line
@@ -188,7 +186,7 @@ def test_dtls_snapshot_sums_inbound_and_reads_the_ice_path():
     assert snap["lost"] == 1
     assert snap["media_path"] == "direct"
     assert (
-        snap["frames"] == 450
+        "frames" not in snap
         and snap["keyframes"] == 15
         and snap["max_keyframe_gap"] == 44
     )
