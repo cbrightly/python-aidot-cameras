@@ -635,3 +635,128 @@ async def test_a_failed_stop_is_reported_not_swallowed(lv, tmp_path, monkeypatch
     result = await lv._attempt(dc, 0, str(tmp_path), 1)
     assert made["s"].stops == 1
     assert "teardown broke" in result.get("stop_error", "")
+
+
+# --------------------------------------------------------------------------- #
+# media probes: what "streamed" means
+# --------------------------------------------------------------------------- #
+
+
+_FFMPEG_LOG = """[info] Input #0, mpegts, from '/tmp/live_1.ts':
+[h264 @ 0x1] [error] non-existing PPS 0 referenced
+[blackdetect @ 0x2] [info] black_start:1.2 black_end:2.0 black_duration:0.8
+[blackdetect @ 0x2] [info] black_start:5 black_end:5.5 black_duration:0.5
+[Parsed_volumedetect_0 @ 0x3] [info] n_samples: 0
+[Parsed_volumedetect_0 @ 0x3] [info] n_samples: 768000
+[Parsed_volumedetect_0 @ 0x3] [info] mean_volume: -63.2 dB
+[Parsed_volumedetect_0 @ 0x3] [info] max_volume: -43.6 dB
+[Parsed_volumedetect_0 @ 0x3] [info] histogram_43db: 4
+[null @ 0x4] [error] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 7 >= 7
+[info] frame=  275 fps=0.0 q=-0.0 Lsize=N/A time=00:00:18.42
+"""
+
+
+def test_probe_log_parser_keeps_errors_and_reads_the_filters(lv):
+    """One ffmpeg pass serves both the error count and the measurements.
+
+    The error set must stay what ``-v error`` produced (decode_errors has a
+    history), and the filter lines must become numbers rather than errors.
+    """
+    errors, meas = lv._parse_ffmpeg_filter_log(_FFMPEG_LOG)
+    assert len(errors) == 2
+    assert errors[0].startswith("[h264 @")
+    assert meas["black_seconds"] == 1.3
+    assert meas["n_samples"] == 768000  # the last report wins, not the first
+    assert meas["mean_dbfs"] == -63.2
+    assert meas["peak_dbfs"] == -43.6
+
+
+def test_probe_log_parser_without_level_tags_still_reads_filters(lv):
+    """An ffmpeg that ignores ``level`` must not turn measurements into errors."""
+    errors, meas = lv._parse_ffmpeg_filter_log(
+        "[Parsed_volumedetect_0 @ 0x3] n_samples: 8000\n"
+        "[Parsed_volumedetect_0 @ 0x3] max_volume: -2.6 dB\n"
+        "[error] [h264 @ 0x1] level tag first is also understood\n"
+    )
+    assert errors == ["[h264 @ 0x1] level tag first is also understood"]
+    errors, meas = lv._parse_ffmpeg_filter_log(
+        "[Parsed_volumedetect_0 @ 0x3] n_samples: 8000\n"
+        "[Parsed_volumedetect_0 @ 0x3] max_volume: -2.6 dB\n"
+    )
+    assert errors == []
+    assert meas["n_samples"] == 8000 and meas["peak_dbfs"] == -2.6
+
+
+@pytest.mark.parametrize(
+    "fields, expected",
+    [
+        ({"audio_seconds": 16.0, "audio_peak_dbfs": -28.8}, "PASS"),
+        ({"audio_seconds": 16.0, "audio_peak_dbfs": -62.7}, "SILENT"),
+        ({"audio_seconds": 0.4, "audio_peak_dbfs": -10.0}, "NONE"),
+        ({"audio_seconds": 0.0}, "NONE"),
+        ({"audio_negotiated": False}, "NOT_NEGOTIATED"),
+        ({"audio_error": "ffmpeg not found"}, "NOT_RUN"),
+    ],
+)
+def test_audio_verdicts(lv, fields, expected):
+    assert lv._audio_verdict(fields) == expected
+
+
+def test_silent_audio_is_separated_from_present_audio(lv):
+    """Digital zero decodes perfectly; only the level tells it apart."""
+    assert lv.AUDIO_SILENT_DBFS < -45, "the SDES trim floors a quiet room near -60"
+    assert lv._audio_verdict({"audio_seconds": 90.0, "audio_peak_dbfs": -62.7}) == "SILENT"
+
+
+def test_audio_is_advisory_until_promoted(lv):
+    """With AUDIO_GATES off, an attempt with video and no audio still passes."""
+    assert lv.AUDIO_GATES is False
+    result = {"decoded_frames": 200, "audio": "NONE"}
+    assert lv._passes(result, media_ok=True)
+    assert lv._passes({"decoded_frames": 200, "audio": "SILENT"}, media_ok=True)
+
+
+def test_audio_gate_only_acts_on_missing_audio(lv, monkeypatch):
+    """Promoted, the gate fails NONE and nothing else - level is never gated."""
+    monkeypatch.setattr(lv, "AUDIO_GATES", True)
+    assert not lv._passes({"decoded_frames": 200, "audio": "NONE"}, media_ok=True)
+    assert lv._passes({"decoded_frames": 200, "audio": "SILENT"}, media_ok=True)
+    assert lv._passes({"decoded_frames": 200, "audio": "NOT_RUN"}, media_ok=True)
+    assert lv._passes({"decoded_frames": 200, "audio": "NOT_NEGOTIATED"}, media_ok=True)
+
+
+def test_video_without_decoded_frames_never_passes(lv):
+    """The video decode check is the gate's floor; audio cannot lift it."""
+    assert not lv._passes({"decoded_frames": 0, "audio": "PASS"}, media_ok=True)
+
+
+def test_summary_records_audio_without_changing_the_verdict(lv, tmp_path):
+    cams = [
+        _cam(lv, "LK.IPC.A000088", "PASS", name="m3"),
+        _cam(lv, "LK.IPC.A001513", "PASS", name="l2"),
+        _cam(lv, "LK.IPC.A001064", "PASS", name="ptz"),
+    ]
+    cams[1]["audio"] = "SILENT"
+    cams[1]["audio_detail"] = {"audio_seconds": 16.0, "audio_peak_dbfs": -62.7}
+    cams[2]["audio"] = "NONE"
+    cams[0]["audio"] = "PASS"
+    report = {"cameras": cams}
+    assert lv._summarize(report, _args(tmp_path)) == 0
+    assert report["verdict"] == "PASS"
+    assert report["audio_failed"] == ["l2", "ptz"]
+    assert report["audio_gates"] is False
+    written = json.load(open(str(tmp_path / "r.json")))
+    assert written["audio_failed"] == ["l2", "ptz"]
+
+
+def test_summary_does_not_list_audio_for_cameras_that_did_not_stream(lv, tmp_path):
+    """A camera with no video has no audio verdict worth recording."""
+    cams = [
+        _cam(lv, "LK.IPC.A000088", "PASS", name="m3"),
+        _cam(lv, "LK.IPC.A001513", "PASS", name="l2"),
+        _cam(lv, "LK.IPC.A001064", "NO_MEDIA", name="ptz"),
+    ]
+    cams[2]["audio"] = "NONE"
+    report = {"cameras": cams}
+    lv._summarize(report, _args(tmp_path))
+    assert report["audio_failed"] == []

@@ -1,9 +1,27 @@
 #!/usr/bin/env python3
 """Release-gating live validation against the real cameras on the LAN.
 
-Streams every camera on the account and reports, per camera, whether real
-media arrived - the single question a release must answer before it can be
-published. Writes a machine-readable JSON report alongside the human log.
+Streams every camera on the account, one at a time, and records each session
+to a file. The release gate then asks one question per REQUIRED MODEL, not per
+camera: did at least one camera of that model deliver video a viewer could
+watch? Writes a machine-readable JSON report alongside the human log.
+
+What "streamed" means here, per attempt:
+
+- **Video (gates).** The recording is run through a decoder and must produce
+  at least one frame. Packet counters and byte counts are not enough on their
+  own - undecryptable packets have the right shape and once counted as media.
+  The decoded frame count, decoded frame rate, picture size, decoder error
+  count and the fraction of the recording that is a black picture are all in
+  the report.
+- **Audio (measured, advisory).** The recording's audio is decoded and its
+  duration and level are reported: the AAC track a DTLS recording carries, or
+  the raw G.711 that an SDES recording carries as an unlabelled MPEG-TS data
+  stream (the container has no type for it). ``AUDIO_GATES`` below says
+  whether a camera whose session negotiated audio but whose recording has
+  none fails the gate; it ships off until enough fleet runs have carried the
+  measurement to know it never fails for a reason outside the code under
+  test, which is how the video decode check was promoted on 2026-08-09.
 
 This is the CI-facing harness. ``scripts/smoke_stream.py`` (quick pass/fail)
 and ``scripts/camera_diag.py`` (deep single-camera diagnostics) remain for
@@ -11,6 +29,15 @@ interactive use.
 
 Why the policy below is shaped the way it is (all learned on hardware, see
 docs/CAMERAS.md):
+
+- **The gate is model coverage, not fleet health.** A release breaks a
+  transport or firmware path, and one camera of a model streaming proves that
+  path still works. Individual cameras fail for reasons the code cannot cause
+  (a flat battery, a unit powered off, an L2 too deeply asleep to wake inside
+  the window), and gating on those teaches everyone to ignore the gate. So each
+  required model needs ONE passing camera; a model with no passing camera still
+  fails, and a model absent from the account still fails. Cameras that failed
+  while their model was covered are listed as "did not gate" - watch them.
 
 - **DTLS connects are probabilistic.** An A000088's per-attempt connect rate is
   ~75-87%, so a single failed attempt is not a release blocker. Each camera
@@ -30,7 +57,8 @@ docs/CAMERAS.md):
   but have never been validated on the reference account, so they are reported
   and never gate.
 
-Exit code is 0 only when every REQUIRED camera passed.
+Exit code is 0 only when every REQUIRED MODEL has a passing camera and the
+token refresh check passed.
 
 Credentials come from ``aidot_cameras.credentials.load_credentials``
 (AIDOT_USERNAME / AIDOT_PASSWORD / AIDOT_COUNTRY).
@@ -53,6 +81,7 @@ import json
 import logging
 import os
 import random as _random
+import re
 import sys
 import time
 
@@ -77,6 +106,25 @@ from sd_event_probe import probe_sd_events
 REQUIRED_MODELS = ("A000088", "A001513", "A001064")
 # Recognized in code but never validated on hardware: reported, never gating.
 ADVISORY_MODELS = ("A001108", "A001360")
+
+# Whether a recording with NO decodable audio fails an attempt whose session
+# negotiated audio. Off: the audio probe runs and reports on every attempt
+# (``audio`` per attempt, ``audio_failed`` per run) but never changes a
+# verdict. Promote it the way the video decode check was promoted - against
+# recorded fleet runs in which every PASS carried audio - not by flipping it.
+# Level is never gated either way: a quiet room is not a defect (measured
+# 2026-10-14, an A001513 in a quiet room sends a raw peak of -47 dBFS).
+AUDIO_GATES = False
+
+# Seconds of decodable audio an attempt must carry to count as having audio.
+# A hold is 16 s by default; one second rules out a header with nothing after
+# it without failing a recording whose audio started a beat late.
+AUDIO_MIN_SECONDS = 1.0
+
+# Below this peak the audio is reported SILENT: present and decodable, but a
+# listener hears nothing. -60 dBFS is under the first A-law step after the
+# library's SDES trim, so it separates "digital zero" from "quiet room".
+AUDIO_SILENT_DBFS = -60.0
 
 # Per-attempt connect is probabilistic for DTLS; give those cameras more tries.
 ATTEMPTS_DTLS = 3
@@ -390,7 +438,125 @@ def _passes(result: dict, media_ok: bool) -> bool:
         return True  # probe unavailable - do not fail the camera for it
     if "decoded_frames" not in result:
         return True  # nothing to say; older behaviour
-    return int(result.get("decoded_frames") or 0) > 0
+    if int(result.get("decoded_frames") or 0) <= 0:
+        return False
+    if AUDIO_GATES and result.get("audio") == "NONE":
+        return False
+    return True
+
+
+def _audio_verdict(result: dict) -> str:
+    """Classify an attempt's audio from the probe's fields. Advisory.
+
+    - ``PASS``: at least ``AUDIO_MIN_SECONDS`` of audio decoded.
+    - ``SILENT``: decoded, but its peak never rose above ``AUDIO_SILENT_DBFS``
+      - a listener would hear nothing. Reported apart from PASS because it is
+      the one audio outcome that looks fine to every counter.
+    - ``NONE``: the session negotiated audio and the recording has none that
+      decodes. This is the verdict ``AUDIO_GATES`` acts on.
+    - ``NOT_NEGOTIATED``: the session carried no audio track, so there was
+      nothing to check.
+    - ``NOT_RUN``: the probe itself could not run (no ffmpeg, no recording).
+    """
+    if result.get("audio_error"):
+        return "NOT_RUN"
+    if result.get("audio_negotiated") is False:
+        return "NOT_NEGOTIATED"
+    seconds = float(result.get("audio_seconds") or 0.0)
+    if seconds < AUDIO_MIN_SECONDS:
+        return "NONE"
+    peak = result.get("audio_peak_dbfs")
+    if peak is not None and float(peak) < AUDIO_SILENT_DBFS:
+        return "SILENT"
+    return "PASS"
+
+
+#: ffmpeg log level for the probes: ``level`` prefixes every line with its
+#: severity (``[error]``, ``[info]``), and ``info`` lets the measuring filters
+#: speak - ``blackdetect`` and ``volumedetect`` both report at info. The
+#: prefix is what lets one pass serve both purposes without guessing which
+#: lines are errors from their wording.
+_PROBE_LOGLEVEL = "level+info"
+
+_LEVEL_TAG = re.compile(
+    r"^(?P<ctx>\[[^\]]*@ 0x[0-9a-fA-F]+\] )?"
+    r"\[(?P<level>panic|fatal|error|warning|info|verbose|debug)\] ?"
+)
+
+
+def _parse_ffmpeg_filter_log(stderr: str) -> tuple[list, dict]:
+    """Split ffmpeg's ``level``-tagged stderr into errors and measurements.
+
+    Errors are the ``[error]`` / ``[fatal]`` / ``[panic]`` lines, exactly the
+    set the previous ``-v error`` pass produced, so ``decode_errors`` keeps
+    its historical meaning. The ``[info]`` lines from ``blackdetect`` and
+    ``volumedetect`` become measurements; everything else (banner, stream
+    mapping, progress) is dropped. Returns ``(errors, measurements)``.
+    """
+    errors: list = []
+    black_s = 0.0
+    meas: dict = {}
+    for raw in stderr.splitlines():
+        ln = raw.strip()
+        if not ln:
+            continue
+        # ffmpeg puts the level tag FIRST on a line with no context
+        # ("[info] Input #0, ...") and AFTER the context on a line that has
+        # one ("[h264 @ 0x1] [error] non-existing PPS"). Take it from
+        # wherever it is and keep the context in the body, so an error reads
+        # the way it always did.
+        m = _LEVEL_TAG.match(ln)
+        if m:
+            level = m.group("level")
+            body = ((m.group("ctx") or "") + ln[m.end() :]).strip()
+        else:
+            level, body = "", ln
+        if level in ("panic", "fatal", "error"):
+            errors.append(body)
+            continue
+        if body.startswith("[blackdetect"):
+            for tok in body.split():
+                if tok.startswith("black_duration:"):
+                    try:
+                        black_s += float(tok.split(":", 1)[1])
+                    except ValueError:
+                        pass
+            continue
+        if body.startswith("[Parsed_volumedetect"):
+            field = body.split("]", 1)[-1].strip()
+            key, _, val = field.partition(":")
+            val = val.strip().split()[0] if val.strip() else ""
+            try:
+                if key == "n_samples":
+                    meas["n_samples"] = int(val)
+                elif key == "mean_volume":
+                    meas["mean_dbfs"] = float(val)
+                elif key == "max_volume":
+                    meas["peak_dbfs"] = float(val)
+            except ValueError:
+                pass
+    meas["black_seconds"] = round(black_s, 2)
+    return errors, meas
+
+
+async def _ffprobe_streams(path: str, timeout: float = 30.0) -> list:
+    """The recording's streams as ffprobe sees them (``[]`` if it cannot)."""
+    try:
+        probe = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_streams",
+            "-of",
+            "json",
+            path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(probe.communicate(), timeout)
+        return list(json.loads((out or b"{}").decode("utf-8", "replace")).get("streams") or [])
+    except Exception:
+        return []
 
 
 async def _decode_probe(path: str, timeout: float = 60.0) -> dict:
@@ -407,20 +573,29 @@ async def _decode_probe(path: str, timeout: float = 60.0) -> dict:
     is the only signal in this harness that distinguishes "media arrived" from
     "media a viewer could watch".
 
-    Returns ``{"decoded_frames": int, "decode_errors": int}``, plus ``error``
-    when the probe itself could not run - a probe that cannot run must not be
-    reported as zero frames, because those mean opposite things.
+    The same decode pass measures how much of the picture is black
+    (``blackdetect``: at least half a second of a frame under 10% luma),
+    reported as ``black_seconds`` so a stream of decodable-but-empty frames
+    is visible in the report. It is not gated: an IR night picture is grey,
+    not black, but a camera facing a dark room could still dip under it.
+
+    Returns ``{"decoded_frames": int, "decode_errors": int, ...}``, plus
+    ``decode_error`` when the probe itself could not run - a probe that cannot
+    run must not be reported as zero frames, because those mean opposite things.
     """
     if not path or not os.path.exists(path):
         return {"decode_error": "no recording"}
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg",
-            "-v",
-            "error",
+            "-nostdin",
+            "-loglevel",
+            _PROBE_LOGLEVEL,
             "-i",
             path,
             "-an",
+            "-vf",
+            "blackdetect=d=0.5:pix_th=0.10",
             "-f",
             "null",
             "-",
@@ -436,9 +611,18 @@ async def _decode_probe(path: str, timeout: float = 60.0) -> dict:
         return {"decode_error": f"probe exceeded {timeout:.0f}s"}
 
     stderr = (err or b"").decode("utf-8", "replace")
-    # -v error keeps this to real decode failures rather than the ordinary
-    # "missed N packets" chatter a lossy live stream always produces.
-    errors = [ln for ln in stderr.splitlines() if ln.strip()]
+    errors, meas = _parse_ffmpeg_filter_log(stderr)
+
+    video = next(
+        (s for s in await _ffprobe_streams(path) if s.get("codec_type") == "video"),
+        None,
+    )
+    shape: dict = {}
+    if video:
+        shape = {
+            "video_codec": video.get("codec_name"),
+            "video_size": f"{video.get('width')}x{video.get('height')}",
+        }
 
     frames = 0
     try:
@@ -477,7 +661,107 @@ async def _decode_probe(path: str, timeout: float = 60.0) -> dict:
         "decoded_frames": frames,
         "decode_errors": len(errors),
         "decode_first_error": errors[0][:200] if errors else None,
+        "black_seconds": meas.get("black_seconds", 0.0),
+        **shape,
     }
+
+
+async def _audio_probe(
+    path: str, audio_pt: int | None = None, timeout: float = 60.0
+) -> dict:
+    """Decode the recording's audio and report how much there is and how loud.
+
+    Two shapes of recording reach this, and both are handled:
+
+    - A DTLS recording carries an ``aac`` track (the in-process mux encodes
+      the camera's A-law to AAC). ffmpeg decodes it directly.
+    - An SDES recording is ffmpeg's own ``-c copy`` of the camera's RTP into
+      MPEG-TS, and MPEG-TS has no stream type for G.711 - so the audio lands
+      as an unlabelled private data stream (``bin_data``) that no player can
+      decode. The bytes are the camera's A-law (payload type 8) or mu-law
+      (payload type 0) as sent, 8000 per second; this pulls that stream out
+      and decodes it as such, choosing the law from ``audio_pt`` - what the
+      session negotiated - rather than guessing from the bytes.
+
+    Returns ``audio_codec``, ``audio_seconds``, ``audio_mean_dbfs``,
+    ``audio_peak_dbfs`` and ``audio_negotiated``; ``audio_error`` when the
+    probe could not run, which is not the same as finding no audio.
+    """
+    if not path or not os.path.exists(path):
+        return {"audio_error": "no recording"}
+    streams = await _ffprobe_streams(path)
+    if not streams:
+        return {"audio_error": "ffprobe gave no streams"}
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    data = next((s for s in streams if s.get("codec_type") == "data"), None)
+
+    base: dict = {"audio_negotiated": True}
+    if audio is not None:
+        base["audio_codec"] = audio.get("codec_name")
+        rate = int(audio.get("sample_rate") or 0) or 48000
+        cmd = ["ffmpeg", "-nostdin", "-loglevel", _PROBE_LOGLEVEL, "-i", path]
+    elif data is not None and audio_pt in (0, 8):
+        law = "alaw" if audio_pt == 8 else "mulaw"
+        base["audio_codec"] = f"{'pcma' if audio_pt == 8 else 'pcmu'}-in-ts"
+        rate = 8000
+        raw = path + ".g711"
+        try:
+            ex = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-nostdin",
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                path,
+                "-map",
+                f"0:{data.get('index')}",
+                "-c",
+                "copy",
+                "-f",
+                "data",
+                raw,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(ex.communicate(), timeout)
+        except FileNotFoundError:
+            return {"audio_error": "ffmpeg not found"}
+        except TimeoutError:
+            ex.kill()
+            return {"audio_error": f"extract exceeded {timeout:.0f}s"}
+        if not os.path.exists(raw) or os.path.getsize(raw) == 0:
+            return {**base, "audio_seconds": 0.0}
+        cmd = [
+            "ffmpeg", "-nostdin", "-loglevel", _PROBE_LOGLEVEL,
+            "-f", law, "-ar", "8000", "-ac", "1", "-i", raw,
+        ]
+    elif audio_pt is None and data is None:
+        # Neither an audio track nor a data stream: the session carried no
+        # audio (a video-only serve), so there is nothing to judge.
+        return {"audio_negotiated": False}
+    else:
+        return {**base, "audio_seconds": 0.0, "audio_codec": None}
+
+    cmd += ["-vn", "-af", "volumedetect", "-f", "null", "-"]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        _out, err = await asyncio.wait_for(proc.communicate(), timeout)
+    except FileNotFoundError:
+        return {"audio_error": "ffmpeg not found"}
+    except TimeoutError:
+        proc.kill()
+        return {"audio_error": f"probe exceeded {timeout:.0f}s"}
+    _errs, meas = _parse_ffmpeg_filter_log((err or b"").decode("utf-8", "replace"))
+    samples = int(meas.get("n_samples") or 0)
+    out = {**base, "audio_seconds": round(samples / rate, 2)}
+    if "mean_dbfs" in meas:
+        out["audio_mean_dbfs"] = meas["mean_dbfs"]
+    if "peak_dbfs" in meas:
+        out["audio_peak_dbfs"] = meas["peak_dbfs"]
+    return out
 
 
 async def _recording_seconds(path: str, timeout: float = 30.0):
@@ -1120,6 +1404,12 @@ async def _attempt(
         ok, evidence = _media_seen(session, frames["n"], out)
         result.update(evidence)
         result.update(await _decode_probe(out))
+        # Which G.711 law an SDES recording's unlabelled audio is in comes
+        # from the session's negotiated payload type; a DTLS recording has a
+        # labelled AAC track and needs no hint.
+        _apt = (evidence.get("media_stats") or {}).get("audio_pt")
+        result.update(await _audio_probe(out, _apt if isinstance(_apt, int) else None))
+        result["audio"] = _audio_verdict(result)
         if quality_arm is not None:
             # Video only, from the file, independent of our own counter.
             result.update(await _video_bitrate_series(out))
@@ -1129,6 +1419,8 @@ async def _attempt(
             _bytes = result.get("recorded_bytes") or 0
             # From the file's own duration, never from `max_seconds`.
             result["kbps"] = round(_bytes * 8 / _secs / 1000, 1)
+            if result.get("decoded_frames"):
+                result["decoded_fps"] = round(result["decoded_frames"] / _secs, 1)
         result["verdict"] = "PASS" if _passes(result, ok) else "NO_MEDIA"
     except AidotCameraBusy as exc:
         # Someone else is watching. Distinct from a media failure - but still
@@ -1267,6 +1559,17 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
                 else ""
             )
             + (f"  decode_probe={res['decode_error']}" if "decode_error" in res else "")
+            + (f"  black={res['black_seconds']}s" if res.get("black_seconds") else "")
+            + (
+                f"  audio={res['audio']}"
+                + (
+                    f"({res['audio_seconds']}s, peak {res['audio_peak_dbfs']} dBFS)"
+                    if res.get("audio_seconds") and "audio_peak_dbfs" in res
+                    else ""
+                )
+                if "audio" in res
+                else ""
+            )
             + (f"  {res['error']}" if "error" in res else "")
         )
         if quality_arms:
@@ -1317,6 +1620,31 @@ async def _validate_camera(client, device, args, cooldown_until: dict) -> dict:
         )
     )
     entry["attempts_used"] = len(entry["attempts"])
+    # The media of the attempt that passed (or of the last one, when none did),
+    # lifted to the camera so the summary and the step summary can show what
+    # the camera delivered without walking the attempts.
+    judged = next(
+        (a for a in entry["attempts"] if a.get("verdict") == "PASS"),
+        entry["attempts"][-1] if entry["attempts"] else {},
+    )
+    entry["video"] = {
+        k: judged.get(k)
+        for k in (
+            "decoded_frames",
+            "decoded_fps",
+            "video_size",
+            "decode_errors",
+            "black_seconds",
+            "recorded_seconds",
+        )
+        if k in judged
+    }
+    entry["audio"] = judged.get("audio", "NOT_RUN")
+    entry["audio_detail"] = {
+        k: judged.get(k)
+        for k in ("audio_codec", "audio_seconds", "audio_mean_dbfs", "audio_peak_dbfs")
+        if k in judged
+    }
     return entry
 
 
@@ -1449,9 +1777,22 @@ def _summarize(report: dict, args) -> int:
     print("\n==== SUMMARY ====")
     for c in report["cameras"]:
         tag = "" if c["tier"] == "required" else "  (advisory)"
+        video = c.get("video") or {}
+        media = ""
+        if video.get("decoded_frames") is not None:
+            media = f"  video={video['decoded_frames']}f"
+            if video.get("decoded_fps") is not None:
+                media += f"@{video['decoded_fps']}"
+            if video.get("video_size"):
+                media += f" {video['video_size']}"
+        if c.get("audio"):
+            media += f"  audio={c['audio']}"
+            det = c.get("audio_detail") or {}
+            if det.get("audio_seconds") and det.get("audio_peak_dbfs") is not None:
+                media += f"({det['audio_seconds']}s, peak {det['audio_peak_dbfs']} dBFS)"
         print(
             f"  {c['verdict']:9} {c['name']!r:32} {c['model']:18} "
-            f"{c['transport']}  attempts={c['attempts_used']}{tag}"
+            f"{c['transport']}  attempts={c['attempts_used']}{media}{tag}"
         )
 
     # The gate is about MODEL coverage, not fleet health: a release breaks a
@@ -1514,6 +1855,33 @@ def _summarize(report: dict, args) -> int:
     }
     report["missing_required_models"] = missing
     report["advisory_failed"] = [c["name"] for c in advisory if c["verdict"] != "PASS"]
+    # Cameras that streamed video but whose audio was not a clean PASS. With
+    # AUDIO_GATES off this list never changes a verdict; it is the record the
+    # promotion decision will be made from.
+    audio_failed = [
+        c["name"]
+        for c in report["cameras"]
+        if c["verdict"] == "PASS" and c.get("audio") not in (None, "PASS", "NOT_NEGOTIATED")
+    ]
+    report["audio_failed"] = audio_failed
+    report["audio_gates"] = AUDIO_GATES
+    if audio_failed:
+        print(
+            "\n  audio not clean on cameras that streamed"
+            f" ({'gating' if AUDIO_GATES else 'advisory'}):"
+        )
+        for c in report["cameras"]:
+            if c["name"] in audio_failed:
+                det = c.get("audio_detail") or {}
+                print(
+                    f"    {c.get('audio'):9} {c['name']!r} {c['model']}"
+                    + (
+                        f"  {det.get('audio_seconds')}s"
+                        f" peak {det.get('audio_peak_dbfs')} dBFS"
+                        if det.get("audio_seconds") is not None
+                        else ""
+                    )
+                )
     # A broken token refresh gates: in the field it would surface hours later,
     # as every session dies at its first token expiry.  A report without the
     # check (a --list run, or an older report) is not held to it.
