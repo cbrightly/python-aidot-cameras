@@ -6,6 +6,18 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Changed
+
+- **The health line no longer carries the serve canary's frame figures.**
+  Measured against a captured stream from an A000088 on 2026-10-14, the
+  canary's `frames` ran at twice the picture rate - it counts what the
+  receiver hands over, not pictures - and over one 20 s period reported four
+  times that, with `keyframes` up by the same factor, while the capture stayed
+  a regular 15 fps with one keyframe every three seconds. Until that counting
+  is understood the figures would mislead, so `frames`, `keyframes` and
+  `max_keyframe_gap` are off the line; `packets`, `lost`, `stall`, `path` and
+  `viewers` carry the diagnosis. The canary still logs at DEBUG as before.
+
 ## [1.0.0rc50]
 
 ### Fixed

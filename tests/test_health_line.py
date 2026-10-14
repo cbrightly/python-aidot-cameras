@@ -111,10 +111,12 @@ def test_optional_video_counters_are_appended_when_given():
     r = health.HealthReporter("dev1", period_s=60.0)
     r.tick(0.0, _snap(frames=0, keyframes=0))
     line = r.tick(60.0, _snap(frames=900, keyframes=30, max_keyframe_gap=44))
+    # canary figures are deliberately absent until their counting is understood
     assert "frames=900 (15.0/s)" in line
     assert "keyframes=30" in line
-    assert "max_keyframe_gap=44" in line
-    assert "max_gap=" not in line
+    assert "max_keyframe_gap" not in line
+    assert "frames=" not in line
+    assert "keyframes=" not in line
 
 
 def test_a_zero_period_disables_the_line():

@@ -380,7 +380,7 @@ turns it off). A DTLS camera's looks like this, with the device id after
 `camera`:
 
 ```
-health 20s: packets=1686 (84.1/s) lost=0 (0.0%) stall=0.0s path=direct viewers=unknown frames=558 (27.8/s) keyframes=18 max_keyframe_gap=44
+health 20s: packets=1686 (84.1/s) lost=0 (0.0%) stall=0.0s path=direct viewers=present
 ```
 
 Each figure is for that period alone, so a steady trickle of loss reads as a
@@ -398,9 +398,6 @@ rate rather than vanishing into a session total:
 - `viewers`: `present`, `absent`, or `unknown` when the consumer cannot be
   counted; a battery camera with nobody watching is released after its
   idle window.
-- `frames`, `keyframes` and `max_keyframe_gap` (DTLS only): what the serve
-  saw. The gap is a frame count, the longest run between two keyframes.
-
 So a pasted log says which of "the link is lossy", "the picture froze" and
 "nobody was watching" it was. A report that fails for any reason is dropped
 and never ends the session.
