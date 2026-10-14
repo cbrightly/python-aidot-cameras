@@ -6,6 +6,25 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **SDES cameras' served audio is no longer digital zero.** The direct
+  publisher (the default serve for A001064 and A001513) applied only the
+  fixed `-8` dB trim to the camera's A-law, and these cameras send their rooms
+  at about -68 to -70 dBFS RMS - measured 2026-10-14 on an A001064 and an
+  A001513 - so after the trim every sample sat under the first A-law step and
+  listeners heard nothing, while an A000088 in the same conditions was served
+  through the DTLS publisher's level normalizer at a listening level. The SDES
+  publisher now runs the same normalizer (`AlawAgc`, the `AIDOT_AUDIO_*`
+  knobs) before the trim, the trim is an offset after it, and the trim's
+  default on the direct publish is `0`; the ffmpeg serve keeps `-8` on raw
+  A-law. A caller that sets `sdes_audio_gain_db` (Home Assistant does, from
+  its option) gets its value as the offset, so the integration's default moves
+  to 0 in the release that floors on this one. Replayed over the raw captures:
+  the A001064 comes out at -47 dBFS RMS with -7 dBFS peaks; the A001513's
+  quiet room stays quiet (-64 dBFS RMS) because the gate fades the gain below
+  -45 dBFS RMS instead of lifting the quantization floor into clicks -
+  `AIDOT_AUDIO_GATE_DBFS` is the knob for that.
+
 ### Changed
 - **The live-validation harness measures audio and the picture on every
   recording, and says what the gate is.** `scripts/live_validate.py` now
