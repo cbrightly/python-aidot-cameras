@@ -138,6 +138,26 @@ whose venv also holds `pytest-homeassistant-custom-component`, that plugin
 turns on `pytest-socket` and every socket-using test here fails with
 `SocketBlockedError`; run with `-p no:homeassistant -p no:socket`.
 
+## Running the whole suite on a workstation
+
+CI runs with `AIDOT_FAIL_ON_SKIP=1`, so a test that skips for a missing tool
+fails the run. To match it locally you need `ffmpeg`, a go2rtc binary
+(`AIDOT_GO2RTC_BIN=/path/to/go2rtc`, 1.9.14 is what CI pins) and `pyflakes`
+in the venv; without them the real-go2rtc tests and the undefined-names test
+skip, and the guard turns those skips into failures. The only skips the suite
+expects are the upstream-shape ones (`typed upstream shape only` and the
+`read_data` seam), which depend on the `python-aidot` version installed.
+
+```
+AIDOT_FAIL_ON_SKIP=1 AIDOT_GO2RTC_BIN=~/bin/go2rtc pytest tests/ -q -p no:randomly
+```
+
+About eleven minutes on an Apple-silicon laptop, three and a half without
+`tests/e2e`. Run it from a clean export (`git archive HEAD | tar -x -C
+/tmp/clean`) if the checkout holds git worktrees under an ignored directory:
+`test_no_working_note_filenames_anywhere_in_the_repo` scans the working tree,
+not the index, and reports the worktree's files as if they were tracked.
+
 ## Adding a test: which tier?
 
 - Can you express it as inputs -> outputs on a function? **Unit.** Prefer

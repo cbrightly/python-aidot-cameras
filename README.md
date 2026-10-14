@@ -373,6 +373,38 @@ await session.async_stop_talk()
 See [`docs/CAMERAS.md`](https://github.com/cbrightly/python-aidot-cameras/blob/main/docs/CAMERAS.md) for the full camera API (streaming,
 snapshots, recordings, motion polling, two-way audio, and LAN-direct media).
 
+### Reading the health line
+
+Every live session logs one INFO line a minute (`AIDOT_HEALTH_LINE_S`, `0`
+turns it off). A DTLS camera's looks like this, with the device id after
+`camera`:
+
+```
+health 20s: packets=1686 (84.1/s) lost=0 (0.0%) stall=0.0s path=direct viewers=unknown frames=558 (27.8/s) keyframes=18 max_keyframe_gap=44
+```
+
+Each figure is for that period alone, so a steady trickle of loss reads as a
+rate rather than vanishing into a session total:
+
+- `packets` and the rate: RTP packets that arrived. An SDES camera reports
+  `bytes` as well; a DTLS camera reports `lost`, the receiver's own count.
+- `stall`: seconds since the last media packet. A rising `stall` with
+  `lost=0` means the camera stopped sending, not that the link dropped
+  packets; a DTLS session with no video for `AIDOT_DTLS_VIDEO_GRACE_S`
+  (30 s) is torn down and re-opened on its own.
+- `path`: `direct` when the media crosses the LAN, `relay` when it rides
+  the vendor's TURN relay (a camera with no route back, or one on another
+  subnet).
+- `viewers`: `present`, `absent`, or `unknown` when the consumer cannot be
+  counted; a battery camera with nobody watching is released after its
+  idle window.
+- `frames`, `keyframes` and `max_keyframe_gap` (DTLS only): what the serve
+  saw. The gap is a frame count, the longest run between two keyframes.
+
+So a pasted log says which of "the link is lossy", "the picture froze" and
+"nobody was watching" it was. A report that fails for any reason is dropped
+and never ends the session.
+
 ## Camera controls and state
 
 Controls are on the camera device client. Writes are confirmed by reading the
