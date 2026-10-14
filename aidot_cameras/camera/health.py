@@ -136,8 +136,11 @@ def format_health_line(
         parts.append(f"frames={frames} ({frames / secs:.1f}/s)")
     if "keyframes" in cur:
         parts.append(f"keyframes={_delta(prev, cur, 'keyframes', reset)}")
-    if cur.get("max_gap_s") is not None:
-        parts.append(f"max_gap={float(cur['max_gap_s']):.2f}s")
+    if cur.get("max_keyframe_gap") is not None:
+        # The serve canary's largest run of frames between two keyframes - a
+        # frame COUNT, not a time: 44 on a 15 fps camera is a three-second GOP.
+        # Printed as seconds in 1.0.0rc49, which read as a 44 s freeze.
+        parts.append(f"max_keyframe_gap={int(cur['max_keyframe_gap'])}")
     return " ".join(parts)
 
 
@@ -153,7 +156,8 @@ def dtls_snapshot(
     and lost, summed over audio and video, and the nominated ICE pairs, from
     which the path is ``relay`` when any remote candidate is a relay, else
     ``direct``, else unknown. ``canary`` is the serve's video canary (frames,
-    keyframes, max gap). There is no byte count on this transport, so the
+    keyframes, largest frame count between keyframes). There is no byte count
+    on this transport, so the
     snapshot carries none and the line says nothing about bytes.
     """
     packets = 0
@@ -177,7 +181,7 @@ def dtls_snapshot(
     if canary:
         out["frames"] = int(canary.get("frames") or 0)
         out["keyframes"] = int(canary.get("keyframes") or 0)
-        out["max_gap_s"] = float(canary.get("max_gap") or 0.0)
+        out["max_keyframe_gap"] = int(canary.get("max_gap") or 0)
     return out
 
 
