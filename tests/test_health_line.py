@@ -186,7 +186,9 @@ def test_dtls_snapshot_sums_inbound_and_reads_the_ice_path():
     assert snap["lost"] == 1
     assert snap["media_path"] == "direct"
     assert (
-        snap["frames"] == 450 and snap["keyframes"] == 15 and snap["max_keyframe_gap"] == 44
+        snap["frames"] == 450
+        and snap["keyframes"] == 15
+        and snap["max_keyframe_gap"] == 44
     )
     assert snap["last_media_monotonic"] == 12.5 and snap["viewer"] is True
     assert "bytes" not in snap
