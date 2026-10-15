@@ -5,7 +5,6 @@ import json
 import logging
 from urllib.parse import urlparse
 import os
-import random
 import time
 import asyncio
 import warnings
@@ -45,13 +44,7 @@ from .constants import (  # noqa: F401 - re-exported for device_client / back-co
 from .models import (  # re-exported: data models split into models.py
     CameraDeviceInformation,
     CameraStatusData,
-    VideoFrame,
     _as_int,
-)
-from .tutk import TutkStreamSession  # re-exported (split into tutk.py)
-from .playback import (  # re-exported (split into playback.py)
-    CloudPlaybackSession,
-    LiveStreamSession,  # noqa: F401 - back-compat re-export (unused in-module)
 )
 from .webrtc import WebRTCSession  # re-exported (split into webrtc.py)
 from . import h264_sps as _h264_sps
@@ -557,11 +550,6 @@ except ImportError as _exc:  # pragma: no cover - ordering contract violation
 
 
 # --------------------------------------------------------------------------- #
-# Camera / Leedarson smarthome API constants
-# --------------------------------------------------------------------------- #
-
-
-# --------------------------------------------------------------------------- #
 # JPEG snapshot helper
 # --------------------------------------------------------------------------- #
 
@@ -1020,92 +1008,6 @@ def _build_sdes_serve_cmd(
         sdp_path,
         *dest_args,
     ]
-
-
-# --------------------------------------------------------------------------- #
-# TCP binary framing helpers
-# --------------------------------------------------------------------------- #
-
-
-# Terminal webrtcResp ack codes - the camera/cloud refused the stream and retrying
-# is futile. Source: decompiled AckBean.java; the official app treats both as terminal
-# (LiveCameraView.java:765 - shows an error, does NOT retry).
-#   -50002 = WEBRTC_ERROR_EN_RTC_ERR_CODE_SESSION_EXCEED (max concurrent streams)
-#   -50015 = LIVE_SD_MAX_CONNECT_ERROR (SD-card / connection cap)
-
-
-# Real-time camera alarm types - carried as a TRANSIENT `alarmType` field inside the
-# setDevAttrNotif MQTT push (iot/v1/c/{userId}/#), NOT a separate event message.
-# Source: decompiled NewLiveFragment.java:6934-6938 / props.alarmType parse :3654.
-#   65 = motion, 66 = person. (Historical events with picUrl/videoUrl are a separate
-#   cloud-REST poll - async_get_cloud_recordings.)
-
-
-# --------------------------------------------------------------------------- #
-# CloudPlaybackSession
-# --------------------------------------------------------------------------- #
-
-
-# --------------------------------------------------------------------------- #
-# TutkStreamSession
-#
-# TUTK IOTC P2P live-stream session for Leedarson/AiDot cameras.
-# Use DeviceClient.async_open_live_stream() to obtain an instance.
-#
-# Protocol source: classes.jar.decompiled.zip / TutkManager.java
-#   IOTC_Connect_ByUID_Parallel(uid, sid) -> nSID
-#   avClientStart2(nSID, "admin", "admin123", ...) -> avIndex
-#   avSendIOCtrl(avIndex, 511, ...) -> start video (IOTYPE_USER_IPCAM_START)
-#   avRecvFrameData2(avIndex, ...) -> frame data loop
-#
-# Requires: libIOTCAPIs.so + libAVAPIs.so from the TUTK SDK.
-# Obtain them from the TUTK SDK distribution or an extracted AiDot APK.
-# --------------------------------------------------------------------------- #
-
-
-# --------------------------------------------------------------------------- #
-# LiveStreamSession
-#
-# Manages a single live-stream TCP session for a Leedarson/AiDot camera.
-# Use DeviceClient.async_open_live_stream() to obtain an instance.
-#
-# Protocol source: iOS LDSXplayer startRealPlay -> LDSTCPManager
-#   connectHost:port:sessionId:aesKey:heartbeat:msg:cmd:subCmd:cmdParam:tls:
-#
-# Wire format: same 37-byte header + payload as CloudPlaybackSession, but:
-#   - TLS socket (server cert not verified -- IoT device)
-#   - AES-256/ECB/PKCS7 encrypts outbound payloads; decrypts inbound payloads
-#   - LOGIN payload carries sessionId from the MQTT connectipc response
-#   - STREAM_REQ starts the live video feed (no taskId needed)
-# --------------------------------------------------------------------------- #
-
-
-# --------------------------------------------------------------------------- #
-# WebRTCSession
-#
-# Manages a live WebRTC stream opened by DeviceClient.async_open_webrtc_stream.
-# Call await session.stop() to tear down the peer connection and MQTT session.
-# --------------------------------------------------------------------------- #
-
-
-# Two-way-audio (talk) PCM format: signed-16-bit little-endian, 8 kHz mono, in
-# 20 ms frames (PCMA/PT=8 on the wire). Exported so producers - e.g. the HA
-# aidot.talk service - frame audio identically to what the talk track consumes.
-
-# SDES two-way-audio timing.  SPEAKERSTART must be deferred ~0.6 s after the
-# command channel is up: the camera ignores it if sent immediately after LIVING
-# (no 851 ACK) but accepts it once its media pipeline is ready (~0.58 s observed).
-
-
-# --------------------------------------------------------------------------- #
-# MQTT helpers (playback provisioning + live-stream discovery)
-#
-# Uses paho-mqtt with WebSocket transport.  The synchronous paho loop runs in
-# a thread-pool executor so it never blocks the asyncio event loop.
-# Threading primitives (threading.Event, queue.Queue) replace the complex
-# asyncio Future/call_soon_threadsafe bridge that had VERSION2 ReasonCode
-# compatibility issues.
-# --------------------------------------------------------------------------- #
 
 
 _WEBRTC_OPEN_GATE: "Optional[asyncio.Semaphore]" = None
@@ -2591,6 +2493,7 @@ class CameraMixin(
             _LOGGER.error("device user info for %s failed: %r", self.device_id, exc)
         return None
 
+<<<<<<< HEAD
     async def async_get_p2p_uid(self) -> Optional[str]:
         """Fetch the TUTK P2P UID for this camera.
 
@@ -2721,6 +2624,8 @@ class CameraMixin(
     # Phase 2: device controls via MQTT setDevAttrReq                     #
     # ------------------------------------------------------------------ #
 
+=======
+>>>>>>> origin/chore/dead-code-pass
     async def _mqtt_device_cmd(
         self,
         pub_topic: str,
@@ -5111,7 +5016,11 @@ class CameraMixin(
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
                 self.device_id,
+<<<<<<< HEAD
                 "_deregister_go2rtc",
+=======
+                "_release_after_loop_error",
+>>>>>>> origin/chore/dead-code-pass
                 exc_info=True,
             )
 
@@ -5358,13 +5267,10 @@ class CameraMixin(
             # window as DTLS; the next view re-runs camera.stream_source().  Fail
             # safe: unknown (non-Linux /proc) never releases a mains camera; a
             # battery camera releases after AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S
-            # without a known viewer.  Escape hatch:
-            # AIDOT_SDES_IDLE_RELEASE=0.
+            # without a known viewer.
             # stream_idle_s / AIDOT_STREAM_IDLE_S override; <= 0 = never release.
             _idle_secs = self._resolve_idle_secs()
-            _idle_on = (
-                os.environ.get("AIDOT_SDES_IDLE_RELEASE", "1") != "0" and _idle_secs > 0
-            )
+            _idle_on = _idle_secs > 0
             _serve_port = _sdes_serve_port(self._keepalive_rtsp_url)
             _last_consumer = _started_at  # grace: count idle from session open
             # Battery exception to "unknown never releases": a battery camera
@@ -5490,7 +5396,7 @@ class CameraMixin(
                     _LOGGER.debug(
                         "camera %s: swallowed exception in %s",
                         getattr(self, "device_id", "?"),
-                        "_sdes_keepalive_loop",
+                        "_sdes_keepalive_loop_inner",
                         exc_info=True,
                     )
                 self._streaming_active = False
@@ -5510,7 +5416,7 @@ class CameraMixin(
                     _LOGGER.debug(
                         "camera %s: swallowed exception in %s",
                         getattr(self, "device_id", "?"),
-                        "_deregister_go2rtc",
+                        "_sdes_keepalive_loop_inner",
                         exc_info=True,
                     )
                 _LOGGER.debug(
@@ -5562,7 +5468,7 @@ class CameraMixin(
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
                     getattr(self, "device_id", "?"),
-                    "_sdes_keepalive_loop",
+                    "_sdes_keepalive_loop_inner",
                     exc_info=True,
                 )
 
@@ -5743,7 +5649,7 @@ class CameraMixin(
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
                     getattr(self, "device_id", "?"),
-                    "_on_frame",
+                    "_streaming_loop",
                     exc_info=True,
                 )
 
@@ -6928,7 +6834,7 @@ class CameraMixin(
                         _LOGGER.debug(
                             "camera %s: swallowed exception in %s",
                             getattr(self, "device_id", "?"),
-                            "_pc_dead",
+                            "_dtls_serve_loop_inner",
                             exc_info=True,
                         )
                     wfile = None
@@ -7007,7 +6913,7 @@ class CameraMixin(
                         _LOGGER.debug(
                             "camera %s: swallowed exception in %s",
                             getattr(self, "device_id", "?"),
-                            "_pc_dead",
+                            "_dtls_serve_loop_inner",
                             exc_info=True,
                         )
                 if mux_thread is not None and mux_thread.is_alive():
@@ -7025,7 +6931,7 @@ class CameraMixin(
                     _LOGGER.debug(
                         "camera %s: swallowed exception in %s",
                         getattr(self, "device_id", "?"),
-                        "_pc_dead",
+                        "_dtls_serve_loop_inner",
                         exc_info=True,
                     )
 
@@ -7046,7 +6952,7 @@ class CameraMixin(
                     _LOGGER.debug(
                         "camera %s: swallowed exception in %s",
                         getattr(self, "device_id", "?"),
-                        "_deregister_go2rtc",
+                        "_dtls_serve_loop_inner",
                         exc_info=True,
                     )
                 _LOGGER.debug(
@@ -7149,339 +7055,6 @@ class CameraMixin(
     # Uses IOCtrl cmd=4097 (IOTYPE_USER_IPCAM_PTZ_COMMAND) - NOT MQTT.
     # DTLS path: sent via WebRTC DataChannel. SDES path: sent via encrypted
     # SCTP cmd_chan. Requires an active stream session (_stream_session).
-
-    async def async_open_cloud_playback(
-        self,
-        start_ts: int,
-        end_ts: int,
-        on_frame: Callable[[VideoFrame], None],
-    ) -> Optional[CloudPlaybackSession]:
-        """DEPRECATED and non-functional. Use ``async_get_event_video_media``.
-
-        Measured 2026-08-14 on the owner account against an A001064 with ten
-        cloud clips in the last seven days: step 1 (the MQTT
-        ``getPlaybackServerInfoReq``) returns an empty response, so this method
-        returns None before a session is ever opened.
-
-        **RESOLVED: the cloud does not serve this request.** Proven by pairing
-        it, in one session, with a request that IS answered -
-        ``lowPowerActiveStateReq``, the battery wake handshake this library
-        relies on in production. Same connection, same subscription, same
-        client id, Home Assistant disabled so nothing competed:
-
-            CONTROL wake answered: True    (lowPowerActiveStateResp,
-                                            wakeupStatus, keepAliveState,
-                                            devEventNotif x3, sleepStatus)
-            playback answered:     False   (nothing, 40 s)
-
-        Eleven messages arrived on that subscription. So the transport,
-        credentials, client id and topics are all fine, and every earlier
-        "zero messages" here was a genuine non-answer rather than us failing to
-        listen. ``getPlaybackServerInfoReq`` is simply not served on this
-        account.
-
-        Ruled out along the way, each by measurement rather than argument: the
-        suffixed-client-id defect (this method never had it), contention for
-        the id (HA disabled), and the ``srcAddr`` form - all four variants
-        including the terminalIndex session form drew no reply.
-
-        There is nothing left to fix on this side. The deprecation stands, and
-        removal at 1.0.0 is the right end for it.  Nothing in this library,
-        its tests, its CI or the reference integration calls it, which is why
-        that went unnoticed - the README named it as the retrieval path for
-        cloud recordings while it did not work.
-
-        The path that does work, and that the reference integration actually
-        uses, is ``async_get_cloud_recordings`` to list plus
-        ``async_get_event_video_media(event_uuid)`` for a playable HLS URL.
-        This method is scheduled for removal in 1.0.0 and is kept only so an
-        importer gets a warning rather than an AttributeError.
-        """
-        warnings.warn(
-            "async_open_cloud_playback is deprecated and does not work: its "
-            "MQTT handshake returns an empty response (measured 2026-08-14). "
-            "Use async_get_cloud_recordings + async_get_event_video_media. "
-            "It will be removed in 1.0.0.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        # Open a cloud-playback session and begin streaming VideoFrame objects.
-        # start_ts / end_ts: Unix timestamps in milliseconds.
-        # on_frame: called in the asyncio event loop for each decoded frame.
-        # Returns a running CloudPlaybackSession, or None if handshake fails.
-        #
-        # Three-step handshake from LDSOpenSDK.playCloudRecord():
-        #   1. MQTT getPlaybackServerInfoReq -> serverIP, serverPort, heartbeat
-        #   2. HTTP POST playRecord          -> taskId
-        #   3. TCP binary login + stream
-        import aiohttp
-
-        # Fetch MQTT credentials from the Leedarson smarthome /user/login endpoint.
-        # The AiDot platform login does NOT return mqttUser/mqttPassword.
-        smarthome_auth = await self._async_get_smarthome_auth()
-        mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
-        client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
-
-        # Step 1 - MQTT
-        mqtt_url = await self._async_get_mqtt_url()
-        if not mqtt_url:
-            _LOGGER.error(
-                "async_open_cloud_playback: cannot determine MQTT URL for %s",
-                self.device_id,
-            )
-            return None
-
-        _LOGGER.debug("Cloud playback step 1: MQTT for %s", self.device_id)
-        srv_info = await _mqtt_get_playback_server_info(
-            mqtt_url,
-            mqtt_user,
-            mqtt_pwd,
-            self.device_id,
-            client_id,
-        )
-        if not srv_info:
-            _LOGGER.error(
-                "async_open_cloud_playback: MQTT response empty for %s",
-                self.device_id,
-            )
-            return None
-
-        server_ip = srv_info.get("serverIP")
-        server_port = srv_info.get("serverPort")
-        heartbeat = int(srv_info.get("heartbeat") or 15)
-
-        if not server_ip or not server_port:
-            _LOGGER.error(
-                "async_open_cloud_playback: incomplete server info for %s: %s",
-                self.device_id,
-                srv_info,
-            )
-            return None
-
-        # Step 2 - HTTP playRecord
-        _LOGGER.debug("Cloud playback step 2: HTTP playRecord for %s", self.device_id)
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self._smarthome_base}/api/ipc/playbackController/playRecord",
-                    json={
-                        "deviceId": self.device_id,
-                        "recordStaTime": start_ts,
-                        "recordEndTime": end_ts,
-                    },
-                    headers=self._leedarson_headers(),
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    play_body = await resp.json(content_type=None)
-
-            if play_body.get("code") != 200:
-                _LOGGER.error(
-                    "playRecord returned code=%s for %s: %s",
-                    play_body.get("code"),
-                    self.device_id,
-                    play_body,
-                )
-                return None
-
-            task_id = (play_body.get("data") or {}).get("taskId")
-            if task_id is None:
-                _LOGGER.error(
-                    "playRecord: no taskId in response for %s: %s",
-                    self.device_id,
-                    play_body,
-                )
-                return None
-
-        except Exception as exc:
-            _LOGGER.error(
-                "async_open_cloud_playback: playRecord failed for %s: %s",
-                self.device_id,
-                exc,
-            )
-            return None
-
-        # Step 3 - TCP
-        _LOGGER.debug(
-            "Cloud playback step 3: TCP to %s:%d task=%d heartbeat=%ds",
-            server_ip,
-            server_port,
-            task_id,
-            heartbeat,
-        )
-        pb_session = CloudPlaybackSession(
-            server_ip=server_ip,
-            server_port=int(server_port),
-            heartbeat_interval=heartbeat,
-            task_id=int(task_id),
-            client_id=str(self.user_id),
-            start_ts_s=start_ts // 1000,
-            on_frame=on_frame,
-        )
-        if not await pb_session.start():
-            return None
-
-        _LOGGER.info(
-            "Cloud playback session open for %s task=%d start=%d",
-            self.device_id,
-            task_id,
-            start_ts // 1000,
-        )
-        return pb_session
-
-    async def async_open_live_stream(
-        self,
-        on_frame: Callable[[VideoFrame], None],
-        timeout: float = 60.0,
-    ) -> Optional[TutkStreamSession]:
-        """Open a TUTK IOTC P2P live-stream session, delivering frames to on_frame.
-
-        **Not usable on any camera seen so far, and not for want of code.** It
-        needs two things this package cannot supply: a ``p2pId`` (the TUTK UID),
-        which came back None for every device on the reference account, and the
-        proprietary ``libIOTCAPIs.so`` / ``libAVAPIs.so`` from the TUTK SDK,
-        which are not redistributable here. See ``docs/DEFERRED_FEATURES.md``.
-        Live video on every supported model goes through
-        ``async_open_webrtc_stream``; this exists because the protocol was
-        worked out, not because anything reaches it.
-        """
-        # Open a TUTK IOTC P2P live-stream session.
-        # on_frame: called from the receive thread for each decoded VideoFrame.
-        # Returns a running TutkStreamSession, or None on failure.
-        #
-        # Protocol: TUTK IOTC P2P (confirmed from classes.jar.decompiled.zip).
-        #   p2pId (TUTK UID) <- POST /v21/devices/batchGetDeviceUserInfo
-        #   IOTC_Connect_ByUID_Parallel(uid) -> nSID
-        #   avClientStart2(nSID, "admin", "admin123") -> avIndex
-        #   avSendIOCtrl(avIndex, 511, ...) -> start video stream
-        #   avRecvFrameData2(avIndex, ...) -> frame loop
-        #
-        # Requires libIOTCAPIs.so + libAVAPIs.so from the TUTK SDK.
-
-        uid = await self.async_get_p2p_uid()
-        if not uid:
-            props = getattr(self, "_raw_device", {}).get("properties") or {}
-            is_webrtc = (
-                str(props.get("enableSdes", "0")) == "1"
-                or str(props.get("liveType", "0")) == "2"
-            )
-            if is_webrtc:
-                _LOGGER.error(
-                    "async_open_live_stream: p2pId not available for %s - "
-                    "this camera uses WebRTC streaming (enableSdes=%s, liveType=%s); "
-                    "use async_open_webrtc_stream() for live video.",
-                    self.device_id,
-                    props.get("enableSdes", "0"),
-                    props.get("liveType", "0"),
-                )
-            else:
-                _LOGGER.error(
-                    "async_open_live_stream: p2pId not available for %s. "
-                    "Ensure batchGetDeviceUserInfo returns data (check auth/request "
-                    "format) or that the smarthome getP2pId endpoint is reachable.",
-                    self.device_id,
-                )
-            return None
-
-        _LOGGER.debug(
-            "async_open_live_stream: TUTK P2P uid=%s for %s", uid, self.device_id
-        )
-        session = TutkStreamSession(uid=uid, on_frame=on_frame)
-        try:
-            ok = await asyncio.wait_for(session.start(), timeout=timeout)
-        except TimeoutError:
-            _LOGGER.error(
-                "async_open_live_stream: TUTK connect timed out after %.0fs for %s",
-                timeout,
-                self.device_id,
-            )
-            return None
-        if not ok:
-            return None
-
-        _LOGGER.info(
-            "TUTK live stream session open for %s (uid=%s)",
-            self.device_id,
-            uid,
-        )
-        return session
-
-    async def async_get_ice_config(self, device_id: str) -> Optional[dict]:
-        """Fetch STUN/TURN ICE server credentials for a liveType=2 camera.
-
-        Publishes ``IPC/getIceConfigReq`` via MQTT and waits up to 5 s for the
-        ``IPC/getIceConfigResp`` reply.  The response contains per-device and
-        per-user TURN credentials for the Arnoo TURN cluster.
-
-        Returns a dict with keys ``app`` (list of user-side ICE server entries)
-        and ``dev`` (list of device-side ICE server entries), each entry having
-        the shape::
-
-            {"id": str, "token": int, "ttl": int,
-             "uris": [...], "dnsUris": [...]}
-
-        Returns ``None`` if the MQTT session fails or no response arrives.
-        A fallback ICE config (public STUN only, no TURN credentials) can be
-        constructed by the caller if ``None`` is returned.
-        """
-        smarthome_auth = await self._async_get_smarthome_auth()
-        mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
-        user_id = str(self.user_id)
-        # Use the server-assigned authorised clientId - the broker rejects
-        # random or made-up prefixes with rc=4.
-        diag_cid = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
-        mqtt_url = await self._async_get_mqtt_url()
-        if not mqtt_url:
-            _LOGGER.warning("async_get_ice_config: no MQTT URL available")
-            return None
-
-        seq = f"ap{random.randint(1000000, 9999999)}"
-        result: dict = {}
-
-        payload = json.dumps(
-            {
-                "method": "getIceConfigReq",
-                "service": "IPC",
-                "srcAddr": f"0.{user_id}",
-                "seq": seq,
-                "tst": int(time.time() * 1000),
-                "payload": {"deviceId": device_id, "userId": user_id},
-            }
-        )
-
-        def _capture(topic: str, raw: str) -> None:
-            # Accept any message on the user callback topic that looks like
-            # an ICE config response.
-            if "iceconfig" in topic.lower() or "getice" in topic.lower():
-                try:
-                    msg = json.loads(raw)
-                    inner = msg.get("payload") or msg.get("data") or msg
-                    if (
-                        isinstance(inner, dict) and ("app" in inner or "dev" in inner)
-                    ) or (isinstance(inner, dict) and "data" not in result):
-                        result["data"] = inner
-                except Exception:
-                    result["data"] = raw
-
-        await _mqtt_session(
-            mqtt_url,
-            mqtt_user,
-            mqtt_pwd,
-            diag_cid,
-            subscribe_topics=[f"iot/v1/c/{user_id}/#"],
-            publish_items=[(f"iot/v1/s/{user_id}/IPC/getIceConfigReq", payload)],
-            duration=5.0,
-            on_message=_capture,
-        )
-
-        if "data" not in result:
-            _LOGGER.warning(
-                "async_get_ice_config: no getIceConfigResp received for device %s; "
-                "the device may not support MQTT ICE config (try after opening app live view)",
-                device_id,
-            )
-        return result.get("data")
 
     async def async_get_ice_config_http(self) -> Optional[dict]:
         """Fetch ICE config via HTTP (primary path used by official app).

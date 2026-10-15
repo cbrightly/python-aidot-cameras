@@ -1,6 +1,6 @@
 """SDES-SRTP stream-open state machine, split out of client.py.
 
-``CameraMixin._open_sdes_stream`` is the ~3.6k-line SDES open path (isDTLS=='0'
+``CameraMixin._open_sdes_stream`` is the SDES open path (one very long coroutine) (isDTLS=='0'
 cameras: battery / PTZ).  It lives here as a mixin to keep client.py readable;
 behaviour-preserving (the method body is unchanged except for a lazy import that
 breaks the client<->sdes_open cycle).  CameraMixin inherits this mixin, so
@@ -761,15 +761,6 @@ EXPT_CAP_FILE = _os.environ.get("AIDOT_EXPT_CAP_FILE")
 #: absence changes. Override with AIDOT_SDES_LIVEPLAY_ECHO_S (seconds, 0
 #: disables the wait entirely) to measure it against the old value.
 _LIVEPLAY_ECHO_S = 0.25
-#: The fast-liveplay path used to keep the 1.5 s it was given, because the
-#: 169/169 evidence above was gathered on the non-fast wait only and nothing
-#: had measured this one.  It has now been measured, and it behaves identically:
-#: over 3 h on 2026-09-03 the fast wait ran 22 times and timed out 22 times, at
-#: 1500-1501 ms every time, with zero "livePlayReq echo received" among them.
-#: So it is the same pure latency as its sibling, and it costs 1.25 s of a
-#: 5.4 s time-to-first-media on a cold battery camera - roughly a quarter of the
-#: whole connect.  Same value, same reasoning, same override.
-_LIVEPLAY_ECHO_S_FAST = 0.25
 
 
 def _sdes_liveplay_echo_timeout(fast_liveplay: bool) -> float:
@@ -786,7 +777,9 @@ def _sdes_liveplay_echo_timeout(fast_liveplay: bool) -> float:
             val = None
         if val is not None and val >= 0.0:
             return val
-    return _LIVEPLAY_ECHO_S_FAST if fast_liveplay else _LIVEPLAY_ECHO_S
+    # The fast-liveplay path was measured on 2026-09-03 to behave exactly like
+    # the ordinary one (22 of 22 timed out at the same point), so one value.
+    return _LIVEPLAY_ECHO_S
 
 
 def _sdes_max_session_s(device_id: str, path: "Optional[str]" = None) -> float:
@@ -2759,7 +2752,6 @@ class _SdesOpenMixin:
         # SDES path: fast_connect's wait-skips / TURN-strip destabilise the SCTP
         # handshake (session churns ~every 60-90s -> live view drops to snapshot),
         # so the SDES path always uses the full, stable handshake.
-        _fast_connect = False
 
         user_id = user_id or str(self.user_id)
 
@@ -2875,7 +2867,7 @@ class _SdesOpenMixin:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
                 getattr(self, "device_id", "?"),
-                "_open_sdes_stream",
+                "_open_sdes_stream_impl",
                 exc_info=True,
             )
 
@@ -2937,7 +2929,7 @@ class _SdesOpenMixin:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
                 getattr(self, "device_id", "?"),
-                "_open_sdes_stream",
+                "_open_sdes_stream_impl",
                 exc_info=True,
             )
 
@@ -3104,7 +3096,7 @@ class _SdesOpenMixin:
         # the offer goes out immediately with host/srflx candidates and the LAN
         # path connects without waiting on a cloud TURN Allocate round-trip.
         # Connection mode "lan" does the same skip for SDES specifically, where
-        # _fast_connect is force-off (see _resolve_sdes_skip_turn).  Either way
+        # Either way
         # the cost is instrumented below so the saving is measurable: grep
         # ``signaling-wait[`` for sdes-turn-prealloc.
         _skip_turn_prealloc = self._resolve_sdes_skip_turn()
@@ -3117,7 +3109,7 @@ class _SdesOpenMixin:
             _status(f"SDES: connection mode {_conn_mode}")
         _turn_t0 = time.monotonic()
         _turn_did = False
-        if _sdes_turn_entries and not _fast_connect and not _skip_turn_prealloc:
+        if _sdes_turn_entries and not _skip_turn_prealloc:
             _turn_did = True
             try:
                 import re as _re_pre
@@ -3188,44 +3180,12 @@ class _SdesOpenMixin:
             bool(_skip_turn_prealloc),
         )
 
-        # --- DTLS certificate for m=application probe ----------------------- #
-        # PreCon cameras (sptPreconn=1) need SESSION_MODE_REQ via SCTP datachannel.
-        # Include m=application in offer so camera answers with its own DataChannel
-        # section.  Use cryptography (already a dependency) - no aiortc needed.
-        _dc_probe_fp = ""
-        try:
-            from cryptography import x509 as _cx509
-            from cryptography.x509.oid import NameOID as _CNOID
-            from cryptography.hazmat.primitives import (
-                hashes as _ch,
-                serialization as _cser,
-            )
-            from cryptography.hazmat.primitives.asymmetric import ec as _cec
-            from cryptography.hazmat.backends import default_backend as _cbd
-            import datetime as _dt_dc
-            import hashlib as _hs_dc
-
-            _dc_key = _cec.generate_private_key(_cec.SECP256R1(), _cbd())
-            _dc_name = _cx509.Name(
-                [_cx509.NameAttribute(_CNOID.COMMON_NAME, "aidot-dc")]
-            )
-            _dc_cert = (
-                _cx509.CertificateBuilder()
-                .subject_name(_dc_name)
-                .issuer_name(_dc_name)
-                .public_key(_dc_key.public_key())
-                .serial_number(_cx509.random_serial_number())
-                .not_valid_before(_dt_dc.datetime.utcnow())
-                .not_valid_after(_dt_dc.datetime.utcnow() + _dt_dc.timedelta(days=365))
-                .sign(_dc_key, _ch.SHA256(), _cbd())
-            )
-            _dc_der = _dc_cert.public_bytes(_cser.Encoding.DER)
-            _dc_hex = _hs_dc.sha256(_dc_der).hexdigest().upper()
-            _dc_probe_fp = "sha-256 " + ":".join(
-                _dc_hex[i : i + 2] for i in range(0, len(_dc_hex), 2)
-            )
-        except Exception as _cert_exc:
-            _LOGGER.debug("DC probe: cert generation failed: %s", _cert_exc)
+        # PreCon cameras (sptPreconn=1) take SESSION_MODE_REQ over an SCTP data
+        # channel, so the offer carries an m=application section for the camera
+        # to answer. Only its presence matters: the section is keyed by its
+        # a=crypto line, not by a fingerprint (an EC certificate used to be
+        # generated here on every open to decide this boolean).
+        _dc_probe_fp = "present"
 
         # --- Generate PSK before SDP (must precede SDP building) ------------- #
         # PSK is injected into SDP as a=psk: and into wPayload.psk.
@@ -3530,19 +3490,7 @@ class _SdesOpenMixin:
                 # proceed rather than abort on a code we can't classify as terminal
                 # (genuine terminal rejects are still caught on the webrtcResp ack).
                 if _lp_on_sdes == 0:
-                    # Match the sibling raises: close the reserved sockets and
-                    # signal the MQTT thread before propagating.  (No sdp_path
-                    # unlink here - it is not created until later, below.)
-                    for _rsock in (_audio_sock, _video_sock):
-                        try:
-                            _rsock.close()
-                        except Exception:
-                            _LOGGER.debug(
-                                "camera %s: swallowed exception in %s",
-                                getattr(self, "device_id", "?"),
-                                "_bridge_fn",
-                                exc_info=True,
-                            )
+                    # The sockets and the SDP file are released by the exit stack as this raises.
                     outgoing_q.put_nowait(None)  # stop MQTT thread
                     raise RuntimeError(
                         f"livePlay refused by camera (livePlay=0, code={_lp_code_sdes})"
@@ -3687,7 +3635,7 @@ class _SdesOpenMixin:
                                 _LOGGER.debug(
                                     "camera %s: swallowed exception in %s",
                                     getattr(self, "device_id", "?"),
-                                    "_k",
+                                    "_compress_sdp_req",
                                     exc_info=True,
                                 )
                         elif "H265/90000" in _ln and _seen.get("H265/90000") is None:
@@ -3698,7 +3646,7 @@ class _SdesOpenMixin:
                                 _LOGGER.debug(
                                     "camera %s: swallowed exception in %s",
                                     getattr(self, "device_id", "?"),
-                                    "_k",
+                                    "_compress_sdp_req",
                                     exc_info=True,
                                 )
                         elif "apt=" in _ln:
@@ -3827,7 +3775,7 @@ class _SdesOpenMixin:
                     _LOGGER.debug(
                         "camera %s: swallowed exception in %s",
                         getattr(self, "device_id", "?"),
-                        "_k",
+                        "_open_sdes_stream_impl",
                         exc_info=True,
                     )
             # Allocate TURN relay if not already done before offer build.
@@ -4068,7 +4016,11 @@ class _SdesOpenMixin:
         # Skipped in AIDOT_FAST_CONNECT (LAN-direct): no relay alloc, host/srflx
         # candidates only (the synchronous allocate would block the post-offer
         # candidate trickle on a cloud round-trip).
+<<<<<<< HEAD
         if not _relay_addrs and not _fast_connect and not _skip_turn_prealloc:
+=======
+        if not _relay_addrs and not _skip_turn_prealloc:
+>>>>>>> origin/chore/dead-code-pass
             try:
                 import re as _re_relay
                 import hashlib as _hlk
@@ -4196,7 +4148,7 @@ class _SdesOpenMixin:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
                 getattr(self, "device_id", "?"),
-                "_open_sdes_stream",
+                "_open_sdes_stream_impl",
                 exc_info=True,
             )
         # When the cloud supplied no TURN entry, fall back to the vendor's TURN
@@ -4228,7 +4180,7 @@ class _SdesOpenMixin:
                     _LOGGER.debug(
                         "camera %s: swallowed exception in %s",
                         getattr(self, "device_id", "?"),
-                        "_send_sdes_ice_cand",
+                        "_open_sdes_stream_impl",
                         exc_info=True,
                     )
             # Punch to TURN allocation port (5349) as well so port-restricted NAT
@@ -4241,7 +4193,7 @@ class _SdesOpenMixin:
                         _LOGGER.debug(
                             "camera %s: swallowed exception in %s",
                             getattr(self, "device_id", "?"),
-                            "_send_sdes_ice_cand",
+                            "_open_sdes_stream_impl",
                             exc_info=True,
                         )
             _status(
@@ -4307,7 +4259,7 @@ class _SdesOpenMixin:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
                     getattr(self, "device_id", "?"),
-                    "_is_self_peer_ip",
+                    "_open_sdes_stream_impl",
                     exc_info=True,
                 )
         while time.monotonic() < _stun_deadline:
@@ -4507,7 +4459,7 @@ class _SdesOpenMixin:
                             _LOGGER.debug(
                                 "camera %s: swallowed exception in %s",
                                 getattr(self, "device_id", "?"),
-                                "_is_self_peer_ip",
+                                "_open_sdes_stream_impl",
                                 exc_info=True,
                             )
                 else:
@@ -4552,7 +4504,7 @@ class _SdesOpenMixin:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
                     getattr(self, "device_id", "?"),
-                    "_is_self_peer_ip",
+                    "_open_sdes_stream_impl",
                     exc_info=True,
                 )
         if _stun_count:
@@ -4631,7 +4583,7 @@ class _SdesOpenMixin:
                     _LOGGER.debug(
                         "camera %s: swallowed exception in %s",
                         getattr(self, "device_id", "?"),
-                        "_is_self_peer_ip",
+                        "_open_sdes_stream_impl",
                         exc_info=True,
                     )
             # Retry STUN window (8 s)
@@ -4691,7 +4643,7 @@ class _SdesOpenMixin:
                             _LOGGER.debug(
                                 "camera %s: swallowed exception in %s",
                                 getattr(self, "device_id", "?"),
-                                "_is_self_peer_ip",
+                                "_open_sdes_stream_impl",
                                 exc_info=True,
                             )
                     else:
@@ -4799,7 +4751,7 @@ class _SdesOpenMixin:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
                     getattr(self, "device_id", "?"),
-                    "_is_self_peer_ip",
+                    "_open_sdes_stream_impl",
                     exc_info=True,
                 )
         if _pre_launch_answer_sdp:
@@ -4871,70 +4823,8 @@ class _SdesOpenMixin:
             if _cam_key_video and _cam_key_video != srtp_key_video:
                 _status("Using camera's video SRTP key from answer (was our offer key)")
                 srtp_key_video = _cam_key_video
-            # Rewrite SDP file on disk with the (potentially updated) keys.
-            # TUTK cameras (A001064/A001513) probe with TUTK 0xC8 frames then
-            # switch to SRTP after the stream trigger.  Use SAVPF + crypto so
-            # ffmpeg can decrypt real SRTP.  Synthesized fake-RTP probe packets
-            # are plain and will fail SRTP auth (ffmpeg skips them); real SRTP
-            # audio/video will decode correctly.
-            _ts = int(time.time())
-            if _use_plain_rtp:
-                # RTP/AVP (no crypto) because we decrypt SDES ourselves and
-                # forward plain RTP to ffmpeg; ffmpeg must not expect SRTP auth.
-                _updated_sdp = (
-                    "v=0\r\n"
-                    f"o=- {_ts} {_ts} IN IP4 0.0.0.0\r\n"
-                    "s=aidot-tutk-rx\r\n"
-                    "t=0 0\r\n"
-                    f"m=audio {audio_port} RTP/AVP 0 8\r\n"
-                    "c=IN IP4 0.0.0.0\r\n"
-                    "a=rtpmap:0 PCMU/8000\r\n"
-                    "a=rtpmap:8 PCMA/8000\r\n"
-                    "a=rtcp-mux\r\n"
-                    f"m=video {video_port} RTP/AVP 96 97 98\r\n"
-                    "c=IN IP4 0.0.0.0\r\n"
-                    "a=rtpmap:96 H264/90000\r\n"
-                    "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
-                    "profile-level-id=42e01f\r\n"
-                    "a=rtpmap:97 H265/90000\r\n"
-                    "a=fmtp:97 level-id=93\r\n"
-                    "a=rtpmap:98 H265/90000\r\n"
-                    "a=fmtp:98 level-id=93\r\n"
-                    "a=rtcp-mux\r\n"
-                )
-            else:
-                _updated_sdp = (
-                    "v=0\r\n"
-                    f"o=- {_ts} {_ts} IN IP4 0.0.0.0\r\n"
-                    "s=aidot-sdes-rx\r\n"
-                    "t=0 0\r\n"
-                    f"m=audio {audio_port} RTP/SAVPF 0 8\r\n"
-                    "c=IN IP4 0.0.0.0\r\n"
-                    f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
-                    "a=rtpmap:0 PCMU/8000\r\n"
-                    "a=rtpmap:8 PCMA/8000\r\n"
-                    "a=rtcp-mux\r\n"
-                    f"m=video {video_port} RTP/SAVPF 96 97\r\n"
-                    "c=IN IP4 0.0.0.0\r\n"
-                    f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
-                    "a=rtpmap:96 H264/90000\r\n"
-                    "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
-                    "profile-level-id=42e01f\r\n"
-                    "a=rtpmap:97 H265/90000\r\n"
-                    "a=fmtp:97 level-id=93\r\n"
-                    "a=rtcp-mux\r\n"
-                )
-            try:
-                await asyncio.get_running_loop().run_in_executor(
-                    None,
-                    lambda: _write_text_file(
-                        sdp_path, _inject_sprop(_updated_sdp, self.device_id)
-                    ),
-                )
-            except Exception as _sdp_exc:
-                _LOGGER.warning(
-                    "_open_sdes_stream: could not rewrite SDP: %s", _sdp_exc
-                )
+            # (The SDP file is written once, below, after the bridge decides
+            # its final form; an earlier rewrite here was always replaced.)
 
         # --- SCTP helper functions (always defined - even when answer arrives late) --- #
         def _crc32c_fn(data):
@@ -4960,18 +4850,6 @@ class _SdesOpenMixin:
             n = 4 + len(data)
             raw = _st_sc.pack("!BBH", ctype, flags, n) + data
             return raw + b"\x00" * ((-len(raw)) % 4)
-
-        def _sctp_init():
-            import struct as _st_sc
-            import random as _r_sc
-
-            if _sctp["local_tag"] == 0:
-                _sctp["local_tag"] = _r_sc.randint(1, 0xFFFFFFFF)
-                _sctp["local_tsn"] = _r_sc.randint(1, 0xFFFFFFFF)
-            body = _st_sc.pack(
-                "!IIHHI", _sctp["local_tag"], 131072, 1024, 2048, _sctp["local_tsn"]
-            )
-            return _sctp_pkt(0, _sctp_chunk(0x01, 0, body))
 
         def _sctp_parse_init(pkt):
             import struct as _st_sc
@@ -6203,7 +6081,7 @@ class _SdesOpenMixin:
                             _LOGGER.debug(
                                 "camera %s: swallowed exception in %s",
                                 getattr(self, "device_id", "?"),
-                                "_bridge_fn",
+                                "_resend_avio_living",
                                 exc_info=True,
                             )
                         for _rp in [_re_enc, _re_plain]:
@@ -6221,7 +6099,7 @@ class _SdesOpenMixin:
                                 _LOGGER.debug(
                                     "camera %s: swallowed exception in %s",
                                     getattr(self, "device_id", "?"),
-                                    "_bridge_fn",
+                                    "_resend_avio_living",
                                     exc_info=True,
                                 )
 
@@ -6439,7 +6317,7 @@ class _SdesOpenMixin:
                                 _LOGGER.debug(
                                     "camera %s: swallowed exception in %s",
                                     getattr(self, "device_id", "?"),
-                                    "_probe_source_verdict",
+                                    "_bridge_fn",
                                     exc_info=True,
                                 )
                             try:
@@ -6739,7 +6617,7 @@ class _SdesOpenMixin:
                                         _LOGGER.debug(
                                             "camera %s: swallowed exception in %s",
                                             getattr(self, "device_id", "?"),
-                                            "_persistent_sdes_cmd",
+                                            "_bridge_fn",
                                             exc_info=True,
                                         )
                                 _avio_living_sent = True
@@ -7395,7 +7273,7 @@ class _SdesOpenMixin:
                                         _LOGGER.debug(
                                             "camera %s: swallowed exception in %s",
                                             getattr(self, "device_id", "?"),
-                                            "_persistent_sdes_cmd",
+                                            "_bridge_fn",
                                             exc_info=True,
                                         )
                                     if not _rtcp_sent:
@@ -7407,7 +7285,7 @@ class _SdesOpenMixin:
                                             _LOGGER.debug(
                                                 "camera %s: swallowed exception in %s",
                                                 getattr(self, "device_id", "?"),
-                                                "_enc_c8_sctp",
+                                                "_bridge_fn",
                                                 exc_info=True,
                                             )
                                     if _bridge_fn._tutk_count == 1:
@@ -7514,7 +7392,7 @@ class _SdesOpenMixin:
                                             _LOGGER.debug(
                                                 "camera %s: swallowed exception in %s",
                                                 getattr(self, "device_id", "?"),
-                                                "_enc_c8_sctp",
+                                                "_bridge_fn",
                                                 exc_info=True,
                                             )
                                 # Counted for the first-media trigger rule: this
@@ -8226,25 +8104,7 @@ class _SdesOpenMixin:
                 " - camera likely requires DTLS; falling back"
             )
             # Stop bridge thread by closing its sockets before we raise.
-            for _rsock in (_audio_sock, _video_sock):
-                try:
-                    _rsock.close()
-                except Exception:
-                    _LOGGER.debug(
-                        "camera %s: swallowed exception in %s",
-                        getattr(self, "device_id", "?"),
-                        "_bridge_fn",
-                        exc_info=True,
-                    )
-            try:
-                os.unlink(sdp_path)
-            except Exception:
-                _LOGGER.debug(
-                    "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
-                    "_bridge_fn",
-                    exc_info=True,
-                )
+            # The sockets and the SDP file are released by the exit stack as this raises.
             outgoing_q.put_nowait(None)  # stop MQTT thread
             raise CameraMixin._SdesNoAnswerError()
         elif (
@@ -8413,7 +8273,7 @@ class _SdesOpenMixin:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
                     getattr(self, "device_id", "?"),
-                    "_first_media_stall_report",
+                    "_report_first_media_stall",
                     exc_info=True,
                 )
 
@@ -8581,7 +8441,7 @@ class _SdesOpenMixin:
                         _LOGGER.debug(
                             "camera %s: swallowed exception in %s",
                             getattr(self, "device_id", "?"),
-                            "answer_pt_kinds",
+                            "_open_sdes_stream_impl",
                             exc_info=True,
                         )
                 if (
@@ -8810,7 +8670,7 @@ class _SdesOpenMixin:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
                     getattr(self, "device_id", "?"),
-                    "video_pt_from_answer_sdp",
+                    "_open_sdes_stream_impl",
                     exc_info=True,
                 )
             _pin_pt = _resolve_sdes_video_pt()
@@ -8919,7 +8779,7 @@ class _SdesOpenMixin:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
                     getattr(self, "device_id", "?"),
-                    "_open_sdes_stream",
+                    "_open_sdes_stream_impl",
                     exc_info=True,
                 )
         # Direct publish (AIDOT_DIRECT_PUBLISH): an in-process RTSP publisher
@@ -9004,25 +8864,7 @@ class _SdesOpenMixin:
         if not _direct_publish and _ffmpeg_path() is None:
             # ffmpeg is not installed - clean up and surface a clear error
             # before launching (avoids a cryptic FileNotFoundError).
-            for _rsock in (_audio_sock, _video_sock):
-                try:
-                    _rsock.close()
-                except Exception:
-                    _LOGGER.debug(
-                        "camera %s: swallowed exception in %s",
-                        getattr(self, "device_id", "?"),
-                        "_bridge_fn",
-                        exc_info=True,
-                    )
-            try:
-                os.unlink(sdp_path)
-            except Exception:
-                _LOGGER.debug(
-                    "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
-                    "_bridge_fn",
-                    exc_info=True,
-                )
+            # The sockets and the SDP file are released by the exit stack as this raises.
             outgoing_q.put_nowait(None)  # stop MQTT thread
             raise RuntimeError(
                 "ffmpeg not found - install ffmpeg to stream SDES-SRTP cameras.\n"
@@ -9036,25 +8878,7 @@ class _SdesOpenMixin:
             _cl(_reap, proc)  # kill ffmpeg if the open is cancelled before hand-off
         except FileNotFoundError:
             # ffmpeg is not installed - clean up and surface a clear error.
-            for _rsock in (_audio_sock, _video_sock):
-                try:
-                    _rsock.close()
-                except Exception:
-                    _LOGGER.debug(
-                        "camera %s: swallowed exception in %s",
-                        getattr(self, "device_id", "?"),
-                        "_bridge_fn",
-                        exc_info=True,
-                    )
-            try:
-                os.unlink(sdp_path)
-            except Exception:
-                _LOGGER.debug(
-                    "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
-                    "_bridge_fn",
-                    exc_info=True,
-                )
+            # The sockets and the SDP file are released by the exit stack as this raises.
             outgoing_q.put_nowait(None)  # stop MQTT thread
             raise RuntimeError(
                 "ffmpeg not found - install ffmpeg to stream SDES-SRTP cameras.\n"
@@ -9354,25 +9178,7 @@ class _SdesOpenMixin:
                     proc.wait(timeout=2)
                 except Exception:
                     proc.kill()
-                for _rsock in (_audio_sock, _video_sock):
-                    try:
-                        _rsock.close()
-                    except Exception:
-                        _LOGGER.debug(
-                            "camera %s: swallowed exception in %s",
-                            getattr(self, "device_id", "?"),
-                            "_udp_port_bound",
-                            exc_info=True,
-                        )
-                try:
-                    os.unlink(sdp_path)
-                except Exception:
-                    _LOGGER.debug(
-                        "camera %s: swallowed exception in %s",
-                        getattr(self, "device_id", "?"),
-                        "_udp_port_bound",
-                        exc_info=True,
-                    )
+                # The sockets and the SDP file are released by the exit stack as this raises.
                 outgoing_q.put_nowait(None)  # signal MQTT thread to exit
                 raise CameraMixin._SdesNoAnswerError()
             else:

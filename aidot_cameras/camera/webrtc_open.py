@@ -1,6 +1,6 @@
 """WebRTC (DTLS-SRTP) stream-open state machine, split out of client.py.
 
-``CameraMixin._async_open_webrtc_stream_impl`` is the ~3.3k-line DTLS open path.
+``CameraMixin._async_open_webrtc_stream_impl`` is the DTLS open path (one very long coroutine).
 It lives here as a mixin to keep client.py readable; behaviour-preserving (the
 method body is unchanged except for a lazy import that breaks the
 client<->webrtc_open cycle).  CameraMixin inherits this mixin, so ``self`` is a
@@ -958,7 +958,6 @@ class _WebRTCOpenMixin:
         # must not consume ice_q: the DTLS fallback re-reads that queue, and a
         # candidate taken by SDES would never reach aiortc.
         ice_cands_seen: list = []
-        cam_ip_q: asyncio.Queue = asyncio.Queue()  # camera IP from setDevAttrNotif
         camera_ready_ev: asyncio.Event = asyncio.Event()  # set when camera is on MQTT
         liveplay_echo_ev: asyncio.Event = (
             asyncio.Event()
@@ -999,8 +998,6 @@ class _WebRTCOpenMixin:
         # Confirmed 2026-05-02: both A000088 and A001064 PTZ report
         # sptPreconn:1.  AVIO LIVING (SESSION_MODE_REQ=5376) must be sent
         # via the data channel to trigger streaming in PreCon cameras.
-        _spt_preconn: list = [False]
-
         # Gate: block asyncio until MQTT is connected + subscribed
         import threading as _threading
 
@@ -1031,34 +1028,6 @@ class _WebRTCOpenMixin:
         def _on_mqtt_ready(st: dict) -> None:
             _mqtt_conn_status.update(st)
             _mqtt_ready_ev.set()
-
-        def _extract_cam_ip(method_name: str, inner: dict, msg: dict) -> None:
-            _cam_ip = (
-                inner.get("ipAddress")
-                or inner.get("ip")
-                or inner.get("localIp")
-                or inner.get("localIPAddress")
-                or inner.get("wlanIp")
-                or inner.get("wlanIPAddress")
-                or inner.get("deviceIp")
-                or inner.get("localAddr")
-                or msg.get("ipAddress")
-                or msg.get("ip")
-                or msg.get("localIp")
-                or msg.get("localIPAddress")
-            )
-            if _cam_ip:
-                loop.call_soon_threadsafe(cam_ip_q.put_nowait, _cam_ip)
-                loop.call_soon_threadsafe(
-                    lambda ip=_cam_ip: _status(f"{method_name}: camera IP = {ip}")
-                )
-            else:
-                _LOGGER.warning(
-                    "%s: no IP address field found; inner_keys=%s  msg_keys=%s",
-                    method_name,
-                    list(inner.keys()),
-                    [k for k in msg if k != "payload"],
-                )
 
         def _on_mqtt_message(topic: str, payload_str: str) -> None:
             # Never the body: the broker echoes our own webrtcReq (with its
@@ -1270,26 +1239,10 @@ class _WebRTCOpenMixin:
                         )
                     )
                 )
-            elif method == "setDevAttrNotif":
-                # Camera broadcasts its real LAN IP shortly after ICE starts.
-                # Capture it so the role-reversal path can inject synthetic
-                # remote candidates (camera-IP + echoed ports) to give aiortc
-                # a concrete target for STUN probes when the camera is ICE-lite
-                # and won't send its own binding requests.
-                _extract_cam_ip("setDevAttrNotif", inner, msg)
-                # Also capture sptPreconn (PreCon / PreConnect support flag).
-                # Confirmed 2026-05-02: both A001064 PTZ and A000088 have
-                # sptPreconn:1.  Per BaseKVSCameraView.k():805-815, the official
-                # client sends AVIO LIVING (SESSION_MODE_REQ=5376) via the data
-                # channel only when isSupportPreCon() is true.  Set the flag
-                # here so the DC on("open") callback can send LIVING.
-                _spt = inner.get("attr", {}).get("sptPreconn", 0)
-                if _spt:
-                    loop.call_soon_threadsafe(lambda: _spt_preconn.__setitem__(0, True))
-            elif method == "getDevAttrResp":
-                # Defensive: some camera firmware pushes getDevAttrResp rather
-                # than setDevAttrNotif.  Extract the LAN IP if present.
-                _extract_cam_ip("getDevAttrResp", inner, msg)
+            elif method in ("setDevAttrNotif", "getDevAttrResp"):
+                # Attribute notifications: nothing to do here. (They used to
+                # feed a camera-IP pipeline that no longer has a consumer.)
+                pass
             elif method == "getIceConfigResp":
                 # Capture TURN server credentials so aiortc can use them.
                 # getIceConfigResp arrives before RTCPeerConnection is created,
@@ -1772,7 +1725,7 @@ class _WebRTCOpenMixin:
                     _LOGGER.debug(
                         "camera %s: swallowed exception in %s",
                         getattr(self, "device_id", "?"),
-                        "_http_keepalive",
+                        "_async_open_webrtc_stream_impl",
                         exc_info=True,
                     )
 
@@ -2378,7 +2331,7 @@ class _WebRTCOpenMixin:
             # already generate (deviceId_random_count_0_streamID).  Camera
             # firmware likely pattern-matches this label.
             _dc_label = f"data-channel-of-{peer_id}"
-            # Pre-negotiated channel (negotiated=True, id=1): skip DCEP
+            # Pre-negotiated channel (negotiated=True, id=0): skip DCEP
             # entirely.  Tested default (DCEP) createDataChannel on
             # 2026-04-25 - DTLS regression: aiortc allocates a second
             # ICE/DTLS transport for the DCEP-mode datachannel that doesn't
@@ -2685,7 +2638,7 @@ class _WebRTCOpenMixin:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
                     getattr(self, "device_id", "?"),
-                    "_on_track",
+                    "_async_open_webrtc_stream_impl",
                     exc_info=True,
                 )
 
@@ -2868,89 +2821,10 @@ class _WebRTCOpenMixin:
                 )
             )
 
-        # Store ICE candidates for reconnect re-send (camera may quickConn-reset
-        # during the signaling wait and need a fresh offer + candidates).
-        _dtls_ice_payloads: list = []  # list of (topic, json_str)
-
-        # Forward our own ICE candidates to the camera via MQTT
-        @pc.on("icecandidate")
-        def _on_local_ice(candidate) -> None:
-            # Diag: aiortc gathers candidates during setLocalDescription and
-            # may never fire this event (vanilla-ICE behavior).  Log unconditionally
-            # so the next run tells us whether we can rely on this hook or must
-            # do the manual local-SDP candidate extraction (see post-SRD block).
-            _status(f"icecandidate event fired: {candidate!r}")
-            if candidate is None:
-                return
-            # Skip candidates that remote cameras cannot use.
-            # Docker-bridge (172.17.x), CGNAT/Tailscale (100.x.x.x), and
-            # IPv6 addresses are unreachable from cameras on the internet or
-            # a different LAN segment.  Sending them wastes ICE checking time
-            # and can cause ICE-lite cameras to echo them back as their own
-            # candidates, polluting the remote candidate list.
-            import re as _re
-
-            _cand_ip = getattr(candidate, "ip", "") or ""
-            if _re.match(r"^172\.17\.", _cand_ip):
-                return  # Docker bridge - skip
-            if _re.match(r"^100\.", _cand_ip):
-                return  # CGNAT / Tailscale - skip
-            if ":" in _cand_ip:
-                return  # IPv6 - skip
-            cand_str = (
-                f"candidate:{candidate.foundation} {candidate.component} "
-                f"{candidate.protocol} {candidate.priority} {candidate.ip} "
-                f"{candidate.port} typ {candidate.type}"
-            )
-            if getattr(candidate, "relatedAddress", None):
-                cand_str += (
-                    f" raddr {candidate.relatedAddress} rport {candidate.relatedPort}"
-                )
-            # Include sdpMid/sdpMLineIndex so the camera can map the candidate
-            # to the correct m-section.  A001064 and similar firmware needs these
-            # fields; without them the camera may silently ignore the candidates.
-            _cand_obj: dict = {"candidate": cand_str}
-            _c_mid = getattr(candidate, "sdpMid", None)
-            _c_mid_idx = getattr(candidate, "sdpMLineIndex", None)
-            if _c_mid is not None:
-                _cand_obj["sdpMid"] = _c_mid
-            if _c_mid_idx is not None:
-                _cand_obj["sdpMLineIndex"] = _c_mid_idx
-            payload = json.dumps(
-                {
-                    "method": "iceCandidateReq",
-                    "service": "IPC",
-                    "devId": device_id,
-                    "srcAddr": f"0.{user_id}",
-                    "seq": _seq(),
-                    "tst": int(time.time() * 1000),
-                    **(
-                        {"userId": _numeric_uid_raw}
-                        if _numeric_uid_raw is not None
-                        else {}
-                    ),
-                    "payload": {
-                        # dstAddr routes the candidate to the target device (device ID,
-                        # not user ID).  HAR captures from the official AiDot web app
-                        # confirm payload.dstAddr = deviceId on every iceCandidateReq.
-                        "dstAddr": device_id,
-                        # wPayload is the browser-style nested format required by
-                        # newer firmware (e.g. LK.IPC.A001064) that parses
-                        # payload.wPayload.candidate rather than payload.candidate.
-                        "wPayload": {
-                            "peerid": peer_id,
-                            "candidate": _cand_obj,
-                        },
-                        # Keep flat fields for older firmware that reads payload.peerid /
-                        # payload.candidate directly.
-                        "peerid": peer_id,
-                        "devId": device_id,
-                        "candidate": _cand_obj,
-                    },
-                }
-            )
-            outgoing_q.put_nowait((ice_cand_topic, payload))
-            _dtls_ice_payloads.append((ice_cand_topic, payload))
+        # aiortc gathers every candidate inside setLocalDescription and never
+        # emits "icecandidate", so there is nothing to trickle from here: our
+        # candidates travel in the offer SDP. (A handler for that event lived
+        # here for a year and never ran.)
 
         # Wait for EITHER webrtcResp (normal) OR webrtcReq from camera (role reversal).
         # Some firmware (e.g. LK.IPC.A001064) responds to our offer by sending back
@@ -2998,12 +2872,10 @@ class _WebRTCOpenMixin:
                 _status(
                     f"camera quickConn-reset before signaling reply"
                     f" (resend {_init_reconnect_resends})"
-                    " - re-sending DTLS webrtcReq + ICE candidates"
+                    " - re-sending DTLS webrtcReq"
                 )
                 await asyncio.sleep(1.5)  # let camera re-subscribe to MQTT
                 outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
-                for _di_p in _dtls_ice_payloads:
-                    outgoing_q.put_nowait(_di_p)
         _rr_done, _rr_pending = _init_done, _init_pending
         if terminal_error_fut.done():
             # GAP D on the DTLS path: the camera said -50002/-50015. Before
@@ -3063,8 +2935,6 @@ class _WebRTCOpenMixin:
                     )
                     await asyncio.sleep(1.5)  # let camera re-subscribe
                     outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
-                    for _di_p in _dtls_ice_payloads:
-                        outgoing_q.put_nowait(_di_p)
             if _rr_done2:
                 # Real response arrived - proceed normally
                 _rr_done, _rr_pending = _rr_done2, _rr_pending2
@@ -3079,8 +2949,6 @@ class _WebRTCOpenMixin:
                     " - re-sending DTLS webrtcReq (camera clearing SDES session)"
                 )
                 outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
-                for _di_p in _dtls_ice_payloads:
-                    outgoing_q.put_nowait(_di_p)
 
                 _rr_ext_limit = 20.0
                 _rr_ext_deadline = asyncio.get_running_loop().time() + _rr_ext_limit
@@ -3104,8 +2972,6 @@ class _WebRTCOpenMixin:
                         )
                         await asyncio.sleep(1.5)
                         outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
-                        for _di_p in _dtls_ice_payloads:
-                            outgoing_q.put_nowait(_di_p)
 
                 if _rr_done3:
                     # Camera finally answered - proceed via normal path
@@ -3137,10 +3003,6 @@ class _WebRTCOpenMixin:
             raise RuntimeError(
                 f"async_open_webrtc_stream: no webrtcResp received within {timeout}s"
             )
-
-        # Ports from camera counter-offer for synthetic candidate injection.
-        # Populated in the role-reversal path below; consumed in the ICE wait loop.
-        _rr_cam_ports: list = []  # list of (sdpMid, sdpMLineIndex, port)
 
         # Stored webrtcResp + ICE candidate payloads for reconnect re-send.
         # Set in the role-reversal block; consumed in the ICE wait loop when the
@@ -3268,21 +3130,11 @@ class _WebRTCOpenMixin:
             _cam_counter_sdp = (camera_offer_fut.result() or {}).get("sdp", "")
             _cam_ice_ufrag: str | None = None
             _cam_ice_pwd: str | None = None
-            _rr_cm_idx = -1
             for _rr_cln in _cam_counter_sdp.splitlines():
                 if _rr_cln.startswith("a=ice-ufrag:") and _cam_ice_ufrag is None:
                     _cam_ice_ufrag = _rr_cln.strip()
                 if _rr_cln.startswith("a=ice-pwd:") and _cam_ice_pwd is None:
                     _cam_ice_pwd = _rr_cln.strip()
-                # Collect ports from the camera counter-offer m-lines for later
-                # synthetic candidate injection (cam-IP + echoed port).
-                if _rr_cln.startswith("m="):
-                    _rr_cm_idx += 1
-                    _rr_pm = _rr_re.match(r"m=\S+ (\d+)", _rr_cln)
-                    if _rr_pm:
-                        _rr_cp = int(_rr_pm.group(1))
-                        if _rr_cp != 0 and _rr_cm_idx <= 1:
-                            _rr_cam_ports.append((str(_rr_cm_idx), _rr_cm_idx, _rr_cp))
             # Use pc.localDescription.sdp (the unpatched aiortc offer) as the
             # synthetic answer base so the codec list matches aiortc's internal state
             # (VP8/H264 PT=97-102 for all m-sections, no PT=103=H265).
@@ -3652,10 +3504,6 @@ class _WebRTCOpenMixin:
             # those sections so aiortc sees port=0/inactive for H265 - we
             # still benefit from the camera negotiating H265 (it proves the
             # 4-section BUNDLE is aligned) but we only decode H264 and audio.
-            _h265_offer_pts: set = (
-                set()
-            )  # H265 no longer offered; camera won't answer H265 PTs
-
             # Our offer's video payload types, used both here (to tell the
             # camera's real video answer from an H265 section it added) and
             # again by _aiortc_answer below.
@@ -3707,23 +3555,7 @@ class _WebRTCOpenMixin:
                         f"a=mid:{_m}" if _bl.startswith("a=mid:") else _bl
                         for _bl in _ans_block
                     ]
-                # Force-stub H265 sections: detect by camera's answer m-line
-                # using only our H265 PTs (103/104).
-                _ans_h265 = False
-                if _ans_block and _ans_kind == "video":
-                    for _al in _ans_block:
-                        if _al.startswith("m="):
-                            _pts = set(_al.split()[3:])
-                            if _pts and _pts.issubset(_h265_offer_pts):
-                                _ans_h265 = True
-                            break
-                if _ans_h265:
-                    _s = _stub(_m, _expected_kind)
-                    _rebuilt.extend(_s)
-                    _stub_count += 1
-                    if _s and _s[0].split()[1] == "0":
-                        _rejected_mids.add(_m)
-                elif _ans_block and _ans_kind == _expected_kind:
+                if _ans_block and _ans_kind == _expected_kind:
                     _rebuilt.extend(_ans_block)
                     _kept_count += 1
                 else:
@@ -4377,14 +4209,9 @@ class _WebRTCOpenMixin:
             # non-parity, so it is removed.  The camera's real candidates are still
             # processed below from its second webrtcResp SDP (second_answer_fut) and
             # from the iceCandidateReq trickle.  Drain the queue so it cannot grow.
-            while True:
-                try:
-                    cam_ip_q.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
             # Process camera's real second webrtcResp SDP for ICE candidates.
             # For LK.IPC.A001064 (role-reversal), the camera's counter-offer echoes
-            # our SDP (so _rr_cam_ports has OUR ports, not camera's).  The camera's
+            # our SDP (it echoes OUR ports, not the camera's).  The camera's
             # real second webrtcResp (captured in second_answer_fut) typically
             # contains the camera's actual a=candidate: host lines with its real
             # ICE port.  Without this, aiortc probes wrong ports forever and ICE
@@ -4444,7 +4271,6 @@ class _WebRTCOpenMixin:
             _remaining = deadline - time.monotonic()
             if (
                 not _userconnect_midloop_sent
-                and cam_ip_q.empty()
                 and _remaining > 0
                 and _remaining <= _ice_timeout / 2.0
             ):

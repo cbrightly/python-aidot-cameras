@@ -590,7 +590,7 @@ def _compress_sdp_for_camera(sdp: str) -> str:
                             _kept_pts.add(ln.split(":")[1].split(" ")[0])
                         except Exception:
                             _LOGGER.debug(
-                                "swallowed exception in %s", "keep", exc_info=True
+                                "swallowed exception in %s", "_compress_sdp_for_camera", exc_info=True
                             )
             elif media_type == "m=video":
                 if "H264/90000" in ln and seen.get("H264/90000") is None:
@@ -600,7 +600,7 @@ def _compress_sdp_for_camera(sdp: str) -> str:
                         _kept_pts.add(seen["H264/90000_pt"])
                     except Exception:
                         _LOGGER.debug(
-                            "swallowed exception in %s", "keep", exc_info=True
+                            "swallowed exception in %s", "_compress_sdp_for_camera", exc_info=True
                         )
                 elif "H265/90000" in ln and seen.get("H265/90000") is None:
                     keep(ln, "H265/90000")
@@ -609,7 +609,7 @@ def _compress_sdp_for_camera(sdp: str) -> str:
                         _kept_pts.add(seen["H265/90000_pt"])
                     except Exception:
                         _LOGGER.debug(
-                            "swallowed exception in %s", "keep", exc_info=True
+                            "swallowed exception in %s", "_compress_sdp_for_camera", exc_info=True
                         )
                 elif "apt=" in ln:
                     try:
@@ -2391,7 +2391,7 @@ def _mqtt_session_sync(
         try:
             client.disconnect()
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", "_on_log", exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "_mqtt_session_sync", exc_info=True)
         return [], status
 
     if not status["connected"]:
@@ -2406,7 +2406,7 @@ def _mqtt_session_sync(
         try:
             client.disconnect()
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", "_on_log", exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "_mqtt_session_sync", exc_info=True)
         return [], status
 
     _LOGGER.info(
@@ -2425,7 +2425,7 @@ def _mqtt_session_sync(
         try:
             on_ready(status)
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", "_on_log", exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "_mqtt_session_sync", exc_info=True)
 
     collected = []
     deadline = _time.monotonic() + duration
@@ -2482,7 +2482,7 @@ def _mqtt_session_sync(
             try:
                 on_message(*item)
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", "_on_log", exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", "_mqtt_session_sync", exc_info=True)
 
     client.loop_stop()
     try:

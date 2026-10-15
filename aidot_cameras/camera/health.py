@@ -154,7 +154,7 @@ def dtls_snapshot(
     which the path is ``relay`` when any remote candidate is a relay, else
     ``direct``, else unknown. ``canary`` is the serve's video canary (frames,
     keyframes, largest frame count between keyframes); it is accepted for the
-    call sites' sake and not reported - see ``_format``. There is no byte count
+    call sites' sake and not reported - see ``format_health_line``. There is no byte count
     on this transport, so the
     snapshot carries none and the line says nothing about bytes.
     """

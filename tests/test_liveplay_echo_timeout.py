@@ -21,20 +21,19 @@ import pytest
 
 from aidot_cameras.camera.sdes_open import (
     _LIVEPLAY_ECHO_S,
-    _LIVEPLAY_ECHO_S_FAST,
     _sdes_liveplay_echo_timeout,
 )
 
 
 class TestTheDefault:
-    def test_only_the_non_fast_path_moves(self, monkeypatch):
+    def test_both_paths_share_the_one_value(self, monkeypatch):
         monkeypatch.delenv("AIDOT_SDES_LIVEPLAY_ECHO_S", raising=False)
         assert _sdes_liveplay_echo_timeout(False) == _LIVEPLAY_ECHO_S == 0.25
         # The fast-liveplay path was held at 1.5 s only because the 169/169
         # evidence was gathered on the non-fast wait. Measured on its own
         # 2026-09-03 it behaves identically - 22 runs, 22 timeouts at
-        # 1500-1501 ms, no echo ever - so it moves to the same value.
-        assert _sdes_liveplay_echo_timeout(True) == _LIVEPLAY_ECHO_S_FAST == 0.25
+        # 1500-1501 ms, no echo ever - so it is the same constant now.
+        assert _sdes_liveplay_echo_timeout(True) == _LIVEPLAY_ECHO_S == 0.25
 
     def test_it_is_far_below_the_old_five_seconds(self, monkeypatch):
         """The regression this guards: quietly restoring a multi-second wait for

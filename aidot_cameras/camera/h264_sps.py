@@ -255,8 +255,9 @@ def _restriction(w: _Writer, vui: dict) -> None:
 
 @functools.lru_cache(maxsize=64)
 def fix_sps(nal: bytes) -> bytes:
-    """The SPS with ``max_num_reorder_frames = 0`` stated; unchanged if it
-    already states a reorder depth or cannot be read with certainty."""
+    """The SPS with ``max_num_reorder_frames = 0`` stated in place of a
+    non-zero reorder depth; unchanged if it states none (or 0) already or
+    cannot be read with certainty."""
     try:
         s = parse_sps(nal)
     except (ValueError, IndexError):

@@ -13,7 +13,11 @@ reintroduction fails loudly rather than leaking quietly.
 import inspect
 
 from aidot_cameras.camera import client as camera_client
+<<<<<<< HEAD
 from aidot_cameras.camera import playback, sdes_open, webrtc_open
+=======
+from aidot_cameras.camera import sdes_open, webrtc_open
+>>>>>>> origin/chore/dead-code-pass
 from aidot_cameras.camera.protocol import mask_sdp_secrets
 
 _SDP = (
@@ -84,11 +88,14 @@ def test_webrtc_open_masks_the_answer_sdp_it_logs_on_failure():
     assert "mask_sdp_secrets(_ans_sdp)" in src[i : i + 300]
 
 
+<<<<<<< HEAD
 def test_playback_does_not_log_the_decrypted_login_reply():
     src = inspect.getsource(playback)
     assert "LOGIN_RES: %s" not in src
 
 
+=======
+>>>>>>> origin/chore/dead-code-pass
 def test_device_detail_bodies_are_logged_as_keys():
     src = inspect.getsource(camera_client)
     assert "returned no UID for %s. body=%s" not in src

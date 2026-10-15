@@ -6,6 +6,36 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Removed
+- Code that could not run or that nothing called, found by the 2026-10-15
+  review: the DTLS open's `icecandidate` handler (aiortc never emits that
+  event, so the candidate list it fed was always empty and every "resend
+  with ICE candidates" only ever resent the request), the camera-IP pipeline
+  that was only ever drained (and warned with key dumps on every attribute
+  notification), two write-only variables, the H.265 answer-stub branch
+  whose trigger set was empty, the EC certificate generated on every SDES
+  open to decide a boolean, the SCTP client INIT that was never sent, the
+  MQTT form of `async_get_ice_config` (the HTTP form is the one used), the
+  `AIDOT_SDES_IDLE_RELEASE` switch (`stream_idle_s` / `AIDOT_STREAM_IDLE_S`
+  at 0 already means never release), and `TIMESTAMP_POLICIES`, `_TRUTHY`,
+  `hwaccel._compiled_in` and `hwaccel.decoder_args`.
+- **The TUTK and cloud-playback surface.** `async_open_live_stream`,
+  `async_get_p2p_uid` and `async_open_cloud_playback` with the
+  `TutkStreamSession`, `LiveStreamSession` and `CloudPlaybackSession` classes
+  behind them (`camera/tutk.py` and `camera/playback.py`). None could work on
+  any camera this library has seen: the cloud never returns the TUTK UID the
+  P2P path needs, the TUTK native libraries cannot ship, and the cloud does
+  not serve the playback request - each method said as much in its own log
+  line. Recordings are reached through the cloud and on-device APIs that do
+  work (`async_get_cloud_recordings`, `async_list_sd_recordings`).
+  `async_open_kvs_stream` stays as the deprecated alias of
+  `async_open_webrtc_stream`.
+- Inside the SDES open: the `_fast_connect` constant that was always False
+  and the two conditions on it, a second echo-wait constant equal to the
+  first, an SDP rewrite that a later unconditional rewrite always replaced,
+  and five hand-rolled socket/SDP cleanup blocks on error exits that
+  duplicated what the open's exit stack already does.
+
 ### Fixed
 - **A serve loop that dies releases the camera.** The DTLS serve loop and the
   SDES keepalive loop had no guard around their bodies, so an exception

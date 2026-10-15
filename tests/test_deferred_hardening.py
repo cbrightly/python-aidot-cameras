@@ -13,7 +13,6 @@ import pytest
 from aidot_cameras.crypto import aes_encrypt
 from aidot_cameras.camera.client import _mqtt_publish_delivered
 from aidot_cameras.camera.lan_control import _MAGIC, CameraLanClient, CameraLanError
-from aidot_cameras.camera.playback import CloudPlaybackSession
 
 
 # -- _mqtt_device_cmd no longer reports success on a failed broker connection --
@@ -25,30 +24,6 @@ def test_mqtt_publish_delivered_semantics():
     assert _mqtt_publish_delivered({"connected": True}) is True
     assert _mqtt_publish_delivered({"connected": False}) is False  # broker refused
     assert _mqtt_publish_delivered({"error": "timeout"}) is False  # connect error
-
-
-# -- CloudPlaybackSession TLS is opt-in, default off ---------------------------
-
-
-def _cloud_session(use_tls):
-    return CloudPlaybackSession(
-        server_ip="10.0.0.5",
-        server_port=443,
-        heartbeat_interval=10,
-        task_id=1,
-        client_id="c",
-        start_ts_s=0,
-        on_frame=lambda f: None,
-        use_tls=use_tls,
-    )
-
-
-def test_cloud_playback_tls_defaults_off():
-    assert _cloud_session(False)._use_tls is False
-
-
-def test_cloud_playback_tls_opt_in():
-    assert _cloud_session(True)._use_tls is True
 
 
 # -- LAN control: a login we can't complete de-eligibilities the client --------

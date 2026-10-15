@@ -9,7 +9,10 @@ import asyncio
 import inspect
 import queue
 import time
+<<<<<<< HEAD
 import types
+=======
+>>>>>>> origin/chore/dead-code-pass
 
 import pytest
 
@@ -135,7 +138,11 @@ def test_sdes_bridge_thread_logs_an_unexpected_error():
 
 def test_lan_mode_gates_the_turn_preallocation():
     src = inspect.getsource(sdes_open)
+<<<<<<< HEAD
     assert "if not _relay_addrs and not _fast_connect and not _skip_turn_prealloc:" in src
+=======
+    assert "if not _relay_addrs and not _skip_turn_prealloc:" in src
+>>>>>>> origin/chore/dead-code-pass
 
 
 def test_dtls_signaling_wait_watches_the_refusal_future():

@@ -15,6 +15,10 @@ not merged into the active code path.  Each section explains:
 
 ### What it does
 
+> **Removed from the code after 1.0.0rc52**: `TutkStreamSession`, `LiveStreamSession`,
+> `CloudPlaybackSession` and the methods that built them are gone (see the changelog);
+> this section is kept as the record of what was tried.
+
 Three improvements to `TutkStreamSession._start_sync` (the TUTK C SDK P2P path in
 `aidot_cameras/camera/tutk.py`) were researched from the `LdsTutkChannel.java` class in
 a decompiled AiDot APK:

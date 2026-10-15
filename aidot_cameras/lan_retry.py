@@ -258,8 +258,9 @@ class LanRetryMixin:
             self.reset,
         )
         if not ok:
-            # reset() cleared it, but the parked attempt never ran connect()'s
-            # own finally, so make the in-flight flag honest either way.
+            # wait_for cancelled the attempt and its finally cleared this; a
+            # reset() in between may have raced it. Make the flag honest
+            # either way.
             self._connecting = False
         device_id = getattr(self, "device_id", None)
         if getattr(self, "_connect_and_login", False):

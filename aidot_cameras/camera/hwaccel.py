@@ -233,11 +233,6 @@ def _available(cand: List[str]) -> bool:
     return cand[1] in _hwaccels_memo
 
 
-def _compiled_in(name: str) -> bool:
-    """Back-compat shim: is this named decoder in the build?"""
-    return _available(["-c:v", name])
-
-
 # The cameras send 1280x720, and the probe clip matches that deliberately.
 # A smaller clip is cheaper but ranks candidates badly: hardware decoding pays a
 # fixed session-setup cost that dominates a tiny job, so a 320x240 clip can make
@@ -502,6 +497,3 @@ def cached_decoder(codec: str) -> Optional[List[str]]:
     return None
 
 
-def decoder_args(codec: str) -> List[str]:
-    """Input arguments for decoding ``codec``, probing if necessary."""
-    return probe_decoder(codec)

@@ -58,13 +58,6 @@ _LOGGER = logging.getLogger(__name__)
 #: Env switch for the whole feature. On by default since 1.0.0rc44; set it to
 #: 0 to turn the feature off (see direct_publish_enabled below).
 ENV_DIRECT_PUBLISH = "AIDOT_DIRECT_PUBLISH"
-#: Timestamp policies: SDES video is ``steered`` (its clock runs ~7% fast and
-#: steering keeps its even spacing at real-time rate), every other track is
-#: ``hybrid`` (the camera's own deltas, with an arrival-time repair for a gap).
-TIMESTAMP_POLICIES = ("hybrid", "steered")
-
-_TRUTHY = ("1", "true", "yes", "on")
-
 #: go2rtc drops an idle publisher after 15 s; any OPTIONS resets that.
 KEEPALIVE_S = 5.0
 #: Per-request handshake timeout (go2rtc uses 5 s on its side too).
@@ -1173,7 +1166,7 @@ class LoopbackRtpPublisher:
         # ffmpeg it replaces did: the SDES open waits for both loopback ports to
         # be bound before it signals, and the bridge sends audio regardless.
         # Media on a port that is not announced is read and discarded.
-        _, _all_tracks, ports = publish_sdp_from_serve_sdp(serve_sdp)
+        _, _, ports = publish_sdp_from_serve_sdp(serve_sdp)
         self._port_track: List[Optional[int]] = [
             announced_ports.index(p) if p in announced_ports else None for p in ports
         ]
@@ -1321,7 +1314,8 @@ class LoopbackRtpPublisher:
 
     def kill(self) -> None:
         self._request_stop(EXIT_KILLED)
-        # A kill must not wait on anything: release the sockets now.
+        # Give the worker a moment to release the loopback sockets, so a
+        # caller that rebinds the same ports right after the kill can.
         self._done.wait(1.0)
 
     def send_signal(self, _sig) -> None:
