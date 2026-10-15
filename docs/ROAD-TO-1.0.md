@@ -2080,6 +2080,14 @@ Day zero stays 2026-10-11; the target stays 2026-10-25. The reference installati
 
 Day zero stays 2026-10-11; the target stays 2026-10-25, subject to the outage note under `rc50`.
 
+#### 2026-10-15: `rc52` conditions SDES audio
+
+| release | date | find | resets? |
+|---|---|---|---|
+| `rc52` | 2026-10-15 | The SDES direct publisher applied only a fixed `-8` dB trim to the camera's A-law, and an A001064 and an A001513 send their rooms at about -68 and -70 dBFS RMS, so after the trim every sample sat under the first A-law step and both models published digital zero for whole holds (found by a hand check of recordings from the LAN runner on 2026-10-14; the live gate could not see it, which `rc51`'s harness change fixed by measuring audio on every recording). The SDES publisher now runs the same level normalizer the DTLS publisher has run since `rc26`, with the trim as an offset after it defaulting to 0 on this path | Yes - new per-packet code in the SDES publish's audio path, the first media-path change since day zero. The reference installation is still off the network, so the clock restarts when it comes back with this release installed, which the outage note under `rc50` already required |
+
+Day zero becomes the day the reference installation returns with `rc52` on it; the target is ten days after that.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /

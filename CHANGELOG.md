@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc52]
+
 ### Fixed
 - **SDES cameras' served audio is no longer digital zero.** The direct
   publisher (the default serve for A001064 and A001513) applied only the
