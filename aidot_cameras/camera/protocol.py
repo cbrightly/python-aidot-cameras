@@ -3858,3 +3858,34 @@ class AvioRequestMixin:
             waiter.cancel()
             return None
         return await waiter.result(timeout)
+
+
+_SDP_SECRET_ATTRS = ("a=ice-pwd:", "a=psk:")
+
+
+def mask_sdp_secrets(sdp: str) -> str:
+    """``sdp`` with every credential-bearing attribute value masked.
+
+    Camera SDP goes into the log on a handful of paths (an answer that
+    failed to apply, the data-channel probe's echoed section), and users
+    paste those logs into public issues. Three attributes carry secrets:
+    ``a=crypto`` (the SDES SRTP master key and salt after ``inline:``),
+    ``a=ice-pwd`` (the ICE password) and ``a=psk`` (the media PSK carried
+    over signaling). The value is replaced, the attribute name and the
+    rest of the line stay, so the line is still recognisable as what it
+    was. Everything else in the SDP is left untouched.
+    """
+    out = []
+    for ln in sdp.splitlines(keepends=True):
+        stripped = ln.lstrip()
+        if stripped.startswith("a=crypto:"):
+            ln = re.sub(r"inline:[A-Za-z0-9+/=]+", "inline:<masked>", ln)
+        else:
+            for attr in _SDP_SECRET_ATTRS:
+                if stripped.startswith(attr):
+                    head, _, _rest = ln.partition(attr)
+                    tail = "\r\n" if ln.endswith("\r\n") else ("\n" if ln.endswith("\n") else "")
+                    ln = f"{head}{attr}<masked>{tail}"
+                    break
+        out.append(ln)
+    return "".join(out)

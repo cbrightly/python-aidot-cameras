@@ -26,11 +26,13 @@ from .constants import (
 from .models import VideoFrame  # noqa: F401 - forward-ref annotation
 from .sdes import SdesSession
 from .rtsp_publish import (
+    redact_url,
     LoopbackRtpPublisher,
     direct_publish_enabled,
     is_publishable_url,
 )
 from .protocol import (
+    mask_sdp_secrets,
     AVIO_HDR_LEN,
     REMB_TARGET_BPS,
     AvioResponseRouter,
@@ -3250,7 +3252,7 @@ class _SdesOpenMixin:
         _LOGGER.debug(
             "sdes: offer key=%s psk=%s",
             _key_fingerprint(srtp_key_audio),
-            _psk_value_req,
+            _key_fingerprint(_psk_value_req),
         )
         ts = int(time.time())
         # SDES-SRTP cameras use SIP-era plain SDP (RFC 3264 + RFC 3711).
@@ -4834,9 +4836,13 @@ class _SdesOpenMixin:
                     if _in_dc_sec:
                         _dc_ans_lines.append(_aln)
                 if _dc_ans_lines:
+                    # The section carries the camera's a=crypto inline key
+                    # (the data channel's SRTP key); it is masked before this
+                    # reaches the log.
                     _status(
                         "DC probe ACCEPTED: camera answered m=application"
-                        f" ({len(_dc_ans_lines)} lines):\n" + "\n".join(_dc_ans_lines)
+                        f" ({len(_dc_ans_lines)} lines):\n"
+                        + mask_sdp_secrets("\n".join(_dc_ans_lines))
                     )
                 else:
                     _status(
@@ -8979,7 +8985,11 @@ class _SdesOpenMixin:
                 "" if _direct_audio else ", video only",
             )
         else:
-            _LOGGER.info("SDES ffmpeg cmd: %s", " ".join(cmd))
+            # The push URL may carry user:pass@; never log it whole.
+            _LOGGER.info(
+                "SDES ffmpeg cmd: %s",
+                " ".join(redact_url(t) if "://" in t else t for t in cmd),
+            )
         if not _direct_publish and _ffmpeg_path() is None:
             # ffmpeg is not installed - clean up and surface a clear error
             # before launching (avoids a cryptic FileNotFoundError).

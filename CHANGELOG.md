@@ -6,6 +6,22 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **Key material no longer reaches the log.** Four sites printed secrets on
+  paths that Home Assistant users paste into public issues: the SDES media
+  PSK in full at DEBUG (the comment above it already said DEBUG was not low
+  enough); the camera's echoed `m=application` answer section at INFO, which
+  carries the data channel's `a=crypto` inline SRTP key; the first 400
+  characters of every inbound signaling payload at DEBUG, which includes the
+  broker's echo of our own request (with its PSK) and the TURN credentials;
+  and the whole camera answer SDP, ICE password included, at WARNING when it
+  failed to apply. The PSK is now fingerprinted like the SRTP keys, SDP goes
+  through a new `mask_sdp_secrets` (crypto inline keys, `a=ice-pwd`, `a=psk`
+  replaced, everything else kept), payloads are logged by topic and size, the
+  SDES ffmpeg command line has its push URL redacted, the live-stream login
+  reply is no longer logged decrypted, and device-detail bodies are logged as
+  their key names. `tests/test_no_key_material_in_logs.py` pins each site.
+
 ## [1.0.0rc52]
 
 ### Fixed

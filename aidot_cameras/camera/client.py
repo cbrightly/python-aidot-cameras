@@ -2646,9 +2646,9 @@ class CameraMixin(
                 _LOGGER.debug("async_get_p2p_uid: got UID from getP2pId: %s", uid)
                 return str(uid)
             _LOGGER.debug(
-                "async_get_p2p_uid: getP2pId returned no UID for %s. body=%s",
+                "async_get_p2p_uid: getP2pId returned no UID for %s. keys=%s",
                 self.device_id,
-                body,
+                sorted(body) if isinstance(body, dict) else type(body).__name__,
             )
         except Exception as exc:
             _LOGGER.debug(
@@ -2690,10 +2690,10 @@ class CameraMixin(
                     )
                     return str(uid)
                 _LOGGER.debug(
-                    "async_get_p2p_uid: v32%s returned no UID for %s. body=%s",
+                    "async_get_p2p_uid: v32%s returned no UID for %s. keys=%s",
                     path,
                     self.device_id,
-                    body,
+                    sorted(body) if isinstance(body, dict) else type(body).__name__,
                 )
                 # If we got a 200-level response (not 404/405), don't try other paths
                 break

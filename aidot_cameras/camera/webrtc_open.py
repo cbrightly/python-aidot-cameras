@@ -24,6 +24,7 @@ from .constants import _LIVE_PLAY_NOT_READY, fallback_turn_uris, stun_server_uri
 from .sdes_open import _answer_sdp_can_nominate
 from .webrtc import WebRTCSession
 from .protocol import (
+    mask_sdp_secrets,
     AvioResponseRouter,
     _avio_cmd_id,
     _compress_sdp_for_camera,
@@ -1060,7 +1061,9 @@ class _WebRTCOpenMixin:
                 )
 
         def _on_mqtt_message(topic: str, payload_str: str) -> None:
-            _LOGGER.debug("webrtc rx  topic=%s  %.400s", topic, payload_str)
+            # Never the body: the broker echoes our own webrtcReq (with its
+            # psk) and getIceConfigResp carries the TURN credentials.
+            _LOGGER.debug("webrtc rx  topic=%s  bytes=%d", topic, len(payload_str))
             try:
                 msg = json.loads(payload_str)
             except Exception:
@@ -4194,7 +4197,7 @@ class _WebRTCOpenMixin:
                 _LOGGER.warning(
                     "setRemoteDescription failed: %s\n--- camera answer SDP ---\n%s\n--- traceback ---\n%s",
                     exc,
-                    _ans_sdp,
+                    mask_sdp_secrets(_ans_sdp),
                     _tb_dtls.format_exc(),
                 )
                 _status(f"setRemoteDescription failed: {exc}")

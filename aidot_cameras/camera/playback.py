@@ -457,7 +457,11 @@ class LiveStreamSession:
             # Decrypt and log the login response (best-effort -- ignore on error)
             try:
                 resp_plain = aes_ecb_decrypt_str_key(payload, self._aes_key)
-                _LOGGER.debug("LiveStreamSession: LOGIN_RES: %s", resp_plain[:200])
+                # The reply shape is undocumented and the request carried the
+                # session id as a credential: log that it decrypted, not what.
+                _LOGGER.debug(
+                    "LiveStreamSession: LOGIN_RES decrypted (%d chars)", len(resp_plain)
+                )
             except Exception:
                 _LOGGER.debug("LiveStreamSession: LOGIN_RES payload not AES-encrypted")
 
