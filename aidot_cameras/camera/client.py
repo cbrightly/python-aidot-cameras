@@ -5978,20 +5978,29 @@ class CameraMixin(
             "off",
         )
 
-    def _resolve_sdes_audio_gain_db(self) -> float:
-        """Gain (dB) applied to the served SDES audio (the camera mic runs hot).
+    def _resolve_sdes_audio_gain_db(self, default: float = -8.0) -> float:
+        """Gain (dB) applied to the served SDES audio.
 
         Per-camera ``sdes_audio_gain_db`` (via ``start_keepalive``) wins; else the
-        ``AIDOT_SDES_AUDIO_GAIN_DB`` env; else ``-8``.  A bad value falls back to
-        the default rather than raising."""
+        ``AIDOT_SDES_AUDIO_GAIN_DB`` env; else ``default``.  A bad value falls
+        back to the default rather than raising.
+
+        The default differs by serve path. The ffmpeg serve applies the gain to
+        the camera's raw A-law and keeps ``-8``, sized in 0.7.34 for a hot
+        microphone. The direct publisher runs the same level normalizer as the
+        DTLS publisher first and applies this as an offset after it, so its
+        default is ``0``: the same loudness an A000088 is served at. A caller
+        that sets the value explicitly gets it on either path."""
         opt = getattr(self, "_sdes_audio_gain_opt", None)
         src = (
-            opt if opt is not None else os.environ.get("AIDOT_SDES_AUDIO_GAIN_DB", "-8")
+            opt
+            if opt is not None
+            else os.environ.get("AIDOT_SDES_AUDIO_GAIN_DB", str(default))
         )
         try:
             return float(src)
         except (ValueError, TypeError):
-            return -8.0
+            return float(default)
 
     def _resolve_live_stream_param(self) -> bool:
         """Whether to make the cloud ``liveStreamParam`` KVS pre-connect before

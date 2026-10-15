@@ -995,13 +995,22 @@ _ALAW_SQUARES = tuple(float(v) * v for v in _ALAW_TO_LINEAR)
 
 
 class AlawAgc:
-    """The DTLS mux's audio conditioning, applied to A-law payloads.
+    """The audio conditioning both direct publishers apply to A-law payloads.
 
-    The PyAV mux this publisher replaces did not send the camera's audio as it
-    arrived: it decoded, ran a level tracker with a gain clamp, a noise gate
-    and a tanh soft-limiter toward a target level, and re-encoded. Publishing
-    raw A-law would quietly drop all of that, so the same conditioning runs
-    here, reading the same environment variables:
+    The PyAV mux the DTLS publisher replaces did not send the camera's audio
+    as it arrived: it decoded, ran a level tracker with a gain clamp, a noise
+    gate and a tanh soft-limiter toward a target level, and re-encoded.
+    Publishing raw A-law would quietly drop all of that, so the same
+    conditioning runs here, reading the same environment variables.
+
+    The SDES publisher runs it too (since the release after 1.0.0rc51). It
+    had only a fixed trim, sized in 0.7.34 for a hot microphone, and the
+    measured truth on 2026-10-14 was the opposite: an A001064 and an A001513
+    send their rooms at -68 and -70 dBFS RMS, so after the trim every sample
+    sat under the first A-law step and the published audio was digital zero,
+    while the same room through an A000088 came out at a listening level.
+    The two transports now get the same conditioning, and the trim is an
+    offset applied after it. Variables:
 
     ``AIDOT_AUDIO_TARGET_DBFS`` (-15), ``AIDOT_AUDIO_MAXGAIN_DB`` (30),
     ``AIDOT_AUDIO_MINGAIN_DB`` (-12), ``AIDOT_AUDIO_GATE_DBFS`` (-45).
@@ -1170,6 +1179,10 @@ class LoopbackRtpPublisher:
         ]
         self._reorder = [RtpReorderBuffer() for _ in self._tracks]
         self._input_timeout = input_timeout_s
+        # Same conditioning as the DTLS publisher, then the caller's trim as
+        # an offset on top of the normalized level. The AAC track is fed the
+        # conditioned payload too, so both audio tracks carry the same sound.
+        self._agc: Optional[AlawAgc] = AlawAgc() if include_audio else None
         self._gain = alaw_gain_table(audio_gain_db)
         # An explicit policy applies to every track. Otherwise video is
         # steered (the SDES camera's video clock runs ~7% fast) and audio,
@@ -1650,8 +1663,11 @@ class LoopbackRtpPublisher:
                     return  # already served: not forwarded, not timelined
                 dedup["last_accepted_ts"] = ts
                 dedup["accepted_closed"] = marker
-        if self._gain is not None and track.codec == "PCMA":
-            payload = payload.translate(self._gain)
+        if track.codec == "PCMA":
+            if self._agc is not None:
+                payload = self._agc.process(payload)
+            if self._gain is not None:
+                payload = payload.translate(self._gain)
         seq, out_ts = self._timelines[idx].stamp(ts, arrival)
         try:
             pub.send_rtp(

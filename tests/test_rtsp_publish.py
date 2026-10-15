@@ -2704,3 +2704,59 @@ def test_sdes_tee_is_not_held_up_by_dropped_re_sent_frames(go2rtc, monkeypatch):
         tx.close()
         proc.terminate()
         proc.wait(3)
+
+
+def test_the_sdes_publisher_conditions_its_audio_too():
+    """The SDES direct publisher ran only a fixed trim; measured 2026-10-14,
+    that published two cameras' rooms as digital zero. Both publishers now
+    run the same conditioning, and the trim is an offset after it."""
+    import inspect
+
+    src = inspect.getsource(rp.LoopbackRtpPublisher._send)
+    assert "self._agc.process(payload)" in src
+    # Conditioned first, trimmed second: a pre-trim would push a quiet room
+    # further under the gate and the normalizer could never bring it back.
+    assert src.index("self._agc.process(payload)") < src.index(
+        "payload.translate(self._gain)"
+    )
+
+
+def test_loopback_publisher_lifts_a_quiet_camera(go2rtc, monkeypatch):
+    """An A001513 in a quiet room sends about -70 dBFS RMS; a listener must
+    not get digital zero from it. 40 frames let the level tracker settle."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", audio_gain_db=0
+    )
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        quiet = _alaw_tone(600)  # about -35 dBFS
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for i in range(40):
+            tx.sendto(
+                rp.build_rtp(8, False, i + 1, 160 * (i + 1), 1, quiet),
+                ("127.0.0.1", a_port),
+            )
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) >= 40)
+        out = rp.parse_rtp(go2rtc.frames[-1][1])[4]
+        assert _alaw_rms(out) > _alaw_rms(quiet) * 4
+    finally:
+        proc.kill()
+    assert proc.poll() == rp.EXIT_KILLED
+
+
+def test_loopback_publisher_without_audio_builds_no_conditioner(go2rtc, monkeypatch):
+    """Video-only publishes (a PCMU camera, audio switched off) must not pay
+    for a conditioner that never sees a payload."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), device_id="cam", include_audio=False
+    )
+    try:
+        assert proc._agc is None
+    finally:
+        proc.kill()
+    assert proc.poll() == rp.EXIT_KILLED

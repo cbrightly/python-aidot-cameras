@@ -101,3 +101,37 @@ if __name__ == "__main__":
                 print(f"FAIL {_k}")
                 traceback.print_exc()
     raise SystemExit(1 if _fail else 0)
+
+
+def test_gain_default_is_per_path(monkeypatch):
+    """The ffmpeg serve keeps -8 on raw A-law; the direct publisher, which
+    normalizes the level first and applies this after, asks for 0."""
+    monkeypatch.delenv("AIDOT_SDES_AUDIO_GAIN_DB", raising=False)
+    assert _cam()._resolve_sdes_audio_gain_db() == -8.0
+    assert _cam()._resolve_sdes_audio_gain_db(default=0.0) == 0.0
+
+
+def test_gain_bad_value_falls_back_to_the_asked_default(monkeypatch):
+    monkeypatch.setenv("AIDOT_SDES_AUDIO_GAIN_DB", "loud")
+    assert _cam()._resolve_sdes_audio_gain_db(default=0.0) == 0.0
+
+
+def test_gain_explicit_setting_wins_on_either_path(monkeypatch):
+    monkeypatch.delenv("AIDOT_SDES_AUDIO_GAIN_DB", raising=False)
+    cam = _cam()
+    cam._sdes_audio_gain_opt = -8.0
+    assert cam._resolve_sdes_audio_gain_db(default=0.0) == -8.0
+    monkeypatch.setenv("AIDOT_SDES_AUDIO_GAIN_DB", "-4")
+    assert _cam()._resolve_sdes_audio_gain_db(default=0.0) == -4.0
+
+
+def test_the_direct_publisher_asks_for_the_zero_default():
+    """Measured 2026-10-14: with the -8 trim on raw A-law, an A001064 and an
+    A001513 published digital zero. The direct publisher conditions the level
+    first, so its trim must default to no offset."""
+    import inspect
+
+    from aidot_cameras.camera import sdes_open
+
+    src = inspect.getsource(sdes_open)
+    assert "_resolve_sdes_audio_gain_db(default=0.0)" in src

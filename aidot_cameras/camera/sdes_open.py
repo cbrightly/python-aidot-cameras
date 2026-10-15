@@ -8936,7 +8936,9 @@ class _SdesOpenMixin:
         _direct_timeout = _resolve_serve_input_timeout_s(
             bool(getattr(self, "is_battery_camera", False))
         )
-        _direct_gain_db = self._resolve_sdes_audio_gain_db()
+        # The direct publisher normalizes the level itself, so its trim is an
+        # offset after that and defaults to 0, not the ffmpeg serve's -8.
+        _direct_gain_db = self._resolve_sdes_audio_gain_db(default=0.0)
 
         async def _spawn_serve():
             """Start the serve: the direct publisher, or the ffmpeg in `cmd`.

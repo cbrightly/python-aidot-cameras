@@ -174,6 +174,19 @@ not carried over in A1 (noted as a gap at the time); `1.0.0rc26` restored the
 audio conditioning, and `1.0.0rc44` removed the `AIDOT_AUDIO_AGC` switch that
 could turn it off, so it is simply on.
 
+**Carried to SDES after 1.0.0rc51.** The SDES publisher had only the trim,
+and a hand check of recordings on 2026-10-14 found both SDES models published
+digital zero: an A001064 and an A001513 send their rooms at about -68 and -70
+dBFS RMS, so after -8 dB every sample fell under the first A-law step, while
+the same room through an A000088's normalizer came out at a listening level.
+The SDES publisher now runs the same `AlawAgc` before the trim, the trim is an
+offset after it, and its default on this path is 0 (the ffmpeg serve keeps
+-8, which is applied to raw A-law). Replayed over the raw captures, the
+normalizer at its defaults lifts the A001064 to -47 dBFS RMS with -7 dBFS
+peaks and leaves the A001513's quiet room at -64 dBFS RMS, because the gate
+fades the gain below -45 dBFS RMS rather than amplify the quantization floor;
+`AIDOT_AUDIO_GATE_DBFS` is the knob for a room that should read louder.
+
 Trade-off: HA's HLS fallback and recorder drop PCMA and keep video only.
 **Phase A3 (built)** restores AAC for exactly those consumers: the stream
 definition gains an `ffmpeg:aidot_x#audio=aac` source *after* the live one.
