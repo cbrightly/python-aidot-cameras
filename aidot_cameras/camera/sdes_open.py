@@ -4016,11 +4016,7 @@ class _SdesOpenMixin:
         # Skipped in AIDOT_FAST_CONNECT (LAN-direct): no relay alloc, host/srflx
         # candidates only (the synchronous allocate would block the post-offer
         # candidate trickle on a cloud round-trip).
-<<<<<<< HEAD
-        if not _relay_addrs and not _fast_connect and not _skip_turn_prealloc:
-=======
         if not _relay_addrs and not _skip_turn_prealloc:
->>>>>>> origin/chore/dead-code-pass
             try:
                 import re as _re_relay
                 import hashlib as _hlk
