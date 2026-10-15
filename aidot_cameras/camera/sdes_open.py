@@ -619,8 +619,25 @@ def _sdes_nack_enabled() -> bool:
 #: The serve runs ``-max_delay 500000``; a repeat later than that is discarded
 #: by ffmpeg anyway, having already emitted the damaged frame.  Same env var as
 #: the serve so the two cannot drift apart.
+def _grace_env_s(name: str, default: float) -> float:
+    """A grace in seconds from ``name``; a malformed or non-finite value is the
+    default. A bare float() here stopped the library importing on an empty
+    value, and `nan` made both rules fire at once."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = None
+    if value is None or value != value or value in (float("inf"), float("-inf")):
+        _LOGGER.debug("%s=%r is not a number; using %.0f", name, raw, default)
+        return default
+    return value
+
+
 _SERVE_REORDER_BUDGET_S = min(
-    float(os.environ.get("AIDOT_SERVE_MAX_DELAY_US", "500000") or 500000) / 1e6,
+    _grace_env_s("AIDOT_SERVE_MAX_DELAY_US", 500000.0) / 1e6,
     0.5,
 )
 
@@ -1090,9 +1107,7 @@ _FIRST_MEDIA_WAIT_S = 75.0
 # +30 s, inside that window on both measured wake times.
 #
 # Set AIDOT_BATTERY_STALE_OFFER_GRACE_S=0 to restore the previous behaviour.
-_BATTERY_STALE_OFFER_GRACE_S = float(
-    os.environ.get("AIDOT_BATTERY_STALE_OFFER_GRACE_S", "15")
-)
+_BATTERY_STALE_OFFER_GRACE_S = _grace_env_s("AIDOT_BATTERY_STALE_OFFER_GRACE_S", 15.0)
 
 
 # How long a nominated candidate has to produce ANY inbound STUN Binding Success
@@ -1111,9 +1126,7 @@ _BATTERY_STALE_OFFER_GRACE_S = float(
 # preserved.
 #
 # Set AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S=0 to restore the previous behaviour.
-_UNREACHABLE_NOMINEE_GRACE_S = float(
-    os.environ.get("AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S", "20")
-)
+_UNREACHABLE_NOMINEE_GRACE_S = _grace_env_s("AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S", 20.0)
 
 
 # The two companions of the unreachable-nominee grace, for the two first-media
@@ -1122,21 +1135,6 @@ _UNREACHABLE_NOMINEE_GRACE_S = float(
 # 28 live-validation runs (2026-09-22 to 10-09), the slowest 9.5 s after
 # webrtcReq; 29 of 30 stalls in those runs were the two shapes these rules end.
 # Also the earlier finding that the trigger arms within about a second or never.
-def _grace_env_s(name: str, default: float) -> float:
-    """A grace in seconds from ``name``; a malformed or non-finite value is the
-    default. A bare float() here stopped the library importing on an empty
-    value, and `nan` made both rules fire at once."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        value = None
-    if value is None or value != value or value in (float("inf"), float("-inf")):
-        _LOGGER.debug("%s=%r is not a number; using %.0f", name, raw, default)
-        return default
-    return value
 
 
 _ANSWER_PROBE_GRACE_S = _grace_env_s("AIDOT_SDES_ANSWER_PROBE_GRACE_S", 20.0)
@@ -2189,7 +2187,7 @@ def _classify_ffmpeg_exit(rc: int, teardown_requested: bool) -> int:
 #: ``AIDOT_SDES_STALL_NUDGE=0`` turns it off and
 #: ``AIDOT_SDES_STALL_NUDGE_AFTER_S`` moves the trigger point.
 _STALL_NUDGE_ENABLED = os.environ.get("AIDOT_SDES_STALL_NUDGE", "1") != "0"
-_STALL_NUDGE_AFTER_S = float(os.environ.get("AIDOT_SDES_STALL_NUDGE_AFTER_S", "2.5"))
+_STALL_NUDGE_AFTER_S = _grace_env_s("AIDOT_SDES_STALL_NUDGE_AFTER_S", 2.5)
 
 
 def _stall_nudge_due(
@@ -4070,7 +4068,7 @@ class _SdesOpenMixin:
         # Skipped in AIDOT_FAST_CONNECT (LAN-direct): no relay alloc, host/srflx
         # candidates only (the synchronous allocate would block the post-offer
         # candidate trickle on a cloud round-trip).
-        if not _relay_addrs and not _fast_connect:
+        if not _relay_addrs and not _fast_connect and not _skip_turn_prealloc:
             try:
                 import re as _re_relay
                 import hashlib as _hlk
@@ -5221,7 +5219,11 @@ class _SdesOpenMixin:
                 )
 
             # XOR-PEER-ADDRESS: family, port ^ magic[:2], addr ^ magic
-            _cp_ip_b = _cp_socket.inet_aton(_cp_peer_ip)
+            try:
+                _cp_ip_b = _cp_socket.inet_aton(_cp_peer_ip)
+            except OSError:
+                # _ICE_CAND_RE admits "1.2.3.4.5"; not an address, not a peer.
+                return False
             _cp_xport = (_cp_peer_port ^ 0x2112) & 0xFFFF
             _cp_xaddr = bytes(a ^ b for a, b in zip(_cp_ip_b, _STUN_MAGIC, strict=True))
             _cp_xpa = b"\x00\x01" + _cp_struct.pack("!H", _cp_xport) + _cp_xaddr
@@ -8083,6 +8085,15 @@ class _SdesOpenMixin:
                                 _uc_cpwd,
                                 (_c_ip, _c_port),
                             )
+            except Exception:
+                # Only pockets of the body are guarded. A stray exception used
+                # to end the thread with nothing at camera level in the log,
+                # and the session died minutes later as "stalled".
+                _LOGGER.error(
+                    "camera %s: SDES bridge ended by an unexpected error",
+                    getattr(self, "device_id", "?"),
+                    exc_info=True,
+                )
             finally:
                 try:
                     _lo_a.close()

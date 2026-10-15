@@ -2626,12 +2626,40 @@ class _WebRTCOpenMixin:
 
         recorder = self._attach_file_recorder(pc, output_path, on_frame)
 
+        async def _abort_open() -> None:
+            """Undo everything this open holds when it cannot complete.
+
+            One place instead of a copy at every failure exit: the MQTT
+            thread's stop sentinel, the track tasks, the recorder (whose file
+            was opened above and used to be left open), and the peer
+            connection.
+            """
+            outgoing_q.put_nowait(None)  # stop MQTT thread
+            _cancel_track_tasks()
+            if recorder is not None:
+                try:
+                    await recorder.stop()
+                except Exception:
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_abort_open",
+                        exc_info=True,
+                    )
+            await pc.close()
+
         # ------------------------------------------------------------------ #
         # Create SDP offer and publish webrtcReq
         # ------------------------------------------------------------------ #
-        offer = await pc.createOffer()
-        _gather_t0 = asyncio.get_running_loop().time()
-        await pc.setLocalDescription(offer)
+        try:
+            offer = await pc.createOffer()
+            _gather_t0 = asyncio.get_running_loop().time()
+            await pc.setLocalDescription(offer)
+        except BaseException:
+            # createOffer/setLocalDescription can raise (an ICE gather that
+            # cannot bind, a cancelled open); before this nothing cleaned up.
+            await _abort_open()
+            raise
         _status(
             "ICE gather (setLocalDescription) took "
             f"{(asyncio.get_running_loop().time() - _gather_t0) * 1000.0:.0f}ms"
@@ -2947,7 +2975,12 @@ class _WebRTCOpenMixin:
         # Without re-publishing webrtcReq + ICE candidates after the reconnect,
         # the camera silently ignores the original request and we time out.
         _init_done: set = set()
-        _init_pending: set = {answer_fut, camera_offer_fut, webrtc_req_echo_fut}
+        _init_pending: set = {
+            answer_fut,
+            camera_offer_fut,
+            webrtc_req_echo_fut,
+            terminal_error_fut,
+        }
         _init_deadline = asyncio.get_running_loop().time() + timeout
         _init_reconnect_resends = 0
         while asyncio.get_running_loop().time() < _init_deadline:
@@ -2972,6 +3005,20 @@ class _WebRTCOpenMixin:
                 for _di_p in _dtls_ice_payloads:
                     outgoing_q.put_nowait(_di_p)
         _rr_done, _rr_pending = _init_done, _init_pending
+        if terminal_error_fut.done():
+            # GAP D on the DTLS path: the camera said -50002/-50015. Before
+            # this the refusal was only read when nothing else had answered,
+            # so with the broker's echo in hand the open ran into a 30 s ICE
+            # wait and failed as a timeout, and the loop retried a camera
+            # that had said no.
+            _code, _desc = terminal_error_fut.result()
+            _status(f"camera refused: ack {_code} {_desc} - terminal, not retrying")
+            for _f in _rr_pending:
+                _f.cancel()
+            await _abort_open()
+            raise AidotCameraBusy(_code, _desc)
+        _rr_pending.discard(terminal_error_fut)
+        _rr_done.discard(terminal_error_fut)
 
         # Echo-reversal path: echo arrived but no proper response yet.
         # Poll up to 20 s for a real webrtcResp; handle camera quickConn resets
@@ -3083,14 +3130,10 @@ class _WebRTCOpenMixin:
             if terminal_error_fut.done():
                 _code, _desc = terminal_error_fut.result()
                 _status(f"camera refused: ack {_code} {_desc} - terminal, not retrying")
-                outgoing_q.put_nowait(None)
-                _cancel_track_tasks()
-                await pc.close()
+                await _abort_open()
                 raise AidotCameraBusy(_code, _desc)
             _status(f"no webrtcResp in {timeout}s")
-            outgoing_q.put_nowait(None)
-            _cancel_track_tasks()
-            await pc.close()
+            await _abort_open()
             raise RuntimeError(
                 f"async_open_webrtc_stream: no webrtcResp received within {timeout}s"
             )
@@ -3298,9 +3341,7 @@ class _WebRTCOpenMixin:
                 _status(
                     f"role-reversal: early setRemoteDescription failed: {_rr_srd_exc}"
                 )
-                outgoing_q.put_nowait(None)
-                _cancel_track_tasks()
-                await pc.close()
+                await _abort_open()
                 raise RuntimeError(
                     f"async_open_webrtc_stream: setRemoteDescription failed:"
                     f" {_rr_srd_exc}"
@@ -4201,9 +4242,7 @@ class _WebRTCOpenMixin:
                     _tb_dtls.format_exc(),
                 )
                 _status(f"setRemoteDescription failed: {exc}")
-                outgoing_q.put_nowait(None)
-                _cancel_track_tasks()
-                await pc.close()
+                await _abort_open()
                 raise RuntimeError(
                     f"async_open_webrtc_stream: setRemoteDescription failed: {exc}"
                 ) from exc
@@ -4457,9 +4496,7 @@ class _WebRTCOpenMixin:
             await _wait_or_event(connected_ev, 0.1)
 
         if pc.connectionState not in ("connected", "completed"):
-            outgoing_q.put_nowait(None)
-            _cancel_track_tasks()
-            await pc.close()
+            await _abort_open()
             if _answer_inserted:
                 # Before the answer sections were matched by content, a shifted
                 # answer on the live path stubbed every section and raised this

@@ -154,8 +154,23 @@ def _is_transient_cloud_error(exc: BaseException) -> bool:
 # cloud explicitly reports a device offline, failed-open retries re-check the
 # flag every RECHECK seconds and only probe a real open every PROBE seconds,
 # instead of consuming an open-gate slot on the normal reconnect cadence.
-_OFFLINE_RECHECK_S = float(os.environ.get("AIDOT_OFFLINE_RECHECK_S", "30"))
-_OFFLINE_PROBE_S = float(os.environ.get("AIDOT_OFFLINE_PROBE_S", "600"))
+class _FfmpegMissing(RuntimeError):
+    """The serve needs an ffmpeg that is not there; see _release_after_loop_error."""
+
+
+def _parse_env_float(name: str, default: float) -> float:
+    """Parse a float env var, falling back to ``default`` on any missing or
+    malformed value (matches the try/except idiom used by
+    _get_webrtc_open_gate / _get_stream_slots below for AIDOT_MAX_CONCURRENT_*
+    rather than raising at import time)."""
+    try:
+        return float(os.environ.get(name, str(default)))
+    except (ValueError, TypeError):
+        return default
+
+
+_OFFLINE_RECHECK_S = _parse_env_float("AIDOT_OFFLINE_RECHECK_S", 30.0)
+_OFFLINE_PROBE_S = _parse_env_float("AIDOT_OFFLINE_PROBE_S", 600.0)
 
 # DTLS serve loop slow-probe: an idle-but-cloud-online camera (asleep, wedged
 # firmware, ...) never trips the offline pause above (the cloud keeps reporting
@@ -177,18 +192,9 @@ _SLOW_PROBE_INTERVAL_S = float(
 _SLOW_PROBE_LOG_EVERY = int(os.environ.get("AIDOT_DTLS_SLOW_PROBE_LOG_EVERY", "6"))
 # Sleep increment for the slow-probe wait: never one blocking
 # asyncio.sleep(interval) call, so stop() is not delayed by up to 10 minutes.
-_SLOW_PROBE_SLEEP_CHUNK_S = float(os.environ.get("AIDOT_DTLS_SLOW_PROBE_CHUNK_S", "5"))
+_SLOW_PROBE_SLEEP_CHUNK_S = _parse_env_float("AIDOT_DTLS_SLOW_PROBE_CHUNK_S", 5.0)
 
 
-def _parse_env_float(name: str, default: float) -> float:
-    """Parse a float env var, falling back to ``default`` on any missing or
-    malformed value (matches the try/except idiom used by
-    _get_webrtc_open_gate / _get_stream_slots below for AIDOT_MAX_CONCURRENT_*
-    rather than raising at import time)."""
-    try:
-        return float(os.environ.get(name, str(default)))
-    except (ValueError, TypeError):
-        return default
 
 
 # DTLS serve-open timeout: how long a single async_open_webrtc_stream() call
@@ -699,7 +705,7 @@ def _resolve_serve_input_timeout_s(is_battery: bool) -> int:
 #: origin of this project's "battery cameras need 30-45 minutes" rule.
 #: Still a real wait: retrying instantly would hammer a camera that genuinely
 #: has none free, and on a battery model risks a wake-then-sleep loop.
-_BUSY_BACKOFF_S = float(os.environ.get("AIDOT_BUSY_BACKOFF_S", "20"))
+_BUSY_BACKOFF_S = _parse_env_float("AIDOT_BUSY_BACKOFF_S", 20.0)
 
 #: Consecutive background sessions that deliver NO media before the keepalive
 #: stops reopening a battery camera. Observed 2026-08-07 on an A001513: 22 opens
@@ -4590,7 +4596,15 @@ class CameraMixin(
         if sdes_connection_mode is not None:
             self._sdes_connection_mode_opt = sdes_connection_mode
         if self._stream_task is not None and not self._stream_task.done():
-            return
+            if self._streaming_active:
+                return
+            # The previous loop went dormant and is still finishing (its
+            # go2rtc deregister). Returning here used to drop this view on
+            # the floor until the next one; wait for it instead, briefly.
+            try:
+                await asyncio.wait_for(asyncio.shield(self._stream_task), 10.0)
+            except (TimeoutError, asyncio.CancelledError, Exception):
+                self._stream_task.cancel()
         self._keepalive_rtsp_url = rtsp_push_url
         self._go2rtc_url = go2rtc_url
         self._go2rtc_manages_stream = bool(go2rtc_register)
@@ -4818,20 +4832,25 @@ class CameraMixin(
                 return None
             return frame
 
-        if not await session.async_start_talk(_provider):
-            if own_session:
-                await session.stop()
-            return False
+        started = False
         try:
-            await asyncio.wait_for(done.wait(), timeout=max_seconds)
-        except TimeoutError:
-            pass
-        try:
-            await session.async_stop_talk()
+            started = bool(await session.async_start_talk(_provider))
+            if not started:
+                return False
+            try:
+                await asyncio.wait_for(done.wait(), timeout=max_seconds)
+            except TimeoutError:
+                pass
+            return True
         finally:
-            if own_session:
-                await session.stop()
-        return True
+            # Whatever happened above - a start that raised, a cancelled wait -
+            # the talk is stopped and a session this call opened is closed.
+            try:
+                if started:
+                    await session.async_stop_talk()
+            finally:
+                if own_session:
+                    await session.stop()
 
     def _sdes_serve_consumer_present(self, port: int) -> "Optional[bool]":
         """True if a TCP client is connected to the SDES serve ``port`` (a viewer
@@ -5043,6 +5062,59 @@ class CameraMixin(
         self._viewer_cache = (_now_mono, _answer)
         return _answer
 
+    async def _release_after_loop_error(self, which: str, exc: BaseException) -> None:
+        """Release the camera when a serve loop ends by an exception.
+
+        The loops' bodies are long and some of what they call can raise
+        outside the paths they guard (a malformed environment value, an
+        exhausted port range, a dead ffmpeg). Before this, such an exception
+        ended the task while ``_streaming_active`` stayed True: the stream
+        URL kept answering, ``start_keepalive`` saw a live task and did
+        nothing, and on a battery camera the keepalive renew loop kept
+        posting every 20 s with nothing behind it. This puts the camera in
+        the same state the idle release does, so the next view starts afresh.
+        """
+        if isinstance(exc, _FfmpegMissing):
+            _LOGGER.error(
+                "camera %s: %s: %s - the camera is released until the next view;"
+                " install ffmpeg or enable the direct publish",
+                self.device_id,
+                which,
+                exc,
+            )
+        else:
+            _LOGGER.error(
+                "camera %s: %s loop ended by an unexpected error - the camera is"
+                " released until the next view",
+                self.device_id,
+                which,
+                exc_info=exc,
+            )
+        self._streaming_active = False
+        self._cancel_keepalive_renew()
+        self._keepalive_rtsp_url = None
+        self._serve_ready.clear()
+        session, self._stream_session = self._stream_session, None
+        if session is not None:
+            try:
+                await session.stop()
+            except Exception:
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    self.device_id,
+                    "_release_after_loop_error",
+                    exc_info=True,
+                )
+        try:
+            await self._deregister_go2rtc()
+        except Exception:
+            _LOGGER.debug(
+                "camera %s: swallowed exception in %s",
+                self.device_id,
+                "_deregister_go2rtc",
+                exc_info=True,
+            )
+
     async def _sdes_keepalive_loop(self) -> None:
         """Keep the cold-start serve relay alive around the SDES keepalive loop.
 
@@ -5051,7 +5123,12 @@ class CameraMixin(
         the SDES handshake runs (the same race fixed for the DTLS serve)."""
         self._serve_relay = self._maybe_start_serve_relay(self._keepalive_rtsp_url)
         try:
-            await self._sdes_keepalive_loop_inner()
+            try:
+                await self._sdes_keepalive_loop_inner()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._release_after_loop_error("SDES keepalive", exc)
         finally:
             _relay = self._serve_relay
             self._serve_relay = None
@@ -5603,6 +5680,9 @@ class CameraMixin(
                 )
 
         while self._streaming_active:
+            # A fresh clock for the watchdog below: the last frame of the
+            # previous session must not be held against this one.
+            self._last_frame_time = 0.0
             _open_time = asyncio.get_running_loop().time()
             try:
                 session = await self.async_open_webrtc_stream(on_frame=_on_frame)
@@ -5879,7 +5959,7 @@ class CameraMixin(
         if opt is not None:
             return float(opt)
         try:
-            return float(os.environ.get("AIDOT_STREAM_IDLE_S", "120"))
+            return _parse_env_float("AIDOT_STREAM_IDLE_S", 120.0)
         except (TypeError, ValueError):
             return 120.0
 
@@ -6314,7 +6394,12 @@ class CameraMixin(
             # permit for the life of the process - the cap would silently shrink
             # until nothing could stream at all.
             self._serve_relay = self._maybe_start_serve_relay(self._keepalive_rtsp_url)
-            await self._dtls_serve_loop_inner()
+            try:
+                await self._dtls_serve_loop_inner()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await self._release_after_loop_error("DTLS serve", exc)
         finally:
             _relay = self._serve_relay
             self._serve_relay = None
@@ -6346,7 +6431,7 @@ class CameraMixin(
         # independently, enforce a hard minimum wall-clock spacing between OPEN
         # attempts so no code path (reset bug, fast PC-death) can pound the camera.
         _MIN_DELAY, _MAX_DELAY = 15.0, 300.0
-        _open_gate = float(os.environ.get("AIDOT_DTLS_RETRY_GATE_S", "15"))
+        _open_gate = _parse_env_float("AIDOT_DTLS_RETRY_GATE_S", 15.0)
         # Jittered-backoff pacer for failed opens. Unlike the SDES/JPEG loops this
         # serve loop resets on any successful open (it has the _open_gate spacing
         # below) rather than escalating on no-media - hence reset() not
@@ -6384,7 +6469,7 @@ class CameraMixin(
                 # Another viewer holds the camera's single slot. Retry on a short
                 # interval (not the 5-min backoff) so it reconnects promptly once
                 # the slot frees (e.g. the user closes the app / reboots the cam).
-                busy_retry = float(os.environ.get("AIDOT_BUSY_RETRY_S", "45"))
+                busy_retry = _parse_env_float("AIDOT_BUSY_RETRY_S", 45.0)
                 _LOGGER.warning(
                     "DTLS serve: camera %s busy (%s) - retrying in %.0fs",
                     self.device_id,
@@ -6482,7 +6567,7 @@ class CameraMixin(
             # - f0.java:2495).  Previously a stuck "disconnected" was only caught
             # ~120 s later by the idle-progress timer.
             _disc_since = [None]
-            _DISC_DEBOUNCE = float(os.environ.get("AIDOT_ICE_DISCONNECT_S", "8"))
+            _DISC_DEBOUNCE = _parse_env_float("AIDOT_ICE_DISCONNECT_S", 8.0)
 
             def _pc_dead(
                 pc=pc, _disc_since=_disc_since, _DISC_DEBOUNCE=_DISC_DEBOUNCE
@@ -6619,7 +6704,9 @@ class CameraMixin(
                         os.close(rfd)
                         if proc is None:
                             os.close(wfd)
-                            break
+                            # Not a retry: without ffmpeg every cycle would
+                            # reopen the camera 15 s later and fail the same way.
+                            raise _FfmpegMissing("ffmpeg could not be started")
                         if _relay is not None:
                             _relay.set_backend(_ff_port)
                         wfile = os.fdopen(wfd, "wb", buffering=0)
@@ -6665,7 +6752,7 @@ class CameraMixin(
                     # dominated by long native GOPs).  0 disables; raising it
                     # lowers bitrate at the cost of latency.  Mains DTLS cameras
                     # only; the SDES path has its own PLI cadence.
-                    _gop_pli_s = float(os.environ.get("AIDOT_GOP_PLI_S", "2.0"))
+                    _gop_pli_s = _parse_env_float("AIDOT_GOP_PLI_S", 2.0)
                     # Stall-triggered keyframe: if muxed frames stop for
                     # _stall_pli_s (a dropped GOP on a jittery link, e.g. a weak-
                     # RSSI camera), ask for an IDR immediately instead of waiting
@@ -6673,7 +6760,7 @@ class CameraMixin(
                     # at most ONCE per stall episode (re-armed only when frames
                     # resume) so a no-consumer stall - which also freezes progress
                     # - can't spam the camera with PLIs.  0 disables.
-                    _stall_pli_s = float(os.environ.get("AIDOT_STALL_PLI_S", "1.0"))
+                    _stall_pli_s = _parse_env_float("AIDOT_STALL_PLI_S", 1.0)
                     _last_gop_pli = loop.time()
                     _stall_pli_armed = True
                     _last_viewer_dtls = loop.time()
@@ -6684,7 +6771,7 @@ class CameraMixin(
                     # _pc_dead(), which reads the ICE/PC state - and a session
                     # receiving audio and no video passes it forever (measured
                     # 2026-08-17: hours of it, while HA retried every 10-40s).
-                    _vid_grace = float(os.environ.get("AIDOT_DTLS_VIDEO_GRACE_S", "30"))
+                    _vid_grace = _parse_env_float("AIDOT_DTLS_VIDEO_GRACE_S", 30.0)
                     _connected_at = loop.time()
                     _first_video_at = None
                     _no_video = False

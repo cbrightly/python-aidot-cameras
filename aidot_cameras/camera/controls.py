@@ -63,7 +63,7 @@ class _CameraControlsMixin:
         ok = await self.async_set_device_attribute("LightOnOff", 1 if on else 0)
         if ok and on and brightness != 100:
             await self.async_set_device_attribute(
-                "Dimming", max(0, min(100, brightness))
+                "Dimming", max(LIGHT_BRIGHTNESS_MIN, min(LIGHT_BRIGHTNESS_MAX, brightness))
             )
         return ok
 

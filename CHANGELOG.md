@@ -7,6 +7,34 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 ## [Unreleased]
 
 ### Fixed
+- **A serve loop that dies releases the camera.** The DTLS serve loop and the
+  SDES keepalive loop had no guard around their bodies, so an exception
+  outside the pockets they handle (a malformed `AIDOT_*` value read with a
+  bare `float()`, an exhausted port range) ended the task while
+  `_streaming_active` stayed True: the stream URL kept answering,
+  `start_keepalive` saw a live task and did nothing, and a battery camera's
+  keepalive renew kept posting every 20 s. Both loops now release the camera
+  on an unexpected error (logged at ERROR with the traceback) exactly as the
+  idle release does, every environment value the loops read goes through
+  `_parse_env_float`, and a host without ffmpeg is such an error rather than a
+  reopen every 15 s. In the same pass: the JPEG watchdog no longer judges a
+  new session by the previous session's last frame; `start_keepalive` waits
+  for a dormant loop that is still deregistering instead of dropping the view;
+  `async_speak` closes the session it opened on every exit; the DTLS direct
+  publish thread reports any exception instead of only its own; the SDES
+  module's four import-time `float()` reads go through `_grace_env_s` so an
+  empty value cannot stop the library importing; the SDES bridge thread logs
+  an unexpected error at camera level and a malformed peer address cannot
+  kill it; connection mode `lan` now skips the TURN pre-allocation it said it
+  skipped; the DTLS signaling wait acts on a camera's -50002/-50015 refusal
+  when it arrives instead of running into the ICE timeout; the MQTT session
+  loop no longer keeps every inbound message of an hour-long stream for a
+  result nobody read, and drains outgoing publishes on every pass; the token
+  cache write-back runs off the event loop and a token file that is not a
+  JSON object is ignored like an unreadable one; floodlight brightness clamps
+  to the documented 10-100 range. The DTLS open now has one abort path for
+  its failure exits, which also stops the file recorder (its file used to
+  stay open) and runs when creating or applying the local offer raises.
 - **Key material no longer reaches the log.** Four sites printed secrets on
   paths that Home Assistant users paste into public issues: the SDES media
   PSK in full at DEBUG (the comment above it already said DEBUG was not low

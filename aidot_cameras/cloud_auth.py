@@ -85,9 +85,9 @@ def _install_token_cache(client: AidotClient, path: str) -> None:
     fights HA over a shared refresh token.
     """
 
-    def _cb() -> None:
+    def _write(info) -> None:
         try:
-            _write_token_file(path, client.serializable_login_info())
+            _write_token_file(path, info)
             _LOGGER.debug("Cached refreshed token to %s", path)
         except (OSError, TypeError) as exc:
             # TypeError: a defensive belt-and-suspenders catch alongside
@@ -99,6 +99,17 @@ def _install_token_cache(client: AidotClient, path: str) -> None:
             # this exact TypeError - "Object of type Lock is not JSON
             # serializable" - previously escaped this callback uncaught).
             _LOGGER.warning("Could not cache refreshed token to %s: %s", path, exc)
+
+    def _cb() -> None:
+        # Called on the event loop after a refresh; the file write (mkstemp,
+        # dump, replace) goes to a thread, as the seed write below does.
+        info = client.serializable_login_info()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _write(info)
+            return
+        loop.run_in_executor(None, _write, info)
 
     client.set_token_fresh_cb(_cb)
 
@@ -146,8 +157,13 @@ async def _make_client(
             # crash CLI startup.
             _LOGGER.warning("ignoring unreadable token cache %s: %s", token_file, exc)
         else:
-            client = AidotClient(session=session, token=token)
-            _install_token_cache(client, token_file)
+            if not isinstance(token, dict):
+                _LOGGER.warning(
+                    "ignoring token cache %s: not a JSON object", token_file
+                )
+            else:
+                client = AidotClient(session=session, token=token)
+                _install_token_cache(client, token_file)
             return client
 
     if not username or not password:

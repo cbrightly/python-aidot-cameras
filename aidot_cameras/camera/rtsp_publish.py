@@ -2041,6 +2041,11 @@ def dtls_rtp_publish_run(
     except RtspPublishError as exc:
         res["error"] = str(exc)
         _LOGGER.warning("camera %s: DTLS direct publish: %s", device_id, exc)
+    except Exception as exc:  # the loopback worker has the same guard
+        res["error"] = f"{type(exc).__name__}: {exc}"
+        _LOGGER.error(
+            "camera %s: DTLS direct publish failed: %s", device_id, exc, exc_info=True
+        )
     finally:
         res["timestamp_repairs"] = vtl.repairs + atl.repairs
         res["packets"] = pub.packets_sent

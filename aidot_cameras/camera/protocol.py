@@ -2446,32 +2446,38 @@ def _mqtt_session_sync(
                 status.get("rc_str"),
             )
             break
+        # Drain the outgoing publishes on every pass, not only when the inbox
+        # is empty: a busy account (every camera's signaling and events arrive
+        # on the wildcard subscriptions) used to starve our own sends.
+        if outgoing_queue is not None:
+            while True:
+                try:
+                    out = outgoing_queue.get_nowait()
+                except _queue.Empty:
+                    break
+                if out is None:  # stop sentinel
+                    client.loop_stop()
+                    try:
+                        client.disconnect()
+                    except Exception:
+                        _LOGGER.debug(
+                            "swallowed exception in %s", "_mqtt_session_sync", exc_info=True
+                        )
+                    return collected, status
+                pub_topic, pub_payload = out
+                client.publish(pub_topic, pub_payload)
+                _LOGGER.debug("_mqtt_session: published %s", pub_topic)
         try:
             item = msg_q.get(timeout=min(remaining, 0.1))
         except _queue.Empty:
-            # Drain outgoing publish queue
-            if outgoing_queue is not None:
-                while True:
-                    try:
-                        out = outgoing_queue.get_nowait()
-                    except _queue.Empty:
-                        break
-                    if out is None:  # stop sentinel
-                        client.loop_stop()
-                        try:
-                            client.disconnect()
-                        except Exception:
-                            _LOGGER.debug(
-                                "swallowed exception in %s", "_on_log", exc_info=True
-                            )
-                        return collected, status
-                    pub_topic, pub_payload = out
-                    client.publish(pub_topic, pub_payload)
-                    _LOGGER.debug("_mqtt_session: published %s", pub_topic)
             continue
         if item is None:  # disconnect sentinel
             break
-        collected.append(item)
+        # A caller with an on_message handler gets each message there; keeping
+        # every one for an hour-long stream session as well was unbounded
+        # growth for a result nobody read.
+        if not on_message:
+            collected.append(item)
         if on_message:
             try:
                 on_message(*item)

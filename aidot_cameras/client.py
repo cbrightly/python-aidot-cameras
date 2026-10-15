@@ -291,6 +291,9 @@ class CameraClient(_UpstreamAidotClient):
             token=_survivable_token(token, username, password),
         )
 
+        if token is not None and not isinstance(token, dict):
+            _LOGGER.warning("ignoring a stored token that is not an object (%s)", type(token).__name__)
+            token = None
         if token is not None:
             stored = token
             if stored.get(CONF_ID) is None and stored.get(CONF_LOGIN_INFO) is not None:
