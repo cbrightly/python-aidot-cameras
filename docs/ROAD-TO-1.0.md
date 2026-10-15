@@ -2088,6 +2088,14 @@ Day zero stays 2026-10-11; the target stays 2026-10-25, subject to the outage no
 
 Day zero becomes the day the reference installation returns with `rc52` on it; the target is ten days after that.
 
+#### 2026-10-15: `rc53` carries the review fixes
+
+| release | date | find | resets? |
+|---|---|---|---|
+| `rc53` | 2026-10-15 | A read-only review of every module (seven passes, findings re-verified by hand) found four places where key material reached the log (the SDES PSK in full at DEBUG, the camera's data-channel SRTP key inside a logged answer section at INFO, raw signaling payloads carrying the PSK and TURN credentials at DEBUG, a whole answer SDP with its ICE password at WARNING), two serve loops that ended by exception with the camera still marked streaming, a JPEG watchdog judging a new session by the old one's last frame, a view dropped during the dormancy window, and a camera reopened every 15 s on a host without ffmpeg - plus about 2000 lines of code that could not run (an ICE event aiortc never emits, a camera-IP pipeline only ever drained, the TUTK and cloud-playback surface, duplicate cleanup and constants). All fixed or removed in this release; see the changelog | Yes - the serve loops, the DTLS and SDES opens and the publisher all changed, so this is the build the reference installation has to soak. The box has been off the network since 2026-10-13, so the clock starts when it returns with `rc53` on it, which the `rc52` note already required |
+
+Day zero becomes the day the reference installation returns with `rc53` on it; the target is ten days after that.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /

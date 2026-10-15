@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc53]
+
 ### Removed
 - Code that could not run or that nothing called, found by the 2026-10-15
   review: the DTLS open's `icecandidate` handler (aiortc never emits that
