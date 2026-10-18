@@ -25,6 +25,7 @@ import time
 import zlib
 from typing import Any, Callable, Optional, NamedTuple
 
+from .agc import AlawAgc
 from .constants import TALK_PCM_FRAME_BYTES, TALK_PCM_RATE
 
 _LOGGER = logging.getLogger(__name__)
@@ -1842,6 +1843,8 @@ def _dtls_av_mux_run(
       timestamps, so DTS is clean/monotonic (fixes HA's "No dts" stutter).
     - MPEG-TS can't carry G.711 PCMA, so audio is transcoded to AAC (trivial CPU
       at 8 kHz mono).
+      The A-law is conditioned by ``AlawAgc`` first, the same normalizer the
+      direct publishers run, so a serve and a publish sound the same.
     - ``progress[0]`` is bumped on every successful mux so the serve loop can
       detect "no consumer pulling" (the pipe fills and mux blocks -> stale).
     - ``align_audio_start`` (file recordings): video is presented from the
@@ -1935,32 +1938,10 @@ def _dtls_av_mux_run(
         resampler = av.AudioResampler(format="fltp", layout="mono", rate=48000)
         fifo = av.AudioFifo()
 
-        # AGC: track the audio level and adapt the gain toward a target of -15
-        # dBFS - matching the official app's androidGain/iosGain = -15 - capped so
-        # silent rooms aren't over-amplified.  Loud rooms read loud, quiet rooms
-        # quiet, and nothing exceeds the target (a tanh limiter catches peaks).
-        def _db2amp(_d):
-            return 10.0 ** (_d / 20.0)
-
-        try:
-            _target = (
-                _db2amp(float(os.environ.get("AIDOT_AUDIO_TARGET_DBFS", "-15")))
-                * 32767.0
-            )
-            _maxg = _db2amp(float(os.environ.get("AIDOT_AUDIO_MAXGAIN_DB", "30")))
-            _ming = _db2amp(float(os.environ.get("AIDOT_AUDIO_MINGAIN_DB", "-12")))
-            # Noise gate: below this RMS the input is (near) silence, so the AGC
-            # must NOT crank toward +maxg - doing so amplifies the A-law
-            # quantization floor into audible high-frequency clicking on a quiet
-            # camera.  Gain is scaled down quadratically below the gate.  Set very
-            # low (e.g. -120) to disable.
-            _gate = (
-                _db2amp(float(os.environ.get("AIDOT_AUDIO_GATE_DBFS", "-45"))) * 32767.0
-            )
-        except (ValueError, TypeError):
-            _target, _maxg, _ming = _db2amp(-15) * 32767.0, _db2amp(30), _db2amp(-12)
-            _gate = _db2amp(-45) * 32767.0
-        _agc_ms = [None]  # smoothed mean-square (level tracker)
+        # The level normalizer every served path runs (see agc.py): it works
+        # on the A-law bytes before they are decoded, so the mux conditions
+        # exactly what the direct publishers condition.
+        agc = AlawAgc()
         try:
             import numpy as _np
         except Exception:
@@ -2077,40 +2058,9 @@ def _dtls_av_mux_run(
                                 "_flush_audio",
                                 exc_info=True,
                             )
-                for fr in adec.decode(av.Packet(data)):
+                for fr in adec.decode(av.Packet(agc.process(data))):
                     _ndec = fr.samples
                     fr.pts = None
-                    if _np is not None:
-                        try:
-                            _x = fr.to_ndarray().astype(_np.float64)
-                            # Track the level (smoothed mean-square ~0.4s) and aim
-                            # the gain at the -15 dBFS target, clamped [min, max].
-                            _ms = float(_np.mean(_x * _x))
-                            if _agc_ms[0] is None:
-                                _agc_ms[0] = _ms
-                            else:
-                                _agc_ms[0] = _agc_ms[0] * 0.95 + _ms * 0.05
-                            _rms = (_agc_ms[0] ** 0.5) + 1.0
-                            _gain = min(_maxg, max(_ming, _target / _rms))
-                            # Noise gate: when the level is below the gate floor the
-                            # signal is essentially silence; scale the gain down
-                            # quadratically so the A-law quantization noise is not
-                            # amplified into audible clicking.
-                            if _rms < _gate:
-                                _gain *= (_rms / _gate) ** 2
-                            # tanh soft-limiter catches transient peaks past target.
-                            _y = _np.tanh(_x * (_gain / 32767.0)) * 32767.0
-                            _g = av.AudioFrame.from_ndarray(
-                                _y.astype(_np.int16), format="s16", layout="mono"
-                            )
-                            _g.sample_rate = 8000
-                            fr = _g
-                        except Exception:
-                            _LOGGER.debug(
-                                "swallowed exception in %s",
-                                "_flush_audio",
-                                exc_info=True,
-                            )
                     for rfr in resampler.resample(fr):  # 8k PCMA -> 48k fltp
                         fifo.write(rfr)
                     a_in[0] += _ndec

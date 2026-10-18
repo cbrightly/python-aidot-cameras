@@ -335,7 +335,7 @@ class AacEncoder:
         import numpy as np
         from av.audio.resampler import AudioResampler
 
-        from .rtsp_publish import _ALAW_TO_LINEAR
+        from .agc import _ALAW_TO_LINEAR
 
         self._av = av
         self._np = np

@@ -6,6 +6,18 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Changed
+- **One level normalizer.** The PyAV mux behind the ffmpeg serve carried its
+  own numpy copy of the audio conditioning the direct publishers run as
+  `AlawAgc`: the same algorithm and the same four `AIDOT_AUDIO_*` variables,
+  but with the noise gate and the gain clamp in the opposite order and
+  without the non-finite guard, so the two paths disagreed by up to 12 dB
+  on a silent room and a malformed `AIDOT_AUDIO_*` value reached the copy
+  unchecked. The mux now runs `AlawAgc` on the A-law bytes before it decodes
+  them, and the class and its A-law helpers live in `camera/agc.py`
+  (`rtsp_publish` still exports the same names). The direct publishers,
+  which every H.264 session has used since 1.0.0rc44, are unchanged.
+
 ## [1.0.0rc54]
 
 ### Fixed
