@@ -2104,6 +2104,14 @@ Day zero becomes the day the reference installation returns with `rc53` on it; t
 
 Day zero still becomes the day the reference installation returns with the current release on it; the target is ten days after that.
 
+#### 2026-10-18: `rc55` has one level normalizer
+
+| release | date | find | resets? |
+|---|---|---|---|
+| `rc55` | 2026-10-18 | The PyAV mux behind the ffmpeg serve carried its own numpy copy of the audio conditioning the direct publishers run as `AlawAgc` (the 2026-10-15 review's duplicated-AGC item): the same algorithm and the same four `AIDOT_AUDIO_*` variables, but with the noise gate and the gain clamp in the opposite order and without the non-finite guard, so a camera served through ffmpeg could sit up to 12 dB apart from the same camera published directly on a silent room, and a malformed variable reached the copy unchecked. The mux now runs `AlawAgc` on the A-law bytes before it decodes them; the class and its helpers live in `camera/agc.py`. Pinned by an offline test that the mux's output level matches the class on the same bytes | **No, by the maintainer's call (2026-10-18):** the direct publishers, which every H.264 session has used since `rc44`, are byte-for-byte unchanged; only the ffmpeg-serve mux (H.265 sessions, and hosts without a go2rtc to publish into) changes, and it changes toward the conditioning the live gate has already checked on every camera since `rc52`. Gated on real cameras before release like every rc |
+
+Day zero still becomes the day the reference installation returns with the current release on it; the target is ten days after that.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /

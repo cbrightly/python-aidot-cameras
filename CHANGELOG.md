@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc55]
+
 ### Changed
 - **One level normalizer.** The PyAV mux behind the ffmpeg serve carried its
   own numpy copy of the audio conditioning the direct publishers run as
