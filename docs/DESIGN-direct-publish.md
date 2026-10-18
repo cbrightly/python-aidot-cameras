@@ -173,6 +173,8 @@ the publisher applies it on the A-law bytes through a 256-entry lookup table
 not carried over in A1 (noted as a gap at the time); `1.0.0rc26` restored the
 audio conditioning, and `1.0.0rc44` removed the `AIDOT_AUDIO_AGC` switch that
 could turn it off, so it is simply on.
+The mux kept a numpy copy of the same algorithm until the release after
+`1.0.0rc54`, when it switched to the publishers' `AlawAgc` (`camera/agc.py`).
 
 **Carried to SDES after 1.0.0rc51.** The SDES publisher had only the trim,
 and a hand check of recordings on 2026-10-14 found both SDES models published

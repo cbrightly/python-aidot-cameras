@@ -149,3 +149,48 @@ def test_quiet_input_still_produces_audio_stream():
     ts = _run_mux(wire)
     y, _sr = _decode_aac(ts)
     assert len(y) > 0
+
+
+def _alaw_rms_dbfs(payload: bytes) -> float:
+    from aidot_cameras.camera.agc import _alaw_to_linear
+
+    vals = [float(_alaw_to_linear(b)) for b in payload]
+    return 20 * np.log10((sum(v * v for v in vals) / len(vals)) ** 0.5 / 32767.0)
+
+
+def test_mux_conditions_audio_like_the_direct_publishers():
+    """The mux used to run its own numpy copy of the publishers' normalizer.
+    Now it runs ``AlawAgc`` on the A-law before decoding, so a quiet camera
+    comes out of the ffmpeg serve at the same level the direct publish gives
+    it: lifted toward -15 dBFS, and within a couple of dB of what the shared
+    class produces on the same bytes (the rest is AAC)."""
+    from aidot_cameras.camera.agc import AlawAgc
+
+    wire, _n_in = _make_pcma_packets(level_dbfs=-35.0)
+    ts = _run_mux(wire)
+    y, sr = _decode_aac(ts)
+    # Skip the first second: the level tracker settles over ~0.4 s.
+    tail = y[sr:]
+    out_dbfs = 20 * np.log10(np.sqrt(np.mean(tail**2)) + 1e-9)
+
+    agc = AlawAgc(env={})
+    conditioned = b"".join(agc.process(w) for w, _ts in wire)
+    ref_dbfs = _alaw_rms_dbfs(conditioned[SR:])
+
+    assert out_dbfs > -25.0, f"quiet input was not lifted: {out_dbfs:.1f} dBFS"
+    assert abs(out_dbfs - ref_dbfs) < 2.5, (
+        f"mux output {out_dbfs:.1f} dBFS vs AlawAgc on the same bytes "
+        f"{ref_dbfs:.1f} dBFS - the mux is not running the shared normalizer"
+    )
+
+
+def test_mux_has_no_normalizer_of_its_own():
+    """Pin the dedup: the knobs are read in one place, ``agc.py``."""
+    import inspect
+
+    from aidot_cameras.camera import protocol
+
+    src = inspect.getsource(protocol._dtls_av_mux_run)
+    assert "agc.process(" in src
+    assert "tanh" not in src and "AIDOT_AUDIO_" not in src
+    assert "AIDOT_AUDIO_" not in inspect.getsource(protocol)
