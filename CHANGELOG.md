@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc54]
+
 ### Fixed
 - **SDP key material still reached the log; now a filter catches it.**
   1.0.0rc53 masked secrets at each call site, and a real Home Assistant

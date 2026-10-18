@@ -2096,6 +2096,14 @@ Day zero becomes the day the reference installation returns with `rc52` on it; t
 
 Day zero becomes the day the reference installation returns with `rc53` on it; the target is ten days after that.
 
+#### 2026-10-18: `rc54` closes the SDP leak `rc53` left open
+
+| release | date | find | resets? |
+|---|---|---|---|
+| `rc54` | 2026-10-18 | `rc53` masked key material at each call site, and a Home Assistant instance running that build at DEBUG still printed 18 ICE passwords. Three sites log a whole SDP and were missed - our own offer line, and `setLocalDescription` and `setRemoteDescription` inside the vendored aiortc, which dumps the full offer and answer at DEBUG. Call-site masking was the wrong shape for a "never log this" rule. A `RedactSdpFilter` now sits on every logger that can emit an SDP, so `a=crypto ... inline:`, `a=ice-pwd` and `a=psk` are masked wherever they appear and in any site added later. Found by standing up a throwaway instance and reading its log, which is the only way this class of defect shows itself | No - logging only; no media, timestamp or lifecycle code changes. Re-verified on that instance after the fix: 935 debug lines over 8 SDP dumps, 0 unmasked, 12 masked |
+
+Day zero still becomes the day the reference installation returns with the current release on it; the target is ten days after that.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /
