@@ -2620,7 +2620,7 @@ class _WebRTCOpenMixin:
         )
         _LOGGER.debug(
             "webrtc: SDP offer (first 500 chars):\n%s",
-            pc.localDescription.sdp[:500],
+            mask_sdp_secrets(pc.localDescription.sdp[:500]),
         )
 
         # Scope the A000088 high-port nomination fix to THIS DTLS camera's aioice

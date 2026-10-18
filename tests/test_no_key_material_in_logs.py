@@ -87,3 +87,85 @@ def test_webrtc_open_masks_the_answer_sdp_it_logs_on_failure():
 def test_device_detail_bodies_are_logged_as_keys():
     src = inspect.getsource(camera_client)
     assert "returned no UID for %s. body=%s" not in src
+
+
+# --------------------------------------------------------------------------- #
+# A filter, not call-site masking: found live on 2026-10-18
+# --------------------------------------------------------------------------- #
+#
+# Masking at each call site shipped in 1.0.0rc53 and missed three places that
+# log a whole SDP - our own "SDP offer (first 500 chars)" line and, inside the
+# vendored aiortc, setLocalDescription and setRemoteDescription. A real Home
+# Assistant instance with the library at DEBUG printed 18 ICE passwords. The
+# filter below catches every site, including ones added later.
+
+
+def test_sdp_redaction_masks_all_three_credential_attributes():
+    from aidot_cameras._log_redaction import redact_sdp_secrets
+
+    sdp = (
+        "v=0\r\n"
+        "a=ice-ufrag:xu0G\r\n"
+        "a=ice-pwd:tl5mID0sjY2OjnmVLs50er\r\n"
+        "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:Zm9vYmFyYmF6cXV1eA==\r\n"
+        "a=psk:deadbeef1234567890\r\n"
+        "a=mid:0\r\n"
+    )
+    out = redact_sdp_secrets(sdp)
+    for secret in ("tl5mID0sjY2OjnmVLs50er", "Zm9vYmFyYmF6cXV1eA==", "deadbeef1234567890"):
+        assert secret not in out
+    # Everything that is not key material survives, so the log stays useful.
+    assert "a=ice-ufrag:xu0G" in out
+    assert "a=mid:0" in out
+    assert "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:<masked>" in out
+
+
+def test_the_vendored_aiortc_logger_is_covered():
+    """aiortc logs the full offer and answer at DEBUG; it is vendored, so its
+    logger is ours to filter."""
+    import logging
+
+    from aidot_cameras._log_redaction import (
+        SDP_LOGGERS,
+        RedactSdpFilter,
+        install_upstream_redaction,
+    )
+
+    assert "aidot_cameras._vendor.aiortc.rtcpeerconnection" in SDP_LOGGERS
+    install_upstream_redaction()
+    lg = logging.getLogger("aidot_cameras._vendor.aiortc.rtcpeerconnection")
+    assert any(isinstance(f, RedactSdpFilter) for f in lg.filters)
+
+    sdp = "v=0\r\na=ice-pwd:supersecreticepassword\r\n"
+    rec = lg.makeRecord(
+        lg.name, logging.DEBUG, "f", 1, "setLocalDescription(offer)\n%s", (sdp,), None
+    )
+    for f in lg.filters:
+        f.filter(rec)
+    assert "supersecreticepassword" not in rec.getMessage()
+
+
+def test_installing_the_filters_is_idempotent():
+    import logging
+
+    from aidot_cameras._log_redaction import (
+        SDP_LOGGERS,
+        RedactSdpFilter,
+        install_upstream_redaction,
+    )
+
+    for _ in range(3):
+        install_upstream_redaction()
+    for name in SDP_LOGGERS:
+        lg = logging.getLogger(name)
+        assert sum(isinstance(f, RedactSdpFilter) for f in lg.filters) == 1, name
+
+
+def test_the_offer_log_line_masks_at_the_call_site_too():
+    """Belt and braces: the filter is the real guard, but the call site shows
+    the intent to anyone reading the code."""
+    import inspect
+
+    src = inspect.getsource(webrtc_open)
+    i = src.index("webrtc: SDP offer (first 500 chars)")
+    assert "mask_sdp_secrets(" in src[i : i + 200]

@@ -6,6 +6,20 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **SDP key material still reached the log; now a filter catches it.**
+  1.0.0rc53 masked secrets at each call site, and a real Home Assistant
+  instance running that build at DEBUG still printed 18 ICE passwords. Three
+  sites log a whole SDP and were missed: our own `webrtc: SDP offer` line, and
+  `setLocalDescription` and `setRemoteDescription` inside the vendored aiortc,
+  which dumps the full offer and answer at DEBUG. Call-site masking was the
+  wrong shape for this. `_log_redaction` now carries `redact_sdp_secrets` and a
+  `RedactSdpFilter` installed on every logger that can emit an SDP, including
+  the vendored aiortc's, so `a=crypto ... inline:`, `a=ice-pwd` and `a=psk`
+  values are masked wherever they are logged and whatever is added later. The
+  attribute names and the rest of the document are kept, so a logged SDP is
+  still readable. Found by live validation on a temporary instance, 2026-10-18.
+
 ## [1.0.0rc53]
 
 ### Removed
