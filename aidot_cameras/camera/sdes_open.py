@@ -8,12 +8,14 @@ breaks the client<->sdes_open cycle).  CameraMixin inherits this mixin, so
 """
 
 import asyncio
+import hashlib as _hashlib_mod
 import json
 import logging
 import os
 import random
 import re
 import secrets as _secrets_mod
+import struct as _struct_mod
 import time
 from typing import Callable, Optional  # noqa: F401 - method annotations
 
@@ -1551,6 +1553,57 @@ async def _select_readable(socks, timeout: float) -> list:
         await asyncio.sleep(min(_SELECT_POLL_S, remaining))
 
 
+def _turn_target(entries, user_id):
+    """(host, port, username, password) of our TURN server, or None.
+
+    Our entry is the one whose ``Username`` is our user id, else the first.
+    The three TURN allocations in the SDES open (pre-offer, echo fallback,
+    post-offer) each parsed this inline; the pick and the parse were the same
+    in all three.
+    """
+    if not entries:
+        return None
+    entry = next((e for e in entries if e.get("Username") == user_id), entries[0])
+    if not entry:
+        return None
+    uri = next((str(u) for u in (entry.get("Uris") or []) if "turn:" in str(u)), "")
+    m = re.search(r"turns?:([^:?]+)(?::(\d+))?", uri)
+    if not m:
+        return None
+    return (
+        m.group(1),
+        int(m.group(2) or 5349),
+        (entry.get("Username") or "").encode(),
+        str(entry.get("Password") or "").encode(),
+    )
+
+
+def _turn_relay_record(allocation, host, port, username, password):
+    """The ``_relay_addrs`` entry for one allocation.
+
+    ``(relay_ip, relay_port, realm, nonce, server_host, server_port,
+    long_term_key, username)``; the key is RFC 5389's MD5 of
+    ``username:realm:password``.
+    """
+    relay_ip, relay_port, realm, nonce = allocation
+    key = _hashlib_mod.md5(username + b":" + realm + b":" + password).digest()
+    return (relay_ip, relay_port, realm, nonce, host, port, key, username)
+
+
+def _stun_attr(attr_type: int, value: bytes) -> bytes:
+    """One STUN attribute: type, length, value, zero-padded to 4 bytes.
+
+    RFC 5389 section 15. Seven hand-rolled copies of this lived in the TURN
+    allocate, permission, refresh and send-indication builders and both STUN
+    responders before they shared it.
+    """
+    return (
+        _struct_mod.pack("!HH", attr_type, len(value))
+        + value
+        + b"\x00" * ((-len(value)) % 4)
+    )
+
+
 async def _run_off_loop(fn, *args):
     """Run a blocking ``fn(*args)`` in the default executor and return its result.
 
@@ -2965,10 +3018,6 @@ class _SdesOpenMixin:
 
             _MAGIC_TA = b"\x21\x12\xa4\x42"
 
-            def _a(_t, _v):
-                _p = (-len(_v)) % 4
-                return _st_ta.pack("!HH", _t, len(_v)) + _v + b"\x00" * _p
-
             def _stun_message_integrity(_k, _m):
                 # Patch Length to include the MI attribute (4 hdr + 20 digest = 24)
                 _patched = _m[:2] + _st_ta.pack("!H", len(_m) - 20 + 24) + _m[4:]
@@ -2976,7 +3025,7 @@ class _SdesOpenMixin:
 
             # Step 1: unauthenticated Allocate -> get REALM and NONCE from 401
             _tid1 = os.urandom(12)
-            _b1 = _a(
+            _b1 = _stun_attr(
                 0x0019, b"\x11\x00\x00\x00"
             )  # REQUESTED-TRANSPORT = UDP(17), RFC 5766 section 14.7 protocol in MSB
             _r1 = b"\x00\x03" + _st_ta.pack("!H", len(_b1)) + _MAGIC_TA + _tid1 + _b1
@@ -3028,15 +3077,15 @@ class _SdesOpenMixin:
             _tid2 = os.urandom(12)
             _key_ta = _ha.md5(_ta_user + b":" + _realm_ta + b":" + _ta_pass).digest()
             _b2 = (
-                _a(0x0006, _ta_user)  # USERNAME
-                + _a(0x0014, _realm_ta)  # REALM
-                + _a(0x0015, _nonce_ta)  # NONCE
-                + _a(
+                _stun_attr(0x0006, _ta_user)  # USERNAME
+                + _stun_attr(0x0014, _realm_ta)  # REALM
+                + _stun_attr(0x0015, _nonce_ta)  # NONCE
+                + _stun_attr(
                     0x0019, b"\x11\x00\x00\x00"
                 )  # REQUESTED-TRANSPORT = UDP, RFC 5766 section 14.7 protocol in MSB
             )
             _h2 = b"\x00\x03" + _st_ta.pack("!H", len(_b2) + 24) + _MAGIC_TA + _tid2
-            _b2 += _a(
+            _b2 += _stun_attr(
                 0x0008, _stun_message_integrity(_key_ta, _h2 + _b2)
             )  # MESSAGE-INTEGRITY
             _r2 = b"\x00\x03" + _st_ta.pack("!H", len(_b2)) + _MAGIC_TA + _tid2 + _b2
@@ -3122,59 +3171,22 @@ class _SdesOpenMixin:
         if _sdes_turn_entries and not _skip_turn_prealloc:
             _turn_did = True
             try:
-                import re as _re_pre
-                import hashlib as _hlk_pre
-
-                _our_te_pre = next(
-                    (e for e in _sdes_turn_entries if e.get("Username") == user_id),
-                    _sdes_turn_entries[0],
-                )
-                _t_uri_pre = next(
-                    (
-                        str(u)
-                        for u in (_our_te_pre.get("Uris") or [])
-                        if "turn:" in str(u)
-                    ),
-                    "",
-                )
-                _tm_pre = _re_pre.search(r"turns?:([^:?]+)(?::(\d+))?", _t_uri_pre)
-                if _tm_pre:
-                    _t_host_pre = _tm_pre.group(1)
-                    _t_port_pre = int(_tm_pre.group(2) or 5349)
-                    _t_user_pre = (_our_te_pre.get("Username") or "").encode()
-                    _t_pass_pre = str(_our_te_pre.get("Password") or "").encode()
+                _tgt_pre = _turn_target(_sdes_turn_entries, user_id)
+                if _tgt_pre:
                     for _pre_sock, _pre_name in (
                         (_audio_sock, "audio"),
                         (_video_sock, "video"),
                     ):
                         _pre_res = await _run_off_loop(
-                            _turn_allocate_udp,
-                            _pre_sock,
-                            _t_host_pre,
-                            _t_port_pre,
-                            _t_user_pre,
-                            _t_pass_pre,
+                            _turn_allocate_udp, _pre_sock, *_tgt_pre
                         )
                         if _pre_res:
-                            _r_ip_pre, _r_port_pre, _r_realm_pre, _r_nonce_pre = (
-                                _pre_res
-                            )
-                            _r_key_pre = _hlk_pre.md5(
-                                _t_user_pre + b":" + _r_realm_pre + b":" + _t_pass_pre
-                            ).digest()
-                            _relay_addrs[_pre_sock] = (
-                                _r_ip_pre,
-                                _r_port_pre,
-                                _r_realm_pre,
-                                _r_nonce_pre,
-                                _t_host_pre,
-                                _t_port_pre,
-                                _r_key_pre,
-                                _t_user_pre,
+                            _relay_addrs[_pre_sock] = _turn_relay_record(
+                                _pre_res, *_tgt_pre
                             )
                             _status(
                                 f"TURN relay pre-allocated (offer): {_pre_name}"
-                                f" -> {_r_ip_pre}:{_r_port_pre}"
+                                f" -> {_pre_res[0]}:{_pre_res[1]}"
                             )
             except Exception as _pre_exc:
                 _LOGGER.warning("TURN pre-allocation error: %s", _pre_exc)
@@ -3796,63 +3808,21 @@ class _SdesOpenMixin:
             # allocation here was trickled and put in the answer's c= anyway.
             if not _relay_addrs and not _skip_turn_prealloc:
                 try:
-                    import re as _re_relay_e
-                    import hashlib as _hlk_e
-
-                    _our_te = next(
-                        (e for e in _sdes_turn_entries if e.get("Username") == user_id),
-                        _sdes_turn_entries[0] if _sdes_turn_entries else None,
-                    )
-                    if _our_te:
-                        _t_uri_e = next(
-                            (
-                                str(u)
-                                for u in (_our_te.get("Uris") or [])
-                                if "turn:" in str(u)
-                            ),
-                            "",
-                        )
-                        _tm_e = _re_relay_e.search(
-                            r"turns?:([^:?]+)(?::(\d+))?", _t_uri_e
-                        )
-                        if _tm_e:
-                            _t_host_e = _tm_e.group(1)
-                            _t_port_e = int(_tm_e.group(2) or 5349)
-                            _t_user_e = (_our_te.get("Username") or "").encode()
-                            _t_pass_e = str(_our_te.get("Password") or "").encode()
-                            for _alloc_sock_e in (_audio_sock, _video_sock):
-                                _alloc_res_e = (
-                                    await _run_off_loop(
-                                        _turn_allocate_udp,
-                                        _alloc_sock_e,
-                                        _t_host_e,
-                                        _t_port_e,
-                                        _t_user_e,
-                                        _t_pass_e,
-                                    )
+                    _tgt_e = _turn_target(_sdes_turn_entries, user_id)
+                    if _tgt_e:
+                        for _alloc_sock_e in (_audio_sock, _video_sock):
+                            _alloc_res_e = await _run_off_loop(
+                                _turn_allocate_udp, _alloc_sock_e, *_tgt_e
+                            )
+                            if _alloc_res_e:
+                                _relay_addrs[_alloc_sock_e] = _turn_relay_record(
+                                    _alloc_res_e, *_tgt_e
                                 )
-                                if _alloc_res_e:
-                                    _r_ip_e, _r_port_e, _r_realm_e, _r_nonce_e = (
-                                        _alloc_res_e
-                                    )
-                                    _r_key_e = _hlk_e.md5(
-                                        _t_user_e + b":" + _r_realm_e + b":" + _t_pass_e
-                                    ).digest()
-                                    _relay_addrs[_alloc_sock_e] = (
-                                        _r_ip_e,
-                                        _r_port_e,
-                                        _r_realm_e,
-                                        _r_nonce_e,
-                                        _t_host_e,
-                                        _t_port_e,
-                                        _r_key_e,
-                                        _t_user_e,
-                                    )
-                                    _status(
-                                        f"TURN relay allocated (echo fallback): "
-                                        f"{'audio' if _alloc_sock_e is _audio_sock else 'video'}"
-                                        f" -> {_r_ip_e}:{_r_port_e}"
-                                    )
+                                _status(
+                                    f"TURN relay allocated (echo fallback): "
+                                    f"{'audio' if _alloc_sock_e is _audio_sock else 'video'}"
+                                    f" -> {_alloc_res_e[0]}:{_alloc_res_e[1]}"
+                                )
                 except Exception as _relay_early_exc:
                     _LOGGER.warning("TURN relay allocation error: %s", _relay_early_exc)
             # Answer SDP c= and m= use the TURN relay address when available so
@@ -4034,67 +4004,26 @@ class _SdesOpenMixin:
         # candidate trickle on a cloud round-trip).
         if not _relay_addrs and not _skip_turn_prealloc:
             try:
-                import re as _re_relay
-                import hashlib as _hlk
-
-                _our_turn_entry = None
-                for _te in _sdes_turn_entries:
-                    if _te.get("Username") == user_id:
-                        _our_turn_entry = _te
-                        break
-                if _our_turn_entry is None and _sdes_turn_entries:
-                    _our_turn_entry = _sdes_turn_entries[0]
-                if _our_turn_entry:
-                    _t_uri_r = next(
-                        (
-                            str(u)
-                            for u in (_our_turn_entry.get("Uris") or [])
-                            if "turn:" in str(u)
-                        ),
-                        "",
-                    )
-                    _tm_r = _re_relay.search(r"turns?:([^:?]+)(?::(\d+))?", _t_uri_r)
-                    if _tm_r:
-                        _t_host_r = _tm_r.group(1)
-                        _t_port_r = int(_tm_r.group(2) or 5349)
-                        _t_user_r = (_our_turn_entry.get("Username") or "").encode()
-                        _t_pass_r = str(_our_turn_entry.get("Password") or "").encode()
-                        for _alloc_sock in (_audio_sock, _video_sock):
-                            _alloc_res = (
-                                await _run_off_loop(
-                                    _turn_allocate_udp,
-                                    _alloc_sock,
-                                    _t_host_r,
-                                    _t_port_r,
-                                    _t_user_r,
-                                    _t_pass_r,
-                                )
+                _tgt_r = _turn_target(_sdes_turn_entries, user_id)
+                if _tgt_r:
+                    for _alloc_sock in (_audio_sock, _video_sock):
+                        _alloc_res = await _run_off_loop(
+                            _turn_allocate_udp, _alloc_sock, *_tgt_r
+                        )
+                        if _alloc_res:
+                            _relay_addrs[_alloc_sock] = _turn_relay_record(
+                                _alloc_res, *_tgt_r
                             )
-                            if _alloc_res:
-                                _r_ip, _r_port, _r_realm, _r_nonce = _alloc_res
-                                _r_key = _hlk.md5(
-                                    _t_user_r + b":" + _r_realm + b":" + _t_pass_r
-                                ).digest()
-                                _relay_addrs[_alloc_sock] = (
-                                    _r_ip,
-                                    _r_port,
-                                    _r_realm,
-                                    _r_nonce,
-                                    _t_host_r,
-                                    _t_port_r,
-                                    _r_key,
-                                    _t_user_r,
-                                )
-                                _status(
-                                    f"TURN relay allocated: "
-                                    f"{'audio' if _alloc_sock is _audio_sock else 'video'}"
-                                    f" -> {_r_ip}:{_r_port}"
-                                )
-                            else:
-                                _LOGGER.warning(
-                                    "TURN allocation failed for %s socket",
-                                    "audio" if _alloc_sock is _audio_sock else "video",
-                                )
+                            _status(
+                                f"TURN relay allocated: "
+                                f"{'audio' if _alloc_sock is _audio_sock else 'video'}"
+                                f" -> {_alloc_res[0]}:{_alloc_res[1]}"
+                            )
+                        else:
+                            _LOGGER.warning(
+                                "TURN allocation failed for %s socket",
+                                "audio" if _alloc_sock is _audio_sock else "video",
+                            )
             except Exception as _relay_exc:
                 _LOGGER.warning("TURN relay allocation error: %s", _relay_exc)
 
@@ -4426,17 +4355,9 @@ class _SdesOpenMixin:
                                     + _si_xip
                                 )
 
-                                def _build_stun_attr(_t, _v):
-                                    _p = (-len(_v)) % 4
-                                    return (
-                                        _struct.pack("!HH", _t, len(_v))
-                                        + _v
-                                        + b"\x00" * _p
-                                    )
-
-                                _si_body = _build_stun_attr(
-                                    0x0012, _si_xpa
-                                ) + _build_stun_attr(0x0013, _resp)
+                                _si_body = _stun_attr(0x0012, _si_xpa) + _stun_attr(
+                                    0x0013, _resp
+                                )
                                 _send_ind = (
                                     b"\x00\x16"
                                     + _struct.pack("!H", len(_si_body))
@@ -4925,9 +4846,7 @@ class _SdesOpenMixin:
 
             seq = _r_sc.randint(0, 0x7FFFFFFF)
             ts = int(_t_sc.time() * 1000)
-            return avio_header(seq, 5376, ts, 8, 0) + _st_sc.pack(
-                "<IB3x", 0, 1
-            )
+            return avio_header(seq, 5376, ts, 8, 0) + _st_sc.pack("<IB3x", 0, 1)
 
         def _sctp_send_living(sock, addr):
             dcep = _sctp_data(50, _dcep_open_msg())
@@ -4969,11 +4888,7 @@ class _SdesOpenMixin:
             _MAGIC_UC = b"\x21\x12\xa4\x42"
             _tid_uc = _os_uc.urandom(12)
             _user = f"{cam_ufrag}:{our_ufrag}".encode()
-            _user_a = (
-                _st_uc.pack("!HH", 0x0006, len(_user))
-                + _user
-                + b"\x00" * ((-len(_user)) % 4)
-            )
+            _user_a = _stun_attr(0x0006, _user)
             _tiebreaker = int.from_bytes(_os_uc.urandom(8), "big")
             _ctrl_a = _st_uc.pack("!HHQ", 0x802A, 8, _tiebreaker)  # ICE-CONTROLLING
             _prio_a = _st_uc.pack("!HHI", 0x0024, 4, 1845493759)  # PRIORITY (prflx)
@@ -5101,13 +5016,6 @@ class _SdesOpenMixin:
                 :8
             ]
 
-            def _cp_attr(_t, _v):
-                return (
-                    _cp_struct.pack("!HH", _t, len(_v))
-                    + _v
-                    + b"\x00" * ((-len(_v)) % 4)
-                )
-
             # XOR-PEER-ADDRESS: family, port ^ magic[:2], addr ^ magic
             try:
                 _cp_ip_b = _cp_socket.inet_aton(_cp_peer_ip)
@@ -5120,10 +5028,10 @@ class _SdesOpenMixin:
 
             _cp_tid = os.urandom(12)
             _cp_body = (
-                _cp_attr(0x0012, _cp_xpa)  # XOR-PEER-ADDRESS
-                + _cp_attr(0x0006, _cp_user)  # USERNAME
-                + _cp_attr(0x0014, _cp_realm)  # REALM
-                + _cp_attr(0x0015, _cp_nonce)
+                _stun_attr(0x0012, _cp_xpa)  # XOR-PEER-ADDRESS
+                + _stun_attr(0x0006, _cp_user)  # USERNAME
+                + _stun_attr(0x0014, _cp_realm)  # REALM
+                + _stun_attr(0x0015, _cp_nonce)
             )  # NONCE
             _cp_hdr = (
                 b"\x00\x08"  # CreatePermission request
@@ -5134,7 +5042,7 @@ class _SdesOpenMixin:
             _cp_mi = _cp_hmac.new(
                 _cp_key, _cp_hdr + _cp_body, _cp_hashlib.sha1
             ).digest()
-            _cp_body += _cp_attr(0x0008, _cp_mi)  # MESSAGE-INTEGRITY
+            _cp_body += _stun_attr(0x0008, _cp_mi)  # MESSAGE-INTEGRITY
             _cp_msg = (
                 b"\x00\x08"
                 + _cp_struct.pack("!H", len(_cp_body))
@@ -5170,19 +5078,12 @@ class _SdesOpenMixin:
                 :8
             ]
 
-            def _rf_attr(_t, _v):
-                return (
-                    _rf_struct.pack("!HH", _t, len(_v))
-                    + _v
-                    + b"\x00" * ((-len(_v)) % 4)
-                )
-
             _rf_tid = os.urandom(12)
             _rf_body = (
-                _rf_attr(0x000D, _rf_struct.pack("!I", _rf_lifetime))
-                + _rf_attr(0x0006, _rf_user)  # USERNAME
-                + _rf_attr(0x0014, _rf_realm)  # REALM
-                + _rf_attr(0x0015, _rf_nonce)
+                _stun_attr(0x000D, _rf_struct.pack("!I", _rf_lifetime))
+                + _stun_attr(0x0006, _rf_user)  # USERNAME
+                + _stun_attr(0x0014, _rf_realm)  # REALM
+                + _stun_attr(0x0015, _rf_nonce)
             )  # NONCE
             _rf_hdr = (
                 b"\x00\x04"  # Refresh request
@@ -5193,7 +5094,7 @@ class _SdesOpenMixin:
             _rf_mi = _rf_hmac.new(
                 _rf_key, _rf_hdr + _rf_body, _rf_hashlib.sha1
             ).digest()
-            _rf_body += _rf_attr(0x0008, _rf_mi)  # MESSAGE-INTEGRITY
+            _rf_body += _stun_attr(0x0008, _rf_mi)  # MESSAGE-INTEGRITY
             _rf_msg = (
                 b"\x00\x04"
                 + _rf_struct.pack("!H", len(_rf_body))
@@ -5227,13 +5128,6 @@ class _SdesOpenMixin:
                 return False
             _si_thost, _si_tport = _si[4], _si[5]
 
-            def _si_attr(_t, _v):
-                return (
-                    _si_struct.pack("!HH", _t, len(_v))
-                    + _v
-                    + b"\x00" * ((-len(_v)) % 4)
-                )
-
             try:
                 _si_ip_b = bytes(int(_o) for _o in _si_peer_ip.split("."))
             except Exception:
@@ -5244,7 +5138,7 @@ class _SdesOpenMixin:
             _si_xaddr = bytes(a ^ b for a, b in zip(_si_ip_b, _STUN_MAGIC, strict=True))
             _si_xpa = b"\x00\x01" + _si_struct.pack("!H", _si_xport) + _si_xaddr
 
-            _si_body = _si_attr(0x0012, _si_xpa) + _si_attr(0x0013, _si_data)
+            _si_body = _stun_attr(0x0012, _si_xpa) + _stun_attr(0x0013, _si_data)
             _si_msg = (
                 b"\x00\x16"  # Send indication
                 + _si_struct.pack("!H", len(_si_body))
@@ -6066,7 +5960,9 @@ class _SdesOpenMixin:
 
                         _re_ts = int(_time_br.time() * 1000)
                         _re_seq = _r_re2.randint(0, 0x7FFFFFFF)
-                        _re_plain = avio_header(_re_seq, 5376, _re_ts, 28, 0) + _st_re2.pack("<IIIIIII", 0, 0, 1, 0, 0, 0, 0)  # 56B
+                        _re_plain = avio_header(
+                            _re_seq, 5376, _re_ts, 28, 0
+                        ) + _st_re2.pack("<IIIIIII", 0, 0, 1, 0, 0, 0, 0)  # 56B
                         _re_enc = None
                         try:
                             from Crypto.Cipher import AES as _AES_re2
@@ -6368,17 +6264,9 @@ class _SdesOpenMixin:
                                         + _br_xip2
                                     )
 
-                                    def _build_stun_attr(_t, _v):
-                                        _p = (-len(_v)) % 4
-                                        return (
-                                            _st_br.pack("!HH", _t, len(_v))
-                                            + _v
-                                            + b"\x00" * _p
-                                        )
-
-                                    _br_si_body = _build_stun_attr(
+                                    _br_si_body = _stun_attr(
                                         0x0012, _br_xpa
-                                    ) + _build_stun_attr(0x0013, _bresp)
+                                    ) + _stun_attr(0x0013, _bresp)
                                     _br_send_ind = (
                                         b"\x00\x16"
                                         + _st_br.pack("!H", len(_br_si_body))
@@ -6569,7 +6457,9 @@ class _SdesOpenMixin:
 
                                 _ts_ms = int(_time_br.time() * 1000)
                                 _tk_seq = _rand_tk.randint(0, 0x7FFFFFFF)
-                                _avio_plain = avio_header(_tk_seq, 5376, _ts_ms, 28, 0) + _st_tk.pack(
+                                _avio_plain = avio_header(
+                                    _tk_seq, 5376, _ts_ms, 28, 0
+                                ) + _st_tk.pack(
                                     "<IIIIIII", 0, 0, 1, 0, 0, 0, 0
                                 )  # 28B AVIO header + 28B AVStream = 56B
 
