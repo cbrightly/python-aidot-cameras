@@ -95,7 +95,8 @@ def test_the_bridge_stamps_when_living_is_first_sent():
     # Whitespace-free, so the formatter's line wrapping cannot break it.
     src = "".join(inspect.getsource(sdes_open).split())
     assert "_bridge_fn._br_trigger_sent_ts=None" in src
-    assert "_bridge_fn._br_trigger_sent_ts=(_time_br.monotonic())" in src
+    # The bridge body is built by make_sdes_bridge; the stamp is written there.
+    assert "_bridge_fn._br_trigger_sent_ts=_time_br.monotonic()" in src
 
 
 def test_tutk_framed_media_is_counted_for_the_trigger_rule():

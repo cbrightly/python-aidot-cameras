@@ -176,5 +176,8 @@ def test_the_bridge_builds_from_the_negotiated_key_not_the_first_answer():
             keys.append(node.args[1])
 
     assert len(keys) == 1
-    assert isinstance(keys[0], ast.Name)
-    assert keys[0].id == "srtp_key_audio"
+    # The bridge reads the negotiated key through the getter the open hands
+    # make_sdes_bridge, so a key restart is seen by the running thread.
+    assert isinstance(keys[0], ast.Call)
+    assert isinstance(keys[0].func, ast.Name)
+    assert keys[0].func.id == "get_srtp_key_audio"
