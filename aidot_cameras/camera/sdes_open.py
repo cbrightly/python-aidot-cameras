@@ -2006,6 +2006,55 @@ def narrow_sdp_payload_types(sdp_text: str, keep_video=None, keep_audio=None) ->
     return "".join(kept)
 
 
+def _ffmpeg_rx_sdp(
+    *,
+    ts: int,
+    audio_port: int,
+    video_port: int,
+    plain_rtp: bool,
+    srtp_key_audio: str,
+    srtp_key_video: str,
+    conn_ip: str,
+    session_name: str,
+) -> str:
+    """The SDP ffmpeg reads to receive the bridge's audio and video.
+
+    Four copies of this template lived in the open (the first launch, the
+    key-restart rebuild and both branches of the bridge's rewrite); they
+    differed only in what this takes as arguments. ``plain_rtp`` selects
+    RTP/AVP with no ``a=crypto`` for the models whose bridge decrypts and
+    forwards plain RTP; the rest is RTP/SAVP keyed with the SRTP keys.
+    """
+    proto = "RTP/AVP" if plain_rtp else "RTP/SAVP"
+
+    def _crypto(key: str) -> str:
+        if plain_rtp:
+            return ""
+        return f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{key}\r\n"
+
+    return (
+        "v=0\r\n"
+        f"o=- {ts} {ts} IN IP4 0.0.0.0\r\n"
+        f"s={session_name}\r\n"
+        "t=0 0\r\n"
+        f"m=audio {audio_port} {proto} 0 8\r\n"
+        f"c=IN IP4 {conn_ip}\r\n"
+        f"{_crypto(srtp_key_audio)}"
+        "a=rtpmap:0 PCMU/8000\r\n"
+        "a=rtpmap:8 PCMA/8000\r\n"
+        "a=rtcp-mux\r\n"
+        f"m=video {video_port} {proto} 96 97\r\n"
+        f"c=IN IP4 {conn_ip}\r\n"
+        f"{_crypto(srtp_key_video)}"
+        "a=rtpmap:96 H264/90000\r\n"
+        "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
+        "profile-level-id=42e01f\r\n"
+        "a=rtpmap:97 H265/90000\r\n"
+        "a=fmtp:97 level-id=93\r\n"
+        "a=rtcp-mux\r\n"
+    )
+
+
 def _build_restart_sdp(
     *,
     ts: int,
@@ -2040,33 +2089,15 @@ def _build_restart_sdp(
     sprop-parameter-sets injection and the on-disk rewrite stay with the
     caller.
     """
-    _proto = "RTP/AVP" if use_plain_rtp else "RTP/SAVP"
-
-    def _crypto(key: str) -> str:
-        if use_plain_rtp:
-            return ""
-        return f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{key}\r\n"
-
-    sdp = (
-        "v=0\r\n"
-        f"o=- {ts} {ts} IN IP4 0.0.0.0\r\n"
-        "s=aidot-sdes-rx\r\n"
-        "t=0 0\r\n"
-        f"m=audio {lo_audio_port} {_proto} 0 8\r\n"
-        "c=IN IP4 127.0.0.1\r\n"
-        f"{_crypto(srtp_key_audio)}"
-        "a=rtpmap:0 PCMU/8000\r\n"
-        "a=rtpmap:8 PCMA/8000\r\n"
-        "a=rtcp-mux\r\n"
-        f"m=video {lo_video_port} {_proto} 96 97\r\n"
-        "c=IN IP4 127.0.0.1\r\n"
-        f"{_crypto(srtp_key_video)}"
-        "a=rtpmap:96 H264/90000\r\n"
-        "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
-        "profile-level-id=42e01f\r\n"
-        "a=rtpmap:97 H265/90000\r\n"
-        "a=fmtp:97 level-id=93\r\n"
-        "a=rtcp-mux\r\n"
+    sdp = _ffmpeg_rx_sdp(
+        ts=ts,
+        audio_port=lo_audio_port,
+        video_port=lo_video_port,
+        plain_rtp=use_plain_rtp,
+        srtp_key_audio=srtp_key_audio,
+        srtp_key_video=srtp_key_video,
+        conn_ip="127.0.0.1",
+        session_name="aidot-sdes-rx",
     )
     return narrow_sdp_payload_types(
         sdp,
@@ -3548,27 +3579,17 @@ class _SdesOpenMixin:
         # with "Could not find codec parameters" when SAVPF is used.  The
         # camera-facing offer SDP still uses RTP/SAVPF as required by the
         # firmware; only this local file (read by ffmpeg) needs SAVP.
-        ffmpeg_sdp = (
-            "v=0\r\n"
-            f"o=- {ts} {ts} IN IP4 0.0.0.0\r\n"
-            "s=aidot-sdes-rx\r\n"
-            "t=0 0\r\n"
-            f"m=audio {audio_port} RTP/SAVP 0 8\r\n"
-            "c=IN IP4 0.0.0.0\r\n"
-            f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
-            "a=rtpmap:0 PCMU/8000\r\n"
-            "a=rtpmap:8 PCMA/8000\r\n"
-            # a=rtcp-mux prevents ffmpeg from trying to bind audio_port+1 for
-            # RTCP (a separate socket that is never needed here).
-            "a=rtcp-mux\r\n"
-            f"m=video {video_port} RTP/SAVP 96 97\r\n"
-            "c=IN IP4 0.0.0.0\r\n"
-            f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
-            "a=rtpmap:96 H264/90000\r\n"
-            "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\n"
-            "a=rtpmap:97 H265/90000\r\n"
-            "a=fmtp:97 level-id=93\r\n"
-            "a=rtcp-mux\r\n"
+        # a=rtcp-mux in the template keeps ffmpeg from binding audio_port+1
+        # for RTCP, a separate socket that is never needed here.
+        ffmpeg_sdp = _ffmpeg_rx_sdp(
+            ts=ts,
+            audio_port=audio_port,
+            video_port=video_port,
+            plain_rtp=False,
+            srtp_key_audio=srtp_key_audio,
+            srtp_key_video=srtp_key_video,
+            conn_ip="0.0.0.0",
+            session_name="aidot-sdes-rx",
         )
 
         sdp_path = await asyncio.get_running_loop().run_in_executor(
@@ -5279,48 +5300,16 @@ class _SdesOpenMixin:
         # standard RTP packets from TUTK SFrames and forwards without crypto.
         _ts_br = int(time.time())
         # (Out-of-band SPS/PPS is injected at the write below via _inject_sprop.)
-        if _use_plain_rtp:
-            _br_sdp = (
-                "v=0\r\n"
-                f"o=- {_ts_br} {_ts_br} IN IP4 0.0.0.0\r\n"
-                "s=aidot-tutk-rx\r\n"
-                "t=0 0\r\n"
-                f"m=audio {_lo_audio_port} RTP/AVP 0 8\r\n"
-                "c=IN IP4 127.0.0.1\r\n"
-                "a=rtpmap:0 PCMU/8000\r\n"
-                "a=rtpmap:8 PCMA/8000\r\n"
-                "a=rtcp-mux\r\n"
-                f"m=video {_lo_video_port} RTP/AVP 96 97\r\n"
-                "c=IN IP4 127.0.0.1\r\n"
-                "a=rtpmap:96 H264/90000\r\n"
-                "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
-                "profile-level-id=42e01f\r\n"
-                "a=rtpmap:97 H265/90000\r\n"
-                "a=fmtp:97 level-id=93\r\n"
-                "a=rtcp-mux\r\n"
-            )
-        else:
-            _br_sdp = (
-                "v=0\r\n"
-                f"o=- {_ts_br} {_ts_br} IN IP4 0.0.0.0\r\n"
-                "s=aidot-sdes-rx\r\n"
-                "t=0 0\r\n"
-                f"m=audio {_lo_audio_port} RTP/SAVP 0 8\r\n"
-                "c=IN IP4 127.0.0.1\r\n"
-                f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
-                "a=rtpmap:0 PCMU/8000\r\n"
-                "a=rtpmap:8 PCMA/8000\r\n"
-                "a=rtcp-mux\r\n"
-                f"m=video {_lo_video_port} RTP/SAVP 96 97\r\n"
-                "c=IN IP4 127.0.0.1\r\n"
-                f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
-                "a=rtpmap:96 H264/90000\r\n"
-                "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
-                "profile-level-id=42e01f\r\n"
-                "a=rtpmap:97 H265/90000\r\n"
-                "a=fmtp:97 level-id=93\r\n"
-                "a=rtcp-mux\r\n"
-            )
+        _br_sdp = _ffmpeg_rx_sdp(
+            ts=_ts_br,
+            audio_port=_lo_audio_port,
+            video_port=_lo_video_port,
+            plain_rtp=_use_plain_rtp,
+            srtp_key_audio=srtp_key_audio,
+            srtp_key_video=srtp_key_video,
+            conn_ip="127.0.0.1",
+            session_name="aidot-tutk-rx" if _use_plain_rtp else "aidot-sdes-rx",
+        )
         try:
             await asyncio.get_running_loop().run_in_executor(
                 None,
