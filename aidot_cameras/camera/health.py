@@ -113,13 +113,18 @@ def format_health_line(
         "viewers="
         + ("present" if viewer is True else "absent" if viewer is False else "unknown")
     )
-    # The serve canary's frames, keyframes and keyframe gap are deliberately
-    # NOT on the line. Measured 2026-10-14 against a captured stream from an
-    # A000088: the canary ran at twice the picture rate (it counts what the
-    # receiver hands over, not pictures) and once reported four times that
-    # over one period while the capture stayed a regular 15 fps. Until that
-    # counting is understood the figures would mislead; the canary still logs
-    # at DEBUG as before.
+    if "frames" in cur:
+        # Pictures a viewer is served, not frames the receiver handed over:
+        # the camera re-sends about 41% of its frames and every consumer
+        # drops the repeats (client._observe_video_frame), which is why the
+        # raw count read at about twice the picture rate in 1.0.0rc49.
+        # `max_keyframe_gap` is the largest run of pictures between
+        # keyframes since the session started.
+        frames = _delta(prev, cur, "frames", reset)
+        parts.append(f"frames={frames} ({frames / secs:.1f}/s)")
+        parts.append(f"resent={_delta(prev, cur, 'resent', reset)}")
+        parts.append(f"keyframes={_delta(prev, cur, 'keyframes', reset)}")
+        parts.append(f"max_keyframe_gap={int(cur.get('max_keyframe_gap') or 0)}")
     return " ".join(parts)
 
 
@@ -134,11 +139,13 @@ def dtls_snapshot(
     ``stats`` is ``WebRTCSession.get_stats()``: inbound RTP packets received
     and lost, summed over audio and video, and the nominated ICE pairs, from
     which the path is ``relay`` when any remote candidate is a relay, else
-    ``direct``, else unknown. ``canary`` is the serve's video canary (frames,
-    keyframes, largest frame count between keyframes); it is accepted for the
-    call sites' sake and not reported - see ``format_health_line``. There is no byte count
-    on this transport, so the
-    snapshot carries none and the line says nothing about bytes.
+    ``direct``, else unknown. ``canary`` is the serve's video canary; its
+    ``pictures``, ``pict_keyframes``, ``pict_max_gap`` and ``resent`` become
+    the snapshot's ``frames``, ``keyframes``, ``max_keyframe_gap`` and
+    ``resent`` (the served figures, see ``client._observe_video_frame``); a
+    canary without them, or none at all, puts no frame figures on the line.
+    There is no byte count on this transport, so the snapshot carries none
+    and the line says nothing about bytes.
     """
     packets = 0
     lost = 0
@@ -158,6 +165,11 @@ def dtls_snapshot(
         "media_path": path,
         "viewer": viewer,
     }
+    if canary and "pictures" in canary:
+        out["frames"] = int(canary.get("pictures") or 0)
+        out["keyframes"] = int(canary.get("pict_keyframes") or 0)
+        out["max_keyframe_gap"] = int(canary.get("pict_max_gap") or 0)
+        out["resent"] = int(canary.get("resent") or 0)
     return out
 
 
