@@ -22,9 +22,10 @@ plus a test run - see [`docs/UPSTREAM.md`](https://github.com/cbrightly/python-a
 > nothing here: no upstream file is edited or merged, and upstream arrives as an
 > ordinary pip dependency. The number that describes an install is the
 > *resolved* upstream version, which is a range rather than a pin -- upstream
-> shipped two incompatible shapes of the private API this attaches to and both
-> are live, so two people on the same release of this library can be running
-> different upstream releases. To see yours:
+> changes the private API this attaches to inside patch releases, and Home
+> Assistant core pins an older one than a bare install resolves, so two people
+> on the same release of this library can be running different upstream
+> releases. To see yours:
 >
 > ```
 > python -c "from importlib.metadata import version; print(version('python-aidot'))"

@@ -1,33 +1,23 @@
-"""Test helpers for building records that suit whichever upstream is installed.
+"""Test helpers for building records and stubs that suit the installed upstream.
 
-Upstream ships two incompatible shapes of its account/device records and both
-are live (see ``aidot_cameras/_upstream.py`` and docs/UPSTREAM.md).  Tests that
-construct a ``CameraDeviceClient`` need the pair upstream actually expects:
-
-* typed shape (0.3.54 - 0.3.55): ``DeviceModel`` + ``UserInformation``
-* dict shape (<=0.3.53, >=0.3.56): the raw cloud dicts, natively
-
-Importing ``aidot.models.auth_model`` directly - as several test modules used to
-- is an ImportError on the dict shape at *collection* time, which takes the
-whole module down rather than failing one assertion.  Build records through the
-helpers here instead.
+Upstream has changed its account/device API inside patch releases (see
+``aidot_cameras/_upstream.py`` and docs/UPSTREAM.md).  Only the dict shape
+(0.3.56+) is supported now, but the account back-reference that 0.3.57 added is
+still a live difference, so tests build records and stubs through the helpers
+here rather than hardcoding today's spelling - a future rename then lands in
+one place.
 """
 
 from aidot_cameras import _upstream
 
-#: True when upstream exposes the typed account/device dataclasses.
-TYPED = _upstream.HAS_TYPED_ACCOUNT
-
-#: The typed cloud device record class, whatever upstream calls it this week.
+#: The typed cloud device record class, whatever upstream calls it.
 DeviceModel = _upstream.DeviceModel
 
 
 def device_record(data: dict):
     """The typed device record for ``data``.
 
-    Both shapes have one (``DeviceModel`` / ``DeviceInformation``) and both
-    expose ``from_json`` / ``to_dict``, so this needs no branch - it exists so
-    tests have a single name to import.
+    It exists so tests have a single name to import.
     """
     return DeviceModel.from_json(data=data)
 
@@ -35,48 +25,36 @@ def device_record(data: dict):
 def account_record(data: dict):
     """The account record upstream's ``DeviceClient`` expects as ``user_info``.
 
-    A ``UserInformation`` on the typed shape; the plain dict on the dict shape,
-    where upstream deleted the dataclass entirely.
+    Upstream takes the plain account dict.
     """
-    if _upstream.UserInformation is not None:
-        return _upstream.UserInformation.from_json(data=data)
     return dict(data)
 
 
 def set_access_token(client, token: str) -> None:
-    """Write an access token onto an account client, on either shape.
+    """Write an access token onto an account client.
 
-    The typed shape stores it on the ``user_info`` dataclass and only mirrors it
-    into ``login_info`` when the property getter runs; the dict shape keeps
-    ``login_info`` as the single source of truth.
+    ``login_info`` is the single source of truth for the account's tokens.
     """
     from aidot_cameras.const import CONF_ACCESS_TOKEN
 
-    if TYPED:
-        client.user_info.accessToken = token
-    else:
-        client.login_info[CONF_ACCESS_TOKEN] = token
+    client.login_info[CONF_ACCESS_TOKEN] = token
 
 
 def set_refresh_token(client, token: str) -> None:
-    """Write a refresh token onto an account client, on either shape."""
+    """Write a refresh token onto an account client."""
     from aidot_cameras.const import CONF_REFRESH_TOKEN
 
-    if TYPED:
-        client.user_info.refreshToken = token
-    else:
-        client.login_info[CONF_REFRESH_TOKEN] = token
+    client.login_info[CONF_REFRESH_TOKEN] = token
 
 
 def make_upstream_device_client(raw_device: dict, raw_account: dict, client=None):
     """Build a PLAIN upstream ``DeviceClient`` from raw cloud dicts.
 
     Tests that exercise the non-camera path construct upstream's own class, so
-    they need whatever *it* takes: typed models on the typed shape, the raw
-    dicts on the dict shape, plus the account back-reference on >=0.3.57.
-    ``_upstream.device_client_args`` already encodes every one of those
-    decisions, so reuse it rather than branching again here - and **splat** the
-    result, because its length varies by upstream.
+    they need whatever *it* takes: the raw dicts, plus the account
+    back-reference on >=0.3.57.  ``_upstream.device_client_args`` already
+    encodes that decision, so reuse it rather than branching again here - and
+    **splat** the result, because its length varies by upstream.
 
     ``client`` defaults to ``None`` because these fixtures never reach
     ``async_set_effect``, the one upstream method that uses it.  Production
@@ -96,58 +74,36 @@ def make_upstream_device_client(raw_device: dict, raw_account: dict, client=None
 
 
 def arm_reconnect(device_client, callback, delay: float = 0.05) -> None:
-    """Arm a pending reconnect on ``device_client`` the way its shape does.
+    """Arm a pending reconnect on ``device_client`` the way upstream does.
 
-    Typed shape: ``_reconnect_timer`` holding an ``aidot.utils.AsyncTimer``.
-    Dict shape:  ``_reconnect_handle`` holding an ``asyncio.TimerHandle`` from
-    ``loop.call_later`` (upstream deleted ``AsyncTimer`` along with
-    ``aidot/utils/``).
-
-    Both objects expose ``.cancel()``, which is all
-    ``_upstream.cancel_pending_reconnect`` needs - the point of the test using
-    this is that the *attribute name* differs, so a hardcoded one would silently
-    arm nothing on the other shape and the assertion would pass vacuously.
+    ``_reconnect_handle`` holding an ``asyncio.TimerHandle`` from
+    ``loop.call_later``.  The name comes from ``_upstream`` rather than being
+    hardcoded here: the point of the test using this is that the attribute name
+    has changed before, so a stale one would silently arm nothing and the
+    assertion would pass vacuously.
     """
     import asyncio
 
-    if TYPED:
-        from aidot.utils import AsyncTimer
-
-        timer = AsyncTimer(callback=callback, interval=delay)
-        timer.start()
-        device_client._reconnect_timer = timer
-    else:
-        loop = asyncio.get_running_loop()
-        device_client._reconnect_handle = loop.call_later(delay, callback)
+    (attr,) = _upstream.RECONNECT_HANDLE_ATTRS
+    loop = asyncio.get_running_loop()
+    setattr(device_client, attr, loop.call_later(delay, callback))
 
 
 def stub_account_http(client, fake_api) -> None:
-    """Point an account client's four cloud calls at ``fake_api``.
+    """Point an account client's cloud listing calls at ``fake_api``.
 
-    ``fake_api`` must expose ``get_houses`` / ``get_devices`` / ``get_products``
-    (the typed shape's ``CloudApi`` method names).  On the typed shape it is
-    installed as ``client._cloud_api`` verbatim; on the dict shape, where those
-    calls became ``client.async_get_*`` methods on the client itself, each is
-    bound across.
+    ``fake_api`` must expose ``get_houses`` / ``get_devices`` /
+    ``get_products``; each is bound across to the client's own
+    ``async_get_*`` method.
 
-    Tests that build a client with ``object.__new__`` need this - stubbing
-    ``_cloud_api`` alone leaves the dict shape reaching for ``self._base_url``
-    on a half-built object.
+    Tests that build a client with ``object.__new__`` need this - the real
+    methods reach for ``self._base_url`` on a half-built object.
     """
-    client._cloud_api = fake_api
-    if not TYPED:
-        client.async_get_houses = fake_api.get_houses
-        client.async_get_devices = fake_api.get_devices
-        client.async_get_products = fake_api.get_products
+    client.async_get_houses = fake_api.get_houses
+    client.async_get_devices = fake_api.get_devices
+    client.async_get_products = fake_api.get_products
 
 
 def patch_refresh_token_call(client, fake):
-    """Replace the client's token-refresh HTTP call with ``fake``.
-
-    Typed shape: ``client._cloud_api.refresh_token``.
-    Dict shape:  ``client.async_refresh_token``.
-    """
-    if TYPED:
-        client._cloud_api.refresh_token = fake
-    else:
-        client.async_refresh_token = fake
+    """Replace the client's token-refresh HTTP call (``async_refresh_token``)."""
+    client.async_refresh_token = fake

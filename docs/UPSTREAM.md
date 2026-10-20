@@ -73,19 +73,25 @@ version with a known-good one.
 
 **Only the dict shape is supported, from 0.3.56.** The typed shape
 (0.3.54-0.3.55) was dropped on 2026-09-23 - see "The typed shape is no longer
-supported" below - and `pyproject.toml` requires `python-aidot>=0.3.56`. The
-typed branches in `_upstream.py` remain but are unreachable.
+supported" below - and `pyproject.toml` requires `python-aidot>=0.3.56`. Its
+branches in `_upstream.py`, unreachable since then, have been removed. The
+flags that reported it (`HAS_TYPED_ACCOUNT`, `UPSTREAM_SHAPE`,
+`UserInformation`, `HAS_READ_DATA_SEAM`, `HAS_SHARED_DISCOVERY_MAP`,
+`DEVICE_STATE_IS_UPSTREAMS`) remain importable as fixed constants with their
+dict-shape values, because the Home Assistant integration and the tests import
+them.
 
-Every difference is resolved in
-`aidot_cameras/_upstream.py`, which detects the shape *by capability* (does the
-name import?) and never by parsing a version string - a version comparison would
-encode the five-day excursion rather than the shape.  No other module in the
-package may branch on the upstream version; if you find yourself writing a
-second `try: import aidot...`, put it in `_upstream.py` instead.
+Every difference that is still live within the range (today: the account
+back-reference) is resolved in `aidot_cameras/_upstream.py`, which detects it
+*by capability* (does the name import, what does the signature say?) and never
+by parsing a version string - a version comparison would encode the five-day
+excursion rather than the shape.  No other module in the package may branch on
+the upstream version; if you find yourself writing a second
+`try: import aidot...`, put it in `_upstream.py` instead.
 
-`tests/test_upstream_compat.py` asserts against whichever shape is installed,
-with `typed_only` / `dict_only` marks for the assertions that apply to one.
-Tests with no mark must hold on both.
+`tests/test_upstream_compat.py` asserts against the installed upstream. It also
+asserts that the typed shape's names are still absent, so a flip back fails by
+name rather than silently.
 
 ## The procedure
 
@@ -154,13 +160,13 @@ Keep this list in sync when you add or remove a seam; it is what
 | --- | --- |
 | Dispatch camera vs non-camera devices | `AidotClient.get_device_client(device)` - the single place upstream constructs a device client |
 | Device client constructor arguments | `DeviceClient.__init__(device, user_info[, client])` - built by `_upstream.device_client_args` (cameras) and `_upstream.light_device_client_args` (everything else), splatted because the length varies |
-| Camera device client | subclass `DeviceClient`, overriding `async_login`, `close`, `_notify_status_update`, and `read_data` **where it exists** (typed shape only) |
+| Camera device client | subclass `DeviceClient`, overriding `async_login` and `close` |
 | Camera status / info | subclass `DeviceStatusData`, `DeviceInformation` |
-| Raw cloud records | typed shape: `DeviceModel.to_dict()`, `UserInformation.to_dict()`.  Dict shape: the raw dicts natively (no round trip) |
-| Shared crypto | `aidot.utils.crypto` (typed) / `aidot.aes_utils` (dict): `aes_encrypt`, `aes_decrypt`, `aes_decrypt_to_json`.  `rsa_encrypt` is **ours** - see below |
-| Account HTTP | typed shape: `client._cloud_api.{get_houses,get_devices,get_products,refresh_token}`.  Dict shape: `client.async_*` methods |
-| Consumer-facing re-exports | `aidot.device_client`: `DeviceClient`, `DeviceState` - handed on under `aidot_cameras.device_client` so a consumer never imports `aidot` itself.  `DeviceState` does not exist on the dict shape and is supplied by `_upstream` |
-| Constants | `aidot.const` (+ `aidot.login_const` on the dict shape): `APP_ID`, `PUBLIC_KEY_PEM`, `API_URL_TEMPLATE` (the cloud API version - see above), `DEFAULT_REGION`, `Identity`, `CONF_*` |
+| Raw cloud records | the raw dicts, passed to upstream natively (no round trip) |
+| Shared crypto | `aidot.aes_utils`: `aes_encrypt`, `aes_decrypt`, `aes_decrypt_to_json`.  `rsa_encrypt` is **ours** - see below |
+| Account HTTP | `AidotClient.async_get_houses`, `async_get_devices`, `async_get_products`, `async_refresh_token` |
+| Consumer-facing re-exports | `aidot.device_client.DeviceClient`, handed on under `aidot_cameras.device_client` so a consumer never imports `aidot` itself, alongside `DeviceState`, which upstream deleted in 0.3.56 and `_upstream` supplies |
+| Constants | `aidot.const` and `aidot.login_const`: `APP_ID`, `PUBLIC_KEY_PEM`, `API_URL_TEMPLATE` (the cloud API version - see above), `DEFAULT_REGION`, `Identity`, `CONF_*` |
 
 **Non-camera devices are upstream's job.** `CameraClient.get_device_client`
 returns a plain upstream `DeviceClient` for anything that is not a camera, so
@@ -173,14 +179,16 @@ This is the single most important thing to know before proposing a "cloud mode"
 for lights, plugs or switches.  Upstream's transport model is: **the cloud for
 discovery and auth, the LAN for everything else.**
 
-- `aidot.api.cloud_api.CloudApi` exposes only `login`, `refresh_token`,
-  `get_houses`, `get_devices`, `get_products`.  There is **no device-control
-  endpoint** - it is an inventory and authentication API.
+- `AidotClient`'s cloud calls are login, token refresh, houses, devices,
+  products and the effect/preset lookups - an inventory and authentication API.
+  The one cloud *command* is `async_execute_diff_command`
+  (`/devices/execute/diffCommand`, 0.3.57+), which only `async_set_effect`
+  uses; there is **no cloud endpoint for on/off, brightness or colour**.
 - `DeviceClient.send_dev_attr()` refuses outright unless the LAN session is
-  authenticated: `if self._state != DeviceState.AUTHENTICATED: raise
+  authenticated: `if not self._connect_and_login: raise
   ConnectionError("Device offline")`.  Every setter (`async_set_cct`,
   `async_set_rgbw`, `async_set_brightness`, `async_turn_on/off`) goes through it.
-- `write_request()` frames an AES-encrypted packet over **TCP:10000**.
+- `send_action()` frames an AES-encrypted packet over **TCP:10000**.
 - `status.online` therefore means "the LAN control channel is up", not "the cloud
   says the device is reachable".  A device that is powered and visible in the
   AiDot app but not reachable over the LAN is correctly reported offline.
@@ -204,18 +212,17 @@ that account, and a cloud mode could fix availability but never on/off or colour
 (`cloud_state_probe.py`, a local developer tool not shipped in the repo) before
 revisiting this conclusion.
 
-## Known dual-support gaps
+## Known gaps
 
-Places where supporting both upstream shapes is not perfectly symmetric.  Each
-is deliberate and narrow; none affects the camera path.
+Places where this package does less than it once did, or supplies something
+upstream no longer has.  Each is deliberate and narrow; none affects the camera
+path.
 
-| Gap | Which shape | Why it is acceptable |
-| --- | --- | --- |
-| `CameraDeviceClient.read_data` is not defined | dict shape | The dict shape inlines the decrypt into `receive_data`, so there is no seam and the raw JSON never escapes.  That hook exists only to recover camera-only attribute keys upstream's typed `DeviceAttr` drops - and cameras never reach it anyway, because `async_login` returns early for IPC models and a camera therefore never opens the TCP:10000 session the loop reads from.  On the dict shape `_notify_status_update` finds no stashed payload and degrades to a plain notify. |
-| `CameraClient._on_token_refreshed` is not defined | dict shape | There is no such hook to override.  It exists on the typed shape to force the rotated token into the shared `login_info` before `_token_fresh_cb` persists it; the dict shape writes the token straight into `login_info` and fires the callback itself, so the guarantee already holds.  The proactive-refresh rescheduling it also did is covered by `_reschedule_after_refresh`, called from `_do_ensure_token`. |
-| `DeviceState` is a local stand-in, not upstream's enum | dict shape | Upstream deleted the enum (the session is `_connecting` / `_connect_and_login` booleans now).  Dropping a public name outright would break the integration at import, so a value-identical `IntEnum` is supplied.  Nothing upstream *produces* one there - call `_upstream.device_session_authenticated(client)` for the answer, which works on both. |
-| `rsa_encrypt` is implemented locally | both | The typed shape had `rsa_encrypt(message, public_key)`; the dict shape replaced it with a one-argument `rsa_password_encrypt(message)`.  Neither signature exists on both, and `aidot_cameras.crypto.rsa_encrypt` is public surface the integration repo may import, so the two-argument form is kept and satisfied here. |
-| Discovered addresses are per-instance | dict shape | The typed shape needed the sweep to write into the process-wide `Discover.DISCOVERED_DEVICE` class dict, because that is what upstream's `get_device_client` reads.  The dict shape reads `self._discover.discovered_device` off our own object instead, so a per-instance map suffices - and is better: two accounts no longer pool addresses in global state. |
+| Gap | Why it is acceptable |
+| --- | --- |
+| Camera-only attribute keys pushed over the LAN session are not recovered | Upstream inlines the decrypt into `receive_data`, so there is no `read_data` seam and the raw JSON never escapes; keys upstream's typed `DeviceAttr` has no field for are dropped.  0.3.54-0.3.55 had the seam and this package hooked it.  Cameras never reach that loop anyway: `async_login` returns early for IPC models, so a camera never opens the TCP:10000 session it reads from.  `test_read_data_seam_flag_matches_reality` fails if upstream brings the seam back. |
+| `DeviceState` is a local stand-in, not upstream's enum | Upstream deleted the enum in 0.3.56 (the session is `_connecting` / `_connect_and_login` booleans now).  Dropping a public name outright would break the integration at import, so a value-identical `IntEnum` is supplied.  Nothing upstream *produces* one - call `_upstream.device_session_authenticated(client)` for the answer. |
+| `rsa_encrypt` is implemented locally | 0.3.54-0.3.55 had `rsa_encrypt(message, public_key)`; the supported releases have only a one-argument `rsa_password_encrypt(message)`.  `aidot_cameras.crypto.rsa_encrypt` is public surface the integration repo may import, so the two-argument form is kept and satisfied here. |
 
 ### The typed shape is no longer supported
 
@@ -232,8 +239,12 @@ no known install runs (Home Assistant core pins 0.3.56), the floor was raised to
 0.3.56 and the 0.3.55 CI arm removed.
 `test_upstream_compat.py::test_declared_range_excludes_the_typed_shape` pins
 that decision: lowering the floor again means solving the LAN retry gap first.
-The rows above that mention the typed shape describe code that is now
-unreachable, kept until someone removes those branches.
+
+The typed-shape branches in `_upstream.py`, `client.py`, `device_client.py` and
+`discover.py` - unreachable from the moment the floor moved - were removed
+afterwards, along with the tests that only ran on that shape (they had been
+skipping on every supported install).  Lowering the floor would now also mean
+restoring them.
 
 ## Carried overrides (self-liquidating)
 
@@ -245,7 +256,7 @@ condition is met - after which those devices fall through to pure upstream.
 | Override | Upstream PR | Drop when |
 | --- | --- | --- |
 | `active_color_mode` on RGBW+CCT bulbs (reports color temp instead of a stale RGB color) | `AiDot-Development-Team/python-AiDot#6` | that PR merges |
-| `CameraClient.async_close()` cancels each device client's pending reconnect (`_reconnect_timer` on the typed shape, `_reconnect_handle` on the dict shape - see `_upstream.cancel_pending_reconnect`) | not filed yet - see [Inherited upstream defects](#inherited-upstream-defects) | upstream's `DeviceClient.close()` cancels it itself |
+| `CameraClient.async_close()` cancels each device client's pending reconnect (`_reconnect_handle` - see `_upstream.cancel_pending_reconnect`) | not filed yet - see [Inherited upstream defects](#inherited-upstream-defects) | upstream's `DeviceClient.close()` cancels it itself |
 
 Find every carried site with `grep -rn '# CARRIED:' aidot_cameras/`.  The markers
 do **not** all share one drop condition, so read each one and delete only the

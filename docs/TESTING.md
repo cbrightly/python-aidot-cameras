@@ -151,8 +151,9 @@ fails the run. To match it locally you need `ffmpeg`, a go2rtc binary
 (`AIDOT_GO2RTC_BIN=/path/to/go2rtc`, 1.9.14 is what CI pins) and `pyflakes`
 in the venv; without them the real-go2rtc tests and the undefined-names test
 skip, and the guard turns those skips into failures. The only skips the suite
-expects are the upstream-shape ones (`typed upstream shape only` and the
-`read_data` seam), which depend on the `python-aidot` version installed.
+expects are the account back-reference ones (`upstream takes no account
+client` / `upstream DeviceClient takes the account client`), which skip only
+when `python-aidot` 0.3.56 is installed; on 0.3.57+ nothing should skip.
 
 ```
 AIDOT_FAIL_ON_SKIP=1 AIDOT_GO2RTC_BIN=~/bin/go2rtc pytest tests/ -q -p no:randomly

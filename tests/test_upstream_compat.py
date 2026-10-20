@@ -6,12 +6,15 @@ promised to keep.  A version bump that quietly moves or renames one of them
 would otherwise surface as a puzzling failure deep inside a camera stream (or,
 worse, as a silently skipped override).
 
-**Upstream ships two live shapes and this file asserts against both.**  0.3.56
-is a *revert* of the refactor 0.3.54 introduced and 0.3.55 carried, so "old" and
-"current" are the same shape and neither can be assumed permanent:
+Upstream has changed this private API inside patch releases.  0.3.56 is a
+*revert* of the refactor 0.3.54 introduced and 0.3.55 carried:
 
     <=0.3.53, >=0.3.56   dict-based client, ``aes_utils``, ``login_const``
     0.3.54 - 0.3.55      typed dataclasses, ``api/``, ``utils/crypto``
+
+The declared range starts at 0.3.56, so only the dict shape is supported and
+asserted here; the checks that the typed names are absent stay, as a tripwire
+for upstream flipping back.
 
 Separately, 0.3.57+ passes the owning ``AidotClient`` to ``DeviceClient`` as a
 third argument - an independent axis, flagged by
@@ -19,11 +22,9 @@ third argument - an independent axis, flagged by
 v35.  A run can only see the arity that is installed; the other one is covered
 by ``test_upstream_seam_adapter.py``, which stubs both.
 
-Which one is installed is detected by ``aidot_cameras._upstream``, and that
-module is the only place in the package allowed to know.  Tests below that
-apply to one shape only are marked with the matching skipif; tests with no mark
-must hold on both.  Read the file as the checklist to work through when the pin
-in pyproject.toml moves.
+Which release is installed is resolved by ``aidot_cameras._upstream``, and that
+module is the only place in the package allowed to know.  Read the file as the
+checklist to work through when the pin in pyproject.toml moves.
 
 Keep it importing ``aidot.*`` directly - it is the one test module that
 deliberately does NOT target our package, except for ``_upstream`` itself, whose
@@ -36,14 +37,9 @@ import pytest
 
 from aidot_cameras import _upstream
 
-TYPED = _upstream.HAS_TYPED_ACCOUNT
-
-typed_only = pytest.mark.skipif(not TYPED, reason="typed upstream shape only")
-dict_only = pytest.mark.skipif(TYPED, reason="dict upstream shape only")
-
 BACKREF = _upstream.HAS_DEVICE_CLIENT_BACKREF
 
-# Orthogonal to the record shape: 0.3.57+ is the dict shape plus this.
+# 0.3.57+ is the dict shape plus this.
 backref_only = pytest.mark.skipif(
     not BACKREF, reason="upstream DeviceClient takes the account client"
 )
@@ -55,7 +51,11 @@ backref_only = pytest.mark.skipif(
 
 
 def test_shape_detection_is_self_consistent():
-    """Every capability flag must match the tree that is really importable."""
+    """Every capability flag must match the tree that is really importable.
+
+    The shape-B flags are fixed constants now; these assertions still hold and
+    fail if upstream ever brings the typed names back.
+    """
     import importlib
 
     def importable(mod, name):
@@ -70,7 +70,8 @@ def test_shape_detection_is_self_consistent():
     assert _upstream.DEVICE_STATE_IS_UPSTREAMS is importable(
         "aidot.device_client", "DeviceState"
     )
-    assert _upstream.UPSTREAM_SHAPE == ("typed" if TYPED else "dict")
+    assert _upstream.UPSTREAM_SHAPE == "dict"
+    assert _upstream.UserInformation is None
 
     # Derived independently of the detector: calling
     # _init_takes_account_client here would only compare the flag with itself.
@@ -218,20 +219,6 @@ def test_client_methods_we_override_or_call(name):
     assert callable(getattr(AidotClient, name, None)), name
 
 
-@typed_only
-def test_on_token_refreshed_hook_exists_on_the_typed_shape():
-    """``CameraClient._on_token_refreshed`` is defined only when this exists.
-
-    The dict shape has no such hook and needs none - it writes the rotated
-    token straight into ``login_info`` and fires ``_token_fresh_cb`` itself.
-    If upstream ever reintroduces the hook on the dict shape, the conditional
-    override in client.py should be revisited rather than left dead.
-    """
-    from aidot.client import AidotClient
-
-    assert callable(getattr(AidotClient, "_on_token_refreshed", None))
-
-
 @pytest.mark.parametrize(
     "name",
     [
@@ -246,55 +233,28 @@ def test_client_attributes_we_reach_into(name):
     assert hasattr(client, name), name
 
 
-@typed_only
-def test_typed_account_attributes():
-    from aidot.client import AidotClient
-
-    client = AidotClient(None, country_code="US")
-    # The HTTP surface async_get_all_device drives, and the typed account
-    # record login_info mirrors.
-    assert hasattr(client, "_cloud_api")
-    assert hasattr(client, "user_info")
-
-
-@dict_only
 def test_dict_account_attributes():
     from aidot.client import AidotClient
 
     client = AidotClient(None, country_code="US")
-    # Replaces user_info.region / user_info.country on this shape.
+    # What _upstream.account_region and friends read.
     assert hasattr(client, "_region")
     assert hasattr(client, "_base_url")
     assert isinstance(client.login_info, dict)
 
 
 def test_account_http_calls_used_by_async_get_all_device():
-    """The four cloud calls, whichever object they hang off."""
+    """The four cloud calls ``_upstream``'s ``api_*`` helpers make."""
     from aidot.client import AidotClient
 
     client = AidotClient(None, country_code="US")
-    if TYPED:
-        target, names = (
-            client._cloud_api,
-            [
-                "get_houses",
-                "get_devices",
-                "get_products",
-                "refresh_token",
-            ],
-        )
-    else:
-        target, names = (
-            client,
-            [
-                "async_get_houses",
-                "async_get_devices",
-                "async_get_products",
-                "async_refresh_token",
-            ],
-        )
-    for name in names:
-        assert callable(getattr(target, name, None)), name
+    for name in [
+        "async_get_houses",
+        "async_get_devices",
+        "async_get_products",
+        "async_refresh_token",
+    ]:
+        assert callable(getattr(client, name, None)), name
 
 
 def test_account_field_helpers_work_on_a_real_client():
@@ -307,12 +267,11 @@ def test_account_field_helpers_work_on_a_real_client():
     assert _upstream.account_token_ttl(client, 7200) == 7200
 
 
-@dict_only
 def test_dict_shape_constructor_indexes_token_keys_directly():
     """Why ``_survivable_token`` exists.
 
-    The dict shape reads four keys off a stored token with ``[]``, so a partial
-    entry - which the typed shape tolerated via ``update_from_json`` - raises
+    Upstream reads four keys off a stored token with ``[]``, so a partial
+    entry - which 0.3.54-0.3.55 tolerated via ``update_from_json`` - raises
     KeyError and the account never loads.  If upstream ever softens this to
     ``.get()``, ``_survivable_token`` can go.
     """
@@ -323,7 +282,6 @@ def test_dict_shape_constructor_indexes_token_keys_directly():
         AidotClient(None, country_code="US", token={CONF_ID: "u1"})
 
 
-@dict_only
 def test_survivable_token_lets_a_partial_entry_load():
     from aidot_cameras.client import CameraClient
     from aidot_cameras.const import CONF_ID
@@ -344,8 +302,8 @@ def test_survivable_token_lets_a_partial_entry_load():
         # override, leaving upstream's behavior in place).
         "async_login",
         "close",
-        "_notify_status_update",
         # Called on the client, not overridden.
+        "_notify_status_update",
         "receive_data",
         "update_ip_address",
         "send_dev_attr",
@@ -358,11 +316,12 @@ def test_device_client_methods(name):
 
 
 def test_read_data_seam_flag_matches_reality():
-    """``CameraDeviceClient.read_data`` is defined only when this is True.
+    """No ``read_data`` seam upstream, and no override of one here.
 
-    The dict shape inlines the decrypt into ``receive_data``, so the raw JSON
-    never escapes and the camera-only attribute recovery has nothing to hook.
-    See docs/UPSTREAM.md, "Known dual-support gaps".
+    Upstream inlines the decrypt into ``receive_data``, so the raw JSON never
+    escapes and there is nothing to hook (0.3.54-0.3.55 had the seam).  Fails
+    if upstream brings it back, so the camera-only attribute recovery that
+    used it can be reconsidered.  See docs/UPSTREAM.md, "Known gaps".
     """
     from aidot.device_client import DeviceClient
     from aidot_cameras.device_client import CameraDeviceClient
@@ -413,7 +372,7 @@ def test_device_client_requires_only_arguments_we_know_how_to_supply():
 
 
 def test_device_client_constructor_argument_shape():
-    """``__init__(device, user_info)`` - typed models or raw dicts."""
+    """``__init__(device, user_info)`` - the raw dicts."""
     from aidot.device_client import DeviceClient
 
     params = list(inspect.signature(DeviceClient.__init__).parameters)
@@ -422,11 +381,8 @@ def test_device_client_constructor_argument_shape():
         assert params[3] == "client", params
     annotations = inspect.signature(DeviceClient.__init__).parameters
     device_annotation = annotations["device"].annotation
-    if TYPED:
-        assert device_annotation is not dict, device_annotation
-    else:
-        # dict[str, Any] - the raw cloud record, natively.
-        assert getattr(device_annotation, "__origin__", None) is dict
+    # dict[str, Any] - the raw cloud record, natively.
+    assert getattr(device_annotation, "__origin__", None) is dict
 
 
 @backref_only
@@ -460,7 +416,7 @@ def test_device_client_builds_from_whatever_the_shape_wants():
     args = _upstream.device_client_args(
         record,
         raw_device,
-        _fake_typed_account(),
+        {"id": "u1", "region": "us"},
         {"id": "u1", "region": "us"},
         client=account_client,
     )
@@ -480,19 +436,13 @@ def test_device_client_builds_from_whatever_the_shape_wants():
     assert isinstance(client.info, DeviceInformation)
 
 
-def _fake_typed_account():
-    """A ``UserInformation`` on the typed shape, a plain dict otherwise."""
-    if _upstream.UserInformation is not None:
-        return _upstream.UserInformation.from_json(data={"id": "u1", "region": "us"})
-    return {"id": "u1", "region": "us"}
-
-
-def test_reconnect_handle_is_cancellable_on_either_spelling():
+def test_reconnect_handle_is_cancellable():
     """The close-time leak fix must not go quiet when upstream renames this.
 
     ``cancel_pending_reconnect`` returns False rather than silently succeeding,
-    which is the whole point - a ``getattr(x, "_reconnect_timer", None)`` finds
-    nothing on the dict shape and reports success.
+    which is the whole point - upstream has renamed the handle before
+    (``_reconnect_timer`` on 0.3.54-0.3.55), and a getattr on a stale name
+    finds nothing and reports success.
     """
 
     class _Handle:
@@ -512,16 +462,17 @@ def test_reconnect_handle_is_cancellable_on_either_spelling():
 
 
 def test_device_session_authenticated_reads_the_right_signal():
-    if TYPED:
-        holder = type("H", (), {"_state": _upstream.DeviceState.AUTHENTICATED})()
-        assert _upstream.device_session_authenticated(holder) is True
-        holder2 = type("H", (), {"_state": _upstream.DeviceState.IDLE})()
-        assert _upstream.device_session_authenticated(holder2) is False
-    else:
-        holder = type("H", (), {"connect_and_login": True})()
-        assert _upstream.device_session_authenticated(holder) is True
-        holder2 = type("H", (), {"connect_and_login": False})()
-        assert _upstream.device_session_authenticated(holder2) is False
+    holder = type("H", (), {"connect_and_login": True})()
+    assert _upstream.device_session_authenticated(holder) is True
+    holder2 = type("H", (), {"connect_and_login": False})()
+    assert _upstream.device_session_authenticated(holder2) is False
+
+
+def test_device_session_signal_exists_upstream():
+    """``device_session_authenticated`` reads a property upstream must have."""
+    from aidot.device_client import DeviceClient
+
+    assert isinstance(DeviceClient.__dict__.get("connect_and_login"), property)
 
 
 # --------------------------------------------------------------------------- #
@@ -552,9 +503,8 @@ def test_device_information_is_subclassable():
         pass
 
     raw = {"id": "d1", "modelId": "m"}
-    # The typed shape's constructor wants the record; the dict shape's wants
-    # the dict.  Our subclass accepts both, but upstream's base does not.
-    info = _Sub(_upstream.DeviceModel.from_json(data=raw) if TYPED else raw)
+    # Upstream's constructor takes the raw dict.
+    info = _Sub(raw)
     assert info.dev_id == "d1"
 
 
@@ -569,14 +519,6 @@ def test_device_record_round_trips_to_dict():
     """The camera layer works from raw cloud records, recovered via to_dict()."""
     device = _upstream.DeviceModel.from_json(data={"id": "d1", "modelId": "m"})
     assert callable(device.to_dict) and device.to_dict()["id"] == "d1"
-
-
-@typed_only
-def test_typed_account_round_trips_to_dict():
-    from aidot.models.auth_model import UserInformation
-
-    user_info = UserInformation.from_json(data={"id": "u1"})
-    assert callable(user_info.to_dict) and user_info.to_dict()["id"] == "u1"
 
 
 # --------------------------------------------------------------------------- #
@@ -622,13 +564,11 @@ def test_const_names_reexported():
 def test_discovered_device_map_reaches_upstreams_device_clients():
     """Our sweep's addresses must be visible to a plain upstream DeviceClient.
 
-    Typed shape: via the process-wide ``Discover.DISCOVERED_DEVICE`` class dict,
-    which ``AidotClient.get_device_client`` reads - so CameraDiscover subclasses
-    Discover purely to inherit that attribute by reference.
-
-    Dict shape: upstream reads ``self._discover.discovered_device``, i.e.
-    straight off our own instance, so a per-instance map is enough (and is
-    better - two accounts no longer pool addresses in global state).
+    Upstream reads ``self._discover.discovered_device``, i.e. straight off our
+    own instance, so a per-instance map is enough (and two accounts never pool
+    addresses in global state).  0.3.54-0.3.55 used a process-wide
+    ``Discover.DISCOVERED_DEVICE`` class dict instead; its absence is checked
+    so a flip back is caught.
     """
     from aidot.discover import Discover
     from aidot_cameras.discover import CameraDiscover
@@ -637,12 +577,8 @@ def test_discovered_device_map_reaches_upstreams_device_clients():
     sweep._discover_callback("d1", {"ipAddress": "192.0.2.10"})
 
     assert sweep.discovered_device["d1"] == "192.0.2.10"
-    if _upstream.HAS_SHARED_DISCOVERY_MAP:
-        assert Discover.DISCOVERED_DEVICE["d1"] == "192.0.2.10"
-        Discover.DISCOVERED_DEVICE.pop("d1", None)
-    else:
-        # Nothing global to leak into.
-        assert not hasattr(Discover, "DISCOVERED_DEVICE")
+    # Nothing global to leak into.
+    assert not hasattr(Discover, "DISCOVERED_DEVICE")
 
 
 @pytest.mark.parametrize(
@@ -665,17 +601,15 @@ def test_broadcast_protocol_methods(name):
 
 
 def test_broadcast_protocol_construction_matches_the_shape():
-    """``(callback)`` on the typed shape, ``(callback, user_id)`` on the dict one."""
+    """``(callback, user_id)`` - 0.3.54-0.3.55 took ``(callback)`` alone."""
     from aidot.discover import BroadcastProtocol
     from aidot_cameras.discover import InterfaceBroadcastProtocol
 
     params = list(inspect.signature(BroadcastProtocol.__init__).parameters)
-    assert params[1] == "callback", params
-    assert _upstream.broadcast_protocol_args(None, "u1") == (
-        (None, "u1") if "user_id" in params else (None,)
-    )
+    assert params[:3] == ["self", "callback", "user_id"], params
+    assert _upstream.broadcast_protocol_args(None, "u1") == (None, "u1")
 
-    # Our subclass must build on either shape and expose what it overrides.
+    # Our subclass must build and expose what it overrides.
     protocol = InterfaceBroadcastProtocol(None, "u1", broadcast_addr="192.0.2.255")
     for name in ("_is_closed", "aes_key", "_discover_cb", "user_id"):
         assert hasattr(protocol, name), name
@@ -694,18 +628,13 @@ def test_discover_request_and_response_models():
 def test_device_state_is_reexported_and_stays_value_compatible():
     """Public surface the Home Assistant integration annotates against.
 
-    On the typed shape it must BE upstream's enum, so a comparison against a
-    live client's ``_state`` is meaningful.  On the dict shape upstream deleted
-    it, so a value-identical stand-in is supplied rather than letting a public
-    name vanish - consumers wanting the answer should call
-    ``_upstream.device_session_authenticated`` instead.
+    Upstream deleted it in 0.3.56, so a value-identical stand-in is supplied
+    rather than letting a public name vanish - consumers wanting the answer
+    should call ``_upstream.device_session_authenticated`` instead.
     """
     from aidot_cameras.device_client import DeviceState
 
-    if _upstream.DEVICE_STATE_IS_UPSTREAMS:
-        from aidot.device_client import DeviceState as _upstream_enum
-
-        assert DeviceState is _upstream_enum
+    assert DeviceState is _upstream.DeviceState
     for name in ("IDLE", "AUTHENTICATED"):
         assert hasattr(DeviceState, name), name
     # Values are load-bearing: a consumer may have persisted or hard-coded one.

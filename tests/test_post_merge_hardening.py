@@ -6,15 +6,14 @@ DeviceClient / CameraMixin name-collision tripwire for future upstream bumps.
 
 The connect() login gate and the reconnect chain dedup/backoff that this file
 also used to cover were fork-only hardening of a fork-only connect()/login()
-pair.  Upstream owns the connection lifecycle now (a DeviceState machine plus
-its own _reconnect_timer) and we do not override any of it, so those two tests
+pair.  Upstream owns the connection lifecycle now (its own session flags and
+reconnect handle) and we do not override any of it, so those two tests
 were asserting code this package no longer contains; they were dropped rather
 than rewritten against upstream internals.
 """
 
 import asyncio
 
-import pytest
 import os
 import sys
 
@@ -23,7 +22,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aidot.device_client import DeviceClient as UpstreamDeviceClient
 from aidot.models.device_client_model import DeviceAttr
-from aidot_cameras._upstream import HAS_READ_DATA_SEAM
 from upstream_shapes import (
     account_record,
     arm_reconnect,
@@ -50,8 +48,8 @@ USER = {"id": "user1", "region": "us"}
 
 
 def make_dc(device=DEVICE):
-    # Upstream's constructor takes typed models; the raw dicts still go through
-    # for the camera layer, exactly as CameraClient.get_device_client does.
+    # The typed device record plus the raw dicts, exactly as
+    # CameraClient.get_device_client passes them.
     return CameraDeviceClient(
         device_record(dict(device)),
         account_record(dict(USER)),
@@ -97,10 +95,10 @@ def test_no_reconnect_after_client_close():
     Plain upstream device clients are the exposed case (cameras have their own
     login gate), so the subject here is an upstream DeviceClient.
 
-    The handle is spelled `_reconnect_timer` on the typed shape and
-    `_reconnect_handle` on the dict shape, so it is armed via `arm_reconnect`
-    rather than by name - hardcoding one would arm nothing on the other shape
-    and this assertion would pass without testing anything.
+    The handle has been renamed by upstream before (`_reconnect_timer` on
+    0.3.54-0.3.55), so it is armed via `arm_reconnect`, which takes the name
+    from `_upstream`, rather than by a hardcoded name - a stale one would arm
+    nothing and this assertion would pass without testing anything.
     """
 
     async def run():
@@ -164,52 +162,6 @@ def test_camera_state_carry_forward():
     dc._init_camera_state(dict(DEVICE), dict(USER))
     assert isinstance(dc.status, CameraStatusData)
     assert dc.status.online is True
-
-
-# --------------------------------------------------------------------------- #
-# camera-only attributes across the upstream receive loop
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.skipif(
-    not HAS_READ_DATA_SEAM,
-    reason=(
-        "upstream's dict shape inlines the decrypt into receive_data, so there "
-        "is no read_data seam to hook - see docs/UPSTREAM.md, "
-        "'Known dual-support gaps'"
-    ),
-)
-def test_raw_camera_attrs_survive_upstreams_typed_model(monkeypatch):
-    """The read_data/_notify_status_update pair recovers camera-only keys.
-
-    Upstream's receive loop feeds status from its typed DeviceAttr model, which
-    has no field for Battery_remaining (or Occupancy, SDcardStatus,
-    MotionDetection_*), so those keys are dropped on the way in.  read_data
-    stashes the raw frame and _notify_status_update re-applies payload.attr
-    before the callback fires.  Both are called polymorphically by upstream's
-    receive_data, which is what makes the pair reachable at all.
-
-    Typed shape only: the dict shape has no read_data, so this pair does not
-    exist there.  Cameras never reach that loop anyway (async_login returns
-    early for IPC models), which is why the gap is acceptable.
-    """
-    frame = {"payload": {"attr": {"Battery_remaining": "77", "OnOff": 1}}}
-
-    async def _fake_base_read(self):
-        return frame
-
-    monkeypatch.setattr(UpstreamDeviceClient, "read_data", _fake_base_read)
-    dc = make_dc(CAMERA)
-    assert asyncio.run(dc.read_data()) is frame
-
-    dc._notify_status_update()
-    assert dc.status.battery_remaining == 77
-
-    # The stash is consumed, not just read: a notify that is NOT driven by a
-    # frame (reset(), login) must not re-apply a stale attribute set.
-    dc.status.battery_remaining = None
-    dc._notify_status_update()
-    assert dc.status.battery_remaining is None
 
 
 # --------------------------------------------------------------------------- #

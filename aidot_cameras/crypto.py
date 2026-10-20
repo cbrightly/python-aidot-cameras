@@ -5,9 +5,9 @@ modules have one import site.  Only the string-keyed AES-256/ECB pair is defined
 here: it is a Leedarson camera-SDK convention (zero-pad a string key to 32
 bytes) that upstream has no use for.
 
-Upstream moved these between shapes - ``aidot.utils.crypto`` on 0.3.55,
-``aidot.aes_utils`` on 0.3.56 - and deleted ``rsa_encrypt`` outright in favour
-of a one-argument ``rsa_password_encrypt``.  ``_upstream`` resolves the AES
+Upstream has moved these before (``aidot.utils.crypto`` on 0.3.54-0.3.55,
+``aidot.aes_utils`` since 0.3.56) and deleted ``rsa_encrypt`` outright in favour
+of a one-argument ``rsa_password_encrypt``.  ``_upstream`` imports the AES
 three and supplies ``rsa_encrypt`` itself, keeping the two-argument signature
 this module has always exported.
 """

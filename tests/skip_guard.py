@@ -7,8 +7,8 @@ want of ffmpeg, and a clip losing its first seconds passed (2026-10-07).
 
 With ``AIDOT_FAIL_ON_SKIP`` set - CI sets it - every skip is checked against
 ``EXPECTED_SKIP_REASONS``, the reasons that are a deliberate choice of which
-test applies (two tests covering the two shapes of an upstream record, one of
-which always skips). Any other skip fails the run, with the tests named. Unset,
+test applies to the installed upstream (the account back-reference tests, which
+skip on python-aidot 0.3.56). Any other skip fails the run, with the tests named. Unset,
 the guard does nothing.
 """
 
@@ -20,13 +20,10 @@ ENV = "AIDOT_FAIL_ON_SKIP"
 
 #: Reasons a skip may give in any environment. Matched as prefixes.
 EXPECTED_SKIP_REASONS = (
-    # tests/test_upstream_compat.py and friends: one of each pair always skips,
-    # by which python-aidot is installed.
-    "typed upstream shape only",
-    "dict upstream shape only",
+    # tests/test_upstream_compat.py and friends: the account back-reference
+    # tests skip on python-aidot 0.3.56, which does not take one.
     "upstream takes no account client",
     "upstream DeviceClient takes the account client",
-    "upstream's dict shape inlines the decrypt into receive_data",
 )
 
 
