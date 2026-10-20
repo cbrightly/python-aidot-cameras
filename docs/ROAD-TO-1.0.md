@@ -2120,6 +2120,16 @@ Day zero still becomes the day the reference installation returns with the curre
 
 Day zero still becomes the day the reference installation returns with the current release on it; the target is ten days after that.
 
+#### 2026-10-20: `rc57` closes what the review's rc53 row rounded up, and is meant to be the last rc
+
+| release | date | find | resets? |
+|---|---|---|---|
+| `rc57` | 2026-10-20 | The changelog for `rc53` listed every item in section 1b of the 2026-10-15 review as fixed; a re-check of the code against the list found four that were not, or not wholly. On the DTLS path a camera's -50002 / -50015 refusal was read in the first signalling wait but not in the two echo-reversal waits after it, and the broker's echo usually lands first, so a refusal was missed until role reversal and an ICE timeout (1b.6). The declined-media exit never stopped the recorder, and nothing cleaned up an open cancelled during its signalling or ICE wait (1b.7). Connection mode `lan` still allocated a TURN relay on the webrtcReq-echo path (1b.12). A token file holding JSON that is not an object raised `UnboundLocalError` where it used to raise `AttributeError` (1b.15, CLI only). Each is pinned by a test that fails without the fix | Yes - the DTLS open, a default path. The reference installation is still off the network, so this costs no soak time |
+
+**`rc57` is intended as the release the soak runs on and the one 1.0.0 is cut from.** The decomposition of the open and serve-loop coroutines (design dated 2026-10-12), the shape-B removal and the integration's deduplication are written but deliberately held until after 1.0.0: they rewrite both opens and both serve loops, have not been through the live gate, and 1.0.0 asserts a shape that has settled. A fortnight of soak on code that is then replaced would be evidence about the wrong program. Any further rc before 1.0.0 should be a fix the soak finds, not planned work.
+
+Day zero still becomes the day the reference installation returns with the current release on it; the target is ten days after that.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /

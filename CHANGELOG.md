@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc57]
+
 ### Fixed
 - **A DTLS camera that refuses after the broker's echo is told no at once.**
   The first signalling wait already read the camera's -50002 / -50015 refusal,
