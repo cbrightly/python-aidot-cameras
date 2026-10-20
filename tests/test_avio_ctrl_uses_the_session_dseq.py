@@ -84,5 +84,12 @@ def test_the_avio_control_frame_no_longer_uses_a_random_dseq():
 def test_the_header_layout_is_unchanged():
     # Only the VALUE in the dSeq slot changes. The layout is verified
     # byte-for-byte against the app: 28 bytes, little-endian, dSeq/cmd/ts/len/0.
+    import struct
+
+    from aidot_cameras.camera.protocol import avio_header
+
+    assert avio_header(1, 5376, 2, 28) == struct.pack("<IIqII4x", 1, 5376, 2, 28, 0), (
+        "the 28-byte little-endian AVIO header must not change"
+    )
     src = (_SRC / "sdes_open.py").read_text()
-    assert "<IIqII4x" in src, "the 28-byte little-endian AVIO header must not change"
+    assert "avio_header(" in src, "the SDES senders must pack through the one helper"

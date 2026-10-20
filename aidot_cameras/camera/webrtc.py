@@ -8,11 +8,11 @@ preserving; re-exported from client.py.
 import asyncio
 import logging
 import random
-import struct
 import time
 from typing import Any, Callable, Optional
 
 from .protocol import (
+    avio_header,
     SPEAKER_ACK_TIMEOUT_S,
     AvioRequestMixin,
     AvioResponseRouter,
@@ -76,7 +76,7 @@ class WebRTCSession(AvioRequestMixin):
         try:
             _seq = random.randint(0, 0x7FFFFFFF)
             _ts_ms = int(time.time() * 1000)
-            _hdr = struct.pack("<IIqII4x", _seq, cmd, _ts_ms, len(payload), 0)
+            _hdr = avio_header(_seq, cmd, _ts_ms, len(payload), 0)
             self._dc.send(_hdr + payload)
             return True
         except Exception:
