@@ -584,6 +584,391 @@ def dtls_on_track(
             track_tasks.append(t)
 
 
+def make_mqtt_message_handler(
+    *,
+    self,
+    _spawn_bg,
+    _status,
+    _trace,
+    _wake_keepalive_sent,
+    answer_fut,
+    camera_offer_fut,
+    camera_ready_ev,
+    camera_reconnect_ev,
+    device_id,
+    ice_cands_seen,
+    ice_config_fut,
+    ice_q,
+    liveplay_echo_ev,
+    liveplay_resp_fut,
+    loop,
+    peer_id,
+    second_answer_fut,
+    terminal_error_fut,
+    user_id,
+    webrtc_req_echo_fut,
+):
+    """Build the DTLS open's MQTT message handler for one open.
+
+    The handler was a 282-line closure inside the open reading 21 of its
+    names, every one bound once before the handler was defined and never
+    rebound, so they arrive here by value. The body is the closure's,
+    verbatim; the open registers the returned function on the MQTT stream
+    exactly as before.
+    """
+
+    def _on_mqtt_message(topic: str, payload_str: str) -> None:
+        # Never the body: the broker echoes our own webrtcReq (with its
+        # psk) and getIceConfigResp carries the TURN credentials.
+        _LOGGER.debug("webrtc rx  topic=%s  bytes=%d", topic, len(payload_str))
+        try:
+            msg = json.loads(payload_str)
+        except Exception:
+            loop.call_soon_threadsafe(
+                lambda t=topic, p=payload_str: _status(
+                    f"camera raw (non-JSON)  topic={t}  data={p[:200]!r}"
+                )
+            )
+            return
+        method = msg.get("method") or ""
+        inner = msg.get("payload") or {}
+        # Fire camera_ready_ev the moment the camera appears on MQTT.  See
+        # _is_camera_present_signal for what counts as evidence and why the
+        # server's wake-ACK is not enough for a battery camera.
+        if _is_camera_present_signal(topic, msg, device_id):
+            loop.call_soon_threadsafe(camera_ready_ev.set)
+        # ...and separately, note when the CAMERA itself was heard from.
+        # The gate above is happy with the cloud's ack; the stale-offer
+        # detector is not, and this is the only place that distinction is
+        # visible.
+        if _is_camera_present_signal(topic, msg, device_id, accept_server_ack=False):
+            self._camera_device_seen_ts = time.monotonic()
+            # App parity, and the fix for a battery camera that wakes and
+            # then sleeps again mid-handshake.  The official client's live
+            # view fires keepAliveHandle() the moment the device becomes
+            # usable, and gates the view on lowPowerActiveState "wakeup"
+            # until then.  We send setKeepAliveTime once at open time -
+            # which for a cold camera is BEFORE it is awake, so it is sent
+            # into the void - and then renew on a fixed cadence measured
+            # from the open rather than from the camera's own wake.
+            #
+            # Measured 2026-09-03: the camera woke at +10.9 s, stayed awake
+            # long enough to emit motion events, and went back to sleep at
+            # +39.8 s while the handshake was still running; the attempt
+            # then died with no media.  Re-asserting here restarts the
+            # camera's own window from the moment it is actually listening.
+            #
+            # One-shot per open (the renew loop covers the rest), battery
+            # only - a mains camera has no window to restart - and fired
+            # from the loop because this runs on the MQTT thread.
+            if (
+                getattr(self, "is_battery_camera", False)
+                and not _wake_keepalive_sent[0]
+            ):
+                _wake_keepalive_sent[0] = True
+                loop.call_soon_threadsafe(
+                    lambda: _spawn_bg(self._async_set_keep_alive())
+                )
+        # livePlayResp: explicit camera ack/nack for start-play command.
+        # The camera echoes our peer_id (verified live); its payload has NO
+        # devId, so the old devId-only match never fired and this future never
+        # resolved (the wait always timed out).  Match on the echoed peer_id
+        # (per-open, precise); keep devId as a fallback for any camera that
+        # does send it.  dstAddr is the account-wide userId - too loose to use.
+        if method == "livePlayResp" and (
+            inner.get("peerid") == peer_id or inner.get("devId") == device_id
+        ):
+            # Record the code whether or not anyone is waiting on the future
+            # (sdes_fast_liveplay skips that wait by default).  Hopped onto the
+            # loop thread rather than assigned here - this runs on the MQTT
+            # thread.
+            loop.call_soon_threadsafe(self._note_live_play_resp, inner)
+            _resolve_future_threadsafe(loop, liveplay_resp_fut, inner)
+        # livePlayReq echo: broker/camera confirmed delivery of our livePlayReq.
+        # Signal _open_sdes_stream to proceed with webrtcReq.
+        if method == "livePlayReq" and inner.get("devId") == device_id:
+            loop.call_soon_threadsafe(liveplay_echo_ev.set)
+        if method == "webrtcResp":
+            # GAP D: a terminal ack (-50002 max-streams / -50015 SD-cap) means the
+            # camera refused - retrying is futile (mirrors the official app, which
+            # shows an error and does NOT retry). Signal it so the connect raises
+            # AidotCameraBusy instead of timing out into a generic retry.
+            _term = _terminal_webrtc_ack(msg)
+            if _term is not None:
+                # Isolate per camera/stream BEFORE accepting the refusal.  We
+                # subscribe to the account-wide topic (iot/v1/c/{user_id}/#),
+                # so without this a -50002 for a DIFFERENT camera aborts this
+                # camera's healthy open with AidotCameraBusy.  That matters
+                # now that the SDES path polls terminal_error_fut across the
+                # whole first-media wait rather than reading it once.
+                # Same accept rule the answer branch below uses: an exact
+                # peerid match, or BOTH devId and dstAddr (dstAddr alone is
+                # the shared account id and matches every camera).
+                _t_pid = inner.get("peerid")
+                if not (
+                    _t_pid == peer_id
+                    or (
+                        inner.get("devId") == device_id
+                        and inner.get("dstAddr") == user_id
+                    )
+                ):
+                    loop.call_soon_threadsafe(
+                        lambda rp=_t_pid, c=_term[0]: _status(
+                            f"terminal ack {c} IGNORED - belongs to another"
+                            f" camera/stream: peerid {rp!r}"
+                        )
+                    )
+                    return
+                _resolve_future_threadsafe(loop, terminal_error_fut, _term)
+                return
+            resp_pid = inner.get("peerid")
+            answer = inner.get("offer") or inner.get("answer") or {}
+            if not answer.get("sdp"):
+                return  # empty / incomplete response - ignore
+            if resp_pid == peer_id:
+                pass  # exact peerid match - accept (fast path)
+            elif inner.get("devId") == device_id and inner.get("dstAddr") == user_id:
+                # Camera replied with its own stable session peerid rather than
+                # echoing back our peerid.  Accept only if BOTH devId and dstAddr
+                # match - dstAddr alone matches every message to our account.
+                loop.call_soon_threadsafe(
+                    lambda rp=resp_pid: _status(
+                        f"webrtcResp accepted (camera peerid) -"
+                        f" got {rp!r}"
+                        f" expected ...{peer_id[-12:]}"
+                    )
+                )
+            else:
+                loop.call_soon_threadsafe(
+                    lambda rp=resp_pid: _trace(
+                        f"webrtcResp IGNORED - peerid/devId/dstAddr mismatch:"
+                        f" got {rp!r}"
+                    )
+                )
+                return
+            _from_cam = _answer_is_from_the_camera(
+                src_addr=(inner.get("srcAddr") or msg.get("srcAddr") or ""),
+                user_id=user_id,
+            )
+            if (
+                self._camera_answer_ice_ready_ts is None
+                and _from_cam
+                and _answer_sdp_can_nominate(answer.get("sdp", ""))
+            ):
+                self._camera_answer_ice_ready_ts = time.monotonic()
+            _deliver_webrtc_answer(
+                loop,
+                answer_fut,
+                second_answer_fut,
+                answer,
+                from_camera=_from_cam,
+            )
+        elif method == "iceCandidateReq":
+            resp_pid = inner.get("peerid")
+            # Isolate per camera/stream.  NOTE: dstAddr is the shared account
+            # user_id (identical for every camera), so it must NOT gate
+            # isolation - including it made the filter never reject, letting a
+            # FOREIGN camera's ICE candidates leak into this connection (the
+            # cross-contamination / wrong-feed bug).  peer_id is per-stream and
+            # devId is per-camera; either is a valid isolation key.
+            if resp_pid != peer_id and inner.get("devId") != device_id:
+                return  # candidate for a different camera/session
+            cand = inner.get("candidate") or {}
+            if cand.get("candidate"):
+                ice_cands_seen.append(cand)
+                loop.call_soon_threadsafe(ice_q.put_nowait, cand)
+        elif method == "webrtcReq":
+            # Camera acting as WebRTC offerer (role reversal observed on
+            # LK.IPC.A001064).  Set camera_offer_fut so the DTLS path can
+            # respond with a proper webrtcResp answer.
+            resp_pid = inner.get("peerid")
+            cam_offer = inner.get("offer") or {}
+            src_addr = inner.get("srcAddr") or msg.get("srcAddr") or ""
+            own_prefix = f"0.{user_id}"
+            is_echo = src_addr.startswith(own_prefix) or src_addr == own_prefix
+            if is_echo:
+                # Broker echoes our own webrtcReq back with our srcAddr.
+                # Signal the SDES path so it can send webrtcResp to the camera.
+                if not webrtc_req_echo_fut.done():
+                    loop.call_soon_threadsafe(webrtc_req_echo_fut.set_result, cam_offer)
+            elif (
+                cam_offer.get("sdp")
+                # Same isolation as iceCandidateReq: accept the offer only
+                # if it's for THIS camera/stream.  dstAddr is the shared
+                # account id, so it must not be an accept key (it would
+                # accept every camera's offer).
+                and (resp_pid == peer_id or inner.get("devId") == device_id)
+            ):
+                if not camera_offer_fut.done():
+                    loop.call_soon_threadsafe(camera_offer_fut.set_result, cam_offer)
+            # Extract IceServerList from the camera's webrtcReq and seed
+            # ice_config_fut so RTCPeerConnection can use TURN servers.
+            # Only process when not an echo - we sent those servers ourselves.
+            if not is_echo:
+                _req_ice_list = inner.get("IceServerList") or []
+                if _req_ice_list and not ice_config_fut.done():
+                    loop.call_soon_threadsafe(
+                        ice_config_fut.set_result,
+                        {"IceServerList": _req_ice_list},
+                    )
+            loop.call_soon_threadsafe(
+                lambda m=method, t=topic, o=_signal_origin(topic, msg, device_id): (
+                    _trace(
+                        f"camera replied  method={m!r}"
+                        f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
+                    )
+                )
+            )
+        elif method in ("setDevAttrNotif", "getDevAttrResp"):
+            # Attribute notifications: nothing to do here. (They used to
+            # feed a camera-IP pipeline that no longer has a consumer.)
+            pass
+        elif method == "getIceConfigResp":
+            # Capture TURN server credentials so aiortc can use them.
+            # getIceConfigResp arrives before RTCPeerConnection is created,
+            # so we store it in ice_config_fut and consumed later when
+            # building the RTCPeerConnection configuration.
+            #
+            # Accept any non-empty response regardless of key names -
+            # the actual structure is normalised in the extraction code
+            # below.  Previously this block silently dropped responses
+            # whose payload didn't have top-level "app"/"dev" keys,
+            # which prevented TURN credentials from reaching aiortc.
+            _ice_inner = inner if isinstance(inner, dict) else {}
+            if not _ice_inner and isinstance(msg.get("data"), dict):
+                _ice_inner = msg["data"]
+            # Accept anything that looks like ICE config data.
+            _has_known_keys = (
+                "app" in _ice_inner
+                or "dev" in _ice_inner
+                or "iceServers" in _ice_inner
+                or "turnServers" in _ice_inner
+            )
+            if not _has_known_keys and _ice_inner:
+                # Log the actual structure so we can learn the format.
+                _LOGGER.warning(
+                    "getIceConfigResp: unexpected structure (no app/dev/iceServers)"
+                    " - storing raw for extraction attempt.  keys=%s",
+                    list(_ice_inner.keys())[:20],
+                )
+            if _ice_inner and not ice_config_fut.done():
+                loop.call_soon_threadsafe(ice_config_fut.set_result, _ice_inner)
+                # getIceConfigResp arriving means the broker session is
+                # active and TURN credentials are available.  Wake the
+                # camera_ready_ev so we don't burn the full 12-second
+                # timeout when the server responds promptly.
+                loop.call_soon_threadsafe(camera_ready_ev.set)
+            elif not _ice_inner and not ice_config_fut.done():
+                # No usable payload - store the whole message as fallback.
+                _LOGGER.warning(
+                    "getIceConfigResp: empty inner payload; storing full msg."
+                    " msg_keys=%s",
+                    list(msg.keys()),
+                )
+                if msg and not ice_config_fut.done():
+                    loop.call_soon_threadsafe(ice_config_fut.set_result, msg)
+        elif method == "connect":
+            # Camera re-connected (quickConn cycle after WebRTC signaling).
+            # Signal the ICE wait loop so it can re-send webrtcResp + ICE
+            # candidates - the camera may have reset its WebRTC session state
+            # and needs fresh signaling to continue ICE connectivity checks.
+            if inner.get("devId") == device_id:
+                loop.call_soon_threadsafe(camera_reconnect_ev.set)
+            loop.call_soon_threadsafe(
+                lambda m=method, t=topic, o=_signal_origin(topic, msg, device_id): (
+                    _trace(
+                        f"camera replied  method={m!r}"
+                        f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
+                    )
+                )
+            )
+        else:
+            loop.call_soon_threadsafe(
+                lambda m=method, t=topic, o=_signal_origin(topic, msg, device_id): (
+                    _trace(
+                        f"camera replied  method={m!r}"
+                        f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
+                    )
+                )
+            )
+
+    return _on_mqtt_message
+
+
+def dtls_on_dc_open(
+    dc_label,
+    kvs_dc,
+    spawn_bg,
+    status,
+    talk_pcm_provider,
+    track_tasks,
+    send_avio_living,
+    send_avio_audiostart,
+    send_avio_speaker,
+    send_avio_heartbeat,
+) -> None:
+    async def _dcep_open_then_living() -> None:
+        # The official KVS Android client uses DCEP
+        # (createDataChannel with default Init), so the camera
+        # registers stream 0 only after receiving DATA_CHANNEL_OPEN
+        # (PPID=50, RFC 8832 section 5.1).  Our pre-negotiated DC skips
+        # DCEP, so AVIO LIVING (PPID=51) arrives on an unregistered
+        # stream and is silently discarded at the application layer
+        # (SCTP SACK confirms transport delivery, but no response).
+        # Send DATA_CHANNEL_OPEN first so the camera registers
+        # stream 0, then send AVIO LIVING.
+        try:
+            _label_bytes = dc_label.encode("utf-8")
+            _dc_open_msg = (
+                struct.pack(
+                    "!BBHLHH",
+                    0x03,
+                    0x00,  # OPEN, DATA_CHANNEL_RELIABLE
+                    0,
+                    0,  # priority, reliability_param
+                    len(_label_bytes),
+                    0,  # label_len, proto_len
+                )
+                + _label_bytes
+            )
+            await kvs_dc.transport._send(0, 50, _dc_open_msg)
+            status(
+                f"DC[{dc_label}] sent DATA_CHANNEL_OPEN (PPID=50) {len(_dc_open_msg)}B"
+            )
+            # Yield to event loop so DATA_CHANNEL_OPEN is
+            # transmitted and camera can register stream 0.
+            await asyncio.sleep(0.3)
+        except Exception as _dc_open_exc:
+            status(f"DC[{dc_label}] DATA_CHANNEL_OPEN failed: {_dc_open_exc}")
+        send_avio_living(kvs_dc, dc_label + " (PreCon)")
+        send_avio_audiostart(kvs_dc)
+        # Talk mode: open the camera speaker so it plays our audio.
+        if talk_pcm_provider is not None:
+            send_avio_speaker(kvs_dc, True)
+
+        # Periodic keepalive loop:
+        # - HEARTBEAT (5156) every 10 s: prevents camera's ~22 s
+        #   DTLS watchdog (f0.java:2991).
+        # - AUDIOSTART (768) every 10 s: prevents camera's ~25 s
+        #   audio watchdog.  Camera negotiates audio as sendrecv;
+        #   aiortc's sender emits RTCP SR with packet_count=0, which
+        #   the camera reads as "viewer not sending audio -> stop
+        #   sending audio".  Periodic AUDIOSTART keeps audio alive.
+        async def _heartbeat_loop() -> None:
+            try:
+                while True:
+                    await asyncio.sleep(10.0)
+                    send_avio_heartbeat(kvs_dc)
+                    send_avio_audiostart(kvs_dc)
+            except asyncio.CancelledError:
+                pass
+
+        _hb_task = asyncio.ensure_future(_heartbeat_loop())
+        track_tasks.append(_hb_task)
+
+    spawn_bg(_dcep_open_then_living())
+
+
 def _verified_dtls_fingerprint(cam_cert, pinned_fp: str, cert_fp_fn) -> Optional[str]:
     """Return the peer cert's sha-256 fingerprint, enforcing the pin if set.
 
@@ -1430,288 +1815,29 @@ class _WebRTCOpenMixin:
             _mqtt_conn_status.update(st)
             _mqtt_ready_ev.set()
 
-        def _on_mqtt_message(topic: str, payload_str: str) -> None:
-            # Never the body: the broker echoes our own webrtcReq (with its
-            # psk) and getIceConfigResp carries the TURN credentials.
-            _LOGGER.debug("webrtc rx  topic=%s  bytes=%d", topic, len(payload_str))
-            try:
-                msg = json.loads(payload_str)
-            except Exception:
-                loop.call_soon_threadsafe(
-                    lambda t=topic, p=payload_str: _status(
-                        f"camera raw (non-JSON)  topic={t}  data={p[:200]!r}"
-                    )
-                )
-                return
-            method = msg.get("method") or ""
-            inner = msg.get("payload") or {}
-            # Fire camera_ready_ev the moment the camera appears on MQTT.  See
-            # _is_camera_present_signal for what counts as evidence and why the
-            # server's wake-ACK is not enough for a battery camera.
-            if _is_camera_present_signal(topic, msg, device_id):
-                loop.call_soon_threadsafe(camera_ready_ev.set)
-            # ...and separately, note when the CAMERA itself was heard from.
-            # The gate above is happy with the cloud's ack; the stale-offer
-            # detector is not, and this is the only place that distinction is
-            # visible.
-            if _is_camera_present_signal(
-                topic, msg, device_id, accept_server_ack=False
-            ):
-                self._camera_device_seen_ts = time.monotonic()
-                # App parity, and the fix for a battery camera that wakes and
-                # then sleeps again mid-handshake.  The official client's live
-                # view fires keepAliveHandle() the moment the device becomes
-                # usable, and gates the view on lowPowerActiveState "wakeup"
-                # until then.  We send setKeepAliveTime once at open time -
-                # which for a cold camera is BEFORE it is awake, so it is sent
-                # into the void - and then renew on a fixed cadence measured
-                # from the open rather than from the camera's own wake.
-                #
-                # Measured 2026-09-03: the camera woke at +10.9 s, stayed awake
-                # long enough to emit motion events, and went back to sleep at
-                # +39.8 s while the handshake was still running; the attempt
-                # then died with no media.  Re-asserting here restarts the
-                # camera's own window from the moment it is actually listening.
-                #
-                # One-shot per open (the renew loop covers the rest), battery
-                # only - a mains camera has no window to restart - and fired
-                # from the loop because this runs on the MQTT thread.
-                if (
-                    getattr(self, "is_battery_camera", False)
-                    and not _wake_keepalive_sent[0]
-                ):
-                    _wake_keepalive_sent[0] = True
-                    loop.call_soon_threadsafe(
-                        lambda: _spawn_bg(self._async_set_keep_alive())
-                    )
-            # livePlayResp: explicit camera ack/nack for start-play command.
-            # The camera echoes our peer_id (verified live); its payload has NO
-            # devId, so the old devId-only match never fired and this future never
-            # resolved (the wait always timed out).  Match on the echoed peer_id
-            # (per-open, precise); keep devId as a fallback for any camera that
-            # does send it.  dstAddr is the account-wide userId - too loose to use.
-            if method == "livePlayResp" and (
-                inner.get("peerid") == peer_id or inner.get("devId") == device_id
-            ):
-                # Record the code whether or not anyone is waiting on the future
-                # (sdes_fast_liveplay skips that wait by default).  Hopped onto the
-                # loop thread rather than assigned here - this runs on the MQTT
-                # thread.
-                loop.call_soon_threadsafe(self._note_live_play_resp, inner)
-                _resolve_future_threadsafe(loop, liveplay_resp_fut, inner)
-            # livePlayReq echo: broker/camera confirmed delivery of our livePlayReq.
-            # Signal _open_sdes_stream to proceed with webrtcReq.
-            if method == "livePlayReq" and inner.get("devId") == device_id:
-                loop.call_soon_threadsafe(liveplay_echo_ev.set)
-            if method == "webrtcResp":
-                # GAP D: a terminal ack (-50002 max-streams / -50015 SD-cap) means the
-                # camera refused - retrying is futile (mirrors the official app, which
-                # shows an error and does NOT retry). Signal it so the connect raises
-                # AidotCameraBusy instead of timing out into a generic retry.
-                _term = _terminal_webrtc_ack(msg)
-                if _term is not None:
-                    # Isolate per camera/stream BEFORE accepting the refusal.  We
-                    # subscribe to the account-wide topic (iot/v1/c/{user_id}/#),
-                    # so without this a -50002 for a DIFFERENT camera aborts this
-                    # camera's healthy open with AidotCameraBusy.  That matters
-                    # now that the SDES path polls terminal_error_fut across the
-                    # whole first-media wait rather than reading it once.
-                    # Same accept rule the answer branch below uses: an exact
-                    # peerid match, or BOTH devId and dstAddr (dstAddr alone is
-                    # the shared account id and matches every camera).
-                    _t_pid = inner.get("peerid")
-                    if not (
-                        _t_pid == peer_id
-                        or (
-                            inner.get("devId") == device_id
-                            and inner.get("dstAddr") == user_id
-                        )
-                    ):
-                        loop.call_soon_threadsafe(
-                            lambda rp=_t_pid, c=_term[0]: _status(
-                                f"terminal ack {c} IGNORED - belongs to another"
-                                f" camera/stream: peerid {rp!r}"
-                            )
-                        )
-                        return
-                    _resolve_future_threadsafe(loop, terminal_error_fut, _term)
-                    return
-                resp_pid = inner.get("peerid")
-                answer = inner.get("offer") or inner.get("answer") or {}
-                if not answer.get("sdp"):
-                    return  # empty / incomplete response - ignore
-                if resp_pid == peer_id:
-                    pass  # exact peerid match - accept (fast path)
-                elif (
-                    inner.get("devId") == device_id and inner.get("dstAddr") == user_id
-                ):
-                    # Camera replied with its own stable session peerid rather than
-                    # echoing back our peerid.  Accept only if BOTH devId and dstAddr
-                    # match - dstAddr alone matches every message to our account.
-                    loop.call_soon_threadsafe(
-                        lambda rp=resp_pid: _status(
-                            f"webrtcResp accepted (camera peerid) -"
-                            f" got {rp!r}"
-                            f" expected ...{peer_id[-12:]}"
-                        )
-                    )
-                else:
-                    loop.call_soon_threadsafe(
-                        lambda rp=resp_pid: _trace(
-                            f"webrtcResp IGNORED - peerid/devId/dstAddr mismatch:"
-                            f" got {rp!r}"
-                        )
-                    )
-                    return
-                _from_cam = _answer_is_from_the_camera(
-                    src_addr=(inner.get("srcAddr") or msg.get("srcAddr") or ""),
-                    user_id=user_id,
-                )
-                if (
-                    self._camera_answer_ice_ready_ts is None
-                    and _from_cam
-                    and _answer_sdp_can_nominate(answer.get("sdp", ""))
-                ):
-                    self._camera_answer_ice_ready_ts = time.monotonic()
-                _deliver_webrtc_answer(
-                    loop,
-                    answer_fut,
-                    second_answer_fut,
-                    answer,
-                    from_camera=_from_cam,
-                )
-            elif method == "iceCandidateReq":
-                resp_pid = inner.get("peerid")
-                # Isolate per camera/stream.  NOTE: dstAddr is the shared account
-                # user_id (identical for every camera), so it must NOT gate
-                # isolation - including it made the filter never reject, letting a
-                # FOREIGN camera's ICE candidates leak into this connection (the
-                # cross-contamination / wrong-feed bug).  peer_id is per-stream and
-                # devId is per-camera; either is a valid isolation key.
-                if resp_pid != peer_id and inner.get("devId") != device_id:
-                    return  # candidate for a different camera/session
-                cand = inner.get("candidate") or {}
-                if cand.get("candidate"):
-                    ice_cands_seen.append(cand)
-                    loop.call_soon_threadsafe(ice_q.put_nowait, cand)
-            elif method == "webrtcReq":
-                # Camera acting as WebRTC offerer (role reversal observed on
-                # LK.IPC.A001064).  Set camera_offer_fut so the DTLS path can
-                # respond with a proper webrtcResp answer.
-                resp_pid = inner.get("peerid")
-                cam_offer = inner.get("offer") or {}
-                src_addr = inner.get("srcAddr") or msg.get("srcAddr") or ""
-                own_prefix = f"0.{user_id}"
-                is_echo = src_addr.startswith(own_prefix) or src_addr == own_prefix
-                if is_echo:
-                    # Broker echoes our own webrtcReq back with our srcAddr.
-                    # Signal the SDES path so it can send webrtcResp to the camera.
-                    if not webrtc_req_echo_fut.done():
-                        loop.call_soon_threadsafe(
-                            webrtc_req_echo_fut.set_result, cam_offer
-                        )
-                elif (
-                    cam_offer.get("sdp")
-                    # Same isolation as iceCandidateReq: accept the offer only
-                    # if it's for THIS camera/stream.  dstAddr is the shared
-                    # account id, so it must not be an accept key (it would
-                    # accept every camera's offer).
-                    and (resp_pid == peer_id or inner.get("devId") == device_id)
-                ):
-                    if not camera_offer_fut.done():
-                        loop.call_soon_threadsafe(
-                            camera_offer_fut.set_result, cam_offer
-                        )
-                # Extract IceServerList from the camera's webrtcReq and seed
-                # ice_config_fut so RTCPeerConnection can use TURN servers.
-                # Only process when not an echo - we sent those servers ourselves.
-                if not is_echo:
-                    _req_ice_list = inner.get("IceServerList") or []
-                    if _req_ice_list and not ice_config_fut.done():
-                        loop.call_soon_threadsafe(
-                            ice_config_fut.set_result,
-                            {"IceServerList": _req_ice_list},
-                        )
-                loop.call_soon_threadsafe(
-                    lambda m=method, t=topic, o=_signal_origin(topic, msg, device_id): (
-                        _trace(
-                            f"camera replied  method={m!r}"
-                            f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
-                        )
-                    )
-                )
-            elif method in ("setDevAttrNotif", "getDevAttrResp"):
-                # Attribute notifications: nothing to do here. (They used to
-                # feed a camera-IP pipeline that no longer has a consumer.)
-                pass
-            elif method == "getIceConfigResp":
-                # Capture TURN server credentials so aiortc can use them.
-                # getIceConfigResp arrives before RTCPeerConnection is created,
-                # so we store it in ice_config_fut and consumed later when
-                # building the RTCPeerConnection configuration.
-                #
-                # Accept any non-empty response regardless of key names -
-                # the actual structure is normalised in the extraction code
-                # below.  Previously this block silently dropped responses
-                # whose payload didn't have top-level "app"/"dev" keys,
-                # which prevented TURN credentials from reaching aiortc.
-                _ice_inner = inner if isinstance(inner, dict) else {}
-                if not _ice_inner and isinstance(msg.get("data"), dict):
-                    _ice_inner = msg["data"]
-                # Accept anything that looks like ICE config data.
-                _has_known_keys = (
-                    "app" in _ice_inner
-                    or "dev" in _ice_inner
-                    or "iceServers" in _ice_inner
-                    or "turnServers" in _ice_inner
-                )
-                if not _has_known_keys and _ice_inner:
-                    # Log the actual structure so we can learn the format.
-                    _LOGGER.warning(
-                        "getIceConfigResp: unexpected structure (no app/dev/iceServers)"
-                        " - storing raw for extraction attempt.  keys=%s",
-                        list(_ice_inner.keys())[:20],
-                    )
-                if _ice_inner and not ice_config_fut.done():
-                    loop.call_soon_threadsafe(ice_config_fut.set_result, _ice_inner)
-                    # getIceConfigResp arriving means the broker session is
-                    # active and TURN credentials are available.  Wake the
-                    # camera_ready_ev so we don't burn the full 12-second
-                    # timeout when the server responds promptly.
-                    loop.call_soon_threadsafe(camera_ready_ev.set)
-                elif not _ice_inner and not ice_config_fut.done():
-                    # No usable payload - store the whole message as fallback.
-                    _LOGGER.warning(
-                        "getIceConfigResp: empty inner payload; storing full msg."
-                        " msg_keys=%s",
-                        list(msg.keys()),
-                    )
-                    if msg and not ice_config_fut.done():
-                        loop.call_soon_threadsafe(ice_config_fut.set_result, msg)
-            elif method == "connect":
-                # Camera re-connected (quickConn cycle after WebRTC signaling).
-                # Signal the ICE wait loop so it can re-send webrtcResp + ICE
-                # candidates - the camera may have reset its WebRTC session state
-                # and needs fresh signaling to continue ICE connectivity checks.
-                if inner.get("devId") == device_id:
-                    loop.call_soon_threadsafe(camera_reconnect_ev.set)
-                loop.call_soon_threadsafe(
-                    lambda m=method, t=topic, o=_signal_origin(topic, msg, device_id): (
-                        _trace(
-                            f"camera replied  method={m!r}"
-                            f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
-                        )
-                    )
-                )
-            else:
-                loop.call_soon_threadsafe(
-                    lambda m=method, t=topic, o=_signal_origin(topic, msg, device_id): (
-                        _trace(
-                            f"camera replied  method={m!r}"
-                            f"  endpoint={t.rsplit('/', 1)[-1]}  {o}"
-                        )
-                    )
-                )
+        _on_mqtt_message = make_mqtt_message_handler(
+            self=self,
+            _spawn_bg=_spawn_bg,
+            _status=_status,
+            _trace=_trace,
+            _wake_keepalive_sent=_wake_keepalive_sent,
+            answer_fut=answer_fut,
+            camera_offer_fut=camera_offer_fut,
+            camera_ready_ev=camera_ready_ev,
+            camera_reconnect_ev=camera_reconnect_ev,
+            device_id=device_id,
+            ice_cands_seen=ice_cands_seen,
+            ice_config_fut=ice_config_fut,
+            ice_q=ice_q,
+            liveplay_echo_ev=liveplay_echo_ev,
+            liveplay_resp_fut=liveplay_resp_fut,
+            loop=loop,
+            peer_id=peer_id,
+            second_answer_fut=second_answer_fut,
+            terminal_error_fut=terminal_error_fut,
+            user_id=user_id,
+            webrtc_req_echo_fut=webrtc_req_echo_fut,
+        )
 
         # MQTT transport for the stream signaling.  Default: a dedicated
         # connect-per-stream session in an executor (stopped via outgoing_q
@@ -2745,69 +2871,18 @@ class _WebRTCOpenMixin:
 
             @_kvs_dc.on("open")
             def _on_kvs_dc_open() -> None:
-                async def _dcep_open_then_living() -> None:
-                    # The official KVS Android client uses DCEP
-                    # (createDataChannel with default Init), so the camera
-                    # registers stream 0 only after receiving DATA_CHANNEL_OPEN
-                    # (PPID=50, RFC 8832 section 5.1).  Our pre-negotiated DC skips
-                    # DCEP, so AVIO LIVING (PPID=51) arrives on an unregistered
-                    # stream and is silently discarded at the application layer
-                    # (SCTP SACK confirms transport delivery, but no response).
-                    # Send DATA_CHANNEL_OPEN first so the camera registers
-                    # stream 0, then send AVIO LIVING.
-                    try:
-                        _label_bytes = _dc_label.encode("utf-8")
-                        _dc_open_msg = (
-                            struct.pack(
-                                "!BBHLHH",
-                                0x03,
-                                0x00,  # OPEN, DATA_CHANNEL_RELIABLE
-                                0,
-                                0,  # priority, reliability_param
-                                len(_label_bytes),
-                                0,  # label_len, proto_len
-                            )
-                            + _label_bytes
-                        )
-                        await _kvs_dc.transport._send(0, 50, _dc_open_msg)
-                        _status(
-                            f"DC[{_dc_label}] sent DATA_CHANNEL_OPEN"
-                            f" (PPID=50) {len(_dc_open_msg)}B"
-                        )
-                        # Yield to event loop so DATA_CHANNEL_OPEN is
-                        # transmitted and camera can register stream 0.
-                        await asyncio.sleep(0.3)
-                    except Exception as _dc_open_exc:
-                        _status(
-                            f"DC[{_dc_label}] DATA_CHANNEL_OPEN failed: {_dc_open_exc}"
-                        )
-                    _send_avio_living(_kvs_dc, _dc_label + " (PreCon)")
-                    _send_avio_audiostart(_kvs_dc)
-                    # Talk mode: open the camera speaker so it plays our audio.
-                    if talk_pcm_provider is not None:
-                        _send_avio_speaker(_kvs_dc, True)
-
-                    # Periodic keepalive loop:
-                    # - HEARTBEAT (5156) every 10 s: prevents camera's ~22 s
-                    #   DTLS watchdog (f0.java:2991).
-                    # - AUDIOSTART (768) every 10 s: prevents camera's ~25 s
-                    #   audio watchdog.  Camera negotiates audio as sendrecv;
-                    #   aiortc's sender emits RTCP SR with packet_count=0, which
-                    #   the camera reads as "viewer not sending audio -> stop
-                    #   sending audio".  Periodic AUDIOSTART keeps audio alive.
-                    async def _heartbeat_loop() -> None:
-                        try:
-                            while True:
-                                await asyncio.sleep(10.0)
-                                _send_avio_heartbeat(_kvs_dc)
-                                _send_avio_audiostart(_kvs_dc)
-                        except asyncio.CancelledError:
-                            pass
-
-                    _hb_task = asyncio.ensure_future(_heartbeat_loop())
-                    track_tasks.append(_hb_task)
-
-                _spawn_bg(_dcep_open_then_living())
+                dtls_on_dc_open(
+                    _dc_label,
+                    _kvs_dc,
+                    _spawn_bg,
+                    _status,
+                    talk_pcm_provider,
+                    track_tasks,
+                    _send_avio_living,
+                    _send_avio_audiostart,
+                    _send_avio_speaker,
+                    _send_avio_heartbeat,
+                )
 
             @_kvs_dc.on("message")
             def _on_kvs_dc_message(message) -> None:

@@ -177,9 +177,11 @@ def test_the_readiness_flag_is_stamped_off_the_loop_thread():
     only QUEUED while it runs and answer_fut.done() stays False throughout -
     which is why the window could not see the answer in the first place.  The
     marker therefore has to be written by the MQTT thread directly."""
-    from aidot_cameras.camera.webrtc_open import _WebRTCOpenMixin
+    from aidot_cameras.camera.webrtc_open import make_mqtt_message_handler
 
-    src = inspect.getsource(_WebRTCOpenMixin)
+    # The MQTT handler is built by a module-level factory; its body is where
+    # the marker is written.
+    src = inspect.getsource(make_mqtt_message_handler)
     assert "_camera_answer_ice_ready_ts" in src
     assert "_answer_sdp_can_nominate" in src
 
@@ -250,9 +252,9 @@ def test_an_answer_with_no_srcaddr_keeps_the_prior_behaviour():
 
 
 def test_the_stamp_consults_the_sender_check():
-    from aidot_cameras.camera.webrtc_open import _WebRTCOpenMixin
+    from aidot_cameras.camera.webrtc_open import make_mqtt_message_handler
 
-    src = inspect.getsource(_WebRTCOpenMixin)
+    src = inspect.getsource(make_mqtt_message_handler)
     assert "_answer_is_from_the_camera" in src
 
 
