@@ -164,7 +164,7 @@ async def _make_client(
             else:
                 client = AidotClient(session=session, token=token)
                 _install_token_cache(client, token_file)
-            return client
+                return client
 
     if not username or not password:
         raise CloudAuthUnavailable(
