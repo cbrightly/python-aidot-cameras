@@ -8,8 +8,10 @@ full CameraMixin at runtime.
 """
 
 import asyncio
+import functools
 import json
 import random
+import re
 import struct
 import time
 import logging
@@ -228,6 +230,358 @@ def _camera_cert_acceptor(pinned_fp: str, device_id, fingerprint_cls, cert_fp_fn
             )
 
     return _accept_camera_cert
+
+
+def answer_section_stub(
+    ice_ufrag_ln, ice_pwd_ln, fp_ln, setup_ln, _m: str, _kind: str
+) -> list:
+    if _kind == "application":
+        # Synthesize a VALID m=application section so aiortc's SCTP
+        # transport can start.  Camera (KVS firmware) answers mid:2
+        # with m=video H265 instead of m=application but always
+        # opens SCTP on port 5000 regardless.  Without these attrs
+        # aiortc crashes in serialize_packet (port=None).
+        # port=9 per RFC 8842 = "use sctp-port".
+        _hdr = "m=application 9 UDP/DTLS/SCTP webrtc-datachannel"
+        _block = [_hdr, "c=IN IP4 0.0.0.0", f"a=mid:{_m}"]
+        for _x in (ice_ufrag_ln, ice_pwd_ln, fp_ln, setup_ln):
+            if _x:
+                _block.append(_x)
+        _block.append("a=sctp-port:5000")
+        _block.append("a=max-message-size:262144")
+        return _block
+    if _kind == "audio":
+        _hdr = "m=audio 0 UDP/TLS/RTP/SAVPF 0"
+    else:
+        # PT=0 (PCMU/audio) in a video stub causes aiortc to fail
+        # "Failed to set remote video description send parameters"
+        # because PT=0 is not in aiortc's video codec registry.
+        # PT=97 is always in aiortc's video codec list (VP8 or H264
+        # variant) and satisfies codec lookup for a rejected section.
+        _hdr = "m=video 0 UDP/TLS/RTP/SAVPF 97"
+    _block = [_hdr, "c=IN IP4 0.0.0.0", f"a=mid:{_m}"]
+    for _x in (ice_ufrag_ln, ice_pwd_ln, fp_ln, setup_ln):
+        if _x:
+            _block.append(_x)
+    # aiortc's __validate_description requires a=rtcp-mux in every
+    # m-section that appears in the answer when the offer had it.
+    # Our offer always includes a=rtcp-mux; stub sections must echo
+    # it or setRemoteDescription raises "RTCP mux is not enabled".
+    _block.append("a=rtcp-mux")
+    _block.append("a=inactive")
+    return _block
+
+
+def build_aiortc_answer(
+    stub,
+    media_declined,
+    offer_video_pts,
+    status,
+    ice_ufrag_ln,
+    ice_pwd_ln,
+    fp_ln,
+    setup_ln,
+    sdp: str,
+) -> str:
+    """Produce a 3-section answer SDP for aiortc (audio/H264/DC),
+    in aiortc's fixed transceiver order regardless of how the camera
+    ordered or padded its reply.
+
+    aiortc matches answer m-sections to its transceivers BY POSITION:
+    audio(mid:0), H264(mid:1), DC(mid:2).  H265-capable firmware
+    (A000088) sometimes answers with 4 sections AND reorders them
+    (e.g. video / audio / video / application) and/or includes a bogus
+    single-PT video stub.  Positional matching then fails with
+    "Media sections in answer do not match offer".
+
+    This selects by CONTENT and re-emits in offer order:
+      1. audio  = first m=audio section.
+      2. video  = the m=video section whose payload types intersect
+         our offer's video PTs (the real H264 answer), preferring the
+         one with the most overlap; falls back to the m=video with the
+         most PTs.  Bogus/H265 stubs are dropped.
+      3. DC     = first m=application section, or a synthesised stub
+         using the camera's ICE credentials.
+    Each selected section's a=mid is rewritten to 0/1/2 and BUNDLE is
+    normalised to "0 1 2".
+    """
+    _lines2 = re.split(r"\r?\n", sdp)
+    _secs2, _cur2 = [], []
+    for _l2 in _lines2:
+        if _l2.startswith("m=") and _cur2:
+            _secs2.append(_cur2)
+            _cur2 = [_l2]
+        else:
+            _cur2.append(_l2)
+    if _cur2:
+        _secs2.append(_cur2)
+
+    # A valid m= line is "m=<media> <port> <proto> <fmt>..." (>=4
+    # tokens).  Drop malformed/forged sections here so the later
+    # s[0].split()[1] / [3:] accesses cannot raise IndexError on an
+    # attacker-influenced answer (an unguarded IndexError here would
+    # crash the connect coroutine -> repeatable stream DoS).
+    _audio_secs = [
+        s for s in _secs2 if s and s[0].startswith("m=audio") and len(s[0].split()) >= 4
+    ]
+    _video_secs = [
+        s for s in _secs2 if s and s[0].startswith("m=video") and len(s[0].split()) >= 4
+    ]
+    _app_secs = [s for s in _secs2 if s and s[0].startswith("m=application")]
+
+    def _set_mid(_sec: list, _mid: str) -> list:
+        _seen_mid = False
+        _res = []
+        for _l in _sec:
+            if _l.startswith("a=mid:"):
+                _res.append(f"a=mid:{_mid}")
+                _seen_mid = True
+            else:
+                _res.append(_l)
+        if not _seen_mid:
+            # Insert mid right after the m= line.
+            _res.insert(1, f"a=mid:{_mid}")
+        return _res
+
+    _out_secs: list[list[str]] = []
+    _dc_only_video = False
+    _dc_only_audio = False
+
+    # 1. audio -> mid:0
+    if _audio_secs:
+        if _audio_secs[0][0].split()[1] == "0":
+            # Full datachannel-only answer: the camera also rejected
+            # audio (port 0, a=inactive).  Re-emit a port-0 stub that
+            # still carries an a=rtpmap, otherwise aiortc's
+            # find_common_codecs() is empty and setRemoteDescription
+            # raises "Failed to set remote audio description send
+            # parameters" (rtcpeerconnection.py:909).  PT 0 (PCMU) is
+            # always present in our offer.  Flag it so mid:0 is also
+            # EXCLUDED from BUNDLE below (aiortc rejects a port-0
+            # section inside the BUNDLE group).  Verified offline:
+            # audio+video stubs WITH rtpmap -> SRD accepted.
+            _astub = [
+                "m=audio 0 UDP/TLS/RTP/SAVPF 0",
+                "c=IN IP4 0.0.0.0",
+                "a=mid:0",
+            ]
+            for _xa in (ice_ufrag_ln, ice_pwd_ln, fp_ln, setup_ln):
+                if _xa:
+                    _astub.append(_xa)
+            _astub += ["a=rtpmap:0 PCMU/8000", "a=rtcp-mux", "a=inactive"]
+            _out_secs.append(_astub)
+            _dc_only_audio = True
+        else:
+            _out_secs.append(_set_mid(_audio_secs[0], "0"))
+
+    # 2. real video -> mid:1 (pick best PT overlap with our offer)
+    _best_video = None
+    _best_overlap = -1
+    for _vs in _video_secs:
+        _pts = set(_vs[0].split()[3:])
+        if _vs[0].split()[1] == "0":
+            continue  # port-0 stub
+        _overlap = len(_pts & offer_video_pts)
+        # Prefer real PT overlap; tie-break on PT count (richer section).
+        _score = (_overlap, len(_pts))
+        if _score > (_best_overlap, -1) and (_overlap > 0 or _best_video is None):
+            _best_video = _vs
+            _best_overlap = _overlap
+    if _best_video is None and _video_secs:
+        # No overlap at all - fall back to the richest non-stub video.
+        _best_video = max(
+            (s for s in _video_secs if s[0].split()[1] != "0"),
+            key=lambda s: len(s[0].split()[3:]),
+            default=None,
+        )
+    if _best_video is not None:
+        _out_secs.append(_set_mid(_best_video, "1"))
+    else:
+        # DC-only answer: the camera rejected video (port 0, no
+        # usable H264).  Keep a rejected port-0 video placeholder at
+        # mid:1 so the section count/order still matches our
+        # 3-section offer and aiortc accepts the answer instead of
+        # throwing - we then fail cleanly into retry rather than
+        # crashing setRemoteDescription.  (Driving media over the
+        # datachannel was tested and ruled out: a DC-only answer is
+        # the camera declining media and always co-fails DTLS, so the
+        # channel never opens.)
+        _vstub = [
+            "m=video 0 UDP/TLS/RTP/SAVPF 97",
+            "c=IN IP4 0.0.0.0",
+            "a=mid:1",
+        ]
+        for _xv in (ice_ufrag_ln, ice_pwd_ln, fp_ln, setup_ln):
+            if _xv:
+                _vstub.append(_xv)
+        # rtpmap required or aiortc rejects with "Failed to set remote
+        # video description send parameters" (find_common_codecs empty).
+        # PT 97 H264 is always in our offer.  Verified offline.
+        _vstub += [
+            "a=rtpmap:97 H264/90000",
+            "a=fmtp:97 level-asymmetry-allowed=1;"
+            "packetization-mode=1;profile-level-id=42e01f",
+            "a=rtcp-mux",
+            "a=inactive",
+        ]
+        _out_secs.append(_vstub)
+        _dc_only_video = True
+
+    # 3. datachannel -> mid:2
+    if _app_secs:
+        _out_secs.append(_set_mid(_app_secs[0], "2"))
+    else:
+        _dc_stub = [
+            "m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
+            "c=IN IP4 0.0.0.0",
+            "a=mid:2",
+        ]
+        for _x2 in (ice_ufrag_ln, ice_pwd_ln, fp_ln, setup_ln):
+            if _x2:
+                _dc_stub.append(_x2)
+        _dc_stub.extend(["a=sctp-port:5000", "a=max-message-size:262144"])
+        _out_secs.append(_dc_stub)
+
+    # Session header = everything before the first m= section.
+    _header = _secs2[0] if (_secs2 and not _secs2[0][0].startswith("m=")) else []
+    _out2: list[str] = list(_header)
+    for _sec in _out_secs:
+        _out2.extend(_sec)
+    sdp2 = "\r\n".join(_out2)
+    # Ensure BUNDLE lists only the ACTIVE mids in order.  Any port-0
+    # (rejected) section must be EXCLUDED - aiortc rejects a port-0
+    # section inside the BUNDLE group.  A full datachannel-only answer
+    # rejects both audio and video, leaving BUNDLE just "2".
+    _bundle_mids = []
+    if not _dc_only_audio:
+        _bundle_mids.append("0")
+    if not _dc_only_video:
+        _bundle_mids.append("1")
+    if _app_secs:
+        _bundle_mids.append("2")
+    _bundle_str = "a=group:BUNDLE " + " ".join(_bundle_mids)
+    if _dc_only_audio or _dc_only_video:
+        media_declined[0] = True
+        status(
+            f"DC-only answer: audio_rejected={_dc_only_audio}"
+            f" video_rejected={_dc_only_video} -> {_bundle_str}"
+            " (camera declined media; encoder not ready - fast-retry)"
+        )
+    if "a=group:BUNDLE" in sdp2:
+        sdp2 = re.sub(
+            r"a=group:BUNDLE [0-9 ]+",
+            _bundle_str,
+            sdp2,
+            count=1,
+        )
+    return sdp2
+
+
+def dtls_on_track(
+    self, pc, on_frame, talk_pcm_provider, track_tasks, spawn_bg, status, trace, track
+) -> None:
+    if track.kind == "audio":
+        status(f"audio track: id={track.id} kind={track.kind}")
+
+        # The audio transceiver is sendrecv (no actual sender track).
+        # aiortc's RTCRtpSender fires RTCP SR every ~1 s with
+        # packet_count=0.  Camera firmware interprets 25 s of
+        # zero-packet SR as "viewer not transmitting audio -> stop
+        # sending audio to them."  We patch the sender's _send_rtcp
+        # to a no-op so no SR reaches the camera.
+        #
+        # In talk mode we attach a REAL PCMA sender, so its RTCP SR
+        # carries genuine packet counts - skip the suppression so the
+        # camera sees a properly-transmitting viewer.
+        async def _suppress_audio_sender_rtcp() -> None:
+            # Patch _send_rtcp on the sender instance to a no-op so
+            # the RTCP SR loop keeps running (no BYE sent) but every
+            # SR with packet_count=0 is silently discarded.
+            # Cancelling the task instead would trigger a RTCP BYE,
+            # signalling "sender done" to the camera - worse outcome.
+            await asyncio.sleep(1.5)  # wait for sender to start
+            for _t in pc.getTransceivers():
+                if _t.kind == "audio":
+
+                    async def _noop_rtcp(_pkts, **_kw):
+                        pass
+
+                    _t.sender._send_rtcp = _noop_rtcp
+                    trace(
+                        "audio sender: _send_rtcp patched -> no-op"
+                        " (suppresses 0-packet SR audio watchdog)"
+                    )
+                    break
+
+        if talk_pcm_provider is None:
+            spawn_bg(_suppress_audio_sender_rtcp())
+
+        # Drain decoded audio frames so the queue doesn't grow unbounded.
+        async def _drain_audio() -> None:
+            try:
+                while True:
+                    await track.recv()
+            except Exception:
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_drain_audio",
+                    exc_info=True,
+                )
+
+        t = asyncio.ensure_future(_drain_audio())
+        track_tasks.append(t)
+    elif track.kind == "video":
+        # Request an IDR keyframe via RTCP PLI so we start decoding from
+        # a complete frame.  Without this, if the camera's first IDR
+        # arrived before our SRTP path was ready (seq gap at the start),
+        # H264 decoding silently drops every subsequent delta frame and
+        # we receive zero decoded frames.  Previously a SINGLE PLI was
+        # sent once an SSRC appeared (and only after a 0.5s sleep); if
+        # that PLI was lost, decoding stalled until the next natural IDR
+        # (seconds of black on cold start).  Drive it with
+        # _keyframe_prompter instead: fire immediately and repeat every
+        # 0.5s until the first frame is decoded, so a lost PLI is retried.
+        _first_video_frame = asyncio.Event()
+
+        async def _send_pli_once() -> None:
+            # aiortc 1.14 requires the remote SSRC for _send_rtcp_pli;
+            # the SSRC is only known once RTP starts arriving.  No-op
+            # (no receiver/SSRC yet) until RTP flows - the prompter
+            # retries on its own cadence.
+            try:
+                _recv = next(
+                    (r for r in pc.getReceivers() if r.track is track),
+                    None,
+                )
+                if _recv is None:
+                    return
+                _ssrcs = [s.source for s in _recv.getSynchronizationSources()]
+                if not _ssrcs:
+                    return
+                for _ssrc in _ssrcs:
+                    await _recv._send_rtcp_pli(_ssrc)
+                trace(f"video track: sent RTCP PLI (keyframe request) ssrc={_ssrcs}")
+            except Exception as _pli_exc:
+                _LOGGER.debug("RTCP PLI attempt failed: %s", _pli_exc)
+
+        spawn_bg(
+            _keyframe_prompter(
+                _send_pli_once,
+                _first_video_frame,
+                interval=0.5,
+                max_tries=12,
+            )
+        )
+        if on_frame is not None:
+
+            def _on_frame_signal(_f, _on_frame=on_frame):
+                # First decoded frame stops the PLI prompter.
+                _first_video_frame.set()
+                return _on_frame(_f)
+
+            t = asyncio.ensure_future(_webrtc_consume_video(track, _on_frame_signal))
+            track_tasks.append(t)
 
 
 def _verified_dtls_fingerprint(cam_cert, pinned_fp: str, cert_fp_fn) -> Optional[str]:
@@ -1619,18 +1973,18 @@ class _WebRTCOpenMixin:
             _numeric_uid_raw,
             seq=f"ap{random.randint(1000000, 9999999)}",
             payload={
-                    "peerid": peer_id,
-                    "devId": device_id,
-                    # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
-                    # to the target deviceId for livePlayReq.
-                    "dstAddr": device_id,
-                    # App payload compatibility fields (see LiveRequestParamsBean /
-                    # LivePlayPaylodBean in decompiled app).
-                    "livePlay": 1,
-                    "powerType": _live_power_type,
-                    "p2pCache": _live_p2p_cache,
-                    "dseq": self._next_dseq(),
-                },
+                "peerid": peer_id,
+                "devId": device_id,
+                # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
+                # to the target deviceId for livePlayReq.
+                "dstAddr": device_id,
+                # App payload compatibility fields (see LiveRequestParamsBean /
+                # LivePlayPaylodBean in decompiled app).
+                "livePlay": 1,
+                "powerType": _live_power_type,
+                "p2pCache": _live_p2p_cache,
+                "dseq": self._next_dseq(),
+            },
         )
         if not use_sdes:
             # SDES path sends its own livePlayReq inside _open_sdes_stream;
@@ -2498,113 +2852,17 @@ class _WebRTCOpenMixin:
 
         @pc.on("track")
         def _on_track(track) -> None:
-            if track.kind == "audio":
-                _status(f"audio track: id={track.id} kind={track.kind}")
-
-                # The audio transceiver is sendrecv (no actual sender track).
-                # aiortc's RTCRtpSender fires RTCP SR every ~1 s with
-                # packet_count=0.  Camera firmware interprets 25 s of
-                # zero-packet SR as "viewer not transmitting audio -> stop
-                # sending audio to them."  We patch the sender's _send_rtcp
-                # to a no-op so no SR reaches the camera.
-                #
-                # In talk mode we attach a REAL PCMA sender, so its RTCP SR
-                # carries genuine packet counts - skip the suppression so the
-                # camera sees a properly-transmitting viewer.
-                async def _suppress_audio_sender_rtcp() -> None:
-                    # Patch _send_rtcp on the sender instance to a no-op so
-                    # the RTCP SR loop keeps running (no BYE sent) but every
-                    # SR with packet_count=0 is silently discarded.
-                    # Cancelling the task instead would trigger a RTCP BYE,
-                    # signalling "sender done" to the camera - worse outcome.
-                    await asyncio.sleep(1.5)  # wait for sender to start
-                    for _t in pc.getTransceivers():
-                        if _t.kind == "audio":
-
-                            async def _noop_rtcp(_pkts, **_kw):
-                                pass
-
-                            _t.sender._send_rtcp = _noop_rtcp
-                            _trace(
-                                "audio sender: _send_rtcp patched -> no-op"
-                                " (suppresses 0-packet SR audio watchdog)"
-                            )
-                            break
-
-                if talk_pcm_provider is None:
-                    _spawn_bg(_suppress_audio_sender_rtcp())
-
-                # Drain decoded audio frames so the queue doesn't grow unbounded.
-                async def _drain_audio() -> None:
-                    try:
-                        while True:
-                            await track.recv()
-                    except Exception:
-                        _LOGGER.debug(
-                            "camera %s: swallowed exception in %s",
-                            getattr(self, "device_id", "?"),
-                            "_drain_audio",
-                            exc_info=True,
-                        )
-
-                t = asyncio.ensure_future(_drain_audio())
-                track_tasks.append(t)
-            elif track.kind == "video":
-                # Request an IDR keyframe via RTCP PLI so we start decoding from
-                # a complete frame.  Without this, if the camera's first IDR
-                # arrived before our SRTP path was ready (seq gap at the start),
-                # H264 decoding silently drops every subsequent delta frame and
-                # we receive zero decoded frames.  Previously a SINGLE PLI was
-                # sent once an SSRC appeared (and only after a 0.5s sleep); if
-                # that PLI was lost, decoding stalled until the next natural IDR
-                # (seconds of black on cold start).  Drive it with
-                # _keyframe_prompter instead: fire immediately and repeat every
-                # 0.5s until the first frame is decoded, so a lost PLI is retried.
-                _first_video_frame = asyncio.Event()
-
-                async def _send_pli_once() -> None:
-                    # aiortc 1.14 requires the remote SSRC for _send_rtcp_pli;
-                    # the SSRC is only known once RTP starts arriving.  No-op
-                    # (no receiver/SSRC yet) until RTP flows - the prompter
-                    # retries on its own cadence.
-                    try:
-                        _recv = next(
-                            (r for r in pc.getReceivers() if r.track is track),
-                            None,
-                        )
-                        if _recv is None:
-                            return
-                        _ssrcs = [s.source for s in _recv.getSynchronizationSources()]
-                        if not _ssrcs:
-                            return
-                        for _ssrc in _ssrcs:
-                            await _recv._send_rtcp_pli(_ssrc)
-                        _trace(
-                            f"video track: sent RTCP PLI (keyframe request)"
-                            f" ssrc={_ssrcs}"
-                        )
-                    except Exception as _pli_exc:
-                        _LOGGER.debug("RTCP PLI attempt failed: %s", _pli_exc)
-
-                _spawn_bg(
-                    _keyframe_prompter(
-                        _send_pli_once,
-                        _first_video_frame,
-                        interval=0.5,
-                        max_tries=12,
-                    )
-                )
-                if on_frame is not None:
-
-                    def _on_frame_signal(_f, _on_frame=on_frame):
-                        # First decoded frame stops the PLI prompter.
-                        _first_video_frame.set()
-                        return _on_frame(_f)
-
-                    t = asyncio.ensure_future(
-                        _webrtc_consume_video(track, _on_frame_signal)
-                    )
-                    track_tasks.append(t)
+            dtls_on_track(
+                self,
+                pc,
+                on_frame,
+                talk_pcm_provider,
+                track_tasks,
+                _spawn_bg,
+                _status,
+                _trace,
+                track,
+            )
 
         recorder = self._attach_file_recorder(pc, output_path, on_frame)
         _aborted = [False]
@@ -2760,47 +3018,47 @@ class _WebRTCOpenMixin:
             _numeric_uid_raw,
             seq=_seq(),
             payload={
-                    # Browser-style nested fields - newer firmware (e.g. A001064)
-                    # parses payload.wPayload.peerid / payload.wPayload.offer and
-                    # requires IceServerList to activate its ICE agent.
-                    # HAR captures from the official AiDot web app confirm this is
-                    # the canonical format; flat fields are kept for older firmware.
-                    # wPayload.offer.sdp must carry the FULL SDP (not the
-                    # compressed form): the camera's compressed-answer codepath
-                    # appears to skip its fingerprint-fill step when fed a
-                    # compressed offer, returning a malformed
-                    # `a=fingerprint:sha-256 ` line with empty value that
-                    # aiortc then rejects with "not enough values to unpack".
-                    # The legacy flat payload.offer.sdp gets the COMPRESSED SDP
-                    # so the total request still fits under the camera's MQTT
-                    # receive buffer (~10 KB threshold; we want < ~7-8 KB).
-                    "wPayload": {
-                        "peerid": peer_id,
-                        "sts": int(time.time() * 1000),
-                        "psk": _psk_dtls,
-                        "offer": {"type": pc.localDescription.type, "sdp": _offer_sdp},
-                    },
-                    "IceServerList": _ice_server_list,
-                    # Legacy flat fields - older firmware parses payload.peerid directly.
+                # Browser-style nested fields - newer firmware (e.g. A001064)
+                # parses payload.wPayload.peerid / payload.wPayload.offer and
+                # requires IceServerList to activate its ICE agent.
+                # HAR captures from the official AiDot web app confirm this is
+                # the canonical format; flat fields are kept for older firmware.
+                # wPayload.offer.sdp must carry the FULL SDP (not the
+                # compressed form): the camera's compressed-answer codepath
+                # appears to skip its fingerprint-fill step when fed a
+                # compressed offer, returning a malformed
+                # `a=fingerprint:sha-256 ` line with empty value that
+                # aiortc then rejects with "not enough values to unpack".
+                # The legacy flat payload.offer.sdp gets the COMPRESSED SDP
+                # so the total request still fits under the camera's MQTT
+                # receive buffer (~10 KB threshold; we want < ~7-8 KB).
+                "wPayload": {
                     "peerid": peer_id,
-                    "devId": device_id,
-                    "offer": {
-                        "type": pc.localDescription.type,
-                        "sdp": _compressed_offer_sdp,
-                    },
-                    "trackId": 0,
-                    # Decompiled reference app (tyrus/o.java) sets dstAddr=deviceId
-                    # for webrtcReq.
-                    "dstAddr": device_id,
-                    "liveMqtt": 1,
-                    "encOffer": 1,
-                    # powerType/p2pCache: both fields are present on every webrtcReq
-                    # the reference app sends.  Defaults used here match the
-                    # fallback behaviour in the decompiled reference app when IPC
-                    # device info is unavailable.
-                    "powerType": _live_power_type,
-                    "p2pCache": _live_p2p_cache,
+                    "sts": int(time.time() * 1000),
+                    "psk": _psk_dtls,
+                    "offer": {"type": pc.localDescription.type, "sdp": _offer_sdp},
                 },
+                "IceServerList": _ice_server_list,
+                # Legacy flat fields - older firmware parses payload.peerid directly.
+                "peerid": peer_id,
+                "devId": device_id,
+                "offer": {
+                    "type": pc.localDescription.type,
+                    "sdp": _compressed_offer_sdp,
+                },
+                "trackId": 0,
+                # Decompiled reference app (tyrus/o.java) sets dstAddr=deviceId
+                # for webrtcReq.
+                "dstAddr": device_id,
+                "liveMqtt": 1,
+                "encOffer": 1,
+                # powerType/p2pCache: both fields are present on every webrtcReq
+                # the reference app sends.  Defaults used here match the
+                # fallback behaviour in the decompiled reference app when IPC
+                # device info is unavailable.
+                "powerType": _live_power_type,
+                "p2pCache": _live_p2p_cache,
+            },
         )
         outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
         self._cold_phase("webrtcReq")
@@ -3237,21 +3495,21 @@ class _WebRTCOpenMixin:
                 _numeric_uid_raw,
                 seq=_seq(),
                 payload={
+                    "peerid": peer_id,
+                    "devId": device_id,
+                    "answer": {"type": "answer", "sdp": _rr_answer_sdp},
+                    "trackId": 0,
+                    "dstAddr": device_id,
+                    # wPayload mirrors the webrtcReq format.  Newer firmware
+                    # (e.g. LK.IPC.A001064) parses wPayload.answer.sdp to
+                    # extract our ICE credentials and candidates; without this
+                    # the camera cannot form valid STUN binding requests and
+                    # never initiates ICE connectivity checks -> ICE closed.
+                    "wPayload": {
                         "peerid": peer_id,
-                        "devId": device_id,
                         "answer": {"type": "answer", "sdp": _rr_answer_sdp},
-                        "trackId": 0,
-                        "dstAddr": device_id,
-                        # wPayload mirrors the webrtcReq format.  Newer firmware
-                        # (e.g. LK.IPC.A001064) parses wPayload.answer.sdp to
-                        # extract our ICE credentials and candidates; without this
-                        # the camera cannot form valid STUN binding requests and
-                        # never initiates ICE connectivity checks -> ICE closed.
-                        "wPayload": {
-                            "peerid": peer_id,
-                            "answer": {"type": "answer", "sdp": _rr_answer_sdp},
-                        },
                     },
+                },
             )
             outgoing_q.put_nowait((_webrtc_resp_topic, _webrtc_resp_payload))
             # Save for potential reconnect re-send in the ICE wait loop.
@@ -3305,15 +3563,15 @@ class _WebRTCOpenMixin:
                         _numeric_uid_raw,
                         seq=_seq(),
                         payload={
-                                "dstAddr": device_id,
-                                "wPayload": {
-                                    "peerid": peer_id,
-                                    "candidate": _rr_cand_obj,
-                                },
+                            "dstAddr": device_id,
+                            "wPayload": {
                                 "peerid": peer_id,
-                                "devId": device_id,
                                 "candidate": _rr_cand_obj,
                             },
+                            "peerid": peer_id,
+                            "devId": device_id,
+                            "candidate": _rr_cand_obj,
+                        },
                     )
                     outgoing_q.put_nowait((_rr_ice_topic, _rr_ice_json))
                     _rr_ice_payloads.append((_rr_ice_topic, _rr_ice_json))
@@ -3456,42 +3714,9 @@ class _WebRTCOpenMixin:
                         _cur_mid = _ln[len("a=mid:") :].strip()
             _flush()
 
-            def _stub(_m: str, _kind: str) -> list:
-                if _kind == "application":
-                    # Synthesize a VALID m=application section so aiortc's SCTP
-                    # transport can start.  Camera (KVS firmware) answers mid:2
-                    # with m=video H265 instead of m=application but always
-                    # opens SCTP on port 5000 regardless.  Without these attrs
-                    # aiortc crashes in serialize_packet (port=None).
-                    # port=9 per RFC 8842 = "use sctp-port".
-                    _hdr = "m=application 9 UDP/DTLS/SCTP webrtc-datachannel"
-                    _block = [_hdr, "c=IN IP4 0.0.0.0", f"a=mid:{_m}"]
-                    for _x in (_ice_ufrag_ln, _ice_pwd_ln, _fp_ln, _setup_ln):
-                        if _x:
-                            _block.append(_x)
-                    _block.append("a=sctp-port:5000")
-                    _block.append("a=max-message-size:262144")
-                    return _block
-                if _kind == "audio":
-                    _hdr = "m=audio 0 UDP/TLS/RTP/SAVPF 0"
-                else:
-                    # PT=0 (PCMU/audio) in a video stub causes aiortc to fail
-                    # "Failed to set remote video description send parameters"
-                    # because PT=0 is not in aiortc's video codec registry.
-                    # PT=97 is always in aiortc's video codec list (VP8 or H264
-                    # variant) and satisfies codec lookup for a rejected section.
-                    _hdr = "m=video 0 UDP/TLS/RTP/SAVPF 97"
-                _block = [_hdr, "c=IN IP4 0.0.0.0", f"a=mid:{_m}"]
-                for _x in (_ice_ufrag_ln, _ice_pwd_ln, _fp_ln, _setup_ln):
-                    if _x:
-                        _block.append(_x)
-                # aiortc's __validate_description requires a=rtcp-mux in every
-                # m-section that appears in the answer when the offer had it.
-                # Our offer always includes a=rtcp-mux; stub sections must echo
-                # it or setRemoteDescription raises "RTCP mux is not enabled".
-                _block.append("a=rtcp-mux")
-                _block.append("a=inactive")
-                return _block
+            _stub = functools.partial(
+                answer_section_stub, _ice_ufrag_ln, _ice_pwd_ln, _fp_ln, _setup_ln
+            )
 
             # PTs we assigned to H265 in _replace_mid2_codecs_with_h265.
             # If the camera answers a video section using only these PTs,
@@ -3676,7 +3901,6 @@ class _WebRTCOpenMixin:
             # firmware (A000088) may answer with 4 sections, reorder them, or pad a
             # bogus single-PT video stub - all of which break aiortc's positional
             # matching.  _aiortc_answer() below selects by content and re-emits.
-            import re as _re_ans  # module has no top-level `import re`
             # _offer_video_pts (our H264 + RTX payload types) is computed above,
             # where the mid walk needs it, and reused here.
 
@@ -3686,209 +3910,17 @@ class _WebRTCOpenMixin:
             # than letting DTLS co-fail into the generic 15s-gated retry.
             _media_declined = [False]
 
-            def _aiortc_answer(sdp: str) -> str:
-                """Produce a 3-section answer SDP for aiortc (audio/H264/DC),
-                in aiortc's fixed transceiver order regardless of how the camera
-                ordered or padded its reply.
-
-                aiortc matches answer m-sections to its transceivers BY POSITION:
-                audio(mid:0), H264(mid:1), DC(mid:2).  H265-capable firmware
-                (A000088) sometimes answers with 4 sections AND reorders them
-                (e.g. video / audio / video / application) and/or includes a bogus
-                single-PT video stub.  Positional matching then fails with
-                "Media sections in answer do not match offer".
-
-                This selects by CONTENT and re-emits in offer order:
-                  1. audio  = first m=audio section.
-                  2. video  = the m=video section whose payload types intersect
-                     our offer's video PTs (the real H264 answer), preferring the
-                     one with the most overlap; falls back to the m=video with the
-                     most PTs.  Bogus/H265 stubs are dropped.
-                  3. DC     = first m=application section, or a synthesised stub
-                     using the camera's ICE credentials.
-                Each selected section's a=mid is rewritten to 0/1/2 and BUNDLE is
-                normalised to "0 1 2".
-                """
-                _lines2 = _re_ans.split(r"\r?\n", sdp)
-                _secs2, _cur2 = [], []
-                for _l2 in _lines2:
-                    if _l2.startswith("m=") and _cur2:
-                        _secs2.append(_cur2)
-                        _cur2 = [_l2]
-                    else:
-                        _cur2.append(_l2)
-                if _cur2:
-                    _secs2.append(_cur2)
-
-                # A valid m= line is "m=<media> <port> <proto> <fmt>..." (>=4
-                # tokens).  Drop malformed/forged sections here so the later
-                # s[0].split()[1] / [3:] accesses cannot raise IndexError on an
-                # attacker-influenced answer (an unguarded IndexError here would
-                # crash the connect coroutine -> repeatable stream DoS).
-                _audio_secs = [
-                    s
-                    for s in _secs2
-                    if s and s[0].startswith("m=audio") and len(s[0].split()) >= 4
-                ]
-                _video_secs = [
-                    s
-                    for s in _secs2
-                    if s and s[0].startswith("m=video") and len(s[0].split()) >= 4
-                ]
-                _app_secs = [
-                    s for s in _secs2 if s and s[0].startswith("m=application")
-                ]
-
-                def _set_mid(_sec: list, _mid: str) -> list:
-                    _seen_mid = False
-                    _res = []
-                    for _l in _sec:
-                        if _l.startswith("a=mid:"):
-                            _res.append(f"a=mid:{_mid}")
-                            _seen_mid = True
-                        else:
-                            _res.append(_l)
-                    if not _seen_mid:
-                        # Insert mid right after the m= line.
-                        _res.insert(1, f"a=mid:{_mid}")
-                    return _res
-
-                _out_secs: list[list[str]] = []
-                _dc_only_video = False
-                _dc_only_audio = False
-
-                # 1. audio -> mid:0
-                if _audio_secs:
-                    if _audio_secs[0][0].split()[1] == "0":
-                        # Full datachannel-only answer: the camera also rejected
-                        # audio (port 0, a=inactive).  Re-emit a port-0 stub that
-                        # still carries an a=rtpmap, otherwise aiortc's
-                        # find_common_codecs() is empty and setRemoteDescription
-                        # raises "Failed to set remote audio description send
-                        # parameters" (rtcpeerconnection.py:909).  PT 0 (PCMU) is
-                        # always present in our offer.  Flag it so mid:0 is also
-                        # EXCLUDED from BUNDLE below (aiortc rejects a port-0
-                        # section inside the BUNDLE group).  Verified offline:
-                        # audio+video stubs WITH rtpmap -> SRD accepted.
-                        _astub = [
-                            "m=audio 0 UDP/TLS/RTP/SAVPF 0",
-                            "c=IN IP4 0.0.0.0",
-                            "a=mid:0",
-                        ]
-                        for _xa in (_ice_ufrag_ln, _ice_pwd_ln, _fp_ln, _setup_ln):
-                            if _xa:
-                                _astub.append(_xa)
-                        _astub += ["a=rtpmap:0 PCMU/8000", "a=rtcp-mux", "a=inactive"]
-                        _out_secs.append(_astub)
-                        _dc_only_audio = True
-                    else:
-                        _out_secs.append(_set_mid(_audio_secs[0], "0"))
-
-                # 2. real video -> mid:1 (pick best PT overlap with our offer)
-                _best_video = None
-                _best_overlap = -1
-                for _vs in _video_secs:
-                    _pts = set(_vs[0].split()[3:])
-                    if _vs[0].split()[1] == "0":
-                        continue  # port-0 stub
-                    _overlap = len(_pts & _offer_video_pts)
-                    # Prefer real PT overlap; tie-break on PT count (richer section).
-                    _score = (_overlap, len(_pts))
-                    if _score > (_best_overlap, -1) and (
-                        _overlap > 0 or _best_video is None
-                    ):
-                        _best_video = _vs
-                        _best_overlap = _overlap
-                if _best_video is None and _video_secs:
-                    # No overlap at all - fall back to the richest non-stub video.
-                    _best_video = max(
-                        (s for s in _video_secs if s[0].split()[1] != "0"),
-                        key=lambda s: len(s[0].split()[3:]),
-                        default=None,
-                    )
-                if _best_video is not None:
-                    _out_secs.append(_set_mid(_best_video, "1"))
-                else:
-                    # DC-only answer: the camera rejected video (port 0, no
-                    # usable H264).  Keep a rejected port-0 video placeholder at
-                    # mid:1 so the section count/order still matches our
-                    # 3-section offer and aiortc accepts the answer instead of
-                    # throwing - we then fail cleanly into retry rather than
-                    # crashing setRemoteDescription.  (Driving media over the
-                    # datachannel was tested and ruled out: a DC-only answer is
-                    # the camera declining media and always co-fails DTLS, so the
-                    # channel never opens.)
-                    _vstub = [
-                        "m=video 0 UDP/TLS/RTP/SAVPF 97",
-                        "c=IN IP4 0.0.0.0",
-                        "a=mid:1",
-                    ]
-                    for _xv in (_ice_ufrag_ln, _ice_pwd_ln, _fp_ln, _setup_ln):
-                        if _xv:
-                            _vstub.append(_xv)
-                    # rtpmap required or aiortc rejects with "Failed to set remote
-                    # video description send parameters" (find_common_codecs empty).
-                    # PT 97 H264 is always in our offer.  Verified offline.
-                    _vstub += [
-                        "a=rtpmap:97 H264/90000",
-                        "a=fmtp:97 level-asymmetry-allowed=1;"
-                        "packetization-mode=1;profile-level-id=42e01f",
-                        "a=rtcp-mux",
-                        "a=inactive",
-                    ]
-                    _out_secs.append(_vstub)
-                    _dc_only_video = True
-
-                # 3. datachannel -> mid:2
-                if _app_secs:
-                    _out_secs.append(_set_mid(_app_secs[0], "2"))
-                else:
-                    _dc_stub = [
-                        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel",
-                        "c=IN IP4 0.0.0.0",
-                        "a=mid:2",
-                    ]
-                    for _x2 in (_ice_ufrag_ln, _ice_pwd_ln, _fp_ln, _setup_ln):
-                        if _x2:
-                            _dc_stub.append(_x2)
-                    _dc_stub.extend(["a=sctp-port:5000", "a=max-message-size:262144"])
-                    _out_secs.append(_dc_stub)
-
-                # Session header = everything before the first m= section.
-                _header = (
-                    _secs2[0] if (_secs2 and not _secs2[0][0].startswith("m=")) else []
-                )
-                _out2: list[str] = list(_header)
-                for _sec in _out_secs:
-                    _out2.extend(_sec)
-                sdp2 = "\r\n".join(_out2)
-                # Ensure BUNDLE lists only the ACTIVE mids in order.  Any port-0
-                # (rejected) section must be EXCLUDED - aiortc rejects a port-0
-                # section inside the BUNDLE group.  A full datachannel-only answer
-                # rejects both audio and video, leaving BUNDLE just "2".
-                _bundle_mids = []
-                if not _dc_only_audio:
-                    _bundle_mids.append("0")
-                if not _dc_only_video:
-                    _bundle_mids.append("1")
-                if _app_secs:
-                    _bundle_mids.append("2")
-                _bundle_str = "a=group:BUNDLE " + " ".join(_bundle_mids)
-                if _dc_only_audio or _dc_only_video:
-                    _media_declined[0] = True
-                    _status(
-                        f"DC-only answer: audio_rejected={_dc_only_audio}"
-                        f" video_rejected={_dc_only_video} -> {_bundle_str}"
-                        " (camera declined media; encoder not ready - fast-retry)"
-                    )
-                if "a=group:BUNDLE" in sdp2:
-                    sdp2 = _re_ans.sub(
-                        r"a=group:BUNDLE [0-9 ]+",
-                        _bundle_str,
-                        sdp2,
-                        count=1,
-                    )
-                return sdp2
+            _aiortc_answer = functools.partial(
+                build_aiortc_answer,
+                _stub,
+                _media_declined,
+                _offer_video_pts,
+                _status,
+                _ice_ufrag_ln,
+                _ice_pwd_ln,
+                _fp_ln,
+                _setup_ln,
+            )
 
             _aiortc_sdp = _aiortc_answer(_ans_sdp)
 
@@ -4011,15 +4043,15 @@ class _WebRTCOpenMixin:
                             _numeric_uid_raw,
                             seq=_seq(),
                             payload={
-                                    "dstAddr": device_id,
-                                    "wPayload": {
-                                        "peerid": peer_id,
-                                        "candidate": _cand_obj,
-                                    },
+                                "dstAddr": device_id,
+                                "wPayload": {
                                     "peerid": peer_id,
-                                    "devId": device_id,
                                     "candidate": _cand_obj,
                                 },
+                                "peerid": peer_id,
+                                "devId": device_id,
+                                "candidate": _cand_obj,
+                            },
                         )
                         outgoing_q.put_nowait((ice_cand_topic, _ic_payload))
                         _sent_n += 1
