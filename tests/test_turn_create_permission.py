@@ -69,19 +69,21 @@ def test_permission_is_installed_before_every_nomination():
     """
     src = _impl_source()
     regions = {
-        "answer": _extract_helper(src, "_nominate_from_answer_sdp"),
+        "answer": inspect.getsource(so.nominate_from_answer_sdp),
         "setup": src[
             src.index("if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:") :
         ][:2000],
         "bridge": src[src.index("Periodic ICE controlling check") :][:4000],
     }
+    # The answer path is a module function now, so the names it calls have no
+    # leading underscore; the substrings below match both spellings.
     for name, block in regions.items():
-        assert "_send_use_candidate(" in block, f"{name}: expected a nomination"
-        assert "_turn_install_permissions(" in block, (
+        assert "send_use_candidate(" in block, f"{name}: expected a nomination"
+        assert "install_permissions(" in block, (
             f"{name}: nominates without installing a relay permission"
         )
-        assert block.index("_turn_install_permissions(") < block.index(
-            "_send_use_candidate("
+        assert block.index("install_permissions(") < block.index(
+            "send_use_candidate("
         ), (
             f"{name}: the relay permission must be installed BEFORE the "
             "connectivity checks, otherwise the relay drops the camera's reply"
@@ -243,18 +245,15 @@ def test_trickled_candidates_are_permissioned_not_just_the_answer_sdp():
     assert "ice_cands_seen" in src, (
         "the SDES path must observe the camera's trickled ICE candidates"
     )
-    trickle = src[src.index("async def _consume_camera_trickle") :]
-    trickle = trickle[: trickle.index("\n        if ice_cands_seen is not None")]
-    assert "_turn_install_permissions(" in trickle, (
+    trickle = inspect.getsource(so.consume_camera_trickle)
+    assert "install_permissions(" in trickle, (
         "every trickled candidate needs a relay permission"
     )
 
     # No candidate-type filter between parsing the type and installing: srflx
     # and relay are precisely the addresses the TURN server can match, so a
     # guard that skipped them would reinstate the original black hole.
-    body = trickle[
-        trickle.index("_tk_typ = ") : trickle.index("_turn_install_permissions(")
-    ]
+    body = trickle[trickle.index("_tk_typ = ") : trickle.index("install_permissions(")]
     for guard in ("_tk_typ ==", "_tk_typ !=", "_tk_typ in", "_tk_typ not in"):
         assert guard not in body, (
             f"candidate type is filtered by `{guard}` before the permission is "
@@ -296,13 +295,12 @@ def test_trickle_regex_parses_real_camera_candidates():
 
 def test_nomination_set_is_rebound_not_mutated():
     """The bridge thread iterates this list; mutating it under them raises."""
-    src = _impl_source()
-    trickle = src[src.index("async def _consume_camera_trickle") :]
-    assert '_bridge_uc_info["cands"] = [' in trickle, (
+    trickle = inspect.getsource(so.consume_camera_trickle)
+    assert 'uc_info["cands"] = [' in trickle, (
         "rebind the candidate list to a new object so the bridge thread never "
         "sees it mutate mid-iteration"
     )
-    assert '_bridge_uc_info["cands"].append' not in trickle, (
+    assert 'uc_info["cands"].append' not in trickle, (
         "appending in place races the bridge thread's iteration"
     )
 

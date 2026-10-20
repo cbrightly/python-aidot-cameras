@@ -115,22 +115,14 @@ def test_the_compressed_offer_leaves_both_sockets_using_what_the_camera_got():
     whose credentials were dropped is signing STUN with a password the camera
     has never seen - which is exactly what happened before this change.
 
-    Reaches the nested compressor through the module source rather than an
-    import, because it is defined inside the open method."""
-    import inspect
+    The compressor is a module function (the open binds it with the device
+    id), so it is called directly."""
+    import functools
     import re as _re
-    import textwrap
 
-    from aidot_cameras.camera.client import CameraMixin
+    from aidot_cameras.camera.sdes_open import compress_sdp_req
 
-    src = inspect.getsource(CameraMixin._open_sdes_stream_impl)
-    m = _re.search(
-        r"\n( +)def _compress_sdp_req\(.*?\n(?=\1[a-zA-Z_#]|\1def )", src, _re.S
-    )
-    assert m, "could not locate _compress_sdp_req"
-    ns: dict = {}
-    exec(textwrap.dedent(m.group(0)), {"re": _re}, ns)  # noqa: S102 - test only
-    compress = ns["_compress_sdp_req"]
+    compress = functools.partial(compress_sdp_req, "cam")
 
     ufrag, pwd = _new_ice_credentials()
     sdp = (

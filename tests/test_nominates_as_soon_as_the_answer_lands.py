@@ -278,9 +278,11 @@ def test_a_corrupt_candidate_line_is_still_rejected():
 def test_the_trickle_path_reads_candidates_through_the_same_parser():
     """It kept its own copy of the pattern, so the two could disagree about the
     same line - which is the gap the collapse exists to close."""
-    src = _open_source()
-    assert "_parse_candidate_line" in src
-    assert "_re_ice" not in src
+    from aidot_cameras.camera.sdes_open import consume_camera_trickle
+
+    trickle = inspect.getsource(consume_camera_trickle)
+    assert "_parse_candidate_line" in trickle
+    assert "_re_ice" not in trickle and "_re_ice" not in _open_source()
 
 
 def test_the_candidate_parse_accepts_a_line_that_ends_at_typ():

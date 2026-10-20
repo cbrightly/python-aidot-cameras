@@ -1928,6 +1928,322 @@ def turn_install_permissions(
     return _perm_ok
 
 
+def compress_sdp_req(device_id, _sdp: str) -> str:
+    """g.b() equivalent - selective SDP filter for wPayload."""
+    _out: list = []
+    _seen: dict = {}
+    _media_type = ""
+    _before_m = True
+
+    def _k(_ln: str, _key: str = "") -> None:
+        _out.append(_ln + "\r\n")
+        if _key:
+            _seen[_key] = "1"
+
+    for _ln in _sdp.splitlines():
+        if _ln.startswith("m="):
+            _before_m = False
+            _media_type = _ln.split(" ")[0]
+            _k(_ln)
+            continue
+        if _before_m:
+            if _ln.startswith("s="):
+                _k(_ln)
+            continue
+        if _ln.startswith("a=ssrc") and "cname" in _ln:
+            _k(_ln)
+            continue
+        if any(_d in _ln for _d in ("sendrecv", "recvonly", "sendonly")):
+            _k(_ln)
+            continue
+        for _ak in (
+            "ice-ufrag",
+            "ice-pwd",
+            "fingerprint",
+            "setup",
+            "ice-options",
+            "crypto",
+            "psk",
+        ):
+            if _ak in _ln:
+                if _seen.get(_ak) is None:
+                    _k(_ln, _ak)
+                break
+        else:
+            if "candidate" in _ln and " udp " in _ln.lower():
+                _k(_ln)
+                continue
+            if _media_type == "m=audio":
+                if any(_c in _ln for _c in ("opus", "PCMU", "PCMA", "AAC")):
+                    _k(_ln)
+            elif _media_type == "m=video":
+                if "H264/90000" in _ln and _seen.get("H264/90000") is None:
+                    _k(_ln, "H264/90000")
+                    try:
+                        _seen["H264/90000_pt"] = _ln.split(":")[1].split(" ")[0]
+                    except Exception:
+                        _LOGGER.debug(
+                            "camera %s: swallowed exception in %s",
+                            device_id,
+                            "compress_sdp_req",
+                            exc_info=True,
+                        )
+                elif "H265/90000" in _ln and _seen.get("H265/90000") is None:
+                    _k(_ln, "H265/90000")
+                    try:
+                        _seen["H265/90000_pt"] = _ln.split(":")[1].split(" ")[0]
+                    except Exception:
+                        _LOGGER.debug(
+                            "camera %s: swallowed exception in %s",
+                            device_id,
+                            "compress_sdp_req",
+                            exc_info=True,
+                        )
+                elif "apt=" in _ln:
+                    try:
+                        _apt = _ln.split("apt=")[1].strip()
+                    except Exception:
+                        _apt = ""
+                    if _apt and _apt in (
+                        _seen.get("H264/90000_pt", ""),
+                        _seen.get("H265/90000_pt", ""),
+                    ):
+                        _k(_ln)
+                elif "fmtp" in _ln and "profile-level-id" in _ln:
+                    if _seen.get("profile-level") is None:
+                        _k(_ln, "profile-level")
+            elif _media_type == "m=application":
+                if "sctp-port" in _ln:
+                    _k(_ln)
+    return "".join(_out)
+
+
+def send_use_candidate(
+    device_id,
+    is_self_peer_ip,
+    relay_addrs,
+    sock,
+    our_ufrag,
+    our_pwd,
+    cam_ufrag,
+    cam_pwd,
+    cam_addr,
+):
+    """Send a STUN Binding Request with ICE-CONTROLLING + USE-CANDIDATE."""
+    import struct as _st_uc
+    import os as _os_uc
+    import hmac as _hm_uc
+    import hashlib as _hs_uc
+
+    _MAGIC_UC = b"\x21\x12\xa4\x42"
+    _tid_uc = _os_uc.urandom(12)
+    _user = f"{cam_ufrag}:{our_ufrag}".encode()
+    _user_a = _stun_attr(0x0006, _user)
+    _tiebreaker = int.from_bytes(_os_uc.urandom(8), "big")
+    _ctrl_a = _st_uc.pack("!HHQ", 0x802A, 8, _tiebreaker)  # ICE-CONTROLLING
+    _prio_a = _st_uc.pack("!HHI", 0x0024, 4, 1845493759)  # PRIORITY (prflx)
+    _uc_a = _st_uc.pack("!HH", 0x0025, 0)  # USE-CANDIDATE
+    _attrs = _user_a + _ctrl_a + _prio_a + _uc_a
+    _mi_len = len(_attrs) + 24
+    _mi_in = _st_uc.pack("!HH", 0x0001, _mi_len) + _MAGIC_UC + _tid_uc + _attrs
+    _mi = _hm_uc.new(cam_pwd.encode(), _mi_in, _hs_uc.sha1).digest()
+    _mi_a = _st_uc.pack("!HH", 0x0008, 20) + _mi
+    _total = len(_attrs) + len(_mi_a)
+    # FINGERPRINT (RFC 5389 section 15.5): CRC32 XOR 0x5354554E, after MI.
+    # KVS SDK silently drops binding requests without a valid FINGERPRINT.
+    # MI is computed with length=_total (end-of-MI); FINGERPRINT uses
+    # length=_total+8.  The camera strips FINGERPRINT before verifying MI,
+    # so the MI value is unchanged.
+    import zlib as _zl_uc
+
+    _fp_total = _total + 8
+    _req_for_fp = (
+        _st_uc.pack("!HH", 0x0001, _fp_total) + _MAGIC_UC + _tid_uc + _attrs + _mi_a
+    )
+    _fp_val = (_zl_uc.crc32(_req_for_fp) & 0xFFFFFFFF) ^ 0x5354554E
+    _fp_a = _st_uc.pack("!HHI", 0x8028, 4, _fp_val)
+    _req = _req_for_fp + _fp_a
+    try:
+        sock.sendto(_req, cam_addr)
+    except Exception:
+        _LOGGER.debug(
+            "camera %s: swallowed exception in %s",
+            device_id,
+            "send_use_candidate",
+            exc_info=True,
+        )
+    # Probe the same peer a second time, out of our relay allocation.
+    # These are two different candidate pairs (host->peer and
+    # relay->peer) and ICE validates pairs, not addresses: without the
+    # relayed copy the camera never sees a check whose source is the
+    # relay candidate we advertised, so it never nominates that pair,
+    # never sends media to it, and nothing ever arrives - which also
+    # means the reactive Send-indication path can never bootstrap.
+    # Measured on a live A001513: permissions installed and CONFIRMED
+    # by the TURN server for the camera's host, srflx and relay
+    # addresses, and still ZERO relay-carried inbound packets.
+    # The direct send above is untouched, so directly reachable
+    # cameras behave exactly as before.
+    if not is_self_peer_ip(cam_addr[0], cam_addr[1]):
+        turn_send_indication(relay_addrs, sock, cam_addr[0], cam_addr[1], _req)
+
+
+def nominate_from_answer_sdp(
+    install_permissions, send_use_candidate, socks, creds, nominated_seen, sdp_text
+) -> int:
+    """Nominate every candidate in ``sdp_text``; return how many.
+
+    Same parse as the post-wait path, factored out so the first-media
+    wait can use it.  ``_pre_launch_answer_sdp`` is snapshotted before
+    the camera has answered, so for A001513/A001064 the parse above
+    finds no credentials and nothing is ever nominated - and a camera
+    that never sees USE-CANDIDATE stays in ICE "Checking" and never
+    sends SRTP (see the note above).  Returns 0 while the answer is
+    still absent, so the caller can keep polling.
+    """
+    if not sdp_text:
+        return 0
+    _u, _p, _cands, _ = _parse_answer_ice(sdp_text)
+    if not (_u and _p and _cands):
+        return 0
+    # Open the relay's door before probing, same invariant the setup and
+    # bridge paths hold: a check sent to a peer the relay has no
+    # permission for is discarded, so nominating first would probe a
+    # black hole on any camera we cannot reach directly.
+    install_permissions(_cands, "answer")
+    (_audio_sock, _video_sock) = socks
+    ((_ufrag_a, _pwd_a), (_ufrag_v, _pwd_v)) = creds
+    for _c_ip, _c_port in _cands:
+        send_use_candidate(_audio_sock, _ufrag_a, _pwd_a, _u, _p, (_c_ip, _c_port))
+        send_use_candidate(_video_sock, _ufrag_v, _pwd_v, _u, _p, (_c_ip, _c_port))
+        if (_c_ip, _c_port) not in nominated_seen:
+            nominated_seen.append((_c_ip, _c_port))
+    return len(_cands)
+
+
+async def consume_camera_trickle(
+    install_permissions, bridge_uc_info, ice_cands_seen, timeout
+):
+    """Feed the camera's trickled candidates to TURN and to nomination.
+
+    The answer SDP carries only the camera's host candidate - a private
+    address.  A TURN permission is matched against the peer's source
+    address AS THE RELAY SEES IT, so a permission built from that host
+    candidate authorises an address that can never arrive, and the relay
+    keeps discarding the camera exactly as if no permission existed.
+    Measured on a live A001513: CreatePermission for the host candidate
+    drew a success response and still produced ZERO relay-carried
+    inbound packets.
+
+    The addresses that can actually reach us - the camera's srflx and
+    its own relay allocation - arrive later, by iceCandidateReq trickle.
+    Permission each one as it appears, and add it to the nomination set:
+    when the camera is not directly reachable, USE-CANDIDATE aimed only
+    at its host candidate cannot be delivered either.
+    """
+    _tk_deadline = time.monotonic() + min(max(timeout, 30.0), 90.0)
+    _tk_next = 0
+    _tk_seen: set = set()
+    while time.monotonic() < _tk_deadline:
+        while _tk_next < len(ice_cands_seen):
+            _tk_line = ice_cands_seen[_tk_next].get("candidate") or ""
+            _tk_next += 1
+            # The shared parser, so a candidate the answer path
+            # nominates cannot be one this path silently skips.
+            _tk_parsed = _parse_candidate_line(_tk_line)
+            if not _tk_parsed:
+                continue
+            _tk_ip = _tk_parsed[0]
+            _tk_port = _tk_parsed[1]
+            _tk_typ = _tk_parsed[2]
+            if (_tk_ip, _tk_port) in _tk_seen:
+                continue
+            _tk_seen.add((_tk_ip, _tk_port))
+            install_permissions([(_tk_ip, _tk_port)], f"trickle {_tk_typ}")
+            _tk_cur = bridge_uc_info["cands"]
+            if (_tk_ip, _tk_port) not in _tk_cur:
+                # Rebind to a NEW list rather than appending: the bridge
+                # thread iterates this and must never see it mutate.
+                bridge_uc_info["cands"] = [*_tk_cur, (_tk_ip, _tk_port)]
+        await asyncio.sleep(0.25)
+
+
+def report_first_media_stall(
+    device_id,
+    pre_launch_answer_sdp,
+    answer_fut,
+    bridge,
+    nominated_seen,
+    bridge_uc_info,
+    abandoned_by,
+    _waited_s,
+    _cancelled=False,
+):
+    """Emit the one line that says why nothing arrived.
+
+    A local closure, not inline, because there are two ways to leave the
+    wait without media and both need it.  The wait expiring is the
+    obvious one.  The other is a caller giving up first, which is what a
+    snapshot does at its own budget - measured at 50 s against this
+    75 s wait - so the session that most needed explaining was cancelled
+    25 s before the explanation would have been written.
+    """
+    try:
+        # What the answer carried, so `nominated=none` says which
+        # cause. Both sources are consulted inside the helper: the
+        # pre-launch snapshot is empty on a late answer - measured at
+        # +1.3 s - and the future is the only place that shape's SDP
+        # ever appears.
+        _stall_answer = _stall_answer_candidates(pre_launch_answer_sdp, answer_fut)
+        # Same two sources, same arrival rule: whether that answer also
+        # carried ICE credentials, so a 0-candidate answer says which
+        # degenerate shape it was.
+        _stall_answer_creds = _stall_answer_has_creds(pre_launch_answer_sdp, answer_fut)
+        _stall_probes = list(
+            (getattr(bridge, "_br_probe_verdicts", None) or {}).items()
+        )
+        # Union of every nomination source, deduped and order-preserving:
+        # the answer-peek path records into nominated_seen, the setup /
+        # trickle / late-answer paths into bridge_uc_info, and the
+        # bridge's peer-reflexive learning into ["prflx"].  Any one of
+        # them alone under-reports on some shape.
+        _stall_nominated: list = []
+        for _sn in (
+            *nominated_seen,
+            *bridge_uc_info["cands"],
+            *bridge_uc_info["prflx"],
+        ):
+            if _sn not in _stall_nominated:
+                _stall_nominated.append(_sn)
+        _LOGGER.warning(
+            "%s",
+            _first_media_stall_report(
+                device_id=device_id,
+                waited_s=_waited_s,
+                nominated=_stall_nominated,
+                use_candidate_sent=bool(bridge_uc_info["sent"] or nominated_seen),
+                binding_success=int(getattr(bridge, "_br_binding_success_count", 0)),
+                trigger_sent=bool(getattr(bridge, "_tutk_trigger_sent", False)),
+                probes=_stall_probes,
+                probes_dropped=int(getattr(bridge, "_br_probe_overflow", 0)),
+                cancelled=_cancelled,
+                media_pkts=int(getattr(bridge, "_br_media_pkts", 0)),
+                decrypt_fails=int(getattr(bridge, "_br_decrypt_fails", 0)),
+                answer_cands=_stall_answer,
+                answer_has_creds=_stall_answer_creds,
+                trigger_acked=bool(getattr(bridge, "_br_session_mode_resp", 0)),
+                abandoned_by=abandoned_by,
+            ),
+        )
+    except Exception:
+        _LOGGER.debug(
+            "camera %s: swallowed exception in %s",
+            device_id,
+            "report_first_media_stall",
+            exc_info=True,
+        )
+
+
 async def _run_off_loop(fn, *args):
     """Run a blocking ``fn(*args)`` in the default executor and return its result.
 
@@ -3804,94 +4120,7 @@ class _SdesOpenMixin:
 
         # _psk_value_req was generated before the SDP offer (see above).
         # Reused here in webrtcReq and webrtcResp for consistency.
-        def _compress_sdp_req(_sdp: str) -> str:
-            """g.b() equivalent - selective SDP filter for wPayload."""
-            _out: list = []
-            _seen: dict = {}
-            _media_type = ""
-            _before_m = True
-
-            def _k(_ln: str, _key: str = "") -> None:
-                _out.append(_ln + "\r\n")
-                if _key:
-                    _seen[_key] = "1"
-
-            for _ln in _sdp.splitlines():
-                if _ln.startswith("m="):
-                    _before_m = False
-                    _media_type = _ln.split(" ")[0]
-                    _k(_ln)
-                    continue
-                if _before_m:
-                    if _ln.startswith("s="):
-                        _k(_ln)
-                    continue
-                if _ln.startswith("a=ssrc") and "cname" in _ln:
-                    _k(_ln)
-                    continue
-                if any(_d in _ln for _d in ("sendrecv", "recvonly", "sendonly")):
-                    _k(_ln)
-                    continue
-                for _ak in (
-                    "ice-ufrag",
-                    "ice-pwd",
-                    "fingerprint",
-                    "setup",
-                    "ice-options",
-                    "crypto",
-                    "psk",
-                ):
-                    if _ak in _ln:
-                        if _seen.get(_ak) is None:
-                            _k(_ln, _ak)
-                        break
-                else:
-                    if "candidate" in _ln and " udp " in _ln.lower():
-                        _k(_ln)
-                        continue
-                    if _media_type == "m=audio":
-                        if any(_c in _ln for _c in ("opus", "PCMU", "PCMA", "AAC")):
-                            _k(_ln)
-                    elif _media_type == "m=video":
-                        if "H264/90000" in _ln and _seen.get("H264/90000") is None:
-                            _k(_ln, "H264/90000")
-                            try:
-                                _seen["H264/90000_pt"] = _ln.split(":")[1].split(" ")[0]
-                            except Exception:
-                                _LOGGER.debug(
-                                    "camera %s: swallowed exception in %s",
-                                    getattr(self, "device_id", "?"),
-                                    "_compress_sdp_req",
-                                    exc_info=True,
-                                )
-                        elif "H265/90000" in _ln and _seen.get("H265/90000") is None:
-                            _k(_ln, "H265/90000")
-                            try:
-                                _seen["H265/90000_pt"] = _ln.split(":")[1].split(" ")[0]
-                            except Exception:
-                                _LOGGER.debug(
-                                    "camera %s: swallowed exception in %s",
-                                    getattr(self, "device_id", "?"),
-                                    "_compress_sdp_req",
-                                    exc_info=True,
-                                )
-                        elif "apt=" in _ln:
-                            try:
-                                _apt = _ln.split("apt=")[1].strip()
-                            except Exception:
-                                _apt = ""
-                            if _apt and _apt in (
-                                _seen.get("H264/90000_pt", ""),
-                                _seen.get("H265/90000_pt", ""),
-                            ):
-                                _k(_ln)
-                        elif "fmtp" in _ln and "profile-level-id" in _ln:
-                            if _seen.get("profile-level") is None:
-                                _k(_ln, "profile-level")
-                    elif _media_type == "m=application":
-                        if "sctp-port" in _ln:
-                            _k(_ln)
-            return "".join(_out)
+        _compress_sdp_req = functools.partial(compress_sdp_req, device_id)
 
         _compressed_sdp_req = _compress_sdp_req(sdes_offer_sdp)
         _webrtc_req_sdes_payload = ipc_envelope(
@@ -5061,68 +5290,9 @@ class _SdesOpenMixin:
             _parse_answer_ice(_pre_launch_answer_sdp)
         )
 
-        def _send_use_candidate(sock, our_ufrag, our_pwd, cam_ufrag, cam_pwd, cam_addr):
-            """Send a STUN Binding Request with ICE-CONTROLLING + USE-CANDIDATE."""
-            import struct as _st_uc
-            import os as _os_uc
-            import hmac as _hm_uc
-            import hashlib as _hs_uc
-
-            _MAGIC_UC = b"\x21\x12\xa4\x42"
-            _tid_uc = _os_uc.urandom(12)
-            _user = f"{cam_ufrag}:{our_ufrag}".encode()
-            _user_a = _stun_attr(0x0006, _user)
-            _tiebreaker = int.from_bytes(_os_uc.urandom(8), "big")
-            _ctrl_a = _st_uc.pack("!HHQ", 0x802A, 8, _tiebreaker)  # ICE-CONTROLLING
-            _prio_a = _st_uc.pack("!HHI", 0x0024, 4, 1845493759)  # PRIORITY (prflx)
-            _uc_a = _st_uc.pack("!HH", 0x0025, 0)  # USE-CANDIDATE
-            _attrs = _user_a + _ctrl_a + _prio_a + _uc_a
-            _mi_len = len(_attrs) + 24
-            _mi_in = _st_uc.pack("!HH", 0x0001, _mi_len) + _MAGIC_UC + _tid_uc + _attrs
-            _mi = _hm_uc.new(cam_pwd.encode(), _mi_in, _hs_uc.sha1).digest()
-            _mi_a = _st_uc.pack("!HH", 0x0008, 20) + _mi
-            _total = len(_attrs) + len(_mi_a)
-            # FINGERPRINT (RFC 5389 section 15.5): CRC32 XOR 0x5354554E, after MI.
-            # KVS SDK silently drops binding requests without a valid FINGERPRINT.
-            # MI is computed with length=_total (end-of-MI); FINGERPRINT uses
-            # length=_total+8.  The camera strips FINGERPRINT before verifying MI,
-            # so the MI value is unchanged.
-            import zlib as _zl_uc
-
-            _fp_total = _total + 8
-            _req_for_fp = (
-                _st_uc.pack("!HH", 0x0001, _fp_total)
-                + _MAGIC_UC
-                + _tid_uc
-                + _attrs
-                + _mi_a
-            )
-            _fp_val = (_zl_uc.crc32(_req_for_fp) & 0xFFFFFFFF) ^ 0x5354554E
-            _fp_a = _st_uc.pack("!HHI", 0x8028, 4, _fp_val)
-            _req = _req_for_fp + _fp_a
-            try:
-                sock.sendto(_req, cam_addr)
-            except Exception:
-                _LOGGER.debug(
-                    "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
-                    "_send_use_candidate",
-                    exc_info=True,
-                )
-            # Probe the same peer a second time, out of our relay allocation.
-            # These are two different candidate pairs (host->peer and
-            # relay->peer) and ICE validates pairs, not addresses: without the
-            # relayed copy the camera never sees a check whose source is the
-            # relay candidate we advertised, so it never nominates that pair,
-            # never sends media to it, and nothing ever arrives - which also
-            # means the reactive Send-indication path can never bootstrap.
-            # Measured on a live A001513: permissions installed and CONFIRMED
-            # by the TURN server for the camera's host, srflx and relay
-            # addresses, and still ZERO relay-carried inbound packets.
-            # The direct send above is untouched, so directly reachable
-            # cameras behave exactly as before.
-            if not _is_self_peer_ip(cam_addr[0], cam_addr[1]):
-                _turn_send_indication(sock, cam_addr[0], cam_addr[1], _req)
+        _send_use_candidate = functools.partial(
+            send_use_candidate, device_id, _is_self_peer_ip, _relay_addrs
+        )
 
         # Every candidate this session actually sent USE-CANDIDATE to, in the
         # order it was nominated.  Instrumentation only, and it exists because
@@ -5136,36 +5306,15 @@ class _SdesOpenMixin:
         _nominated_seen: list = []
 
         def _nominate_from_answer_sdp(sdp_text) -> int:
-            """Nominate every candidate in ``sdp_text``; return how many.
-
-            Same parse as the post-wait path, factored out so the first-media
-            wait can use it.  ``_pre_launch_answer_sdp`` is snapshotted before
-            the camera has answered, so for A001513/A001064 the parse above
-            finds no credentials and nothing is ever nominated - and a camera
-            that never sees USE-CANDIDATE stays in ICE "Checking" and never
-            sends SRTP (see the note above).  Returns 0 while the answer is
-            still absent, so the caller can keep polling.
-            """
-            if not sdp_text:
-                return 0
-            _u, _p, _cands, _ = _parse_answer_ice(sdp_text)
-            if not (_u and _p and _cands):
-                return 0
-            # Open the relay's door before probing, same invariant the setup and
-            # bridge paths hold: a check sent to a peer the relay has no
-            # permission for is discarded, so nominating first would probe a
-            # black hole on any camera we cannot reach directly.
-            _turn_install_permissions(_cands, "answer")
-            for _c_ip, _c_port in _cands:
-                _send_use_candidate(
-                    _audio_sock, _ufrag_a, _pwd_a, _u, _p, (_c_ip, _c_port)
-                )
-                _send_use_candidate(
-                    _video_sock, _ufrag_v, _pwd_v, _u, _p, (_c_ip, _c_port)
-                )
-                if (_c_ip, _c_port) not in _nominated_seen:
-                    _nominated_seen.append((_c_ip, _c_port))
-            return len(_cands)
+            """Nominate every candidate in ``sdp_text``; see nominate_from_answer_sdp."""
+            return nominate_from_answer_sdp(
+                _turn_install_permissions,
+                _send_use_candidate,
+                (_audio_sock, _video_sock),
+                ((_ufrag_a, _pwd_a), (_ufrag_v, _pwd_v)),
+                _nominated_seen,
+                sdp_text,
+            )
 
         # Open the TURN relay's door for the camera BEFORE probing it.
         #
@@ -7900,51 +8049,13 @@ class _SdesOpenMixin:
             f" video={video_port} -> ffmpeg loopback {_lo_audio_port}/{_lo_video_port}"
         )
 
-        async def _consume_camera_trickle():
-            """Feed the camera's trickled candidates to TURN and to nomination.
-
-            The answer SDP carries only the camera's host candidate - a private
-            address.  A TURN permission is matched against the peer's source
-            address AS THE RELAY SEES IT, so a permission built from that host
-            candidate authorises an address that can never arrive, and the relay
-            keeps discarding the camera exactly as if no permission existed.
-            Measured on a live A001513: CreatePermission for the host candidate
-            drew a success response and still produced ZERO relay-carried
-            inbound packets.
-
-            The addresses that can actually reach us - the camera's srflx and
-            its own relay allocation - arrive later, by iceCandidateReq trickle.
-            Permission each one as it appears, and add it to the nomination set:
-            when the camera is not directly reachable, USE-CANDIDATE aimed only
-            at its host candidate cannot be delivered either.
-            """
-            _tk_deadline = time.monotonic() + min(max(timeout, 30.0), 90.0)
-            _tk_next = 0
-            _tk_seen: set = set()
-            while time.monotonic() < _tk_deadline:
-                while _tk_next < len(ice_cands_seen):
-                    _tk_line = ice_cands_seen[_tk_next].get("candidate") or ""
-                    _tk_next += 1
-                    # The shared parser, so a candidate the answer path
-                    # nominates cannot be one this path silently skips.
-                    _tk_parsed = _parse_candidate_line(_tk_line)
-                    if not _tk_parsed:
-                        continue
-                    _tk_ip = _tk_parsed[0]
-                    _tk_port = _tk_parsed[1]
-                    _tk_typ = _tk_parsed[2]
-                    if (_tk_ip, _tk_port) in _tk_seen:
-                        continue
-                    _tk_seen.add((_tk_ip, _tk_port))
-                    _turn_install_permissions(
-                        [(_tk_ip, _tk_port)], f"trickle {_tk_typ}"
-                    )
-                    _tk_cur = _bridge_uc_info["cands"]
-                    if (_tk_ip, _tk_port) not in _tk_cur:
-                        # Rebind to a NEW list rather than appending: the bridge
-                        # thread iterates this and must never see it mutate.
-                        _bridge_uc_info["cands"] = [*_tk_cur, (_tk_ip, _tk_port)]
-                await asyncio.sleep(0.25)
+        _consume_camera_trickle = functools.partial(
+            consume_camera_trickle,
+            _turn_install_permissions,
+            _bridge_uc_info,
+            ice_cands_seen,
+            timeout,
+        )
 
         if ice_cands_seen is not None:
             # Hold a strong reference: a task referenced only by a local can be
@@ -8076,81 +8187,21 @@ class _SdesOpenMixin:
         def _report_first_media_stall(_waited_s, _cancelled=False):
             """Emit the one line that says why nothing arrived.
 
-            A local closure, not inline, because there are two ways to leave the
-            wait without media and both need it.  The wait expiring is the
-            obvious one.  The other is a caller giving up first, which is what a
-            snapshot does at its own budget - measured at 50 s against this
-            75 s wait - so the session that most needed explaining was cancelled
-            25 s before the explanation would have been written.
+            A local closure because ``_abandoned_by`` is set by whichever exit
+            happens later and must be read at call time; the body lives in
+            report_first_media_stall.
             """
-            try:
-                # What the answer carried, so `nominated=none` says which
-                # cause. Both sources are consulted inside the helper: the
-                # pre-launch snapshot is empty on a late answer - measured at
-                # +1.3 s - and the future is the only place that shape's SDP
-                # ever appears.
-                _stall_answer = _stall_answer_candidates(
-                    _pre_launch_answer_sdp, answer_fut
-                )
-                # Same two sources, same arrival rule: whether that answer also
-                # carried ICE credentials, so a 0-candidate answer says which
-                # degenerate shape it was.
-                _stall_answer_creds = _stall_answer_has_creds(
-                    _pre_launch_answer_sdp, answer_fut
-                )
-                _stall_probes = list(
-                    (getattr(_bridge_fn, "_br_probe_verdicts", None) or {}).items()
-                )
-                # Union of every nomination source, deduped and order-preserving:
-                # the answer-peek path records into _nominated_seen, the setup /
-                # trickle / late-answer paths into _bridge_uc_info, and the
-                # bridge's peer-reflexive learning into ["prflx"].  Any one of
-                # them alone under-reports on some shape.
-                _stall_nominated: list = []
-                for _sn in (
-                    *_nominated_seen,
-                    *_bridge_uc_info["cands"],
-                    *_bridge_uc_info["prflx"],
-                ):
-                    if _sn not in _stall_nominated:
-                        _stall_nominated.append(_sn)
-                _LOGGER.warning(
-                    "%s",
-                    _first_media_stall_report(
-                        device_id=getattr(self, "device_id", "?"),
-                        waited_s=_waited_s,
-                        nominated=_stall_nominated,
-                        use_candidate_sent=bool(
-                            _bridge_uc_info["sent"] or _nominated_seen
-                        ),
-                        binding_success=int(
-                            getattr(_bridge_fn, "_br_binding_success_count", 0)
-                        ),
-                        trigger_sent=bool(
-                            getattr(_bridge_fn, "_tutk_trigger_sent", False)
-                        ),
-                        probes=_stall_probes,
-                        probes_dropped=int(
-                            getattr(_bridge_fn, "_br_probe_overflow", 0)
-                        ),
-                        cancelled=_cancelled,
-                        media_pkts=int(getattr(_bridge_fn, "_br_media_pkts", 0)),
-                        decrypt_fails=int(getattr(_bridge_fn, "_br_decrypt_fails", 0)),
-                        answer_cands=_stall_answer,
-                        answer_has_creds=_stall_answer_creds,
-                        trigger_acked=bool(
-                            getattr(_bridge_fn, "_br_session_mode_resp", 0)
-                        ),
-                        abandoned_by=_abandoned_by,
-                    ),
-                )
-            except Exception:
-                _LOGGER.debug(
-                    "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
-                    "_report_first_media_stall",
-                    exc_info=True,
-                )
+            report_first_media_stall(
+                device_id,
+                _pre_launch_answer_sdp,
+                answer_fut,
+                _bridge_fn,
+                _nominated_seen,
+                _bridge_uc_info,
+                abandoned_by=_abandoned_by,
+                _waited_s=_waited_s,
+                _cancelled=_cancelled,
+            )
 
         try:
             while _first_video_pt[0] is None and time.monotonic() < _media_deadline:
