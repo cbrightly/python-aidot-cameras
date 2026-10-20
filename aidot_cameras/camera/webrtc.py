@@ -237,14 +237,14 @@ class WebRTCSession(AvioRequestMixin):
                 self._talk_holder["was_active"] = False
                 await asyncio.sleep(0.4)  # let the DataChannel deliver SPEAKERSTOP
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", "_stop_once", exc_info=True)
         for task in self._track_tasks:
             task.cancel()
         if self._recorder is not None:
             try:
                 await self._recorder.stop()
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", "_stop_once", exc_info=True)
         # Send None sentinel to stop the MQTT session in its thread
         self._outgoing_q.put_nowait(None)
         try:
@@ -252,8 +252,8 @@ class WebRTCSession(AvioRequestMixin):
         except Exception:
             # aiortc's close can raise part-way (an SSL write the peer refuses);
             # the MQTT session still has to be shut down below.
-            _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "_stop_once", exc_info=True)
         try:
             await asyncio.wait_for(self._mqtt_fut, timeout=_STOP_MQTT_WAIT_S)
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "_stop_once", exc_info=True)

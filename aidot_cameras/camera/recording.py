@@ -116,4 +116,4 @@ class TsCopyRecorder:
         try:
             self._file.close()
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "_close", exc_info=True)

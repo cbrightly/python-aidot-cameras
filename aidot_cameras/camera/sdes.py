@@ -403,7 +403,7 @@ class SdesSession(AvioRequestMixin):
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
                     self._device_id,
-                    "stop",
+                    "_stop_once",
                     exc_info=True,
                 )
         # Flag this as a locally-initiated teardown BEFORE signalling ffmpeg, so
@@ -422,7 +422,7 @@ class SdesSession(AvioRequestMixin):
             try:
                 await _stop_loop.run_in_executor(None, lambda: self._proc.wait(5))
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", "_stop_once", exc_info=True)
         # Read drained stderr in the executor with a hard timeout: proc.stderr.read()
         # blocks until EOF, which never arrives if the killed process is still a
         # zombie / stuck in uninterruptible I/O - doing it inline would hang the
@@ -435,32 +435,32 @@ class SdesSession(AvioRequestMixin):
                 timeout=2.0,
             )
         except Exception:  # incl. asyncio.TimeoutError - never let teardown hang here
-            _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "_stop_once", exc_info=True)
             # On timeout the executor thread is still blocked in stderr.read() on
             # a wedged ffmpeg; close the pipe so that read returns instead of
             # pinning a default-pool thread for the life of the process.
             try:
                 self._proc.stderr.close()
             except Exception:
-                _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
+                _LOGGER.debug("swallowed exception in %s", "_stop_once", exc_info=True)
         self._log_ffmpeg_stderr(stderr_bytes or self._drained_stderr_tail())
         import os
 
         try:
             os.unlink(self._sdp_path)
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "_stop_once", exc_info=True)
         for _sock in (self._audio_sock, self._video_sock):
             if _sock is not None:
                 try:
                     _sock.close()
                 except Exception:
-                    _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
+                    _LOGGER.debug("swallowed exception in %s", "_stop_once", exc_info=True)
         self._outgoing_q.put_nowait(None)
         try:
             await asyncio.wait_for(self._mqtt_fut, timeout=_STOP_MQTT_WAIT_S)
         except Exception:
-            _LOGGER.debug("swallowed exception in %s", "stop", exc_info=True)
+            _LOGGER.debug("swallowed exception in %s", "_stop_once", exc_info=True)
 
 
 def _run_sdes_talk_pump(state: dict) -> None:
