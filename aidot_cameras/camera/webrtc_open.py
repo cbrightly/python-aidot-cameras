@@ -2889,18 +2889,25 @@ class _WebRTCOpenMixin:
                 await asyncio.sleep(1.5)  # let camera re-subscribe to MQTT
                 outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
         _rr_done, _rr_pending = _init_done, _init_pending
-        if terminal_error_fut.done():
+
+        async def _raise_if_refused(pending: set) -> None:
             # GAP D on the DTLS path: the camera said -50002/-50015. Before
             # this the refusal was only read when nothing else had answered,
             # so with the broker's echo in hand the open ran into a 30 s ICE
             # wait and failed as a timeout, and the loop retried a camera
-            # that had said no.
+            # that had said no.  Checked after the first wait and after each
+            # echo-reversal wait, which keep the refusal in their wait set.
+            if not terminal_error_fut.done():
+                return
             _code, _desc = terminal_error_fut.result()
             _status(f"camera refused: ack {_code} {_desc} - terminal, not retrying")
-            for _f in _rr_pending:
-                _f.cancel()
+            for _f in pending:
+                if _f is not terminal_error_fut:
+                    _f.cancel()
             await _abort_open()
             raise AidotCameraBusy(_code, _desc)
+
+        await _raise_if_refused(_rr_pending)
         _rr_pending.discard(terminal_error_fut)
         _rr_done.discard(terminal_error_fut)
 
@@ -2925,7 +2932,10 @@ class _WebRTCOpenMixin:
                 asyncio.get_running_loop().time() + _rr_secondary_limit
             )
             _rr_done2: set = set()
-            _rr_pending2 = _rr_pending  # {answer_fut, camera_offer_fut}
+            # {answer_fut, camera_offer_fut}, plus the refusal: the broker's
+            # echo usually lands first, and a camera that refuses after it
+            # must end the open here rather than at role reversal or ICE.
+            _rr_pending2 = _rr_pending | {terminal_error_fut}
             _rr_reconnect_resends = 0
             while asyncio.get_running_loop().time() < _rr_secondary_deadline:
                 _remaining = _rr_secondary_deadline - asyncio.get_running_loop().time()
@@ -2947,6 +2957,7 @@ class _WebRTCOpenMixin:
                     )
                     await asyncio.sleep(1.5)  # let camera re-subscribe
                     outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
+            await _raise_if_refused(_rr_pending2)
             if _rr_done2:
                 # Real response arrived - proceed normally
                 _rr_done, _rr_pending = _rr_done2, _rr_pending2
@@ -2984,6 +2995,7 @@ class _WebRTCOpenMixin:
                         )
                         await asyncio.sleep(1.5)
                         outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
+                await _raise_if_refused(_rr_pending2)
 
                 if _rr_done3:
                     # Camera finally answered - proceed via normal path
@@ -2998,6 +3010,8 @@ class _WebRTCOpenMixin:
                     camera_offer_fut.set_result(webrtc_req_echo_fut.result())
                     _rr_done = {camera_offer_fut}
                     _rr_pending = _rr_pending2
+            # The refusal future is read again below; never cancel it.
+            _rr_pending.discard(terminal_error_fut)
 
         for _f in _rr_pending:
             _f.cancel()
@@ -3005,11 +3019,7 @@ class _WebRTCOpenMixin:
         if not _rr_done:
             # GAP D: distinguish a TERMINAL refusal (camera said -50002/-50015) from a
             # generic no-answer. A terminal refusal must NOT be retried.
-            if terminal_error_fut.done():
-                _code, _desc = terminal_error_fut.result()
-                _status(f"camera refused: ack {_code} {_desc} - terminal, not retrying")
-                await _abort_open()
-                raise AidotCameraBusy(_code, _desc)
+            await _raise_if_refused(set())
             _status(f"no webrtcResp in {timeout}s")
             await _abort_open()
             raise RuntimeError(
