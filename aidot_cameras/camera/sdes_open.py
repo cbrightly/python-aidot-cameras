@@ -1562,6 +1562,53 @@ def _stun_window_answer_exit_due(*, stun_seen: bool, answer_ready: bool) -> bool
     return bool(stun_seen and answer_ready)
 
 
+_SELECT_POLL_S = 0.01
+
+
+async def _select_readable(socks, timeout: float) -> list:
+    """The readable subset of ``socks``, waiting up to ``timeout`` for one.
+
+    Replaces a blocking ``select.select(socks, [], [], timeout)`` inside the
+    open coroutine: the STUN windows polled that way for up to 20 s and held
+    the event loop - every other camera's signalling and Home Assistant with
+    it - for the whole window.  Polls with a zero timeout and sleeps
+    ``_SELECT_POLL_S`` between polls, so a packet waits at most that long.
+    Raises whatever ``select`` raises (a closed socket), as before.
+    """
+    import select as _select_mod
+
+    deadline = time.monotonic() + timeout
+    while True:
+        rlist, _, _ = _select_mod.select(socks, [], [], 0)
+        if rlist:
+            return rlist
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return []
+        await asyncio.sleep(min(_SELECT_POLL_S, remaining))
+
+
+async def _run_off_loop(fn, *args):
+    """Run a blocking ``fn(*args)`` in the default executor and return its result.
+
+    If the caller is cancelled meanwhile, the call is still waited out before
+    the cancellation propagates: the TURN allocates run on the session's media
+    sockets, and the open's cleanup closes those sockets, so letting the
+    worker run on would leave it reading from (or sending through) a file
+    descriptor a reopen may already have been handed.  The wait is bounded by
+    the allocate's own deadlines (about 4 s).
+    """
+    fut = asyncio.get_running_loop().run_in_executor(None, fn, *args)
+    try:
+        return await asyncio.shield(fut)
+    except asyncio.CancelledError:
+        try:
+            await fut
+        except BaseException:
+            pass
+        raise
+
+
 def video_pt_from_answer_sdp(sdp_text: str) -> Optional[int]:
     """Which video payload type to narrow to, taken from the camera's answer SDP.
 
@@ -3137,7 +3184,8 @@ class _SdesOpenMixin:
                         (_audio_sock, "audio"),
                         (_video_sock, "video"),
                     ):
-                        _pre_res = _turn_allocate_udp(
+                        _pre_res = await _run_off_loop(
+                            _turn_allocate_udp,
                             _pre_sock,
                             _t_host_pre,
                             _t_port_pre,
@@ -3808,12 +3856,15 @@ class _SdesOpenMixin:
                             _t_user_e = (_our_te.get("Username") or "").encode()
                             _t_pass_e = str(_our_te.get("Password") or "").encode()
                             for _alloc_sock_e in (_audio_sock, _video_sock):
-                                _alloc_res_e = _turn_allocate_udp(
-                                    _alloc_sock_e,
-                                    _t_host_e,
-                                    _t_port_e,
-                                    _t_user_e,
-                                    _t_pass_e,
+                                _alloc_res_e = (
+                                    await _run_off_loop(
+                                        _turn_allocate_udp,
+                                        _alloc_sock_e,
+                                        _t_host_e,
+                                        _t_port_e,
+                                        _t_user_e,
+                                        _t_pass_e,
+                                    )
                                 )
                                 if _alloc_res_e:
                                     _r_ip_e, _r_port_e, _r_realm_e, _r_nonce_e = (
@@ -4044,12 +4095,15 @@ class _SdesOpenMixin:
                         _t_user_r = (_our_turn_entry.get("Username") or "").encode()
                         _t_pass_r = str(_our_turn_entry.get("Password") or "").encode()
                         for _alloc_sock in (_audio_sock, _video_sock):
-                            _alloc_res = _turn_allocate_udp(
-                                _alloc_sock,
-                                _t_host_r,
-                                _t_port_r,
-                                _t_user_r,
-                                _t_pass_r,
+                            _alloc_res = (
+                                await _run_off_loop(
+                                    _turn_allocate_udp,
+                                    _alloc_sock,
+                                    _t_host_r,
+                                    _t_port_r,
+                                    _t_user_r,
+                                    _t_pass_r,
+                                )
                             )
                             if _alloc_res:
                                 _r_ip, _r_port, _r_realm, _r_nonce = _alloc_res
@@ -4228,7 +4282,6 @@ class _SdesOpenMixin:
         #   SRTP early exit: if a non-STUN packet arrives (SRTP), ICE is done -
         #     close sockets immediately so ffmpeg can bind.
         import struct as _struct
-        import select as _select
 
         _STUN_MAGIC = b"\x21\x12\xa4\x42"
         _stun_count = 0
@@ -4287,7 +4340,7 @@ class _SdesOpenMixin:
             elif not _cam_echo_received and idle > _pre_stun_idle:
                 break  # no STUN at all - non-ICE camera, skip window
             try:
-                _rlist, _, _ = _select.select([_audio_sock, _video_sock], [], [], 0.1)
+                _rlist = await _select_readable([_audio_sock, _video_sock], 0.1)
             except Exception:
                 break
             for _sock in _rlist:
@@ -4607,9 +4660,7 @@ class _SdesOpenMixin:
                 if _stun_seen and time.monotonic() - _last_pkt_t > _idle_limit:
                     break
                 try:
-                    _rlist_r, _, _ = _select.select(
-                        [_audio_sock, _video_sock], [], [], 0.1
-                    )
+                    _rlist_r = await _select_readable([_audio_sock, _video_sock], 0.1)
                 except Exception:
                     break
                 for _sk_r in _rlist_r:

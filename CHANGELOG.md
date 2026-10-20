@@ -6,6 +6,19 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **An SDES open no longer stalls the event loop.** The STUN-responder window
+  and its retry waited on the media sockets with a blocking `select` inside the
+  open coroutine, for up to 20 s and 8 s, and the TURN pre-allocation and the
+  two later allocates ran their blocking request/response exchanges (up to 4 s
+  per socket) the same way. For that long every other camera's signalling, and
+  Home Assistant's own loop, stood still. The windows now poll without
+  blocking (a packet waits at most 10 ms) and the allocates run in an
+  executor. `tests/test_sdes_open_yields_the_loop.py` pins both. One visible
+  consequence: a stop, unload or reload that lands during an SDES open now
+  takes effect at once instead of after the window; a cancelled allocate is
+  still waited out (about 4 s at most) before the open's sockets close.
+
 ## [1.0.0rc55]
 
 ### Changed
