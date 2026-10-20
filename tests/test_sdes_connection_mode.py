@@ -288,8 +288,7 @@ def test_lan_mode_gates_every_turn_allocate_in_the_open():
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and any(
-            isinstance(a, ast.Name) and a.id == "_turn_allocate_udp"
-            for a in node.args
+            isinstance(a, ast.Name) and a.id == "_turn_allocate_udp" for a in node.args
         )
     ]
     assert len(sites) >= 3, "expected the three allocate sites in the SDES open"

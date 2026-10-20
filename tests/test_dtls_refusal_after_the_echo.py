@@ -73,8 +73,7 @@ def test_each_echo_reversal_wait_is_followed_by_the_refusal_check():
         stmts, i = parents[loop]
         after = ast.unparse(stmts[i + 1])
         assert after.startswith("await _raise_if_refused("), (
-            f"the wait loop at line {loop.lineno} must be followed by the "
-            "refusal check"
+            f"the wait loop at line {loop.lineno} must be followed by the refusal check"
         )
 
 
