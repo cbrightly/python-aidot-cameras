@@ -7157,21 +7157,40 @@ class CameraMixin(
         DTLS ones. They are not interchangeable - see docs/API-STABILITY.md for
         the four methods both are promised to have.
         """
+        # The DTLS open registers its abort here once it holds a peer
+        # connection, so an open that ends by any exception - a cancellation
+        # during the signalling or ICE wait included - releases the peer
+        # connection, the track tasks and the recorder's file.
+        abort_holder: list = []
         async with _get_webrtc_open_gate():
-            return await self._async_open_webrtc_stream_impl(
-                on_frame,
-                stream_id=stream_id,
-                timeout=timeout,
-                output_path=output_path,
-                max_seconds=max_seconds,
-                status_callback=status_callback,
-                force_sdes=force_sdes,
-                rtsp_push_url=rtsp_push_url,
-                talk_pcm_provider=talk_pcm_provider,
-                talk=talk,
-                reuse_peer_id=reuse_peer_id,
-                **kwargs,
-            )
+            try:
+                return await self._async_open_webrtc_stream_impl(
+                    on_frame,
+                    stream_id=stream_id,
+                    timeout=timeout,
+                    output_path=output_path,
+                    max_seconds=max_seconds,
+                    status_callback=status_callback,
+                    force_sdes=force_sdes,
+                    rtsp_push_url=rtsp_push_url,
+                    talk_pcm_provider=talk_pcm_provider,
+                    talk=talk,
+                    reuse_peer_id=reuse_peer_id,
+                    _abort_holder=abort_holder,
+                    **kwargs,
+                )
+            except BaseException:
+                if abort_holder:
+                    try:
+                        await abort_holder[-1]()
+                    except BaseException:
+                        _LOGGER.debug(
+                            "camera %s: swallowed exception in %s",
+                            getattr(self, "device_id", "?"),
+                            "async_open_webrtc_stream",
+                            exc_info=True,
+                        )
+                raise
 
     async def async_open_kvs_stream(self, *args: Any, **kwargs: Any):
         """Deprecated alias for :meth:`async_open_webrtc_stream`.

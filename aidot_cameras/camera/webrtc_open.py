@@ -490,6 +490,7 @@ class _WebRTCOpenMixin:
         talk: bool = False,
         reuse_peer_id: Optional[str] = None,
         _ice_wait_timeout_s: Optional[float] = None,
+        _abort_holder: "Optional[list]" = None,
     ) -> "WebRTCSession":
         """Open a liveType=2 WebRTC stream via MQTT signaling.
 
@@ -1837,6 +1838,7 @@ class _WebRTCOpenMixin:
                     # Carry the caller's ICE budget across the fallback, or it
                     # silently reverts to `timeout` on this path.
                     _ice_wait_timeout_s=_ice_wait_timeout_s,
+                    _abort_holder=_abort_holder,
                 )
 
         # ------------------------------------------------------------------ #
@@ -2578,6 +2580,7 @@ class _WebRTCOpenMixin:
                     track_tasks.append(t)
 
         recorder = self._attach_file_recorder(pc, output_path, on_frame)
+        _aborted = [False]
 
         async def _abort_open() -> None:
             """Undo everything this open holds when it cannot complete.
@@ -2585,8 +2588,14 @@ class _WebRTCOpenMixin:
             One place instead of a copy at every failure exit: the MQTT
             thread's stop sentinel, the track tasks, the recorder (whose file
             was opened above and used to be left open), and the peer
-            connection.
+            connection. Runs once: the gated entry point also calls it when
+            the open ends by any exception, a cancellation included, because
+            nothing between here and the return guards the signalling and ICE
+            waits.
             """
+            if _aborted[0]:
+                return
+            _aborted[0] = True
             outgoing_q.put_nowait(None)  # stop MQTT thread
             _cancel_track_tasks()
             if recorder is not None:
@@ -2600,6 +2609,9 @@ class _WebRTCOpenMixin:
                         exc_info=True,
                     )
             await pc.close()
+
+        if _abort_holder is not None:
+            _abort_holder.append(_abort_open)
 
         # ------------------------------------------------------------------ #
         # Create SDP offer and publish webrtcReq
@@ -3925,13 +3937,18 @@ class _WebRTCOpenMixin:
                 # Camera answered cleanly but declined media (DC-only): its
                 # encoder is still cold.  Tear down and raise so the serve loop
                 # fast-retries in a bounded burst instead of letting DTLS
-                # co-fail into the full 15s-gated generic retry.
-                outgoing_q.put_nowait(None)  # stop MQTT thread (avoid orphan)
+                # co-fail into the full 15s-gated generic retry.  The abort
+                # also stops the recorder, whose file this exit used to leave
+                # open.
                 try:
-                    _cancel_track_tasks()
-                    await pc.close()
+                    await _abort_open()
                 except Exception:
-                    pass
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_async_open_webrtc_stream_impl",
+                        exc_info=True,
+                    )
                 raise AidotCameraNotReady(self.device_id)
 
             try:
@@ -4345,6 +4362,8 @@ class _WebRTCOpenMixin:
         # reaps outgoing_q + mqtt_fut); clear the backstop slot so a concurrent
         # open on this camera cannot reap this live session's drain.
         self._release_stream_drain_to_session()
+        if _abort_holder is not None:
+            _abort_holder.clear()  # the session owns teardown from here
         return WebRTCSession(
             pc=pc,
             outgoing_q=outgoing_q,
