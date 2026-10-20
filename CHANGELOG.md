@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc56]
+
 ### Fixed
 - **An SDES open no longer stalls the event loop.** The STUN-responder window
   and its retry waited on the media sockets with a blocking `select` inside the

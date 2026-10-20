@@ -2112,6 +2112,14 @@ Day zero still becomes the day the reference installation returns with the curre
 
 Day zero still becomes the day the reference installation returns with the current release on it; the target is ten days after that.
 
+#### 2026-10-20: `rc56` stops the SDES open from blocking the event loop
+
+| release | date | find | resets? |
+|---|---|---|---|
+| `rc56` | 2026-10-20 | The SDES open waited on its media sockets with blocking calls inside the open coroutine (the 2026-10-15 review's section 1b item 9): the STUN-responder window and its retry polled with `select` for up to 20 s and 8 s, and the TURN pre-allocation and the two later allocates ran blocking 2 s request/response exchanges per socket. For that long every other camera's signalling and Home Assistant's own event loop stood still. The windows now poll without blocking (a packet waits at most 10 ms) and the allocates run in an executor, waited out on cancellation so the open's cleanup never closes a socket under a running worker. A stop or reload during an SDES open now acts at once. Pinned by tests that measure the loop stall and walk the open coroutine for blocking calls. Its first live run failed on the A001064 alone; unchanged `rc55` then failed the same way (the camera answered ping but not ICE) until the camera was power-cycled, after which the branch passed | Yes - a change to the SDES open, a default path. The reference installation is still off the network, so this costs no soak time: day zero is the day it returns with the current release on it |
+
+Day zero still becomes the day the reference installation returns with the current release on it; the target is ten days after that.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /
