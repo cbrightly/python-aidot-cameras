@@ -490,6 +490,7 @@ class _WebRTCOpenMixin:
         talk: bool = False,
         reuse_peer_id: Optional[str] = None,
         _ice_wait_timeout_s: Optional[float] = None,
+        _abort_holder: "Optional[list]" = None,
     ) -> "WebRTCSession":
         """Open a liveType=2 WebRTC stream via MQTT signaling.
 
@@ -1837,6 +1838,7 @@ class _WebRTCOpenMixin:
                     # Carry the caller's ICE budget across the fallback, or it
                     # silently reverts to `timeout` on this path.
                     _ice_wait_timeout_s=_ice_wait_timeout_s,
+                    _abort_holder=_abort_holder,
                 )
 
         # ------------------------------------------------------------------ #
@@ -2578,6 +2580,7 @@ class _WebRTCOpenMixin:
                     track_tasks.append(t)
 
         recorder = self._attach_file_recorder(pc, output_path, on_frame)
+        _aborted = [False]
 
         async def _abort_open() -> None:
             """Undo everything this open holds when it cannot complete.
@@ -2585,8 +2588,14 @@ class _WebRTCOpenMixin:
             One place instead of a copy at every failure exit: the MQTT
             thread's stop sentinel, the track tasks, the recorder (whose file
             was opened above and used to be left open), and the peer
-            connection.
+            connection. Runs once: the gated entry point also calls it when
+            the open ends by any exception, a cancellation included, because
+            nothing between here and the return guards the signalling and ICE
+            waits.
             """
+            if _aborted[0]:
+                return
+            _aborted[0] = True
             outgoing_q.put_nowait(None)  # stop MQTT thread
             _cancel_track_tasks()
             if recorder is not None:
@@ -2600,6 +2609,9 @@ class _WebRTCOpenMixin:
                         exc_info=True,
                     )
             await pc.close()
+
+        if _abort_holder is not None:
+            _abort_holder.append(_abort_open)
 
         # ------------------------------------------------------------------ #
         # Create SDP offer and publish webrtcReq
@@ -2877,18 +2889,25 @@ class _WebRTCOpenMixin:
                 await asyncio.sleep(1.5)  # let camera re-subscribe to MQTT
                 outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
         _rr_done, _rr_pending = _init_done, _init_pending
-        if terminal_error_fut.done():
+
+        async def _raise_if_refused(pending: set) -> None:
             # GAP D on the DTLS path: the camera said -50002/-50015. Before
             # this the refusal was only read when nothing else had answered,
             # so with the broker's echo in hand the open ran into a 30 s ICE
             # wait and failed as a timeout, and the loop retried a camera
-            # that had said no.
+            # that had said no.  Checked after the first wait and after each
+            # echo-reversal wait, which keep the refusal in their wait set.
+            if not terminal_error_fut.done():
+                return
             _code, _desc = terminal_error_fut.result()
             _status(f"camera refused: ack {_code} {_desc} - terminal, not retrying")
-            for _f in _rr_pending:
-                _f.cancel()
+            for _f in pending:
+                if _f is not terminal_error_fut:
+                    _f.cancel()
             await _abort_open()
             raise AidotCameraBusy(_code, _desc)
+
+        await _raise_if_refused(_rr_pending)
         _rr_pending.discard(terminal_error_fut)
         _rr_done.discard(terminal_error_fut)
 
@@ -2913,7 +2932,10 @@ class _WebRTCOpenMixin:
                 asyncio.get_running_loop().time() + _rr_secondary_limit
             )
             _rr_done2: set = set()
-            _rr_pending2 = _rr_pending  # {answer_fut, camera_offer_fut}
+            # {answer_fut, camera_offer_fut}, plus the refusal: the broker's
+            # echo usually lands first, and a camera that refuses after it
+            # must end the open here rather than at role reversal or ICE.
+            _rr_pending2 = _rr_pending | {terminal_error_fut}
             _rr_reconnect_resends = 0
             while asyncio.get_running_loop().time() < _rr_secondary_deadline:
                 _remaining = _rr_secondary_deadline - asyncio.get_running_loop().time()
@@ -2935,6 +2957,7 @@ class _WebRTCOpenMixin:
                     )
                     await asyncio.sleep(1.5)  # let camera re-subscribe
                     outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
+            await _raise_if_refused(_rr_pending2)
             if _rr_done2:
                 # Real response arrived - proceed normally
                 _rr_done, _rr_pending = _rr_done2, _rr_pending2
@@ -2972,6 +2995,7 @@ class _WebRTCOpenMixin:
                         )
                         await asyncio.sleep(1.5)
                         outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
+                await _raise_if_refused(_rr_pending2)
 
                 if _rr_done3:
                     # Camera finally answered - proceed via normal path
@@ -2986,6 +3010,8 @@ class _WebRTCOpenMixin:
                     camera_offer_fut.set_result(webrtc_req_echo_fut.result())
                     _rr_done = {camera_offer_fut}
                     _rr_pending = _rr_pending2
+            # The refusal future is read again below; never cancel it.
+            _rr_pending.discard(terminal_error_fut)
 
         for _f in _rr_pending:
             _f.cancel()
@@ -2993,11 +3019,7 @@ class _WebRTCOpenMixin:
         if not _rr_done:
             # GAP D: distinguish a TERMINAL refusal (camera said -50002/-50015) from a
             # generic no-answer. A terminal refusal must NOT be retried.
-            if terminal_error_fut.done():
-                _code, _desc = terminal_error_fut.result()
-                _status(f"camera refused: ack {_code} {_desc} - terminal, not retrying")
-                await _abort_open()
-                raise AidotCameraBusy(_code, _desc)
+            await _raise_if_refused(set())
             _status(f"no webrtcResp in {timeout}s")
             await _abort_open()
             raise RuntimeError(
@@ -3925,13 +3947,18 @@ class _WebRTCOpenMixin:
                 # Camera answered cleanly but declined media (DC-only): its
                 # encoder is still cold.  Tear down and raise so the serve loop
                 # fast-retries in a bounded burst instead of letting DTLS
-                # co-fail into the full 15s-gated generic retry.
-                outgoing_q.put_nowait(None)  # stop MQTT thread (avoid orphan)
+                # co-fail into the full 15s-gated generic retry.  The abort
+                # also stops the recorder, whose file this exit used to leave
+                # open.
                 try:
-                    _cancel_track_tasks()
-                    await pc.close()
+                    await _abort_open()
                 except Exception:
-                    pass
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_async_open_webrtc_stream_impl",
+                        exc_info=True,
+                    )
                 raise AidotCameraNotReady(self.device_id)
 
             try:
@@ -4345,6 +4372,8 @@ class _WebRTCOpenMixin:
         # reaps outgoing_q + mqtt_fut); clear the backstop slot so a concurrent
         # open on this camera cannot reap this live session's drain.
         self._release_stream_drain_to_session()
+        if _abort_holder is not None:
+            _abort_holder.clear()  # the session owns teardown from here
         return WebRTCSession(
             pc=pc,
             outgoing_q=outgoing_q,

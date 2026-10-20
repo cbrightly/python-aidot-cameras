@@ -6,6 +6,36 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **A DTLS camera that refuses after the broker's echo is told no at once.**
+  The first signalling wait already read the camera's -50002 / -50015 refusal,
+  but the broker's echo of our own webrtcReq usually lands first, and the two
+  echo-reversal waits after it watched only for an answer or a camera offer.
+  A refusal that arrived during them was not seen: the open waited out 20 s,
+  re-sent, waited another 20 s, fell to role reversal (which reads no refusal)
+  and failed later as an ICE timeout, which the serve loop retries. Both waits
+  now keep the refusal in their wait set and end the open with
+  `AidotCameraBusy` when it lands.
+- **A failed or cancelled DTLS open releases everything it holds.** The
+  "camera declined media" exit tore down the peer connection itself and never
+  stopped the recorder, so the file `TsCopyRecorder` opens up front stayed
+  open on every DC-only answer; and nothing guarded the signalling and ICE
+  waits, so an open cancelled there (a stop or reload) left the peer
+  connection, its track tasks and the recorder's file behind. The open now
+  hands its abort to the gated entry point, which runs it once on any
+  exception, and the declined-media exit goes through it too.
+- **Connection mode `lan` allocates no TURN relay on the echo path.** rc53
+  gated the pre-offer and post-offer allocates on `lan`, but not the one in
+  the webrtcReq-echo branch, so an echoing camera (the A001064) in `lan` mode
+  still allocated a relay after the offer, trickled it, and put it in the
+  answer's `c=` line. Every allocate in the SDES open is now gated, and a test
+  walks the module to keep it so.
+- **A token file holding JSON that is not an object falls back to password
+  login** (`aidot-go2rtc` / `AIDOT_TOKEN_FILE` only; Home Assistant does not
+  use it). The check added in rc53 warned and then returned a client it had
+  not created, raising `UnboundLocalError` where it used to raise
+  `AttributeError`.
+
 ## [1.0.0rc56]
 
 ### Fixed
