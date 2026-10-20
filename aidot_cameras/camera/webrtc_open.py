@@ -23,6 +23,7 @@ from .constants import _LIVE_PLAY_NOT_READY, fallback_turn_uris, stun_server_uri
 from .sdes_open import _answer_sdp_can_nominate
 from .webrtc import WebRTCSession
 from .protocol import (
+    ipc_envelope,
     avio_header,
     mask_sdp_secrets,
     AvioResponseRouter,
@@ -1473,19 +1474,13 @@ class _WebRTCOpenMixin:
         # ------------------------------------------------------------------ #
         # Build getIceConfigReq payload unconditionally - used in both the
         # normal wake-wait path and the DTLS-fallback no-wait path below.
-        _ice_req_payload = json.dumps(
-            {
-                "method": "getIceConfigReq",
-                "service": "IPC",
-                "devId": device_id,
-                "srcAddr": f"0.{user_id}",
-                "seq": f"ap{random.randint(1000000, 9999999)}",
-                "tst": int(time.time() * 1000),
-                **(
-                    {"userId": _numeric_uid_raw} if _numeric_uid_raw is not None else {}
-                ),
-                "payload": {"devId": device_id, "userId": user_id},
-            }
+        _ice_req_payload = ipc_envelope(
+            "getIceConfigReq",
+            device_id,
+            user_id,
+            _numeric_uid_raw,
+            seq=f"ap{random.randint(1000000, 9999999)}",
+            payload={"devId": device_id, "userId": user_id},
         )
 
         if _skip_ice_config:
@@ -1617,18 +1612,13 @@ class _WebRTCOpenMixin:
         # this message is always sent first to arm the camera's WebRTC
         # subsystem; the camera silently ignores webrtcReq without it.
         # ------------------------------------------------------------------ #
-        _live_req_payload = json.dumps(
-            {
-                "method": "livePlayReq",
-                "service": "IPC",
-                "devId": device_id,
-                "srcAddr": f"0.{user_id}",
-                "seq": f"ap{random.randint(1000000, 9999999)}",
-                "tst": int(time.time() * 1000),
-                **(
-                    {"userId": _numeric_uid_raw} if _numeric_uid_raw is not None else {}
-                ),
-                "payload": {
+        _live_req_payload = ipc_envelope(
+            "livePlayReq",
+            device_id,
+            user_id,
+            _numeric_uid_raw,
+            seq=f"ap{random.randint(1000000, 9999999)}",
+            payload={
                     "peerid": peer_id,
                     "devId": device_id,
                     # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
@@ -1641,7 +1631,6 @@ class _WebRTCOpenMixin:
                     "p2pCache": _live_p2p_cache,
                     "dseq": self._next_dseq(),
                 },
-            }
         )
         if not use_sdes:
             # SDES path sends its own livePlayReq inside _open_sdes_stream;
@@ -2764,18 +2753,13 @@ class _WebRTCOpenMixin:
         # broker session before processing the request.
         _compressed_offer_sdp = _compress_sdp_for_camera(_offer_sdp)
 
-        webrtc_req_payload = json.dumps(
-            {
-                "method": "webrtcReq",
-                "service": "IPC",
-                "devId": device_id,
-                "srcAddr": f"0.{user_id}",
-                "seq": _seq(),
-                "tst": int(time.time() * 1000),
-                **(
-                    {"userId": _numeric_uid_raw} if _numeric_uid_raw is not None else {}
-                ),
-                "payload": {
+        webrtc_req_payload = ipc_envelope(
+            "webrtcReq",
+            device_id,
+            user_id,
+            _numeric_uid_raw,
+            seq=_seq(),
+            payload={
                     # Browser-style nested fields - newer firmware (e.g. A001064)
                     # parses payload.wPayload.peerid / payload.wPayload.offer and
                     # requires IceServerList to activate its ICE agent.
@@ -2817,7 +2801,6 @@ class _WebRTCOpenMixin:
                     "powerType": _live_power_type,
                     "p2pCache": _live_p2p_cache,
                 },
-            }
         )
         outgoing_q.put_nowait((webrtc_req_topic, webrtc_req_payload))
         self._cold_phase("webrtcReq")
@@ -3247,20 +3230,13 @@ class _WebRTCOpenMixin:
                 )
             )
             _webrtc_resp_topic = f"iot/v1/s/{user_id}/IPC/webrtcResp"
-            _webrtc_resp_payload = json.dumps(
-                {
-                    "method": "webrtcResp",
-                    "service": "IPC",
-                    "devId": device_id,
-                    "srcAddr": f"0.{user_id}",
-                    "seq": _seq(),
-                    "tst": int(time.time() * 1000),
-                    **(
-                        {"userId": _numeric_uid_raw}
-                        if _numeric_uid_raw is not None
-                        else {}
-                    ),
-                    "payload": {
+            _webrtc_resp_payload = ipc_envelope(
+                "webrtcResp",
+                device_id,
+                user_id,
+                _numeric_uid_raw,
+                seq=_seq(),
+                payload={
                         "peerid": peer_id,
                         "devId": device_id,
                         "answer": {"type": "answer", "sdp": _rr_answer_sdp},
@@ -3276,7 +3252,6 @@ class _WebRTCOpenMixin:
                             "answer": {"type": "answer", "sdp": _rr_answer_sdp},
                         },
                     },
-                }
             )
             outgoing_q.put_nowait((_webrtc_resp_topic, _webrtc_resp_payload))
             # Save for potential reconnect re-send in the ICE wait loop.
@@ -3323,20 +3298,13 @@ class _WebRTCOpenMixin:
                         "sdpMid": str(_rr_cur_midx),
                         "sdpMLineIndex": _rr_cur_midx,
                     }
-                    _rr_ice_json = json.dumps(
-                        {
-                            "method": "iceCandidateReq",
-                            "service": "IPC",
-                            "devId": device_id,
-                            "srcAddr": f"0.{user_id}",
-                            "seq": _seq(),
-                            "tst": int(time.time() * 1000),
-                            **(
-                                {"userId": _numeric_uid_raw}
-                                if _numeric_uid_raw is not None
-                                else {}
-                            ),
-                            "payload": {
+                    _rr_ice_json = ipc_envelope(
+                        "iceCandidateReq",
+                        device_id,
+                        user_id,
+                        _numeric_uid_raw,
+                        seq=_seq(),
+                        payload={
                                 "dstAddr": device_id,
                                 "wPayload": {
                                     "peerid": peer_id,
@@ -3346,7 +3314,6 @@ class _WebRTCOpenMixin:
                                 "devId": device_id,
                                 "candidate": _rr_cand_obj,
                             },
-                        }
                     )
                     outgoing_q.put_nowait((_rr_ice_topic, _rr_ice_json))
                     _rr_ice_payloads.append((_rr_ice_topic, _rr_ice_json))
@@ -4037,20 +4004,13 @@ class _WebRTCOpenMixin:
                             "sdpMid": _cur_mid,
                             "sdpMLineIndex": _cur_idx,
                         }
-                        _ic_payload = json.dumps(
-                            {
-                                "method": "iceCandidateReq",
-                                "service": "IPC",
-                                "devId": device_id,
-                                "srcAddr": f"0.{user_id}",
-                                "seq": _seq(),
-                                "tst": int(time.time() * 1000),
-                                **(
-                                    {"userId": _numeric_uid_raw}
-                                    if _numeric_uid_raw is not None
-                                    else {}
-                                ),
-                                "payload": {
+                        _ic_payload = ipc_envelope(
+                            "iceCandidateReq",
+                            device_id,
+                            user_id,
+                            _numeric_uid_raw,
+                            seq=_seq(),
+                            payload={
                                     "dstAddr": device_id,
                                     "wPayload": {
                                         "peerid": peer_id,
@@ -4060,7 +4020,6 @@ class _WebRTCOpenMixin:
                                     "devId": device_id,
                                     "candidate": _cand_obj,
                                 },
-                            }
                         )
                         outgoing_q.put_nowait((ice_cand_topic, _ic_payload))
                         _sent_n += 1

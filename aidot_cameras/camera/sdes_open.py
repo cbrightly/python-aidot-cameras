@@ -9,7 +9,6 @@ breaks the client<->sdes_open cycle).  CameraMixin inherits this mixin, so
 
 import asyncio
 import hashlib as _hashlib_mod
-import json
 import logging
 import os
 import random
@@ -34,6 +33,7 @@ from .rtsp_publish import (
     is_publishable_url,
 )
 from .protocol import (
+    ipc_envelope,
     avio_header,
     mask_sdp_secrets,
     AVIO_HDR_LEN,
@@ -3459,16 +3459,13 @@ class _SdesOpenMixin:
         # Send livePlayReq before the SDP offer to arm the camera's stream.
         import random as _random
 
-        _live_req_sdes = json.dumps(
-            {
-                "method": "livePlayReq",
-                "service": "IPC",
-                "devId": device_id,
-                "srcAddr": f"0.{user_id}",
-                "seq": f"ap{_random.randint(1000000, 9999999)}",
-                "tst": int(time.time() * 1000),
-                **({"userId": numeric_uid_raw} if numeric_uid_raw is not None else {}),
-                "payload": {
+        _live_req_sdes = ipc_envelope(
+            "livePlayReq",
+            device_id,
+            user_id,
+            numeric_uid_raw,
+            seq=f"ap{_random.randint(1000000, 9999999)}",
+            payload={
                     "peerid": peer_id,
                     "devId": device_id,
                     # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
@@ -3480,7 +3477,6 @@ class _SdesOpenMixin:
                     "p2pCache": _live_p2p_cache,
                     "dseq": self._next_dseq(),
                 },
-            }
         )
         _live_play_topic_sdes = f"iot/v1/s/{user_id}/IPC/livePlayReq"
         outgoing_q.put_nowait((_live_play_topic_sdes, _live_req_sdes))
@@ -3712,16 +3708,13 @@ class _SdesOpenMixin:
             return "".join(_out)
 
         _compressed_sdp_req = _compress_sdp_req(sdes_offer_sdp)
-        _webrtc_req_sdes_payload = json.dumps(
-            {
-                "method": "webrtcReq",
-                "service": "IPC",
-                "devId": device_id,
-                "srcAddr": f"0.{user_id}",
-                "seq": _seq(),
-                "tst": int(time.time() * 1000),
-                **({"userId": numeric_uid_raw} if numeric_uid_raw is not None else {}),
-                "payload": {
+        _webrtc_req_sdes_payload = ipc_envelope(
+            "webrtcReq",
+            device_id,
+            user_id,
+            numeric_uid_raw,
+            seq=_seq(),
+            payload={
                     # Legacy flat fields - older firmware parses payload.peerid directly.
                     "peerid": peer_id,
                     "devId": device_id,
@@ -3754,7 +3747,6 @@ class _SdesOpenMixin:
                     },
                     "IceServerList": _sdes_ice_server_list,
                 },
-            }
         )
         outgoing_q.put_nowait((webrtc_req_topic, _webrtc_req_sdes_payload))
         self._cold_phase("webrtcReq (sdes)")
@@ -3909,20 +3901,13 @@ class _SdesOpenMixin:
             _compressed_sdp_ans = _compress_sdp_req(_relay_answer_sdp)
 
             _webrtc_resp_sdes_topic = f"iot/v1/s/{user_id}/IPC/webrtcResp"
-            _webrtc_resp_sdes = json.dumps(
-                {
-                    "method": "webrtcResp",
-                    "service": "IPC",
-                    "devId": device_id,
-                    "srcAddr": f"0.{user_id}",
-                    "seq": _seq(),
-                    "tst": int(time.time() * 1000),
-                    **(
-                        {"userId": numeric_uid_raw}
-                        if numeric_uid_raw is not None
-                        else {}
-                    ),
-                    "payload": {
+            _webrtc_resp_sdes = ipc_envelope(
+                "webrtcResp",
+                device_id,
+                user_id,
+                numeric_uid_raw,
+                seq=_seq(),
+                payload={
                         "peerid": peer_id,
                         "devId": device_id,
                         "answer": {"type": "answer", "sdp": _relay_answer_sdp},
@@ -3940,7 +3925,6 @@ class _SdesOpenMixin:
                             "answer": {"type": "answer", "sdp": _compressed_sdp_ans},
                         },
                     },
-                }
             )
             # Send SDES webrtcResp: camera will send SRTP to our public IP/port
             # (srflx), which routes through NAT directly to our socket.
@@ -3982,20 +3966,13 @@ class _SdesOpenMixin:
                 "sdpMid": mid,
                 "sdpMLineIndex": int(mid),
             }
-            _msg = json.dumps(
-                {
-                    "method": "iceCandidateReq",
-                    "service": "IPC",
-                    "devId": device_id,
-                    "srcAddr": f"0.{user_id}",
-                    "seq": _seq(),
-                    "tst": int(time.time() * 1000),
-                    **(
-                        {"userId": numeric_uid_raw}
-                        if numeric_uid_raw is not None
-                        else {}
-                    ),
-                    "payload": {
+            _msg = ipc_envelope(
+                "iceCandidateReq",
+                device_id,
+                user_id,
+                numeric_uid_raw,
+                seq=_seq(),
+                payload={
                         # dstAddr routes to the camera device, not the user account.
                         # HAR captures confirm payload.dstAddr = deviceId on every
                         # iceCandidateReq; using user_id causes silent drops by firmware.
@@ -4012,7 +3989,6 @@ class _SdesOpenMixin:
                         "devId": device_id,
                         "candidate": _cand_obj,
                     },
-                }
             )
             outgoing_q.put_nowait((_ice_cand_topic_sdes, _msg))
 
