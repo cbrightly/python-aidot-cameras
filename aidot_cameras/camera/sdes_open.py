@@ -3142,8 +3142,8 @@ class _SdesOpenMixin:
         # AIDOT_FAST_CONNECT skips this blocking pre-allocation (LAN-direct mode):
         # the offer goes out immediately with host/srflx candidates and the LAN
         # path connects without waiting on a cloud TURN Allocate round-trip.
-        # Connection mode "lan" does the same skip for SDES specifically, where
-        # Either way
+        # Connection mode "lan" does the same skip for SDES specifically, and
+        # the echo-path and post-offer allocates below honour it too. Either way
         # the cost is instrumented below so the saving is measurable: grep
         # ``signaling-wait[`` for sdes-turn-prealloc.
         _skip_turn_prealloc = self._resolve_sdes_skip_turn()
@@ -3829,7 +3829,9 @@ class _SdesOpenMixin:
             # Allocate TURN relay if not already done before offer build.
             # When ice_config provided TURN entries, pre-allocation already ran
             # and _relay_addrs is populated - skip to avoid double-allocation.
-            if not _relay_addrs:
+            # Connection mode lan skips it here too: lan means no relay, and an
+            # allocation here was trickled and put in the answer's c= anyway.
+            if not _relay_addrs and not _skip_turn_prealloc:
                 try:
                     import re as _re_relay_e
                     import hashlib as _hlk_e

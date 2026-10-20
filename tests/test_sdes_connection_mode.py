@@ -257,3 +257,52 @@ def test_the_offer_uses_the_endpoint_helper_and_prearms_the_permission():
         "relay-in-c= must install the permission for our public address, or "
         "the relayed path is a black hole"
     )
+
+
+def test_lan_mode_gates_every_turn_allocate_in_the_open():
+    """Source guard (2026-10-15 review, 1b.12): lan must mean no relay.
+
+    rc53 gated the pre-offer and post-offer allocates on the lan skip but not
+    the one in the webrtcReq-echo branch, so an echoing camera (the A001064)
+    in lan mode still allocated a relay after the offer, trickled it, and put
+    it in the answer's c= line. Every call that runs ``_turn_allocate_udp``
+    must sit under an ``if`` whose test reads ``_skip_turn_prealloc``.
+    """
+    import ast
+    import pathlib
+
+    src = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "aidot_cameras"
+        / "camera"
+        / "sdes_open.py"
+    ).read_text()
+    tree = ast.parse(src)
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    sites = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and any(
+            isinstance(a, ast.Name) and a.id == "_turn_allocate_udp"
+            for a in node.args
+        )
+    ]
+    assert len(sites) >= 3, "expected the three allocate sites in the SDES open"
+    for call in sites:
+        node, gated = call, False
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, ast.If) and "_skip_turn_prealloc" in ast.unparse(
+                node.test
+            ):
+                gated = True
+                break
+        assert gated, (
+            f"_turn_allocate_udp at line {call.lineno} runs in lan mode: gate "
+            "it on _skip_turn_prealloc"
+        )
