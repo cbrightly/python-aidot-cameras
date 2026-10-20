@@ -4220,6 +4220,35 @@ class CameraMixin(
             prev.cancel()
         self._keepalive_task = asyncio.ensure_future(self._keepalive_renew_loop())
 
+    async def _go_dormant(self, *, release_url: bool, why: str) -> None:
+        """Mark the camera not streaming and take its stream out of go2rtc.
+
+        Leaving the stream registered would point go2rtc at a source that no
+        longer exists, so a viewer attaching while the camera is dormant gets
+        "connection refused" on the serve port instead of a clean "no such
+        stream" (in push mode that source was never dialable at all), and it
+        would stop the integration's stale-stream watchdog, which keys on the
+        keepalive having ended. ``stream_source()`` re-registers on the next
+        view. ``release_url`` also forgets the keepalive's push URL and clears
+        the serve-ready event, which the idle release does and an abandon
+        after futile sessions does not. Five exits of the two loops did this
+        by hand.
+        """
+        self._streaming_active = False
+        self._cancel_keepalive_renew()
+        if release_url:
+            self._keepalive_rtsp_url = None
+            self._serve_ready.clear()
+        try:
+            await self._deregister_go2rtc()
+        except Exception:
+            _LOGGER.debug(
+                "camera %s: go2rtc deregister after %s failed",
+                self.device_id,
+                why,
+                exc_info=True,
+            )
+
     def _cancel_keepalive_renew(self) -> None:
         """Cancel the battery keep-alive renew loop if running (fire-and-forget)."""
         task, self._keepalive_task = getattr(self, "_keepalive_task", None), None
@@ -5037,16 +5066,7 @@ class CameraMixin(
                         self.device_id,
                         _no_media_streak,
                     )
-                    self._streaming_active = False
-                    self._cancel_keepalive_renew()
-                    try:
-                        await self._deregister_go2rtc()
-                    except Exception:
-                        _LOGGER.debug(
-                            "camera %s: go2rtc deregister after abandon failed",
-                            self.device_id,
-                            exc_info=True,
-                        )
+                    await self._go_dormant(release_url=False, why="abandon")
                     return
                 _not_ready_burst = self._next_not_ready_burst(False, _not_ready_burst)
                 _delay, _fast_retry = self._not_ready_retry_delay(
@@ -5241,26 +5261,7 @@ class CameraMixin(
                         "_sdes_keepalive_loop_inner",
                         exc_info=True,
                     )
-                self._streaming_active = False
-                self._cancel_keepalive_renew()
-                self._keepalive_rtsp_url = None
-                self._serve_ready.clear()
-                # Take the stream out of go2rtc too. Leaving it registered
-                # points go2rtc at a source that no longer exists, so a viewer
-                # attaching while the camera is dormant gets a hard refusal
-                # ("connection refused" on the serve port) instead of a clean
-                # "no such stream" - and in push mode that source was never
-                # dialable in the first place. stream_source() re-registers on
-                # the next view.
-                try:
-                    await self._deregister_go2rtc()
-                except Exception:
-                    _LOGGER.debug(
-                        "camera %s: swallowed exception in %s",
-                        getattr(self, "device_id", "?"),
-                        "_sdes_keepalive_loop_inner",
-                        exc_info=True,
-                    )
+                await self._go_dormant(release_url=True, why="idle release")
                 _LOGGER.debug(
                     "SDES serve: %s idle (no viewer) - released until next view",
                     self.device_id,
@@ -5341,21 +5342,7 @@ class CameraMixin(
                         self.device_id,
                         _no_media_streak,
                     )
-                    self._streaming_active = False
-                    # Same teardown the idle-release exit does. Leaving the
-                    # go2rtc stream registered points it at a serve port with
-                    # nothing listening, so a viewer attaching to a dormant
-                    # camera gets "connection refused" instead of a clean miss -
-                    # exactly what the idle-release path exists to avoid.
-                    self._cancel_keepalive_renew()
-                    try:
-                        await self._deregister_go2rtc()
-                    except Exception:
-                        _LOGGER.debug(
-                            "camera %s: go2rtc deregister after abandon failed",
-                            self.device_id,
-                            exc_info=True,
-                        )
+                    await self._go_dormant(release_url=False, why="abandon")
                     return
 
             if self._streaming_active:
@@ -6705,17 +6692,9 @@ class CameraMixin(
                             # of a clean miss - and stops the integration's
                             # stale-stream watchdog, which keys on the
                             # keepalive having ended.
-                            self._streaming_active = False
-                            self._cancel_keepalive_renew()
-                            try:
-                                await self._deregister_go2rtc()
-                            except Exception:
-                                _LOGGER.debug(
-                                    "camera %s: go2rtc deregister after video "
-                                    "abandon failed",
-                                    self.device_id,
-                                    exc_info=True,
-                                )
+                            await self._go_dormant(
+                                release_url=False, why="video abandon"
+                            )
                             return
                         break
                     if idle_release:
@@ -6759,21 +6738,7 @@ class CameraMixin(
             if idle_release:
                 # No viewer - go dormant; camera.stream_source() restarts us when
                 # someone opens the live view again.
-                self._streaming_active = False
-                self._cancel_keepalive_renew()
-                self._keepalive_rtsp_url = None
-                self._serve_ready.clear()
-                # Same as the SDES path: do not leave go2rtc holding a stream
-                # whose source no longer exists.
-                try:
-                    await self._deregister_go2rtc()
-                except Exception:
-                    _LOGGER.debug(
-                        "camera %s: swallowed exception in %s",
-                        getattr(self, "device_id", "?"),
-                        "_dtls_serve_loop_inner",
-                        exc_info=True,
-                    )
+                await self._go_dormant(release_url=True, why="idle release")
                 _LOGGER.debug(
                     "DTLS serve: %s idle (no viewer) - released until next view",
                     self.device_id,

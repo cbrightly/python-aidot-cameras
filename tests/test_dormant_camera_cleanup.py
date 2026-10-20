@@ -11,6 +11,7 @@ listening, and go2rtc reporting
 `dial tcp 127.0.0.1:18981: connect: connection refused`.
 """
 
+import asyncio
 import inspect
 
 import aidot_cameras.camera.client as cc
@@ -25,31 +26,61 @@ def _src(name):
     return inspect.getsource(getattr(cc.CameraMixin, name))
 
 
-def test_sdes_idle_release_deregisters_from_go2rtc():
+def test_sdes_idle_release_goes_dormant():
     src = _src("_sdes_keepalive_loop_inner")
     idle = src[src.index("if _idle_release:") :]
-    assert "_deregister_go2rtc" in idle
+    assert "_go_dormant(release_url=True" in idle
 
 
-def test_dtls_idle_release_deregisters_from_go2rtc():
+def test_dtls_idle_release_goes_dormant():
     src = _src("_dtls_serve_loop_inner")
     idle = src[src.index("if idle_release:") :]
-    assert "_deregister_go2rtc" in idle
+    assert "_go_dormant(release_url=True" in idle
 
 
-def test_deregistration_failure_cannot_break_the_release():
+class _Dormant:
+    """The attributes _go_dormant touches, with a go2rtc that may refuse."""
+
+    def __init__(self, fail=False):
+        self.device_id = "cam"
+        self._streaming_active = True
+        self._keepalive_rtsp_url = "rtsp://x"
+        self._serve_ready = asyncio.Event()
+        self._serve_ready.set()
+        self.cancelled = 0
+        self.deregistered = 0
+        self._fail = fail
+
+    def _cancel_keepalive_renew(self):
+        self.cancelled += 1
+
+    async def _deregister_go2rtc(self):
+        self.deregistered += 1
+        if self._fail:
+            raise OSError("go2rtc unreachable")
+
+
+async def test_going_dormant_deregisters_and_releases_the_url():
+    d = _Dormant()
+    await cc.CameraMixin._go_dormant(d, release_url=True, why="idle release")
+    assert d._streaming_active is False
+    assert d.cancelled == 1 and d.deregistered == 1
+    assert d._keepalive_rtsp_url is None and not d._serve_ready.is_set()
+
+
+async def test_an_abandon_keeps_the_url_but_still_deregisters():
+    d = _Dormant()
+    await cc.CameraMixin._go_dormant(d, release_url=False, why="abandon")
+    assert d._streaming_active is False
+    assert d.deregistered == 1
+    assert d._keepalive_rtsp_url == "rtsp://x" and d._serve_ready.is_set()
+
+
+async def test_deregistration_failure_cannot_break_the_release():
     # Going dormant must still complete if go2rtc is unreachable.
-    for name, marker in (
-        ("_sdes_keepalive_loop_inner", "if _idle_release:"),
-        ("_dtls_serve_loop_inner", "if idle_release:"),
-    ):
-        idle = _src(name)
-        idle = idle[idle.index(marker) :]
-        block = idle[
-            idle.index("_deregister_go2rtc") - 200 : idle.index("_deregister_go2rtc")
-            + 300
-        ]
-        assert "try:" in block and "except Exception" in block
+    d = _Dormant(fail=True)
+    await cc.CameraMixin._go_dormant(d, release_url=True, why="idle release")
+    assert d._streaming_active is False and d.deregistered == 1
 
 
 def test_consumer_disconnect_is_not_logged_as_a_failure():
@@ -83,6 +114,10 @@ def test_every_exit_that_stops_streaming_also_deregisters():
     `self._streaming_active = False` must have a `_deregister_go2rtc` call
     between the two. It fails on the next exit added carelessly, which the
     slicing form cannot.
+
+    Since the exits share `_go_dormant`, which sets the flag and deregisters
+    in one call, a call to it counts as both; a bare `_streaming_active =
+    False` in a loop is still checked the old way.
     """
     import ast
     import textwrap
@@ -92,6 +127,11 @@ def test_every_exit_that_stops_streaming_also_deregisters():
         fn = tree.body[0]
 
         stops = []  # (lineno of `_streaming_active = False`)
+        dormants = [
+            n.lineno
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Attribute) and n.attr == "_go_dormant"
+        ]
         for node in ast.walk(fn):
             if not isinstance(node, ast.Assign):
                 continue
@@ -104,9 +144,9 @@ def test_every_exit_that_stops_streaming_also_deregisters():
                 ):
                     stops.append(node.lineno)
 
-        assert stops, f"{name}: no `_streaming_active = False` found at all"
+        assert stops or dormants, f"{name}: nothing in it ever stops streaming"
 
-        deregs = [
+        deregs = dormants + [
             n.lineno
             for n in ast.walk(fn)
             if isinstance(n, ast.Attribute) and n.attr == "_deregister_go2rtc"
