@@ -15,22 +15,23 @@ reaching for a camera symbol.  Here, a camera import would be visible on sight.
 
 import asyncio
 import logging
-import os
 from typing import Optional
+
+from . import settings
 
 _LOGGER = logging.getLogger(__name__)
 
 #: How many consecutive failed LAN logins before this device is left alone, and
 #: the ceiling on the delay between them.  Both overridable per install.
-_LOGIN_RETRY_LIMIT = int(os.environ.get("AIDOT_LOGIN_RETRY_LIMIT", "6"))
-_LOGIN_RETRY_CAP_S = float(os.environ.get("AIDOT_LOGIN_RETRY_CAP_S", "60"))
+_LOGIN_RETRY_LIMIT = settings.read("AIDOT_LOGIN_RETRY_LIMIT")
+_LOGIN_RETRY_CAP_S = settings.read("AIDOT_LOGIN_RETRY_CAP_S")
 _LOGIN_RETRY_BASE_S = 1.0
 
 #: Ceiling on one LAN connect+login attempt.  Upstream has no read timeout at
 #: all - `grep -cE "wait_for|timeout"` over its device_client returns 0 - so a
 #: device that accepts the TCP connection and then stops answering parks
 #: `readexactly(8)` forever, inside `connect()`.
-_LOGIN_CONNECT_TIMEOUT_S = float(os.environ.get("AIDOT_LOGIN_CONNECT_TIMEOUT_S", "20"))
+_LOGIN_CONNECT_TIMEOUT_S = settings.read("AIDOT_LOGIN_CONNECT_TIMEOUT_S")
 
 #: Upstream's device-client logger, which writes one WARNING per connect attempt.
 UPSTREAM_DEVICE_LOGGER = "aidot.device_client"

@@ -3,7 +3,9 @@
 Every `AIDOT_*` variable the library reads that is **not** in the README's
 table, in four groups: the streaming knobs, the deeper internals that used to
 sit in `CAMERAS.md`, the serve and retry policy, and the endpoint overrides and
-measurement seams. Most were added during an investigation of one camera model,
+measurement seams. The code's own copy of this inventory is
+`aidot_cameras/settings.py`: every variable, its default and how it parses, and
+a test that fails when this file and that table disagree. Most were added during an investigation of one camera model,
 and every default was measured. None is part of the 1.0 API (see
 `API-STABILITY.md`): each may be removed in a later release once the behaviour
 it tunes has settled, and the CHANGELOG will say so.

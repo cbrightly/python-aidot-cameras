@@ -25,7 +25,6 @@ camera layer and the CLI depend on and upstream does not provide:
 import asyncio
 import json
 import logging
-import os
 import random
 from typing import Any, Optional
 
@@ -173,7 +172,9 @@ def _include_shared_houses() -> bool:
     returns the shared house and every camera in it, and the filter below
     throws all of them away.
     """
-    return os.environ.get("AIDOT_INCLUDE_SHARED_HOUSES", "0") != "0"
+    from . import settings
+
+    return settings.read("AIDOT_INCLUDE_SHARED_HOUSES")
 
 
 def _without_mqtt_password(data: Any) -> Any:

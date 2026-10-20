@@ -36,6 +36,8 @@ from .rtsp_publish import direct_publish_enabled
 from .ts_fanout import TsRouter
 from .ts_tee import TsSession, TsTee
 
+from .. import settings
+
 _LOGGER = logging.getLogger(__name__)
 
 ENV_HLS_DIRECT_TS = "AIDOT_HLS_DIRECT_TS"
@@ -56,12 +58,7 @@ def enabled() -> bool:
     All three are on unless turned off (since 1.0.0rc44): the in-sync stream
     is what makes a recording's sound and picture agree whenever it joins.
     """
-    on = os.environ.get(ENV_HLS_DIRECT_TS, "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
+    on = settings.read(ENV_HLS_DIRECT_TS)
     return on and direct_publish_enabled() and publish_aac_enabled()
 
 
@@ -73,10 +70,7 @@ def _path(name: str) -> str:
 def _get_router() -> TsRouter:
     global _router
     if _router is None:
-        try:
-            port = int(os.environ.get(ENV_HLS_TS_PORT, "0") or 0)
-        except ValueError:
-            port = 0
+        port = settings.read(ENV_HLS_TS_PORT)
         r = TsRouter(port)
         r.start()
         _router = r

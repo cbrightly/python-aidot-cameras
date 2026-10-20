@@ -14,7 +14,6 @@ we own. Everything that reads the first audio track (WebRTC) is unchanged.
 from __future__ import annotations
 
 import logging
-import os
 import random
 import struct
 from typing import List, Optional, Tuple
@@ -75,7 +74,9 @@ def publish_aac_enabled() -> bool:
     On by default since 1.0.0rc44: it is what gives an AAC-only consumer
     (Home Assistant's HLS player, ``camera.record``) sound at all.
     """
-    return os.environ.get(ENV_PUBLISH_AAC, "1").strip().lower() not in _OFF
+    from .. import settings
+
+    return settings.read(ENV_PUBLISH_AAC)
 
 
 def audio_specific_config(
