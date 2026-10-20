@@ -2126,6 +2126,21 @@ class CameraMixin(
             _LOGGER.error("_async_get_mqtt_url failed: %r", exc)
             return None
 
+    async def _mqtt_credentials(self) -> tuple:
+        """``(mqttUser, mqttPassword, client id)`` for the account's broker.
+
+        The user falls back to the account id and the password to empty when
+        the smarthome auth carries neither; the client id is the account's
+        registered ``mqttClientId``, else ``app-<user>``. Four MQTT sessions
+        (control commands, device actions, attribute reads and the shared
+        persistent connection) built this the same way.
+        """
+        smarthome_auth = await self._async_get_smarthome_auth()
+        mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
+        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
+        client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
+        return mqtt_user, mqtt_pwd, client_id
+
     async def _async_get_smarthome_auth(self) -> Optional[dict]:
         """Fetch MQTT credentials (mqttUser + mqttPassword) for the Arnoo broker.
 
@@ -2490,10 +2505,7 @@ class CameraMixin(
         """
         import json as _json
 
-        smarthome_auth = await self._async_get_smarthome_auth()
-        mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
-        client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
+        mqtt_user, mqtt_pwd, client_id = await self._mqtt_credentials()
         user_id = self.user_id
 
         mqtt_url = await self._async_get_mqtt_url()
@@ -2823,14 +2835,11 @@ class CameraMixin(
 
         user_id = self.user_id
         device_id = self.device_id
-        smarthome_auth = await self._async_get_smarthome_auth()
+        mqtt_user, mqtt_pwd, client_id = await self._mqtt_credentials()
         mqtt_url = await self._async_get_mqtt_url()
         if not mqtt_url:
             _LOGGER.debug("async_query_device_action: no MQTT URL for %s", device_id)
             return None
-        mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(user_id)
-        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
-        client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
 
         _dev = self._camera_properties() or {}
         parent_id = (
@@ -3126,10 +3135,7 @@ class CameraMixin(
                     exc_info=True,
                 )
 
-        smarthome_auth = await self._async_get_smarthome_auth()
-        mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
-        _base_cid = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
+        mqtt_user, mqtt_pwd, _base_cid = await self._mqtt_credentials()
         # The broker binds the credential to the EXACT registered mqttClientId.
         # A suffixed connect is refused outright with CONNACK rc=4, "Bad user
         # name or password" - so the "-cmd" id this used to build could never
@@ -5959,10 +5965,7 @@ class CameraMixin(
             pm = li.get(LOGIN_INFO_PERSISTENT_MQTT_KEY)  # re-check under the lock
             if pm is not None:
                 return pm
-            smarthome_auth = await self._async_get_smarthome_auth()
-            mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-            mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
-            client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
+            mqtt_user, mqtt_pwd, client_id = await self._mqtt_credentials()
             mqtt_url = await self._async_get_mqtt_url()
             if not mqtt_url:
                 return None

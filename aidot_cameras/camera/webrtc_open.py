@@ -179,6 +179,56 @@ def _dtls_pin_matches(real_fp: str, pinned_fp: str) -> bool:
     return _normalize_fingerprint(real_fp) == _normalize_fingerprint(pinned_fp)
 
 
+def _warn_unpinned_peer(device_id) -> None:
+    """Say once per open that the camera's DTLS certificate goes unverified."""
+    _LOGGER.warning(
+        "camera %s: DTLS peer certificate is NOT authenticated "
+        "(signaling echoes our own fingerprint); the media channel "
+        "is exposed to an on-path MITM. Set AIDOT_DTLS_PINNED_FP to "
+        "the camera's sha-256 fingerprint to enforce verification.",
+        device_id,
+    )
+
+
+def _camera_cert_acceptor(pinned_fp: str, device_id, fingerprint_cls, cert_fp_fn):
+    """A ``_validate_peer_identity`` for aiortc's DTLS transport.
+
+    The camera echoes OUR fingerprint in its SDP, so signaling carries no
+    trustworthy value to verify the camera against; aiortc's own check would
+    compare the camera's certificate against our echoed fingerprint and fail
+    every handshake. The returned method overwrites the stored fingerprint
+    with the camera's actual certificate digest, verified against
+    ``pinned_fp`` when one is set.
+
+    Fails CLOSED under a pin: a missing certificate or any error computing or
+    comparing the fingerprint fails the handshake rather than silently
+    accepting an unverified peer. Unpinned, an unreadable certificate is
+    accepted and noted at DEBUG. Both DTLS paths (role reversal and the
+    normal answer) install this; they used to carry it twice.
+    """
+
+    def _accept_camera_cert(self, remote_params):
+        try:
+            cam_cert = self._ssl.get_peer_certificate(as_cryptography=True)
+            real_fp = _verified_dtls_fingerprint(cam_cert, pinned_fp, cert_fp_fn)
+            if real_fp is not None:
+                remote_params.fingerprints[:] = [
+                    fingerprint_cls(algorithm="sha-256", value=real_fp)
+                ]
+        except ValueError:
+            raise  # pin mismatch / no cert under pin: fail the handshake
+        except Exception:
+            if pinned_fp:
+                raise  # fail closed: never accept an unverifiable cert
+            _LOGGER.debug(
+                "camera %s: DTLS cert retrieval failed; accept-any (unpinned)",
+                device_id,
+                exc_info=True,
+            )
+
+    return _accept_camera_cert
+
+
 def _verified_dtls_fingerprint(cam_cert, pinned_fp: str, cert_fp_fn) -> Optional[str]:
     """Return the peer cert's sha-256 fingerprint, enforcing the pin if set.
 
@@ -753,16 +803,16 @@ class _WebRTCOpenMixin:
         # ------------------------------------------------------------------ #
         # Credentials + MQTT setup
         # ------------------------------------------------------------------ #
-        smarthome_auth = await self._async_get_smarthome_auth()
-        mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
+        mqtt_user, mqtt_pwd, _base_cid = await self._mqtt_credentials()
         user_id = str(self.user_id)
+        # This path alone also honours the raw user config's client id, ahead
+        # of the ``app-<user>`` fallback the shared helper already applied.
         mqtt_cid = (
             self._user_info.get("mqttClientId")
             or (self._user_info.get("_userConfigRaw") or {})
             .get("mqtt", {})
             .get("clientId")
-            or f"app-{mqtt_user}"
+            or _base_cid
         )
         # terminalIndex is the session prefix of mqtt_cid (e.g. "1i1h3m" from "1i1h3m-{userId}").
         # The camera validates srcAddr against active MQTT sessions; "0.{userId}" matches nothing.
@@ -3069,41 +3119,10 @@ class _WebRTCOpenMixin:
                 # when set, a mismatching cert fails the handshake instead.
                 _pinned_fp = (settings.read("AIDOT_DTLS_PINNED_FP") or "").strip()
                 if not _pinned_fp:
-                    _LOGGER.warning(
-                        "camera %s: DTLS peer certificate is NOT authenticated "
-                        "(signaling echoes our own fingerprint); the media channel "
-                        "is exposed to an on-path MITM. Set AIDOT_DTLS_PINNED_FP to "
-                        "the camera's sha-256 fingerprint to enforce verification.",
-                        getattr(self, "device_id", "?"),
-                    )
-
-                def _accept_camera_cert(self, remote_params):
-                    """Verify (if pinned) or accept the camera's actual DTLS cert.
-
-                    Fails CLOSED when AIDOT_DTLS_PINNED_FP is set: a missing cert
-                    or any error computing/comparing the fingerprint fails the
-                    handshake rather than silently accepting an unverified peer.
-                    """
-                    try:
-                        _cam_cert = self._ssl.get_peer_certificate(as_cryptography=True)
-                        _real_fp = _verified_dtls_fingerprint(
-                            _cam_cert, _pinned_fp, _rr_cert_fp
-                        )
-                        if _real_fp is not None:
-                            remote_params.fingerprints[:] = [
-                                _RRFp(algorithm="sha-256", value=_real_fp)
-                            ]
-                    except ValueError:
-                        raise  # pin mismatch / no cert under pin: fail the handshake
-                    except Exception:
-                        if _pinned_fp:
-                            raise  # fail closed: never accept an unverifiable cert
-                        _LOGGER.debug(
-                            "camera %s: DTLS cert retrieval failed; accept-any "
-                            "(unpinned)",
-                            getattr(self, "device_id", "?"),
-                            exc_info=True,
-                        )
+                    _warn_unpinned_peer(getattr(self, "device_id", "?"))
+                _accept_camera_cert = _camera_cert_acceptor(
+                    _pinned_fp, getattr(self, "device_id", "?"), _RRFp, _rr_cert_fp
+                )
 
                 for _rr_tc in pc.getTransceivers():
                     _rr_tc.receiver.transport._validate_peer_identity = (
@@ -3637,38 +3656,13 @@ class _WebRTCOpenMixin:
                     )
 
                     if not _np_pinned_fp:
-                        _LOGGER.warning(
-                            "camera %s: DTLS peer certificate is NOT authenticated "
-                            "(signaling echoes our own fingerprint); the media "
-                            "channel is exposed to an on-path MITM. Set "
-                            "AIDOT_DTLS_PINNED_FP to the camera's sha-256 "
-                            "fingerprint to enforce verification.",
-                            getattr(self, "device_id", "?"),
-                        )
-
-                    def _np_accept_cam_cert(self, remote_params):
-                        try:
-                            _cam_cert = self._ssl.get_peer_certificate(
-                                as_cryptography=True
-                            )
-                            _real_fp = _verified_dtls_fingerprint(
-                                _cam_cert, _np_pinned_fp, _np_cert_fp
-                            )
-                            if _real_fp is not None:
-                                remote_params.fingerprints[:] = [
-                                    _NPFp(algorithm="sha-256", value=_real_fp)
-                                ]
-                        except ValueError:
-                            raise  # pin mismatch / no cert under pin: fail handshake
-                        except Exception:
-                            if _np_pinned_fp:
-                                raise  # fail closed: never accept an unverifiable cert
-                            _LOGGER.debug(
-                                "camera %s: swallowed exception in %s",
-                                getattr(self, "device_id", "?"),
-                                "_np_accept_cam_cert",
-                                exc_info=True,
-                            )
+                        _warn_unpinned_peer(getattr(self, "device_id", "?"))
+                    _np_accept_cam_cert = _camera_cert_acceptor(
+                        _np_pinned_fp,
+                        getattr(self, "device_id", "?"),
+                        _NPFp,
+                        _np_cert_fp,
+                    )
 
                     # Diag: log PC/ICE state at patch-application time so we
                     # can see whether DTLS handshake has *already* started by
