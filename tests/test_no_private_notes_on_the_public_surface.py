@@ -53,8 +53,16 @@ SKIP_DIRS = {
 
 def _text_files():
     for root, dirs, files in os.walk(REPO):
+        # Hidden directories are local tool state, excluded from git and never
+        # published; some hold other checkouts of this repo (worktrees), whose
+        # tests/ would otherwise be scanned as if they were prose - the
+        # exclusion below matches only the top-level tests/.
         dirs[:] = sorted(
-            d for d in dirs if d not in SKIP_DIRS and not d.endswith(".egg-info")
+            d
+            for d in dirs
+            if d not in SKIP_DIRS
+            and not d.startswith(".")
+            and not d.endswith(".egg-info")
         )
         for fn in sorted(files):
             if not fn.endswith(TEXT_SUFFIXES):
