@@ -732,6 +732,40 @@ def _should_abandon_keepalive(
 _SERVE_ARRIVAL_TS = settings.read("AIDOT_SERVE_ARRIVAL_TS")
 
 
+def _aac_silence_mix_args(audio_gain_db) -> list:
+    """ffmpeg arguments that mix the camera's audio over silence and encode AAC.
+
+    Shared by the http-listen serve and the RTSP push, which carried the same
+    twenty arguments twice. A continuous ``anullsrc`` under
+    ``amix(normalize=0)`` feeds the encoder from t=0 and is a no-op wherever
+    real audio is present, so sparse battery PCMA cannot stall the output.
+    """
+    return [
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=r=8000:cl=mono",
+        "-filter_complex",
+        (
+            "[0:a]aresample=async=1[a0];"
+            "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
+            f"volume={audio_gain_db}dB[aout]"
+        ),
+        "-map",
+        "0:v:0",
+        "-map",
+        "[aout]",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-ar",
+        "48000",
+        "-b:a",
+        "128k",
+    ]
+
+
 def _build_sdes_serve_cmd(
     *,
     sdp_path: str,
@@ -786,28 +820,7 @@ def _build_sdes_serve_cmd(
                 # encoder fed from t=0 so the mpegts PMT writes promptly on sparse
                 # battery PCMA; real audio mixes over the 0-valued silence
                 # (normalize=0 -> no-op when audio is present).
-                "-f",
-                "lavfi",
-                "-i",
-                "anullsrc=r=8000:cl=mono",
-                "-filter_complex",
-                (
-                    "[0:a]aresample=async=1[a0];"
-                    "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
-                    f"volume={audio_gain_db}dB[aout]"
-                ),
-                "-map",
-                "0:v:0",
-                "-map",
-                "[aout]",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-ar",
-                "48000",
-                "-b:a",
-                "128k",
+                *_aac_silence_mix_args(audio_gain_db),
                 *time_args,
                 "-f",
                 "mpegts",
@@ -844,28 +857,7 @@ def _build_sdes_serve_cmd(
         # amix(normalize=0) feeds the encoder from t=0 and is a no-op wherever
         # real audio is present, so sparse audio cannot stall the publish.
         dest_args = [
-            "-f",
-            "lavfi",
-            "-i",
-            "anullsrc=r=8000:cl=mono",
-            "-filter_complex",
-            (
-                "[0:a]aresample=async=1[a0];"
-                "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
-                f"volume={audio_gain_db}dB[aout]"
-            ),
-            "-map",
-            "0:v:0",
-            "-map",
-            "[aout]",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-ar",
-            "48000",
-            "-b:a",
-            "128k",
+            *_aac_silence_mix_args(audio_gain_db),
             *time_args,
             "-f",
             "rtsp",
