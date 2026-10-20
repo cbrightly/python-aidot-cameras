@@ -155,7 +155,8 @@ bought nothing. Earlier integration releases did prewarm a battery camera on
 motion.
 
 The **DTLS** path has the targeted equivalent (0.9.0): `dtls_fast_liveplay`
-(`AIDOT_DTLS_FAST_LIVEPLAY` env / `_dtls_fast_liveplay_opt`) skips only the
+(the `AIDOT_DTLS_FAST_LIVEPLAY` environment variable; there is no per-camera
+parameter) skips only the
 up-to-2 s `livePlayResp` wait while keeping the full ICE/TURN/DTLS handshake - so
 remote/relay viewing is unaffected (unlike `fast_connect`, which also strips
 TURN). **On by default**; ~2 s off a cold LAN open. Separately, the HTTP ICE
