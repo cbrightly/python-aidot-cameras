@@ -89,17 +89,18 @@ def test_permission_is_installed_before_every_nomination():
 
 
 def test_permission_helper_covers_every_candidate_on_both_sockets():
-    body = _extract_helper(_impl_source(), "_turn_install_permissions")
+    body = inspect.getsource(so.turn_install_permissions)
     assert "for _c_ip, _c_port in _ip_cands" in body, "must cover every candidate"
-    assert "_audio_sock" in body and "_video_sock" in body, (
+    assert "for _p_sock in socks" in body
+    bound = _impl_source()
+    bound = bound[bound.index("_turn_install_permissions = functools.partial(") :][:400]
+    assert "(_audio_sock, _video_sock)" in bound, (
         "audio and video have separate relay allocations; both need permissions"
     )
 
 
 def test_create_permission_message_is_a_valid_stun_request():
     """Byte-level check of the SHIPPED builder, exercised via a fake socket."""
-    body = _extract_helper(_impl_source(), "_turn_create_permission")
-
     sent = {}
 
     class _Sock:
@@ -108,17 +109,10 @@ def test_create_permission_message_is_a_valid_stun_request():
 
     sock = _Sock()
     key = b"k" * 16
-    ns = {
-        "_relay_addrs": {
-            sock: ("1.2.3.4", 5000, b"realm", b"nonce", "turn.host", 3478, key, b"user")
-        },
-        "_STUN_MAGIC": _STUN_MAGIC,
-        "os": os,
-        "_LOGGER": so._LOGGER,
-        "_stun_attr": so._stun_attr,
+    relay_addrs = {
+        sock: ("1.2.3.4", 5000, b"realm", b"nonce", "turn.host", 3478, key, b"user")
     }
-    exec(body, ns)  # noqa: S102 - exercising the shipped source
-    assert ns["_turn_create_permission"](sock, "192.0.2.55", 41234) is True
+    assert so.turn_create_permission(relay_addrs, sock, "192.0.2.55", 41234) is True
 
     msg = sent["msg"]
     assert sent["addr"] == ("turn.host", 3478)
@@ -146,15 +140,7 @@ def test_create_permission_message_is_a_valid_stun_request():
 
 
 def test_permission_helper_is_defensive_without_an_allocation():
-    body = _extract_helper(_impl_source(), "_turn_create_permission")
-    ns = {
-        "_relay_addrs": {},
-        "_STUN_MAGIC": _STUN_MAGIC,
-        "os": os,
-        "_LOGGER": so._LOGGER,
-    }
-    exec(body, ns)  # noqa: S102
-    assert ns["_turn_create_permission"](object(), "10.0.0.1", 1234) is False, (
+    assert so.turn_create_permission({}, object(), "10.0.0.1", 1234) is False, (
         "a socket with no relay allocation must be a no-op, not an exception"
     )
 
@@ -184,7 +170,7 @@ def test_permission_helper_is_reachable_from_the_bridge_thread():
     enter that branch.
     """
     src = _impl_source()
-    def_at = src.index("def _turn_create_permission")
+    def_at = src.index("_turn_create_permission = functools.partial(")
     branch_at = src.index("if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:")
     assert def_at < branch_at, (
         "_turn_create_permission must be defined at function scope so the "

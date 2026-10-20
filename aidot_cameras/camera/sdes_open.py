@@ -8,6 +8,7 @@ breaks the client<->sdes_open cycle).  CameraMixin inherits this mixin, so
 """
 
 import asyncio
+import functools
 import hashlib as _hashlib_mod
 import logging
 import os
@@ -1528,6 +1529,8 @@ def _stun_window_answer_exit_due(*, stun_seen: bool, answer_ready: bool) -> bool
 
 
 _SELECT_POLL_S = 0.01
+#: RFC 5389 magic cookie, the fixed 32-bit word every STUN message carries.
+STUN_MAGIC_COOKIE = b"\x21\x12\xa4\x42"
 
 
 async def _select_readable(socks, timeout: float) -> list:
@@ -1602,6 +1605,327 @@ def _stun_attr(attr_type: int, value: bytes) -> bytes:
         + value
         + b"\x00" * ((-len(value)) % 4)
     )
+
+
+def turn_allocate_udp(_ta_sock, _ta_host, _ta_port, _ta_user, _ta_pass):
+    """RFC 5766 TURN relay allocation with long-term credential auth.
+    Returns (relay_ip, relay_port, realm, nonce) or None on failure."""
+    import hashlib as _ha
+    import hmac as _hm
+    import struct as _st_ta
+    import select as _sl_ta
+    import time as _tm_ta
+
+    _MAGIC_TA = b"\x21\x12\xa4\x42"
+
+    def _stun_message_integrity(_k, _m):
+        # Patch Length to include the MI attribute (4 hdr + 20 digest = 24)
+        _patched = _m[:2] + _st_ta.pack("!H", len(_m) - 20 + 24) + _m[4:]
+        return _hm.new(_k, _patched, _ha.sha1).digest()
+
+    # Step 1: unauthenticated Allocate -> get REALM and NONCE from 401
+    _tid1 = os.urandom(12)
+    _b1 = _stun_attr(
+        0x0019, b"\x11\x00\x00\x00"
+    )  # REQUESTED-TRANSPORT = UDP(17), RFC 5766 section 14.7 protocol in MSB
+    _r1 = b"\x00\x03" + _st_ta.pack("!H", len(_b1)) + _MAGIC_TA + _tid1 + _b1
+    try:
+        _ta_sock.sendto(_r1, (_ta_host, _ta_port))
+    except Exception:
+        return None
+    # Loop until we get a response whose TID matches our request (discard
+    # stale packets from previous exchanges that may linger in the buffer).
+    _rsp1 = None
+    _dl1 = _tm_ta.time() + 2.0
+    while _tm_ta.time() < _dl1:
+        _rem = _dl1 - _tm_ta.time()
+        _rs1, _, _ = _sl_ta.select([_ta_sock], [], [], min(_rem, 0.5))
+        if not _rs1:
+            continue
+        try:
+            _cand1, _ = _ta_sock.recvfrom(2048)
+        except OSError:
+            break
+        if len(_cand1) >= 20 and _cand1[8:20] == _tid1:
+            _rsp1 = _cand1
+            break
+    if _rsp1 is None:
+        return None
+    _realm_ta = _nonce_ta = b""
+    _o = 20
+    while _o + 4 <= len(_rsp1):
+        _at, _al = _st_ta.unpack_from("!HH", _rsp1, _o)
+        _av = _rsp1[_o + 4 : _o + 4 + _al]
+        _o += 4 + _al + (-_al % 4)
+        if _at == 0x0014:
+            _realm_ta = _av
+        elif _at == 0x0015:
+            _nonce_ta = _av
+    if not _realm_ta or not _nonce_ta:
+        _LOGGER.debug(
+            "TURN alloc step1: no realm/nonce in response type=%s",
+            _rsp1[:2].hex(),
+        )
+        return None
+    _LOGGER.debug(
+        "TURN alloc step1 challenge: realm=%r nonce_len=%d",
+        _realm_ta.decode(errors="replace"),
+        len(_nonce_ta),
+    )
+
+    # Step 2: authenticated Allocate
+    _tid2 = os.urandom(12)
+    _key_ta = _ha.md5(_ta_user + b":" + _realm_ta + b":" + _ta_pass).digest()
+    _b2 = (
+        _stun_attr(0x0006, _ta_user)  # USERNAME
+        + _stun_attr(0x0014, _realm_ta)  # REALM
+        + _stun_attr(0x0015, _nonce_ta)  # NONCE
+        + _stun_attr(
+            0x0019, b"\x11\x00\x00\x00"
+        )  # REQUESTED-TRANSPORT = UDP, RFC 5766 section 14.7 protocol in MSB
+    )
+    _h2 = b"\x00\x03" + _st_ta.pack("!H", len(_b2) + 24) + _MAGIC_TA + _tid2
+    _b2 += _stun_attr(
+        0x0008, _stun_message_integrity(_key_ta, _h2 + _b2)
+    )  # MESSAGE-INTEGRITY
+    _r2 = b"\x00\x03" + _st_ta.pack("!H", len(_b2)) + _MAGIC_TA + _tid2 + _b2
+    try:
+        _ta_sock.sendto(_r2, (_ta_host, _ta_port))
+    except Exception:
+        return None
+    # Same TID-matching loop - if step 1's 401 was still in the buffer,
+    # a bare recvfrom would consume it and report failure on a good alloc.
+    _rsp2 = None
+    _dl2 = _tm_ta.time() + 2.0
+    while _tm_ta.time() < _dl2:
+        _rem = _dl2 - _tm_ta.time()
+        _rs2, _, _ = _sl_ta.select([_ta_sock], [], [], min(_rem, 0.5))
+        if not _rs2:
+            continue
+        try:
+            _cand2, _ = _ta_sock.recvfrom(2048)
+        except OSError:
+            break
+        if len(_cand2) >= 20 and _cand2[8:20] == _tid2:
+            _rsp2 = _cand2
+            break
+    if _rsp2 is None:
+        return None
+    if _rsp2[:2] != b"\x01\x03":  # Allocate Success = 0x0103
+        # Parse ERROR-CODE (0x0009) for diagnostics
+        _ec2 = 0
+        _o_ec = 20
+        while _o_ec + 4 <= len(_rsp2):
+            _at_ec, _al_ec = _st_ta.unpack_from("!HH", _rsp2, _o_ec)
+            _av_ec = _rsp2[_o_ec + 4 : _o_ec + 4 + _al_ec]
+            _o_ec += 4 + _al_ec + (-_al_ec % 4)
+            if _at_ec == 0x0009 and _al_ec >= 4:
+                _ec2 = (_av_ec[2] & 0x07) * 100 + _av_ec[3]
+        _LOGGER.debug(
+            "TURN alloc step2 error_code=%d realm=%r response_type=%s",
+            _ec2,
+            _realm_ta.decode(errors="replace"),
+            _rsp2[:2].hex(),
+        )
+        return None
+
+    # Parse XOR-RELAYED-ADDRESS (0x0016)
+    _o = 20
+    while _o + 4 <= len(_rsp2):
+        _at, _al = _st_ta.unpack_from("!HH", _rsp2, _o)
+        _av = _rsp2[_o + 4 : _o + 4 + _al]
+        _o += 4 + _al + (-_al % 4)
+        if _at == 0x0016 and _al >= 8:  # XOR-RELAYED-ADDRESS
+            _xp = _st_ta.unpack_from("!H", _av, 2)[0] ^ 0x2112
+            _xb = bytes(a ^ b for a, b in zip(_av[4:8], _MAGIC_TA, strict=False))
+            _r_ip_ta = ".".join(str(b) for b in _xb)
+            # Do NOT pre-create permissions for our own srflx IP or
+            # TURN server IP. That can cause TURN self-loop Data
+            # Indications and massive STUN echo storms.
+            return _r_ip_ta, _xp, _realm_ta, _nonce_ta
+    return None
+
+
+def turn_create_permission(relay_addrs, _cp_sock, _cp_peer_ip, _cp_peer_port):
+    """Authenticated CreatePermission for one peer on _cp_sock's relay."""
+    import hashlib as _cp_hashlib
+    import hmac as _cp_hmac
+    import socket as _cp_socket
+    import struct as _cp_struct
+
+    _cp = relay_addrs.get(_cp_sock)
+    if not _cp or len(_cp) < 8:
+        return False
+    (_, _, _cp_realm, _cp_nonce, _cp_thost, _cp_tport, _cp_key, _cp_user) = _cp[:8]
+
+    # XOR-PEER-ADDRESS: family, port ^ magic[:2], addr ^ magic
+    try:
+        _cp_ip_b = _cp_socket.inet_aton(_cp_peer_ip)
+    except OSError:
+        # _ICE_CAND_RE admits "1.2.3.4.5"; not an address, not a peer.
+        return False
+    _cp_xport = (_cp_peer_port ^ 0x2112) & 0xFFFF
+    _cp_xaddr = bytes(a ^ b for a, b in zip(_cp_ip_b, STUN_MAGIC_COOKIE, strict=True))
+    _cp_xpa = b"\x00\x01" + _cp_struct.pack("!H", _cp_xport) + _cp_xaddr
+
+    _cp_tid = os.urandom(12)
+    _cp_body = (
+        _stun_attr(0x0012, _cp_xpa)  # XOR-PEER-ADDRESS
+        + _stun_attr(0x0006, _cp_user)  # USERNAME
+        + _stun_attr(0x0014, _cp_realm)  # REALM
+        + _stun_attr(0x0015, _cp_nonce)
+    )  # NONCE
+    _cp_hdr = (
+        b"\x00\x08"  # CreatePermission request
+        + _cp_struct.pack("!H", len(_cp_body) + 24)
+        + STUN_MAGIC_COOKIE
+        + _cp_tid
+    )
+    _cp_mi = _cp_hmac.new(_cp_key, _cp_hdr + _cp_body, _cp_hashlib.sha1).digest()
+    _cp_body += _stun_attr(0x0008, _cp_mi)  # MESSAGE-INTEGRITY
+    _cp_msg = (
+        b"\x00\x08"
+        + _cp_struct.pack("!H", len(_cp_body))
+        + STUN_MAGIC_COOKIE
+        + _cp_tid
+        + _cp_body
+    )
+    try:
+        _cp_sock.sendto(_cp_msg, (_cp_thost, _cp_tport))
+        return True
+    except Exception:
+        _LOGGER.debug("CreatePermission send failed", exc_info=True)
+        return False
+
+
+def turn_refresh_allocation(relay_addrs, _rf_sock, _rf_lifetime=600):
+    """Refresh _rf_sock's allocation before the server expires it.
+
+    The relay is granted for a limited LIFETIME (measured against this
+    camera's TURN server: 600 s) and the server tears it down silently
+    when it lapses.  Stock libwebrtc, which is what the vendor app
+    runs, keeps a scheduled Refresh for exactly this reason; without
+    one a held session loses its relay mid-stream and the failure looks
+    like the camera stopping rather than the allocation expiring.
+    """
+    import hashlib as _rf_hashlib
+    import hmac as _rf_hmac
+    import struct as _rf_struct
+
+    _rf = relay_addrs.get(_rf_sock)
+    if not _rf or len(_rf) < 8:
+        return False
+    (_, _, _rf_realm, _rf_nonce, _rf_thost, _rf_tport, _rf_key, _rf_user) = _rf[:8]
+
+    _rf_tid = os.urandom(12)
+    _rf_body = (
+        _stun_attr(0x000D, _rf_struct.pack("!I", _rf_lifetime))
+        + _stun_attr(0x0006, _rf_user)  # USERNAME
+        + _stun_attr(0x0014, _rf_realm)  # REALM
+        + _stun_attr(0x0015, _rf_nonce)
+    )  # NONCE
+    _rf_hdr = (
+        b"\x00\x04"  # Refresh request
+        + _rf_struct.pack("!H", len(_rf_body) + 24)
+        + STUN_MAGIC_COOKIE
+        + _rf_tid
+    )
+    _rf_mi = _rf_hmac.new(_rf_key, _rf_hdr + _rf_body, _rf_hashlib.sha1).digest()
+    _rf_body += _stun_attr(0x0008, _rf_mi)  # MESSAGE-INTEGRITY
+    _rf_msg = (
+        b"\x00\x04"
+        + _rf_struct.pack("!H", len(_rf_body))
+        + STUN_MAGIC_COOKIE
+        + _rf_tid
+        + _rf_body
+    )
+    try:
+        _rf_sock.sendto(_rf_msg, (_rf_thost, _rf_tport))
+        return True
+    except Exception:
+        _LOGGER.debug("TURN Refresh send failed", exc_info=True)
+        return False
+
+
+def turn_send_indication(relay_addrs, _si_sock, _si_peer_ip, _si_peer_port, _si_data):
+    """Send _si_data to a peer THROUGH _si_sock's relay allocation.
+
+    Egress from the relay address is the whole point: ICE validates a
+    candidate PAIR, so a camera can only nominate the relay candidate
+    we advertised if it receives packets whose source IS that relay.
+    Writing straight to the camera from the host socket leaves the
+    advertised relay candidate permanently unvalidated.
+
+    Send indications carry no MESSAGE-INTEGRITY (RFC 5766 s10.2), so
+    this needs the allocation's server address and nothing else.
+    """
+    import struct as _si_struct
+
+    _si = relay_addrs.get(_si_sock)
+    if not _si or len(_si) < 6:
+        return False
+    _si_thost, _si_tport = _si[4], _si[5]
+
+    try:
+        _si_ip_b = bytes(int(_o) for _o in _si_peer_ip.split("."))
+    except Exception:
+        return False
+    if len(_si_ip_b) != 4:
+        return False
+    _si_xport = (_si_peer_port ^ 0x2112) & 0xFFFF
+    _si_xaddr = bytes(a ^ b for a, b in zip(_si_ip_b, STUN_MAGIC_COOKIE, strict=True))
+    _si_xpa = b"\x00\x01" + _si_struct.pack("!H", _si_xport) + _si_xaddr
+
+    _si_body = _stun_attr(0x0012, _si_xpa) + _stun_attr(0x0013, _si_data)
+    _si_msg = (
+        b"\x00\x16"  # Send indication
+        + _si_struct.pack("!H", len(_si_body))
+        + STUN_MAGIC_COOKIE
+        + os.urandom(12)
+        + _si_body
+    )
+    try:
+        _si_sock.sendto(_si_msg, (_si_thost, _si_tport))
+        return True
+    except Exception:
+        _LOGGER.debug("TURN Send indication failed", exc_info=True)
+        return False
+
+
+def turn_install_permissions(
+    create_permission, socks, relay_addrs, status, _ip_cands, _ip_why, _log=None
+):
+    """CreatePermission for every camera candidate on both allocations.
+
+    Non-fatal by design: a socket with no allocation is a no-op, so the
+    direct path is untouched.  Returns the number of requests sent.
+
+    ``_log`` is the channel to report on.  The open-time install is a
+    once-per-session lifecycle fact and belongs at INFO; the bridge
+    re-installs every 120 s for the life of the session, which does
+    not.
+    """
+    _log = _log or status
+    _perm_ok = 0
+    for _c_ip, _c_port in _ip_cands:
+        for _p_sock in socks:
+            if create_permission(_p_sock, _c_ip, _c_port):
+                _perm_ok += 1
+    if _perm_ok:
+        _log(
+            f"TURN: installed {_perm_ok} relay permission(s) for"
+            f" {len(_ip_cands)} camera candidate(s) [{_ip_why}] - relay"
+            f" path is now usable if the camera cannot be reached"
+            f" directly"
+        )
+    elif _ip_cands and relay_addrs:
+        _log(
+            f"TURN: NO relay permission installed for {len(_ip_cands)}"
+            f" camera candidate(s) [{_ip_why}] despite"
+            f" {len(relay_addrs)} allocation(s) - relay path stays a"
+            f" black hole if the camera cannot be reached directly"
+        )
+    return _perm_ok
 
 
 async def _run_off_loop(fn, *args):
@@ -3038,145 +3362,7 @@ class _SdesOpenMixin:
         # that stores a shorter tuple silently disables the relay permission.
         _relay_addrs: dict = {}
 
-        def _turn_allocate_udp(_ta_sock, _ta_host, _ta_port, _ta_user, _ta_pass):
-            """RFC 5766 TURN relay allocation with long-term credential auth.
-            Returns (relay_ip, relay_port, realm, nonce) or None on failure."""
-            import hashlib as _ha
-            import hmac as _hm
-            import struct as _st_ta
-            import select as _sl_ta
-            import time as _tm_ta
-
-            _MAGIC_TA = b"\x21\x12\xa4\x42"
-
-            def _stun_message_integrity(_k, _m):
-                # Patch Length to include the MI attribute (4 hdr + 20 digest = 24)
-                _patched = _m[:2] + _st_ta.pack("!H", len(_m) - 20 + 24) + _m[4:]
-                return _hm.new(_k, _patched, _ha.sha1).digest()
-
-            # Step 1: unauthenticated Allocate -> get REALM and NONCE from 401
-            _tid1 = os.urandom(12)
-            _b1 = _stun_attr(
-                0x0019, b"\x11\x00\x00\x00"
-            )  # REQUESTED-TRANSPORT = UDP(17), RFC 5766 section 14.7 protocol in MSB
-            _r1 = b"\x00\x03" + _st_ta.pack("!H", len(_b1)) + _MAGIC_TA + _tid1 + _b1
-            try:
-                _ta_sock.sendto(_r1, (_ta_host, _ta_port))
-            except Exception:
-                return None
-            # Loop until we get a response whose TID matches our request (discard
-            # stale packets from previous exchanges that may linger in the buffer).
-            _rsp1 = None
-            _dl1 = _tm_ta.time() + 2.0
-            while _tm_ta.time() < _dl1:
-                _rem = _dl1 - _tm_ta.time()
-                _rs1, _, _ = _sl_ta.select([_ta_sock], [], [], min(_rem, 0.5))
-                if not _rs1:
-                    continue
-                try:
-                    _cand1, _ = _ta_sock.recvfrom(2048)
-                except OSError:
-                    break
-                if len(_cand1) >= 20 and _cand1[8:20] == _tid1:
-                    _rsp1 = _cand1
-                    break
-            if _rsp1 is None:
-                return None
-            _realm_ta = _nonce_ta = b""
-            _o = 20
-            while _o + 4 <= len(_rsp1):
-                _at, _al = _st_ta.unpack_from("!HH", _rsp1, _o)
-                _av = _rsp1[_o + 4 : _o + 4 + _al]
-                _o += 4 + _al + (-_al % 4)
-                if _at == 0x0014:
-                    _realm_ta = _av
-                elif _at == 0x0015:
-                    _nonce_ta = _av
-            if not _realm_ta or not _nonce_ta:
-                _LOGGER.debug(
-                    "TURN alloc step1: no realm/nonce in response type=%s",
-                    _rsp1[:2].hex(),
-                )
-                return None
-            _LOGGER.debug(
-                "TURN alloc step1 challenge: realm=%r nonce_len=%d",
-                _realm_ta.decode(errors="replace"),
-                len(_nonce_ta),
-            )
-
-            # Step 2: authenticated Allocate
-            _tid2 = os.urandom(12)
-            _key_ta = _ha.md5(_ta_user + b":" + _realm_ta + b":" + _ta_pass).digest()
-            _b2 = (
-                _stun_attr(0x0006, _ta_user)  # USERNAME
-                + _stun_attr(0x0014, _realm_ta)  # REALM
-                + _stun_attr(0x0015, _nonce_ta)  # NONCE
-                + _stun_attr(
-                    0x0019, b"\x11\x00\x00\x00"
-                )  # REQUESTED-TRANSPORT = UDP, RFC 5766 section 14.7 protocol in MSB
-            )
-            _h2 = b"\x00\x03" + _st_ta.pack("!H", len(_b2) + 24) + _MAGIC_TA + _tid2
-            _b2 += _stun_attr(
-                0x0008, _stun_message_integrity(_key_ta, _h2 + _b2)
-            )  # MESSAGE-INTEGRITY
-            _r2 = b"\x00\x03" + _st_ta.pack("!H", len(_b2)) + _MAGIC_TA + _tid2 + _b2
-            try:
-                _ta_sock.sendto(_r2, (_ta_host, _ta_port))
-            except Exception:
-                return None
-            # Same TID-matching loop - if step 1's 401 was still in the buffer,
-            # a bare recvfrom would consume it and report failure on a good alloc.
-            _rsp2 = None
-            _dl2 = _tm_ta.time() + 2.0
-            while _tm_ta.time() < _dl2:
-                _rem = _dl2 - _tm_ta.time()
-                _rs2, _, _ = _sl_ta.select([_ta_sock], [], [], min(_rem, 0.5))
-                if not _rs2:
-                    continue
-                try:
-                    _cand2, _ = _ta_sock.recvfrom(2048)
-                except OSError:
-                    break
-                if len(_cand2) >= 20 and _cand2[8:20] == _tid2:
-                    _rsp2 = _cand2
-                    break
-            if _rsp2 is None:
-                return None
-            if _rsp2[:2] != b"\x01\x03":  # Allocate Success = 0x0103
-                # Parse ERROR-CODE (0x0009) for diagnostics
-                _ec2 = 0
-                _o_ec = 20
-                while _o_ec + 4 <= len(_rsp2):
-                    _at_ec, _al_ec = _st_ta.unpack_from("!HH", _rsp2, _o_ec)
-                    _av_ec = _rsp2[_o_ec + 4 : _o_ec + 4 + _al_ec]
-                    _o_ec += 4 + _al_ec + (-_al_ec % 4)
-                    if _at_ec == 0x0009 and _al_ec >= 4:
-                        _ec2 = (_av_ec[2] & 0x07) * 100 + _av_ec[3]
-                _LOGGER.debug(
-                    "TURN alloc step2 error_code=%d realm=%r response_type=%s",
-                    _ec2,
-                    _realm_ta.decode(errors="replace"),
-                    _rsp2[:2].hex(),
-                )
-                return None
-
-            # Parse XOR-RELAYED-ADDRESS (0x0016)
-            _o = 20
-            while _o + 4 <= len(_rsp2):
-                _at, _al = _st_ta.unpack_from("!HH", _rsp2, _o)
-                _av = _rsp2[_o + 4 : _o + 4 + _al]
-                _o += 4 + _al + (-_al % 4)
-                if _at == 0x0016 and _al >= 8:  # XOR-RELAYED-ADDRESS
-                    _xp = _st_ta.unpack_from("!H", _av, 2)[0] ^ 0x2112
-                    _xb = bytes(
-                        a ^ b for a, b in zip(_av[4:8], _MAGIC_TA, strict=False)
-                    )
-                    _r_ip_ta = ".".join(str(b) for b in _xb)
-                    # Do NOT pre-create permissions for our own srflx IP or
-                    # TURN server IP. That can cause TURN self-loop Data
-                    # Indications and massive STUN echo storms.
-                    return _r_ip_ta, _xp, _realm_ta, _nonce_ta
-            return None
+        _turn_allocate_udp = turn_allocate_udp
 
         # --- Early TURN relay allocation (before offer build) --------------- #
         # Allocate relay now so offer c= and m= carry relay IP/port.
@@ -3466,17 +3652,17 @@ class _SdesOpenMixin:
             numeric_uid_raw,
             seq=f"ap{_random.randint(1000000, 9999999)}",
             payload={
-                    "peerid": peer_id,
-                    "devId": device_id,
-                    # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
-                    # to the target deviceId for livePlayReq.
-                    "dstAddr": device_id,
-                    # App payload compatibility fields (decompiled live-play model).
-                    "livePlay": 1,
-                    "powerType": _live_power_type,
-                    "p2pCache": _live_p2p_cache,
-                    "dseq": self._next_dseq(),
-                },
+                "peerid": peer_id,
+                "devId": device_id,
+                # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
+                # to the target deviceId for livePlayReq.
+                "dstAddr": device_id,
+                # App payload compatibility fields (decompiled live-play model).
+                "livePlay": 1,
+                "powerType": _live_power_type,
+                "p2pCache": _live_p2p_cache,
+                "dseq": self._next_dseq(),
+            },
         )
         _live_play_topic_sdes = f"iot/v1/s/{user_id}/IPC/livePlayReq"
         outgoing_q.put_nowait((_live_play_topic_sdes, _live_req_sdes))
@@ -3715,38 +3901,38 @@ class _SdesOpenMixin:
             numeric_uid_raw,
             seq=_seq(),
             payload={
-                    # Legacy flat fields - older firmware parses payload.peerid directly.
+                # Legacy flat fields - older firmware parses payload.peerid directly.
+                "peerid": peer_id,
+                "devId": device_id,
+                "offer": {"type": "offer", "sdp": sdes_offer_sdp},
+                "trackId": 0,
+                # Decompiled reference app (tyrus/o.java) sets dstAddr=deviceId
+                # for webrtcReq.
+                "dstAddr": device_id,
+                "encOffer": 1,
+                "liveMqtt": 1,
+                # powerType / p2pCache ride on the webrtcReq payload, alongside
+                # encOffer and liveMqtt - the same object the reference client
+                # puts them on (LDSMQTTClient.sendSdpOffer, smali :2967-2969,
+                # put at :3017/:3022).  They are STRINGS on the wire there: the
+                # app stringifies the ints it reads from the IPC device info,
+                # and its no-device-info fallback puts the literals "1" / "0".
+                # The DTLS webrtcReq has carried both for a long time
+                # (webrtc_open.py) and sends them as ints; that path is
+                # fleet-proven, so it is deliberately left alone rather than
+                # churned to match.
+                "powerType": str(_live_power_type),
+                "p2pCache": str(_live_p2p_cache),
+                # wPayload: newer firmware parses wPayload for ICE credentials
+                # and PSK.  Fields match reference app o.java (signaling/tyrus).
+                "wPayload": {
                     "peerid": peer_id,
-                    "devId": device_id,
-                    "offer": {"type": "offer", "sdp": sdes_offer_sdp},
-                    "trackId": 0,
-                    # Decompiled reference app (tyrus/o.java) sets dstAddr=deviceId
-                    # for webrtcReq.
-                    "dstAddr": device_id,
-                    "encOffer": 1,
-                    "liveMqtt": 1,
-                    # powerType / p2pCache ride on the webrtcReq payload, alongside
-                    # encOffer and liveMqtt - the same object the reference client
-                    # puts them on (LDSMQTTClient.sendSdpOffer, smali :2967-2969,
-                    # put at :3017/:3022).  They are STRINGS on the wire there: the
-                    # app stringifies the ints it reads from the IPC device info,
-                    # and its no-device-info fallback puts the literals "1" / "0".
-                    # The DTLS webrtcReq has carried both for a long time
-                    # (webrtc_open.py) and sends them as ints; that path is
-                    # fleet-proven, so it is deliberately left alone rather than
-                    # churned to match.
-                    "powerType": str(_live_power_type),
-                    "p2pCache": str(_live_p2p_cache),
-                    # wPayload: newer firmware parses wPayload for ICE credentials
-                    # and PSK.  Fields match reference app o.java (signaling/tyrus).
-                    "wPayload": {
-                        "peerid": peer_id,
-                        "sts": int(time.time() * 1000),
-                        "psk": _psk_value_req,
-                        "offer": {"type": "offer", "sdp": _compressed_sdp_req},
-                    },
-                    "IceServerList": _sdes_ice_server_list,
+                    "sts": int(time.time() * 1000),
+                    "psk": _psk_value_req,
+                    "offer": {"type": "offer", "sdp": _compressed_sdp_req},
                 },
+                "IceServerList": _sdes_ice_server_list,
+            },
         )
         outgoing_q.put_nowait((webrtc_req_topic, _webrtc_req_sdes_payload))
         self._cold_phase("webrtcReq (sdes)")
@@ -3908,23 +4094,23 @@ class _SdesOpenMixin:
                 numeric_uid_raw,
                 seq=_seq(),
                 payload={
+                    "peerid": peer_id,
+                    "devId": device_id,
+                    "answer": {"type": "answer", "sdp": _relay_answer_sdp},
+                    "trackId": 0,
+                    "dstAddr": device_id,
+                    "encOffer": 1,
+                    "liveMqtt": 1,
+                    # wPayload: newer firmware (e.g. LK.IPC.A001064) parses
+                    # wPayload to extract ICE credentials and PSK.  Fields match
+                    # reference app o.java (signaling/tyrus).
+                    "wPayload": {
                         "peerid": peer_id,
-                        "devId": device_id,
-                        "answer": {"type": "answer", "sdp": _relay_answer_sdp},
-                        "trackId": 0,
-                        "dstAddr": device_id,
-                        "encOffer": 1,
-                        "liveMqtt": 1,
-                        # wPayload: newer firmware (e.g. LK.IPC.A001064) parses
-                        # wPayload to extract ICE credentials and PSK.  Fields match
-                        # reference app o.java (signaling/tyrus).
-                        "wPayload": {
-                            "peerid": peer_id,
-                            "sts": int(time.time() * 1000),
-                            "psk": _psk_value_req,
-                            "answer": {"type": "answer", "sdp": _compressed_sdp_ans},
-                        },
+                        "sts": int(time.time() * 1000),
+                        "psk": _psk_value_req,
+                        "answer": {"type": "answer", "sdp": _compressed_sdp_ans},
                     },
+                },
             )
             # Send SDES webrtcResp: camera will send SRTP to our public IP/port
             # (srflx), which routes through NAT directly to our socket.
@@ -3973,22 +4159,22 @@ class _SdesOpenMixin:
                 numeric_uid_raw,
                 seq=_seq(),
                 payload={
-                        # dstAddr routes to the camera device, not the user account.
-                        # HAR captures confirm payload.dstAddr = deviceId on every
-                        # iceCandidateReq; using user_id causes silent drops by firmware.
-                        "dstAddr": device_id,
-                        # wPayload is the nested format required by newer firmware
-                        # (e.g. LK.IPC.A001064) that parses wPayload.candidate instead
-                        # of the flat payload.candidate field.
-                        "wPayload": {
-                            "peerid": peer_id,
-                            "candidate": _cand_obj,
-                        },
-                        # Flat legacy fields retained for older firmware compatibility.
+                    # dstAddr routes to the camera device, not the user account.
+                    # HAR captures confirm payload.dstAddr = deviceId on every
+                    # iceCandidateReq; using user_id causes silent drops by firmware.
+                    "dstAddr": device_id,
+                    # wPayload is the nested format required by newer firmware
+                    # (e.g. LK.IPC.A001064) that parses wPayload.candidate instead
+                    # of the flat payload.candidate field.
+                    "wPayload": {
                         "peerid": peer_id,
-                        "devId": device_id,
                         "candidate": _cand_obj,
                     },
+                    # Flat legacy fields retained for older firmware compatibility.
+                    "peerid": peer_id,
+                    "devId": device_id,
+                    "candidate": _cand_obj,
+                },
             )
             outgoing_q.put_nowait((_ice_cand_topic_sdes, _msg))
 
@@ -4999,189 +5185,23 @@ class _SdesOpenMixin:
         # purpose: relay-only battery cams (LAN IP unknown) answer AFTER the
         # STUN window, so they never enter that branch at all and the bridge
         # thread is the only place their permissions can be installed.
-        def _turn_create_permission(_cp_sock, _cp_peer_ip, _cp_peer_port):
-            """Authenticated CreatePermission for one peer on _cp_sock's relay."""
-            import hashlib as _cp_hashlib
-            import hmac as _cp_hmac
-            import socket as _cp_socket
-            import struct as _cp_struct
+        _turn_create_permission = functools.partial(
+            turn_create_permission, _relay_addrs
+        )
 
-            _cp = _relay_addrs.get(_cp_sock)
-            if not _cp or len(_cp) < 8:
-                return False
-            (_, _, _cp_realm, _cp_nonce, _cp_thost, _cp_tport, _cp_key, _cp_user) = _cp[
-                :8
-            ]
+        _turn_refresh_allocation = functools.partial(
+            turn_refresh_allocation, _relay_addrs
+        )
 
-            # XOR-PEER-ADDRESS: family, port ^ magic[:2], addr ^ magic
-            try:
-                _cp_ip_b = _cp_socket.inet_aton(_cp_peer_ip)
-            except OSError:
-                # _ICE_CAND_RE admits "1.2.3.4.5"; not an address, not a peer.
-                return False
-            _cp_xport = (_cp_peer_port ^ 0x2112) & 0xFFFF
-            _cp_xaddr = bytes(a ^ b for a, b in zip(_cp_ip_b, _STUN_MAGIC, strict=True))
-            _cp_xpa = b"\x00\x01" + _cp_struct.pack("!H", _cp_xport) + _cp_xaddr
+        _turn_send_indication = functools.partial(turn_send_indication, _relay_addrs)
 
-            _cp_tid = os.urandom(12)
-            _cp_body = (
-                _stun_attr(0x0012, _cp_xpa)  # XOR-PEER-ADDRESS
-                + _stun_attr(0x0006, _cp_user)  # USERNAME
-                + _stun_attr(0x0014, _cp_realm)  # REALM
-                + _stun_attr(0x0015, _cp_nonce)
-            )  # NONCE
-            _cp_hdr = (
-                b"\x00\x08"  # CreatePermission request
-                + _cp_struct.pack("!H", len(_cp_body) + 24)
-                + _STUN_MAGIC
-                + _cp_tid
-            )
-            _cp_mi = _cp_hmac.new(
-                _cp_key, _cp_hdr + _cp_body, _cp_hashlib.sha1
-            ).digest()
-            _cp_body += _stun_attr(0x0008, _cp_mi)  # MESSAGE-INTEGRITY
-            _cp_msg = (
-                b"\x00\x08"
-                + _cp_struct.pack("!H", len(_cp_body))
-                + _STUN_MAGIC
-                + _cp_tid
-                + _cp_body
-            )
-            try:
-                _cp_sock.sendto(_cp_msg, (_cp_thost, _cp_tport))
-                return True
-            except Exception:
-                _LOGGER.debug("CreatePermission send failed", exc_info=True)
-                return False
-
-        def _turn_refresh_allocation(_rf_sock, _rf_lifetime=600):
-            """Refresh _rf_sock's allocation before the server expires it.
-
-            The relay is granted for a limited LIFETIME (measured against this
-            camera's TURN server: 600 s) and the server tears it down silently
-            when it lapses.  Stock libwebrtc, which is what the vendor app
-            runs, keeps a scheduled Refresh for exactly this reason; without
-            one a held session loses its relay mid-stream and the failure looks
-            like the camera stopping rather than the allocation expiring.
-            """
-            import hashlib as _rf_hashlib
-            import hmac as _rf_hmac
-            import struct as _rf_struct
-
-            _rf = _relay_addrs.get(_rf_sock)
-            if not _rf or len(_rf) < 8:
-                return False
-            (_, _, _rf_realm, _rf_nonce, _rf_thost, _rf_tport, _rf_key, _rf_user) = _rf[
-                :8
-            ]
-
-            _rf_tid = os.urandom(12)
-            _rf_body = (
-                _stun_attr(0x000D, _rf_struct.pack("!I", _rf_lifetime))
-                + _stun_attr(0x0006, _rf_user)  # USERNAME
-                + _stun_attr(0x0014, _rf_realm)  # REALM
-                + _stun_attr(0x0015, _rf_nonce)
-            )  # NONCE
-            _rf_hdr = (
-                b"\x00\x04"  # Refresh request
-                + _rf_struct.pack("!H", len(_rf_body) + 24)
-                + _STUN_MAGIC
-                + _rf_tid
-            )
-            _rf_mi = _rf_hmac.new(
-                _rf_key, _rf_hdr + _rf_body, _rf_hashlib.sha1
-            ).digest()
-            _rf_body += _stun_attr(0x0008, _rf_mi)  # MESSAGE-INTEGRITY
-            _rf_msg = (
-                b"\x00\x04"
-                + _rf_struct.pack("!H", len(_rf_body))
-                + _STUN_MAGIC
-                + _rf_tid
-                + _rf_body
-            )
-            try:
-                _rf_sock.sendto(_rf_msg, (_rf_thost, _rf_tport))
-                return True
-            except Exception:
-                _LOGGER.debug("TURN Refresh send failed", exc_info=True)
-                return False
-
-        def _turn_send_indication(_si_sock, _si_peer_ip, _si_peer_port, _si_data):
-            """Send _si_data to a peer THROUGH _si_sock's relay allocation.
-
-            Egress from the relay address is the whole point: ICE validates a
-            candidate PAIR, so a camera can only nominate the relay candidate
-            we advertised if it receives packets whose source IS that relay.
-            Writing straight to the camera from the host socket leaves the
-            advertised relay candidate permanently unvalidated.
-
-            Send indications carry no MESSAGE-INTEGRITY (RFC 5766 s10.2), so
-            this needs the allocation's server address and nothing else.
-            """
-            import struct as _si_struct
-
-            _si = _relay_addrs.get(_si_sock)
-            if not _si or len(_si) < 6:
-                return False
-            _si_thost, _si_tport = _si[4], _si[5]
-
-            try:
-                _si_ip_b = bytes(int(_o) for _o in _si_peer_ip.split("."))
-            except Exception:
-                return False
-            if len(_si_ip_b) != 4:
-                return False
-            _si_xport = (_si_peer_port ^ 0x2112) & 0xFFFF
-            _si_xaddr = bytes(a ^ b for a, b in zip(_si_ip_b, _STUN_MAGIC, strict=True))
-            _si_xpa = b"\x00\x01" + _si_struct.pack("!H", _si_xport) + _si_xaddr
-
-            _si_body = _stun_attr(0x0012, _si_xpa) + _stun_attr(0x0013, _si_data)
-            _si_msg = (
-                b"\x00\x16"  # Send indication
-                + _si_struct.pack("!H", len(_si_body))
-                + _STUN_MAGIC
-                + os.urandom(12)
-                + _si_body
-            )
-            try:
-                _si_sock.sendto(_si_msg, (_si_thost, _si_tport))
-                return True
-            except Exception:
-                _LOGGER.debug("TURN Send indication failed", exc_info=True)
-                return False
-
-        def _turn_install_permissions(_ip_cands, _ip_why, _log=None):
-            """CreatePermission for every camera candidate on both allocations.
-
-            Non-fatal by design: a socket with no allocation is a no-op, so the
-            direct path is untouched.  Returns the number of requests sent.
-
-            ``_log`` is the channel to report on.  The open-time install is a
-            once-per-session lifecycle fact and belongs at INFO; the bridge
-            re-installs every 120 s for the life of the session, which does
-            not.
-            """
-            _log = _log or _status
-            _perm_ok = 0
-            for _c_ip, _c_port in _ip_cands:
-                for _p_sock in (_audio_sock, _video_sock):
-                    if _turn_create_permission(_p_sock, _c_ip, _c_port):
-                        _perm_ok += 1
-            if _perm_ok:
-                _log(
-                    f"TURN: installed {_perm_ok} relay permission(s) for"
-                    f" {len(_ip_cands)} camera candidate(s) [{_ip_why}] - relay"
-                    f" path is now usable if the camera cannot be reached"
-                    f" directly"
-                )
-            elif _ip_cands and _relay_addrs:
-                _log(
-                    f"TURN: NO relay permission installed for {len(_ip_cands)}"
-                    f" camera candidate(s) [{_ip_why}] despite"
-                    f" {len(_relay_addrs)} allocation(s) - relay path stays a"
-                    f" black hole if the camera cannot be reached directly"
-                )
-            return _perm_ok
+        _turn_install_permissions = functools.partial(
+            turn_install_permissions,
+            _turn_create_permission,
+            (_audio_sock, _video_sock),
+            _relay_addrs,
+            _status,
+        )
 
         # Relay mode only: the camera dials our relay allocation, and its
         # packets arrive at the TURN server from the house WAN address - OUR
