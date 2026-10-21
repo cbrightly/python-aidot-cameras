@@ -12,24 +12,14 @@ Source guards, because the waits live inside the one long open coroutine.
 """
 
 import ast
-import pathlib
-
-_SRC = (
-    pathlib.Path(__file__).resolve().parents[1]
-    / "aidot_cameras"
-    / "camera"
-    / "webrtc_open.py"
-)
 
 
 def _impl():
-    tree = ast.parse(_SRC.read_text())
-    return next(
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.AsyncFunctionDef)
-        and n.name == "_async_open_webrtc_stream_impl"
-    )
+    # The open and the phase coroutines it was split into, as one module, in
+    # the order they run.
+    from tests.source_parts import full_source
+
+    return ast.parse(full_source("_async_open_webrtc_stream_impl"))
 
 
 def _echo_branch(fn):

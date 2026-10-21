@@ -57,8 +57,10 @@ def _fn_source(mod, qualname):
 
 def test_sdes_open_path_checks_the_terminal_future():
     # The SDES branch must consult terminal_error_fut; before the fix it never did.
-    src = _fn_source(wo, "_async_open_webrtc_stream_impl")
-    sdes_branch = src[src.rindex("if use_sdes:") :]
+    import inspect
+
+    # The SDES branch of the DTLS open is its own phase coroutine.
+    sdes_branch = inspect.getsource(wo._dtls_open_sdes_branch)
     assert "terminal_error_fut" in sdes_branch, (
         "SDES branch must read terminal_error_fut (GAP D was DTLS-only)"
     )

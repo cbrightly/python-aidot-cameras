@@ -196,9 +196,13 @@ def test_the_readiness_flag_is_stamped_off_the_loop_thread():
 def test_the_flag_is_cleared_for_each_open():
     """Left set, the second open leaves its window instantly on the first
     open's answer."""
-    from aidot_cameras.camera.webrtc_open import _WebRTCOpenMixin
+    from aidot_cameras.camera import webrtc_open as wo
 
-    src = inspect.getsource(_WebRTCOpenMixin)
+    src = inspect.getsource(wo._WebRTCOpenMixin) + "".join(
+        inspect.getsource(getattr(wo, n))
+        for n in dir(wo)
+        if n.startswith("_dtls_open_")
+    )
     assert "self._camera_answer_ice_ready_ts = None" in src
 
 
