@@ -115,6 +115,7 @@ def test_create_permission_message_is_a_valid_stun_request():
         "_STUN_MAGIC": _STUN_MAGIC,
         "os": os,
         "_LOGGER": so._LOGGER,
+        "_stun_attr": so._stun_attr,
     }
     exec(body, ns)  # noqa: S102 - exercising the shipped source
     assert ns["_turn_create_permission"](sock, "192.0.2.55", 41234) is True
@@ -209,6 +210,13 @@ def test_every_relay_allocation_records_the_username():
     ]
     assert stores, "expected at least one _relay_addrs assignment"
     for node in stores:
+        if (
+            isinstance(node.value, ast.Call)
+            and getattr(node.value.func, "id", None) == "_turn_relay_record"
+        ):
+            # The shared builder takes the username as a required positional
+            # and stores all 8 fields; test_turn_target_shared pins its shape.
+            continue
         assert isinstance(node.value, ast.Tuple), "_relay_addrs stores a tuple"
         if any(isinstance(e, ast.Starred) for e in node.value.elts):
             # A splat rewrites one field of an existing entry (the stale-nonce

@@ -3147,6 +3147,30 @@ def avio_header(
     return _AVIO_RESP_HDR.pack(seq, command, ts_ms, length, reserved)
 
 
+def ipc_envelope(
+    method: str, device_id: str, user_id, numeric_uid_raw, *, seq: str, payload
+) -> str:
+    """The JSON envelope every IPC request to a camera rides in.
+
+    ``srcAddr`` is ``0.<user id>``, ``tst`` is now in milliseconds, and the
+    camera's registered numeric user id rides as ``userId`` when known (an
+    A001064 silently ignores an offer without it). Key order is the order
+    the app sends. Eleven requests across the two opens built this inline.
+    """
+    env = {
+        "method": method,
+        "service": "IPC",
+        "devId": device_id,
+        "srcAddr": f"0.{user_id}",
+        "seq": seq,
+        "tst": int(time.time() * 1000),
+    }
+    if numeric_uid_raw is not None:
+        env["userId"] = numeric_uid_raw
+    env["payload"] = payload
+    return json.dumps(env)
+
+
 class AvioResponse(NamedTuple):
     """A decoded AVIO control response."""
 

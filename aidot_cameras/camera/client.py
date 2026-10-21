@@ -732,6 +732,40 @@ def _should_abandon_keepalive(
 _SERVE_ARRIVAL_TS = settings.read("AIDOT_SERVE_ARRIVAL_TS")
 
 
+def _aac_silence_mix_args(audio_gain_db) -> list:
+    """ffmpeg arguments that mix the camera's audio over silence and encode AAC.
+
+    Shared by the http-listen serve and the RTSP push, which carried the same
+    twenty arguments twice. A continuous ``anullsrc`` under
+    ``amix(normalize=0)`` feeds the encoder from t=0 and is a no-op wherever
+    real audio is present, so sparse battery PCMA cannot stall the output.
+    """
+    return [
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=r=8000:cl=mono",
+        "-filter_complex",
+        (
+            "[0:a]aresample=async=1[a0];"
+            "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
+            f"volume={audio_gain_db}dB[aout]"
+        ),
+        "-map",
+        "0:v:0",
+        "-map",
+        "[aout]",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-ar",
+        "48000",
+        "-b:a",
+        "128k",
+    ]
+
+
 def _build_sdes_serve_cmd(
     *,
     sdp_path: str,
@@ -786,28 +820,7 @@ def _build_sdes_serve_cmd(
                 # encoder fed from t=0 so the mpegts PMT writes promptly on sparse
                 # battery PCMA; real audio mixes over the 0-valued silence
                 # (normalize=0 -> no-op when audio is present).
-                "-f",
-                "lavfi",
-                "-i",
-                "anullsrc=r=8000:cl=mono",
-                "-filter_complex",
-                (
-                    "[0:a]aresample=async=1[a0];"
-                    "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
-                    f"volume={audio_gain_db}dB[aout]"
-                ),
-                "-map",
-                "0:v:0",
-                "-map",
-                "[aout]",
-                "-c:v",
-                "copy",
-                "-c:a",
-                "aac",
-                "-ar",
-                "48000",
-                "-b:a",
-                "128k",
+                *_aac_silence_mix_args(audio_gain_db),
                 *time_args,
                 "-f",
                 "mpegts",
@@ -844,28 +857,7 @@ def _build_sdes_serve_cmd(
         # amix(normalize=0) feeds the encoder from t=0 and is a no-op wherever
         # real audio is present, so sparse audio cannot stall the publish.
         dest_args = [
-            "-f",
-            "lavfi",
-            "-i",
-            "anullsrc=r=8000:cl=mono",
-            "-filter_complex",
-            (
-                "[0:a]aresample=async=1[a0];"
-                "[a0][1:a]amix=inputs=2:duration=longest:normalize=0,"
-                f"volume={audio_gain_db}dB[aout]"
-            ),
-            "-map",
-            "0:v:0",
-            "-map",
-            "[aout]",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-ar",
-            "48000",
-            "-b:a",
-            "128k",
+            *_aac_silence_mix_args(audio_gain_db),
             *time_args,
             "-f",
             "rtsp",
@@ -2134,6 +2126,21 @@ class CameraMixin(
             _LOGGER.error("_async_get_mqtt_url failed: %r", exc)
             return None
 
+    async def _mqtt_credentials(self) -> tuple:
+        """``(mqttUser, mqttPassword, client id)`` for the account's broker.
+
+        The user falls back to the account id and the password to empty when
+        the smarthome auth carries neither; the client id is the account's
+        registered ``mqttClientId``, else ``app-<user>``. Four MQTT sessions
+        (control commands, device actions, attribute reads and the shared
+        persistent connection) built this the same way.
+        """
+        smarthome_auth = await self._async_get_smarthome_auth()
+        mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
+        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
+        client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
+        return mqtt_user, mqtt_pwd, client_id
+
     async def _async_get_smarthome_auth(self) -> Optional[dict]:
         """Fetch MQTT credentials (mqttUser + mqttPassword) for the Arnoo broker.
 
@@ -2498,10 +2505,7 @@ class CameraMixin(
         """
         import json as _json
 
-        smarthome_auth = await self._async_get_smarthome_auth()
-        mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
-        client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
+        mqtt_user, mqtt_pwd, client_id = await self._mqtt_credentials()
         user_id = self.user_id
 
         mqtt_url = await self._async_get_mqtt_url()
@@ -2831,14 +2835,11 @@ class CameraMixin(
 
         user_id = self.user_id
         device_id = self.device_id
-        smarthome_auth = await self._async_get_smarthome_auth()
+        mqtt_user, mqtt_pwd, client_id = await self._mqtt_credentials()
         mqtt_url = await self._async_get_mqtt_url()
         if not mqtt_url:
             _LOGGER.debug("async_query_device_action: no MQTT URL for %s", device_id)
             return None
-        mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(user_id)
-        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
-        client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
 
         _dev = self._camera_properties() or {}
         parent_id = (
@@ -3134,10 +3135,7 @@ class CameraMixin(
                     exc_info=True,
                 )
 
-        smarthome_auth = await self._async_get_smarthome_auth()
-        mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-        mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
-        _base_cid = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
+        mqtt_user, mqtt_pwd, _base_cid = await self._mqtt_credentials()
         # The broker binds the credential to the EXACT registered mqttClientId.
         # A suffixed connect is refused outright with CONNACK rc=4, "Bad user
         # name or password" - so the "-cmd" id this used to build could never
@@ -4222,6 +4220,35 @@ class CameraMixin(
             prev.cancel()
         self._keepalive_task = asyncio.ensure_future(self._keepalive_renew_loop())
 
+    async def _go_dormant(self, *, release_url: bool, why: str) -> None:
+        """Mark the camera not streaming and take its stream out of go2rtc.
+
+        Leaving the stream registered would point go2rtc at a source that no
+        longer exists, so a viewer attaching while the camera is dormant gets
+        "connection refused" on the serve port instead of a clean "no such
+        stream" (in push mode that source was never dialable at all), and it
+        would stop the integration's stale-stream watchdog, which keys on the
+        keepalive having ended. ``stream_source()`` re-registers on the next
+        view. ``release_url`` also forgets the keepalive's push URL and clears
+        the serve-ready event, which the idle release does and an abandon
+        after futile sessions does not. Five exits of the two loops did this
+        by hand.
+        """
+        self._streaming_active = False
+        self._cancel_keepalive_renew()
+        if release_url:
+            self._keepalive_rtsp_url = None
+            self._serve_ready.clear()
+        try:
+            await self._deregister_go2rtc()
+        except Exception:
+            _LOGGER.debug(
+                "camera %s: go2rtc deregister after %s failed",
+                self.device_id,
+                why,
+                exc_info=True,
+            )
+
     def _cancel_keepalive_renew(self) -> None:
         """Cancel the battery keep-alive renew loop if running (fire-and-forget)."""
         task, self._keepalive_task = getattr(self, "_keepalive_task", None), None
@@ -5039,16 +5066,7 @@ class CameraMixin(
                         self.device_id,
                         _no_media_streak,
                     )
-                    self._streaming_active = False
-                    self._cancel_keepalive_renew()
-                    try:
-                        await self._deregister_go2rtc()
-                    except Exception:
-                        _LOGGER.debug(
-                            "camera %s: go2rtc deregister after abandon failed",
-                            self.device_id,
-                            exc_info=True,
-                        )
+                    await self._go_dormant(release_url=False, why="abandon")
                     return
                 _not_ready_burst = self._next_not_ready_burst(False, _not_ready_burst)
                 _delay, _fast_retry = self._not_ready_retry_delay(
@@ -5243,26 +5261,7 @@ class CameraMixin(
                         "_sdes_keepalive_loop_inner",
                         exc_info=True,
                     )
-                self._streaming_active = False
-                self._cancel_keepalive_renew()
-                self._keepalive_rtsp_url = None
-                self._serve_ready.clear()
-                # Take the stream out of go2rtc too. Leaving it registered
-                # points go2rtc at a source that no longer exists, so a viewer
-                # attaching while the camera is dormant gets a hard refusal
-                # ("connection refused" on the serve port) instead of a clean
-                # "no such stream" - and in push mode that source was never
-                # dialable in the first place. stream_source() re-registers on
-                # the next view.
-                try:
-                    await self._deregister_go2rtc()
-                except Exception:
-                    _LOGGER.debug(
-                        "camera %s: swallowed exception in %s",
-                        getattr(self, "device_id", "?"),
-                        "_sdes_keepalive_loop_inner",
-                        exc_info=True,
-                    )
+                await self._go_dormant(release_url=True, why="idle release")
                 _LOGGER.debug(
                     "SDES serve: %s idle (no viewer) - released until next view",
                     self.device_id,
@@ -5343,21 +5342,7 @@ class CameraMixin(
                         self.device_id,
                         _no_media_streak,
                     )
-                    self._streaming_active = False
-                    # Same teardown the idle-release exit does. Leaving the
-                    # go2rtc stream registered points it at a serve port with
-                    # nothing listening, so a viewer attaching to a dormant
-                    # camera gets "connection refused" instead of a clean miss -
-                    # exactly what the idle-release path exists to avoid.
-                    self._cancel_keepalive_renew()
-                    try:
-                        await self._deregister_go2rtc()
-                    except Exception:
-                        _LOGGER.debug(
-                            "camera %s: go2rtc deregister after abandon failed",
-                            self.device_id,
-                            exc_info=True,
-                        )
+                    await self._go_dormant(release_url=False, why="abandon")
                     return
 
             if self._streaming_active:
@@ -5967,10 +5952,7 @@ class CameraMixin(
             pm = li.get(LOGIN_INFO_PERSISTENT_MQTT_KEY)  # re-check under the lock
             if pm is not None:
                 return pm
-            smarthome_auth = await self._async_get_smarthome_auth()
-            mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
-            mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
-            client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
+            mqtt_user, mqtt_pwd, client_id = await self._mqtt_credentials()
             mqtt_url = await self._async_get_mqtt_url()
             if not mqtt_url:
                 return None
@@ -6710,17 +6692,9 @@ class CameraMixin(
                             # of a clean miss - and stops the integration's
                             # stale-stream watchdog, which keys on the
                             # keepalive having ended.
-                            self._streaming_active = False
-                            self._cancel_keepalive_renew()
-                            try:
-                                await self._deregister_go2rtc()
-                            except Exception:
-                                _LOGGER.debug(
-                                    "camera %s: go2rtc deregister after video "
-                                    "abandon failed",
-                                    self.device_id,
-                                    exc_info=True,
-                                )
+                            await self._go_dormant(
+                                release_url=False, why="video abandon"
+                            )
                             return
                         break
                     if idle_release:
@@ -6764,21 +6738,7 @@ class CameraMixin(
             if idle_release:
                 # No viewer - go dormant; camera.stream_source() restarts us when
                 # someone opens the live view again.
-                self._streaming_active = False
-                self._cancel_keepalive_renew()
-                self._keepalive_rtsp_url = None
-                self._serve_ready.clear()
-                # Same as the SDES path: do not leave go2rtc holding a stream
-                # whose source no longer exists.
-                try:
-                    await self._deregister_go2rtc()
-                except Exception:
-                    _LOGGER.debug(
-                        "camera %s: swallowed exception in %s",
-                        getattr(self, "device_id", "?"),
-                        "_dtls_serve_loop_inner",
-                        exc_info=True,
-                    )
+                await self._go_dormant(release_url=True, why="idle release")
                 _LOGGER.debug(
                     "DTLS serve: %s idle (no viewer) - released until next view",
                     self.device_id,
