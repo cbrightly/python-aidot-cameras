@@ -27,6 +27,7 @@ retry when the camera said -50019, and the ordinary unhealthy-session delay
 otherwise. Never the open-failure escalation.
 """
 
+import inspect
 import os
 import sys
 
@@ -36,6 +37,19 @@ import pytest
 
 from aidot_cameras.exceptions import AidotCameraBusy, AidotCameraNoMedia, AidotError
 from aidot_cameras.camera.sdes_open import _should_skip_doomed_serve
+
+
+def _open_source():
+    """The SDES open and the phase coroutines it was split into."""
+    from aidot_cameras.camera import sdes_open as _so
+
+    parts = [inspect.getsource(_so._SdesOpenMixin._open_sdes_stream_impl)]
+    parts += [
+        inspect.getsource(getattr(_so, n))
+        for n in dir(_so)
+        if n.startswith("_sdes_open_")
+    ]
+    return "\n".join(parts)
 
 
 def _s(**kw):
@@ -242,11 +256,8 @@ def test_a_talk_or_snapshot_open_is_never_abandoned():
 
 
 def test_the_gate_only_fires_when_a_serve_is_actually_being_built():
-    import inspect
 
-    from aidot_cameras.camera.client import CameraMixin
-
-    src = inspect.getsource(CameraMixin._open_sdes_stream_impl)
+    src = _open_source()
     assert "serving=bool(rtsp_push_url or output_path)" in src, (
         "the gate must be told whether this open builds a serve at all"
     )

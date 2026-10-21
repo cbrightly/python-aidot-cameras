@@ -29,10 +29,9 @@ def _impl_signature():
 
 
 def _fn_source(qualname):
-    for cls in vars(cc).values():
-        if isinstance(cls, type) and qualname in cls.__dict__:
-            return inspect.getsource(cls.__dict__[qualname])
-    raise AssertionError(f"{qualname} not found")
+    from tests.source_parts import full_source
+
+    return full_source(qualname)
 
 
 def test_impl_accepts_reuse_peer_id_defaulting_to_none():

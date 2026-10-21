@@ -18,11 +18,8 @@ the exits that already call it are unaffected.
 
 import ast
 import asyncio
-import pathlib
 
 import pytest
-
-_SRC = pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras" / "camera"
 
 
 def _mixin():
@@ -99,13 +96,11 @@ def test_a_failing_abort_does_not_replace_the_open_error():
 
 
 def _impl_function():
-    tree = ast.parse((_SRC / "webrtc_open.py").read_text())
-    return next(
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.AsyncFunctionDef)
-        and n.name == "_async_open_webrtc_stream_impl"
-    )
+    # The open and the phase coroutines it was split into, as one module: the
+    # abort is defined in one phase and called from the later ones.
+    from tests.source_parts import full_source
+
+    return ast.parse(full_source("_async_open_webrtc_stream_impl"))
 
 
 def test_the_open_registers_its_abort_and_clears_it_on_hand_off():

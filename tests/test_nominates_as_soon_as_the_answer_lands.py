@@ -139,10 +139,17 @@ def test_it_is_not_scoped_to_one_branch_of_the_window():
 # --------------------------------------------------------------------------- #
 
 
-def _open_source() -> str:
-    from aidot_cameras.camera.client import CameraMixin
+def _open_source():
+    """The SDES open and the phase coroutines it was split into."""
+    from aidot_cameras.camera import sdes_open as _so
 
-    return inspect.getsource(CameraMixin._open_sdes_stream_impl)
+    parts = [inspect.getsource(_so._SdesOpenMixin._open_sdes_stream_impl)]
+    parts += [
+        inspect.getsource(getattr(_so, n))
+        for n in dir(_so)
+        if n.startswith("_sdes_open_")
+    ]
+    return "\n".join(parts)
 
 
 def test_the_window_loop_consults_the_exit_helper():
@@ -189,9 +196,13 @@ def test_the_readiness_flag_is_stamped_off_the_loop_thread():
 def test_the_flag_is_cleared_for_each_open():
     """Left set, the second open leaves its window instantly on the first
     open's answer."""
-    from aidot_cameras.camera.webrtc_open import _WebRTCOpenMixin
+    from aidot_cameras.camera import webrtc_open as wo
 
-    src = inspect.getsource(_WebRTCOpenMixin)
+    src = inspect.getsource(wo._WebRTCOpenMixin) + "".join(
+        inspect.getsource(getattr(wo, n))
+        for n in dir(wo)
+        if n.startswith("_dtls_open_")
+    )
     assert "self._camera_answer_ice_ready_ts = None" in src
 
 

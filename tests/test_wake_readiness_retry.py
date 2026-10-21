@@ -169,7 +169,10 @@ def test_not_ready_never_aborts_an_open():
     import inspect
     import aidot_cameras.camera.sdes_open as so
 
-    _body = inspect.getsource(so._SdesOpenMixin)
+    # The open and the phase coroutines it was split into.
+    _body = inspect.getsource(so._SdesOpenMixin) + "".join(
+        inspect.getsource(getattr(so, n)) for n in dir(so) if n.startswith("_sdes_open_")
+    )
     _idx = _body.find("_LIVE_PLAY_NOT_READY")
     assert _idx != -1, "the SDES open no longer references the not-ready code"
     # The only refusal branch keys on livePlay == 0, not on the code.

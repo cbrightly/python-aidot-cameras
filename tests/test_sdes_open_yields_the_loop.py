@@ -100,15 +100,19 @@ async def test_a_closed_socket_raises_like_select_did():
         a.close()
 
 
-def _open_impl_node():
+def _open_impl_nodes():
+    """The open coroutine and the phase coroutines it was split into."""
     tree = ast.parse(inspect.getsource(sdes_open))
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.AsyncFunctionDef)
-            and node.name == "_open_sdes_stream_impl"
-        ):
-            return node
-    raise AssertionError("_open_sdes_stream_impl not found")
+    found = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and (
+            node.name == "_open_sdes_stream_impl" or node.name.startswith("_sdes_open_")
+        )
+    ]
+    assert any(n.name == "_open_sdes_stream_impl" for n in found)
+    return found
 
 
 def _calls_on_the_coroutine_body(fn_node):
@@ -142,7 +146,7 @@ def _name(call):
 
 
 def test_the_open_coroutine_makes_no_blocking_socket_waits():
-    calls = _calls_on_the_coroutine_body(_open_impl_node())
+    calls = [c for n in _open_impl_nodes() for c in _calls_on_the_coroutine_body(n)]
     blocking = [
         (c.lineno, _name(c))
         for c in calls
@@ -156,7 +160,7 @@ def test_the_open_coroutine_makes_no_blocking_socket_waits():
 
 def test_the_allocates_still_happen_off_the_loop():
     """Guard the guard: the allocate must still be reached, via the executor."""
-    calls = _calls_on_the_coroutine_body(_open_impl_node())
+    calls = [c for n in _open_impl_nodes() for c in _calls_on_the_coroutine_body(n)]
     via_executor = [
         c
         for c in calls
