@@ -13,7 +13,6 @@ terminal, and the SDES keepalive loop treats AidotCameraBusy as "back off for
 the release window" rather than "retry immediately".
 """
 
-import inspect
 import os
 import sys
 
@@ -23,7 +22,6 @@ from aidot_cameras.camera.protocol import (
     _WEBRTC_TERMINAL_ACK_CODES,
     _terminal_webrtc_ack,
 )
-import aidot_cameras.camera.client as cc
 import aidot_cameras.camera.webrtc_open as wo
 
 
@@ -45,16 +43,6 @@ def test_transient_ack_is_not_terminal():
     assert _terminal_webrtc_ack(msg) is None
 
 
-def _fn_source(mod, qualname):
-    """Source of a method by name, without relying on file offsets."""
-    for cls in vars(mod).values():
-        if isinstance(cls, type):
-            fn = cls.__dict__.get(qualname)
-            if fn is not None:
-                return inspect.getsource(fn)
-    raise AssertionError(f"{qualname} not found in {mod.__name__}")
-
-
 def test_sdes_open_path_checks_the_terminal_future():
     # The SDES branch must consult terminal_error_fut; before the fix it never did.
     import inspect
@@ -68,7 +56,9 @@ def test_sdes_open_path_checks_the_terminal_future():
 
 
 def test_sdes_keepalive_loop_backs_off_on_camera_busy():
-    loop_src = _fn_source(cc, "_sdes_keepalive_loop_inner")
+    from tests.source_parts import full_source
+
+    loop_src = full_source("_sdes_keepalive_loop_inner")
     assert "except AidotCameraBusy" in loop_src, (
         "the SDES keepalive loop must honour a camera refusal instead of "
         "retrying on the short backoff"

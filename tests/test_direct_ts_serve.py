@@ -345,11 +345,9 @@ def test_the_serve_loop_binds_the_advertised_port_when_there_is_no_relay():
     describes cleanly (`rc: 0, h264,video`) when go2rtc is pointed at the port
     it actually bound.
     """
-    import inspect
+    from tests.source_parts import full_source
 
-    import aidot_cameras.camera.client as cc
-
-    src = inspect.getsource(cc.CameraMixin._dtls_serve_loop_inner)
+    src = full_source("_dtls_serve_loop_inner")
     assert "_DirectTsServer(_ff_port or 0)" not in src, (
         "binds a random port when no relay holds the public one"
     )

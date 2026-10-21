@@ -8,10 +8,8 @@ the cause lasted (reproduced against integration 2.37.2 on a bundled-only
 install, and an add-on outage does the same).
 """
 
-import inspect
-
-import aidot_cameras.camera.client as cc
 from aidot_cameras.camera.protocol import _battery_cap_spans_sessions_due as due
+from tests.source_parts import full_source
 
 
 def test_a_battery_keepalive_with_no_known_viewer_past_the_cap_stops():
@@ -32,7 +30,7 @@ def test_a_cap_of_zero_or_none_disables_it():
 
 
 def _src():
-    return inspect.getsource(cc.CameraMixin._sdes_keepalive_loop_inner)
+    return full_source("_sdes_keepalive_loop_inner")
 
 
 def test_the_anchor_is_set_once_per_keepalive_not_per_session():

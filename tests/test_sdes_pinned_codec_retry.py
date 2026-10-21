@@ -74,11 +74,9 @@ def test_the_abandon_is_a_no_media_abandon_that_names_both_codecs():
 
 
 def _loop_source() -> str:
-    import inspect
+    from tests.source_parts import full_source
 
-    from aidot_cameras.camera.client import CameraMixin
-
-    return inspect.getsource(CameraMixin._sdes_keepalive_loop_inner)
+    return full_source("_sdes_keepalive_loop_inner")
 
 
 def test_the_keepalive_retries_a_wrong_codec_without_no_media_accounting():
@@ -89,12 +87,14 @@ def test_the_keepalive_retries_a_wrong_codec_without_no_media_accounting():
     assert src.index("except AidotCameraWrongCodec") < src.index(
         "except AidotCameraNoMedia"
     ), "the more specific handler must come first, or it is never reached"
-    i = src.index("            except AidotCameraWrongCodec")
-    m = re.search(r"\n            except ", src[i + 1 :])
+    head = re.search(r"^( *)except AidotCameraWrongCodec", src, re.M)
+    i, indent = head.start(), head.group(1)
+    m = re.search(rf"\n{indent}except ", src[i + 1 :])
     branch = src[i : i + 1 + m.start()]
     assert "_next_no_media_streak" not in branch
     assert "_should_abandon_keepalive" not in branch
-    assert "continue" in branch
+    # A `continue` of the loop comes back from the region as _LoopContinue.
+    assert "continue" in branch or "_LoopContinue(" in branch
 
 
 def test_the_camera_knows_whether_a_ts_reader_is_expected(monkeypatch):

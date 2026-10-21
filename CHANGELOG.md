@@ -24,6 +24,33 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   AAC silence mixes and the five MQTT credential derivations each share one
   implementation, every one pinned by a test that keeps the previous
   literal and compares.
+- **The opens and the serve loops are orchestrators over phase coroutines,
+  with no behaviour change.** The SDES open's bridge thread, a 2458-line
+  closure over the open's locals, is built by a module factory,
+  `make_sdes_bridge`, which takes everything it read as keyword arguments:
+  fifty-three names by value, the seven it rebound as its initial state, and
+  the three the open reassigns while the thread runs (the two audio SRTP
+  keys and the data-channel answer flag) as getters; the DTLS open's MQTT
+  message handler and data-channel open handler are factories the same way.
+  What remains of each open runs as a sequence of phase coroutines
+  (`_sdes_open_*`, fourteen;
+  `_dtls_open_*`, ten) and each serve loop as region coroutines
+  (`_sdes_keepalive_*`, four; `_dtls_serve_loop_*`, three). A phase receives
+  the open's locals, runs its statements unchanged and returns the names it
+  bound, which the open reads back: a name a phase never bound stays unbound
+  in the open, an early `return` comes back as a sentinel the open returns,
+  and a `continue` of a loop as one the loop continues on. The cuts were
+  placed by analysis of what every nested function reads against what later
+  phases rebind, so no closure sees a different value than it did; where one
+  would have, the statements stayed in the open. Bodies moved verbatim; the
+  phase prologues and the read-backs are the only new code.
+  `_open_sdes_stream_impl` is 1730 lines from 5784, `_async_open_webrtc_stream_impl`
+  219 from 3451, `_sdes_keepalive_loop_inner` 158 from 459 and
+  `_dtls_serve_loop_inner` 192 from 625. The fake lab's library log, compared
+  as a multiset of message templates before and after the split, is
+  identical. Tests that read an open or a loop as source go through
+  `tests/source_parts.full_source`, which joins the method and its phases in
+  the order they run.
 - **The health line carries frame figures again, counting pictures.**
   1.0.0rc49's line showed the serve canary's raw frame count, which ran at
   about twice the picture rate, and rc51 took the figures off until the

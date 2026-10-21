@@ -119,11 +119,9 @@ def test_it_is_catchable_as_a_plain_exception_too():
 
 
 def _loop_source() -> str:
-    import inspect
+    from tests.source_parts import full_source
 
-    from aidot_cameras.camera.client import CameraMixin
-
-    return inspect.getsource(CameraMixin._sdes_keepalive_loop_inner)
+    return full_source("_sdes_keepalive_loop_inner")
 
 
 def test_the_no_media_branch_is_handled_before_the_generic_one():
@@ -143,8 +141,9 @@ def _no_media_branch() -> str:
     import re
 
     src = _loop_source()
-    i = src.index("            except AidotCameraNoMedia")
-    m = re.search(r"\n            except ", src[i + 1 :])
+    head = re.search(r"^( *)except AidotCameraNoMedia", src, re.M)
+    i, indent = head.start(), head.group(1)
+    m = re.search(rf"\n{indent}except ", src[i + 1 :])
     return src[i : i + 1 + m.start()] if m else src[i:]
 
 
@@ -204,7 +203,9 @@ def test_the_no_media_branch_retries_rather_than_giving_up():
     """It must loop round to another attempt - except when the futile-keepalive
     guard deliberately stops, which is a `return`, not a failure to retry."""
     branch = _no_media_branch()
-    assert "continue" in branch
+    # The branch lives in a region coroutine of the loop, where a `continue`
+    # of the loop is returned to it as the _LoopContinue sentinel.
+    assert "continue" in branch or "_LoopContinue(" in branch
 
 
 # --------------------------------------------------------------------------- #

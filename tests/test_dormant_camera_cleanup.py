@@ -12,7 +12,6 @@ listening, and go2rtc reporting
 """
 
 import asyncio
-import inspect
 
 import aidot_cameras.camera.client as cc
 from aidot_cameras.camera.sdes_open import (
@@ -21,9 +20,11 @@ from aidot_cameras.camera.sdes_open import (
 )
 import logging
 
+from tests.source_parts import full_source
+
 
 def _src(name):
-    return inspect.getsource(getattr(cc.CameraMixin, name))
+    return full_source(name)
 
 
 def test_sdes_idle_release_goes_dormant():
@@ -123,8 +124,8 @@ def test_every_exit_that_stops_streaming_also_deregisters():
     import textwrap
 
     for name in ("_sdes_keepalive_loop_inner", "_dtls_serve_loop_inner"):
-        tree = ast.parse(textwrap.dedent(_src(name)))
-        fn = tree.body[0]
+        # The loop and its region coroutines, parsed together as a module.
+        fn = ast.parse(textwrap.dedent(_src(name)))
 
         stops = []  # (lineno of `_streaming_active = False`)
         dormants = [

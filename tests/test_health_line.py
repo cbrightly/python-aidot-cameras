@@ -263,11 +263,9 @@ def test_period_knob(raw, expected):
 
 
 def test_the_sdes_keepalive_loop_ticks_a_reporter_every_poll():
-    import inspect
+    from tests.source_parts import full_source
 
-    import aidot_cameras.camera.client as cc
-
-    src = inspect.getsource(cc.CameraMixin._sdes_keepalive_loop_inner)
+    src = full_source("_sdes_keepalive_loop_inner")
     made = src.index("_health = HealthReporter(self.device_id)")
     wait = src.index("_fin, _ = await asyncio.wait({_done}, timeout=5.0)")
     tick = src.index("_health.tick(", wait)
@@ -277,11 +275,9 @@ def test_the_sdes_keepalive_loop_ticks_a_reporter_every_poll():
 
 
 def test_the_dtls_serve_loop_reports_on_its_own_cadence():
-    import inspect
+    from tests.source_parts import full_source
 
-    import aidot_cameras.camera.client as cc
-
-    src = inspect.getsource(cc.CameraMixin._dtls_serve_loop_inner)
+    src = full_source("_dtls_serve_loop_inner")
     made = src.index("_health_dtls = HealthReporter(self.device_id)")
     due = src.index("if _health_dtls.due(_now):")
     assert made < due
