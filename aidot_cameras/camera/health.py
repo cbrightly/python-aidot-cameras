@@ -26,32 +26,14 @@ import logging
 import math
 from typing import Any, Mapping, Optional
 
-import os
+from .. import settings
 
 _LOGGER = logging.getLogger(__name__)
 
-_PERIOD_ENV = "AIDOT_HEALTH_LINE_S"
-_PERIOD_DEFAULT_S = 60.0
-
 
 def health_line_period_s(env: Optional[Mapping[str, str]] = None) -> float:
-    """Seconds between health lines; ``0`` disables them (negative reads as 0).
-
-    A malformed or non-finite value is the default: this is read when a session
-    opens, and a typo in a unit file must not be able to stop a camera."""
-    raw = (os.environ if env is None else env).get(_PERIOD_ENV)
-    if raw is None:
-        return _PERIOD_DEFAULT_S
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        v = None
-    if v is None or not math.isfinite(v):
-        _LOGGER.debug(
-            "%s=%r is not a number; using %.0f", _PERIOD_ENV, raw, _PERIOD_DEFAULT_S
-        )
-        return _PERIOD_DEFAULT_S
-    return max(0.0, v)
+    """Seconds between health lines; ``0`` disables them (negative reads as 0)."""
+    return settings.read("AIDOT_HEALTH_LINE_S", env)
 
 
 def _fmt_bytes(n: float) -> str:

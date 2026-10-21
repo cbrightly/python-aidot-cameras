@@ -48,8 +48,8 @@ def test_the_constant_is_wired_to_the_env_var_it_documents():
 
     src = inspect.getsource(camera_client)
     assert (
-        '_DTLS_SERVE_ICE_WAIT_S = _parse_env_float("AIDOT_DTLS_SERVE_ICE_WAIT_S", 30.0)'
-    ) in src
+        '_DTLS_SERVE_ICE_WAIT_S = settings.read("AIDOT_DTLS_SERVE_ICE_WAIT_S")' in src
+    )
 
 
 def test_ice_budget_never_extends_the_callers_own_timeout():

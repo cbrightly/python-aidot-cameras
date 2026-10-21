@@ -59,6 +59,8 @@ from .agc import (  # re-exported: the publishers' callers and tests use these n
 )
 from .rtp_h264 import H264Depacketizer
 
+from .. import settings
+
 _LOGGER = logging.getLogger(__name__)
 
 #: Env switch for the whole feature. On by default since 1.0.0rc44; set it to
@@ -120,7 +122,7 @@ def direct_publish_enabled() -> bool:
     built on it. An ``rtsp://`` push still needs a server that accepts an
     ANNOUNCE (go2rtc); anything else keeps the ffmpeg serve regardless.
     """
-    return os.environ.get(ENV_DIRECT_PUBLISH, "1").strip().lower() not in _OFF
+    return settings.read(ENV_DIRECT_PUBLISH)
 
 
 def is_publishable_url(url: Optional[str]) -> bool:
@@ -140,10 +142,7 @@ def _gap_log_level(gaps_before: int) -> int:
 
 def _publish_gap_warn_s() -> float:
     """Seconds without a frame to publish before saying so; 0 disables."""
-    try:
-        return max(0.0, float(os.environ.get("AIDOT_PUBLISH_GAP_WARN_S", "1.0")))
-    except (TypeError, ValueError):
-        return 1.0
+    return settings.read("AIDOT_PUBLISH_GAP_WARN_S")
 
 
 class RtspPublishError(RuntimeError):

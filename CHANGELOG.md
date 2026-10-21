@@ -6,6 +6,26 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Changed
+- **One registry and one parser for every `AIDOT_*` variable.**
+  `aidot_cameras/settings.py` lists every variable the library reads with its
+  default, kind and floor, and a test fails on a name read in the source but
+  missing from the table, or in the table but missing from the README or
+  `docs/ENVIRONMENT.md`. Every read goes through one parser, still at the
+  moment it was read before (import time stays import time, per-open stays
+  per-open). Compared against the previous code for every variable and 32
+  values each, the results are identical except in two places, both of which
+  used to break things: ten variables (`AIDOT_SERVE_REORDER_QUEUE`,
+  `AIDOT_SERVE_MAX_DELAY_US`, `AIDOT_FUTILE_KEEPALIVE_LIMIT`,
+  `AIDOT_REMB_TARGET_BPS`, the three `AIDOT_DTLS_SLOW_PROBE_*` and the three
+  `AIDOT_LOGIN_*`) stopped the library importing on an empty or malformed
+  value and now read as their default; and `nan` / `inf` given to a numeric
+  variable now reads as its default instead of reaching a timer or a gain.
+  The credential and measurement-seam variables keep their own raw reads and
+  are registered, not migrated. The README no longer lists
+  `AIDOT_PLAYBACK_TLS_VERIFY`, which nothing has read since the playback path
+  was removed in 1.0.0rc53.
+
 ### Removed
 - **Support for upstream `python-aidot` 0.3.54-0.3.55 (the typed "shape B").**
   The declared range has started at 0.3.56 since 2026-09-23, so none of it

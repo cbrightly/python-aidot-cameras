@@ -28,6 +28,8 @@ from typing import Any, Callable, Optional, NamedTuple
 from .agc import AlawAgc
 from .constants import TALK_PCM_FRAME_BYTES, TALK_PCM_RATE
 
+from .. import settings
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -854,7 +856,7 @@ def _sprop_dir() -> str:
     directory, so every container recreation cost a startup-churn window.
     Same lesson as cloud_auth's country default: bind config at call time.
     """
-    return os.environ.get("AIDOT_SPROP_DIR") or os.path.join(
+    return settings.read("AIDOT_SPROP_DIR") or os.path.join(
         _XDG_CONFIG_HOME, "aidot", "sprop"
     )
 
@@ -1128,12 +1130,7 @@ def _warn_lan_serve(host: "Optional[str]", *, context: str) -> None:
     ``AIDOT_ALLOW_LAN_SERVE=1`` once the exposure is understood."""
     if _is_loopback_serve_host(host):
         return
-    if os.environ.get(_ALLOW_LAN_SERVE_ENV, "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    ):
+    if settings.read(_ALLOW_LAN_SERVE_ENV):
         return
     _LOGGER.warning(
         "%s: serving DECRYPTED camera media on host %r with NO authentication - "
@@ -1690,22 +1687,7 @@ def _battery_unknown_release_s(env=None) -> float:
     ``AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S`` overrides the 300 s default;
     ``<= 0`` disables the cap (unknown never releases). A malformed or
     non-finite value falls back to the default with one debug line."""
-    _env = os.environ if env is None else env
-    _raw = _env.get("AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S")
-    if _raw is None:
-        return _BATTERY_UNKNOWN_RELEASE_S
-    try:
-        _v = float(_raw)
-    except (TypeError, ValueError):
-        _v = None
-    if _v is None or _v != _v or _v in (float("inf"), float("-inf")):
-        _LOGGER.debug(
-            "AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S=%r is not a number; using %.0f",
-            _raw,
-            _BATTERY_UNKNOWN_RELEASE_S,
-        )
-        return _BATTERY_UNKNOWN_RELEASE_S
-    return _v
+    return settings.read("AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S", env)
 
 
 #: Default for ``AIDOT_STREAM_STARTUP_GRACE_S``.
@@ -1721,22 +1703,7 @@ def _stream_startup_grace_s(env=None) -> float:
     ``AIDOT_STREAM_STARTUP_GRACE_S`` overrides the 60 s default; ``<= 0``
     means no grace (the idle window alone applies). A malformed or non-finite
     value falls back to the default with one debug line."""
-    _env = os.environ if env is None else env
-    _raw = _env.get("AIDOT_STREAM_STARTUP_GRACE_S")
-    if _raw is None:
-        return _STREAM_STARTUP_GRACE_S
-    try:
-        _v = float(_raw)
-    except (TypeError, ValueError):
-        _v = None
-    if _v is None or _v != _v or _v in (float("inf"), float("-inf")):
-        _LOGGER.debug(
-            "AIDOT_STREAM_STARTUP_GRACE_S=%r is not a number; using %.0f",
-            _raw,
-            _STREAM_STARTUP_GRACE_S,
-        )
-        return _STREAM_STARTUP_GRACE_S
-    return _v
+    return settings.read("AIDOT_STREAM_STARTUP_GRACE_S", env)
 
 
 #: How far ahead of presentation a picture is told to decode. Must exceed the
@@ -1750,11 +1717,7 @@ _REORDER_SLACK_TICKS = 180000
 
 def _reorder_slack(env=None) -> int:
     """Decode-ahead in 90 kHz ticks. ``AIDOT_REORDER_SLACK_TICKS`` overrides."""
-    _env = os.environ if env is None else env
-    try:
-        _v = int(_env.get("AIDOT_REORDER_SLACK_TICKS", _REORDER_SLACK_TICKS))
-    except (TypeError, ValueError):
-        return _REORDER_SLACK_TICKS
+    _v = settings.read("AIDOT_REORDER_SLACK_TICKS", env)
     return _v if _v >= 0 else _REORDER_SLACK_TICKS
 
 
@@ -3352,7 +3315,7 @@ class AvioResponseRouter:
 #: camera does advertise goog-remb in its answer, so this is a working
 #: instrument for anyone who wants to measure their own hardware. Set
 #: AIDOT_REMB_TARGET_BPS to a bitrate to turn it on.
-REMB_TARGET_BPS = int(os.environ.get("AIDOT_REMB_TARGET_BPS", "0"))
+REMB_TARGET_BPS = settings.read("AIDOT_REMB_TARGET_BPS")
 
 
 def build_remb(sender_ssrc: int, media_ssrcs: "list", bitrate_bps: int) -> bytes:

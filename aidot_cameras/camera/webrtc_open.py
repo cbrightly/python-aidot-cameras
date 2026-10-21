@@ -9,7 +9,6 @@ full CameraMixin at runtime.
 
 import asyncio
 import json
-import os
 import random
 import struct
 import time
@@ -49,6 +48,8 @@ from .protocol import (
     _upgrade_sctp,
     _webrtc_consume_video,
 )
+
+from .. import settings
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -637,14 +638,7 @@ class _WebRTCOpenMixin:
         # start_keepalive(fast_connect=...)); fall back to the env var otherwise.
         _fast_connect = getattr(self, "_fast_connect_opt", None)
         if _fast_connect is None:
-            _fast_connect = os.environ.get(
-                "AIDOT_FAST_CONNECT", ""
-            ).strip().lower() in (
-                "1",
-                "true",
-                "yes",
-                "on",
-            )
+            _fast_connect = settings.read("AIDOT_FAST_CONNECT")
         # fast_connect (skip livePlay/ICE waits + strip TURN) is validated for the
         # DTLS path only.  On SDES cameras those skips leave the SCTP handshake
         # under-armed and the session churns/re-establishes (~every 60-90s),
@@ -2062,7 +2056,7 @@ class _WebRTCOpenMixin:
             # routable to the camera) - off-subnet/strict-NAT users need srflx,
             # so default stays STUN-only.  See _narrow_pc_ice for the A/B that
             # showed dedupe/single-STUN do NOT help (the 5s is a fixed timeout).
-            _host_only = os.environ.get("AIDOT_FAST_CONNECT_HOST_ONLY") == "1"
+            _host_only = settings.read("AIDOT_FAST_CONNECT_HOST_ONLY")
             _pc_ice_servers = _narrow_pc_ice(_ice_servers, host_only=_host_only)
             if _host_only:
                 _status(
@@ -3073,7 +3067,7 @@ class _WebRTCOpenMixin:
                 # AIDOT_DTLS_PINNED_FP lets an operator pin the camera's real
                 # sha-256 fingerprint (colon-separated hex, as aiortc formats it);
                 # when set, a mismatching cert fails the handshake instead.
-                _pinned_fp = (os.environ.get("AIDOT_DTLS_PINNED_FP") or "").strip()
+                _pinned_fp = (settings.read("AIDOT_DTLS_PINNED_FP") or "").strip()
                 if not _pinned_fp:
                     _LOGGER.warning(
                         "camera %s: DTLS peer certificate is NOT authenticated "
@@ -3632,7 +3626,7 @@ class _WebRTCOpenMixin:
             # own cert and aiortc's native check would pass. Gating the pin on
             # _fp_subs (empty-fingerprint only) left it silently inert for cameras
             # that present a real fingerprint.
-            _np_pinned_fp = (os.environ.get("AIDOT_DTLS_PINNED_FP") or "").strip()
+            _np_pinned_fp = (settings.read("AIDOT_DTLS_PINNED_FP") or "").strip()
             if _fp_subs or _np_pinned_fp:
                 import types as _np_types
 

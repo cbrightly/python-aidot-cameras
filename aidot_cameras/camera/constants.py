@@ -4,8 +4,9 @@ Extracted verbatim from client.py (behavior-preserving). client.py
 re-imports these names, so the public/runtime surface is unchanged.
 """
 
-import os
 import struct
+
+from .. import settings
 
 # AppKey from LDSAppOpenSDK CocoaPods docs (kLDSAppOpenSDKKey = "appa070")
 _LEEDARSON_APP_KEY = "appa070"
@@ -37,22 +38,21 @@ _AIDOT_API_BASE_TEMPLATE = "https://prod-{region}-api.arnoo.com"
 
 def smarthome_base(region: str) -> str:
     """Smarthome API base for ``region`` (AIDOT_SMARTHOME_URL_TEMPLATE override)."""
-    tmpl = os.environ.get("AIDOT_SMARTHOME_URL_TEMPLATE") or _SMARTHOME_URL_TEMPLATE
+    tmpl = settings.read("AIDOT_SMARTHOME_URL_TEMPLATE") or _SMARTHOME_URL_TEMPLATE
     return tmpl.format(region=region)
 
 
 def aidot_api_base(region: str) -> str:
     """Platform API base for ``region`` (AIDOT_API_BASE_TEMPLATE override)."""
-    tmpl = os.environ.get("AIDOT_API_BASE_TEMPLATE") or _AIDOT_API_BASE_TEMPLATE
+    tmpl = settings.read("AIDOT_API_BASE_TEMPLATE") or _AIDOT_API_BASE_TEMPLATE
     return tmpl.format(region=region)
 
 
 def _ice_uris_from_env(var: str, default: list) -> list:
-    """Comma-separated ICE URI list from ``var``; unset -> default, "" -> []."""
-    env = os.environ.get(var)
-    if env is None:
-        return list(default)
-    return [u.strip() for u in env.split(",") if u.strip()]
+    """Comma-separated ICE URI list from ``var``; unset -> default, "" -> [].
+
+    ``default`` is the registry's and is kept in the call for the reader."""
+    return list(settings.read(var))
 
 
 def stun_server_uris() -> list:

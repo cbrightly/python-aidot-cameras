@@ -55,6 +55,8 @@ from .protocol import (
 
 import os as _os
 
+from .. import settings
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -607,40 +609,14 @@ def _sdes_nack_enabled() -> bool:
 
     Read per call, not at import, so it can be flipped without a restart.
     """
-    return os.environ.get("AIDOT_SDES_NACK", "1").strip().lower() not in (
-        "0",
-        "",
-        "false",
-        "no",
-        "off",
-    )
+    return settings.read("AIDOT_SDES_NACK")
 
 
 #: How long a retransmission has to arrive in to still be worth forwarding.
 #: The serve runs ``-max_delay 500000``; a repeat later than that is discarded
 #: by ffmpeg anyway, having already emitted the damaged frame.  Same env var as
 #: the serve so the two cannot drift apart.
-def _grace_env_s(name: str, default: float) -> float:
-    """A grace in seconds from ``name``; a malformed or non-finite value is the
-    default. A bare float() here stopped the library importing on an empty
-    value, and `nan` made both rules fire at once."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        value = None
-    if value is None or value != value or value in (float("inf"), float("-inf")):
-        _LOGGER.debug("%s=%r is not a number; using %.0f", name, raw, default)
-        return default
-    return value
-
-
-_SERVE_REORDER_BUDGET_S = min(
-    _grace_env_s("AIDOT_SERVE_MAX_DELAY_US", 500000.0) / 1e6,
-    0.5,
-)
+_SERVE_REORDER_BUDGET_S = min(settings.read("AIDOT_SERVE_MAX_DELAY_US") / 1e6, 0.5)
 
 
 def _video_repeat_too_late(
@@ -770,14 +746,9 @@ def _sdes_liveplay_echo_timeout(fast_liveplay: bool) -> float:
     A malformed env value is ignored rather than raising: this runs on every
     open, and an unparseable knob must not be able to stop a camera streaming.
     """
-    raw = _os.environ.get("AIDOT_SDES_LIVEPLAY_ECHO_S")
-    if raw is not None:
-        try:
-            val = float(raw)
-        except (TypeError, ValueError):
-            val = None
-        if val is not None and val >= 0.0:
-            return val
+    val = settings.read_or_none("AIDOT_SDES_LIVEPLAY_ECHO_S")
+    if val is not None:
+        return val
     # The fast-liveplay path was measured on 2026-09-03 to behave exactly like
     # the ordinary one (22 of 22 timed out at the same point), so one value.
     return _LIVEPLAY_ECHO_S
@@ -1101,7 +1072,7 @@ _FIRST_MEDIA_WAIT_S = 75.0
 # +30 s, inside that window on both measured wake times.
 #
 # Set AIDOT_BATTERY_STALE_OFFER_GRACE_S=0 to restore the previous behaviour.
-_BATTERY_STALE_OFFER_GRACE_S = _grace_env_s("AIDOT_BATTERY_STALE_OFFER_GRACE_S", 15.0)
+_BATTERY_STALE_OFFER_GRACE_S = settings.read("AIDOT_BATTERY_STALE_OFFER_GRACE_S")
 
 
 # How long a nominated candidate has to produce ANY inbound STUN Binding Success
@@ -1120,7 +1091,7 @@ _BATTERY_STALE_OFFER_GRACE_S = _grace_env_s("AIDOT_BATTERY_STALE_OFFER_GRACE_S",
 # preserved.
 #
 # Set AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S=0 to restore the previous behaviour.
-_UNREACHABLE_NOMINEE_GRACE_S = _grace_env_s("AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S", 20.0)
+_UNREACHABLE_NOMINEE_GRACE_S = settings.read("AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S")
 
 
 # The two companions of the unreachable-nominee grace, for the two first-media
@@ -1129,10 +1100,11 @@ _UNREACHABLE_NOMINEE_GRACE_S = _grace_env_s("AIDOT_SDES_UNREACHABLE_NOMINEE_GRAC
 # 28 live-validation runs (2026-09-22 to 10-09), the slowest 9.5 s after
 # webrtcReq; 29 of 30 stalls in those runs were the two shapes these rules end.
 # Also the earlier finding that the trigger arms within about a second or never.
-
-
-_ANSWER_PROBE_GRACE_S = _grace_env_s("AIDOT_SDES_ANSWER_PROBE_GRACE_S", 20.0)
-_TRIGGER_GRACE_S = _grace_env_s("AIDOT_SDES_TRIGGER_GRACE_S", 20.0)
+# A malformed or non-finite value is the default: a bare float() here stopped
+# the library importing on an empty value, and `nan` made both rules fire at
+# once. The rules live in ``settings``.
+_ANSWER_PROBE_GRACE_S = settings.read("AIDOT_SDES_ANSWER_PROBE_GRACE_S")
+_TRIGGER_GRACE_S = settings.read("AIDOT_SDES_TRIGGER_GRACE_S")
 
 
 def _stale_offer_abandon_due(
@@ -1310,14 +1282,9 @@ def _pinned_codec_retry_limit() -> int:
     tunables; 0 serves every session as it comes. The default of 2 (three
     tries) turns a 14% chance of an H.265 session into about 0.3%.
     """
-    raw = _os.environ.get("AIDOT_PINNED_CODEC_RETRIES")
-    if raw is not None:
-        try:
-            val = int(raw)
-        except (TypeError, ValueError):
-            val = None
-        if val is not None and val >= 0:
-            return val
+    val = settings.read_or_none("AIDOT_PINNED_CODEC_RETRIES")
+    if val is not None:
+        return val
     return _PINNED_CODEC_RETRIES_DEFAULT
 
 
@@ -1360,14 +1327,9 @@ def _abandoned_media_grace_s() -> float:
     work without a process restart, which the import-time version silently
     required.
     """
-    raw = _os.environ.get("AIDOT_ABANDONED_MEDIA_GRACE_S")
-    if raw is not None:
-        try:
-            val = float(raw)
-        except (TypeError, ValueError):
-            val = None
-        if val is not None and val >= 0.0:
-            return val
+    val = settings.read_or_none("AIDOT_ABANDONED_MEDIA_GRACE_S")
+    if val is not None:
+        return val
     return _ABANDONED_MEDIA_GRACE_DEFAULT_S
 
 
@@ -1856,7 +1818,7 @@ def _resolve_sdes_video_pt() -> Optional[int]:
     default.  A payload type the offer does not advertise would leave the
     camera nothing to send, so it is never pinned to.
     """
-    raw = (os.environ.get("AIDOT_SDES_VIDEO_PT", "") or "").strip().lower()
+    raw = (settings.read("AIDOT_SDES_VIDEO_PT") or "").strip().lower()
     if raw in ("none", "off", "0"):
         return None
     if raw.isdigit() and int(raw) in _SDES_ANSWER_VIDEO_PTS:
@@ -2163,7 +2125,7 @@ def _sdes_echo_wait_timeout(skip_liveplay: bool, echo_seen: bool = False) -> flo
     an ImportError that takes down every camera, and freezing it at import means
     an operator changing it sees nothing until a full restart.
     """
-    raw = _os.environ.get("AIDOT_SDES_ECHO_WAIT_S")
+    raw = settings.read("AIDOT_SDES_ECHO_WAIT_S")
     if raw is not None:
         try:
             val = float(raw)
@@ -2227,8 +2189,8 @@ def _classify_ffmpeg_exit(rc: int, teardown_requested: bool) -> int:
 #: Mid-session stall nudge (see _stall_nudge_due): enabled by default;
 #: ``AIDOT_SDES_STALL_NUDGE=0`` turns it off and
 #: ``AIDOT_SDES_STALL_NUDGE_AFTER_S`` moves the trigger point.
-_STALL_NUDGE_ENABLED = os.environ.get("AIDOT_SDES_STALL_NUDGE", "1") != "0"
-_STALL_NUDGE_AFTER_S = _grace_env_s("AIDOT_SDES_STALL_NUDGE_AFTER_S", 2.5)
+_STALL_NUDGE_ENABLED = settings.read("AIDOT_SDES_STALL_NUDGE")
+_STALL_NUDGE_AFTER_S = settings.read("AIDOT_SDES_STALL_NUDGE_AFTER_S")
 
 
 def _stall_nudge_due(
@@ -4209,7 +4171,7 @@ class _SdesOpenMixin:
         # hardcoded third-party host; AIDOT_SDES_HOLEPUNCH_HOST overrides it
         # (set it empty to disable the hardcoded fallback entirely).
         if not _hp_host:
-            _hp_env = os.environ.get("AIDOT_SDES_HOLEPUNCH_HOST")
+            _hp_env = settings.read("AIDOT_SDES_HOLEPUNCH_HOST")
             if _hp_env is not None:
                 _hp_host = _hp_env.strip() or None
             else:
@@ -5841,11 +5803,7 @@ class _SdesOpenMixin:
                     if _pli_gaps is None:
                         try:
                             _pli_gaps = tuple(
-                                float(_x)
-                                for _x in os.environ.get(
-                                    "AIDOT_SDES_PLI_GAPS", "0,1.5,2,3"
-                                ).split(",")
-                                if _x.strip()
+                                float(_x) for _x in settings.read("AIDOT_SDES_PLI_GAPS")
                             ) or (0.0, 1.5, 2.0, 3.0)
                         except ValueError:
                             _pli_gaps = (0.0, 1.5, 2.0, 3.0)

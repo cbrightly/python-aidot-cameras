@@ -42,6 +42,8 @@ from typing import List, Optional
 
 from .protocol import _sprop_dir  # reuse the same per-user cache root
 
+from .. import settings
+
 _LOGGER = logging.getLogger(__name__)
 
 # Ways to decode, best first; the empty list is plain software and always works.
@@ -99,7 +101,7 @@ _warm_lock = threading.Lock()
 
 
 def _ffmpeg() -> str:
-    return os.environ.get("AIDOT_FFMPEG", "ffmpeg")
+    return settings.read("AIDOT_FFMPEG")
 
 
 _identity_memo: Optional[str] = None
@@ -327,13 +329,13 @@ def probe_decoder(codec: str, force: bool = False) -> List[str]:
     if codec not in _CANDIDATES:
         return []
 
-    forced = os.environ.get(_ENV_OVERRIDE, "").strip()
+    forced = (settings.read(_ENV_OVERRIDE) or "").strip()
     if forced:
         # Accept either form: a bare name is a decoder, "hwaccel:x" a method.
         if forced.startswith("hwaccel:"):
             return ["-hwaccel", forced.split(":", 1)[1]]
         return ["-c:v", forced]
-    if os.environ.get(_ENV_DISABLE, "").strip().lower() in ("1", "true", "yes", "on"):
+    if settings.read(_ENV_DISABLE):
         return []
 
     key = f"v{_CACHE_SCHEMA}:{codec}:{_ffmpeg_identity()}"
@@ -477,12 +479,12 @@ def cached_decoder(codec: str) -> Optional[List[str]]:
     if codec not in _CANDIDATES:
         return None
 
-    forced = os.environ.get(_ENV_OVERRIDE, "").strip()
+    forced = (settings.read(_ENV_OVERRIDE) or "").strip()
     if forced:
         if forced.startswith("hwaccel:"):
             return ["-hwaccel", forced.split(":", 1)[1]]
         return ["-c:v", forced]
-    if os.environ.get(_ENV_DISABLE, "").strip().lower() in ("1", "true", "yes", "on"):
+    if settings.read(_ENV_DISABLE):
         return []
 
     # MEMORY ONLY. This runs on the event loop, so it must not touch the disk:

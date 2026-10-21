@@ -115,6 +115,7 @@ from .protocol import (  # noqa: F401 - re-exported for device_client / back-com
     _highport_nomination_decision,
     _parse_alarm_event,
 )
+from .. import settings
 from .health import HealthReporter, dtls_snapshot as _dtls_snapshot
 
 _LOGGER = logging.getLogger(__name__)
@@ -151,19 +152,8 @@ class _FfmpegMissing(RuntimeError):
     """The serve needs an ffmpeg that is not there; see _release_after_loop_error."""
 
 
-def _parse_env_float(name: str, default: float) -> float:
-    """Parse a float env var, falling back to ``default`` on any missing or
-    malformed value (matches the try/except idiom used by
-    _get_webrtc_open_gate / _get_stream_slots below for AIDOT_MAX_CONCURRENT_*
-    rather than raising at import time)."""
-    try:
-        return float(os.environ.get(name, str(default)))
-    except (ValueError, TypeError):
-        return default
-
-
-_OFFLINE_RECHECK_S = _parse_env_float("AIDOT_OFFLINE_RECHECK_S", 30.0)
-_OFFLINE_PROBE_S = _parse_env_float("AIDOT_OFFLINE_PROBE_S", 600.0)
+_OFFLINE_RECHECK_S = settings.read("AIDOT_OFFLINE_RECHECK_S")
+_OFFLINE_PROBE_S = settings.read("AIDOT_OFFLINE_PROBE_S")
 
 # DTLS serve loop slow-probe: an idle-but-cloud-online camera (asleep, wedged
 # firmware, ...) never trips the offline pause above (the cloud keeps reporting
@@ -178,16 +168,18 @@ _OFFLINE_PROBE_S = _parse_env_float("AIDOT_OFFLINE_PROBE_S", 600.0)
 # Resets the instant an open succeeds, via the same ReconnectPacer.reset() the
 # loop already calls on success (attempt -> 0, so _in_slow_probe is false again
 # with no separate state to clear).
-_SLOW_PROBE_THRESHOLD = int(os.environ.get("AIDOT_DTLS_SLOW_PROBE_THRESHOLD", "5"))
-_SLOW_PROBE_INTERVAL_S = float(
-    os.environ.get("AIDOT_DTLS_SLOW_PROBE_INTERVAL_S", "600")
-)
-_SLOW_PROBE_LOG_EVERY = int(os.environ.get("AIDOT_DTLS_SLOW_PROBE_LOG_EVERY", "6"))
+_SLOW_PROBE_THRESHOLD = settings.read("AIDOT_DTLS_SLOW_PROBE_THRESHOLD")
+_SLOW_PROBE_INTERVAL_S = settings.read("AIDOT_DTLS_SLOW_PROBE_INTERVAL_S")
+_SLOW_PROBE_LOG_EVERY = settings.read("AIDOT_DTLS_SLOW_PROBE_LOG_EVERY")
 # Sleep increment for the slow-probe wait: never one blocking
 # asyncio.sleep(interval) call, so stop() is not delayed by up to 10 minutes.
-_SLOW_PROBE_SLEEP_CHUNK_S = _parse_env_float("AIDOT_DTLS_SLOW_PROBE_CHUNK_S", 5.0)
+_SLOW_PROBE_SLEEP_CHUNK_S = settings.read("AIDOT_DTLS_SLOW_PROBE_CHUNK_S")
 
 
+def _parse_env_float(name: str, default: float) -> float:
+    """A float env var with ``default`` for a missing, malformed or non-finite
+    value. Kept for its callers and tests; the rules live in ``settings``."""
+    return settings.read_knob(settings.Knob(name, float(default), "float"))
 
 
 # DTLS serve-open timeout: how long a single async_open_webrtc_stream() call
@@ -209,7 +201,7 @@ _SLOW_PROBE_SLEEP_CHUNK_S = _parse_env_float("AIDOT_DTLS_SLOW_PROBE_CHUNK_S", 5.
 # open, so a slow open makes other cameras wait longer. It is worth paying
 # because two thirds of opens were failing, so the gate was already being
 # spent almost entirely on attempts that could not succeed.
-_DTLS_SERVE_OPEN_TIMEOUT_S = _parse_env_float("AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S", 75.0)
+_DTLS_SERVE_OPEN_TIMEOUT_S = settings.read("AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S")
 
 # ICE gets its OWN budget, and deliberately not the one above. The open runs two
 # SEQUENTIAL waits - signalling (_init_deadline, webrtc_open.py:2467) then ICE
@@ -222,7 +214,7 @@ _DTLS_SERVE_OPEN_TIMEOUT_S = _parse_env_float("AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S",
 # ICE wait is actively wrong: 45s "is past the ~30 s deadline Home Assistant's
 # stream worker allows, which is the failure this project already learned the
 # hard way". So signalling gets the long wait; ICE keeps the 30s it always had.
-_DTLS_SERVE_ICE_WAIT_S = _parse_env_float("AIDOT_DTLS_SERVE_ICE_WAIT_S", 30.0)
+_DTLS_SERVE_ICE_WAIT_S = settings.read("AIDOT_DTLS_SERVE_ICE_WAIT_S")
 
 # Strong refs to fire-and-forget tasks: asyncio only keeps weak refs, so a
 # discarded task can be garbage-collected mid-flight. Discarded on completion.
@@ -486,11 +478,7 @@ def _futile_video_limit(env: Optional[dict] = None) -> int:
     AIDOT_FUTILE_KEEPALIVE_LIMIT on the SDES path, which exists for the same
     reason.
     """
-    _env = os.environ if env is None else env
-    try:
-        return int(_env.get("AIDOT_DTLS_FUTILE_VIDEO_LIMIT", "5"))
-    except (TypeError, ValueError):
-        return 5
+    return settings.read("AIDOT_DTLS_FUTILE_VIDEO_LIMIT", env)
 
 
 def _probe_interval(
@@ -639,12 +627,12 @@ def _is_self_referential_source(source: str, stream_name: str) -> bool:
 #: keyframe on an A001064 is 146-190 KB - roughly 130 packets - so anything
 #: smaller than a few hundred cannot ride out a burst that arrives out of order.
 #: Env-overridable because the right value depends on the link, not on us.
-_SERVE_REORDER_QUEUE = int(os.environ.get("AIDOT_SERVE_REORDER_QUEUE", "500"))
+_SERVE_REORDER_QUEUE = settings.read("AIDOT_SERVE_REORDER_QUEUE")
 
 #: How long (microseconds) the demuxer waits for a missing packet before moving
 #: on.  Bounded on purpose: waiting forever turns loss into a stall, which is the
 #: failure this is meant to prevent.
-_SERVE_MAX_DELAY_US = int(os.environ.get("AIDOT_SERVE_MAX_DELAY_US", "500000"))
+_SERVE_MAX_DELAY_US = settings.read("AIDOT_SERVE_MAX_DELAY_US")
 
 #: How long (seconds) the serve ffmpeg waits with NO packets on any RTP socket
 #: before its SDP input errors out ("Error during demuxing: Operation timed
@@ -672,7 +660,7 @@ def _resolve_serve_input_timeout_s(is_battery: bool) -> int:
     Pure policy (unit-testable): the env override wins for every camera; else
     mains rides out a transmit gap and battery keeps the fast default.
     """
-    _env = os.environ.get("AIDOT_SERVE_INPUT_TIMEOUT_S")
+    _env = settings.read("AIDOT_SERVE_INPUT_TIMEOUT_S")
     if _env:
         try:
             return max(1, int(_env))
@@ -693,7 +681,7 @@ def _resolve_serve_input_timeout_s(is_battery: bool) -> int:
 #: origin of this project's "battery cameras need 30-45 minutes" rule.
 #: Still a real wait: retrying instantly would hammer a camera that genuinely
 #: has none free, and on a battery model risks a wake-then-sleep loop.
-_BUSY_BACKOFF_S = _parse_env_float("AIDOT_BUSY_BACKOFF_S", 20.0)
+_BUSY_BACKOFF_S = settings.read("AIDOT_BUSY_BACKOFF_S")
 
 #: Consecutive background sessions that deliver NO media before the keepalive
 #: stops reopening a battery camera. Observed 2026-08-07 on an A001513: 22 opens
@@ -702,7 +690,7 @@ _BUSY_BACKOFF_S = _parse_env_float("AIDOT_BUSY_BACKOFF_S", 20.0)
 #: camera that is wasteful; on a battery one it spends charge, and a unit has
 #: already been drained to 5% that way.
 #: 0 disables the ceiling entirely.
-_FUTILE_KEEPALIVE_LIMIT = int(os.environ.get("AIDOT_FUTILE_KEEPALIVE_LIMIT", "5"))
+_FUTILE_KEEPALIVE_LIMIT = settings.read("AIDOT_FUTILE_KEEPALIVE_LIMIT")
 
 
 def _next_no_media_streak(no_media_streak: int, healthy: bool) -> int:
@@ -741,9 +729,7 @@ def _should_abandon_keepalive(
 #: Stamp the serve input by arrival instead of trusting the camera's RTP clock.
 #: The A001513 measurably sends backward timestamps; see the builder comment.
 #: AIDOT_SERVE_ARRIVAL_TS=0 trusts the camera again.
-_SERVE_ARRIVAL_TS = os.environ.get(
-    "AIDOT_SERVE_ARRIVAL_TS", "1"
-).strip().lower() not in ("0", "false", "no", "off")
+_SERVE_ARRIVAL_TS = settings.read("AIDOT_SERVE_ARRIVAL_TS")
 
 
 def _build_sdes_serve_cmd(
@@ -1023,11 +1009,9 @@ def _get_webrtc_open_gate() -> "asyncio.Semaphore":
     """
     global _WEBRTC_OPEN_GATE
     if _WEBRTC_OPEN_GATE is None:
-        try:
-            _n = max(1, int(os.environ.get("AIDOT_MAX_CONCURRENT_OPENS", "2")))
-        except (ValueError, TypeError):
-            _n = 2
-        _WEBRTC_OPEN_GATE = asyncio.Semaphore(_n)
+        _WEBRTC_OPEN_GATE = asyncio.Semaphore(
+            settings.read("AIDOT_MAX_CONCURRENT_OPENS")
+        )
     return _WEBRTC_OPEN_GATE
 
 
@@ -1037,10 +1021,7 @@ _STREAM_SLOTS_CAP: int = 0
 
 def _stream_slots_default() -> int:
     """The configured cap: an explicit env override, else the built-in default."""
-    try:
-        return max(1, int(os.environ.get("AIDOT_MAX_CONCURRENT_STREAMS", "3")))
-    except (ValueError, TypeError):
-        return 3
+    return settings.read("AIDOT_MAX_CONCURRENT_STREAMS")
 
 
 def configure_stream_limits(max_streams: int) -> int:
@@ -1063,7 +1044,7 @@ def configure_stream_limits(max_streams: int) -> int:
     would strand a camera that already holds a slot.
     """
     global _STREAM_SLOTS, _STREAM_SLOTS_CAP
-    if os.environ.get("AIDOT_MAX_CONCURRENT_STREAMS"):
+    if settings.is_set("AIDOT_MAX_CONCURRENT_STREAMS"):
         _get_stream_slots()  # ensure it exists so the cap is populated
         return _STREAM_SLOTS_CAP
     target = max(1, int(max_streams))
@@ -2062,7 +2043,7 @@ class CameraMixin(
         # Test seam: point the whole client at a local broker without any cloud
         # call (paho derives ws-vs-wss and the port from the scheme, so a plain
         # "ws://127.0.0.1:PORT/mqtt" needs nothing else).  Unset in production.
-        _env_mqtt = os.environ.get("AIDOT_MQTT_URL")
+        _env_mqtt = settings.read("AIDOT_MQTT_URL")
         if _env_mqtt:
             _LOGGER.debug("AIDOT_MQTT_URL override in effect: %s", _env_mqtt)
             self._mqtt_url = _env_mqtt
@@ -5727,10 +5708,7 @@ class CameraMixin(
         opt = getattr(self, "_stream_idle_opt", None)
         if opt is not None:
             return float(opt)
-        try:
-            return _parse_env_float("AIDOT_STREAM_IDLE_S", 120.0)
-        except (TypeError, ValueError):
-            return 120.0
+        return settings.read("AIDOT_STREAM_IDLE_S")
 
     def _resolve_sdes_fast_liveplay(self) -> bool:
         """Whether to use SDES fast-liveplay: don't block on the always-timing-out
@@ -5755,12 +5733,7 @@ class CameraMixin(
         ov = getattr(self, "_fast_attempt_override", None)
         if ov is not None:
             return bool(ov)
-        return os.environ.get("AIDOT_SDES_FAST_LIVEPLAY", "").strip().lower() not in (
-            "0",
-            "false",
-            "no",
-            "off",
-        )
+        return settings.read("AIDOT_SDES_FAST_LIVEPLAY")
 
     def _resolve_dtls_fast_liveplay(self) -> bool:
         """Whether to skip the DTLS path's livePlayReq-echo + livePlayResp waits.
@@ -5783,12 +5756,7 @@ class CameraMixin(
         opt = getattr(self, "_dtls_fast_liveplay_opt", None)
         if opt is not None:
             return bool(opt)
-        return os.environ.get("AIDOT_DTLS_FAST_LIVEPLAY", "").strip().lower() not in (
-            "0",
-            "false",
-            "no",
-            "off",
-        )
+        return settings.read("AIDOT_DTLS_FAST_LIVEPLAY")
 
     def _skip_dtls_signaling_wait(self, fast_connect: bool) -> bool:
         """Whether the DTLS open skips its livePlayReq-echo AND livePlayResp waits.
@@ -5822,12 +5790,7 @@ class CameraMixin(
         opt = getattr(self, "_sdes_audio_opt", None)
         if opt is not None:
             return bool(opt)
-        return os.environ.get("AIDOT_SDES_SERVE_AUDIO", "").strip().lower() not in (
-            "0",
-            "false",
-            "no",
-            "off",
-        )
+        return settings.read("AIDOT_SDES_SERVE_AUDIO")
 
     def _resolve_sdes_audio_gain_db(self, default: float = -8.0) -> float:
         """Gain (dB) applied to the served SDES audio.
@@ -5843,13 +5806,14 @@ class CameraMixin(
         default is ``0``: the same loudness an A000088 is served at. A caller
         that sets the value explicitly gets it on either path."""
         opt = getattr(self, "_sdes_audio_gain_opt", None)
-        src = (
-            opt
-            if opt is not None
-            else os.environ.get("AIDOT_SDES_AUDIO_GAIN_DB", str(default))
-        )
+        if opt is None:
+            # The default is the caller's: it differs by serve path (see
+            # above), so the registry's parser runs with it.
+            return settings.read_knob(
+                settings.Knob("AIDOT_SDES_AUDIO_GAIN_DB", float(default), "float")
+            )
         try:
-            return float(src)
+            return float(opt)
         except (ValueError, TypeError):
             return float(default)
 
@@ -5916,7 +5880,7 @@ class CameraMixin(
         """
         for raw in (
             getattr(self, "_sdes_connection_mode_opt", None),
-            os.environ.get("AIDOT_SDES_CONNECTION_MODE"),
+            settings.read("AIDOT_SDES_CONNECTION_MODE"),
         ):
             if raw is None:
                 continue
@@ -5967,12 +5931,7 @@ class CameraMixin(
         opt = getattr(self, "_persistent_mqtt_opt", None)
         if opt is not None:
             return bool(opt)
-        return os.environ.get("AIDOT_PERSISTENT_MQTT", "").strip().lower() not in (
-            "0",
-            "false",
-            "no",
-            "off",
-        )
+        return settings.read("AIDOT_PERSISTENT_MQTT")
 
     async def _get_persistent_mqtt(self):
         """Get-or-create the account-shared ``_PersistentMqtt`` (one per account,
@@ -6123,7 +6082,7 @@ class CameraMixin(
             return None
         opt = getattr(self, "_serve_relay_opt", None)
         if opt is None:
-            opt = os.environ.get("AIDOT_SERVE_RELAY", "1") != "0"
+            opt = settings.read("AIDOT_SERVE_RELAY")
         if not opt:
             return None
         port = _sdes_serve_port(serve_url)
@@ -6202,7 +6161,7 @@ class CameraMixin(
         # independently, enforce a hard minimum wall-clock spacing between OPEN
         # attempts so no code path (reset bug, fast PC-death) can pound the camera.
         _MIN_DELAY, _MAX_DELAY = 15.0, 300.0
-        _open_gate = _parse_env_float("AIDOT_DTLS_RETRY_GATE_S", 15.0)
+        _open_gate = settings.read("AIDOT_DTLS_RETRY_GATE_S")
         # Jittered-backoff pacer for failed opens. Unlike the SDES/JPEG loops this
         # serve loop resets on any successful open (it has the _open_gate spacing
         # below) rather than escalating on no-media - hence reset() not
@@ -6240,7 +6199,7 @@ class CameraMixin(
                 # Another viewer holds the camera's single slot. Retry on a short
                 # interval (not the 5-min backoff) so it reconnects promptly once
                 # the slot frees (e.g. the user closes the app / reboots the cam).
-                busy_retry = _parse_env_float("AIDOT_BUSY_RETRY_S", 45.0)
+                busy_retry = settings.read("AIDOT_BUSY_RETRY_S")
                 _LOGGER.warning(
                     "DTLS serve: camera %s busy (%s) - retrying in %.0fs",
                     self.device_id,
@@ -6338,7 +6297,7 @@ class CameraMixin(
             # - f0.java:2495).  Previously a stuck "disconnected" was only caught
             # ~120 s later by the idle-progress timer.
             _disc_since = [None]
-            _DISC_DEBOUNCE = _parse_env_float("AIDOT_ICE_DISCONNECT_S", 8.0)
+            _DISC_DEBOUNCE = settings.read("AIDOT_ICE_DISCONNECT_S")
 
             def _pc_dead(
                 pc=pc, _disc_since=_disc_since, _DISC_DEBOUNCE=_DISC_DEBOUNCE
@@ -6523,7 +6482,7 @@ class CameraMixin(
                     # dominated by long native GOPs).  0 disables; raising it
                     # lowers bitrate at the cost of latency.  Mains DTLS cameras
                     # only; the SDES path has its own PLI cadence.
-                    _gop_pli_s = _parse_env_float("AIDOT_GOP_PLI_S", 2.0)
+                    _gop_pli_s = settings.read("AIDOT_GOP_PLI_S")
                     # Stall-triggered keyframe: if muxed frames stop for
                     # _stall_pli_s (a dropped GOP on a jittery link, e.g. a weak-
                     # RSSI camera), ask for an IDR immediately instead of waiting
@@ -6531,7 +6490,7 @@ class CameraMixin(
                     # at most ONCE per stall episode (re-armed only when frames
                     # resume) so a no-consumer stall - which also freezes progress
                     # - can't spam the camera with PLIs.  0 disables.
-                    _stall_pli_s = _parse_env_float("AIDOT_STALL_PLI_S", 1.0)
+                    _stall_pli_s = settings.read("AIDOT_STALL_PLI_S")
                     _last_gop_pli = loop.time()
                     _stall_pli_armed = True
                     _last_viewer_dtls = loop.time()
@@ -6542,7 +6501,7 @@ class CameraMixin(
                     # _pc_dead(), which reads the ICE/PC state - and a session
                     # receiving audio and no video passes it forever (measured
                     # 2026-08-17: hours of it, while HA retried every 10-40s).
-                    _vid_grace = _parse_env_float("AIDOT_DTLS_VIDEO_GRACE_S", 30.0)
+                    _vid_grace = settings.read("AIDOT_DTLS_VIDEO_GRACE_S")
                     _connected_at = loop.time()
                     _first_video_at = None
                     _no_video = False
