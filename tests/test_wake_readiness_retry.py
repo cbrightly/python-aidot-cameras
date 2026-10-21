@@ -138,9 +138,9 @@ def test_burst_stays_inside_one_peerid_window():
     # The loop passes burst_max=_PEERID_MAX_REUSE so the whole burst re-offers on
     # the SAME peerid; a fresh one registers another camera-side session, which
     # the camera frees only slowly (0.12.16).
-    import inspect
+    from tests.source_parts import full_source
 
-    _body = inspect.getsource(cc.CameraMixin._sdes_keepalive_loop_inner)
+    _body = full_source("_sdes_keepalive_loop_inner")
     # One module-level bound so this loop and its tests share a number. It is
     # NOT shared with the DTLS serve loop, which does not reuse peer ids across
     # attempts at all - that was tried and reverted, see the constant.
@@ -151,9 +151,9 @@ def test_burst_stays_inside_one_peerid_window():
 def test_fast_retry_is_much_shorter_than_the_pacer_floor():
     # The whole point: the pacer's floor is 10 s and escalates to 300 s; a waking
     # camera should be re-tried well inside that.
-    import inspect
+    from tests.source_parts import full_source
 
-    _body = inspect.getsource(cc.CameraMixin._sdes_keepalive_loop_inner)
+    _body = full_source("_sdes_keepalive_loop_inner")
     assert "_MIN_DELAY = 10.0" in _body
     _delay, _fast = _CAM._not_ready_retry_delay(1, burst_max=3)
     assert _fast is True and _delay < 10.0
@@ -171,7 +171,9 @@ def test_not_ready_never_aborts_an_open():
 
     # The open and the phase coroutines it was split into.
     _body = inspect.getsource(so._SdesOpenMixin) + "".join(
-        inspect.getsource(getattr(so, n)) for n in dir(so) if n.startswith("_sdes_open_")
+        inspect.getsource(getattr(so, n))
+        for n in dir(so)
+        if n.startswith("_sdes_open_")
     )
     _idx = _body.find("_LIVE_PLAY_NOT_READY")
     assert _idx != -1, "the SDES open no longer references the not-ready code"

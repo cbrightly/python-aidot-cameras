@@ -7,13 +7,11 @@ forever as the stream's producer. On a fleet that is mostly DTLS cameras (this o
 is 4 of 5) the fix therefore did nothing.
 """
 
-import inspect
-
-import aidot_cameras.camera.client as cc
+from tests.source_parts import full_source
 
 
 def _src(name):
-    return inspect.getsource(getattr(cc.CameraMixin, name))
+    return full_source(name)
 
 
 def test_sdes_loop_asks_who_is_watching():

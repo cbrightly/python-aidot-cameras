@@ -18,7 +18,6 @@ Two things are locked here, because either alone would rot:
 """
 
 import asyncio
-import inspect
 import os
 import sys
 
@@ -27,15 +26,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import aidot_cameras.camera.client as cc
 
 
-def _fn_source(qualname: str) -> str:
-    for cls in vars(cc).values():
-        if isinstance(cls, type) and qualname in cls.__dict__:
-            return inspect.getsource(cls.__dict__[qualname])
-    raise AssertionError(f"{qualname} not found")
-
-
 def test_the_sdes_keepalive_loop_opens_talk_capable():
-    src = _fn_source("_sdes_keepalive_loop_inner")
+    from tests.source_parts import full_source
+
+    src = full_source("_sdes_keepalive_loop_inner")
     # The loop has exactly one async_open_webrtc_stream call; it must ask for
     # talk, or the session it publishes as _stream_session cannot carry any.
     assert src.count("async_open_webrtc_stream") == 1, (
