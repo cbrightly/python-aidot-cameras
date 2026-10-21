@@ -381,7 +381,7 @@ turns it off). A DTLS camera's looks like this, with the device id after
 `camera`:
 
 ```
-health 20s: packets=1686 (84.1/s) lost=0 (0.0%) stall=0.0s path=direct viewers=present
+health 20s: packets=1686 (84.1/s) lost=0 (0.0%) stall=0.0s path=direct viewers=present frames=300 (15.0/s) resent=207 keyframes=7 max_keyframe_gap=44
 ```
 
 Each figure is for that period alone, so a steady trickle of loss reads as a
@@ -402,6 +402,12 @@ rate rather than vanishing into a session total:
 So a pasted log says which of "the link is lossy", "the picture froze" and
 "nobody was watching" it was. A report that fails for any reason is dropped
 and never ends the session.
+- `frames` and the rate, `keyframes` and `max_keyframe_gap` (DTLS cameras
+  only): pictures a viewer is served in the period, keyframes among them,
+  and the longest run of pictures between keyframes since the session
+  started. `resent` is how many frames the camera sent again that period;
+  these cameras re-send about 40% of their frames and every consumer drops
+  the repeats, so `frames` is the served picture rate, not what arrived.
 
 ## Camera controls and state
 

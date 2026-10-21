@@ -7,6 +7,21 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 ## [Unreleased]
 
 ### Changed
+- **The health line carries frame figures again, counting pictures.**
+  1.0.0rc49's line showed the serve canary's raw frame count, which ran at
+  about twice the picture rate, and rc51 took the figures off until the
+  counting was understood. It is now understood: the camera re-sends runs of
+  frames it has already sent (489 of the 1200 frames in the A000088 tap
+  fixture, 40.75%), and every consumer drops the repeats, so the raw count
+  ran at about 1.7x what a viewer saw. The canary now applies the consumers'
+  own rules at the tap (nothing before the first keyframe, the re-sent-frame
+  filter, the publisher's new-timestamp-base reset), and a DTLS camera's
+  line reports `frames` (pictures served, with the rate), `resent`,
+  `keyframes` and `max_keyframe_gap` from that count; `tests/test_health_line_counts_pictures.py`
+  replays the fixture and gets 1200 frames, 711 pictures. SDES cameras have
+  no tap and carry no frame figures. The raw count still drives the
+  no-video watchdog and the DEBUG canary line, which now also prints
+  pictures and resent.
 - **One registry and one parser for every `AIDOT_*` variable.**
   `aidot_cameras/settings.py` lists every variable the library reads with its
   default, kind and floor, and a test fails on a name read in the source but

@@ -49,6 +49,7 @@ from .models import (  # re-exported: data models split into models.py
 from .webrtc import WebRTCSession  # re-exported (split into webrtc.py)
 from . import h264_sps as _h264_sps
 from .rtsp_publish import (
+    RESENT_MAX_BACK_S,
     direct_publish_enabled,
     dtls_rtp_publish_run,
     is_publishable_url,
@@ -66,6 +67,7 @@ from .sdes_open import (
 )
 from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixin; kept re-exported for back-compat
     _mqtt_timestamp,
+    is_resent_video_frame,
     ReconnectPacer,
     _build_stun_binding_success_response,
     _terminal_webrtc_ack,
@@ -347,6 +349,86 @@ def _correct_ts(state: dict, raw: int) -> int:
     return raw - state["offset"]
 
 
+def _new_serve_canary() -> dict:
+    """The served-stream video canary, counting at the tap.
+
+    ``frames`` and ``keyframes`` count everything the receiver hands over,
+    which is what the presence watchdog reads (``_video_has_started``).
+    ``pictures``, ``pict_keyframes`` and ``pict_max_gap`` count what a viewer
+    is served: see ``_observe_video_frame``.
+    """
+    return {
+        "frames": 0,
+        "keyframes": 0,
+        "gap": 0,
+        "max_gap": 0,
+        "unwrapped": 0,
+        "pictures": 0,
+        "pict_keyframes": 0,
+        "pict_gap": 0,
+        "pict_max_gap": 0,
+        "resent": 0,
+        "pre_keyframe": 0,
+        "resent_filter_resets": 0,
+        "_v0": None,
+        "_hw": {},
+    }
+
+
+def _observe_video_frame(canary: dict, ts: int, kf: bool) -> None:
+    """Count one tapped video frame, both as handed over and as served.
+
+    The camera re-sends runs of frames it has already sent: on the A000088
+    tap fixture 489 of 1200 frames repeat a presentation time already served
+    (40.75%, matching 41-46% measured live), and every consumer - the direct
+    publisher, the PyAV mux and the TS recorder - drops them with
+    ``is_resent_video_frame``. The raw ``frames`` count therefore runs about
+    1.7x the picture rate, which is what the health line showed in 1.0.0rc49
+    and why its frame figures came off in rc51.
+
+    ``pictures`` applies the consumers' own rules to the same corrected
+    timestamp they receive: nothing counts before the first keyframe (the
+    muxes start on one), the presentation time is taken relative to that
+    keyframe, a time at or below the high-water mark is a re-send, and a jump
+    back of more than ``RESENT_MAX_BACK_S`` is a new timestamp base, which
+    restarts the mark as the publisher does rather than counting nothing until
+    the old mark is caught up to. Keyframes and the keyframe gap are counted
+    on pictures only, so a re-sent keyframe is not a second keyframe.
+    """
+    canary["frames"] += 1
+    if kf:
+        canary["keyframes"] += 1
+        canary["gap"] = 0
+    else:
+        canary["gap"] += 1
+        if canary["gap"] > canary["max_gap"]:
+            canary["max_gap"] = canary["gap"]
+    v0 = canary["_v0"]
+    if v0 is None:
+        if not kf:
+            canary["pre_keyframe"] += 1
+            return
+        canary["_v0"] = v0 = ts
+    rel = ts - v0
+    hw = canary["_hw"].get("hw")
+    if hw is not None and rel < hw - RESENT_MAX_BACK_S * 90000:
+        canary["resent_filter_resets"] += 1
+        canary["_hw"] = {}
+        canary["_v0"] = v0 = ts
+        rel = 0
+    if is_resent_video_frame(canary["_hw"], rel):
+        canary["resent"] += 1
+        return
+    canary["pictures"] += 1
+    if kf:
+        canary["pict_keyframes"] += 1
+        canary["pict_gap"] = 0
+    else:
+        canary["pict_gap"] += 1
+        if canary["pict_gap"] > canary["pict_max_gap"]:
+            canary["pict_max_gap"] = canary["pict_gap"]
+
+
 def _log_serve_canary(device_id: Optional[str], canary: dict) -> None:
     """One line per N tapped video frames, naming the camera it counts.
 
@@ -357,13 +439,16 @@ def _log_serve_canary(device_id: Optional[str], canary: dict) -> None:
     """
     _LOGGER.debug(
         "camera %s: serve h264 canary: frames=%d keyframes=%d"
-        " max_keyframe_gap=%d cur_gap=%d unwrap_fixed=%d",
+        " max_keyframe_gap=%d cur_gap=%d unwrap_fixed=%d"
+        " pictures=%d resent=%d",
         device_id or "?",
         canary["frames"],
         canary["keyframes"],
         canary["max_gap"],
         canary["gap"],
         canary.get("unwrapped", 0),
+        canary.get("pictures", 0),
+        canary.get("resent", 0),
     )
 
 
@@ -5553,11 +5638,7 @@ class CameraMixin(
         _orig_put = _qd.put
         _skip_decode = bool(serve and is_video)
         # Served-stream health canary (video-only): observed without decoding.
-        _canary = (
-            {"frames": 0, "keyframes": 0, "gap": 0, "max_gap": 0, "unwrapped": 0}
-            if _skip_decode
-            else None
-        )
+        _canary = _new_serve_canary() if _skip_decode else None
         if _canary is not None:
             _qd._aidot_serve_canary = _canary
         # Every video tap feeds a copy mux (the serve, or a file recording),
@@ -5597,14 +5678,7 @@ class CameraMixin(
                         except Exception:
                             pass  # full -> drop (PLI re-arms a GOP)
                         if _canary is not None:
-                            _canary["frames"] += 1
-                            if _kf:
-                                _canary["keyframes"] += 1
-                                _canary["gap"] = 0
-                            else:
-                                _canary["gap"] += 1
-                                if _canary["gap"] > _canary["max_gap"]:
-                                    _canary["max_gap"] = _canary["gap"]
+                            _observe_video_frame(_canary, int(_ts), _kf)
                             if _canary["frames"] % _CANARY_LOG_EVERY == 0:
                                 _log_serve_canary(device_id, _canary)
                     if _skip_decode:

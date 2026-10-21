@@ -107,14 +107,23 @@ def test_absent_viewers():
     assert "viewers=absent" in r.tick(60.0, _snap(viewer=False))
 
 
-def test_video_counters_are_accepted_but_not_appended():
+def test_video_counters_are_appended_as_deltas():
     r = health.HealthReporter("dev1", period_s=60.0)
-    r.tick(0.0, _snap(frames=0, keyframes=0))
-    line = r.tick(60.0, _snap(frames=900, keyframes=30, max_keyframe_gap=44))
-    # canary figures are deliberately absent until their counting is understood
-    assert "max_keyframe_gap" not in line
-    assert "frames=" not in line
-    assert "keyframes=" not in line
+    r.tick(0.0, _snap(frames=100, keyframes=3, resent=40, max_keyframe_gap=44))
+    line = r.tick(
+        60.0, _snap(frames=1000, keyframes=33, resent=640, max_keyframe_gap=44)
+    )
+    assert "frames=900 (15.0/s)" in line
+    assert "resent=600" in line
+    assert "keyframes=30" in line
+    assert "max_keyframe_gap=44" in line
+
+
+def test_a_snapshot_without_frame_figures_puts_none_on_the_line():
+    r = health.HealthReporter("dev1", period_s=60.0)
+    r.tick(0.0, _snap())
+    line = r.tick(60.0, _snap(packets=600))
+    assert "frames=" not in line and "keyframes=" not in line
 
 
 def test_a_zero_period_disables_the_line():
@@ -180,13 +189,24 @@ def test_dtls_snapshot_sums_inbound_and_reads_the_ice_path():
             },  # aiortc can go negative
         ],
     }
-    canary = {"frames": 450, "keyframes": 15, "gap": 0, "max_gap": 44, "unwrapped": 0}
+    canary = {
+        "frames": 450,
+        "keyframes": 15,
+        "gap": 0,
+        "max_gap": 44,
+        "unwrapped": 0,
+        "pictures": 266,
+        "pict_keyframes": 9,
+        "pict_max_gap": 30,
+        "resent": 184,
+    }
     snap = health.dtls_snapshot(stats, canary, 12.5, True)
     assert snap["packets"] == 1000
     assert snap["lost"] == 1
     assert snap["media_path"] == "direct"
-    assert "frames" not in snap and "keyframes" not in snap
-    assert "max_keyframe_gap" not in snap
+    # The served figures, not the raw ones the watchdog reads.
+    assert snap["frames"] == 266 and snap["keyframes"] == 9
+    assert snap["max_keyframe_gap"] == 30 and snap["resent"] == 184
     assert snap["last_media_monotonic"] == 12.5 and snap["viewer"] is True
     assert "bytes" not in snap
 
