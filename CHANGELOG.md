@@ -7,6 +7,23 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 ## [Unreleased]
 
 ### Changed
+- **The two stream opens are smaller, with no behaviour change.** Thirteen
+  helpers that were nested inside `_open_sdes_stream_impl` and
+  `_async_open_webrtc_stream_impl` - the TURN allocate, permission, refresh
+  and send-indication builders, the SDP compressor, the nomination, trickle
+  and stall-report paths, and the DTLS answer builder and track handler -
+  are module functions now, taking what they read from the open as
+  arguments; the opens bind them under their old names where the nested
+  definitions stood, so the open's own flow is unchanged line for line.
+  Bodies moved verbatim. The SDES open is 5784 lines from 6353 and the DTLS
+  open 3451 from 3773, and each helper can be tested on its own, which the
+  TURN tests now do instead of exec-ing it out of the open's source. The
+  seven copies of the STUN attribute builder, the three TURN allocations,
+  the four ffmpeg receive SDP templates, the ten IPC request envelopes, the
+  five go-dormant exits, the two DTLS peer-certificate acceptors, the two
+  AAC silence mixes and the five MQTT credential derivations each share one
+  implementation, every one pinned by a test that keeps the previous
+  literal and compares.
 - **The health line carries frame figures again, counting pictures.**
   1.0.0rc49's line showed the serve canary's raw frame count, which ran at
   about twice the picture rate, and rc51 took the figures off until the

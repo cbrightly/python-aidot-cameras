@@ -327,7 +327,9 @@ def _first_media_wait_block() -> str:
 
 
 def test_the_stall_path_calls_the_report_helper_at_warning():
-    block = _first_media_wait_block()
+    # The local emitter forwards to the module function, which is where the
+    # builder is called and the WARNING is written.
+    block = inspect.getsource(sdes_open.report_first_media_stall)
     assert "_first_media_stall_report(" in block, (
         "the first-media wait can expire without saying why - the report "
         "helper is not called between the wait and the serve launch"
@@ -375,10 +377,8 @@ def test_the_report_sees_the_candidates_the_answer_peek_path_nominated():
     collapse the "answer carried no ICE credentials" row into the "answer
     carried one unroutable candidate" row -- two different diagnoses.
     """
-    src = inspect.getsource(sdes_open)
-    start = src.index("def _nominate_from_answer_sdp(")
-    end = src.index("return len(_cands)", start)
-    assert "_nominated_seen" in src[start:end], (
+    body = inspect.getsource(sdes_open.nominate_from_answer_sdp)
+    assert "nominated_seen" in body[: body.index("return len(_cands)")], (
         "_nominate_from_answer_sdp nominates without recording what it "
         "nominated, so the stall report cannot see it"
     )
