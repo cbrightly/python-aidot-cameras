@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc59]
+
 ### Fixed
 - **A DTLS camera's open hands back its session again.** In 1.0.0rc58 every
   successful DTLS open returned `None` instead of its `WebRTCSession`: the
