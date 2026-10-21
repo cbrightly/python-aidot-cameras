@@ -32,6 +32,7 @@ from .rtsp_publish import (
     is_publishable_url,
 )
 from .protocol import (
+    avio_header,
     mask_sdp_secrets,
     AVIO_HDR_LEN,
     REMB_TARGET_BPS,
@@ -4962,7 +4963,7 @@ class _SdesOpenMixin:
 
             seq = _r_sc.randint(0, 0x7FFFFFFF)
             ts = int(_t_sc.time() * 1000)
-            return _st_sc.pack("<IIqII4x", seq, 5376, ts, 8, 0) + _st_sc.pack(
+            return avio_header(seq, 5376, ts, 8, 0) + _st_sc.pack(
                 "<IB3x", 0, 1
             )
 
@@ -5746,13 +5747,12 @@ class _SdesOpenMixin:
                         and _hb_src is not None
                         and _time_br.time() - _last_hb_ts >= 10.0
                     ):
-                        import struct as _st_hb
                         import random as _r_hb
 
                         _hb_seq = _r_hb.randint(0, 0x7FFFFFFF)
                         _hb_ts = int(_time_br.time() * 1000)
                         # 28-byte AVIO header, cmd=5156 (HEARTHEAT_REQ), empty payload.
-                        _hb_avio = _st_hb.pack("<IIqII4x", _hb_seq, 5156, _hb_ts, 0, 0)
+                        _hb_avio = avio_header(_hb_seq, 5156, _hb_ts, 0, 0)
                         try:
                             _hb_chunk = _sctp_data(53, _hb_avio)
                             _hb_sock.sendto(
@@ -6024,7 +6024,6 @@ class _SdesOpenMixin:
                                 # after the encrypted-SCTP handshake defines them; same closure
                                 # pattern as the LIVING send above).  dcep_sock/dcep_src are the
                                 # socket+addr the SCTP handshake (and LIVING) used.
-                                import struct as _st_pcmd
 
                                 def _persistent_sdes_cmd(_cmd, _extra=b""):
                                     # dSeq, not a random number.  The app's
@@ -6041,9 +6040,7 @@ class _SdesOpenMixin:
                                     _seq = self._next_dseq()
                                     _ts = int(_time_br.time() * 1000)
                                     _avio = (
-                                        _st_pcmd.pack(
-                                            "<IIqII4x", _seq, _cmd, _ts, len(_extra), 0
-                                        )
+                                        avio_header(_seq, _cmd, _ts, len(_extra), 0)
                                         + _extra
                                     )
                                     _csock = _sctp.get("dcep_sock")
@@ -6111,9 +6108,7 @@ class _SdesOpenMixin:
 
                         _re_ts = int(_time_br.time() * 1000)
                         _re_seq = _r_re2.randint(0, 0x7FFFFFFF)
-                        _re_plain = _st_re2.pack(
-                            "<IIqII4x", _re_seq, 5376, _re_ts, 28, 0
-                        ) + _st_re2.pack("<IIIIIII", 0, 0, 1, 0, 0, 0, 0)  # 56B
+                        _re_plain = avio_header(_re_seq, 5376, _re_ts, 28, 0) + _st_re2.pack("<IIIIIII", 0, 0, 1, 0, 0, 0, 0)  # 56B
                         _re_enc = None
                         try:
                             from Crypto.Cipher import AES as _AES_re2
@@ -6616,9 +6611,7 @@ class _SdesOpenMixin:
 
                                 _ts_ms = int(_time_br.time() * 1000)
                                 _tk_seq = _rand_tk.randint(0, 0x7FFFFFFF)
-                                _avio_plain = _st_tk.pack(
-                                    "<IIqII4x", _tk_seq, 5376, _ts_ms, 28, 0
-                                ) + _st_tk.pack(
+                                _avio_plain = avio_header(_tk_seq, 5376, _ts_ms, 28, 0) + _st_tk.pack(
                                     "<IIIIIII", 0, 0, 1, 0, 0, 0, 0
                                 )  # 28B AVIO header + 28B AVStream = 56B
 

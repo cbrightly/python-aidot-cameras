@@ -24,6 +24,7 @@ from .constants import _LIVE_PLAY_NOT_READY, fallback_turn_uris, stun_server_uri
 from .sdes_open import _answer_sdp_can_nominate
 from .webrtc import WebRTCSession
 from .protocol import (
+    avio_header,
     mask_sdp_secrets,
     AvioResponseRouter,
     _avio_cmd_id,
@@ -2187,14 +2188,7 @@ class _WebRTCOpenMixin:
                 _seq = random.randint(0, 0x7FFFFFFF)
                 _ts_ms = int(time.time() * 1000)
                 _payload = struct.pack("<IB3x", 0, 1)  # channel=0, mode=LIVING
-                _hdr = struct.pack(
-                    "<IIqII4x",
-                    _seq,
-                    5376,
-                    _ts_ms,
-                    len(_payload),
-                    0,
-                )
+                _hdr = avio_header(_seq, 5376, _ts_ms, len(_payload), 0)
                 _frame = _hdr + _payload
                 _dc_ref.send(_frame)
                 _status(
@@ -2212,7 +2206,7 @@ class _WebRTCOpenMixin:
             try:
                 _seq = random.randint(0, 0x7FFFFFFF)
                 _ts_ms = int(time.time() * 1000)
-                _hdr = struct.pack("<IIqII4x", _seq, 5156, _ts_ms, 0, 0)
+                _hdr = avio_header(_seq, 5156, _ts_ms, 0, 0)
                 _dc_ref.send(_hdr)
             except Exception:
                 _LOGGER.debug(
@@ -2236,7 +2230,7 @@ class _WebRTCOpenMixin:
                 _seq = random.randint(0, 0x7FFFFFFF)
                 _ts_ms = int(time.time() * 1000)
                 _payload = b"\x00" * 8
-                _hdr = struct.pack("<IIqII4x", _seq, 768, _ts_ms, len(_payload), 0)
+                _hdr = avio_header(_seq, 768, _ts_ms, len(_payload), 0)
                 _dc_ref.send(_hdr + _payload)
             except Exception:
                 _LOGGER.debug(
@@ -2257,7 +2251,7 @@ class _WebRTCOpenMixin:
                 _seq = random.randint(0, 0x7FFFFFFF)
                 _ts_ms = int(time.time() * 1000)
                 _payload = b"\x00" * 8  # channel=0
-                _hdr = struct.pack("<IIqII4x", _seq, _cmd, _ts_ms, len(_payload), 0)
+                _hdr = avio_header(_seq, _cmd, _ts_ms, len(_payload), 0)
                 _dc_ref.send(_hdr + _payload)
                 _status(
                     f"talk: sent AVIO SPEAKER{'START' if start else 'STOP'} ({_cmd})"

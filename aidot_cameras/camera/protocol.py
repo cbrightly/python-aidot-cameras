@@ -3177,6 +3177,13 @@ _AVIO_RESP_HDR = struct.Struct("<IIqII4x")
 AVIO_HDR_LEN = _AVIO_RESP_HDR.size
 
 
+def avio_header(
+    seq: int, command: int, ts_ms: int, length: int, reserved: int = 0
+) -> bytes:
+    """Pack an AVIO frame header (``_AVIO_RESP_HDR``), the one layout every sender uses."""
+    return _AVIO_RESP_HDR.pack(seq, command, ts_ms, length, reserved)
+
+
 class AvioResponse(NamedTuple):
     """A decoded AVIO control response."""
 
