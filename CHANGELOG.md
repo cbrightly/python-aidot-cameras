@@ -6,6 +6,8 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc58]
+
 ### Changed
 - **The two stream opens are smaller, with no behaviour change.** Thirteen
   helpers that were nested inside `_open_sdes_stream_impl` and
