@@ -3368,6 +3368,2495 @@ def _ensure_srtp_rx_session(holder, key, build, *, on_built=None, on_error=None)
     return new_sess
 
 
+def make_sdes_bridge(
+    *,
+    self,
+    _abort_chan,
+    _answer_pt_kinds,
+    _answer_video_pt,
+    _audio_sock,
+    _avio_responses,
+    _bridge_turn_ips,
+    _bridge_uc_info,
+    _cam_ice_cands,
+    _cam_ice_pwd,
+    _cam_ice_ufrag,
+    _cmd_chan,
+    _first_audio_pt,
+    _first_video_pt,
+    _hp_host,
+    _ice_progress,
+    _lo_audio_port,
+    _lo_video_port,
+    _media_counts,
+    _media_path,
+    _media_progress,
+    _our_tx_srtp_key_audio,
+    _proc_holder,
+    _pwd_a,
+    _pwd_v,
+    _relay_addrs,
+    _sctp,
+    _send_use_candidate,
+    _socket_br,
+    _status,
+    _talk_state,
+    _teardown_holder,
+    _trace,
+    _turn_install_permissions,
+    _turn_refresh_allocation,
+    _turn_send_indication,
+    _ufrag_a,
+    _ufrag_v,
+    _use_plain_rtp,
+    _video_sock,
+    _build_srtp_rx,
+    _dcep_open_msg,
+    _is_self_peer_ip,
+    _on_srtp_rx_built,
+    _on_srtp_rx_error,
+    _sctp_chunk,
+    _sctp_cookie_echo,
+    _sctp_data,
+    _sctp_init_ack_pkt,
+    _sctp_parse_init,
+    _sctp_pkt,
+    _sctp_send_living,
+    _session_mode_req_msg,
+    get_srtp_key_audio,
+    get_cam_key_audio,
+    get_dc_answer_has_app,
+    _br_first_di_logged=False,
+    _br_first_srtp_logged=False,
+    _br_first_req_dumped=False,
+    _br_first_audio_logged=False,
+    _br_first_video_logged=False,
+    _avio_living_sent=False,
+    _bridge_selfloop_drop_count=0,
+):
+    """Build the SDES bridge thread's body for one open.
+
+    The bridge was a 2,458-line closure inside the open reading 42 of its
+    names and rebinding 7 with ``nonlocal``. Those 7 are read nowhere else,
+    so they are this factory's own locals (the keyword defaults); the rest
+    arrive here by value, bound once in the open before the thread starts,
+    except the three the open reassigns while the thread may be running -
+    the audio SRTP key (the key-restart path), the camera's audio key and
+    the data-channel flag (the late-answer path) - which come as getters so
+    the bridge keeps seeing the open's current value as the closure did.
+    The returned function is the thread target; the open stores counters on
+    it as attributes exactly as before. The body is the closure's, verbatim.
+    """
+
+    def _bridge_fn():
+        nonlocal _br_first_di_logged, _br_first_srtp_logged, _br_first_req_dumped
+        nonlocal _br_first_audio_logged, _br_first_video_logged, _avio_living_sent
+        nonlocal _bridge_selfloop_drop_count  # incremented below; needs nonlocal
+        _STUN_MAGIC_BR = b"\x21\x12\xa4\x42"
+        import struct as _st_br
+        import select as _sel_br
+        import time as _time_br
+
+        _br_prefer_direct_stun = {_audio_sock: False, _video_sock: False}
+        _br_last_uc = 0.0
+        _br_last_perm = 0.0  # last CreatePermission install (monotonic)
+        _br_perm_cands = ()  # candidate set those permissions covered
+        # Seeded to now, not 0: the allocation was just created, so the
+        # first refresh belongs one interval out, not on the first tick.
+        _br_last_alloc_refresh = _time_br.monotonic()
+
+        def _br_send_to_cam(_s, _data, _addr, _peer):
+            """Reply to the camera, relayed or direct as the peer requires.
+
+            _addr is where the packet we are answering arrived FROM; when
+            the camera reached us through our relay that is the TURN
+            server, and _peer carries the camera's real address so the
+            payload can be wrapped.  _peer None => plain direct send.
+            """
+            if _peer and _turn_send_indication(_s, _peer[0], _peer[1], _data):
+                return
+            _s.sendto(_data, _addr)
+
+        _br_stun_resp_count = 0
+        _tutk_trigger_sent = False
+        # Instrumentation for the first-media stall report.  These four are
+        # bridge-thread locals that the main coroutine has to be able to
+        # read when the wait expires, so each is mirrored onto _bridge_fn at
+        # its write site - the same publication _sprop_done uses.  Nothing
+        # here is read by the bridge itself; they only ever describe.
+        _br_binding_success_count = 0  # inbound STUN Binding Success (0x0101)
+        _br_probe_verdicts: dict = {}  # probe source -> why it was/wasn't learned
+        # A SET, not a counter: one unrecorded source probing fifty times
+        # is one source, and a per-packet count would put a wrong number in
+        # the report for someone to reason from.
+        _br_probe_overflow: set = set()  # sources past _MAX_PROBE_SOURCES
+        _bridge_fn._tutk_trigger_sent = False
+        _bridge_fn._br_stun_resp_count = 0
+        _bridge_fn._br_binding_success_count = 0
+        _bridge_fn._br_probe_verdicts = {}
+        _bridge_fn._br_probe_overflow = 0
+        # Read by the first-media wait's trigger rule
+        # (_trigger_unacked_abandon_due): when LIVING first went out
+        # (monotonic), and TUTK-framed media, which leaves its branch before
+        # _br_media_pkts is counted.
+        _bridge_fn._br_trigger_sent_ts = None
+        _bridge_fn._br_tutk_media = 0
+        _last_trigger_ts = 0.0  # time of last AVIO LIVING send
+        _trigger_bs = None  # socket used for trigger
+        _trigger_bsrc = None  # camera addr for trigger
+        _trigger_peer = None  # camera's real addr when relayed
+        _sdes_probe_received = False  # True after first 0xC8 probe from camera
+        _last_hb_ts = 0.0  # time of last AVIO HEARTBEAT send
+        _stall_nudges_sent = 0  # LIVING re-sends for the CURRENT stall
+        _stall_last_nudge = 0.0  # wall time of the last stall nudge
+        _stall_active = False  # media had started, then went silent
+        # One-shot guard for the "ffmpeg exited" log below: while the held
+        # proc keeps reporting the same stale exit code across a
+        # teardown-window skip (see _bridge_should_break), only the first
+        # tick logs it.  Reset to False whenever the held proc is next
+        # seen alive (poll() None), so a later, genuine exit of THAT proc
+        # still gets its own line.
+        _br_exit_logged = False
+        _lo_a = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
+        _lo_v = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
+        try:
+            while True:
+                try:
+                    _rl, _, _ = _sel_br.select([_audio_sock, _video_sock], [], [], 0.5)
+                except Exception:
+                    break
+                # Stop the bridge when ffmpeg exits (normal end or crash) -
+                # but NOT on a stale exit seen during a flagged teardown
+                # window (key-restart proc replace, stop(), _reap(), the
+                # DTLS-fallback abort): _bridge_should_break() skips the
+                # break there, and the loop resolves it either via the
+                # key-restart's _proc_holder[0] repoint (next poll() None,
+                # below) or via a genuine teardown closing the loopback
+                # sockets, which raises out of the select() above.
+                _br_proc = _proc_holder[0]
+                if _br_proc is not None:
+                    _br_rc = _br_proc.poll()
+                    if _br_rc is not None:
+                        _br_teardown_requested = bool(_teardown_holder[0])
+                        if _br_rc != 0 and not _br_exit_logged:
+                            _br_exit_logged = True
+                            import logging as _log_br
+
+                            _br_level = _classify_ffmpeg_exit(
+                                _br_rc, _br_teardown_requested
+                            )
+                            # Name the camera.  These lines used to carry no
+                            # device id at all, and this account runs several
+                            # SDES cameras at once, so a burst of exits could
+                            # not be attributed to one of them without extra
+                            # tooling - which sent a live investigation down
+                            # the wrong path once already.
+                            _br_dev = getattr(self, "device_id", "?")
+                            _br_msg = (
+                                "camera %s: SDES bridge: ffmpeg exited with"
+                                " code %d - stopped by teardown"
+                                if _br_level < _log_br.WARNING
+                                else "camera %s: SDES bridge: ffmpeg exited with"
+                                " code %d - stream ended"
+                            )
+                            _log_br.getLogger(__name__).log(
+                                _br_level, _br_msg, _br_dev, _br_rc
+                            )
+                            if _br_level >= _log_br.WARNING:
+                                _serr_tail = getattr(
+                                    _br_proc, "_aidot_stderr_tail", None
+                                )
+                                # The reason first, then the raw tail. On a
+                                # lossy camera the raw tail is all
+                                # Non-monotonic DTS and says nothing about
+                                # why ffmpeg stopped.
+                                _serr_why = getattr(
+                                    _br_proc, "_aidot_stderr_notable", None
+                                )
+                                if _serr_why:
+                                    _log_br.getLogger(__name__).warning(
+                                        "camera %s: SDES serve ffmpeg exit"
+                                        " reason (last %d non-repetitive"
+                                        " lines; %d NACK(s) sent for %d"
+                                        " packet(s), %d late repeat(s) dropped this session):\n%s",
+                                        _br_dev,
+                                        len(_serr_why),
+                                        getattr(_br_proc, "_aidot_nack_sent", 0)
+                                        or getattr(_bridge_fn, "_nack_sent", 0),
+                                        getattr(_bridge_fn, "_nack_seqs", 0),
+                                        getattr(_bridge_fn, "_nack_late_drops", 0),
+                                        "\n".join(_serr_why),
+                                    )
+                                if _serr_tail:
+                                    _log_br.getLogger(__name__).warning(
+                                        "camera %s: SDES serve ffmpeg stderr"
+                                        " (last %d lines):\n%s",
+                                        _br_dev,
+                                        len(_serr_tail),
+                                        "\n".join(_serr_tail),
+                                    )
+                        if _bridge_should_break(_br_rc, _br_teardown_requested):
+                            break
+                    else:
+                        _br_exit_logged = False
+
+                # AVIO HEARTBEAT (cmd=5156) every 10s, sent as an ENCRYPTED SCTP
+                # DATA chunk (PPID=53) - exactly like LIVING - NOT a raw 0xC8 AVIO
+                # frame.  The camera's control channel is SCTP-inside-0xC8: a raw
+                # 0xC8 AVIO frame is not a valid SCTP packet, so the camera's SCTP
+                # layer discards it and the app-layer keepalive never lands.  With
+                # the old raw-0xC8 heartbeat the firmware tore the session down at
+                # ~18-22 s - confirmed 2026-06-02: recorded video duration was
+                # pinned at ~18 s regardless of motion (brief tap-past 18.3 s vs
+                # sustained 40 s motion 17.6 s), while raw-0xC8 heartbeats *were*
+                # firing.  The official app sends this via DataChannel.customSend
+                # (= SCTP) on a 10 s timer (f0.java Z2() -> CMD_AVIO_CTRL_HEARTHEAT_REQ).
+                #
+                # Gating on dcep_sock confines this to the encrypted-SCTP path
+                # (battery SDES cams), which is where the watchdog bites and where
+                # _enc_c8_sctp is in scope (defined in the packet loop below, set up
+                # by the time SCTP reaches DONE - same closure pattern as the LIVING
+                # send at the DCEP_WAIT branch).  Mains plain-RTP cams never sleep
+                # and leave dcep_sock None, so they simply skip the heartbeat.
+                _hb_sock = _sctp.get("dcep_sock")
+                _hb_src = _sctp.get("dcep_src")
+                if (
+                    _sdes_probe_received
+                    and _hb_sock is not None
+                    and _hb_src is not None
+                    and _time_br.time() - _last_hb_ts >= 10.0
+                ):
+                    import random as _r_hb
+
+                    _hb_seq = _r_hb.randint(0, 0x7FFFFFFF)
+                    _hb_ts = int(_time_br.time() * 1000)
+                    # 28-byte AVIO header, cmd=5156 (HEARTHEAT_REQ), empty payload.
+                    _hb_avio = avio_header(_hb_seq, 5156, _hb_ts, 0, 0)
+                    try:
+                        _hb_chunk = _sctp_data(53, _hb_avio)
+                        _hb_sock.sendto(
+                            _enc_c8_sctp(_sctp_pkt(_sctp["peer_tag"], _hb_chunk)),  # noqa: F821
+                            _hb_src,
+                        )
+                        _last_hb_ts = _time_br.time()
+                        _trace(
+                            f"SDES: sent AVIO HEARTBEAT(5156) via SCTP"
+                            f" TSN={(_sctp['local_tsn'] - 1) & 0xFFFFFFFF}"
+                            f" -> {_hb_src[0]}:{_hb_src[1]}"
+                        )
+                    except Exception as _hb_e:
+                        _status(f"SDES: SCTP heartbeat send failed: {_hb_e}")
+
+                # Two-way audio speaker control - MUST run on the bridge thread.
+                # SPEAKERSTART/STOP are SCTP DATA chunks; _sctp_data() mutates the
+                # shared SCTP TSN/stream-seq, so issuing them from the talk pump
+                # thread races the heartbeat here and the camera drops the chunk
+                # (no 851 ACK).  async_start_talk/async_stop_talk only flip the
+                # want_speaker flag; the actual command is sent from here once the
+                # command channel (_cmd_chan[0], set after LIVING) is up.
+                if _talk_state is not None and _cmd_chan[0] is not None:
+                    if _talk_state.get("want_speaker") and not _talk_state.get(
+                        "speaker_on"
+                    ):
+                        # Defer SPEAKERSTART ~0.6 s after the command channel comes
+                        # up.  The camera ignores it if sent immediately after LIVING
+                        # (validated: the working spike sent it on first-audio,
+                        # ~0.58 s post-LIVING and got the 851 ACK; sending at +22 ms
+                        # gets no ACK - the camera's media/audio pipeline isn't ready).
+                        _now_spk = _time_br.time()
+                        if _talk_state.get("spk_eligible_ts") is None:
+                            _talk_state["spk_eligible_ts"] = _now_spk
+                        elif (
+                            _now_spk - _talk_state["spk_eligible_ts"]
+                            >= SDES_SPEAKERSTART_DELAY
+                        ):
+                            try:
+                                _cmd_chan[0](848, b"\x00" * 8)  # SPEAKERSTART
+                                _talk_state["speaker_on"] = True
+                                _status(
+                                    "SDES talk: sent SPEAKERSTART(848) (bridge thread)"
+                                )
+                            except Exception:
+                                _LOGGER.debug(
+                                    "camera %s: swallowed exception in %s",
+                                    getattr(self, "device_id", "?"),
+                                    "_bridge_fn",
+                                    exc_info=True,
+                                )
+                    elif _talk_state.get("speaker_on") and not _talk_state.get(
+                        "want_speaker"
+                    ):
+                        try:
+                            _cmd_chan[0](849, b"\x00" * 8)  # SPEAKERSTOP
+                            _talk_state["speaker_on"] = False
+                            _status("SDES talk: sent SPEAKERSTOP(849) (bridge thread)")
+                        except Exception:
+                            _LOGGER.debug(
+                                "camera %s: swallowed exception in %s",
+                                getattr(self, "device_id", "?"),
+                                "_bridge_fn",
+                                exc_info=True,
+                            )
+
+                # RTCP PLI (Picture Loss Indication) - forces camera to
+                # resend IDR + VPS/SPS/PPS so ffmpeg gets codec params.
+                # STARTUP BURST then SLOW SAFETY: fire at 5 s for the first
+                # few PLIs to win the codec-params race (the original intent),
+                # then drop to 30 s.  A *perpetual* 5 s PLI forces an IDR every
+                # 5 s, and at a fixed camera bitrate each IDR is a bandwidth
+                # spike / P-frame quality dip - a deterministic 5 s stutter
+                # cadence (the official app sends ZERO app-level PLI and relies
+                # on the camera's own GOP).  We can't decode here to detect the
+                # first keyframe, so we time-box the burst and keep a slow
+                # safety PLI in case the camera's GOP is long.
+                # P2: front-load the burst so the first decodable IDR arrives
+                # sooner on a cold open.  Was 3 PLIs at a flat 5 s (first IDR
+                # up to ~10 s); now a denser early ramp, then the same 30 s
+                # safety PLI.  AIDOT_SDES_PLI_GAPS overrides the early gaps
+                # (comma-sep seconds; e.g. "5,5,5" restores the old cadence).
+                _pli_gaps = getattr(_bridge_fn, "_pli_gaps", None)
+                if _pli_gaps is None:
+                    try:
+                        _pli_gaps = tuple(
+                            float(_x) for _x in settings.read("AIDOT_SDES_PLI_GAPS")
+                        ) or (0.0, 1.5, 2.0, 3.0)
+                    except ValueError:
+                        _pli_gaps = (0.0, 1.5, 2.0, 3.0)
+                    _bridge_fn._pli_gaps = _pli_gaps
+                # REMB names the VIDEO stream, which is the one to
+                # limit. An earlier version rode the audio Receiver Report
+                # and so named the audio SSRC - it asked the camera to keep
+                # PCMA under the target, which it already was, and left the
+                # video untouched. Measured no change, correctly.
+                #
+                # Own cadence: the PLI timer backs off to 30s once the
+                # stream is up, which is too slow to hold a rate.
+                # Goes out the relay-aware sender, NOT the socket: via TURN
+                # the address media arrived from is the relay, and a raw
+                # write there is dropped as a malformed STUN message while
+                # sendto still reports success.  That is the bug the NACK
+                # path already had and had fixed; REMB was left behind, so
+                # on a relayed camera it never arrived -- which also means
+                # "REMB was measured to do nothing" cannot have been a valid
+                # measurement on such a session.  No fallback to the socket:
+                # skipping a tick until the sender exists costs a second,
+                # falling back costs correctness on the very sessions this
+                # is for.
+                # Guard order is cost order: the module constant first,
+                # so the default REMB-off config pays nothing per packet
+                # (the sender lookup used to sit above this line and ran
+                # ~300x/s for a feature that ships disabled).
+                if (
+                    REMB_TARGET_BPS > 0
+                    and hasattr(_bridge_fn, "_cam_video_ssrc")
+                    and (_remb_send := getattr(_bridge_fn, "_send_to_cam", None))
+                    is not None
+                    and _time_br.time() - getattr(_bridge_fn, "_last_remb_ts", 0.0)
+                    >= 1.0
+                ):
+                    _bridge_fn._last_remb_ts = _time_br.time()
+                    if _send_video_remb(
+                        _remb_send,
+                        getattr(_bridge_fn, "_pli_tx_sess", None),
+                        _CAM_RTCP_SENDER_SSRC,
+                        _bridge_fn._cam_video_ssrc,
+                        REMB_TARGET_BPS,
+                    ) and not getattr(_bridge_fn, "_remb_logged", False):
+                        _bridge_fn._remb_logged = True
+                        _status(
+                            f"SDES: sent REMB {REMB_TARGET_BPS // 1000} kbps"
+                            f" for video SSRC"
+                            f" 0x{_bridge_fn._cam_video_ssrc:08x}"
+                        )
+
+                _pli_done = getattr(_bridge_fn, "_pli_count", 0)
+                _pli_interval = (
+                    _pli_gaps[_pli_done] if _pli_done < len(_pli_gaps) else 30.0
+                )
+                if (
+                    hasattr(_bridge_fn, "_cam_video_ssrc")
+                    and hasattr(_bridge_fn, "_cam_srtp_sock")
+                    and _time_br.time() - getattr(_bridge_fn, "_last_pli_ts", 0.0)
+                    >= _pli_interval
+                ):
+                    import base64 as _b64_pli
+
+                    _pli_sender_ssrc = 0xAB12CD34
+                    _pli_media_ssrc = _bridge_fn._cam_video_ssrc
+                    _pli_raw = _st_br.pack(
+                        "!BBHII",
+                        0x81,
+                        206,
+                        2,
+                        _pli_sender_ssrc,
+                        _pli_media_ssrc,
+                    )
+                    _pli_sent = False
+                    # Hoisted out of the session-build below only so the
+                    # SRTP-TX-KEY note can report the key that actually went
+                    # out rather than re-deriving it.  Same expression, same
+                    # result - no behavior change.
+                    _pli_key_b64 = _our_tx_srtp_key_audio or get_srtp_key_audio()
+                    try:
+                        import pylibsrtp as _plsrtp_pli
+
+                        if not hasattr(_bridge_fn, "_pli_tx_sess"):
+                            _pli_pol = _plsrtp_pli.Policy(
+                                key=_b64_pli.b64decode(_pli_key_b64),
+                                ssrc_type=_plsrtp_pli.Policy.SSRC_SPECIFIC,
+                                ssrc_value=_pli_sender_ssrc,
+                                srtp_profile=(
+                                    _plsrtp_pli.Policy.SRTP_PROFILE_AES128_CM_SHA1_80
+                                ),
+                            )
+                            _pli_pol.allow_repeat_tx = True
+                            _bridge_fn._pli_tx_sess = _plsrtp_pli.Session(
+                                policy=_pli_pol
+                            )
+                        _bridge_fn._cam_srtp_sock.sendto(
+                            _bridge_fn._pli_tx_sess.protect_rtcp(_pli_raw),
+                            _bridge_fn._cam_srtp_src,
+                        )
+                        _pli_sent = True
+                    except Exception:
+                        _LOGGER.debug(
+                            "camera %s: swallowed exception in %s",
+                            getattr(self, "device_id", "?"),
+                            "_bridge_fn",
+                            exc_info=True,
+                        )
+                    if not _pli_sent:
+                        try:
+                            _bridge_fn._cam_srtp_sock.sendto(
+                                _pli_raw, _bridge_fn._cam_srtp_src
+                            )
+                        except Exception:
+                            _LOGGER.debug(
+                                "camera %s: swallowed exception in %s",
+                                getattr(self, "device_id", "?"),
+                                "_bridge_fn",
+                                exc_info=True,
+                            )
+                    _bridge_fn._last_pli_ts = _time_br.time()
+                    _pli_n = getattr(_bridge_fn, "_pli_count", 0) + 1
+                    _bridge_fn._pli_count = _pli_n
+                    if _pli_n <= len(_pli_gaps):
+                        _trace(
+                            f"SDES: sent RTCP PLI #{_pli_n}"
+                            f" -> SSRC=0x{_pli_media_ssrc:08x}"
+                            f" ({'SRTCP' if _pli_sent else 'plain'})"
+                        )
+                    # First send only, unlike the RR note below: the PLI
+                    # SRTP session is built once and cached on _bridge_fn,
+                    # so the key the first PLI went out with is the key
+                    # every later PLI goes out with.
+                    if _pli_n == 1 and _pli_sent:
+                        _status(
+                            _srtp_tx_key_note(
+                                "PLI",
+                                _pli_key_b64,
+                                _our_tx_srtp_key_audio,
+                                get_cam_key_audio(),
+                            )
+                        )
+
+                # DCEP_WAIT -> send LIVING 300ms after DCEP_OPEN.
+                # Camera needs time to register stream 0 before LIVING arrives.
+                if (
+                    _sctp.get("state") == "DCEP_WAIT"
+                    and _time_br.time() - _sctp.get("dcep_sent_ts", 0.0) >= 0.3
+                ):
+                    _dw_sock = _sctp.get("dcep_sock")
+                    _dw_src = _sctp.get("dcep_src")
+                    if _dw_sock and _dw_src:
+                        try:
+                            _lv_dw = _sctp_data(53, _session_mode_req_msg())
+                            _dw_sock.sendto(
+                                _enc_c8_sctp(_sctp_pkt(_sctp["peer_tag"], _lv_dw)),  # noqa: F821
+                                _dw_src,
+                            )
+                            _sctp["state"] = "DONE"
+                            _sdes_probe_received = True
+                            _last_hb_ts = _time_br.time()
+                            _status(
+                                f"SDES DC: DCEP_WAIT -> LIVING(5376)"
+                                f" TSN={_sctp['local_tsn'] - 1}"
+                                f" (300ms after DCEP_OPEN)"
+                            )
+                            # Build persistent command sender for PTZ/IOCtrl/talk.
+                            # Computes timestamp fresh on every call so commands
+                            # are not stale.  AVIO IOCtrl over SDES MUST go out as an
+                            # encrypted SCTP DATA chunk (PPID=53) - identical to LIVING
+                            # and the keepalive heartbeat - NOT a raw 0xC8 AVIO frame.
+                            # The camera's control channel is SCTP-inside-0xC8; a raw
+                            # 0xC8 AVIO frame is not a valid SCTP packet, so the camera's
+                            # SCTP layer silently drops it (proven by the ~18s heartbeat
+                            # watchdog cutoff that disappeared once the heartbeat was
+                            # SCTP-wrapped, 2026-06-02).  _enc_c8_sctp/_sctp_data/_sctp_pkt
+                            # are in scope by the time this runs (DCEP_WAIT is only reached
+                            # after the encrypted-SCTP handshake defines them; same closure
+                            # pattern as the LIVING send above).  dcep_sock/dcep_src are the
+                            # socket+addr the SCTP handshake (and LIVING) used.
+
+                            def _persistent_sdes_cmd(_cmd, _extra=b""):
+                                # dSeq, not a random number.  The app's
+                                # sendCtrl() takes this from a per-client
+                                # counter that starts at 100 and increments
+                                # on every control command, and we keep the
+                                # same counter for livePlayReq already.
+                                # Filling the slot randomly was the only
+                                # field in the 28-byte header that differed
+                                # from the app's.  Parity, not a fix: PTZ
+                                # (AVIO 0x1001) pans through this very
+                                # builder with a random dSeq, so the camera
+                                # is not validating it.
+                                _seq = self._next_dseq()
+                                _ts = int(_time_br.time() * 1000)
+                                _avio = (
+                                    avio_header(_seq, _cmd, _ts, len(_extra), 0)
+                                    + _extra
+                                )
+                                _csock = _sctp.get("dcep_sock")
+                                _csrc = _sctp.get("dcep_src")
+                                if _csock is None or _csrc is None:
+                                    return
+                                try:
+                                    _chunk = _sctp_data(53, _avio)
+                                    _csock.sendto(
+                                        _enc_c8_sctp(
+                                            _sctp_pkt(_sctp["peer_tag"], _chunk)
+                                        ),
+                                        _csrc,
+                                    )
+                                except Exception:
+                                    _LOGGER.debug(
+                                        "camera %s: swallowed exception in %s",
+                                        getattr(self, "device_id", "?"),
+                                        "_persistent_sdes_cmd",
+                                        exc_info=True,
+                                    )
+
+                            def _persistent_sdes_abort():
+                                """ABORT the association from the same socket the commands use.
+
+                                Lives here rather than in the bridge's main
+                                loop because this is where the encrypted
+                                SCTP context actually is - the dcep socket,
+                                the peer tag and the encrypt helper. An
+                                earlier attempt to send it from the media
+                                loop referenced none of them and would not
+                                have compiled.
+                                """
+                                _csock = _sctp.get("dcep_sock")
+                                _csrc = _sctp.get("dcep_src")
+                                if _csock is None or _csrc is None:
+                                    return False
+                                _csock.sendto(
+                                    _enc_c8_sctp(
+                                        _sctp_pkt(
+                                            _sctp["peer_tag"], _sctp_abort_chunk()
+                                        )
+                                    ),
+                                    _csrc,
+                                )
+                                return True
+
+                            _cmd_chan[0] = _persistent_sdes_cmd
+                            _abort_chan[0] = _persistent_sdes_abort
+                        except Exception as _dw_e:
+                            _status(f"SDES DC: DCEP_WAIT LIVING err: {_dw_e}")
+
+                # One LIVING wire-build, shared by the pre-probe retrigger
+                # below and the mid-session stall nudge: resend the AVIO
+                # LIVING(5376) that starts media, encrypted then plaintext
+                # exactly like the original trigger.
+                # Default-arg binding (not closure capture): re-defined each
+                # tick, so the CURRENT trigger socket/addrs are bound at
+                # definition time and B023 cannot bite.
+                def _resend_avio_living(
+                    _tb=_trigger_bs, _tsrc=_trigger_bsrc, _tpeer=_trigger_peer
+                ) -> None:
+                    import struct as _st_re2
+                    import random as _r_re2
+
+                    _re_ts = int(_time_br.time() * 1000)
+                    _re_seq = _r_re2.randint(0, 0x7FFFFFFF)
+                    _re_plain = avio_header(
+                        _re_seq, 5376, _re_ts, 28, 0
+                    ) + _st_re2.pack("<IIIIIII", 0, 0, 1, 0, 0, 0, 0)  # 56B
+                    _re_enc = None
+                    try:
+                        from Crypto.Cipher import AES as _AES_re2
+                        from Crypto.Util.Padding import pad as _pad_re2
+
+                        _re_key = _our_tx_srtp_key_audio[:16].encode("ascii")
+                        _re_iv = (get_cam_key_audio() or _our_tx_srtp_key_audio)[
+                            :16
+                        ].encode("ascii")
+                        _re_enc = _AES_re2.new(
+                            _re_key, _AES_re2.MODE_CBC, _re_iv
+                        ).encrypt(_pad_re2(_re_plain, 16))
+                    except Exception:
+                        _LOGGER.debug(
+                            "camera %s: swallowed exception in %s",
+                            getattr(self, "device_id", "?"),
+                            "_resend_avio_living",
+                            exc_info=True,
+                        )
+                    for _rp in [_re_enc, _re_plain]:
+                        if _rp is None:
+                            continue
+                        _rsz = len(_rp)
+                        try:
+                            _br_send_to_cam(
+                                _tb,
+                                bytes([0xC8, 0x00, _rsz >> 8, _rsz & 0xFF]) + _rp,
+                                _tsrc,
+                                _tpeer,
+                            )
+                        except Exception:
+                            _LOGGER.debug(
+                                "camera %s: swallowed exception in %s",
+                                getattr(self, "device_id", "?"),
+                                "_resend_avio_living",
+                                exc_info=True,
+                            )
+
+                # Periodic retrigger: resend AVIO LIVING every 2s until probe
+                # received (camera acknowledged our trigger).
+                if (
+                    _avio_living_sent
+                    and not _sdes_probe_received
+                    and _trigger_bs is not None
+                    and _time_br.time() - _last_trigger_ts >= 2.0
+                ):
+                    _resend_avio_living()
+                    _last_trigger_ts = _time_br.time()
+
+                # Mid-session stall nudge: the camera episodically stops
+                # transmitting with no teardown signal (A001064, measured
+                # 2026-08-24/25), the serve's input then times out and the
+                # session dies - yet the camera answers a FRESH handshake
+                # immediately afterwards.  So before letting it die, re-send
+                # the LIVING that starts media.  The AVIO HEARTBEAT alone
+                # does not do this: heartbeats kept flowing right through
+                # measured stalls while the media stayed silent.  Bounded by
+                # _stall_nudge_due; the input timeout and the keepalive
+                # reopen remain the unchanged fallback.
+                if (
+                    _STALL_NUDGE_ENABLED
+                    and _sdes_probe_received
+                    and _trigger_bs is not None
+                    and _media_progress[0] > 0.0
+                ):
+                    _stall_silence = _time_br.monotonic() - _media_progress[0]
+                    if _stall_silence <= _STALL_NUDGE_AFTER_S:
+                        if _stall_active:
+                            _stall_active = False
+                            _stall_nudges_sent = 0
+                            # Ask for an immediate IDR so recovery is not
+                            # hostage to the 30s PLI cadence.
+                            _bridge_fn._last_pli_ts = 0.0
+                            _status("SDES: media resumed after stall - PLI re-armed")
+                    elif _stall_nudge_due(
+                        silence_s=_stall_silence,
+                        nudges_sent=_stall_nudges_sent,
+                        since_last_nudge_s=(_time_br.time() - _stall_last_nudge),
+                        stall_after_s=_STALL_NUDGE_AFTER_S,
+                    ):
+                        _stall_active = True
+                        _stall_nudges_sent += 1
+                        _stall_last_nudge = _time_br.time()
+                        _status(
+                            f"SDES: no media for {_stall_silence:.1f}s"
+                            f" - LIVING nudge {_stall_nudges_sent}/3"
+                        )
+                        _resend_avio_living()
+
+                for _bs in _rl:
+                    try:
+                        _bpkt, _bsrc = _bs.recvfrom(4096)
+                    except OSError:
+                        continue
+                    # --- TURN Data Indication: strip wrapper before dispatch --- #
+                    # Camera SRTP and late ICE probes may arrive wrapped in
+                    # TURN Data Indications (type 0x0017) on the TURN control
+                    # channel (3.230.182.123:5349).  Strip to get the inner
+                    # payload, record the peer address for response routing.
+                    _br_turn_peer_ip = None
+                    _br_turn_peer_port = None
+                    if (
+                        len(_bpkt) >= 20
+                        and _bpkt[:2] == b"\x00\x17"
+                        and _bpkt[4:8] == _STUN_MAGIC_BR
+                    ):
+                        if not _br_first_di_logged:
+                            _br_first_di_logged = True
+                            _status(
+                                f"bridge: first Data Indication from"
+                                f" {_bsrc[0]}:{_bsrc[1]}"
+                            )
+                        _br_off = 20
+                        _br_inner = None
+                        while _br_off + 4 <= len(_bpkt):
+                            _br_at, _br_al = _st_br.unpack_from("!HH", _bpkt, _br_off)
+                            _br_av = _bpkt[_br_off + 4 : _br_off + 4 + _br_al]
+                            _br_off += 4 + _br_al + (-_br_al % 4)
+                            if _br_at == 0x0012 and _br_al >= 8:  # XOR-PEER-ADDRESS
+                                _br_xp = _st_br.unpack_from("!H", _br_av, 2)[0] ^ 0x2112
+                                _br_xb = bytes(
+                                    a ^ b
+                                    for a, b in zip(
+                                        _br_av[4:8], _STUN_MAGIC_BR, strict=False
+                                    )
+                                )
+                                _br_turn_peer_ip = ".".join(str(b) for b in _br_xb)
+                                _br_turn_peer_port = _br_xp
+                            elif _br_at == 0x0013:  # DATA
+                                _br_inner = _br_av
+                        if _br_inner:
+                            _bpkt = _br_inner
+
+                    # When this packet came through our relay, _bsrc is the
+                    # TURN server, not the camera.  Everything we send back
+                    # in response therefore has to be wrapped in a Send
+                    # indication addressed to the camera's real address -
+                    # writing raw SRTP or AVIO bytes to the TURN server
+                    # would be parsed as a malformed STUN message and
+                    # dropped.  None when the camera reached us directly,
+                    # which keeps the direct path byte-for-byte unchanged.
+                    _br_cam_peer = (
+                        (_br_turn_peer_ip, _br_turn_peer_port)
+                        if _br_turn_peer_ip
+                        and _br_turn_peer_port
+                        and not _is_self_peer_ip(_br_turn_peer_ip, _br_turn_peer_port)
+                        else None
+                    )
+
+                    if (
+                        len(_bpkt) >= 20
+                        and _bpkt[4:8] == _STUN_MAGIC_BR
+                        and _bpkt[:2] == b"\x00\x01"
+                    ):
+                        # STUN Binding Request - send Binding Success Response
+                        if not _br_first_req_dumped:
+                            _br_first_req_dumped = True
+                            _attrs = []
+                            _o = 20
+                            while _o + 4 <= len(_bpkt):
+                                _at, _al = _st_br.unpack_from("!HH", _bpkt, _o)
+                                _attrs.append(f"0x{_at:04x}/{_al}")
+                                _o += 4 + _al + (-_al % 4)
+                            _status(
+                                f"bridge: first BindingReq from"
+                                f" {_bsrc[0]}:{_bsrc[1]}"
+                                f" attrs=[{', '.join(_attrs)}]"
+                            )
+                        # Learn where this probe actually came from.  The
+                        # camera reached us from here, so this address is
+                        # known-good in a way an advertised one is not.
+                        # Relay-carried probes carry the camera's real
+                        # address in XOR-PEER-ADDRESS; _bsrc is the TURN
+                        # server and would be useless to nominate.
+                        _br_obs = (
+                            _br_cam_peer
+                            if _br_cam_peer
+                            else (None if _bsrc[0] == _hp_host else _bsrc)
+                        )
+                        _br_prflx_was = _bridge_uc_info["prflx"]
+                        _br_prflx_now = _record_peer_reflexive(
+                            _bridge_uc_info["cands"],
+                            _br_prflx_was,
+                            _br_obs,
+                            _is_self_peer_ip,
+                        )
+                        if _br_prflx_now is not _br_prflx_was:
+                            # Rebind, never append: the nomination tick
+                            # iterates this list.
+                            _bridge_uc_info["prflx"] = _br_prflx_now
+                            _status(
+                                f"ICE: learned peer-reflexive camera"
+                                f" candidate {_br_obs[0]}:{_br_obs[1]}"
+                                f" (not in the {len(_bridge_uc_info['cands'])}"
+                                f" advertised candidate(s)) - will nominate it"
+                            )
+                        # Record why this probe's source was, or was not,
+                        # usable.  Both refusals above are silent, and which
+                        # of them fired decides what a fix would change - so
+                        # the fact is kept here and reported once, on the
+                        # stall path, rather than logged per packet.
+                        try:
+                            _br_pv_where = f"{_bsrc[0]}:{_bsrc[1]}"
+                            if _br_turn_peer_ip:
+                                _br_pv_where += (
+                                    f" via {_br_turn_peer_ip}:{_br_turn_peer_port}"
+                                )
+                            if _br_pv_where in _br_probe_verdicts:
+                                pass
+                            elif len(_br_probe_verdicts) >= _MAX_PROBE_SOURCES:
+                                _br_probe_overflow.add(_br_pv_where)
+                                _bridge_fn._br_probe_overflow = len(_br_probe_overflow)
+                            else:
+                                _br_probe_verdicts[_br_pv_where] = (
+                                    _probe_source_verdict(
+                                        _bsrc,
+                                        _br_turn_peer_ip,
+                                        _br_turn_peer_port,
+                                        cam_peer=_br_cam_peer,
+                                        observed=_br_obs,
+                                        known=bool(
+                                            _br_obs is not None
+                                            and (
+                                                _br_obs in _br_prflx_was
+                                                or _br_obs in _bridge_uc_info["cands"]
+                                            )
+                                        ),
+                                        learned=(_br_prflx_now is not _br_prflx_was),
+                                    )
+                                )
+                                # Rebind, never mutate: the reader is the
+                                # main coroutine on another thread.
+                                _bridge_fn._br_probe_verdicts = dict(_br_probe_verdicts)
+                        except Exception:
+                            _LOGGER.debug(
+                                "camera %s: swallowed exception in %s",
+                                getattr(self, "device_id", "?"),
+                                "_bridge_fn",
+                                exc_info=True,
+                            )
+                        try:
+                            if _br_turn_peer_ip is None and _bsrc[0] != _hp_host:
+                                _br_prefer_direct_stun[_bs] = True
+                            _btid = _bpkt[8:20]
+                            # Use TURN peer address when arrived via relay
+                            _bresp_ip = _br_turn_peer_ip or _bsrc[0]
+                            _bresp_port = _br_turn_peer_port or _bsrc[1]
+                            _bresp = _build_stun_binding_success_response(
+                                transaction_id=_btid,
+                                mapped_ip=_bresp_ip,
+                                mapped_port=_bresp_port,
+                                mi_password=(_pwd_a if _bs is _audio_sock else _pwd_v),
+                                magic_cookie=_STUN_MAGIC_BR,
+                            )
+                            if _br_turn_peer_ip and _br_prefer_direct_stun.get(
+                                _bs, False
+                            ):
+                                pass
+                            elif (
+                                _br_turn_peer_ip
+                                and _bs in _relay_addrs
+                                and not _is_self_peer_ip(
+                                    _br_turn_peer_ip, _br_turn_peer_port
+                                )
+                            ):
+                                # Arrived via TURN - respond via Send Indication
+                                _bri = _relay_addrs[_bs]
+                                _br_t_host, _br_t_port = _bri[4], _bri[5]
+                                _br_pip = bytes(
+                                    int(x) for x in _br_turn_peer_ip.split(".")
+                                )
+                                _br_xip2 = bytes(
+                                    a ^ b
+                                    for a, b in zip(
+                                        _br_pip, _STUN_MAGIC_BR, strict=False
+                                    )
+                                )
+                                _br_xport2 = (_br_turn_peer_port ^ 0x2112) & 0xFFFF
+                                _br_xpa = (
+                                    b"\x00\x01"
+                                    + _st_br.pack("!H", _br_xport2)
+                                    + _br_xip2
+                                )
+
+                                _br_si_body = _stun_attr(0x0012, _br_xpa) + _stun_attr(
+                                    0x0013, _bresp
+                                )
+                                _br_send_ind = (
+                                    b"\x00\x16"
+                                    + _st_br.pack("!H", len(_br_si_body))
+                                    + _STUN_MAGIC_BR
+                                    + os.urandom(12)
+                                    + _br_si_body
+                                )
+                                _bs.sendto(_br_send_ind, (_br_t_host, _br_t_port))
+                            elif _br_turn_peer_ip and _is_self_peer_ip(
+                                _br_turn_peer_ip, _br_turn_peer_port
+                            ):
+                                _bridge_selfloop_drop_count += 1
+                                if (
+                                    _bridge_selfloop_drop_count <= 5
+                                    or _bridge_selfloop_drop_count % 50 == 0
+                                ):
+                                    _LOGGER.debug(
+                                        "bridge: drop TURN self-loop STUN peer %s:%d"
+                                        " (count=%d)",
+                                        _br_turn_peer_ip,
+                                        _br_turn_peer_port,
+                                        _bridge_selfloop_drop_count,
+                                    )
+                            else:
+                                _bs.sendto(_bresp, _bsrc)
+                                _br_stun_resp_count += 1
+                                _bridge_fn._br_stun_resp_count = _br_stun_resp_count
+                            # Late USE-CANDIDATE: send when answer arrived
+                            # after bridge started (empty at setup time).
+                            if not _bridge_uc_info["sent"] and _bridge_uc_info["ufrag"]:
+                                _bridge_uc_info["sent"] = True
+                                # Nominate BOTH the audio and video sockets, not
+                                # just the one that happened to receive this probe.
+                                # The early (answer-in-time) path nominates both;
+                                # the late path previously nominated only _bs (the
+                                # socket with the first BindingReq, typically audio),
+                                # so the video pair was never nominated and the
+                                # camera never started video RTP (audio/control
+                                # recovered, video stayed dark).
+                                for _br_ci, _br_cp in _bridge_uc_info["cands"]:
+                                    for _uc_sock, _uc_ufrag, _uc_pwd in (
+                                        (_audio_sock, _ufrag_a, _pwd_a),
+                                        (_video_sock, _ufrag_v, _pwd_v),
+                                    ):
+                                        try:
+                                            _send_use_candidate(
+                                                _uc_sock,
+                                                _uc_ufrag,
+                                                _uc_pwd,
+                                                _bridge_uc_info["ufrag"],
+                                                _bridge_uc_info["pwd"],
+                                                (_br_ci, _br_cp),
+                                            )
+                                        except Exception:
+                                            _LOGGER.debug(
+                                                "camera %s: swallowed exception in %s",
+                                                getattr(self, "device_id", "?"),
+                                                "_bridge_fn",
+                                                exc_info=True,
+                                            )
+                                _status(
+                                    f"bridge: late USE-CANDIDATE sent (audio+video) to"
+                                    f" {len(_bridge_uc_info['cands'])} camera candidate(s)"
+                                    " (answer arrived after bridge started)"
+                                )
+                        except Exception:
+                            _LOGGER.debug(
+                                "camera %s: swallowed exception in %s",
+                                getattr(self, "device_id", "?"),
+                                "_bridge_fn",
+                                exc_info=True,
+                            )
+                    elif len(_bpkt) >= 20 and _bpkt[4:8] == _STUN_MAGIC_BR:
+                        # CreatePermission response from the TURN server.
+                        # 0x0108 = success (the relay door is open for that
+                        # peer); 0x0118 = error.  438 Stale Nonce is routine
+                        # and recoverable: the server hands back a fresh
+                        # NONCE, so adopt it and retry once.  401 means the
+                        # credentials themselves are wrong, which is worth a
+                        # warning because the relay stays shut.
+                        if _bpkt[:2] in (
+                            b"\x01\x08",
+                            b"\x01\x18",
+                            b"\x01\x04",
+                            b"\x01\x14",
+                        ):
+                            _cp_err = 0
+                            _cp_new_nonce = b""
+                            _cp_i = 20
+                            _cp_end = min(
+                                20 + _st_br.unpack("!H", _bpkt[2:4])[0],
+                                len(_bpkt),
+                            )
+                            while _cp_i + 4 <= _cp_end:
+                                _cp_at, _cp_al = _st_br.unpack_from("!HH", _bpkt, _cp_i)
+                                _cp_v = _bpkt[_cp_i + 4 : _cp_i + 4 + _cp_al]
+                                if _cp_at == 0x0009 and len(_cp_v) >= 4:
+                                    _cp_err = _cp_v[2] * 100 + _cp_v[3]
+                                elif _cp_at == 0x0015:
+                                    _cp_new_nonce = _cp_v
+                                _cp_i += 4 + _cp_al + ((-_cp_al) % 4)
+                            _cp_what = (
+                                "CreatePermission" if _bpkt[1] == 0x08 else "Refresh"
+                            )
+                            if _bpkt[:2] in (b"\x01\x08", b"\x01\x04"):
+                                _cp_seen = f"_cp_ok_logged_{_cp_what}"
+                                if not getattr(_bridge_fn, _cp_seen, False):
+                                    setattr(_bridge_fn, _cp_seen, True)
+                                    _status(
+                                        f"TURN: {_cp_what} confirmed by"
+                                        f" server (success)"
+                                    )
+                            elif _cp_err == 438 and _cp_new_nonce:
+                                _cp_old = _relay_addrs.get(_bs)
+                                if _cp_old and len(_cp_old) >= 8:
+                                    _relay_addrs[_bs] = (
+                                        *_cp_old[:3],
+                                        _cp_new_nonce,
+                                        *_cp_old[4:],
+                                    )
+                                    _trace(
+                                        f"TURN: stale nonce on {_cp_what}"
+                                        " - refreshed and retrying"
+                                    )
+                                    # Re-arm both gates: whichever request
+                                    # hit the stale nonce, the fresh one
+                                    # should be used immediately.
+                                    _br_last_perm = 0.0
+                                    _br_perm_cands = ()
+                                    _br_last_alloc_refresh = 0.0
+                            else:
+                                _status(
+                                    f"TURN: {_cp_what} rejected"
+                                    f" (error {_cp_err or 'unknown'}) -"
+                                    f" relay path unusable"
+                                )
+                            continue
+                        # Count the inbound Binding Success BEFORE the
+                        # trigger gate below.  Counting inside it would make
+                        # this an alias for _tutk_trigger_sent and collapse
+                        # two different diagnoses - "none ever arrived" and
+                        # "one arrived and the trigger still did not go" -
+                        # into a single indistinguishable state.
+                        # Transport liveness: the camera's binding
+                        # successes and keepalive indications both stop the
+                        # instant its ICE agent tears down, which is what
+                        # tells a teardown apart from a media pause.
+                        if _bpkt[:2] in (b"\x01\x01", b"\x00\x11"):
+                            _ice_progress[0] = _time_br.monotonic()
+                        if _bpkt[:2] == b"\x01\x01":
+                            _br_binding_success_count += 1
+                            _bridge_fn._br_binding_success_count = (
+                                _br_binding_success_count
+                            )
+                        # STUN BindingSuccess (0x0101) from camera: ICE complete.
+                        # Send AES-128-CBC encrypted SESSION_MODE_REQ (AVIO LIVING).
+                        #
+                        # Confirmed via Ghidra static analysis of arm64
+                        # libjingle_peerconnection_so.so (usrsctp_transport.cc):
+                        #   - FUN_0098a9b0 (EncryptPayload): AES-128-CBC, PKCS#7 padding
+                        #   - Key:  base64_decode(our_sdes_inline_key)[:16]
+                        #   - IV:   base64_decode(our_sdes_inline_key)[16:30] + \x00\x00
+                        #   - Packet: [0xC8][0x00][len_hi][len_lo][ciphertext]
+                        #     (4-byte header, NOT the 12-byte TUTK SFrame with ts/SSRC)
+                        if (
+                            _use_plain_rtp
+                            and not _tutk_trigger_sent
+                            and _bpkt[:2] == b"\x01\x01"
+                        ):
+                            _tutk_trigger_sent = True
+                            _bridge_fn._tutk_trigger_sent = True
+                            if getattr(_bridge_fn, "_br_trigger_sent_ts", None) is None:
+                                _bridge_fn._br_trigger_sent_ts = _time_br.monotonic()
+                            import struct as _st_tk
+                            import random as _rand_tk
+
+                            _ts_ms = int(_time_br.time() * 1000)
+                            _tk_seq = _rand_tk.randint(0, 0x7FFFFFFF)
+                            _avio_plain = avio_header(
+                                _tk_seq, 5376, _ts_ms, 28, 0
+                            ) + _st_tk.pack(
+                                "<IIIIIII", 0, 0, 1, 0, 0, 0, 0
+                            )  # 28B AVIO header + 28B AVStream = 56B
+
+                            # AES-128-CBC: key=our_inline[:16] ASCII, IV=cam_inline[:16] ASCII.
+                            # Confirmed by Frida v8.23 (2026-05-28): first 16 raw chars of
+                            # each party's a=crypto: inline string, not base64-decoded.
+                            _trigger_enc = None
+                            try:
+                                from Crypto.Cipher import AES as _AES_tk
+                                from Crypto.Util.Padding import pad as _pad_tk
+
+                                _aes_key = _our_tx_srtp_key_audio[:16].encode("ascii")
+                                _aes_iv = (
+                                    get_cam_key_audio() or _our_tx_srtp_key_audio
+                                )[:16].encode("ascii")
+                                _padded = _pad_tk(_avio_plain, 16)  # PKCS#7 -> 64B
+                                _trigger_enc = _AES_tk.new(
+                                    _aes_key, _AES_tk.MODE_CBC, _aes_iv
+                                ).encrypt(_padded)
+                            except Exception:
+                                pass  # no pycryptodome
+
+                            # Packet: [0xC8][0x00][ciphertext_len_BE_2B][ciphertext]
+                            for _payload, _label in [
+                                (_trigger_enc, "AES-128-CBC"),
+                                (_avio_plain, "plaintext"),
+                            ]:
+                                if _payload is None:
+                                    continue
+                                _sz = len(_payload)
+                                _pkt = (
+                                    bytes([0xC8, 0x00, _sz >> 8, _sz & 0xFF]) + _payload
+                                )
+                                try:
+                                    _br_send_to_cam(_bs, _pkt, _bsrc, _br_cam_peer)
+                                    _status(
+                                        f"SDES: sent trigger ({_label})"
+                                        f" len={_sz}"
+                                        f" -> {_bsrc[0]}:{_bsrc[1]}"
+                                    )
+                                except Exception:
+                                    _LOGGER.debug(
+                                        "camera %s: swallowed exception in %s",
+                                        getattr(self, "device_id", "?"),
+                                        "_bridge_fn",
+                                        exc_info=True,
+                                    )
+                            _avio_living_sent = True
+                            _last_trigger_ts = _time_br.time()
+                            _trigger_bs = _bs
+                            _trigger_bsrc = _bsrc
+                            _trigger_peer = _br_cam_peer
+
+                            # Camera is SCTP initiator (a=setup:active).
+                            # Be pure SCTP server: wait for camera's INIT,
+                            # reply INIT-ACK, wait for COOKIE-ECHO, then send data.
+                            if get_dc_answer_has_app():
+                                _status(
+                                    "SDES DC: m=application present"
+                                    " - waiting for camera SCTP INIT"
+                                    f" our_key={_key_fingerprint(_our_tx_srtp_key_audio)}"
+                                    f" cam_key={_key_fingerprint(get_cam_key_audio())}"
+                                )
+                    else:
+                        # Non-STUN packet - demux by first byte.
+                        if _avio_living_sent and len(_bpkt) >= 4:
+                            _nsl_cnt = getattr(_bridge_fn, "_non_stun_logged", 0)
+                            if _nsl_cnt < 5:
+                                _LOGGER.debug(
+                                    "bridge non-STUN %dB from %s:%d first4=%s",
+                                    len(_bpkt),
+                                    _bsrc[0],
+                                    _bsrc[1],
+                                    _bpkt[:4].hex(),
+                                )
+                                _bridge_fn._non_stun_logged = _nsl_cnt + 1
+                        # Plain SCTP over UDP: srcPort=dstPort=5000 (0x1388).
+                        # Camera is a=setup:active (SCTP client - initiates INIT).
+                        # We are SCTP server: wait for camera's INIT, reply INIT-ACK,
+                        # then complete: COOKIE-ECHO -> COOKIE-ACK ->
+                        # DATA_CHANNEL_OPEN + SESSION_MODE_REQ(5376).
+                        # Check for any SCTP-like packet: first 4 bytes are
+                        # srcPort(2B) + dstPort(2B) in SCTP common header.
+                        # Standard SCTP uses port 5000 (0x1388) but log ALL
+                        # candidates to catch non-standard port usage.
+                        _possible_sctp = (
+                            (
+                                len(_bpkt) >= 12
+                                and _bpkt[4:8]
+                                == b"\x00\x00\x00\x00"  # vtag=0 means INIT
+                                and _bpkt[12] in (0x01, 0x02, 0x0A, 0x0B, 0x06)
+                            )
+                            or (
+                                len(_bpkt) >= 12
+                                and _bpkt[:2] == b"\x13\x88"
+                                and _bpkt[2:4] == b"\x13\x88"
+                            )
+                        )
+                        if _possible_sctp:
+                            st = _sctp["state"]
+                            _chunk_type = _bpkt[12] if len(_bpkt) > 12 else 0xFF
+                            _status(
+                                f"SDES DC: plain SCTP {len(_bpkt)}B"
+                                f" from {_bsrc[0]}:{_bsrc[1]}"
+                                f" state={st}"
+                                f" chunk=0x{_chunk_type:02x}"
+                                f" [{_bpkt[:16].hex()}]"
+                            )
+                            # Secondary C: camera may be SCTP client (a=setup:active
+                            # means camera initiates). If state is CLOSED and we see
+                            # an INIT chunk (type=0x01), respond with INIT-ACK.
+                            if st == "CLOSED" and _chunk_type == 0x01:
+                                peer_tag = _sctp_parse_init(_bpkt)
+                                if peer_tag:
+                                    _sctp["state"] = "COOKIE_ECHOED"
+                                    try:
+                                        _ack_pkt = _sctp_init_ack_pkt()
+                                        _br_send_to_cam(
+                                            _bs, _ack_pkt, _bsrc, _br_cam_peer
+                                        )
+                                        _status(
+                                            f"SDES DC: camera sent SCTP INIT"
+                                            f" (peer_tag=0x{peer_tag:08x})"
+                                            f" - sent INIT-ACK"
+                                        )
+                                    except Exception as _iae:
+                                        _status(f"SCTP INIT-ACK failed: {_iae}")
+                            elif st in ("INIT_SENT", "COOKIE_WAIT"):
+                                cookie = _sctp_parse_init_ack(_bpkt, _sctp)
+                                if cookie:
+                                    _sctp["state"] = "COOKIE_ECHOED"
+                                    try:
+                                        _br_send_to_cam(
+                                            _bs,
+                                            _sctp_cookie_echo(cookie),
+                                            _bsrc,
+                                            _br_cam_peer,
+                                        )
+                                        _status(
+                                            f"SDES DC: plain INIT-ACK"
+                                            f" (cookie {len(cookie)}B)"
+                                            f" -> sent COOKIE-ECHO"
+                                        )
+                                    except Exception as _sce:
+                                        _status(f"SCTP COOKIE-ECHO failed: {_sce}")
+                                else:
+                                    _status(
+                                        "SDES DC: plain SCTP pkt in INIT_SENT/COOKIE_WAIT"
+                                        " - parse_init_ack found no cookie"
+                                    )
+                            elif st == "COOKIE_ECHOED":
+                                # Any SCTP packet (COOKIE-ACK = type 0x0B) signals
+                                # SCTP is established.
+                                _sctp["state"] = "ESTABLISHED"
+                                _status("SDES DC: SCTP COOKIE-ACK - DataChannel OPEN")
+                                try:
+                                    _sctp_send_living(_bs, _bsrc)
+                                except Exception as _sle:
+                                    _LOGGER.warning(
+                                        "SDES DC: send living failed: %s", _sle
+                                    )
+                            elif st == "DONE":
+                                pass  # ignore further SCTP (SACKs etc.)
+                            continue
+                        # Log DTLS packets (first byte 0x14-0x17) if they arrive.
+                        # Camera is a=setup:active (DTLS client) - if it sends
+                        # DTLS ClientHello, we'd see 0x16 here.
+                        if len(_bpkt) >= 4 and 0x14 <= _bpkt[0] <= 0x17:
+                            _trace(
+                                f"bridge: DTLS record {len(_bpkt)}B"
+                                f" from {_bsrc[0]}:{_bsrc[1]}"
+                                f" ct=0x{_bpkt[0]:02x}"
+                                f" ver={_bpkt[1:3].hex()}"
+                            )
+                        #
+                        # Raw hex dump of all 0xC8/0xC9 packets (first 10) to verify
+                        # packet format and AES key/IV derivation.
+                        if (
+                            len(_bpkt) >= 1
+                            and _bpkt[0] not in (0xC8, 0xC9)
+                            and not (len(_bpkt) >= 4 and 0x14 <= _bpkt[0] <= 0x17)
+                            and _sctp.get("state") == "DONE"
+                        ):
+                            if not hasattr(_bridge_fn, "_non_c8_after_done"):
+                                _bridge_fn._non_c8_after_done = 0
+                            _bridge_fn._non_c8_after_done += 1
+                            if _bridge_fn._non_c8_after_done <= 5:
+                                _trace(
+                                    f"bridge: non-0xC8 after DONE:"
+                                    f" {len(_bpkt)}B byte0=0x{_bpkt[0]:02x}"
+                                    f" {_bpkt[:24].hex()}"
+                                )
+                        if len(_bpkt) >= 1 and _bpkt[0] in (0xC8, 0xC9):
+                            if not hasattr(_bridge_fn, "_c8_raw_count"):
+                                _bridge_fn._c8_raw_count = 0
+                            _bridge_fn._c8_raw_count += 1
+                            if _bridge_fn._c8_raw_count <= 10:
+                                _sdes_k_fp = _key_fingerprint(_our_tx_srtp_key_audio)
+                                _sdes_v_fp = _key_fingerprint(
+                                    get_cam_key_audio() or _our_tx_srtp_key_audio
+                                )
+                                _trace(
+                                    f"bridge: RAW 0x{_bpkt[0]:02x} {len(_bpkt)}B"
+                                    f" #{_bridge_fn._c8_raw_count}"
+                                    f" our_key={_sdes_k_fp}"
+                                    f" cam_key={_sdes_v_fp}"
+                                    f" [{_bpkt[:24].hex()}]"
+                                )
+                        # TUTK SFrame detection (A001064 / _use_plain_rtp):
+                        # The camera sends TUTK-framed data instead of SRTP.
+                        # Wire-capture analysis (2026-05-02) confirmed:
+                        #   byte0=0xC8 -> TUTK audio SFrame
+                        #   byte0=0xC9 -> TUTK video SFrame (expected)
+                        # TUTK SFrame header (12 bytes):
+                        #   [0]   type   (0xC8=audio, 0xC9=video)
+                        #   [1]   channel/flags
+                        #   [2-3] payload_size (big-endian; = packet_len - 4)
+                        #   [4-7] timestamp (big-endian, camera clock)
+                        #   [8-11] SSRC (big-endian; confirmed matches actual pkt ssrc)
+                        # Strip TUTK header and synthesize a standard RTP/2 packet
+                        # so ffmpeg (configured with RTP/AVP, no SRTP) can decode.
+                        if (
+                            _use_plain_rtp
+                            and len(_bpkt) >= 12
+                            and _bpkt[0] in (0xC8, 0xC9)
+                        ):
+                            _tk_type = _bpkt[0]
+                            _tk_ts = int.from_bytes(_bpkt[4:8], "big")
+                            _tk_ssrc = int.from_bytes(_bpkt[8:12], "big")
+                            _tk_audio = _tk_type == 0xC8
+                            _tk_pt = 8 if _tk_audio else 96  # PCMA or H264
+                            _tk_payload = _bpkt[12:]
+                            # Mark probe received; start heartbeat timer
+                            if not _sdes_probe_received:
+                                _sdes_probe_received = True
+                                _last_hb_ts = _time_br.time()  # HB fires in 10s
+                            # Guard on a counter that is actually assigned.
+                            # This used to test `_tutk_seq`, a name nothing
+                            # ever set, so hasattr was False on EVERY packet
+                            # and both counters were reset to 0 each time -
+                            # every synthesized packet went out with
+                            # sequence number 1.  ffmpeg reads a constant
+                            # sequence as a stream of discontinuities and
+                            # reports `RTP: missed N packets` for loss that
+                            # never happened.
+                            if not hasattr(_bridge_fn, "_tutk_seq_v"):
+                                _bridge_fn._tutk_seq_a = 0
+                                _bridge_fn._tutk_seq_v = 0
+                            if _tk_audio:
+                                _bridge_fn._tutk_seq_a = (
+                                    _bridge_fn._tutk_seq_a + 1
+                                ) & 0xFFFF
+                                _tk_seq = _bridge_fn._tutk_seq_a
+                                _btgt, _lo_target, _kind = (
+                                    _lo_audio_port,
+                                    _lo_a,
+                                    "audio",
+                                )
+                            else:
+                                _bridge_fn._tutk_seq_v = (
+                                    _bridge_fn._tutk_seq_v + 1
+                                ) & 0xFFFF
+                                _tk_seq = _bridge_fn._tutk_seq_v
+                                _btgt, _lo_target, _kind = (
+                                    _lo_video_port,
+                                    _lo_v,
+                                    "video",
+                                )
+                            # Synthesize 12-byte RTP header (V=2, no padding/ext/csrc)
+                            _rtp_hdr = _st_br.pack(
+                                "!BBHII",
+                                0x80,  # V=2 P=0 X=0 CC=0
+                                _tk_pt,  # M=0 PT
+                                _tk_seq,
+                                _tk_ts,
+                                _tk_ssrc,
+                            )
+                            _bpkt = _rtp_hdr + _tk_payload
+                            if not hasattr(_bridge_fn, "_tutk_count"):
+                                _bridge_fn._tutk_count = 0
+                                _bridge_fn._tutk_first_ts = _time_br.time()
+                            _bridge_fn._tutk_count += 1
+                            _elapsed = _time_br.time() - _bridge_fn._tutk_first_ts
+                            # Decrypt audio probe: SRTP AES-CM (RFC 3711).
+                            # AES-128-CBC: key=our_inline[:16], IV=cam_inline[:16].
+                            # Frida v8.23 (2026-05-28) confirmed: both encrypt and
+                            # decrypt use first 16 ASCII chars of the respective
+                            # a=crypto: inline strings, NOT base64-decoded content.
+                            # Ciphertext starts at byte 4 (after 0xC8 header).
+                            _pd_plain = None
+                            if _tk_audio and get_cam_key_audio():
+                                try:
+                                    from Crypto.Cipher import AES as _AES_pd
+                                    from Crypto.Util.Padding import (
+                                        unpad as _unpad_pd,
+                                    )
+
+                                    _pd_key = _our_tx_srtp_key_audio[:16].encode(
+                                        "ascii"
+                                    )
+                                    _pd_iv = get_cam_key_audio()[:16].encode("ascii")
+                                    _pd_ct = _bpkt[
+                                        4:
+                                    ]  # full ciphertext after 4B header
+                                    if len(_pd_ct) % 16 == 0 and len(_pd_ct) >= 16:
+                                        _pd_plain = _unpad_pd(
+                                            _AES_pd.new(
+                                                _pd_key, _AES_pd.MODE_CBC, _pd_iv
+                                            ).decrypt(_pd_ct),
+                                            16,
+                                        )
+                                except ImportError:
+                                    pass
+                                except Exception as _pde:
+                                    _status(f"bridge: SDES decrypt error: {_pde}")
+                            # Log for first 5 and every 10th frame
+                            if (
+                                _bridge_fn._tutk_count <= 5
+                                or _bridge_fn._tutk_count % 10 == 0
+                            ):
+                                _trace(
+                                    f"bridge: TUTK {_kind} SFrame"
+                                    f" type=0x{_tk_type:02x} ssrc={_tk_ssrc}"
+                                    f" ts={_tk_ts} payload={len(_tk_payload)}B"
+                                    f" #{_bridge_fn._tutk_count} (+{_elapsed:.1f}s)"
+                                )
+                                if _bridge_fn._tutk_count <= 5:
+                                    _trace(
+                                        f"bridge: TUTK raw"
+                                        f" type=0x{_tk_type:02x}"
+                                        f" ts={_tk_ts} ssrc=0x{_tk_ssrc:08x}"
+                                        f" payload={len(_tk_payload)}B"
+                                        f" [{_tk_payload[:32].hex()}]"
+                                    )
+                                    if _pd_plain is not None:
+                                        _trace(
+                                            f"bridge: TUTK decrypt ->"
+                                            f" {len(_pd_plain)}B"
+                                            f" [{_pd_plain[:32].hex()}]"
+                                        )
+                            # -- Encrypted SCTP state machine (SDES path) --
+                            # Camera sends SCTP handshake (INIT, COOKIE-ECHO, DATA)
+                            # wrapped in 0xC8 AES-128-CBC frames. Handle before
+                            # forwarding to ffmpeg.
+                            if (
+                                _pd_plain is not None
+                                and len(_pd_plain) >= 16
+                                and _pd_plain[:4] == b"\x13\x88\x13\x88"
+                            ):
+                                _pd_ct8 = _pd_plain[12] if len(_pd_plain) > 12 else 0xFF
+
+                                def _enc_c8_sctp(_raw):
+                                    from Crypto.Cipher import AES as _ae
+                                    from Crypto.Util.Padding import pad as _pa
+
+                                    _k = _our_tx_srtp_key_audio[:16].encode("ascii")
+                                    _v = get_cam_key_audio()[:16].encode("ascii")
+                                    _e = _ae.new(_k, _ae.MODE_CBC, _v).encrypt(
+                                        _pa(_raw, 16)
+                                    )
+                                    return (
+                                        bytes(
+                                            [
+                                                0xC8,
+                                                0x00,
+                                                len(_e) >> 8,
+                                                len(_e) & 0xFF,
+                                            ]
+                                        )
+                                        + _e
+                                    )
+
+                                _sct = _sctp["state"]
+                                if _pd_ct8 == 0x01 and _sct in (
+                                    "CLOSED",
+                                    "INIT_SENT",
+                                    "COOKIE_WAIT",
+                                ):
+                                    # Camera SCTP INIT (or retransmit) -> send encrypted INIT-ACK.
+                                    # Handle retransmits in COOKIE_WAIT: re-send INIT-ACK
+                                    # (our first may have been lost).
+                                    _sc_p = _sctp_parse_init(_pd_plain)
+                                    if _sc_p:
+                                        try:
+                                            _iak_plain = _sctp_init_ack_pkt()
+                                            _iak_bytes = _enc_c8_sctp(_iak_plain)
+                                            _br_send_to_cam(
+                                                _bs, _iak_bytes, _bsrc, _br_cam_peer
+                                            )
+                                            _sctp["state"] = "COOKIE_WAIT"
+                                            _status(
+                                                f"SDES DC: INIT(peer=0x{_sc_p:08x})"
+                                                f" -> INIT-ACK {len(_iak_bytes)}B"
+                                                f" to {_bsrc[0]}:{_bsrc[1]}"
+                                                f" plain[{len(_iak_plain)}B]="
+                                                f"{_iak_plain[:32].hex()}"
+                                            )
+                                        except Exception as _sce8:
+                                            _status(
+                                                f"SDES DC: enc INIT-ACK err: {_sce8}"
+                                            )
+                                elif _pd_ct8 == 0x02 and _sct in (
+                                    "INIT_SENT",
+                                    "COOKIE_WAIT",
+                                ):
+                                    # Camera SCTP INIT-ACK -> send encrypted COOKIE-ECHO
+                                    _sc_ck = _sctp_parse_init_ack(_pd_plain, _sctp)
+                                    if _sc_ck:
+                                        try:
+                                            _br_send_to_cam(
+                                                _bs,
+                                                _enc_c8_sctp(_sctp_cookie_echo(_sc_ck)),
+                                                _bsrc,
+                                                _br_cam_peer,
+                                            )
+                                            _sctp["state"] = "COOKIE_ECHOED"
+                                            _status(
+                                                f"SDES DC: enc INIT-ACK"
+                                                f" (cookie {len(_sc_ck)}B)"
+                                                f" -> sent enc COOKIE-ECHO"
+                                            )
+                                        except Exception as _sce8:
+                                            _status(
+                                                f"SDES DC: enc COOKIE-ECHO err: {_sce8}"
+                                            )
+                                elif _pd_ct8 == 0x0A and _sct in (
+                                    "COOKIE_WAIT",
+                                    "COOKIE_ECHOED",
+                                ):
+                                    # Camera COOKIE-ECHO -> send COOKIE-ACK + DCEP_OPEN,
+                                    # then wait 300ms before sending LIVING (PPID=53).
+                                    # Without DCEP_OPEN (PPID=50), LIVING arrives on an
+                                    # unregistered stream and is silently discarded by the
+                                    # camera's SCTP application layer (SACK confirms transport
+                                    # delivery, but no audio/video results). The DTLS path in
+                                    # client.py (the COOKIE-ECHO/COOKIE-ACK + DCEP_OPEN handler)
+                                    # does exactly this sleep - required.
+                                    try:
+                                        _cak8 = _sctp_pkt(
+                                            _sctp["peer_tag"],
+                                            _sctp_chunk(0x0B, 0, b""),
+                                        )
+                                        _br_send_to_cam(
+                                            _bs,
+                                            _enc_c8_sctp(_cak8),
+                                            _bsrc,
+                                            _br_cam_peer,
+                                        )
+                                        _dc8 = _sctp_data(50, _dcep_open_msg())
+                                        _br_send_to_cam(
+                                            _bs,
+                                            _enc_c8_sctp(
+                                                _sctp_pkt(_sctp["peer_tag"], _dc8)
+                                            ),
+                                            _bsrc,
+                                            _br_cam_peer,
+                                        )
+                                        _sctp["state"] = "DCEP_WAIT"
+                                        _sctp["dcep_sent_ts"] = _time_br.time()
+                                        _sctp["dcep_sock"] = _bs
+                                        _sctp["dcep_src"] = _bsrc
+                                        _status(
+                                            "SDES DC: COOKIE-ECHO"
+                                            " -> COOKIE-ACK + DCEP_OPEN(50),"
+                                            " waiting 300ms before LIVING"
+                                        )
+                                    except Exception as _sce8:
+                                        _status(f"SDES DC: enc COOKIE-ACK err: {_sce8}")
+                                elif _pd_ct8 == 0x0B and _sct == "COOKIE_ECHOED":
+                                    # Camera COOKIE-ACK -> send encrypted LIVING only
+                                    try:
+                                        _lv8 = _sctp_data(53, _session_mode_req_msg())
+                                        _br_send_to_cam(
+                                            _bs,
+                                            _enc_c8_sctp(
+                                                _sctp_pkt(_sctp["peer_tag"], _lv8)
+                                            ),
+                                            _bsrc,
+                                            _br_cam_peer,
+                                        )
+                                        _sctp["state"] = "DONE"
+                                        _sdes_probe_received = True
+                                        _last_hb_ts = _time_br.time()
+                                        _status(
+                                            "SDES DC: enc COOKIE-ACK -> sent enc LIVING"
+                                        )
+                                    except Exception as _sce8:
+                                        _status(f"SDES DC: enc LIVING err: {_sce8}")
+                                elif _pd_ct8 == 0x00 and _sct == "DONE":
+                                    # SCTP DATA from camera.  ACKNOWLEDGE IT
+                                    # FIRST: SCTP puts acknowledgement on the
+                                    # receiver, and sending nothing let the
+                                    # camera's retransmission timer run out and
+                                    # ABORT the association at ~61.4 s, which is
+                                    # what produced the 80.2 s cliff and what
+                                    # stopped PTZ/talkback/SD answering a minute
+                                    # into every session.  Ack before dispatch so
+                                    # a handler that raises cannot cost us the ack.
+                                    if len(_pd_plain) >= 20:
+                                        _sc_tsn = int.from_bytes(
+                                            _pd_plain[16:20], "big"
+                                        )
+                                        _sc_first_sack = (
+                                            _sctp.get("peer_cum_tsn") is None
+                                        )
+                                        _sctp["peer_cum_tsn"] = _sctp_advance_cum_tsn(
+                                            _sctp.get("peer_cum_tsn"), _sc_tsn
+                                        )
+                                        if _sc_first_sack:
+                                            # One line per session: the build tag for the
+                                            # SACK fix, and the thing to look for if the
+                                            # 61.4 s ABORT ever comes back.
+                                            _status(
+                                                f"SDES DC: SACK enabled"
+                                                f" - acking camera DATA from"
+                                                f" TSN={_sc_tsn:#010x}"
+                                            )
+                                        try:
+                                            _br_send_to_cam(
+                                                _bs,
+                                                _enc_c8_sctp(
+                                                    _sctp_pkt(
+                                                        _sctp["peer_tag"],
+                                                        _sctp_sack_chunk(
+                                                            _sctp["peer_cum_tsn"]
+                                                        ),
+                                                    )
+                                                ),
+                                                _bsrc,
+                                                _br_cam_peer,
+                                            )
+                                        except Exception as _sackerr:
+                                            _status(
+                                                f"SDES DC: SACK send failed: {_sackerr}"
+                                            )
+                                    # Reassemble before parsing.  A DATA chunk
+                                    # carries B/E flags (RFC 4960 s3.3.1) and a
+                                    # large reply - the ~2.8 KB SD listing page -
+                                    # arrives as several ~1.2 KB fragments.  Taking
+                                    # each one for a whole AVIO frame got the first
+                                    # rejected (declared length overruns the
+                                    # fragment) and the rest read as junk commands,
+                                    # so the reply was reported as "the camera did
+                                    # not answer".  Use the chunk's own length
+                                    # rather than the rest of the packet: the
+                                    # declared length is what bounds this chunk.
+                                    _sc_flags = (
+                                        _pd_plain[13] if len(_pd_plain) > 13 else 0x03
+                                    )
+                                    _sc_clen = (
+                                        int.from_bytes(_pd_plain[14:16], "big")
+                                        if len(_pd_plain) >= 16
+                                        else 0
+                                    )
+                                    _sc_sid = (
+                                        int.from_bytes(_pd_plain[20:22], "big")
+                                        if len(_pd_plain) >= 22
+                                        else 0
+                                    )
+                                    _sc_frag = (
+                                        _pd_plain[28 : 28 + (_sc_clen - 16)]
+                                        if _sc_clen >= 16 and len(_pd_plain) > 28
+                                        else (
+                                            _pd_plain[28:]
+                                            if len(_pd_plain) > 28
+                                            else b""
+                                        )
+                                    )
+                                    _sc_ppid = (
+                                        int.from_bytes(_pd_plain[24:28], "big")
+                                        if len(_pd_plain) >= 28
+                                        else 0
+                                    )
+                                    _sc_pay = _sctp_reassemble(
+                                        _sc_flags,
+                                        _sc_sid,
+                                        _sc_frag,
+                                        _sctp.setdefault("rx_frag", {}),
+                                    )
+                                    # A mid-message fragment: nothing to parse yet.
+                                    # Its TSN is acknowledged above, so the camera
+                                    # will not retransmit it.  Guarded rather than
+                                    # `continue`d - the nearest enclosing loop is the
+                                    # per-socket one, and skipping it would drop the
+                                    # rest of this socket's turn.
+                                    if _sc_pay is not None:
+                                        _sc_cmd = (
+                                            int.from_bytes(_sc_pay[4:8], "little")
+                                            if len(_sc_pay) >= 8
+                                            else 0
+                                        )
+                                        # This is where the camera's answers
+                                        # come back on SDES.  They were parsed
+                                        # and logged here long before anything
+                                        # could receive them; hand them to
+                                        # whoever asked.
+                                        if _sc_cmd == 5377:
+                                            # SESSION_MODE_RESP: the camera's
+                                            # answer to the LIVING trigger.
+                                            # Counted whether or not anything
+                                            # was waiting for it, because the
+                                            # question the stall report asks is
+                                            # "did the trigger arrive", and the
+                                            # trigger is fire-and-forget.
+                                            _bridge_fn._br_session_mode_resp = (
+                                                getattr(
+                                                    _bridge_fn,
+                                                    "_br_session_mode_resp",
+                                                    0,
+                                                )
+                                                + 1
+                                            )
+                                        _sc_answered = _dispatch_sctp_avio(
+                                            _avio_responses, _sc_pay
+                                        )
+                                        _trace(
+                                            f"SDES DC: enc DATA ppid={_sc_ppid}"
+                                            f" cmd={_sc_cmd} {len(_sc_pay)}B"
+                                            f"{' (answered a request)' if _sc_answered else ''}"
+                                            f" {_sc_pay[:32].hex()}"
+                                        )
+                                else:
+                                    # Log SACK (0x03) with cumulative TSN ack for diagnostics
+                                    if _pd_ct8 == 0x03 and len(_pd_plain) >= 20:
+                                        _cum_tsn = int.from_bytes(
+                                            _pd_plain[16:20], "big"
+                                        )
+                                        _trace(
+                                            f"SDES DC: SACK cum_tsn={_cum_tsn:#010x}"
+                                            f" state={_sct}"
+                                        )
+                                    else:
+                                        _trace(
+                                            f"SDES DC: enc SCTP ct=0x{_pd_ct8:02x}"
+                                            f" state={_sct} {len(_pd_plain)}B"
+                                        )
+                                continue  # SCTP never forwarded to ffmpeg
+                            # Send RTCP RR to camera to acknowledge audio receipt.
+                            if _tk_audio:
+                                _rr_our_ssrc = 0xAB12CD34
+                                _rr_pkt = _st_br.pack(
+                                    "!BBHIIIIIII",
+                                    0x81,
+                                    201,
+                                    7,
+                                    _rr_our_ssrc,
+                                    _tk_ssrc,
+                                    0,
+                                    _bridge_fn._tutk_count,
+                                    0,
+                                    0,
+                                    0,
+                                )
+                                _rtcp_sent = False
+                                # Hoisted purely so the SRTP-TX-KEY note can
+                                # report the key that actually went out.
+                                # Same expression - no behavior change.
+                                _rr_key_b64 = (
+                                    get_cam_key_audio() or _our_tx_srtp_key_audio
+                                )
+                                try:
+                                    import pylibsrtp as _plsrtp_rr
+                                    import base64 as _b64_rr
+
+                                    _rr_key = _b64_rr.b64decode(_rr_key_b64)
+                                    _rr_pol = _plsrtp_rr.Policy(
+                                        key=_rr_key,
+                                        ssrc_type=_plsrtp_rr.Policy.SSRC_SPECIFIC,
+                                        ssrc_value=_rr_our_ssrc,
+                                        srtp_profile=_plsrtp_rr.Policy.SRTP_PROFILE_AES128_CM_SHA1_80,
+                                    )
+                                    _rr_pol.allow_repeat_tx = True
+                                    _rr_sess = _plsrtp_rr.Session(policy=_rr_pol)
+                                    _br_send_to_cam(
+                                        _bs,
+                                        _rr_sess.protect_rtcp(_rr_pkt),
+                                        _bsrc,
+                                        _br_cam_peer,
+                                    )
+                                    _rtcp_sent = True
+                                except Exception:
+                                    _LOGGER.debug(
+                                        "camera %s: swallowed exception in %s",
+                                        getattr(self, "device_id", "?"),
+                                        "_bridge_fn",
+                                        exc_info=True,
+                                    )
+                                if not _rtcp_sent:
+                                    try:
+                                        _br_send_to_cam(
+                                            _bs, _rr_pkt, _bsrc, _br_cam_peer
+                                        )
+                                    except Exception:
+                                        _LOGGER.debug(
+                                            "camera %s: swallowed exception in %s",
+                                            getattr(self, "device_id", "?"),
+                                            "_bridge_fn",
+                                            exc_info=True,
+                                        )
+                                if _bridge_fn._tutk_count == 1:
+                                    _status(
+                                        f"SDES: sent RTCP RR to camera"
+                                        f" (SSRC=0x{_tk_ssrc:08x})"
+                                    )
+                                # Re-noted whenever the selected key changes,
+                                # not just on the first RR: this branch
+                                # rebuilds its SRTP session from the current
+                                # expression on every packet, and
+                                # get_cam_key_audio() can be set after the bridge
+                                # is already running (late-wake answer
+                                # parse), so the RR key does flip mid-session
+                                # on battery cameras.  A first-send-only note
+                                # would have recorded "answer=none differ=no"
+                                # for exactly that session.  Bounded: the
+                                # answer key is only ever set once.
+                                if (
+                                    _rtcp_sent
+                                    and getattr(_bridge_fn, "_rr_key_noted", None)
+                                    != _rr_key_b64
+                                ):
+                                    _bridge_fn._rr_key_noted = _rr_key_b64
+                                    _status(
+                                        _srtp_tx_key_note(
+                                            "RR",
+                                            _rr_key_b64,
+                                            _our_tx_srtp_key_audio,
+                                            get_cam_key_audio(),
+                                        )
+                                    )
+                            # Forward decrypted PCMA audio to ffmpeg loopback.
+                            # AVIO control frames (SESSION_MODE_RESP=5377, etc.) are
+                            # identified by cmd field and skipped; raw PCMA bytes are sent.
+                            if _tk_audio and _pd_plain is not None:
+                                _fwd_cmd = (
+                                    int.from_bytes(_pd_plain[4:8], "little")
+                                    if len(_pd_plain) >= 8
+                                    else 0
+                                )
+                                # AVIO control frames identified by cmd field - never
+                                # forward these to ffmpeg's audio port.  804 =
+                                # LdsTrackSwitchNotify (device->client track-id change,
+                                # f0.java:3224): the camera can send it unsolicited, and
+                                # without it here an 804 frame is misrouted as PCMA noise.
+                                _avio_cmds = {
+                                    5376,
+                                    5377,
+                                    5156,
+                                    5157,
+                                    768,
+                                    769,
+                                    511,
+                                    804,
+                                }
+                                # No response dispatch here.  Measured
+                                # 2026-08-07: the camera's replies come back
+                                # as encrypted SCTP DATA (see
+                                # _dispatch_sctp_avio), never in this
+                                # framing.  Offering every audio packet to
+                                # the router would be per-packet work on the
+                                # media path for something that has never
+                                # arrived on it.
+                                if _fwd_cmd not in _avio_cmds:
+                                    try:
+                                        _lo_a.sendto(
+                                            _rtp_hdr + _pd_plain,
+                                            ("127.0.0.1", _lo_audio_port),
+                                        )
+                                        # Count it: media_stats() documents
+                                        # itself as "media actually forwarded
+                                        # to ffmpeg by the bridge", and
+                                        # scripts/live_validate.py uses it as
+                                        # the SDES release gate.  This is a
+                                        # real forward, so omitting it made a
+                                        # camera whose audio arrives on the
+                                        # TUTK path under-report - far enough
+                                        # to fail an otherwise healthy release.
+                                        _media_progress[0] = _time_br.monotonic()
+                                        _media_counts[0] += 1
+                                        _media_counts[1] += len(_rtp_hdr) + len(
+                                            _pd_plain
+                                        )
+                                        if not _br_first_audio_logged:
+                                            _br_first_audio_logged = True
+                                            # Record the payload type this path
+                                            # SYNTHESISES (_tk_pt, PCMA) so the
+                                            # SDP can be narrowed to it.  Without
+                                            # this the m=audio line keeps
+                                            # advertising "0 8", ffmpeg binds
+                                            # PCMU and discards every packet, and
+                                            # the mpegts PMT is never written - so
+                                            # the consumer gets zero bytes and the
+                                            # VIDEO is lost with the audio.
+                                            _first_audio_pt[0] = _tk_pt
+                                            _status(
+                                                f"bridge: first SDES audio -> ffmpeg"
+                                                f" loopback:{_lo_audio_port}"
+                                                f" ({len(_pd_plain)}B PCMA)"
+                                                f" pt={_tk_pt}"
+                                            )
+                                    except Exception:
+                                        _LOGGER.debug(
+                                            "camera %s: swallowed exception in %s",
+                                            getattr(self, "device_id", "?"),
+                                            "_bridge_fn",
+                                            exc_info=True,
+                                        )
+                            # Counted for the first-media trigger rule: this
+                            # branch leaves before _br_media_pkts is counted,
+                            # so without it a camera sending TUTK-framed
+                            # media would read as sending nothing.
+                            _bridge_fn._br_tutk_media = (
+                                getattr(_bridge_fn, "_br_tutk_media", 0) + 1
+                            )
+                            continue
+
+                        # Standard SRTP/SRTCP demux by RTP payload type.
+                        # Camera answers BUNDLE (a=group:BUNDLE 0 1) so all media
+                        # arrives on _audio_sock.  Routing by source socket would
+                        # send video RTP to ffmpeg's audio loopback.  RFC 5761:
+                        #   - RTP byte[1] = M(1) | PT(7); PT in 0..127
+                        #   - RTCP byte[1] = PT(8); PT in 200..204
+                        # SRTP/SRTCP keeps the header in clear, so we can read PT
+                        # before decryption.  Audio PTs: 0 (PCMU), 8 (PCMA).
+                        # Video PTs: 96 (H264), 97 (H265).
+                        if not hasattr(_bridge_fn, "_srtp_switch_logged"):
+                            _bridge_fn._srtp_switch_logged = True
+                            _LOGGER.info(
+                                "bridge: SRTP/non-TUTK pkt %dB from %s:%d"
+                                " first4=%s (PT=%d) - camera switched to SRTP",
+                                len(_bpkt),
+                                _bsrc[0],
+                                _bsrc[1],
+                                _bpkt[:4].hex(),
+                                (_bpkt[1] & 0x7F) if len(_bpkt) > 1 else -1,
+                            )
+                        _pt_byte = _bpkt[1] if len(_bpkt) > 1 else 0
+                        if _pt_byte < 200 or _pt_byte > 204:
+                            # Every inbound RTP packet, counted BEFORE any
+                            # decryption decision. The media counters are
+                            # deliberately gated on the packet being
+                            # readable, so a session where the camera sent
+                            # plenty and none of it could be decrypted has,
+                            # until here, been indistinguishable from one
+                            # where it sent nothing. Read only by the stall
+                            # report, on a path a healthy open never takes.
+                            _bridge_fn._br_media_pkts = (
+                                getattr(_bridge_fn, "_br_media_pkts", 0) + 1
+                            )
+                        if 200 <= _pt_byte <= 204:
+                            # SRTCP from camera.  For _use_plain_rtp cameras
+                            # the ffmpeg SDP uses RTP/AVP (no crypto).  If we
+                            # forward encrypted SRTCP, ffmpeg reads the
+                            # encrypted NTP/RTP sender-info bytes as garbage
+                            # and uses them to rebase its internal clock,
+                            # producing wildly wrong DTS (~ Unix epoch us).
+                            # Drop encrypted SRTCP entirely; ffmpeg works fine
+                            # without RTCP SR - it uses only RTP timestamps.
+                            if _use_plain_rtp:
+                                continue
+                            # For SDES cameras (non-plain-rtp) ffmpeg uses
+                            # SAVP and handles SRTCP itself - forward as-is.
+                            try:
+                                _lo_a.sendto(_bpkt, ("127.0.0.1", _lo_audio_port))
+                            except Exception:
+                                _LOGGER.debug(
+                                    "camera %s: swallowed exception in %s",
+                                    getattr(self, "device_id", "?"),
+                                    "_bridge_fn",
+                                    exc_info=True,
+                                )
+                            try:
+                                _lo_v.sendto(_bpkt, ("127.0.0.1", _lo_video_port))
+                            except Exception:
+                                _LOGGER.debug(
+                                    "camera %s: swallowed exception in %s",
+                                    getattr(self, "device_id", "?"),
+                                    "_bridge_fn",
+                                    exc_info=True,
+                                )
+                            continue
+                        _pt = _pt_byte & 0x7F
+                        # The ANSWER decides which payload type is which
+                        # kind; the tuples below are only the fallback for a
+                        # packet that beats the answer in.  See
+                        # answer_pt_kinds: this camera negotiates H265 on
+                        # pt=0 in ~14% of sessions and the fixed tuples sent
+                        # every one of those video streams to the AUDIO
+                        # loopback.
+                        _kind_answered = _answer_pt_kinds.get(_pt)
+                        _pt_out = _pt
+                        if _kind_answered == "video":
+                            _btgt, _lo_target, _kind = (
+                                _lo_video_port,
+                                _lo_v,
+                                "video",
+                            )
+                            # The bridge starts before the answer lands, so
+                            # a video packet on an unexpected PT can beat the
+                            # map in by a few hundred ms and latch as the
+                            # session's "first audio".  Left alone that
+                            # narrows the serve's audio line to a payload
+                            # type no audio uses, and the mpegts mux then
+                            # withholds PAT/PMT waiting for a stream that
+                            # never produces - costing the picture, not just
+                            # the sound.  Undo it and let real audio latch.
+                            if _first_audio_pt[0] == _pt:
+                                _first_audio_pt[0] = None
+                                _br_first_audio_logged = False
+                                _status(
+                                    "bridge: pt=%d re-classified as video"
+                                    " from the answer - clearing the audio"
+                                    " latch it took first" % _pt
+                                )
+                            # Our serve SDP describes video as 96=H264 /
+                            # 97=H265 only, so a camera-numbered payload
+                            # type we do not advertise must be translated
+                            # into our numbering before ffmpeg sees it -
+                            # the same translation video_pt_from_answer_sdp
+                            # already performs for the SDP side ("the
+                            # camera's own numbering need not agree").
+                            # Gated on _use_plain_rtp because only there is
+                            # the bridge the decryptor and the packet
+                            # reaching ffmpeg plaintext; rewriting a byte
+                            # ffmpeg will itself authenticate breaks SRTP.
+                            if (
+                                _pt not in _SDP_VIDEO_PTS
+                                and _use_plain_rtp
+                                and _answer_video_pt[0] is not None
+                            ):
+                                _pt_out = int(_answer_video_pt[0])
+                        elif _kind_answered == "audio":
+                            _btgt, _lo_target, _kind = (
+                                _lo_audio_port,
+                                _lo_a,
+                                "audio",
+                            )
+                        elif _pt in (96, 97, 98):
+                            _btgt, _lo_target, _kind = (
+                                _lo_video_port,
+                                _lo_v,
+                                "video",
+                            )
+                        elif _pt in (0, 8):
+                            _btgt, _lo_target, _kind = (
+                                _lo_audio_port,
+                                _lo_a,
+                                "audio",
+                            )
+                        else:
+                            # Unknown PT - fall back to source-socket routing.
+                            if _bs is _audio_sock:
+                                _btgt, _lo_target, _kind = (
+                                    _lo_audio_port,
+                                    _lo_a,
+                                    "audio",
+                                )
+                            else:
+                                _btgt, _lo_target, _kind = (
+                                    _lo_video_port,
+                                    _lo_v,
+                                    "video",
+                                )
+                        if not _br_first_srtp_logged:
+                            _br_first_srtp_logged = True
+                            # Hex-dump first 24 bytes + parsed RTP header
+                            # so we can verify byte 0 is 0x80 (real RTP v2),
+                            # PT, sequence, timestamp, and SSRC against the
+                            # camera's announced ssrc:5075/5073.
+                            _hex24 = _bpkt[:24].hex()
+                            _b0 = _bpkt[0] if len(_bpkt) > 0 else 0
+                            if len(_bpkt) >= 12:
+                                _seq16, _ts32, _ssrc32 = _st_br.unpack_from(
+                                    "!HII", _bpkt, 2
+                                )
+                            else:
+                                _seq16 = _ts32 = _ssrc32 = 0
+                            _status(
+                                f"bridge: first SRTP from"
+                                f" {_bsrc[0]}:{_bsrc[1]} pt={_pt}"
+                                f" -> {_kind} loopback:{_btgt}"
+                                f"  byte0=0x{_b0:02x} byte1=0x{_pt_byte:02x}"
+                                f" seq={_seq16} ts={_ts32}"
+                                f" ssrc={_ssrc32}"
+                                f" len={len(_bpkt)}"
+                                f" hex24={_hex24}"
+                            )
+                        if _kind == "audio" and not _br_first_audio_logged:
+                            _br_first_audio_logged = True
+                            _first_audio_pt[0] = _pt
+                            _status(f"bridge: first audio RTP pt={_pt}")
+                            # Capture the camera's audio return address so the talk
+                            # pump (SdesSession.async_start_talk) can send outbound
+                            # PCMA there.  Only meaningful on a talk-capable open
+                            # (offer advertised sendrecv + a=ssrc); harmless otherwise.
+                            # Guarded so a video-first capture (BUNDLE) is not lost.
+                            if (
+                                _talk_state is not None
+                                and _talk_state.get("src") is None
+                            ):
+                                _talk_state["src"] = _bsrc
+                                _talk_state["sock"] = _bs
+                                _status(
+                                    f"SDES talk: camera audio addr captured"
+                                    f" {_bsrc[0]}:{_bsrc[1]} (talk pump armed)"
+                                )
+                        elif _kind == "video" and not _br_first_video_logged:
+                            _br_first_video_logged = True
+                            # _pt_out, not _pt: everything downstream (the
+                            # serve SDP narrowing, _serve_video_pt's
+                            # "observed beats pinned") speaks OUR numbering,
+                            # and the wire PT is preserved in the log line.
+                            _first_video_pt[0] = _pt_out
+                            _status(
+                                f"bridge: first video RTP pt={_pt_out}"
+                                + (
+                                    f" (camera numbered it {_pt})"
+                                    if _pt_out != _pt
+                                    else ""
+                                )
+                            )
+                            # At INFO, not DEBUG: this is the one line that
+                            # makes a bitrate figure comparable to another
+                            # one, and it is emitted once per session.
+                            _LOGGER.info(
+                                "camera %s: video profile %s",
+                                getattr(self, "device_id", "?"),
+                                describe_video_profile(_pt_out),
+                            )
+                            # Camera answers BUNDLE (all media on one 5-tuple),
+                            # so the talk destination is the same address as
+                            # video.  Capture it here too - the camera may send
+                            # video first (or send no inbound audio at all), so
+                            # gating talk on first-audio alone is unreliable.
+                            if (
+                                _talk_state is not None
+                                and _talk_state.get("src") is None
+                            ):
+                                _talk_state["src"] = _bsrc
+                                _talk_state["sock"] = _bs
+                                _status(
+                                    f"SDES talk: camera media addr captured"
+                                    f" {_bsrc[0]}:{_bsrc[1]} (talk pump armed)"
+                                )
+                            # Capture camera video SSRC for RTCP PLI.
+                            if len(_bpkt) >= 12:
+                                _bridge_fn._cam_video_ssrc = _st_br.unpack_from(
+                                    "!I", _bpkt, 8
+                                )[0]
+                            if _media_path[0] is None:
+                                _media_path[0] = _classify_media_path(
+                                    _bsrc[0], _bridge_turn_ips
+                                )
+                            _bridge_fn._cam_srtp_src = _bsrc
+                            _bridge_fn._cam_srtp_sock = _bs
+                            if getattr(_bridge_fn, "_first_video_ts", None) is None:
+                                _bridge_fn._first_video_ts = _time_br.time()
+                            # Publish the relay-aware sender so the RTCP
+                            # cadence blocks (which have no socket/peer in
+                            # scope) can reach the camera the way the NACK
+                            # does.  This branch runs ONCE per session (it
+                            # sits inside the first-video gate), so the
+                            # sender is frozen at the first video packet's
+                            # source - the same adoption `_cam_srtp_src`
+                            # has always used.  A 1 Hz cadence send to a
+                            # stale address after a mid-session address
+                            # change just drops; the NACK path keeps its
+                            # own per-event binding for exactly that case.
+                            _bridge_fn._send_to_cam = (
+                                lambda _d, _s=_bs, _a=_bsrc, _p=_br_cam_peer: (
+                                    _br_send_to_cam(_s, _d, _a, _p)
+                                )
+                            )
+                            # Schedule immediate PLI so IDR+SPS arrives in
+                            # the analyzeduration window.
+                            _bridge_fn._last_pli_ts = 0.0
+                            # Resolve the NACK switch ONCE per session: the
+                            # per-packet path runs ~300x/s per camera and
+                            # os.environ.get costs ~250ns of it.  A flip
+                            # now takes effect on the next stream open.
+                            _bridge_fn._nack_on = _sdes_nack_enabled()
+                        # For TUTK cameras (_use_plain_rtp) the ffmpeg SDP uses
+                        # RTP/AVP (no crypto). After LIVING the camera switches
+                        # from TUTK SFrames to standard SRTP, so we decrypt here
+                        # before forwarding plain RTP to ffmpeg.
+                        _fwd_pkt = _bpkt
+                        # Whether _fwd_pkt is plaintext by the time anything
+                        # below reads its PAYLOAD. False until something has
+                        # actually decrypted it: forwarding ciphertext is
+                        # inert (ffmpeg discards it), but MINING it is not -
+                        # see _should_capture_sprop.
+                        _decrypted = False
+                        if _use_plain_rtp:
+                            # get_srtp_key_audio(), not get_cam_key_audio(): the
+                            # second-webrtcResp handler adopts the camera's
+                            # real key into get_srtp_key_audio() (this is a live
+                            # closure cell, so the rebind is visible here)
+                            # and leaves get_cam_key_audio() at the first answer's
+                            # value.  Preferring get_cam_key_audio() pinned the
+                            # bridge - the only decryptor on this path - to a
+                            # key the camera had stopped using.
+                            _rx_sess = _ensure_srtp_rx_session(
+                                _bridge_fn,
+                                get_srtp_key_audio(),
+                                _build_srtp_rx,
+                                on_built=_on_srtp_rx_built,
+                                on_error=_on_srtp_rx_error,
+                            )
+                            if _rx_sess is not None:
+                                try:
+                                    _fwd_pkt = _rx_sess.unprotect(_bpkt)
+                                    _decrypted = True
+                                except Exception as _srx_dec_e:
+                                    # Uncapped, unlike the log counter below
+                                    # which stops at 8 to keep the log
+                                    # readable. The stall report needs the
+                                    # real total: "8 failures" and "every
+                                    # packet failed" are different findings.
+                                    _bridge_fn._br_decrypt_fails = (
+                                        getattr(_bridge_fn, "_br_decrypt_fails", 0) + 1
+                                    )
+                                    _ec = getattr(_bridge_fn, "_decrypt_err_n", 0)
+                                    if _ec < 8:
+                                        _bridge_fn._decrypt_err_n = _ec + 1
+                                        _seq_d = (
+                                            int.from_bytes(_bpkt[2:4], "big")
+                                            if len(_bpkt) >= 4
+                                            else -1
+                                        )
+                                        _ssrc_d = (
+                                            int.from_bytes(_bpkt[8:12], "big")
+                                            if len(_bpkt) >= 12
+                                            else 0
+                                        )
+                                        _trace(
+                                            f"bridge: SRTP decrypt err:"
+                                            f" {_srx_dec_e}"
+                                            f" seq={_seq_d}"
+                                            f" ssrc=0x{_ssrc_d:08x}"
+                                            f" pt={_pt}"
+                                        )
+                        # Capture this camera's SPS/PPS once so future streams
+                        # can inject sprop-parameter-sets (out-of-band decoder
+                        # init, robust to in-band SPS loss).  Parses only until
+                        # both are seen; then _sprop_done short-circuits.
+                        if _should_capture_sprop(
+                            _kind,
+                            _decrypted,
+                            getattr(_bridge_fn, "_sprop_done", False),
+                        ):
+                            _ps = _extract_param_sets_from_rtp(_fwd_pkt)
+                            if _ps:
+                                _psc = getattr(_bridge_fn, "_ps_cache", None)
+                                if _psc is None:
+                                    _psc = {}
+                                    _bridge_fn._ps_cache = _psc
+                                _psc.update(_ps)
+                                if 7 in _psc and 8 in _psc:
+                                    _sprop_new = _build_sprop(_psc[7], _psc[8])
+                                    if _sprop_new != _load_sprop(self.device_id):
+                                        # Gated on the result: two of
+                                        # _save_sprop's three outcomes write
+                                        # nothing, and this is the only line
+                                        # the sprop path ever emits.
+                                        if _save_sprop(self.device_id, _sprop_new):
+                                            _status(
+                                                "bridge: cached sprop-parameter"
+                                                f"-sets for {self.device_id}"
+                                            )
+                                        else:
+                                            _status(
+                                                "bridge: parameter sets NOT "
+                                                f"cached for {self.device_id} "
+                                                "(camera marked unstable, or "
+                                                "the cache is unwritable) - "
+                                                "out-of-band injection stays "
+                                                "off for it"
+                                            )
+                                    _bridge_fn._sprop_done = True
+                        # Rebase RTP timestamps to start near 0.  Camera picks a
+                        # random starting timestamp (RFC 3550 section 5.1); the 90 kHz
+                        # video clock can be near 2^32 and wraps, producing huge
+                        # or negative DTS values that the MPEG-TS muxer drops.
+                        # Subtracting the first-seen timestamp per-stream gives
+                        # ffmpeg a monotonically increasing sequence from 0.
+                        if (
+                            _use_plain_rtp
+                            and len(_fwd_pkt) >= 8
+                            and _fwd_pkt[0] == 0x80
+                        ):
+                            _rtp_raw_ts = _st_br.unpack_from("!I", _fwd_pkt, 4)[0]
+                            _ts_base_attr = (
+                                "_rtp_ts_base_video"
+                                if _kind == "video"
+                                else "_rtp_ts_base_audio"
+                            )
+                            if not hasattr(_bridge_fn, _ts_base_attr):
+                                setattr(_bridge_fn, _ts_base_attr, _rtp_raw_ts)
+                            _rtp_base = getattr(_bridge_fn, _ts_base_attr)
+                            _rtp_norm = (_rtp_raw_ts - _rtp_base) & 0xFFFFFFFF
+                            _fwd_pkt = (
+                                _fwd_pkt[:4]
+                                + _st_br.pack("!I", _rtp_norm)
+                                + _fwd_pkt[8:]
+                            )
+                        # Ask the camera to resend anything the air lost.
+                        # The sequence number is in the clear even under
+                        # SRTP, so this reads _bpkt and does not depend on
+                        # the decrypt above having succeeded.
+                        if (
+                            _kind == "video"
+                            and len(_bpkt) >= 12
+                            and hasattr(_bridge_fn, "_cam_video_ssrc")
+                            and hasattr(_bridge_fn, "_cam_srtp_sock")
+                        ):
+                            _nk_seq, _nk_ssrc = (
+                                _st_br.unpack_from("!H", _bpkt, 2)[0],
+                                _st_br.unpack_from("!I", _bpkt, 8)[0],
+                            )
+                            if _nk_ssrc == _bridge_fn._cam_video_ssrc:
+                                _nk_lost = _video_nack_seqs(
+                                    _bridge_fn,
+                                    _nk_seq,
+                                    _time_br.time(),
+                                    enabled=getattr(_bridge_fn, "_nack_on", True),
+                                )
+                                if _nk_lost and _send_video_nack(
+                                    # bound now: called synchronously
+                                    # inside the helper, but the loop
+                                    # vars must not be late-bound.
+                                    lambda _d, _s=_bs, _a=_bsrc, _p=_br_cam_peer: (
+                                        _br_send_to_cam(_s, _d, _a, _p)
+                                    ),
+                                    getattr(_bridge_fn, "_pli_tx_sess", None),
+                                    _CAM_RTCP_SENDER_SSRC,
+                                    _bridge_fn._cam_video_ssrc,
+                                    _nk_lost,
+                                ):
+                                    _bridge_fn._nack_sent = (
+                                        getattr(_bridge_fn, "_nack_sent", 0) + 1
+                                    )
+                                    _bridge_fn._nack_seqs = getattr(
+                                        _bridge_fn, "_nack_seqs", 0
+                                    ) + len(_nk_lost)
+                                    if _bridge_fn._nack_sent == 1:
+                                        _status(
+                                            f"SDES: sent RTCP NACK #1 for"
+                                            f" {len(_nk_lost)} packet(s)"
+                                            f" -> SSRC="
+                                            f"0x{_bridge_fn._cam_video_ssrc:08x}"
+                                        )
+                        # A retransmission that missed ffmpeg's reorder
+                        # window is worse than nothing: the damaged frame
+                        # is already out, so forwarding it only inserts an
+                        # out-of-order packet and the muxer clamps its
+                        # output DTS.  Skip the send (not a `continue` -
+                        # that would change loop control flow for the whole
+                        # SDES fleet) and do not count it, since the
+                        # consumer cannot use it.
+                        _nk_late = (
+                            _kind == "video"
+                            and len(_bpkt) >= 4
+                            and _video_repeat_too_late(
+                                _bridge_fn,
+                                _st_br.unpack_from("!H", _bpkt, 2)[0],
+                                _time_br.time(),
+                            )
+                        )
+                        if _nk_late:
+                            _bridge_fn._nack_late_drops = (
+                                getattr(_bridge_fn, "_nack_late_drops", 0) + 1
+                            )
+                        if _pt_out != _pt and _decrypted:
+                            _fwd_pkt = rewrite_rtp_payload_type(_fwd_pkt, _pt_out)
+                        try:
+                            if not _nk_late:
+                                _lo_target.sendto(_fwd_pkt, ("127.0.0.1", _btgt))
+                            # Forward unconditionally - ciphertext ffmpeg
+                            # discards is inert, and a `continue` here would
+                            # change loop control flow for the whole SDES
+                            # fleet.  But only COUNT what the consumer can
+                            # use: these three are the only in-process proof
+                            # media flowed, so counting a discarded packet
+                            # keeps is_stalled from ever tripping and the
+                            # session reports healthy while the viewer sees
+                            # black.  See _should_count_media.
+                            if not _nk_late and _should_count_media(
+                                _decrypted, _use_plain_rtp
+                            ):
+                                _media_progress[0] = _time_br.monotonic()
+                                _media_counts[0] += 1
+                                _media_counts[1] += len(_fwd_pkt)
+                        except Exception:
+                            _LOGGER.debug(
+                                "camera %s: swallowed exception in %s",
+                                getattr(self, "device_id", "?"),
+                                "_bridge_fn",
+                                exc_info=True,
+                            )
+                # Periodic ICE controlling check: re-send USE-CANDIDATE every 2.5 s.
+                # Keeps the camera in ICE "Completed" state and satisfies consent
+                # refresh (RFC 7675).  Also handles the case where the initial
+                # USE-CANDIDATE (sent right after the STUN window) was lost.
+                _br_now = _time_br.monotonic()
+                # Relay-only battery cams (LAN IP unknown) answer AFTER the STUN
+                # window and send no probes, so the in-window proactive send saw
+                # empty _cam_ice_* and the probe-gated late-send above never runs.
+                # Fall back to the creds parsed late into _bridge_uc_info so this
+                # ungated periodic tick still nominates them.  [SDES-LATECREDS-FIX]
+                _uc_cands = _cam_ice_cands or _bridge_uc_info.get("cands")
+                # Union in anything learned from the camera's own probes.
+                # Advertised candidates stay FIRST and are still nominated,
+                # so a camera we can already reach directly is unaffected;
+                # this only adds a path where there was none.
+                _uc_prflx = _bridge_uc_info.get("prflx")
+                if _uc_prflx:
+                    _uc_cands = [
+                        *(_uc_cands or []),
+                        *(c for c in _uc_prflx if c not in (_uc_cands or [])),
+                    ]
+                _uc_cufrag = _cam_ice_ufrag or _bridge_uc_info.get("ufrag")
+                _uc_cpwd = _cam_ice_pwd or _bridge_uc_info.get("pwd")
+                if (
+                    _uc_cands
+                    and _uc_cufrag
+                    and _uc_cpwd
+                    and (_br_now - _br_last_uc) >= 2.5
+                ):
+                    _br_last_uc = _br_now
+                    # Same RFC 5766 s9 door as the setup path, but this is
+                    # the only place it can be opened for a relay-only
+                    # battery cam: its candidates arrive after the STUN
+                    # window, so the setup-time install above never ran and
+                    # nominating without a permission probes a black hole.
+                    # Re-install when the candidate set changes and every
+                    # 120 s thereafter - a TURN permission expires 300 s
+                    # after it is installed (RFC 5766 s8).
+                    _perm_key = tuple(sorted(_uc_cands))
+                    if (
+                        _perm_key != _br_perm_cands
+                        or (_br_now - _br_last_perm) >= 120.0
+                    ):
+                        _br_perm_cands = _perm_key
+                        _br_last_perm = _br_now
+                        _turn_install_permissions(_uc_cands, "bridge", _trace)
+                    # Keep the allocation itself alive.  The server grants
+                    # it for a LIFETIME (600 s here) and drops it silently
+                    # when that lapses, so refresh well inside the window.
+                    if _relay_addrs and (_br_now - _br_last_alloc_refresh) >= 240.0:
+                        _br_last_alloc_refresh = _br_now
+                        _rf_ok = sum(
+                            1
+                            for _rf_s in (_audio_sock, _video_sock)
+                            if _turn_refresh_allocation(_rf_s)
+                        )
+                        if _rf_ok:
+                            _trace(f"TURN: refreshed {_rf_ok} relay allocation(s)")
+                    for _c_ip, _c_port in _uc_cands:
+                        _send_use_candidate(
+                            _audio_sock,
+                            _ufrag_a,
+                            _pwd_a,
+                            _uc_cufrag,
+                            _uc_cpwd,
+                            (_c_ip, _c_port),
+                        )
+                        _send_use_candidate(
+                            _video_sock,
+                            _ufrag_v,
+                            _pwd_v,
+                            _uc_cufrag,
+                            _uc_cpwd,
+                            (_c_ip, _c_port),
+                        )
+        except Exception:
+            # Only pockets of the body are guarded. A stray exception used
+            # to end the thread with nothing at camera level in the log,
+            # and the session died minutes later as "stalled".
+            _LOGGER.error(
+                "camera %s: SDES bridge ended by an unexpected error",
+                getattr(self, "device_id", "?"),
+                exc_info=True,
+            )
+        finally:
+            try:
+                _lo_a.close()
+            except Exception:
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_bridge_fn",
+                    exc_info=True,
+                )
+            try:
+                _lo_v.close()
+            except Exception:
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_bridge_fn",
+                    exc_info=True,
+                )
+
+    return _bridge_fn
+
+
 class _SdesOpenMixin:
     async def _open_sdes_stream(self, **kwargs) -> "SdesSession":
         """Allocate-and-hand-off wrapper around _open_sdes_stream_impl.
@@ -4575,7 +7064,6 @@ class _SdesOpenMixin:
             )
 
         _selfloop_drop_count = 0
-        _bridge_selfloop_drop_count = 0
         _prefer_direct_stun = {_audio_sock: False, _video_sock: False}
 
         # --- ICE STUN responder (runs while reservation sockets are still open) #
@@ -5557,2472 +8045,6 @@ class _SdesOpenMixin:
                 _bridge_fn._srtp_rx_err_n = _n + 1
                 _status(f"bridge: SRTP RX init failed: {_exc}")
 
-        def _bridge_fn():
-            nonlocal _br_first_di_logged, _br_first_srtp_logged, _br_first_req_dumped
-            nonlocal _br_first_audio_logged, _br_first_video_logged, _avio_living_sent
-            nonlocal _bridge_selfloop_drop_count  # incremented below; needs nonlocal
-            _STUN_MAGIC_BR = b"\x21\x12\xa4\x42"
-            import struct as _st_br
-            import select as _sel_br
-            import time as _time_br
-
-            _br_prefer_direct_stun = {_audio_sock: False, _video_sock: False}
-            _br_last_uc = 0.0
-            _br_last_perm = 0.0  # last CreatePermission install (monotonic)
-            _br_perm_cands = ()  # candidate set those permissions covered
-            # Seeded to now, not 0: the allocation was just created, so the
-            # first refresh belongs one interval out, not on the first tick.
-            _br_last_alloc_refresh = _time_br.monotonic()
-
-            def _br_send_to_cam(_s, _data, _addr, _peer):
-                """Reply to the camera, relayed or direct as the peer requires.
-
-                _addr is where the packet we are answering arrived FROM; when
-                the camera reached us through our relay that is the TURN
-                server, and _peer carries the camera's real address so the
-                payload can be wrapped.  _peer None => plain direct send.
-                """
-                if _peer and _turn_send_indication(_s, _peer[0], _peer[1], _data):
-                    return
-                _s.sendto(_data, _addr)
-
-            _br_stun_resp_count = 0
-            _tutk_trigger_sent = False
-            # Instrumentation for the first-media stall report.  These four are
-            # bridge-thread locals that the main coroutine has to be able to
-            # read when the wait expires, so each is mirrored onto _bridge_fn at
-            # its write site - the same publication _sprop_done uses.  Nothing
-            # here is read by the bridge itself; they only ever describe.
-            _br_binding_success_count = 0  # inbound STUN Binding Success (0x0101)
-            _br_probe_verdicts: dict = {}  # probe source -> why it was/wasn't learned
-            # A SET, not a counter: one unrecorded source probing fifty times
-            # is one source, and a per-packet count would put a wrong number in
-            # the report for someone to reason from.
-            _br_probe_overflow: set = set()  # sources past _MAX_PROBE_SOURCES
-            _bridge_fn._tutk_trigger_sent = False
-            _bridge_fn._br_stun_resp_count = 0
-            _bridge_fn._br_binding_success_count = 0
-            _bridge_fn._br_probe_verdicts = {}
-            _bridge_fn._br_probe_overflow = 0
-            # Read by the first-media wait's trigger rule
-            # (_trigger_unacked_abandon_due): when LIVING first went out
-            # (monotonic), and TUTK-framed media, which leaves its branch before
-            # _br_media_pkts is counted.
-            _bridge_fn._br_trigger_sent_ts = None
-            _bridge_fn._br_tutk_media = 0
-            _last_trigger_ts = 0.0  # time of last AVIO LIVING send
-            _trigger_bs = None  # socket used for trigger
-            _trigger_bsrc = None  # camera addr for trigger
-            _trigger_peer = None  # camera's real addr when relayed
-            _sdes_probe_received = False  # True after first 0xC8 probe from camera
-            _last_hb_ts = 0.0  # time of last AVIO HEARTBEAT send
-            _stall_nudges_sent = 0  # LIVING re-sends for the CURRENT stall
-            _stall_last_nudge = 0.0  # wall time of the last stall nudge
-            _stall_active = False  # media had started, then went silent
-            # One-shot guard for the "ffmpeg exited" log below: while the held
-            # proc keeps reporting the same stale exit code across a
-            # teardown-window skip (see _bridge_should_break), only the first
-            # tick logs it.  Reset to False whenever the held proc is next
-            # seen alive (poll() None), so a later, genuine exit of THAT proc
-            # still gets its own line.
-            _br_exit_logged = False
-            _lo_a = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
-            _lo_v = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
-            try:
-                while True:
-                    try:
-                        _rl, _, _ = _sel_br.select(
-                            [_audio_sock, _video_sock], [], [], 0.5
-                        )
-                    except Exception:
-                        break
-                    # Stop the bridge when ffmpeg exits (normal end or crash) -
-                    # but NOT on a stale exit seen during a flagged teardown
-                    # window (key-restart proc replace, stop(), _reap(), the
-                    # DTLS-fallback abort): _bridge_should_break() skips the
-                    # break there, and the loop resolves it either via the
-                    # key-restart's _proc_holder[0] repoint (next poll() None,
-                    # below) or via a genuine teardown closing the loopback
-                    # sockets, which raises out of the select() above.
-                    _br_proc = _proc_holder[0]
-                    if _br_proc is not None:
-                        _br_rc = _br_proc.poll()
-                        if _br_rc is not None:
-                            _br_teardown_requested = bool(_teardown_holder[0])
-                            if _br_rc != 0 and not _br_exit_logged:
-                                _br_exit_logged = True
-                                import logging as _log_br
-
-                                _br_level = _classify_ffmpeg_exit(
-                                    _br_rc, _br_teardown_requested
-                                )
-                                # Name the camera.  These lines used to carry no
-                                # device id at all, and this account runs several
-                                # SDES cameras at once, so a burst of exits could
-                                # not be attributed to one of them without extra
-                                # tooling - which sent a live investigation down
-                                # the wrong path once already.
-                                _br_dev = getattr(self, "device_id", "?")
-                                _br_msg = (
-                                    "camera %s: SDES bridge: ffmpeg exited with"
-                                    " code %d - stopped by teardown"
-                                    if _br_level < _log_br.WARNING
-                                    else "camera %s: SDES bridge: ffmpeg exited with"
-                                    " code %d - stream ended"
-                                )
-                                _log_br.getLogger(__name__).log(
-                                    _br_level, _br_msg, _br_dev, _br_rc
-                                )
-                                if _br_level >= _log_br.WARNING:
-                                    _serr_tail = getattr(
-                                        _br_proc, "_aidot_stderr_tail", None
-                                    )
-                                    # The reason first, then the raw tail. On a
-                                    # lossy camera the raw tail is all
-                                    # Non-monotonic DTS and says nothing about
-                                    # why ffmpeg stopped.
-                                    _serr_why = getattr(
-                                        _br_proc, "_aidot_stderr_notable", None
-                                    )
-                                    if _serr_why:
-                                        _log_br.getLogger(__name__).warning(
-                                            "camera %s: SDES serve ffmpeg exit"
-                                            " reason (last %d non-repetitive"
-                                            " lines; %d NACK(s) sent for %d"
-                                            " packet(s), %d late repeat(s) dropped this session):\n%s",
-                                            _br_dev,
-                                            len(_serr_why),
-                                            getattr(_br_proc, "_aidot_nack_sent", 0)
-                                            or getattr(_bridge_fn, "_nack_sent", 0),
-                                            getattr(_bridge_fn, "_nack_seqs", 0),
-                                            getattr(_bridge_fn, "_nack_late_drops", 0),
-                                            "\n".join(_serr_why),
-                                        )
-                                    if _serr_tail:
-                                        _log_br.getLogger(__name__).warning(
-                                            "camera %s: SDES serve ffmpeg stderr"
-                                            " (last %d lines):\n%s",
-                                            _br_dev,
-                                            len(_serr_tail),
-                                            "\n".join(_serr_tail),
-                                        )
-                            if _bridge_should_break(_br_rc, _br_teardown_requested):
-                                break
-                        else:
-                            _br_exit_logged = False
-
-                    # AVIO HEARTBEAT (cmd=5156) every 10s, sent as an ENCRYPTED SCTP
-                    # DATA chunk (PPID=53) - exactly like LIVING - NOT a raw 0xC8 AVIO
-                    # frame.  The camera's control channel is SCTP-inside-0xC8: a raw
-                    # 0xC8 AVIO frame is not a valid SCTP packet, so the camera's SCTP
-                    # layer discards it and the app-layer keepalive never lands.  With
-                    # the old raw-0xC8 heartbeat the firmware tore the session down at
-                    # ~18-22 s - confirmed 2026-06-02: recorded video duration was
-                    # pinned at ~18 s regardless of motion (brief tap-past 18.3 s vs
-                    # sustained 40 s motion 17.6 s), while raw-0xC8 heartbeats *were*
-                    # firing.  The official app sends this via DataChannel.customSend
-                    # (= SCTP) on a 10 s timer (f0.java Z2() -> CMD_AVIO_CTRL_HEARTHEAT_REQ).
-                    #
-                    # Gating on dcep_sock confines this to the encrypted-SCTP path
-                    # (battery SDES cams), which is where the watchdog bites and where
-                    # _enc_c8_sctp is in scope (defined in the packet loop below, set up
-                    # by the time SCTP reaches DONE - same closure pattern as the LIVING
-                    # send at the DCEP_WAIT branch).  Mains plain-RTP cams never sleep
-                    # and leave dcep_sock None, so they simply skip the heartbeat.
-                    _hb_sock = _sctp.get("dcep_sock")
-                    _hb_src = _sctp.get("dcep_src")
-                    if (
-                        _sdes_probe_received
-                        and _hb_sock is not None
-                        and _hb_src is not None
-                        and _time_br.time() - _last_hb_ts >= 10.0
-                    ):
-                        import random as _r_hb
-
-                        _hb_seq = _r_hb.randint(0, 0x7FFFFFFF)
-                        _hb_ts = int(_time_br.time() * 1000)
-                        # 28-byte AVIO header, cmd=5156 (HEARTHEAT_REQ), empty payload.
-                        _hb_avio = avio_header(_hb_seq, 5156, _hb_ts, 0, 0)
-                        try:
-                            _hb_chunk = _sctp_data(53, _hb_avio)
-                            _hb_sock.sendto(
-                                _enc_c8_sctp(_sctp_pkt(_sctp["peer_tag"], _hb_chunk)),  # noqa: F821
-                                _hb_src,
-                            )
-                            _last_hb_ts = _time_br.time()
-                            _trace(
-                                f"SDES: sent AVIO HEARTBEAT(5156) via SCTP"
-                                f" TSN={(_sctp['local_tsn'] - 1) & 0xFFFFFFFF}"
-                                f" -> {_hb_src[0]}:{_hb_src[1]}"
-                            )
-                        except Exception as _hb_e:
-                            _status(f"SDES: SCTP heartbeat send failed: {_hb_e}")
-
-                    # Two-way audio speaker control - MUST run on the bridge thread.
-                    # SPEAKERSTART/STOP are SCTP DATA chunks; _sctp_data() mutates the
-                    # shared SCTP TSN/stream-seq, so issuing them from the talk pump
-                    # thread races the heartbeat here and the camera drops the chunk
-                    # (no 851 ACK).  async_start_talk/async_stop_talk only flip the
-                    # want_speaker flag; the actual command is sent from here once the
-                    # command channel (_cmd_chan[0], set after LIVING) is up.
-                    if _talk_state is not None and _cmd_chan[0] is not None:
-                        if _talk_state.get("want_speaker") and not _talk_state.get(
-                            "speaker_on"
-                        ):
-                            # Defer SPEAKERSTART ~0.6 s after the command channel comes
-                            # up.  The camera ignores it if sent immediately after LIVING
-                            # (validated: the working spike sent it on first-audio,
-                            # ~0.58 s post-LIVING and got the 851 ACK; sending at +22 ms
-                            # gets no ACK - the camera's media/audio pipeline isn't ready).
-                            _now_spk = _time_br.time()
-                            if _talk_state.get("spk_eligible_ts") is None:
-                                _talk_state["spk_eligible_ts"] = _now_spk
-                            elif (
-                                _now_spk - _talk_state["spk_eligible_ts"]
-                                >= SDES_SPEAKERSTART_DELAY
-                            ):
-                                try:
-                                    _cmd_chan[0](848, b"\x00" * 8)  # SPEAKERSTART
-                                    _talk_state["speaker_on"] = True
-                                    _status(
-                                        "SDES talk: sent SPEAKERSTART(848) (bridge thread)"
-                                    )
-                                except Exception:
-                                    _LOGGER.debug(
-                                        "camera %s: swallowed exception in %s",
-                                        getattr(self, "device_id", "?"),
-                                        "_bridge_fn",
-                                        exc_info=True,
-                                    )
-                        elif _talk_state.get("speaker_on") and not _talk_state.get(
-                            "want_speaker"
-                        ):
-                            try:
-                                _cmd_chan[0](849, b"\x00" * 8)  # SPEAKERSTOP
-                                _talk_state["speaker_on"] = False
-                                _status(
-                                    "SDES talk: sent SPEAKERSTOP(849) (bridge thread)"
-                                )
-                            except Exception:
-                                _LOGGER.debug(
-                                    "camera %s: swallowed exception in %s",
-                                    getattr(self, "device_id", "?"),
-                                    "_bridge_fn",
-                                    exc_info=True,
-                                )
-
-                    # RTCP PLI (Picture Loss Indication) - forces camera to
-                    # resend IDR + VPS/SPS/PPS so ffmpeg gets codec params.
-                    # STARTUP BURST then SLOW SAFETY: fire at 5 s for the first
-                    # few PLIs to win the codec-params race (the original intent),
-                    # then drop to 30 s.  A *perpetual* 5 s PLI forces an IDR every
-                    # 5 s, and at a fixed camera bitrate each IDR is a bandwidth
-                    # spike / P-frame quality dip - a deterministic 5 s stutter
-                    # cadence (the official app sends ZERO app-level PLI and relies
-                    # on the camera's own GOP).  We can't decode here to detect the
-                    # first keyframe, so we time-box the burst and keep a slow
-                    # safety PLI in case the camera's GOP is long.
-                    # P2: front-load the burst so the first decodable IDR arrives
-                    # sooner on a cold open.  Was 3 PLIs at a flat 5 s (first IDR
-                    # up to ~10 s); now a denser early ramp, then the same 30 s
-                    # safety PLI.  AIDOT_SDES_PLI_GAPS overrides the early gaps
-                    # (comma-sep seconds; e.g. "5,5,5" restores the old cadence).
-                    _pli_gaps = getattr(_bridge_fn, "_pli_gaps", None)
-                    if _pli_gaps is None:
-                        try:
-                            _pli_gaps = tuple(
-                                float(_x) for _x in settings.read("AIDOT_SDES_PLI_GAPS")
-                            ) or (0.0, 1.5, 2.0, 3.0)
-                        except ValueError:
-                            _pli_gaps = (0.0, 1.5, 2.0, 3.0)
-                        _bridge_fn._pli_gaps = _pli_gaps
-                    # REMB names the VIDEO stream, which is the one to
-                    # limit. An earlier version rode the audio Receiver Report
-                    # and so named the audio SSRC - it asked the camera to keep
-                    # PCMA under the target, which it already was, and left the
-                    # video untouched. Measured no change, correctly.
-                    #
-                    # Own cadence: the PLI timer backs off to 30s once the
-                    # stream is up, which is too slow to hold a rate.
-                    # Goes out the relay-aware sender, NOT the socket: via TURN
-                    # the address media arrived from is the relay, and a raw
-                    # write there is dropped as a malformed STUN message while
-                    # sendto still reports success.  That is the bug the NACK
-                    # path already had and had fixed; REMB was left behind, so
-                    # on a relayed camera it never arrived -- which also means
-                    # "REMB was measured to do nothing" cannot have been a valid
-                    # measurement on such a session.  No fallback to the socket:
-                    # skipping a tick until the sender exists costs a second,
-                    # falling back costs correctness on the very sessions this
-                    # is for.
-                    # Guard order is cost order: the module constant first,
-                    # so the default REMB-off config pays nothing per packet
-                    # (the sender lookup used to sit above this line and ran
-                    # ~300x/s for a feature that ships disabled).
-                    if (
-                        REMB_TARGET_BPS > 0
-                        and hasattr(_bridge_fn, "_cam_video_ssrc")
-                        and (_remb_send := getattr(_bridge_fn, "_send_to_cam", None))
-                        is not None
-                        and _time_br.time() - getattr(_bridge_fn, "_last_remb_ts", 0.0)
-                        >= 1.0
-                    ):
-                        _bridge_fn._last_remb_ts = _time_br.time()
-                        if _send_video_remb(
-                            _remb_send,
-                            getattr(_bridge_fn, "_pli_tx_sess", None),
-                            _CAM_RTCP_SENDER_SSRC,
-                            _bridge_fn._cam_video_ssrc,
-                            REMB_TARGET_BPS,
-                        ) and not getattr(_bridge_fn, "_remb_logged", False):
-                            _bridge_fn._remb_logged = True
-                            _status(
-                                f"SDES: sent REMB {REMB_TARGET_BPS // 1000} kbps"
-                                f" for video SSRC"
-                                f" 0x{_bridge_fn._cam_video_ssrc:08x}"
-                            )
-
-                    _pli_done = getattr(_bridge_fn, "_pli_count", 0)
-                    _pli_interval = (
-                        _pli_gaps[_pli_done] if _pli_done < len(_pli_gaps) else 30.0
-                    )
-                    if (
-                        hasattr(_bridge_fn, "_cam_video_ssrc")
-                        and hasattr(_bridge_fn, "_cam_srtp_sock")
-                        and _time_br.time() - getattr(_bridge_fn, "_last_pli_ts", 0.0)
-                        >= _pli_interval
-                    ):
-                        import base64 as _b64_pli
-
-                        _pli_sender_ssrc = 0xAB12CD34
-                        _pli_media_ssrc = _bridge_fn._cam_video_ssrc
-                        _pli_raw = _st_br.pack(
-                            "!BBHII",
-                            0x81,
-                            206,
-                            2,
-                            _pli_sender_ssrc,
-                            _pli_media_ssrc,
-                        )
-                        _pli_sent = False
-                        # Hoisted out of the session-build below only so the
-                        # SRTP-TX-KEY note can report the key that actually went
-                        # out rather than re-deriving it.  Same expression, same
-                        # result - no behavior change.
-                        _pli_key_b64 = _our_tx_srtp_key_audio or srtp_key_audio
-                        try:
-                            import pylibsrtp as _plsrtp_pli
-
-                            if not hasattr(_bridge_fn, "_pli_tx_sess"):
-                                _pli_pol = _plsrtp_pli.Policy(
-                                    key=_b64_pli.b64decode(_pli_key_b64),
-                                    ssrc_type=_plsrtp_pli.Policy.SSRC_SPECIFIC,
-                                    ssrc_value=_pli_sender_ssrc,
-                                    srtp_profile=(
-                                        _plsrtp_pli.Policy.SRTP_PROFILE_AES128_CM_SHA1_80
-                                    ),
-                                )
-                                _pli_pol.allow_repeat_tx = True
-                                _bridge_fn._pli_tx_sess = _plsrtp_pli.Session(
-                                    policy=_pli_pol
-                                )
-                            _bridge_fn._cam_srtp_sock.sendto(
-                                _bridge_fn._pli_tx_sess.protect_rtcp(_pli_raw),
-                                _bridge_fn._cam_srtp_src,
-                            )
-                            _pli_sent = True
-                        except Exception:
-                            _LOGGER.debug(
-                                "camera %s: swallowed exception in %s",
-                                getattr(self, "device_id", "?"),
-                                "_bridge_fn",
-                                exc_info=True,
-                            )
-                        if not _pli_sent:
-                            try:
-                                _bridge_fn._cam_srtp_sock.sendto(
-                                    _pli_raw, _bridge_fn._cam_srtp_src
-                                )
-                            except Exception:
-                                _LOGGER.debug(
-                                    "camera %s: swallowed exception in %s",
-                                    getattr(self, "device_id", "?"),
-                                    "_bridge_fn",
-                                    exc_info=True,
-                                )
-                        _bridge_fn._last_pli_ts = _time_br.time()
-                        _pli_n = getattr(_bridge_fn, "_pli_count", 0) + 1
-                        _bridge_fn._pli_count = _pli_n
-                        if _pli_n <= len(_pli_gaps):
-                            _trace(
-                                f"SDES: sent RTCP PLI #{_pli_n}"
-                                f" -> SSRC=0x{_pli_media_ssrc:08x}"
-                                f" ({'SRTCP' if _pli_sent else 'plain'})"
-                            )
-                        # First send only, unlike the RR note below: the PLI
-                        # SRTP session is built once and cached on _bridge_fn,
-                        # so the key the first PLI went out with is the key
-                        # every later PLI goes out with.
-                        if _pli_n == 1 and _pli_sent:
-                            _status(
-                                _srtp_tx_key_note(
-                                    "PLI",
-                                    _pli_key_b64,
-                                    _our_tx_srtp_key_audio,
-                                    _cam_key_audio,
-                                )
-                            )
-
-                    # DCEP_WAIT -> send LIVING 300ms after DCEP_OPEN.
-                    # Camera needs time to register stream 0 before LIVING arrives.
-                    if (
-                        _sctp.get("state") == "DCEP_WAIT"
-                        and _time_br.time() - _sctp.get("dcep_sent_ts", 0.0) >= 0.3
-                    ):
-                        _dw_sock = _sctp.get("dcep_sock")
-                        _dw_src = _sctp.get("dcep_src")
-                        if _dw_sock and _dw_src:
-                            try:
-                                _lv_dw = _sctp_data(53, _session_mode_req_msg())
-                                _dw_sock.sendto(
-                                    _enc_c8_sctp(_sctp_pkt(_sctp["peer_tag"], _lv_dw)),  # noqa: F821
-                                    _dw_src,
-                                )
-                                _sctp["state"] = "DONE"
-                                _sdes_probe_received = True
-                                _last_hb_ts = _time_br.time()
-                                _status(
-                                    f"SDES DC: DCEP_WAIT -> LIVING(5376)"
-                                    f" TSN={_sctp['local_tsn'] - 1}"
-                                    f" (300ms after DCEP_OPEN)"
-                                )
-                                # Build persistent command sender for PTZ/IOCtrl/talk.
-                                # Computes timestamp fresh on every call so commands
-                                # are not stale.  AVIO IOCtrl over SDES MUST go out as an
-                                # encrypted SCTP DATA chunk (PPID=53) - identical to LIVING
-                                # and the keepalive heartbeat - NOT a raw 0xC8 AVIO frame.
-                                # The camera's control channel is SCTP-inside-0xC8; a raw
-                                # 0xC8 AVIO frame is not a valid SCTP packet, so the camera's
-                                # SCTP layer silently drops it (proven by the ~18s heartbeat
-                                # watchdog cutoff that disappeared once the heartbeat was
-                                # SCTP-wrapped, 2026-06-02).  _enc_c8_sctp/_sctp_data/_sctp_pkt
-                                # are in scope by the time this runs (DCEP_WAIT is only reached
-                                # after the encrypted-SCTP handshake defines them; same closure
-                                # pattern as the LIVING send above).  dcep_sock/dcep_src are the
-                                # socket+addr the SCTP handshake (and LIVING) used.
-
-                                def _persistent_sdes_cmd(_cmd, _extra=b""):
-                                    # dSeq, not a random number.  The app's
-                                    # sendCtrl() takes this from a per-client
-                                    # counter that starts at 100 and increments
-                                    # on every control command, and we keep the
-                                    # same counter for livePlayReq already.
-                                    # Filling the slot randomly was the only
-                                    # field in the 28-byte header that differed
-                                    # from the app's.  Parity, not a fix: PTZ
-                                    # (AVIO 0x1001) pans through this very
-                                    # builder with a random dSeq, so the camera
-                                    # is not validating it.
-                                    _seq = self._next_dseq()
-                                    _ts = int(_time_br.time() * 1000)
-                                    _avio = (
-                                        avio_header(_seq, _cmd, _ts, len(_extra), 0)
-                                        + _extra
-                                    )
-                                    _csock = _sctp.get("dcep_sock")
-                                    _csrc = _sctp.get("dcep_src")
-                                    if _csock is None or _csrc is None:
-                                        return
-                                    try:
-                                        _chunk = _sctp_data(53, _avio)
-                                        _csock.sendto(
-                                            _enc_c8_sctp(
-                                                _sctp_pkt(_sctp["peer_tag"], _chunk)
-                                            ),
-                                            _csrc,
-                                        )
-                                    except Exception:
-                                        _LOGGER.debug(
-                                            "camera %s: swallowed exception in %s",
-                                            getattr(self, "device_id", "?"),
-                                            "_persistent_sdes_cmd",
-                                            exc_info=True,
-                                        )
-
-                                def _persistent_sdes_abort():
-                                    """ABORT the association from the same socket the commands use.
-
-                                    Lives here rather than in the bridge's main
-                                    loop because this is where the encrypted
-                                    SCTP context actually is - the dcep socket,
-                                    the peer tag and the encrypt helper. An
-                                    earlier attempt to send it from the media
-                                    loop referenced none of them and would not
-                                    have compiled.
-                                    """
-                                    _csock = _sctp.get("dcep_sock")
-                                    _csrc = _sctp.get("dcep_src")
-                                    if _csock is None or _csrc is None:
-                                        return False
-                                    _csock.sendto(
-                                        _enc_c8_sctp(
-                                            _sctp_pkt(
-                                                _sctp["peer_tag"], _sctp_abort_chunk()
-                                            )
-                                        ),
-                                        _csrc,
-                                    )
-                                    return True
-
-                                _cmd_chan[0] = _persistent_sdes_cmd
-                                _abort_chan[0] = _persistent_sdes_abort
-                            except Exception as _dw_e:
-                                _status(f"SDES DC: DCEP_WAIT LIVING err: {_dw_e}")
-
-                    # One LIVING wire-build, shared by the pre-probe retrigger
-                    # below and the mid-session stall nudge: resend the AVIO
-                    # LIVING(5376) that starts media, encrypted then plaintext
-                    # exactly like the original trigger.
-                    # Default-arg binding (not closure capture): re-defined each
-                    # tick, so the CURRENT trigger socket/addrs are bound at
-                    # definition time and B023 cannot bite.
-                    def _resend_avio_living(
-                        _tb=_trigger_bs, _tsrc=_trigger_bsrc, _tpeer=_trigger_peer
-                    ) -> None:
-                        import struct as _st_re2
-                        import random as _r_re2
-
-                        _re_ts = int(_time_br.time() * 1000)
-                        _re_seq = _r_re2.randint(0, 0x7FFFFFFF)
-                        _re_plain = avio_header(
-                            _re_seq, 5376, _re_ts, 28, 0
-                        ) + _st_re2.pack("<IIIIIII", 0, 0, 1, 0, 0, 0, 0)  # 56B
-                        _re_enc = None
-                        try:
-                            from Crypto.Cipher import AES as _AES_re2
-                            from Crypto.Util.Padding import pad as _pad_re2
-
-                            _re_key = _our_tx_srtp_key_audio[:16].encode("ascii")
-                            _re_iv = (_cam_key_audio or _our_tx_srtp_key_audio)[
-                                :16
-                            ].encode("ascii")
-                            _re_enc = _AES_re2.new(
-                                _re_key, _AES_re2.MODE_CBC, _re_iv
-                            ).encrypt(_pad_re2(_re_plain, 16))
-                        except Exception:
-                            _LOGGER.debug(
-                                "camera %s: swallowed exception in %s",
-                                getattr(self, "device_id", "?"),
-                                "_resend_avio_living",
-                                exc_info=True,
-                            )
-                        for _rp in [_re_enc, _re_plain]:
-                            if _rp is None:
-                                continue
-                            _rsz = len(_rp)
-                            try:
-                                _br_send_to_cam(
-                                    _tb,
-                                    bytes([0xC8, 0x00, _rsz >> 8, _rsz & 0xFF]) + _rp,
-                                    _tsrc,
-                                    _tpeer,
-                                )
-                            except Exception:
-                                _LOGGER.debug(
-                                    "camera %s: swallowed exception in %s",
-                                    getattr(self, "device_id", "?"),
-                                    "_resend_avio_living",
-                                    exc_info=True,
-                                )
-
-                    # Periodic retrigger: resend AVIO LIVING every 2s until probe
-                    # received (camera acknowledged our trigger).
-                    if (
-                        _avio_living_sent
-                        and not _sdes_probe_received
-                        and _trigger_bs is not None
-                        and _time_br.time() - _last_trigger_ts >= 2.0
-                    ):
-                        _resend_avio_living()
-                        _last_trigger_ts = _time_br.time()
-
-                    # Mid-session stall nudge: the camera episodically stops
-                    # transmitting with no teardown signal (A001064, measured
-                    # 2026-08-24/25), the serve's input then times out and the
-                    # session dies - yet the camera answers a FRESH handshake
-                    # immediately afterwards.  So before letting it die, re-send
-                    # the LIVING that starts media.  The AVIO HEARTBEAT alone
-                    # does not do this: heartbeats kept flowing right through
-                    # measured stalls while the media stayed silent.  Bounded by
-                    # _stall_nudge_due; the input timeout and the keepalive
-                    # reopen remain the unchanged fallback.
-                    if (
-                        _STALL_NUDGE_ENABLED
-                        and _sdes_probe_received
-                        and _trigger_bs is not None
-                        and _media_progress[0] > 0.0
-                    ):
-                        _stall_silence = _time_br.monotonic() - _media_progress[0]
-                        if _stall_silence <= _STALL_NUDGE_AFTER_S:
-                            if _stall_active:
-                                _stall_active = False
-                                _stall_nudges_sent = 0
-                                # Ask for an immediate IDR so recovery is not
-                                # hostage to the 30s PLI cadence.
-                                _bridge_fn._last_pli_ts = 0.0
-                                _status(
-                                    "SDES: media resumed after stall - PLI re-armed"
-                                )
-                        elif _stall_nudge_due(
-                            silence_s=_stall_silence,
-                            nudges_sent=_stall_nudges_sent,
-                            since_last_nudge_s=(_time_br.time() - _stall_last_nudge),
-                            stall_after_s=_STALL_NUDGE_AFTER_S,
-                        ):
-                            _stall_active = True
-                            _stall_nudges_sent += 1
-                            _stall_last_nudge = _time_br.time()
-                            _status(
-                                f"SDES: no media for {_stall_silence:.1f}s"
-                                f" - LIVING nudge {_stall_nudges_sent}/3"
-                            )
-                            _resend_avio_living()
-
-                    for _bs in _rl:
-                        try:
-                            _bpkt, _bsrc = _bs.recvfrom(4096)
-                        except OSError:
-                            continue
-                        # --- TURN Data Indication: strip wrapper before dispatch --- #
-                        # Camera SRTP and late ICE probes may arrive wrapped in
-                        # TURN Data Indications (type 0x0017) on the TURN control
-                        # channel (3.230.182.123:5349).  Strip to get the inner
-                        # payload, record the peer address for response routing.
-                        _br_turn_peer_ip = None
-                        _br_turn_peer_port = None
-                        if (
-                            len(_bpkt) >= 20
-                            and _bpkt[:2] == b"\x00\x17"
-                            and _bpkt[4:8] == _STUN_MAGIC_BR
-                        ):
-                            if not _br_first_di_logged:
-                                _br_first_di_logged = True
-                                _status(
-                                    f"bridge: first Data Indication from"
-                                    f" {_bsrc[0]}:{_bsrc[1]}"
-                                )
-                            _br_off = 20
-                            _br_inner = None
-                            while _br_off + 4 <= len(_bpkt):
-                                _br_at, _br_al = _st_br.unpack_from(
-                                    "!HH", _bpkt, _br_off
-                                )
-                                _br_av = _bpkt[_br_off + 4 : _br_off + 4 + _br_al]
-                                _br_off += 4 + _br_al + (-_br_al % 4)
-                                if _br_at == 0x0012 and _br_al >= 8:  # XOR-PEER-ADDRESS
-                                    _br_xp = (
-                                        _st_br.unpack_from("!H", _br_av, 2)[0] ^ 0x2112
-                                    )
-                                    _br_xb = bytes(
-                                        a ^ b
-                                        for a, b in zip(
-                                            _br_av[4:8], _STUN_MAGIC_BR, strict=False
-                                        )
-                                    )
-                                    _br_turn_peer_ip = ".".join(str(b) for b in _br_xb)
-                                    _br_turn_peer_port = _br_xp
-                                elif _br_at == 0x0013:  # DATA
-                                    _br_inner = _br_av
-                            if _br_inner:
-                                _bpkt = _br_inner
-
-                        # When this packet came through our relay, _bsrc is the
-                        # TURN server, not the camera.  Everything we send back
-                        # in response therefore has to be wrapped in a Send
-                        # indication addressed to the camera's real address -
-                        # writing raw SRTP or AVIO bytes to the TURN server
-                        # would be parsed as a malformed STUN message and
-                        # dropped.  None when the camera reached us directly,
-                        # which keeps the direct path byte-for-byte unchanged.
-                        _br_cam_peer = (
-                            (_br_turn_peer_ip, _br_turn_peer_port)
-                            if _br_turn_peer_ip
-                            and _br_turn_peer_port
-                            and not _is_self_peer_ip(
-                                _br_turn_peer_ip, _br_turn_peer_port
-                            )
-                            else None
-                        )
-
-                        if (
-                            len(_bpkt) >= 20
-                            and _bpkt[4:8] == _STUN_MAGIC_BR
-                            and _bpkt[:2] == b"\x00\x01"
-                        ):
-                            # STUN Binding Request - send Binding Success Response
-                            if not _br_first_req_dumped:
-                                _br_first_req_dumped = True
-                                _attrs = []
-                                _o = 20
-                                while _o + 4 <= len(_bpkt):
-                                    _at, _al = _st_br.unpack_from("!HH", _bpkt, _o)
-                                    _attrs.append(f"0x{_at:04x}/{_al}")
-                                    _o += 4 + _al + (-_al % 4)
-                                _status(
-                                    f"bridge: first BindingReq from"
-                                    f" {_bsrc[0]}:{_bsrc[1]}"
-                                    f" attrs=[{', '.join(_attrs)}]"
-                                )
-                            # Learn where this probe actually came from.  The
-                            # camera reached us from here, so this address is
-                            # known-good in a way an advertised one is not.
-                            # Relay-carried probes carry the camera's real
-                            # address in XOR-PEER-ADDRESS; _bsrc is the TURN
-                            # server and would be useless to nominate.
-                            _br_obs = (
-                                _br_cam_peer
-                                if _br_cam_peer
-                                else (None if _bsrc[0] == _hp_host else _bsrc)
-                            )
-                            _br_prflx_was = _bridge_uc_info["prflx"]
-                            _br_prflx_now = _record_peer_reflexive(
-                                _bridge_uc_info["cands"],
-                                _br_prflx_was,
-                                _br_obs,
-                                _is_self_peer_ip,
-                            )
-                            if _br_prflx_now is not _br_prflx_was:
-                                # Rebind, never append: the nomination tick
-                                # iterates this list.
-                                _bridge_uc_info["prflx"] = _br_prflx_now
-                                _status(
-                                    f"ICE: learned peer-reflexive camera"
-                                    f" candidate {_br_obs[0]}:{_br_obs[1]}"
-                                    f" (not in the {len(_bridge_uc_info['cands'])}"
-                                    f" advertised candidate(s)) - will nominate it"
-                                )
-                            # Record why this probe's source was, or was not,
-                            # usable.  Both refusals above are silent, and which
-                            # of them fired decides what a fix would change - so
-                            # the fact is kept here and reported once, on the
-                            # stall path, rather than logged per packet.
-                            try:
-                                _br_pv_where = f"{_bsrc[0]}:{_bsrc[1]}"
-                                if _br_turn_peer_ip:
-                                    _br_pv_where += (
-                                        f" via {_br_turn_peer_ip}:{_br_turn_peer_port}"
-                                    )
-                                if _br_pv_where in _br_probe_verdicts:
-                                    pass
-                                elif len(_br_probe_verdicts) >= _MAX_PROBE_SOURCES:
-                                    _br_probe_overflow.add(_br_pv_where)
-                                    _bridge_fn._br_probe_overflow = len(
-                                        _br_probe_overflow
-                                    )
-                                else:
-                                    _br_probe_verdicts[_br_pv_where] = (
-                                        _probe_source_verdict(
-                                            _bsrc,
-                                            _br_turn_peer_ip,
-                                            _br_turn_peer_port,
-                                            cam_peer=_br_cam_peer,
-                                            observed=_br_obs,
-                                            known=bool(
-                                                _br_obs is not None
-                                                and (
-                                                    _br_obs in _br_prflx_was
-                                                    or _br_obs
-                                                    in _bridge_uc_info["cands"]
-                                                )
-                                            ),
-                                            learned=(
-                                                _br_prflx_now is not _br_prflx_was
-                                            ),
-                                        )
-                                    )
-                                    # Rebind, never mutate: the reader is the
-                                    # main coroutine on another thread.
-                                    _bridge_fn._br_probe_verdicts = dict(
-                                        _br_probe_verdicts
-                                    )
-                            except Exception:
-                                _LOGGER.debug(
-                                    "camera %s: swallowed exception in %s",
-                                    getattr(self, "device_id", "?"),
-                                    "_bridge_fn",
-                                    exc_info=True,
-                                )
-                            try:
-                                if _br_turn_peer_ip is None and _bsrc[0] != _hp_host:
-                                    _br_prefer_direct_stun[_bs] = True
-                                _btid = _bpkt[8:20]
-                                # Use TURN peer address when arrived via relay
-                                _bresp_ip = _br_turn_peer_ip or _bsrc[0]
-                                _bresp_port = _br_turn_peer_port or _bsrc[1]
-                                _bresp = _build_stun_binding_success_response(
-                                    transaction_id=_btid,
-                                    mapped_ip=_bresp_ip,
-                                    mapped_port=_bresp_port,
-                                    mi_password=(
-                                        _pwd_a if _bs is _audio_sock else _pwd_v
-                                    ),
-                                    magic_cookie=_STUN_MAGIC_BR,
-                                )
-                                if _br_turn_peer_ip and _br_prefer_direct_stun.get(
-                                    _bs, False
-                                ):
-                                    pass
-                                elif (
-                                    _br_turn_peer_ip
-                                    and _bs in _relay_addrs
-                                    and not _is_self_peer_ip(
-                                        _br_turn_peer_ip, _br_turn_peer_port
-                                    )
-                                ):
-                                    # Arrived via TURN - respond via Send Indication
-                                    _bri = _relay_addrs[_bs]
-                                    _br_t_host, _br_t_port = _bri[4], _bri[5]
-                                    _br_pip = bytes(
-                                        int(x) for x in _br_turn_peer_ip.split(".")
-                                    )
-                                    _br_xip2 = bytes(
-                                        a ^ b
-                                        for a, b in zip(
-                                            _br_pip, _STUN_MAGIC_BR, strict=False
-                                        )
-                                    )
-                                    _br_xport2 = (_br_turn_peer_port ^ 0x2112) & 0xFFFF
-                                    _br_xpa = (
-                                        b"\x00\x01"
-                                        + _st_br.pack("!H", _br_xport2)
-                                        + _br_xip2
-                                    )
-
-                                    _br_si_body = _stun_attr(
-                                        0x0012, _br_xpa
-                                    ) + _stun_attr(0x0013, _bresp)
-                                    _br_send_ind = (
-                                        b"\x00\x16"
-                                        + _st_br.pack("!H", len(_br_si_body))
-                                        + _STUN_MAGIC_BR
-                                        + os.urandom(12)
-                                        + _br_si_body
-                                    )
-                                    _bs.sendto(_br_send_ind, (_br_t_host, _br_t_port))
-                                elif _br_turn_peer_ip and _is_self_peer_ip(
-                                    _br_turn_peer_ip, _br_turn_peer_port
-                                ):
-                                    _bridge_selfloop_drop_count += 1
-                                    if (
-                                        _bridge_selfloop_drop_count <= 5
-                                        or _bridge_selfloop_drop_count % 50 == 0
-                                    ):
-                                        _LOGGER.debug(
-                                            "bridge: drop TURN self-loop STUN peer %s:%d"
-                                            " (count=%d)",
-                                            _br_turn_peer_ip,
-                                            _br_turn_peer_port,
-                                            _bridge_selfloop_drop_count,
-                                        )
-                                else:
-                                    _bs.sendto(_bresp, _bsrc)
-                                    _br_stun_resp_count += 1
-                                    _bridge_fn._br_stun_resp_count = _br_stun_resp_count
-                                # Late USE-CANDIDATE: send when answer arrived
-                                # after bridge started (empty at setup time).
-                                if (
-                                    not _bridge_uc_info["sent"]
-                                    and _bridge_uc_info["ufrag"]
-                                ):
-                                    _bridge_uc_info["sent"] = True
-                                    # Nominate BOTH the audio and video sockets, not
-                                    # just the one that happened to receive this probe.
-                                    # The early (answer-in-time) path nominates both;
-                                    # the late path previously nominated only _bs (the
-                                    # socket with the first BindingReq, typically audio),
-                                    # so the video pair was never nominated and the
-                                    # camera never started video RTP (audio/control
-                                    # recovered, video stayed dark).
-                                    for _br_ci, _br_cp in _bridge_uc_info["cands"]:
-                                        for _uc_sock, _uc_ufrag, _uc_pwd in (
-                                            (_audio_sock, _ufrag_a, _pwd_a),
-                                            (_video_sock, _ufrag_v, _pwd_v),
-                                        ):
-                                            try:
-                                                _send_use_candidate(
-                                                    _uc_sock,
-                                                    _uc_ufrag,
-                                                    _uc_pwd,
-                                                    _bridge_uc_info["ufrag"],
-                                                    _bridge_uc_info["pwd"],
-                                                    (_br_ci, _br_cp),
-                                                )
-                                            except Exception:
-                                                _LOGGER.debug(
-                                                    "camera %s: swallowed exception in %s",
-                                                    getattr(self, "device_id", "?"),
-                                                    "_bridge_fn",
-                                                    exc_info=True,
-                                                )
-                                    _status(
-                                        f"bridge: late USE-CANDIDATE sent (audio+video) to"
-                                        f" {len(_bridge_uc_info['cands'])} camera candidate(s)"
-                                        " (answer arrived after bridge started)"
-                                    )
-                            except Exception:
-                                _LOGGER.debug(
-                                    "camera %s: swallowed exception in %s",
-                                    getattr(self, "device_id", "?"),
-                                    "_bridge_fn",
-                                    exc_info=True,
-                                )
-                        elif len(_bpkt) >= 20 and _bpkt[4:8] == _STUN_MAGIC_BR:
-                            # CreatePermission response from the TURN server.
-                            # 0x0108 = success (the relay door is open for that
-                            # peer); 0x0118 = error.  438 Stale Nonce is routine
-                            # and recoverable: the server hands back a fresh
-                            # NONCE, so adopt it and retry once.  401 means the
-                            # credentials themselves are wrong, which is worth a
-                            # warning because the relay stays shut.
-                            if _bpkt[:2] in (
-                                b"\x01\x08",
-                                b"\x01\x18",
-                                b"\x01\x04",
-                                b"\x01\x14",
-                            ):
-                                _cp_err = 0
-                                _cp_new_nonce = b""
-                                _cp_i = 20
-                                _cp_end = min(
-                                    20 + _st_br.unpack("!H", _bpkt[2:4])[0],
-                                    len(_bpkt),
-                                )
-                                while _cp_i + 4 <= _cp_end:
-                                    _cp_at, _cp_al = _st_br.unpack_from(
-                                        "!HH", _bpkt, _cp_i
-                                    )
-                                    _cp_v = _bpkt[_cp_i + 4 : _cp_i + 4 + _cp_al]
-                                    if _cp_at == 0x0009 and len(_cp_v) >= 4:
-                                        _cp_err = _cp_v[2] * 100 + _cp_v[3]
-                                    elif _cp_at == 0x0015:
-                                        _cp_new_nonce = _cp_v
-                                    _cp_i += 4 + _cp_al + ((-_cp_al) % 4)
-                                _cp_what = (
-                                    "CreatePermission"
-                                    if _bpkt[1] == 0x08
-                                    else "Refresh"
-                                )
-                                if _bpkt[:2] in (b"\x01\x08", b"\x01\x04"):
-                                    _cp_seen = f"_cp_ok_logged_{_cp_what}"
-                                    if not getattr(_bridge_fn, _cp_seen, False):
-                                        setattr(_bridge_fn, _cp_seen, True)
-                                        _status(
-                                            f"TURN: {_cp_what} confirmed by"
-                                            f" server (success)"
-                                        )
-                                elif _cp_err == 438 and _cp_new_nonce:
-                                    _cp_old = _relay_addrs.get(_bs)
-                                    if _cp_old and len(_cp_old) >= 8:
-                                        _relay_addrs[_bs] = (
-                                            *_cp_old[:3],
-                                            _cp_new_nonce,
-                                            *_cp_old[4:],
-                                        )
-                                        _trace(
-                                            f"TURN: stale nonce on {_cp_what}"
-                                            " - refreshed and retrying"
-                                        )
-                                        # Re-arm both gates: whichever request
-                                        # hit the stale nonce, the fresh one
-                                        # should be used immediately.
-                                        _br_last_perm = 0.0
-                                        _br_perm_cands = ()
-                                        _br_last_alloc_refresh = 0.0
-                                else:
-                                    _status(
-                                        f"TURN: {_cp_what} rejected"
-                                        f" (error {_cp_err or 'unknown'}) -"
-                                        f" relay path unusable"
-                                    )
-                                continue
-                            # Count the inbound Binding Success BEFORE the
-                            # trigger gate below.  Counting inside it would make
-                            # this an alias for _tutk_trigger_sent and collapse
-                            # two different diagnoses - "none ever arrived" and
-                            # "one arrived and the trigger still did not go" -
-                            # into a single indistinguishable state.
-                            # Transport liveness: the camera's binding
-                            # successes and keepalive indications both stop the
-                            # instant its ICE agent tears down, which is what
-                            # tells a teardown apart from a media pause.
-                            if _bpkt[:2] in (b"\x01\x01", b"\x00\x11"):
-                                _ice_progress[0] = _time_br.monotonic()
-                            if _bpkt[:2] == b"\x01\x01":
-                                _br_binding_success_count += 1
-                                _bridge_fn._br_binding_success_count = (
-                                    _br_binding_success_count
-                                )
-                            # STUN BindingSuccess (0x0101) from camera: ICE complete.
-                            # Send AES-128-CBC encrypted SESSION_MODE_REQ (AVIO LIVING).
-                            #
-                            # Confirmed via Ghidra static analysis of arm64
-                            # libjingle_peerconnection_so.so (usrsctp_transport.cc):
-                            #   - FUN_0098a9b0 (EncryptPayload): AES-128-CBC, PKCS#7 padding
-                            #   - Key:  base64_decode(our_sdes_inline_key)[:16]
-                            #   - IV:   base64_decode(our_sdes_inline_key)[16:30] + \x00\x00
-                            #   - Packet: [0xC8][0x00][len_hi][len_lo][ciphertext]
-                            #     (4-byte header, NOT the 12-byte TUTK SFrame with ts/SSRC)
-                            if (
-                                _use_plain_rtp
-                                and not _tutk_trigger_sent
-                                and _bpkt[:2] == b"\x01\x01"
-                            ):
-                                _tutk_trigger_sent = True
-                                _bridge_fn._tutk_trigger_sent = True
-                                if (
-                                    getattr(_bridge_fn, "_br_trigger_sent_ts", None)
-                                    is None
-                                ):
-                                    _bridge_fn._br_trigger_sent_ts = (
-                                        _time_br.monotonic()
-                                    )
-                                import struct as _st_tk
-                                import random as _rand_tk
-
-                                _ts_ms = int(_time_br.time() * 1000)
-                                _tk_seq = _rand_tk.randint(0, 0x7FFFFFFF)
-                                _avio_plain = avio_header(
-                                    _tk_seq, 5376, _ts_ms, 28, 0
-                                ) + _st_tk.pack(
-                                    "<IIIIIII", 0, 0, 1, 0, 0, 0, 0
-                                )  # 28B AVIO header + 28B AVStream = 56B
-
-                                # AES-128-CBC: key=our_inline[:16] ASCII, IV=cam_inline[:16] ASCII.
-                                # Confirmed by Frida v8.23 (2026-05-28): first 16 raw chars of
-                                # each party's a=crypto: inline string, not base64-decoded.
-                                _trigger_enc = None
-                                try:
-                                    from Crypto.Cipher import AES as _AES_tk
-                                    from Crypto.Util.Padding import pad as _pad_tk
-
-                                    _aes_key = _our_tx_srtp_key_audio[:16].encode(
-                                        "ascii"
-                                    )
-                                    _aes_iv = (
-                                        _cam_key_audio or _our_tx_srtp_key_audio
-                                    )[:16].encode("ascii")
-                                    _padded = _pad_tk(_avio_plain, 16)  # PKCS#7 -> 64B
-                                    _trigger_enc = _AES_tk.new(
-                                        _aes_key, _AES_tk.MODE_CBC, _aes_iv
-                                    ).encrypt(_padded)
-                                except Exception:
-                                    pass  # no pycryptodome
-
-                                # Packet: [0xC8][0x00][ciphertext_len_BE_2B][ciphertext]
-                                for _payload, _label in [
-                                    (_trigger_enc, "AES-128-CBC"),
-                                    (_avio_plain, "plaintext"),
-                                ]:
-                                    if _payload is None:
-                                        continue
-                                    _sz = len(_payload)
-                                    _pkt = (
-                                        bytes([0xC8, 0x00, _sz >> 8, _sz & 0xFF])
-                                        + _payload
-                                    )
-                                    try:
-                                        _br_send_to_cam(_bs, _pkt, _bsrc, _br_cam_peer)
-                                        _status(
-                                            f"SDES: sent trigger ({_label})"
-                                            f" len={_sz}"
-                                            f" -> {_bsrc[0]}:{_bsrc[1]}"
-                                        )
-                                    except Exception:
-                                        _LOGGER.debug(
-                                            "camera %s: swallowed exception in %s",
-                                            getattr(self, "device_id", "?"),
-                                            "_bridge_fn",
-                                            exc_info=True,
-                                        )
-                                _avio_living_sent = True
-                                _last_trigger_ts = _time_br.time()
-                                _trigger_bs = _bs
-                                _trigger_bsrc = _bsrc
-                                _trigger_peer = _br_cam_peer
-
-                                # Camera is SCTP initiator (a=setup:active).
-                                # Be pure SCTP server: wait for camera's INIT,
-                                # reply INIT-ACK, wait for COOKIE-ECHO, then send data.
-                                if _dc_answer_has_app:
-                                    _status(
-                                        "SDES DC: m=application present"
-                                        " - waiting for camera SCTP INIT"
-                                        f" our_key={_key_fingerprint(_our_tx_srtp_key_audio)}"
-                                        f" cam_key={_key_fingerprint(_cam_key_audio)}"
-                                    )
-                        else:
-                            # Non-STUN packet - demux by first byte.
-                            if _avio_living_sent and len(_bpkt) >= 4:
-                                _nsl_cnt = getattr(_bridge_fn, "_non_stun_logged", 0)
-                                if _nsl_cnt < 5:
-                                    _LOGGER.debug(
-                                        "bridge non-STUN %dB from %s:%d first4=%s",
-                                        len(_bpkt),
-                                        _bsrc[0],
-                                        _bsrc[1],
-                                        _bpkt[:4].hex(),
-                                    )
-                                    _bridge_fn._non_stun_logged = _nsl_cnt + 1
-                            # Plain SCTP over UDP: srcPort=dstPort=5000 (0x1388).
-                            # Camera is a=setup:active (SCTP client - initiates INIT).
-                            # We are SCTP server: wait for camera's INIT, reply INIT-ACK,
-                            # then complete: COOKIE-ECHO -> COOKIE-ACK ->
-                            # DATA_CHANNEL_OPEN + SESSION_MODE_REQ(5376).
-                            # Check for any SCTP-like packet: first 4 bytes are
-                            # srcPort(2B) + dstPort(2B) in SCTP common header.
-                            # Standard SCTP uses port 5000 (0x1388) but log ALL
-                            # candidates to catch non-standard port usage.
-                            _possible_sctp = (
-                                (
-                                    len(_bpkt) >= 12
-                                    and _bpkt[4:8]
-                                    == b"\x00\x00\x00\x00"  # vtag=0 means INIT
-                                    and _bpkt[12] in (0x01, 0x02, 0x0A, 0x0B, 0x06)
-                                )
-                                or (
-                                    len(_bpkt) >= 12
-                                    and _bpkt[:2] == b"\x13\x88"
-                                    and _bpkt[2:4] == b"\x13\x88"
-                                )
-                            )
-                            if _possible_sctp:
-                                st = _sctp["state"]
-                                _chunk_type = _bpkt[12] if len(_bpkt) > 12 else 0xFF
-                                _status(
-                                    f"SDES DC: plain SCTP {len(_bpkt)}B"
-                                    f" from {_bsrc[0]}:{_bsrc[1]}"
-                                    f" state={st}"
-                                    f" chunk=0x{_chunk_type:02x}"
-                                    f" [{_bpkt[:16].hex()}]"
-                                )
-                                # Secondary C: camera may be SCTP client (a=setup:active
-                                # means camera initiates). If state is CLOSED and we see
-                                # an INIT chunk (type=0x01), respond with INIT-ACK.
-                                if st == "CLOSED" and _chunk_type == 0x01:
-                                    peer_tag = _sctp_parse_init(_bpkt)
-                                    if peer_tag:
-                                        _sctp["state"] = "COOKIE_ECHOED"
-                                        try:
-                                            _ack_pkt = _sctp_init_ack_pkt()
-                                            _br_send_to_cam(
-                                                _bs, _ack_pkt, _bsrc, _br_cam_peer
-                                            )
-                                            _status(
-                                                f"SDES DC: camera sent SCTP INIT"
-                                                f" (peer_tag=0x{peer_tag:08x})"
-                                                f" - sent INIT-ACK"
-                                            )
-                                        except Exception as _iae:
-                                            _status(f"SCTP INIT-ACK failed: {_iae}")
-                                elif st in ("INIT_SENT", "COOKIE_WAIT"):
-                                    cookie = _sctp_parse_init_ack(_bpkt, _sctp)
-                                    if cookie:
-                                        _sctp["state"] = "COOKIE_ECHOED"
-                                        try:
-                                            _br_send_to_cam(
-                                                _bs,
-                                                _sctp_cookie_echo(cookie),
-                                                _bsrc,
-                                                _br_cam_peer,
-                                            )
-                                            _status(
-                                                f"SDES DC: plain INIT-ACK"
-                                                f" (cookie {len(cookie)}B)"
-                                                f" -> sent COOKIE-ECHO"
-                                            )
-                                        except Exception as _sce:
-                                            _status(f"SCTP COOKIE-ECHO failed: {_sce}")
-                                    else:
-                                        _status(
-                                            "SDES DC: plain SCTP pkt in INIT_SENT/COOKIE_WAIT"
-                                            " - parse_init_ack found no cookie"
-                                        )
-                                elif st == "COOKIE_ECHOED":
-                                    # Any SCTP packet (COOKIE-ACK = type 0x0B) signals
-                                    # SCTP is established.
-                                    _sctp["state"] = "ESTABLISHED"
-                                    _status(
-                                        "SDES DC: SCTP COOKIE-ACK - DataChannel OPEN"
-                                    )
-                                    try:
-                                        _sctp_send_living(_bs, _bsrc)
-                                    except Exception as _sle:
-                                        _LOGGER.warning(
-                                            "SDES DC: send living failed: %s", _sle
-                                        )
-                                elif st == "DONE":
-                                    pass  # ignore further SCTP (SACKs etc.)
-                                continue
-                            # Log DTLS packets (first byte 0x14-0x17) if they arrive.
-                            # Camera is a=setup:active (DTLS client) - if it sends
-                            # DTLS ClientHello, we'd see 0x16 here.
-                            if len(_bpkt) >= 4 and 0x14 <= _bpkt[0] <= 0x17:
-                                _trace(
-                                    f"bridge: DTLS record {len(_bpkt)}B"
-                                    f" from {_bsrc[0]}:{_bsrc[1]}"
-                                    f" ct=0x{_bpkt[0]:02x}"
-                                    f" ver={_bpkt[1:3].hex()}"
-                                )
-                            #
-                            # Raw hex dump of all 0xC8/0xC9 packets (first 10) to verify
-                            # packet format and AES key/IV derivation.
-                            if (
-                                len(_bpkt) >= 1
-                                and _bpkt[0] not in (0xC8, 0xC9)
-                                and not (len(_bpkt) >= 4 and 0x14 <= _bpkt[0] <= 0x17)
-                                and _sctp.get("state") == "DONE"
-                            ):
-                                if not hasattr(_bridge_fn, "_non_c8_after_done"):
-                                    _bridge_fn._non_c8_after_done = 0
-                                _bridge_fn._non_c8_after_done += 1
-                                if _bridge_fn._non_c8_after_done <= 5:
-                                    _trace(
-                                        f"bridge: non-0xC8 after DONE:"
-                                        f" {len(_bpkt)}B byte0=0x{_bpkt[0]:02x}"
-                                        f" {_bpkt[:24].hex()}"
-                                    )
-                            if len(_bpkt) >= 1 and _bpkt[0] in (0xC8, 0xC9):
-                                if not hasattr(_bridge_fn, "_c8_raw_count"):
-                                    _bridge_fn._c8_raw_count = 0
-                                _bridge_fn._c8_raw_count += 1
-                                if _bridge_fn._c8_raw_count <= 10:
-                                    _sdes_k_fp = _key_fingerprint(
-                                        _our_tx_srtp_key_audio
-                                    )
-                                    _sdes_v_fp = _key_fingerprint(
-                                        _cam_key_audio or _our_tx_srtp_key_audio
-                                    )
-                                    _trace(
-                                        f"bridge: RAW 0x{_bpkt[0]:02x} {len(_bpkt)}B"
-                                        f" #{_bridge_fn._c8_raw_count}"
-                                        f" our_key={_sdes_k_fp}"
-                                        f" cam_key={_sdes_v_fp}"
-                                        f" [{_bpkt[:24].hex()}]"
-                                    )
-                            # TUTK SFrame detection (A001064 / _use_plain_rtp):
-                            # The camera sends TUTK-framed data instead of SRTP.
-                            # Wire-capture analysis (2026-05-02) confirmed:
-                            #   byte0=0xC8 -> TUTK audio SFrame
-                            #   byte0=0xC9 -> TUTK video SFrame (expected)
-                            # TUTK SFrame header (12 bytes):
-                            #   [0]   type   (0xC8=audio, 0xC9=video)
-                            #   [1]   channel/flags
-                            #   [2-3] payload_size (big-endian; = packet_len - 4)
-                            #   [4-7] timestamp (big-endian, camera clock)
-                            #   [8-11] SSRC (big-endian; confirmed matches actual pkt ssrc)
-                            # Strip TUTK header and synthesize a standard RTP/2 packet
-                            # so ffmpeg (configured with RTP/AVP, no SRTP) can decode.
-                            if (
-                                _use_plain_rtp
-                                and len(_bpkt) >= 12
-                                and _bpkt[0] in (0xC8, 0xC9)
-                            ):
-                                _tk_type = _bpkt[0]
-                                _tk_ts = int.from_bytes(_bpkt[4:8], "big")
-                                _tk_ssrc = int.from_bytes(_bpkt[8:12], "big")
-                                _tk_audio = _tk_type == 0xC8
-                                _tk_pt = 8 if _tk_audio else 96  # PCMA or H264
-                                _tk_payload = _bpkt[12:]
-                                # Mark probe received; start heartbeat timer
-                                if not _sdes_probe_received:
-                                    _sdes_probe_received = True
-                                    _last_hb_ts = _time_br.time()  # HB fires in 10s
-                                # Guard on a counter that is actually assigned.
-                                # This used to test `_tutk_seq`, a name nothing
-                                # ever set, so hasattr was False on EVERY packet
-                                # and both counters were reset to 0 each time -
-                                # every synthesized packet went out with
-                                # sequence number 1.  ffmpeg reads a constant
-                                # sequence as a stream of discontinuities and
-                                # reports `RTP: missed N packets` for loss that
-                                # never happened.
-                                if not hasattr(_bridge_fn, "_tutk_seq_v"):
-                                    _bridge_fn._tutk_seq_a = 0
-                                    _bridge_fn._tutk_seq_v = 0
-                                if _tk_audio:
-                                    _bridge_fn._tutk_seq_a = (
-                                        _bridge_fn._tutk_seq_a + 1
-                                    ) & 0xFFFF
-                                    _tk_seq = _bridge_fn._tutk_seq_a
-                                    _btgt, _lo_target, _kind = (
-                                        _lo_audio_port,
-                                        _lo_a,
-                                        "audio",
-                                    )
-                                else:
-                                    _bridge_fn._tutk_seq_v = (
-                                        _bridge_fn._tutk_seq_v + 1
-                                    ) & 0xFFFF
-                                    _tk_seq = _bridge_fn._tutk_seq_v
-                                    _btgt, _lo_target, _kind = (
-                                        _lo_video_port,
-                                        _lo_v,
-                                        "video",
-                                    )
-                                # Synthesize 12-byte RTP header (V=2, no padding/ext/csrc)
-                                _rtp_hdr = _st_br.pack(
-                                    "!BBHII",
-                                    0x80,  # V=2 P=0 X=0 CC=0
-                                    _tk_pt,  # M=0 PT
-                                    _tk_seq,
-                                    _tk_ts,
-                                    _tk_ssrc,
-                                )
-                                _bpkt = _rtp_hdr + _tk_payload
-                                if not hasattr(_bridge_fn, "_tutk_count"):
-                                    _bridge_fn._tutk_count = 0
-                                    _bridge_fn._tutk_first_ts = _time_br.time()
-                                _bridge_fn._tutk_count += 1
-                                _elapsed = _time_br.time() - _bridge_fn._tutk_first_ts
-                                # Decrypt audio probe: SRTP AES-CM (RFC 3711).
-                                # AES-128-CBC: key=our_inline[:16], IV=cam_inline[:16].
-                                # Frida v8.23 (2026-05-28) confirmed: both encrypt and
-                                # decrypt use first 16 ASCII chars of the respective
-                                # a=crypto: inline strings, NOT base64-decoded content.
-                                # Ciphertext starts at byte 4 (after 0xC8 header).
-                                _pd_plain = None
-                                if _tk_audio and _cam_key_audio:
-                                    try:
-                                        from Crypto.Cipher import AES as _AES_pd
-                                        from Crypto.Util.Padding import (
-                                            unpad as _unpad_pd,
-                                        )
-
-                                        _pd_key = _our_tx_srtp_key_audio[:16].encode(
-                                            "ascii"
-                                        )
-                                        _pd_iv = _cam_key_audio[:16].encode("ascii")
-                                        _pd_ct = _bpkt[
-                                            4:
-                                        ]  # full ciphertext after 4B header
-                                        if len(_pd_ct) % 16 == 0 and len(_pd_ct) >= 16:
-                                            _pd_plain = _unpad_pd(
-                                                _AES_pd.new(
-                                                    _pd_key, _AES_pd.MODE_CBC, _pd_iv
-                                                ).decrypt(_pd_ct),
-                                                16,
-                                            )
-                                    except ImportError:
-                                        pass
-                                    except Exception as _pde:
-                                        _status(f"bridge: SDES decrypt error: {_pde}")
-                                # Log for first 5 and every 10th frame
-                                if (
-                                    _bridge_fn._tutk_count <= 5
-                                    or _bridge_fn._tutk_count % 10 == 0
-                                ):
-                                    _trace(
-                                        f"bridge: TUTK {_kind} SFrame"
-                                        f" type=0x{_tk_type:02x} ssrc={_tk_ssrc}"
-                                        f" ts={_tk_ts} payload={len(_tk_payload)}B"
-                                        f" #{_bridge_fn._tutk_count} (+{_elapsed:.1f}s)"
-                                    )
-                                    if _bridge_fn._tutk_count <= 5:
-                                        _trace(
-                                            f"bridge: TUTK raw"
-                                            f" type=0x{_tk_type:02x}"
-                                            f" ts={_tk_ts} ssrc=0x{_tk_ssrc:08x}"
-                                            f" payload={len(_tk_payload)}B"
-                                            f" [{_tk_payload[:32].hex()}]"
-                                        )
-                                        if _pd_plain is not None:
-                                            _trace(
-                                                f"bridge: TUTK decrypt ->"
-                                                f" {len(_pd_plain)}B"
-                                                f" [{_pd_plain[:32].hex()}]"
-                                            )
-                                # -- Encrypted SCTP state machine (SDES path) --
-                                # Camera sends SCTP handshake (INIT, COOKIE-ECHO, DATA)
-                                # wrapped in 0xC8 AES-128-CBC frames. Handle before
-                                # forwarding to ffmpeg.
-                                if (
-                                    _pd_plain is not None
-                                    and len(_pd_plain) >= 16
-                                    and _pd_plain[:4] == b"\x13\x88\x13\x88"
-                                ):
-                                    _pd_ct8 = (
-                                        _pd_plain[12] if len(_pd_plain) > 12 else 0xFF
-                                    )
-
-                                    def _enc_c8_sctp(_raw):
-                                        from Crypto.Cipher import AES as _ae
-                                        from Crypto.Util.Padding import pad as _pa
-
-                                        _k = _our_tx_srtp_key_audio[:16].encode("ascii")
-                                        _v = _cam_key_audio[:16].encode("ascii")
-                                        _e = _ae.new(_k, _ae.MODE_CBC, _v).encrypt(
-                                            _pa(_raw, 16)
-                                        )
-                                        return (
-                                            bytes(
-                                                [
-                                                    0xC8,
-                                                    0x00,
-                                                    len(_e) >> 8,
-                                                    len(_e) & 0xFF,
-                                                ]
-                                            )
-                                            + _e
-                                        )
-
-                                    _sct = _sctp["state"]
-                                    if _pd_ct8 == 0x01 and _sct in (
-                                        "CLOSED",
-                                        "INIT_SENT",
-                                        "COOKIE_WAIT",
-                                    ):
-                                        # Camera SCTP INIT (or retransmit) -> send encrypted INIT-ACK.
-                                        # Handle retransmits in COOKIE_WAIT: re-send INIT-ACK
-                                        # (our first may have been lost).
-                                        _sc_p = _sctp_parse_init(_pd_plain)
-                                        if _sc_p:
-                                            try:
-                                                _iak_plain = _sctp_init_ack_pkt()
-                                                _iak_bytes = _enc_c8_sctp(_iak_plain)
-                                                _br_send_to_cam(
-                                                    _bs, _iak_bytes, _bsrc, _br_cam_peer
-                                                )
-                                                _sctp["state"] = "COOKIE_WAIT"
-                                                _status(
-                                                    f"SDES DC: INIT(peer=0x{_sc_p:08x})"
-                                                    f" -> INIT-ACK {len(_iak_bytes)}B"
-                                                    f" to {_bsrc[0]}:{_bsrc[1]}"
-                                                    f" plain[{len(_iak_plain)}B]="
-                                                    f"{_iak_plain[:32].hex()}"
-                                                )
-                                            except Exception as _sce8:
-                                                _status(
-                                                    f"SDES DC: enc INIT-ACK err: {_sce8}"
-                                                )
-                                    elif _pd_ct8 == 0x02 and _sct in (
-                                        "INIT_SENT",
-                                        "COOKIE_WAIT",
-                                    ):
-                                        # Camera SCTP INIT-ACK -> send encrypted COOKIE-ECHO
-                                        _sc_ck = _sctp_parse_init_ack(_pd_plain, _sctp)
-                                        if _sc_ck:
-                                            try:
-                                                _br_send_to_cam(
-                                                    _bs,
-                                                    _enc_c8_sctp(
-                                                        _sctp_cookie_echo(_sc_ck)
-                                                    ),
-                                                    _bsrc,
-                                                    _br_cam_peer,
-                                                )
-                                                _sctp["state"] = "COOKIE_ECHOED"
-                                                _status(
-                                                    f"SDES DC: enc INIT-ACK"
-                                                    f" (cookie {len(_sc_ck)}B)"
-                                                    f" -> sent enc COOKIE-ECHO"
-                                                )
-                                            except Exception as _sce8:
-                                                _status(
-                                                    f"SDES DC: enc COOKIE-ECHO err: {_sce8}"
-                                                )
-                                    elif _pd_ct8 == 0x0A and _sct in (
-                                        "COOKIE_WAIT",
-                                        "COOKIE_ECHOED",
-                                    ):
-                                        # Camera COOKIE-ECHO -> send COOKIE-ACK + DCEP_OPEN,
-                                        # then wait 300ms before sending LIVING (PPID=53).
-                                        # Without DCEP_OPEN (PPID=50), LIVING arrives on an
-                                        # unregistered stream and is silently discarded by the
-                                        # camera's SCTP application layer (SACK confirms transport
-                                        # delivery, but no audio/video results). The DTLS path in
-                                        # client.py (the COOKIE-ECHO/COOKIE-ACK + DCEP_OPEN handler)
-                                        # does exactly this sleep - required.
-                                        try:
-                                            _cak8 = _sctp_pkt(
-                                                _sctp["peer_tag"],
-                                                _sctp_chunk(0x0B, 0, b""),
-                                            )
-                                            _br_send_to_cam(
-                                                _bs,
-                                                _enc_c8_sctp(_cak8),
-                                                _bsrc,
-                                                _br_cam_peer,
-                                            )
-                                            _dc8 = _sctp_data(50, _dcep_open_msg())
-                                            _br_send_to_cam(
-                                                _bs,
-                                                _enc_c8_sctp(
-                                                    _sctp_pkt(_sctp["peer_tag"], _dc8)
-                                                ),
-                                                _bsrc,
-                                                _br_cam_peer,
-                                            )
-                                            _sctp["state"] = "DCEP_WAIT"
-                                            _sctp["dcep_sent_ts"] = _time_br.time()
-                                            _sctp["dcep_sock"] = _bs
-                                            _sctp["dcep_src"] = _bsrc
-                                            _status(
-                                                "SDES DC: COOKIE-ECHO"
-                                                " -> COOKIE-ACK + DCEP_OPEN(50),"
-                                                " waiting 300ms before LIVING"
-                                            )
-                                        except Exception as _sce8:
-                                            _status(
-                                                f"SDES DC: enc COOKIE-ACK err: {_sce8}"
-                                            )
-                                    elif _pd_ct8 == 0x0B and _sct == "COOKIE_ECHOED":
-                                        # Camera COOKIE-ACK -> send encrypted LIVING only
-                                        try:
-                                            _lv8 = _sctp_data(
-                                                53, _session_mode_req_msg()
-                                            )
-                                            _br_send_to_cam(
-                                                _bs,
-                                                _enc_c8_sctp(
-                                                    _sctp_pkt(_sctp["peer_tag"], _lv8)
-                                                ),
-                                                _bsrc,
-                                                _br_cam_peer,
-                                            )
-                                            _sctp["state"] = "DONE"
-                                            _sdes_probe_received = True
-                                            _last_hb_ts = _time_br.time()
-                                            _status(
-                                                "SDES DC: enc COOKIE-ACK -> sent enc LIVING"
-                                            )
-                                        except Exception as _sce8:
-                                            _status(f"SDES DC: enc LIVING err: {_sce8}")
-                                    elif _pd_ct8 == 0x00 and _sct == "DONE":
-                                        # SCTP DATA from camera.  ACKNOWLEDGE IT
-                                        # FIRST: SCTP puts acknowledgement on the
-                                        # receiver, and sending nothing let the
-                                        # camera's retransmission timer run out and
-                                        # ABORT the association at ~61.4 s, which is
-                                        # what produced the 80.2 s cliff and what
-                                        # stopped PTZ/talkback/SD answering a minute
-                                        # into every session.  Ack before dispatch so
-                                        # a handler that raises cannot cost us the ack.
-                                        if len(_pd_plain) >= 20:
-                                            _sc_tsn = int.from_bytes(
-                                                _pd_plain[16:20], "big"
-                                            )
-                                            _sc_first_sack = (
-                                                _sctp.get("peer_cum_tsn") is None
-                                            )
-                                            _sctp["peer_cum_tsn"] = (
-                                                _sctp_advance_cum_tsn(
-                                                    _sctp.get("peer_cum_tsn"), _sc_tsn
-                                                )
-                                            )
-                                            if _sc_first_sack:
-                                                # One line per session: the build tag for the
-                                                # SACK fix, and the thing to look for if the
-                                                # 61.4 s ABORT ever comes back.
-                                                _status(
-                                                    f"SDES DC: SACK enabled"
-                                                    f" - acking camera DATA from"
-                                                    f" TSN={_sc_tsn:#010x}"
-                                                )
-                                            try:
-                                                _br_send_to_cam(
-                                                    _bs,
-                                                    _enc_c8_sctp(
-                                                        _sctp_pkt(
-                                                            _sctp["peer_tag"],
-                                                            _sctp_sack_chunk(
-                                                                _sctp["peer_cum_tsn"]
-                                                            ),
-                                                        )
-                                                    ),
-                                                    _bsrc,
-                                                    _br_cam_peer,
-                                                )
-                                            except Exception as _sackerr:
-                                                _status(
-                                                    f"SDES DC: SACK send failed: {_sackerr}"
-                                                )
-                                        # Reassemble before parsing.  A DATA chunk
-                                        # carries B/E flags (RFC 4960 s3.3.1) and a
-                                        # large reply - the ~2.8 KB SD listing page -
-                                        # arrives as several ~1.2 KB fragments.  Taking
-                                        # each one for a whole AVIO frame got the first
-                                        # rejected (declared length overruns the
-                                        # fragment) and the rest read as junk commands,
-                                        # so the reply was reported as "the camera did
-                                        # not answer".  Use the chunk's own length
-                                        # rather than the rest of the packet: the
-                                        # declared length is what bounds this chunk.
-                                        _sc_flags = (
-                                            _pd_plain[13]
-                                            if len(_pd_plain) > 13
-                                            else 0x03
-                                        )
-                                        _sc_clen = (
-                                            int.from_bytes(_pd_plain[14:16], "big")
-                                            if len(_pd_plain) >= 16
-                                            else 0
-                                        )
-                                        _sc_sid = (
-                                            int.from_bytes(_pd_plain[20:22], "big")
-                                            if len(_pd_plain) >= 22
-                                            else 0
-                                        )
-                                        _sc_frag = (
-                                            _pd_plain[28 : 28 + (_sc_clen - 16)]
-                                            if _sc_clen >= 16 and len(_pd_plain) > 28
-                                            else (
-                                                _pd_plain[28:]
-                                                if len(_pd_plain) > 28
-                                                else b""
-                                            )
-                                        )
-                                        _sc_ppid = (
-                                            int.from_bytes(_pd_plain[24:28], "big")
-                                            if len(_pd_plain) >= 28
-                                            else 0
-                                        )
-                                        _sc_pay = _sctp_reassemble(
-                                            _sc_flags,
-                                            _sc_sid,
-                                            _sc_frag,
-                                            _sctp.setdefault("rx_frag", {}),
-                                        )
-                                        # A mid-message fragment: nothing to parse yet.
-                                        # Its TSN is acknowledged above, so the camera
-                                        # will not retransmit it.  Guarded rather than
-                                        # `continue`d - the nearest enclosing loop is the
-                                        # per-socket one, and skipping it would drop the
-                                        # rest of this socket's turn.
-                                        if _sc_pay is not None:
-                                            _sc_cmd = (
-                                                int.from_bytes(_sc_pay[4:8], "little")
-                                                if len(_sc_pay) >= 8
-                                                else 0
-                                            )
-                                            # This is where the camera's answers
-                                            # come back on SDES.  They were parsed
-                                            # and logged here long before anything
-                                            # could receive them; hand them to
-                                            # whoever asked.
-                                            if _sc_cmd == 5377:
-                                                # SESSION_MODE_RESP: the camera's
-                                                # answer to the LIVING trigger.
-                                                # Counted whether or not anything
-                                                # was waiting for it, because the
-                                                # question the stall report asks is
-                                                # "did the trigger arrive", and the
-                                                # trigger is fire-and-forget.
-                                                _bridge_fn._br_session_mode_resp = (
-                                                    getattr(
-                                                        _bridge_fn,
-                                                        "_br_session_mode_resp",
-                                                        0,
-                                                    )
-                                                    + 1
-                                                )
-                                            _sc_answered = _dispatch_sctp_avio(
-                                                _avio_responses, _sc_pay
-                                            )
-                                            _trace(
-                                                f"SDES DC: enc DATA ppid={_sc_ppid}"
-                                                f" cmd={_sc_cmd} {len(_sc_pay)}B"
-                                                f"{' (answered a request)' if _sc_answered else ''}"
-                                                f" {_sc_pay[:32].hex()}"
-                                            )
-                                    else:
-                                        # Log SACK (0x03) with cumulative TSN ack for diagnostics
-                                        if _pd_ct8 == 0x03 and len(_pd_plain) >= 20:
-                                            _cum_tsn = int.from_bytes(
-                                                _pd_plain[16:20], "big"
-                                            )
-                                            _trace(
-                                                f"SDES DC: SACK cum_tsn={_cum_tsn:#010x}"
-                                                f" state={_sct}"
-                                            )
-                                        else:
-                                            _trace(
-                                                f"SDES DC: enc SCTP ct=0x{_pd_ct8:02x}"
-                                                f" state={_sct} {len(_pd_plain)}B"
-                                            )
-                                    continue  # SCTP never forwarded to ffmpeg
-                                # Send RTCP RR to camera to acknowledge audio receipt.
-                                if _tk_audio:
-                                    _rr_our_ssrc = 0xAB12CD34
-                                    _rr_pkt = _st_br.pack(
-                                        "!BBHIIIIIII",
-                                        0x81,
-                                        201,
-                                        7,
-                                        _rr_our_ssrc,
-                                        _tk_ssrc,
-                                        0,
-                                        _bridge_fn._tutk_count,
-                                        0,
-                                        0,
-                                        0,
-                                    )
-                                    _rtcp_sent = False
-                                    # Hoisted purely so the SRTP-TX-KEY note can
-                                    # report the key that actually went out.
-                                    # Same expression - no behavior change.
-                                    _rr_key_b64 = (
-                                        _cam_key_audio or _our_tx_srtp_key_audio
-                                    )
-                                    try:
-                                        import pylibsrtp as _plsrtp_rr
-                                        import base64 as _b64_rr
-
-                                        _rr_key = _b64_rr.b64decode(_rr_key_b64)
-                                        _rr_pol = _plsrtp_rr.Policy(
-                                            key=_rr_key,
-                                            ssrc_type=_plsrtp_rr.Policy.SSRC_SPECIFIC,
-                                            ssrc_value=_rr_our_ssrc,
-                                            srtp_profile=_plsrtp_rr.Policy.SRTP_PROFILE_AES128_CM_SHA1_80,
-                                        )
-                                        _rr_pol.allow_repeat_tx = True
-                                        _rr_sess = _plsrtp_rr.Session(policy=_rr_pol)
-                                        _br_send_to_cam(
-                                            _bs,
-                                            _rr_sess.protect_rtcp(_rr_pkt),
-                                            _bsrc,
-                                            _br_cam_peer,
-                                        )
-                                        _rtcp_sent = True
-                                    except Exception:
-                                        _LOGGER.debug(
-                                            "camera %s: swallowed exception in %s",
-                                            getattr(self, "device_id", "?"),
-                                            "_bridge_fn",
-                                            exc_info=True,
-                                        )
-                                    if not _rtcp_sent:
-                                        try:
-                                            _br_send_to_cam(
-                                                _bs, _rr_pkt, _bsrc, _br_cam_peer
-                                            )
-                                        except Exception:
-                                            _LOGGER.debug(
-                                                "camera %s: swallowed exception in %s",
-                                                getattr(self, "device_id", "?"),
-                                                "_bridge_fn",
-                                                exc_info=True,
-                                            )
-                                    if _bridge_fn._tutk_count == 1:
-                                        _status(
-                                            f"SDES: sent RTCP RR to camera"
-                                            f" (SSRC=0x{_tk_ssrc:08x})"
-                                        )
-                                    # Re-noted whenever the selected key changes,
-                                    # not just on the first RR: this branch
-                                    # rebuilds its SRTP session from the current
-                                    # expression on every packet, and
-                                    # _cam_key_audio can be set after the bridge
-                                    # is already running (late-wake answer
-                                    # parse), so the RR key does flip mid-session
-                                    # on battery cameras.  A first-send-only note
-                                    # would have recorded "answer=none differ=no"
-                                    # for exactly that session.  Bounded: the
-                                    # answer key is only ever set once.
-                                    if (
-                                        _rtcp_sent
-                                        and getattr(_bridge_fn, "_rr_key_noted", None)
-                                        != _rr_key_b64
-                                    ):
-                                        _bridge_fn._rr_key_noted = _rr_key_b64
-                                        _status(
-                                            _srtp_tx_key_note(
-                                                "RR",
-                                                _rr_key_b64,
-                                                _our_tx_srtp_key_audio,
-                                                _cam_key_audio,
-                                            )
-                                        )
-                                # Forward decrypted PCMA audio to ffmpeg loopback.
-                                # AVIO control frames (SESSION_MODE_RESP=5377, etc.) are
-                                # identified by cmd field and skipped; raw PCMA bytes are sent.
-                                if _tk_audio and _pd_plain is not None:
-                                    _fwd_cmd = (
-                                        int.from_bytes(_pd_plain[4:8], "little")
-                                        if len(_pd_plain) >= 8
-                                        else 0
-                                    )
-                                    # AVIO control frames identified by cmd field - never
-                                    # forward these to ffmpeg's audio port.  804 =
-                                    # LdsTrackSwitchNotify (device->client track-id change,
-                                    # f0.java:3224): the camera can send it unsolicited, and
-                                    # without it here an 804 frame is misrouted as PCMA noise.
-                                    _avio_cmds = {
-                                        5376,
-                                        5377,
-                                        5156,
-                                        5157,
-                                        768,
-                                        769,
-                                        511,
-                                        804,
-                                    }
-                                    # No response dispatch here.  Measured
-                                    # 2026-08-07: the camera's replies come back
-                                    # as encrypted SCTP DATA (see
-                                    # _dispatch_sctp_avio), never in this
-                                    # framing.  Offering every audio packet to
-                                    # the router would be per-packet work on the
-                                    # media path for something that has never
-                                    # arrived on it.
-                                    if _fwd_cmd not in _avio_cmds:
-                                        try:
-                                            _lo_a.sendto(
-                                                _rtp_hdr + _pd_plain,
-                                                ("127.0.0.1", _lo_audio_port),
-                                            )
-                                            # Count it: media_stats() documents
-                                            # itself as "media actually forwarded
-                                            # to ffmpeg by the bridge", and
-                                            # scripts/live_validate.py uses it as
-                                            # the SDES release gate.  This is a
-                                            # real forward, so omitting it made a
-                                            # camera whose audio arrives on the
-                                            # TUTK path under-report - far enough
-                                            # to fail an otherwise healthy release.
-                                            _media_progress[0] = _time_br.monotonic()
-                                            _media_counts[0] += 1
-                                            _media_counts[1] += len(_rtp_hdr) + len(
-                                                _pd_plain
-                                            )
-                                            if not _br_first_audio_logged:
-                                                _br_first_audio_logged = True
-                                                # Record the payload type this path
-                                                # SYNTHESISES (_tk_pt, PCMA) so the
-                                                # SDP can be narrowed to it.  Without
-                                                # this the m=audio line keeps
-                                                # advertising "0 8", ffmpeg binds
-                                                # PCMU and discards every packet, and
-                                                # the mpegts PMT is never written - so
-                                                # the consumer gets zero bytes and the
-                                                # VIDEO is lost with the audio.
-                                                _first_audio_pt[0] = _tk_pt
-                                                _status(
-                                                    f"bridge: first SDES audio -> ffmpeg"
-                                                    f" loopback:{_lo_audio_port}"
-                                                    f" ({len(_pd_plain)}B PCMA)"
-                                                    f" pt={_tk_pt}"
-                                                )
-                                        except Exception:
-                                            _LOGGER.debug(
-                                                "camera %s: swallowed exception in %s",
-                                                getattr(self, "device_id", "?"),
-                                                "_bridge_fn",
-                                                exc_info=True,
-                                            )
-                                # Counted for the first-media trigger rule: this
-                                # branch leaves before _br_media_pkts is counted,
-                                # so without it a camera sending TUTK-framed
-                                # media would read as sending nothing.
-                                _bridge_fn._br_tutk_media = (
-                                    getattr(_bridge_fn, "_br_tutk_media", 0) + 1
-                                )
-                                continue
-
-                            # Standard SRTP/SRTCP demux by RTP payload type.
-                            # Camera answers BUNDLE (a=group:BUNDLE 0 1) so all media
-                            # arrives on _audio_sock.  Routing by source socket would
-                            # send video RTP to ffmpeg's audio loopback.  RFC 5761:
-                            #   - RTP byte[1] = M(1) | PT(7); PT in 0..127
-                            #   - RTCP byte[1] = PT(8); PT in 200..204
-                            # SRTP/SRTCP keeps the header in clear, so we can read PT
-                            # before decryption.  Audio PTs: 0 (PCMU), 8 (PCMA).
-                            # Video PTs: 96 (H264), 97 (H265).
-                            if not hasattr(_bridge_fn, "_srtp_switch_logged"):
-                                _bridge_fn._srtp_switch_logged = True
-                                _LOGGER.info(
-                                    "bridge: SRTP/non-TUTK pkt %dB from %s:%d"
-                                    " first4=%s (PT=%d) - camera switched to SRTP",
-                                    len(_bpkt),
-                                    _bsrc[0],
-                                    _bsrc[1],
-                                    _bpkt[:4].hex(),
-                                    (_bpkt[1] & 0x7F) if len(_bpkt) > 1 else -1,
-                                )
-                            _pt_byte = _bpkt[1] if len(_bpkt) > 1 else 0
-                            if _pt_byte < 200 or _pt_byte > 204:
-                                # Every inbound RTP packet, counted BEFORE any
-                                # decryption decision. The media counters are
-                                # deliberately gated on the packet being
-                                # readable, so a session where the camera sent
-                                # plenty and none of it could be decrypted has,
-                                # until here, been indistinguishable from one
-                                # where it sent nothing. Read only by the stall
-                                # report, on a path a healthy open never takes.
-                                _bridge_fn._br_media_pkts = (
-                                    getattr(_bridge_fn, "_br_media_pkts", 0) + 1
-                                )
-                            if 200 <= _pt_byte <= 204:
-                                # SRTCP from camera.  For _use_plain_rtp cameras
-                                # the ffmpeg SDP uses RTP/AVP (no crypto).  If we
-                                # forward encrypted SRTCP, ffmpeg reads the
-                                # encrypted NTP/RTP sender-info bytes as garbage
-                                # and uses them to rebase its internal clock,
-                                # producing wildly wrong DTS (~ Unix epoch us).
-                                # Drop encrypted SRTCP entirely; ffmpeg works fine
-                                # without RTCP SR - it uses only RTP timestamps.
-                                if _use_plain_rtp:
-                                    continue
-                                # For SDES cameras (non-plain-rtp) ffmpeg uses
-                                # SAVP and handles SRTCP itself - forward as-is.
-                                try:
-                                    _lo_a.sendto(_bpkt, ("127.0.0.1", _lo_audio_port))
-                                except Exception:
-                                    _LOGGER.debug(
-                                        "camera %s: swallowed exception in %s",
-                                        getattr(self, "device_id", "?"),
-                                        "_bridge_fn",
-                                        exc_info=True,
-                                    )
-                                try:
-                                    _lo_v.sendto(_bpkt, ("127.0.0.1", _lo_video_port))
-                                except Exception:
-                                    _LOGGER.debug(
-                                        "camera %s: swallowed exception in %s",
-                                        getattr(self, "device_id", "?"),
-                                        "_bridge_fn",
-                                        exc_info=True,
-                                    )
-                                continue
-                            _pt = _pt_byte & 0x7F
-                            # The ANSWER decides which payload type is which
-                            # kind; the tuples below are only the fallback for a
-                            # packet that beats the answer in.  See
-                            # answer_pt_kinds: this camera negotiates H265 on
-                            # pt=0 in ~14% of sessions and the fixed tuples sent
-                            # every one of those video streams to the AUDIO
-                            # loopback.
-                            _kind_answered = _answer_pt_kinds.get(_pt)
-                            _pt_out = _pt
-                            if _kind_answered == "video":
-                                _btgt, _lo_target, _kind = (
-                                    _lo_video_port,
-                                    _lo_v,
-                                    "video",
-                                )
-                                # The bridge starts before the answer lands, so
-                                # a video packet on an unexpected PT can beat the
-                                # map in by a few hundred ms and latch as the
-                                # session's "first audio".  Left alone that
-                                # narrows the serve's audio line to a payload
-                                # type no audio uses, and the mpegts mux then
-                                # withholds PAT/PMT waiting for a stream that
-                                # never produces - costing the picture, not just
-                                # the sound.  Undo it and let real audio latch.
-                                if _first_audio_pt[0] == _pt:
-                                    _first_audio_pt[0] = None
-                                    _br_first_audio_logged = False
-                                    _status(
-                                        "bridge: pt=%d re-classified as video"
-                                        " from the answer - clearing the audio"
-                                        " latch it took first" % _pt
-                                    )
-                                # Our serve SDP describes video as 96=H264 /
-                                # 97=H265 only, so a camera-numbered payload
-                                # type we do not advertise must be translated
-                                # into our numbering before ffmpeg sees it -
-                                # the same translation video_pt_from_answer_sdp
-                                # already performs for the SDP side ("the
-                                # camera's own numbering need not agree").
-                                # Gated on _use_plain_rtp because only there is
-                                # the bridge the decryptor and the packet
-                                # reaching ffmpeg plaintext; rewriting a byte
-                                # ffmpeg will itself authenticate breaks SRTP.
-                                if (
-                                    _pt not in _SDP_VIDEO_PTS
-                                    and _use_plain_rtp
-                                    and _answer_video_pt[0] is not None
-                                ):
-                                    _pt_out = int(_answer_video_pt[0])
-                            elif _kind_answered == "audio":
-                                _btgt, _lo_target, _kind = (
-                                    _lo_audio_port,
-                                    _lo_a,
-                                    "audio",
-                                )
-                            elif _pt in (96, 97, 98):
-                                _btgt, _lo_target, _kind = (
-                                    _lo_video_port,
-                                    _lo_v,
-                                    "video",
-                                )
-                            elif _pt in (0, 8):
-                                _btgt, _lo_target, _kind = (
-                                    _lo_audio_port,
-                                    _lo_a,
-                                    "audio",
-                                )
-                            else:
-                                # Unknown PT - fall back to source-socket routing.
-                                if _bs is _audio_sock:
-                                    _btgt, _lo_target, _kind = (
-                                        _lo_audio_port,
-                                        _lo_a,
-                                        "audio",
-                                    )
-                                else:
-                                    _btgt, _lo_target, _kind = (
-                                        _lo_video_port,
-                                        _lo_v,
-                                        "video",
-                                    )
-                            if not _br_first_srtp_logged:
-                                _br_first_srtp_logged = True
-                                # Hex-dump first 24 bytes + parsed RTP header
-                                # so we can verify byte 0 is 0x80 (real RTP v2),
-                                # PT, sequence, timestamp, and SSRC against the
-                                # camera's announced ssrc:5075/5073.
-                                _hex24 = _bpkt[:24].hex()
-                                _b0 = _bpkt[0] if len(_bpkt) > 0 else 0
-                                if len(_bpkt) >= 12:
-                                    _seq16, _ts32, _ssrc32 = _st_br.unpack_from(
-                                        "!HII", _bpkt, 2
-                                    )
-                                else:
-                                    _seq16 = _ts32 = _ssrc32 = 0
-                                _status(
-                                    f"bridge: first SRTP from"
-                                    f" {_bsrc[0]}:{_bsrc[1]} pt={_pt}"
-                                    f" -> {_kind} loopback:{_btgt}"
-                                    f"  byte0=0x{_b0:02x} byte1=0x{_pt_byte:02x}"
-                                    f" seq={_seq16} ts={_ts32}"
-                                    f" ssrc={_ssrc32}"
-                                    f" len={len(_bpkt)}"
-                                    f" hex24={_hex24}"
-                                )
-                            if _kind == "audio" and not _br_first_audio_logged:
-                                _br_first_audio_logged = True
-                                _first_audio_pt[0] = _pt
-                                _status(f"bridge: first audio RTP pt={_pt}")
-                                # Capture the camera's audio return address so the talk
-                                # pump (SdesSession.async_start_talk) can send outbound
-                                # PCMA there.  Only meaningful on a talk-capable open
-                                # (offer advertised sendrecv + a=ssrc); harmless otherwise.
-                                # Guarded so a video-first capture (BUNDLE) is not lost.
-                                if (
-                                    _talk_state is not None
-                                    and _talk_state.get("src") is None
-                                ):
-                                    _talk_state["src"] = _bsrc
-                                    _talk_state["sock"] = _bs
-                                    _status(
-                                        f"SDES talk: camera audio addr captured"
-                                        f" {_bsrc[0]}:{_bsrc[1]} (talk pump armed)"
-                                    )
-                            elif _kind == "video" and not _br_first_video_logged:
-                                _br_first_video_logged = True
-                                # _pt_out, not _pt: everything downstream (the
-                                # serve SDP narrowing, _serve_video_pt's
-                                # "observed beats pinned") speaks OUR numbering,
-                                # and the wire PT is preserved in the log line.
-                                _first_video_pt[0] = _pt_out
-                                _status(
-                                    f"bridge: first video RTP pt={_pt_out}"
-                                    + (
-                                        f" (camera numbered it {_pt})"
-                                        if _pt_out != _pt
-                                        else ""
-                                    )
-                                )
-                                # At INFO, not DEBUG: this is the one line that
-                                # makes a bitrate figure comparable to another
-                                # one, and it is emitted once per session.
-                                _LOGGER.info(
-                                    "camera %s: video profile %s",
-                                    getattr(self, "device_id", "?"),
-                                    describe_video_profile(_pt_out),
-                                )
-                                # Camera answers BUNDLE (all media on one 5-tuple),
-                                # so the talk destination is the same address as
-                                # video.  Capture it here too - the camera may send
-                                # video first (or send no inbound audio at all), so
-                                # gating talk on first-audio alone is unreliable.
-                                if (
-                                    _talk_state is not None
-                                    and _talk_state.get("src") is None
-                                ):
-                                    _talk_state["src"] = _bsrc
-                                    _talk_state["sock"] = _bs
-                                    _status(
-                                        f"SDES talk: camera media addr captured"
-                                        f" {_bsrc[0]}:{_bsrc[1]} (talk pump armed)"
-                                    )
-                                # Capture camera video SSRC for RTCP PLI.
-                                if len(_bpkt) >= 12:
-                                    _bridge_fn._cam_video_ssrc = _st_br.unpack_from(
-                                        "!I", _bpkt, 8
-                                    )[0]
-                                if _media_path[0] is None:
-                                    _media_path[0] = _classify_media_path(
-                                        _bsrc[0], _bridge_turn_ips
-                                    )
-                                _bridge_fn._cam_srtp_src = _bsrc
-                                _bridge_fn._cam_srtp_sock = _bs
-                                if getattr(_bridge_fn, "_first_video_ts", None) is None:
-                                    _bridge_fn._first_video_ts = _time_br.time()
-                                # Publish the relay-aware sender so the RTCP
-                                # cadence blocks (which have no socket/peer in
-                                # scope) can reach the camera the way the NACK
-                                # does.  This branch runs ONCE per session (it
-                                # sits inside the first-video gate), so the
-                                # sender is frozen at the first video packet's
-                                # source - the same adoption `_cam_srtp_src`
-                                # has always used.  A 1 Hz cadence send to a
-                                # stale address after a mid-session address
-                                # change just drops; the NACK path keeps its
-                                # own per-event binding for exactly that case.
-                                _bridge_fn._send_to_cam = (
-                                    lambda _d, _s=_bs, _a=_bsrc, _p=_br_cam_peer: (
-                                        _br_send_to_cam(_s, _d, _a, _p)
-                                    )
-                                )
-                                # Schedule immediate PLI so IDR+SPS arrives in
-                                # the analyzeduration window.
-                                _bridge_fn._last_pli_ts = 0.0
-                                # Resolve the NACK switch ONCE per session: the
-                                # per-packet path runs ~300x/s per camera and
-                                # os.environ.get costs ~250ns of it.  A flip
-                                # now takes effect on the next stream open.
-                                _bridge_fn._nack_on = _sdes_nack_enabled()
-                            # For TUTK cameras (_use_plain_rtp) the ffmpeg SDP uses
-                            # RTP/AVP (no crypto). After LIVING the camera switches
-                            # from TUTK SFrames to standard SRTP, so we decrypt here
-                            # before forwarding plain RTP to ffmpeg.
-                            _fwd_pkt = _bpkt
-                            # Whether _fwd_pkt is plaintext by the time anything
-                            # below reads its PAYLOAD. False until something has
-                            # actually decrypted it: forwarding ciphertext is
-                            # inert (ffmpeg discards it), but MINING it is not -
-                            # see _should_capture_sprop.
-                            _decrypted = False
-                            if _use_plain_rtp:
-                                # srtp_key_audio, not _cam_key_audio: the
-                                # second-webrtcResp handler adopts the camera's
-                                # real key into srtp_key_audio (this is a live
-                                # closure cell, so the rebind is visible here)
-                                # and leaves _cam_key_audio at the first answer's
-                                # value.  Preferring _cam_key_audio pinned the
-                                # bridge - the only decryptor on this path - to a
-                                # key the camera had stopped using.
-                                _rx_sess = _ensure_srtp_rx_session(
-                                    _bridge_fn,
-                                    srtp_key_audio,
-                                    _build_srtp_rx,
-                                    on_built=_on_srtp_rx_built,
-                                    on_error=_on_srtp_rx_error,
-                                )
-                                if _rx_sess is not None:
-                                    try:
-                                        _fwd_pkt = _rx_sess.unprotect(_bpkt)
-                                        _decrypted = True
-                                    except Exception as _srx_dec_e:
-                                        # Uncapped, unlike the log counter below
-                                        # which stops at 8 to keep the log
-                                        # readable. The stall report needs the
-                                        # real total: "8 failures" and "every
-                                        # packet failed" are different findings.
-                                        _bridge_fn._br_decrypt_fails = (
-                                            getattr(_bridge_fn, "_br_decrypt_fails", 0)
-                                            + 1
-                                        )
-                                        _ec = getattr(_bridge_fn, "_decrypt_err_n", 0)
-                                        if _ec < 8:
-                                            _bridge_fn._decrypt_err_n = _ec + 1
-                                            _seq_d = (
-                                                int.from_bytes(_bpkt[2:4], "big")
-                                                if len(_bpkt) >= 4
-                                                else -1
-                                            )
-                                            _ssrc_d = (
-                                                int.from_bytes(_bpkt[8:12], "big")
-                                                if len(_bpkt) >= 12
-                                                else 0
-                                            )
-                                            _trace(
-                                                f"bridge: SRTP decrypt err:"
-                                                f" {_srx_dec_e}"
-                                                f" seq={_seq_d}"
-                                                f" ssrc=0x{_ssrc_d:08x}"
-                                                f" pt={_pt}"
-                                            )
-                            # Capture this camera's SPS/PPS once so future streams
-                            # can inject sprop-parameter-sets (out-of-band decoder
-                            # init, robust to in-band SPS loss).  Parses only until
-                            # both are seen; then _sprop_done short-circuits.
-                            if _should_capture_sprop(
-                                _kind,
-                                _decrypted,
-                                getattr(_bridge_fn, "_sprop_done", False),
-                            ):
-                                _ps = _extract_param_sets_from_rtp(_fwd_pkt)
-                                if _ps:
-                                    _psc = getattr(_bridge_fn, "_ps_cache", None)
-                                    if _psc is None:
-                                        _psc = {}
-                                        _bridge_fn._ps_cache = _psc
-                                    _psc.update(_ps)
-                                    if 7 in _psc and 8 in _psc:
-                                        _sprop_new = _build_sprop(_psc[7], _psc[8])
-                                        if _sprop_new != _load_sprop(self.device_id):
-                                            # Gated on the result: two of
-                                            # _save_sprop's three outcomes write
-                                            # nothing, and this is the only line
-                                            # the sprop path ever emits.
-                                            if _save_sprop(self.device_id, _sprop_new):
-                                                _status(
-                                                    "bridge: cached sprop-parameter"
-                                                    f"-sets for {self.device_id}"
-                                                )
-                                            else:
-                                                _status(
-                                                    "bridge: parameter sets NOT "
-                                                    f"cached for {self.device_id} "
-                                                    "(camera marked unstable, or "
-                                                    "the cache is unwritable) - "
-                                                    "out-of-band injection stays "
-                                                    "off for it"
-                                                )
-                                        _bridge_fn._sprop_done = True
-                            # Rebase RTP timestamps to start near 0.  Camera picks a
-                            # random starting timestamp (RFC 3550 section 5.1); the 90 kHz
-                            # video clock can be near 2^32 and wraps, producing huge
-                            # or negative DTS values that the MPEG-TS muxer drops.
-                            # Subtracting the first-seen timestamp per-stream gives
-                            # ffmpeg a monotonically increasing sequence from 0.
-                            if (
-                                _use_plain_rtp
-                                and len(_fwd_pkt) >= 8
-                                and _fwd_pkt[0] == 0x80
-                            ):
-                                _rtp_raw_ts = _st_br.unpack_from("!I", _fwd_pkt, 4)[0]
-                                _ts_base_attr = (
-                                    "_rtp_ts_base_video"
-                                    if _kind == "video"
-                                    else "_rtp_ts_base_audio"
-                                )
-                                if not hasattr(_bridge_fn, _ts_base_attr):
-                                    setattr(_bridge_fn, _ts_base_attr, _rtp_raw_ts)
-                                _rtp_base = getattr(_bridge_fn, _ts_base_attr)
-                                _rtp_norm = (_rtp_raw_ts - _rtp_base) & 0xFFFFFFFF
-                                _fwd_pkt = (
-                                    _fwd_pkt[:4]
-                                    + _st_br.pack("!I", _rtp_norm)
-                                    + _fwd_pkt[8:]
-                                )
-                            # Ask the camera to resend anything the air lost.
-                            # The sequence number is in the clear even under
-                            # SRTP, so this reads _bpkt and does not depend on
-                            # the decrypt above having succeeded.
-                            if (
-                                _kind == "video"
-                                and len(_bpkt) >= 12
-                                and hasattr(_bridge_fn, "_cam_video_ssrc")
-                                and hasattr(_bridge_fn, "_cam_srtp_sock")
-                            ):
-                                _nk_seq, _nk_ssrc = (
-                                    _st_br.unpack_from("!H", _bpkt, 2)[0],
-                                    _st_br.unpack_from("!I", _bpkt, 8)[0],
-                                )
-                                if _nk_ssrc == _bridge_fn._cam_video_ssrc:
-                                    _nk_lost = _video_nack_seqs(
-                                        _bridge_fn,
-                                        _nk_seq,
-                                        _time_br.time(),
-                                        enabled=getattr(_bridge_fn, "_nack_on", True),
-                                    )
-                                    if _nk_lost and _send_video_nack(
-                                        # bound now: called synchronously
-                                        # inside the helper, but the loop
-                                        # vars must not be late-bound.
-                                        lambda _d, _s=_bs, _a=_bsrc, _p=_br_cam_peer: (
-                                            _br_send_to_cam(_s, _d, _a, _p)
-                                        ),
-                                        getattr(_bridge_fn, "_pli_tx_sess", None),
-                                        _CAM_RTCP_SENDER_SSRC,
-                                        _bridge_fn._cam_video_ssrc,
-                                        _nk_lost,
-                                    ):
-                                        _bridge_fn._nack_sent = (
-                                            getattr(_bridge_fn, "_nack_sent", 0) + 1
-                                        )
-                                        _bridge_fn._nack_seqs = getattr(
-                                            _bridge_fn, "_nack_seqs", 0
-                                        ) + len(_nk_lost)
-                                        if _bridge_fn._nack_sent == 1:
-                                            _status(
-                                                f"SDES: sent RTCP NACK #1 for"
-                                                f" {len(_nk_lost)} packet(s)"
-                                                f" -> SSRC="
-                                                f"0x{_bridge_fn._cam_video_ssrc:08x}"
-                                            )
-                            # A retransmission that missed ffmpeg's reorder
-                            # window is worse than nothing: the damaged frame
-                            # is already out, so forwarding it only inserts an
-                            # out-of-order packet and the muxer clamps its
-                            # output DTS.  Skip the send (not a `continue` -
-                            # that would change loop control flow for the whole
-                            # SDES fleet) and do not count it, since the
-                            # consumer cannot use it.
-                            _nk_late = (
-                                _kind == "video"
-                                and len(_bpkt) >= 4
-                                and _video_repeat_too_late(
-                                    _bridge_fn,
-                                    _st_br.unpack_from("!H", _bpkt, 2)[0],
-                                    _time_br.time(),
-                                )
-                            )
-                            if _nk_late:
-                                _bridge_fn._nack_late_drops = (
-                                    getattr(_bridge_fn, "_nack_late_drops", 0) + 1
-                                )
-                            if _pt_out != _pt and _decrypted:
-                                _fwd_pkt = rewrite_rtp_payload_type(_fwd_pkt, _pt_out)
-                            try:
-                                if not _nk_late:
-                                    _lo_target.sendto(_fwd_pkt, ("127.0.0.1", _btgt))
-                                # Forward unconditionally - ciphertext ffmpeg
-                                # discards is inert, and a `continue` here would
-                                # change loop control flow for the whole SDES
-                                # fleet.  But only COUNT what the consumer can
-                                # use: these three are the only in-process proof
-                                # media flowed, so counting a discarded packet
-                                # keeps is_stalled from ever tripping and the
-                                # session reports healthy while the viewer sees
-                                # black.  See _should_count_media.
-                                if not _nk_late and _should_count_media(
-                                    _decrypted, _use_plain_rtp
-                                ):
-                                    _media_progress[0] = _time_br.monotonic()
-                                    _media_counts[0] += 1
-                                    _media_counts[1] += len(_fwd_pkt)
-                            except Exception:
-                                _LOGGER.debug(
-                                    "camera %s: swallowed exception in %s",
-                                    getattr(self, "device_id", "?"),
-                                    "_bridge_fn",
-                                    exc_info=True,
-                                )
-                    # Periodic ICE controlling check: re-send USE-CANDIDATE every 2.5 s.
-                    # Keeps the camera in ICE "Completed" state and satisfies consent
-                    # refresh (RFC 7675).  Also handles the case where the initial
-                    # USE-CANDIDATE (sent right after the STUN window) was lost.
-                    _br_now = _time_br.monotonic()
-                    # Relay-only battery cams (LAN IP unknown) answer AFTER the STUN
-                    # window and send no probes, so the in-window proactive send saw
-                    # empty _cam_ice_* and the probe-gated late-send above never runs.
-                    # Fall back to the creds parsed late into _bridge_uc_info so this
-                    # ungated periodic tick still nominates them.  [SDES-LATECREDS-FIX]
-                    _uc_cands = _cam_ice_cands or _bridge_uc_info.get("cands")
-                    # Union in anything learned from the camera's own probes.
-                    # Advertised candidates stay FIRST and are still nominated,
-                    # so a camera we can already reach directly is unaffected;
-                    # this only adds a path where there was none.
-                    _uc_prflx = _bridge_uc_info.get("prflx")
-                    if _uc_prflx:
-                        _uc_cands = [
-                            *(_uc_cands or []),
-                            *(c for c in _uc_prflx if c not in (_uc_cands or [])),
-                        ]
-                    _uc_cufrag = _cam_ice_ufrag or _bridge_uc_info.get("ufrag")
-                    _uc_cpwd = _cam_ice_pwd or _bridge_uc_info.get("pwd")
-                    if (
-                        _uc_cands
-                        and _uc_cufrag
-                        and _uc_cpwd
-                        and (_br_now - _br_last_uc) >= 2.5
-                    ):
-                        _br_last_uc = _br_now
-                        # Same RFC 5766 s9 door as the setup path, but this is
-                        # the only place it can be opened for a relay-only
-                        # battery cam: its candidates arrive after the STUN
-                        # window, so the setup-time install above never ran and
-                        # nominating without a permission probes a black hole.
-                        # Re-install when the candidate set changes and every
-                        # 120 s thereafter - a TURN permission expires 300 s
-                        # after it is installed (RFC 5766 s8).
-                        _perm_key = tuple(sorted(_uc_cands))
-                        if (
-                            _perm_key != _br_perm_cands
-                            or (_br_now - _br_last_perm) >= 120.0
-                        ):
-                            _br_perm_cands = _perm_key
-                            _br_last_perm = _br_now
-                            _turn_install_permissions(_uc_cands, "bridge", _trace)
-                        # Keep the allocation itself alive.  The server grants
-                        # it for a LIFETIME (600 s here) and drops it silently
-                        # when that lapses, so refresh well inside the window.
-                        if _relay_addrs and (_br_now - _br_last_alloc_refresh) >= 240.0:
-                            _br_last_alloc_refresh = _br_now
-                            _rf_ok = sum(
-                                1
-                                for _rf_s in (_audio_sock, _video_sock)
-                                if _turn_refresh_allocation(_rf_s)
-                            )
-                            if _rf_ok:
-                                _trace(f"TURN: refreshed {_rf_ok} relay allocation(s)")
-                        for _c_ip, _c_port in _uc_cands:
-                            _send_use_candidate(
-                                _audio_sock,
-                                _ufrag_a,
-                                _pwd_a,
-                                _uc_cufrag,
-                                _uc_cpwd,
-                                (_c_ip, _c_port),
-                            )
-                            _send_use_candidate(
-                                _video_sock,
-                                _ufrag_v,
-                                _pwd_v,
-                                _uc_cufrag,
-                                _uc_cpwd,
-                                (_c_ip, _c_port),
-                            )
-            except Exception:
-                # Only pockets of the body are guarded. A stray exception used
-                # to end the thread with nothing at camera level in the log,
-                # and the session died minutes later as "stalled".
-                _LOGGER.error(
-                    "camera %s: SDES bridge ended by an unexpected error",
-                    getattr(self, "device_id", "?"),
-                    exc_info=True,
-                )
-            finally:
-                try:
-                    _lo_a.close()
-                except Exception:
-                    _LOGGER.debug(
-                        "camera %s: swallowed exception in %s",
-                        getattr(self, "device_id", "?"),
-                        "_bridge_fn",
-                        exc_info=True,
-                    )
-                try:
-                    _lo_v.close()
-                except Exception:
-                    _LOGGER.debug(
-                        "camera %s: swallowed exception in %s",
-                        getattr(self, "device_id", "?"),
-                        "_bridge_fn",
-                        exc_info=True,
-                    )
-
-        _br_first_di_logged = False
-        _br_first_srtp_logged = False
-        _br_first_req_dumped = False
-        _br_first_audio_logged = False
-        _br_first_video_logged = False
-        _avio_living_sent = False
-
         # Shared mutable container so the bridge can send USE-CANDIDATE even
         # when the camera's SDP answer arrives after the bridge starts (late-
         # wakeup path where _cam_ice_ufrag/pwd/cands are still empty at setup).
@@ -8040,6 +8062,64 @@ class _SdesOpenMixin:
             "prflx": [],
         }
 
+        _bridge_fn = make_sdes_bridge(
+            self=self,
+            _abort_chan=_abort_chan,
+            _answer_pt_kinds=_answer_pt_kinds,
+            _answer_video_pt=_answer_video_pt,
+            _audio_sock=_audio_sock,
+            _avio_responses=_avio_responses,
+            _bridge_turn_ips=_bridge_turn_ips,
+            _bridge_uc_info=_bridge_uc_info,
+            _cam_ice_cands=_cam_ice_cands,
+            _cam_ice_pwd=_cam_ice_pwd,
+            _cam_ice_ufrag=_cam_ice_ufrag,
+            _cmd_chan=_cmd_chan,
+            _first_audio_pt=_first_audio_pt,
+            _first_video_pt=_first_video_pt,
+            _hp_host=_hp_host,
+            _ice_progress=_ice_progress,
+            _lo_audio_port=_lo_audio_port,
+            _lo_video_port=_lo_video_port,
+            _media_counts=_media_counts,
+            _media_path=_media_path,
+            _media_progress=_media_progress,
+            _our_tx_srtp_key_audio=_our_tx_srtp_key_audio,
+            _proc_holder=_proc_holder,
+            _pwd_a=_pwd_a,
+            _pwd_v=_pwd_v,
+            _relay_addrs=_relay_addrs,
+            _sctp=_sctp,
+            _send_use_candidate=_send_use_candidate,
+            _socket_br=_socket_br,
+            _status=_status,
+            _talk_state=_talk_state,
+            _teardown_holder=_teardown_holder,
+            _trace=_trace,
+            _turn_install_permissions=_turn_install_permissions,
+            _turn_refresh_allocation=_turn_refresh_allocation,
+            _turn_send_indication=_turn_send_indication,
+            _ufrag_a=_ufrag_a,
+            _ufrag_v=_ufrag_v,
+            _use_plain_rtp=_use_plain_rtp,
+            _video_sock=_video_sock,
+            _build_srtp_rx=_build_srtp_rx,
+            _dcep_open_msg=_dcep_open_msg,
+            _is_self_peer_ip=_is_self_peer_ip,
+            _on_srtp_rx_built=_on_srtp_rx_built,
+            _on_srtp_rx_error=_on_srtp_rx_error,
+            _sctp_chunk=_sctp_chunk,
+            _sctp_cookie_echo=_sctp_cookie_echo,
+            _sctp_data=_sctp_data,
+            _sctp_init_ack_pkt=_sctp_init_ack_pkt,
+            _sctp_parse_init=_sctp_parse_init,
+            _sctp_pkt=_sctp_pkt,
+            _sctp_send_living=_sctp_send_living,
+            _session_mode_req_msg=_session_mode_req_msg,
+            get_srtp_key_audio=lambda: srtp_key_audio,
+            get_cam_key_audio=lambda: _cam_key_audio,
+            get_dc_answer_has_app=lambda: _dc_answer_has_app,
+        )
         _bridge_thread = _threading_br.Thread(
             target=_bridge_fn, daemon=True, name="sdes-bridge"
         )

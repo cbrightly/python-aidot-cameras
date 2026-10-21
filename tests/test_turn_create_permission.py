@@ -46,6 +46,11 @@ def _extract_helper(src, name):
     return textwrap.dedent("\n".join(out))
 
 
+def _bridge_source():
+    """The bridge thread's body, built by make_sdes_bridge for each open."""
+    return inspect.getsource(so.make_sdes_bridge)
+
+
 def _impl_source():
     for cls in vars(so).values():
         if isinstance(cls, type):
@@ -73,7 +78,9 @@ def test_permission_is_installed_before_every_nomination():
         "setup": src[
             src.index("if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:") :
         ][:2000],
-        "bridge": src[src.index("Periodic ICE controlling check") :][:4000],
+        "bridge": _bridge_source()[
+            _bridge_source().index("Periodic ICE controlling check") :
+        ][:4000],
     }
     # The answer path is a module function now, so the names it calls have no
     # leading underscore; the substrings below match both spellings.
@@ -154,7 +161,7 @@ def test_relay_only_battery_path_installs_permissions_from_the_bridge():
     periodic nomination tick is the only place its permission can be created.
     Nominating without one probes a black hole.
     """
-    src = _impl_source()
+    src = _bridge_source()
     tick = src[src.index("Periodic ICE controlling check") :]
     perm_at = tick.index("_turn_install_permissions(_uc_cands")
     probe_at = tick.index("_send_use_candidate(")
@@ -219,7 +226,7 @@ def test_every_relay_allocation_records_the_username():
 
 def test_stale_nonce_is_refreshed_and_retried():
     """438 Stale Nonce is routine and recoverable, not a dead end."""
-    src = _impl_source()
+    src = _bridge_source()
     assert "_cp_err == 438" in src, "must recognise 438 Stale Nonce"
     handler = src[src.index("_cp_err == 438") :]
     handler = handler[: handler.index("else:")]
