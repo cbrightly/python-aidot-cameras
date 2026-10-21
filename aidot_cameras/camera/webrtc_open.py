@@ -1203,7 +1203,7 @@ class _PhaseReturn:
 async def _dtls_open_head(self, _in: dict) -> dict:
     """Phase of the DTLS open: head.
 
-    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    Split out of ``_async_open_webrtc_stream_impl`` with its body unchanged; ``_in``
     is the open's ``locals()`` and the result the names the rest of the open
     reads back (see ``_phase_outputs``).
     """
@@ -1473,7 +1473,7 @@ async def _dtls_open_head(self, _in: dict) -> dict:
 async def _dtls_open_credentials_and_mqtt_setup(self, _in: dict) -> dict:
     """Phase of the DTLS open: credentials_and_mqtt_setup.
 
-    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    Split out of ``_async_open_webrtc_stream_impl`` with its body unchanged; ``_in``
     is the open's ``locals()`` and the result the names the rest of the open
     reads back (see ``_phase_outputs``).
     """
@@ -1688,7 +1688,7 @@ async def _dtls_open_credentials_and_mqtt_setup(self, _in: dict) -> dict:
 async def _dtls_open_mqtt_asyncio_bridge(self, _in: dict) -> dict:
     """Phase of the DTLS open: mqtt_asyncio_bridge.
 
-    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    Split out of ``_async_open_webrtc_stream_impl`` with its body unchanged; ``_in``
     is the open's ``locals()`` and the result the names the rest of the open
     reads back (see ``_phase_outputs``).
     """
@@ -1811,7 +1811,7 @@ async def _dtls_open_mqtt_asyncio_bridge(self, _in: dict) -> dict:
 async def _dtls_open_ice_config_and_user_info(self, _in: dict) -> dict:
     """Phase of the DTLS open: ice_config_and_user_info.
 
-    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    Split out of ``_async_open_webrtc_stream_impl`` with its body unchanged; ``_in``
     is the open's ``locals()`` and the result the names the rest of the open
     reads back (see ``_phase_outputs``).
     """
@@ -1993,7 +1993,7 @@ async def _dtls_open_ice_config_and_user_info(self, _in: dict) -> dict:
 async def _dtls_open_host_candidate_and_ice_config_req(self, _in: dict) -> dict:
     """Phase of the DTLS open: host_candidate_and_ice_config_req.
 
-    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    Split out of ``_async_open_webrtc_stream_impl`` with its body unchanged; ``_in``
     is the open's ``locals()`` and the result the names the rest of the open
     reads back (see ``_phase_outputs``).
     """
@@ -2178,7 +2178,7 @@ async def _dtls_open_host_candidate_and_ice_config_req(self, _in: dict) -> dict:
 async def _dtls_open_wake_and_liveplay(self, _in: dict) -> dict:
     """Phase of the DTLS open: wake_and_liveplay.
 
-    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    Split out of ``_async_open_webrtc_stream_impl`` with its body unchanged; ``_in``
     is the open's ``locals()`` and the result the names the rest of the open
     reads back (see ``_phase_outputs``).
     """
@@ -2373,7 +2373,7 @@ async def _dtls_open_wake_and_liveplay(self, _in: dict) -> dict:
 async def _dtls_open_sdes_branch(self, _in: dict) -> dict:
     """Phase of the DTLS open: sdes_branch.
 
-    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    Split out of ``_async_open_webrtc_stream_impl`` with its body unchanged; ``_in``
     is the open's ``locals()`` and the result the names the rest of the open
     reads back (see ``_phase_outputs``).
     """
@@ -2562,7 +2562,7 @@ async def _dtls_open_sdes_branch(self, _in: dict) -> dict:
 async def _dtls_open_peer_connection_setup(self, _in: dict) -> dict:
     """Phase of the DTLS open: peer_connection_setup.
 
-    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    Split out of ``_async_open_webrtc_stream_impl`` with its body unchanged; ``_in``
     is the open's ``locals()`` and the result the names the rest of the open
     reads back (see ``_phase_outputs``).
     """
@@ -3212,7 +3212,7 @@ async def _dtls_open_peer_connection_setup(self, _in: dict) -> dict:
 async def _dtls_open_offer_and_answer(self, _in: dict) -> dict:
     """Phase of the DTLS open: offer_and_answer.
 
-    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    Split out of ``_async_open_webrtc_stream_impl`` with its body unchanged; ``_in``
     is the open's ``locals()`` and the result the names the rest of the open
     reads back (see ``_phase_outputs``).
     """
@@ -4487,7 +4487,7 @@ async def _dtls_open_offer_and_answer(self, _in: dict) -> dict:
 async def _dtls_open_ice_candidates_and_connect(self, _in: dict) -> dict:
     """Phase of the DTLS open: ice_candidates_and_connect.
 
-    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    Split out of ``_async_open_webrtc_stream_impl`` with its body unchanged; ``_in``
     is the open's ``locals()`` and the result the names the rest of the open
     reads back (see ``_phase_outputs``).
     """
@@ -4781,17 +4781,19 @@ async def _dtls_open_ice_candidates_and_connect(self, _in: dict) -> dict:
     self._release_stream_drain_to_session()
     if _abort_holder is not None:
         _abort_holder.clear()  # the session owns teardown from here
-    return WebRTCSession(
-        pc=pc,
-        outgoing_q=outgoing_q,
-        mqtt_fut=mqtt_fut,
-        recorder=recorder,
-        track_tasks=track_tasks,
-        dc=_kvs_dc,
-        audio_sender=_audio_sender,
-        talk_track=_talk_track,
-        talk_holder=_talk_holder,
-        responses=_avio_responses,
+    return _PhaseReturn(
+        WebRTCSession(
+            pc=pc,
+            outgoing_q=outgoing_q,
+            mqtt_fut=mqtt_fut,
+            recorder=recorder,
+            track_tasks=track_tasks,
+            dc=_kvs_dc,
+            audio_sender=_audio_sender,
+            talk_track=_talk_track,
+            talk_holder=_talk_holder,
+            responses=_avio_responses,
+        )
     )
     return _phase_outputs(locals(), ())
 
@@ -5095,4 +5097,6 @@ class _WebRTCOpenMixin:
         # Apply remote ICE candidates + wait for ICE connection
         # ------------------------------------------------------------------ #
         _o = await _dtls_open_ice_candidates_and_connect(self, locals())
+        if isinstance(_o, _PhaseReturn):
+            return _o.value
         return None
