@@ -5777,7 +5777,9 @@ class CameraMixin(
         in full on the common timeout). The only thing lost is fast-fail on an
         outright camera refusal (livePlay=0), which is rare and then surfaces as
         an ICE failure instead. Disable via ``AIDOT_DTLS_FAST_LIVEPLAY`` in
-        {0,false,no,off} or per-camera ``_dtls_fast_liveplay_opt`` (opt wins)."""
+        {0,false,no,off}. Unlike the SDES knob there is no per-camera parameter;
+        ``_dtls_fast_liveplay_opt`` is read only as a test seam and nothing in
+        the library sets it."""
         opt = getattr(self, "_dtls_fast_liveplay_opt", None)
         if opt is not None:
             return bool(opt)
