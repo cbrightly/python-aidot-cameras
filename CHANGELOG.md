@@ -6,6 +6,19 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **A DTLS camera's open hands back its session again.** In 1.0.0rc58 every
+  successful DTLS open returned `None` instead of its `WebRTCSession`: the
+  open's closing `return` was left bare when the open was split into phases,
+  so the open read the session as a phase's outputs and dropped it. On a DTLS
+  camera (the M3 Pro family) the serve loop failed on the missing session and
+  retried, leaving each attempt's peer connection behind, so the camera never
+  streamed through Home Assistant; a snapshot failed; talk reported that the
+  camera has no talk support; and a live view could not be stopped. SDES
+  cameras were not affected. A test now holds every phase and region of both
+  opens and both serve loops to the rule that each `return` reaches the
+  caller.
+
 ## [1.0.0rc58]
 
 ### Changed
