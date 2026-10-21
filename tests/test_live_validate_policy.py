@@ -630,6 +630,22 @@ async def test_a_quality_attempt_also_stops_once(lv, tmp_path, monkeypatch):
     assert events == ["quality", "stop", "read"]
 
 
+async def test_an_open_that_returns_no_session_is_not_a_pass(lv, tmp_path, monkeypatch):
+    # 1.0.0rc58's DTLS open handed back None while its recorder kept writing a
+    # good recording, and the gate passed it on the recording alone.
+    dc, events, made = _gate(lv, monkeypatch)
+    real_open = dc.async_open_webrtc_stream
+
+    async def _open_without_a_session(**kw):
+        await real_open(**kw)  # streams and records, then hands back nothing
+
+    dc.async_open_webrtc_stream = _open_without_a_session
+    result = await lv._attempt(dc, 0, str(tmp_path), 1)
+    assert result["verdict"] == "ERROR", result
+    assert result["transport"] == "NoneType"
+    assert "no session" in result["error"]
+
+
 async def test_a_failed_stop_is_reported_not_swallowed(lv, tmp_path, monkeypatch):
     dc, events, made = _gate(lv, monkeypatch, fail_stop=RuntimeError("teardown broke"))
     result = await lv._attempt(dc, 0, str(tmp_path), 1)
