@@ -2130,6 +2130,16 @@ Day zero still becomes the day the reference installation returns with the curre
 
 Day zero still becomes the day the reference installation returns with the current release on it; the target is ten days after that.
 
+#### 2026-10-21: `rc58` lands the decomposition that the `rc57` note above said to hold
+
+| release | date | find | resets? |
+|---|---|---|---|
+| `rc58` | 2026-10-21 | Planned work, not a soak find, landed by decision on 2026-10-21 against the note above: the settings registry, the deduplicated STUN, TURN, SDP, AAC, MQTT, certificate, dormant-exit and IPC blocks, the health line's picture-counted frame figures, the removal of the unreachable shape-B upstream support, and the decomposition of both opens and both serve loops into phase and region coroutines (design dated 2026-10-12). Every step moved code verbatim and was gated per layer: unit, integration, the fake lab with the library log compared as a multiset of message templates, and live validation on the top of the stack and again on the landed sha | Yes - the opens and the serve loops are rewritten. The reference installation is still off the network, so this costs no soak time |
+
+The reasoning that held this work was that 1.0.0 should assert a settled shape and that a soak should run on the program that ships. Landing it now means the soak, when it starts, runs on the decomposed opens and loops, which is the shape 1.0.0 will have; the alternative was a soak on code that was about to be replaced.
+
+Day zero still becomes the day the reference installation returns with the current release on it; the target is ten days after that.
+
 ## Out of scope for 1.0.0
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /
