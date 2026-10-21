@@ -1319,6 +1319,12 @@ async def _attempt(
         )
         result["handshake_s"] = round(time.time() - t0, 1)
         result["transport"] = type(session).__name__
+        if session is None:
+            # 1.0.0rc58 passed this gate with every DTLS open returning None:
+            # the session's recorder kept writing, so the recording looked
+            # healthy, and only this field said NoneType. A caller with no
+            # session cannot stop, snapshot or talk, so it is not a pass.
+            raise RuntimeError("the open returned no session")
         if quality_arm is None:
             await asyncio.sleep(hold)
         else:
