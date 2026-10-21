@@ -5857,6 +5857,2452 @@ def make_sdes_bridge(
     return _bridge_fn
 
 
+def _phase_outputs(ns: dict, names: tuple) -> dict:
+    """The names a phase of an open bound, for the open to read back.
+
+    A name the phase never bound is left out, so the open's own local stays
+    unbound exactly as it would have in the single-function form.
+    """
+    return {n: ns[n] for n in names if n in ns}
+
+
+async def _sdes_open_head(self, _in: dict) -> dict:
+    """Phase of the SDES open: head.
+
+    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    is the open's ``locals()`` and the result the names the rest of the open
+    reads back (see ``_phase_outputs``).
+    """
+    if "_cleanup" in _in:
+        _cleanup = _in["_cleanup"]
+    if "outgoing_q" in _in:
+        outgoing_q = _in["outgoing_q"]
+    if "self" in _in:
+        self = _in["self"]
+    if "user_id" in _in:
+        user_id = _in["user_id"]
+    """SDES-SRTP streaming path using a hand-crafted SDP offer and ffmpeg.
+
+    SDES cameras negotiate SRTP keys inline in the SDP (``a=crypto:`` lines)
+    rather than via a DTLS handshake.  aiortc does not support SDES-SRTP, so
+    this path sends a manually constructed SDP offer, waits for the camera's
+    SDP answer, writes it to a temp file, and launches ffmpeg to receive and
+    record the SRTP stream.
+    """
+    # When this open began.  The answer-ready marker lives on the camera
+    # object, not the open, so a marker older than this belongs to a
+    # previous open and must not fire this one's early exit.
+    _open_started_at = time.monotonic()
+    # Stop the MQTT signaling thread on ANY abnormal exit from this impl.
+    # The explicit `outgoing_q.put_nowait(None)` calls further down cover the
+    # paths that existed when they were written, but an exception raised
+    # before one of them is reached (AidotCameraBusy on a terminal ack, or a
+    # CancelledError mid-handshake) skipped the sentinel entirely and left
+    # `_mqtt_session_sync` running in an executor thread for its full 3600s.
+    # Those orphans all reconnect with the same stable account clientId, so
+    # they take the session away from later opens and signaling for other
+    # cameras on the account stops being delivered until HA restarts.
+    # The wrapper only closes this stack when the impl did NOT return a
+    # session, so a live session is unaffected.  A duplicate sentinel on the
+    # paths that already send one is harmless - the reader exits on the first.
+    if outgoing_q is not None:
+
+        def _stop_mqtt_thread() -> None:
+            try:
+                outgoing_q.put_nowait(None)
+            except Exception:
+                _LOGGER.debug(
+                    "camera %s: could not signal MQTT thread to exit",
+                    getattr(self, "device_id", "?"),
+                    exc_info=True,
+                )
+
+        _cleanup.callback(_stop_mqtt_thread)
+
+    # SDES path: fast_connect's wait-skips / TURN-strip destabilise the SCTP
+    # handshake (session churns ~every 60-90s -> live view drops to snapshot),
+    # so the SDES path always uses the full, stable handshake.
+
+    user_id = user_id or str(self.user_id)
+
+    # Models confirmed (2026-05-02) to send TUTK-framed data instead of
+    # standard SRTP: camera announces an ASCII-printable fake SDES key and
+    # sends packets with byte0=0xC8 (TUTK audio SFrame header) and an SSRC
+    # that differs from the one advertised in the SDP.  For these models:
+    # (a) ffmpeg SDP uses plain RTP/AVP (no SRTP decryption attempt), and
+    # (b) the bridge thread detects TUTK SFrame headers (0xC8=audio,
+    #     0xC9=video), strips the 12-byte TUTK header, synthesizes a
+    #     standard RTP header from the TUTK timestamp+SSRC fields, and
+    #     forwards the reassembled plain-RTP packet to ffmpeg.
+    # Substring-matched, NOT equality: a revision suffix ("LK.IPC.A001513-1",
+    # the way A000088-1 exists on the DTLS side) is the same firmware and needs
+    # the same framing.  An exact match silently read such a camera as a plain
+    # SRTP model, so ffmpeg tried to decrypt TUTK frames with the announced
+    # fake key and the bridge never stripped the TUTK header - a session that
+    # negotiates and delivers nothing decodable.
+    _model_id = getattr(getattr(self, "info", None), "model_id", None) or ""
+    _use_plain_rtp = any(m in _model_id for m in self._PLAIN_RTP_MODELS)
+    # powerType/p2pCache - IpcServiceImpl.java:B() returns 2 for battery
+    # models; 1 for wired.  Derived from is_battery_camera (see live_power_type)
+    # so the wire value and the battery guards cannot drift apart.  All tested
+    # cameras report p2pCache=2 in their setDevAttrNotif device attributes.
+    # App parity: LivePlayPaylodBean declares these as INT, not String - send
+    # ints so a strict camera JSON parser accepts the livePlayReq (battery cams
+    # appear stricter; a rejected livePlayReq leaves the cam un-armed).
+    _live_power_type = self.live_power_type
+    _live_p2p_cache = 2
+
+    webrtc_req_topic = f"iot/v1/s/{user_id}/IPC/webrtcReq"
+
+    def _seq() -> str:
+        return f"ap{random.randint(1000000, 9999999)}"
+
+    # Register a resource with the wrapper's cleanup stack so it is released
+    # if the cold open is cancelled/raises before the SdesSession takes
+    # ownership.  Each step swallows so ExitStack.close() can never mask the
+    # original CancelledError/exception.  No-op if called without a stack.
+    def _cl(fn, *a):
+        if _cleanup is None:
+            return
+
+        def _run():
+            try:
+                fn(*a)
+            except Exception:
+                _LOGGER.debug(
+                    "camera %s: swallowed sdes-open cleanup step",
+                    getattr(self, "device_id", "?"),
+                    exc_info=True,
+                )
+
+        _cleanup.callback(_run)
+
+    return _phase_outputs(
+        locals(),
+        (
+            "_cl",
+            "_live_p2p_cache",
+            "_live_power_type",
+            "_open_started_at",
+            "_seq",
+            "_use_plain_rtp",
+            "user_id",
+            "webrtc_req_topic",
+        ),
+    )
+
+
+async def _sdes_open_allocate_ports(self, _in: dict) -> dict:
+    """Phase of the SDES open: Allocate UDP ports and determine local IP.
+
+    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    is the open's ``locals()`` and the result the names the rest of the open
+    reads back (see ``_phase_outputs``).
+    """
+    import socket as _socket
+
+    if "_cl" in _in:
+        _cl = _in["_cl"]
+    if "ice_config" in _in:
+        ice_config = _in["ice_config"]
+    if "self" in _in:
+        self = _in["self"]
+    _audio_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    _widen_media_rcvbuf(_audio_sock, "audio", getattr(self, "device_id", "?"))
+    _audio_sock.bind(("0.0.0.0", 0))
+    audio_port = _audio_sock.getsockname()[1]
+    _cl(_audio_sock.close)  # also unblocks the bridge thread's recv on cleanup
+
+    _video_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    _widen_media_rcvbuf(_video_sock, "video", getattr(self, "device_id", "?"))
+    _video_sock.bind(("0.0.0.0", 0))
+    video_port = _video_sock.getsockname()[1]
+    _cl(_video_sock.close)
+
+    # Use the outbound interface toward 8.8.8.8 to find our local IP.
+    # connect() on a UDP socket does not send any packet.
+    with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as _s:
+        _s.connect(("8.8.8.8", 80))
+        local_ip = _s.getsockname()[0]
+
+    # Determine server-reflexive (public) IP from cached getServerUrlConfig.
+    # The Arnoo broker records our outbound IP in the "ip" field; this is the
+    # same address that aiortc discovers via STUN and exposes as srflx
+    # candidates.  Adding it to the SDES offer lets cameras that cannot route
+    # to our LAN IP (WAN cameras, different subnet) send STUN probes to our
+    # public address, which the router NATs to our reservation sockets.
+    _public_ip: Optional[str] = None
+    try:
+        _raw_srv = (self._smarthome_auth or {}).get("raw") or {}
+        _cand_pub = str(_raw_srv.get("ip") or "").strip()
+        if _cand_pub and _cand_pub != local_ip:
+            # Accept any valid IPv4 that differs from our LAN address.
+            _p = _cand_pub.split(".")
+            if len(_p) == 4 and all(x.isdigit() and 0 <= int(x) <= 255 for x in _p):
+                _public_ip = _cand_pub
+    except Exception:
+        _LOGGER.debug(
+            "camera %s: swallowed exception in %s",
+            getattr(self, "device_id", "?"),
+            "_sdes_open_allocate_ports",
+            exc_info=True,
+        )
+
+    # Build TURN server list for _sdes_ice_server_list from ice_config if
+    # available.  The camera's ICE agent uses these to gather its own relay
+    # candidates; a relay path is the last resort when direct and srflx
+    # connectivity both fail (e.g. symmetric NAT or strict firewall).
+    _sdes_turn_entries: list = []
+    try:
+        if ice_config:
+            # Unwrap common envelope shapes (mirrors DTLS path normalisation).
+            _ic = ice_config
+            for _k in ("data", "payload", "result"):
+                if isinstance(_ic, dict) and _k in _ic and isinstance(_ic[_k], dict):
+                    _ic = _ic[_k]
+                    break
+            # Arnoo format: {app: [{uris, id, token}], dev: [...]}
+            for _sect in ("app", "dev"):
+                for _entry in _ic.get(_sect) or []:
+                    _uris = _entry.get("uris") or _entry.get("Uris") or []
+                    _user = (
+                        _entry.get("id")
+                        or _entry.get("Username")
+                        or _entry.get("username")
+                        or ""
+                    )
+                    _cred = (
+                        _entry.get("token")
+                        or _entry.get("Password")
+                        or _entry.get("password")
+                        or ""
+                    )
+                    if any("turn:" in str(u) for u in _uris):
+                        _sdes_turn_entries.append(
+                            {
+                                "Uris": _uris,
+                                "Username": _user,
+                                "Password": str(_cred),
+                            }
+                        )
+            # W3C format: {iceServers: [{urls, username, credential}]}
+            for _entry in _ic.get("iceServers") or []:
+                _uris = _entry.get("urls") or _entry.get("uris") or []
+                if isinstance(_uris, str):
+                    _uris = [_uris]
+                if any("turn:" in str(u) for u in _uris):
+                    _sdes_turn_entries.append(
+                        {
+                            "Uris": _uris,
+                            "Username": _entry.get("username") or "",
+                            "Password": _entry.get("credential") or "",
+                        }
+                    )
+    except Exception:
+        _LOGGER.debug(
+            "camera %s: swallowed exception in %s",
+            getattr(self, "device_id", "?"),
+            "_sdes_open_allocate_ports",
+            exc_info=True,
+        )
+    return _phase_outputs(
+        locals(),
+        (
+            "_audio_sock",
+            "_public_ip",
+            "_sdes_turn_entries",
+            "_video_sock",
+            "audio_port",
+            "local_ip",
+            "u",
+            "video_port",
+            "x",
+        ),
+    )
+
+
+async def _sdes_open_turn_pre_allocation(self, _in: dict) -> dict:
+    """Phase of the SDES open: turn_pre_allocation.
+
+    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    is the open's ``locals()`` and the result the names the rest of the open
+    reads back (see ``_phase_outputs``).
+    """
+    if "_audio_sock" in _in:
+        _audio_sock = _in["_audio_sock"]
+    if "_sdes_turn_entries" in _in:
+        _sdes_turn_entries = _in["_sdes_turn_entries"]
+    if "_status" in _in:
+        _status = _in["_status"]
+    if "_video_sock" in _in:
+        _video_sock = _in["_video_sock"]
+    if "self" in _in:
+        self = _in["self"]
+    if "user_id" in _in:
+        user_id = _in["user_id"]
+    _relay_addrs: dict = {}
+
+    _turn_allocate_udp = turn_allocate_udp
+
+    # --- Early TURN relay allocation (before offer build) --------------- #
+    # Allocate relay now so offer c= and m= carry relay IP/port.
+    # Camera reads offer's c= to know where to send SRTP - relay address
+    # here means SRTP reaches us even through port-restricted / hairpin NAT.
+    # AIDOT_FAST_CONNECT skips this blocking pre-allocation (LAN-direct mode):
+    # the offer goes out immediately with host/srflx candidates and the LAN
+    # path connects without waiting on a cloud TURN Allocate round-trip.
+    # Connection mode "lan" does the same skip for SDES specifically, and
+    # the echo-path and post-offer allocates below honour it too. Either way
+    # the cost is instrumented below so the saving is measurable: grep
+    # ``signaling-wait[`` for sdes-turn-prealloc.
+    _skip_turn_prealloc = self._resolve_sdes_skip_turn()
+    # Which media path to offer (auto | lan | relay).  Resolved once per
+    # open; the candidate blocks below are built from it.  A receipt goes
+    # out whenever it is not the default, because a run that cannot show
+    # the knob was applied cannot tell a result from a coincidence.
+    _conn_mode = self._resolve_sdes_connection_mode()
+    if _conn_mode != "auto" and _status:
+        _status(f"SDES: connection mode {_conn_mode}")
+    _turn_t0 = time.monotonic()
+    _turn_did = False
+    if _sdes_turn_entries and not _skip_turn_prealloc:
+        _turn_did = True
+        try:
+            _tgt_pre = _turn_target(_sdes_turn_entries, user_id)
+            if _tgt_pre:
+                for _pre_sock, _pre_name in (
+                    (_audio_sock, "audio"),
+                    (_video_sock, "video"),
+                ):
+                    _pre_res = await _run_off_loop(
+                        _turn_allocate_udp, _pre_sock, *_tgt_pre
+                    )
+                    if _pre_res:
+                        _relay_addrs[_pre_sock] = _turn_relay_record(
+                            _pre_res, *_tgt_pre
+                        )
+                        _status(
+                            f"TURN relay pre-allocated (offer): {_pre_name}"
+                            f" -> {_pre_res[0]}:{_pre_res[1]}"
+                        )
+        except Exception as _pre_exc:
+            _LOGGER.warning("TURN pre-allocation error: %s", _pre_exc)
+    if _skip_turn_prealloc and _sdes_turn_entries:
+        _status(
+            "connection mode lan: skipping TURN relay pre-allocation (~2-3s)"
+            " - host/srflx candidates only"
+        )
+    _LOGGER.info(
+        "signaling-wait[%s] sdes-turn-prealloc elapsed=%dms allocated=%d skipped=%s",
+        self.device_id,
+        int((time.monotonic() - _turn_t0) * 1000),
+        len(_relay_addrs),
+        bool(_skip_turn_prealloc),
+    )
+
+    # PreCon cameras (sptPreconn=1) take SESSION_MODE_REQ over an SCTP data
+    # channel, so the offer carries an m=application section for the camera
+    # to answer. Only its presence matters: the section is keyed by its
+    # a=crypto line, not by a fingerprint (an EC certificate used to be
+    # generated here on every open to decide this boolean).
+    _dc_probe_fp = "present"
+    return _phase_outputs(
+        locals(),
+        (
+            "_conn_mode",
+            "_dc_probe_fp",
+            "_relay_addrs",
+            "_skip_turn_prealloc",
+            "_turn_allocate_udp",
+        ),
+    )
+
+
+async def _sdes_open_build_offer(self, _in: dict) -> dict:
+    """Phase of the SDES open: build_offer.
+
+    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    is the open's ``locals()`` and the result the names the rest of the open
+    reads back (see ``_phase_outputs``).
+    """
+    import asyncio as _asyncio
+    import random as _random
+    import secrets as _secrets
+    import secrets as _secrets_psk_early
+    import base64
+
+    if "_audio_sock" in _in:
+        _audio_sock = _in["_audio_sock"]
+    if "_conn_mode" in _in:
+        _conn_mode = _in["_conn_mode"]
+    if "_dc_probe_fp" in _in:
+        _dc_probe_fp = _in["_dc_probe_fp"]
+    if "_live_p2p_cache" in _in:
+        _live_p2p_cache = _in["_live_p2p_cache"]
+    if "_live_power_type" in _in:
+        _live_power_type = _in["_live_power_type"]
+    if "_public_ip" in _in:
+        _public_ip = _in["_public_ip"]
+    if "_relay_addrs" in _in:
+        _relay_addrs = _in["_relay_addrs"]
+    if "_status" in _in:
+        _status = _in["_status"]
+    if "_video_sock" in _in:
+        _video_sock = _in["_video_sock"]
+    if "audio_port" in _in:
+        audio_port = _in["audio_port"]
+    if "device_id" in _in:
+        device_id = _in["device_id"]
+    if "liveplay_echo_ev" in _in:
+        liveplay_echo_ev = _in["liveplay_echo_ev"]
+    if "liveplay_resp_fut" in _in:
+        liveplay_resp_fut = _in["liveplay_resp_fut"]
+    if "local_ip" in _in:
+        local_ip = _in["local_ip"]
+    if "numeric_uid_raw" in _in:
+        numeric_uid_raw = _in["numeric_uid_raw"]
+    if "outgoing_q" in _in:
+        outgoing_q = _in["outgoing_q"]
+    if "peer_id" in _in:
+        peer_id = _in["peer_id"]
+    if "self" in _in:
+        self = _in["self"]
+    if "talk" in _in:
+        talk = _in["talk"]
+    if "user_id" in _in:
+        user_id = _in["user_id"]
+    if "video_port" in _in:
+        video_port = _in["video_port"]
+    _psk_charset_req = "123456789abcdef"
+    _psk_value_req = "".join(
+        _secrets_psk_early.choice(_psk_charset_req) for _ in range(64)
+    )
+
+    # --- Build SDES SDP offer ------------------------------------------ #
+    # AES_CM_128_HMAC_SHA1_80: 16-byte key + 14-byte salt = 30 bytes.
+    srtp_key_audio = base64.b64encode(os.urandom(30)).decode()
+    srtp_key_video = base64.b64encode(os.urandom(30)).decode()
+    # DEBUG is not low enough for real key material.  This used to log the
+    # decoded master key AND salt in full hex - the whole secret, not a
+    # prefix - on the reasoning that DEBUG is not "production-level".  But
+    # Home Assistant users turn this integration's logger to debug precisely
+    # when something is wrong, and then paste the log into a public issue.
+    _LOGGER.debug(
+        "sdes: offer key=%s psk=%s",
+        _key_fingerprint(srtp_key_audio),
+        _key_fingerprint(_psk_value_req),
+    )
+    ts = int(time.time())
+    # SDES-SRTP cameras use SIP-era plain SDP (RFC 3264 + RFC 3711).
+    # Use RTP/SAVPF (RFC 4585) - Leedarson firmware expects the feedback
+    # profile and silently ignores offers with plain RTP/SAVP.
+    # Include ICE credentials and a host candidate so that newer PTZ
+    # firmware (e.g. LK.IPC.A001064) that requires ICE for address
+    # discovery will respond.  Older cameras that don't understand ICE
+    # ignore those attributes and use the port in the m= line directly.
+    # ONE pair for the whole offer, not one per m-section - see
+    # _new_ice_credentials for why, and note _compress_sdp_req below keeps
+    # only the first of each attribute anyway.
+    # One pair for the whole offer - see _new_ice_credentials. The video
+    # names are kept as aliases rather than removed: they are threaded
+    # through the STUN responder, the nomination and the bridge, and
+    # collapsing 23 call sites would obscure a change whose whole point is
+    # that the two values are now equal.
+    _ufrag_a, _pwd_a = _new_ice_credentials()
+    _ufrag_v = _ufrag_a
+    _pwd_v = _pwd_a
+    # Use srflx (public) IP and direct port in c= and m= for the offer too,
+    # for consistency with the answer.  TURN relay requires CreatePermission
+    # for the camera's public IP which is unknown; relay in c= causes TURN to
+    # drop every camera packet.  Relay is still in a=candidate: for ICE.
+    # For LAN cameras (_public_ip is None) fall back to local_ip directly.
+    _offer_audio_ip, _offer_audio_port, _relay_in_c_a = _sdes_offer_media_endpoint(
+        _conn_mode,
+        _public_ip or local_ip,
+        audio_port,
+        _relay_addrs.get(_audio_sock),
+        _public_ip,
+    )
+    _offer_video_ip, _offer_video_port, _relay_in_c_v = _sdes_offer_media_endpoint(
+        _conn_mode,
+        _public_ip or local_ip,
+        video_port,
+        _relay_addrs.get(_video_sock),
+        _public_ip,
+    )
+    _relay_in_c = _relay_in_c_a or _relay_in_c_v
+    if _conn_mode == "relay" and not _relay_in_c and _status:
+        _status(
+            "SDES: relay mode fell back to the direct endpoint"
+            " (no allocation or no public ip)"
+        )
+    elif _relay_in_c and _status:
+        _status("SDES: c=/m= at the relay allocation (relay mode)")
+    _bundle_hdr_line = (
+        "a=group:BUNDLE 0 1 2\r\n" if _dc_probe_fp else "a=group:BUNDLE 0 1\r\n"
+    )
+    # Outbound talk: a talk-intended open advertises audio as sendrecv WITH an
+    # a=ssrc so the camera builds a receive path for our PCMA (cname required -
+    # _compress_sdp_req keeps a=ssrc lines only when "cname" is present).  Pure
+    # streaming opens keep audio recvonly (the validated 72s/49s path, untouched).
+    _talk_offer = talk
+    _offer_audio_ssrc = int.from_bytes(os.urandom(4), "big") or 1
+    _offer_audio_cname = _secrets.token_urlsafe(12)[:12]
+    _audio_dir_line = "a=sendrecv\r\n" if _talk_offer else "a=recvonly\r\n"
+    _audio_ssrc_line = (
+        f"a=ssrc:{_offer_audio_ssrc} cname:{_offer_audio_cname}\r\n"
+        if _talk_offer
+        else ""
+    )
+    # Shared talk state (only for talk-capable opens).  The bridge fills
+    # src/sock on first inbound audio; SdesSession.async_start_talk sets
+    # provider + sends SPEAKERSTART(848); the talk pump thread reads this to
+    # emit outbound PCMA as SRTP at our offer SSRC.  srtp_key_audio here is
+    # our offer key (captured before it is reassigned to the camera key after
+    # the answer); the immutable str is safe to hold.
+    _talk_state = (
+        {
+            "provider": None,  # set by async_start_talk; cleared on stop/clip-end
+            "src": None,  # camera media addr (bridge sets on first media)
+            "sock": None,  # media socket (bridge)
+            "ssrc": _offer_audio_ssrc,
+            "key": srtp_key_audio,  # our offer key (immutable str; safe to hold)
+            "want_speaker": False,  # async_start/stop_talk flips this
+            "speaker_on": False,  # bridge sets after it sends SPEAKERSTART
+            "spk_eligible_ts": None,  # bridge: first time SPEAKERSTART is eligible
+            "stop": False,
+        }
+        if _talk_offer
+        else None
+    )
+    # Video codec preference, expressed by m-line order (RFC 3264 5.1):
+    # 96 (H.264) first, 97 (H.265) second. The order was an experiment knob
+    # once; the camera answers from its own template whatever the order,
+    # and the bitrate question it served is closed (2026-08-24).
+    _video_pt_list, _video_codec_attrs = _sdes_offer_video_codec_lines()
+    sdes_offer_sdp = (
+        "v=0\r\n"
+        f"o=- {ts} {ts} IN IP4 {local_ip}\r\n"
+        "s=-\r\n"
+        f"t=0 0\r\n{_bundle_hdr_line}"
+        # audio m-section
+        # a=crypto MUST precede ICE attributes (RFC 4568 section 9.1) so that
+        # linear-parsing camera firmware recognises this as an SDES offer
+        # rather than a pure-ICE offer and does not discard the key.
+        f"m=audio {_offer_audio_port} RTP/SAVPF 0 8\r\n"
+        f"c=IN IP4 {_offer_audio_ip}\r\n" + _audio_dir_line + "a=mid:0\r\n"
+        f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
+        "a=rtpmap:0 PCMU/8000\r\n"
+        "a=rtpmap:8 PCMA/8000\r\n"
+        # a=rtcp-mux: multiplexes RTCP onto the RTP port so the camera does
+        # not send RTCP to audio_port+1 (which is never bound), and so that
+        # ffmpeg does not try to open a separate RTCP socket.
+        "a=rtcp-mux\r\n"
+        + _audio_ssrc_line
+        # PSK is sent in wPayload only - real app does NOT inject a=psk: into
+        # the SDP body (confirmed from logcat ground truth 2026-05-22).
+        + f"a=ice-ufrag:{_ufrag_a}\r\n"
+        f"a=ice-pwd:{_pwd_a}\r\n"
+        + _sdes_offer_candidate_lines(
+            _conn_mode,
+            local_ip,
+            audio_port,
+            _public_ip,
+            _relay_addrs.get(_audio_sock),
+        )
+        # video m-section
+        + f"m=video {_offer_video_port} RTP/SAVPF {_video_pt_list}\r\n"
+        f"c=IN IP4 {_offer_video_ip}\r\n" + "a=recvonly\r\n"
+        "a=mid:1\r\n"
+        f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
+        + _video_codec_attrs
+        + "a=rtcp-mux\r\n"
+        f"a=ice-ufrag:{_ufrag_v}\r\n"
+        f"a=ice-pwd:{_pwd_v}\r\n"
+        + _sdes_offer_candidate_lines(
+            _conn_mode,
+            local_ip,
+            video_port,
+            _public_ip,
+            _relay_addrs.get(_video_sock),
+        )
+        # m=application SCTP DataChannel section for SDES cameras.
+        # Ground truth from real Leedarson app logcat (2026-05-22):
+        #   m=application 9 SCTP webrtc-datachannel
+        #   a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{key}
+        # That is ALL - no a=setup, no a=sctp-port, no fingerprint.
+        # Using UDP/DTLS/SCTP or a=setup:active triggers the SCTP deadlock;
+        # plain SCTP lets the camera handle role negotiation internally.
+        # The a=crypto line is required: GetSctpSdesKey0/1 in the camera
+        # firmware parse inline: from this attribute to derive the AES key.
+        + (
+            "m=application 9 SCTP webrtc-datachannel\r\n"
+            "c=IN IP4 0.0.0.0\r\n"
+            "a=mid:2\r\n"
+            f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
+            if _dc_probe_fp
+            else ""
+        )
+    )
+
+    # The default since 1.0.0rc44: NARROW the OFFER to one video codec
+    # (H.264) rather than advertising both 96/97 and letting the camera
+    # decide in its answer.  Distinct from the codec order above, which
+    # only states which of the two we would rather have and leaves both on
+    # the wire; this one takes the other away, which for 97 took the video
+    # with it.
+    #
+    # The offer is the SDP that matters here.  Traced live 2026-08-07 with
+    # every status line printed: this path sends webrtcReq carrying OUR
+    # offer and then reports "Using camera's video SRTP key from answer" -
+    # the camera answers, we do not.  The answer builder further down runs
+    # only on the branch where the camera offers first, which this camera
+    # did not take, so pinning there changed nothing at all while the
+    # arms still came out looking like the pin had worked.  Only
+    # AIDOT_SDES_VIDEO_PT=none leaves the camera its choice.
+    _pin_video_pt = _resolve_sdes_video_pt()
+    if _pin_video_pt is not None:
+        sdes_offer_sdp = narrow_sdp_payload_types(
+            sdes_offer_sdp, keep_video=_pin_video_pt
+        )
+        if _status:
+            _status(f"SDES: offer pinned to video pt={_pin_video_pt}")
+
+    _relay_str = (
+        f"  relay-audio={_relay_addrs[_audio_sock][0]}:{_relay_addrs[_audio_sock][1]}"
+        if _audio_sock in _relay_addrs
+        else ""
+    )
+    _status(
+        f"SDP offer (SDES)  local={local_ip}"
+        + (f"  srflx={_public_ip}" if _public_ip else "")
+        + f"  audio={audio_port}  video={video_port}"
+        + _relay_str
+    )
+
+    # Send livePlayReq before the SDP offer to arm the camera's stream.
+    _live_req_sdes = ipc_envelope(
+        "livePlayReq",
+        device_id,
+        user_id,
+        numeric_uid_raw,
+        seq=f"ap{_random.randint(1000000, 9999999)}",
+        payload={
+            "peerid": peer_id,
+            "devId": device_id,
+            # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
+            # to the target deviceId for livePlayReq.
+            "dstAddr": device_id,
+            # App payload compatibility fields (decompiled live-play model).
+            "livePlay": 1,
+            "powerType": _live_power_type,
+            "p2pCache": _live_p2p_cache,
+            "dseq": self._next_dseq(),
+        },
+    )
+    _live_play_topic_sdes = f"iot/v1/s/{user_id}/IPC/livePlayReq"
+    outgoing_q.put_nowait((_live_play_topic_sdes, _live_req_sdes))
+    _status(f"livePlayReq sent (SDES)  peerid={peer_id}")
+    # Wait for the livePlayReq echo from the broker/camera before sending
+    # webrtcReq.  The echo confirms the MQTT pipeline to this device is live
+    # and the broker session is registered.  Fall through after 5 s if it
+    # never arrives (same safety as the old fixed 0.5 s sleep, but adaptive).
+    # SDES fast-liveplay (sdes_fast_liveplay, DEFAULT ON since 0.7.32 - the
+    # official app fire-and-forgets too): instrumentation showed the echo and
+    # livePlayResp waits BOTH always time out for the SDES cameras measured
+    # (echo/resp never arrive) yet streaming succeeds - i.e. ~6 s of dead
+    # padding.  When on (the default), cap the echo wait short and skip the
+    # livePlayResp wait; the full ICE/TURN/SCTP handshake is untouched.  This
+    # is the SDES path's OWN livePlay waits (the DTLS gate above never runs for
+    # SDES: use_sdes is True there).  VALIDATED in a 3 h live soak (15 SDES
+    # opens across battery cameras, 0 churn / 0 fail, ~4.5 s signaling saved)
+    # and shipped default-on across 0.8/0.9.x.  Role-reversal models
+    # (_NO_FAST_LIVEPLAY_MODELS, e.g. A001064) are always excluded; disable
+    # elsewhere via AIDOT_SDES_FAST_LIVEPLAY={0,false,no,off}.
+    _skip_lp = self._resolve_sdes_fast_liveplay()
+    _echo_timeout = _sdes_liveplay_echo_timeout(_skip_lp)
+    _echo_t0 = time.monotonic()
+    try:
+        await _asyncio.wait_for(liveplay_echo_ev.wait(), timeout=_echo_timeout)
+        _status(
+            "livePlayReq echo received - sending webrtcReq, ICE, then launching ffmpeg"
+        )
+    except TimeoutError:
+        _status(
+            f"no livePlayReq echo in {_echo_timeout:.1f}s - sending webrtcReq,"
+            " ICE, then launching ffmpeg anyway"
+        )
+    _LOGGER.info(
+        "signaling-wait[%s] livePlayReq-echo elapsed=%dms (timeout=%.1fs)",
+        self.device_id,
+        int((time.monotonic() - _echo_t0) * 1000),
+        _echo_timeout,
+    )
+    # livePlayResp: explicit camera accept/reject before SDP/ICE.
+    if _skip_lp:
+        _LOGGER.info(
+            "signaling-wait[%s] livePlayResp skipped (sdes_fast_liveplay)",
+            self.device_id,
+        )
+    else:
+        _lp_t0 = time.monotonic()
+        _lp_arrived = False
+        try:
+            _lp_resp_sdes = await _asyncio.wait_for(
+                _asyncio.shield(liveplay_resp_fut), timeout=1.0
+            )
+            _lp_arrived = True
+            _lp_code_sdes = int(_lp_resp_sdes.get("code", 200))
+            _lp_on_sdes = int(_lp_resp_sdes.get("livePlay", 1))
+            # Only an explicit livePlay=0 is an unambiguous refusal (fast-fail).
+            # Numeric codes (e.g. -50019 "not ready" on a waking battery cam)
+            # are transient - the camera recovers and streams - so log and
+            # proceed rather than abort on a code we can't classify as terminal
+            # (genuine terminal rejects are still caught on the webrtcResp ack).
+            if _lp_on_sdes == 0:
+                # The sockets and the SDP file are released by the exit stack as this raises.
+                outgoing_q.put_nowait(None)  # stop MQTT thread
+                raise RuntimeError(
+                    f"livePlay refused by camera (livePlay=0, code={_lp_code_sdes})"
+                )
+            elif _lp_code_sdes not in (0, 200):
+                _status(
+                    f"livePlayResp: non-OK code {_lp_code_sdes}"
+                    f"{' (not ready, transient)' if _lp_code_sdes == _LIVE_PLAY_NOT_READY else ''}"
+                    " - proceeding"
+                )
+        except TimeoutError:
+            pass
+        _LOGGER.info(
+            "signaling-wait[%s] livePlayResp elapsed=%dms arrived=%s",
+            self.device_id,
+            int((time.monotonic() - _lp_t0) * 1000),
+            _lp_arrived,
+        )
+    return _phase_outputs(
+        locals(),
+        (
+            "_psk_value_req",
+            "_pwd_a",
+            "_pwd_v",
+            "_relay_in_c",
+            "_skip_lp",
+            "_talk_state",
+            "_ufrag_a",
+            "_ufrag_v",
+            "sdes_offer_sdp",
+            "srtp_key_audio",
+            "srtp_key_video",
+            "ts",
+        ),
+    )
+
+
+async def _sdes_open_write_ffmpeg_sdp_and_send_webrtcreq(self, _in: dict) -> dict:
+    """Phase of the SDES open: write_ffmpeg_sdp_and_send_webrtcreq.
+
+    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    is the open's ``locals()`` and the result the names the rest of the open
+    reads back (see ``_phase_outputs``).
+    """
+    if "_cl" in _in:
+        _cl = _in["_cl"]
+    if "_live_p2p_cache" in _in:
+        _live_p2p_cache = _in["_live_p2p_cache"]
+    if "_live_power_type" in _in:
+        _live_power_type = _in["_live_power_type"]
+    if "_psk_value_req" in _in:
+        _psk_value_req = _in["_psk_value_req"]
+    if "_sdes_turn_entries" in _in:
+        _sdes_turn_entries = _in["_sdes_turn_entries"]
+    if "_seq" in _in:
+        _seq = _in["_seq"]
+    if "_status" in _in:
+        _status = _in["_status"]
+    if "audio_port" in _in:
+        audio_port = _in["audio_port"]
+    if "device_id" in _in:
+        device_id = _in["device_id"]
+    if "numeric_uid_raw" in _in:
+        numeric_uid_raw = _in["numeric_uid_raw"]
+    if "outgoing_q" in _in:
+        outgoing_q = _in["outgoing_q"]
+    if "peer_id" in _in:
+        peer_id = _in["peer_id"]
+    if "sdes_offer_sdp" in _in:
+        sdes_offer_sdp = _in["sdes_offer_sdp"]
+    if "self" in _in:
+        self = _in["self"]
+    if "srtp_key_audio" in _in:
+        srtp_key_audio = _in["srtp_key_audio"]
+    if "srtp_key_video" in _in:
+        srtp_key_video = _in["srtp_key_video"]
+    if "ts" in _in:
+        ts = _in["ts"]
+    if "user_id" in _in:
+        user_id = _in["user_id"]
+    if "video_port" in _in:
+        video_port = _in["video_port"]
+    if "webrtc_req_topic" in _in:
+        webrtc_req_topic = _in["webrtc_req_topic"]
+    ffmpeg_sdp = _ffmpeg_rx_sdp(
+        ts=ts,
+        audio_port=audio_port,
+        video_port=video_port,
+        plain_rtp=False,
+        srtp_key_audio=srtp_key_audio,
+        srtp_key_video=srtp_key_video,
+        conn_ip="0.0.0.0",
+        session_name="aidot-sdes-rx",
+    )
+
+    sdp_path = await asyncio.get_running_loop().run_in_executor(
+        # _inject_sprop reads the sprop cache from disk; keep it inside the
+        # executor (not as an eagerly-evaluated arg) so the blocking open()
+        # does not run on the event loop.
+        None,
+        lambda: _make_sdp_tempfile(_inject_sprop(ffmpeg_sdp, self.device_id)),
+    )
+    _cl(os.unlink, sdp_path)  # released with the sockets on a cancelled open
+
+    # --- Send webrtcReq BEFORE releasing reservation sockets ------------- #
+    # ICE cameras (e.g. LK.IPC.A001064) send STUN binding requests to our
+    # ICE candidates immediately after receiving webrtcReq.  We must respond
+    # from the reservation sockets (which own those ports) BEFORE handing
+    # the ports to ffmpeg.  Non-ICE cameras start streaming SRTP straight
+    # away; any early SRTP packets landing on the reservation sockets are
+    # discarded, but the camera keeps streaming once ffmpeg is bound.
+    # IceServerList for SDES path.  Always include STUN so the camera's ICE
+    # agent can gather its own srflx candidate.  Append any TURN entries from
+    # ice_config so the camera can allocate a relay and probe our srflx/host
+    # candidates when direct connectivity fails (e.g. symmetric NAT).
+    # Advertise an ICE server to the camera only when we actually have a
+    # URI for it.  With AIDOT_STUN_SERVERS="" this used to put
+    # {"Uris": []} into webrtcReq - an entry the camera must parse and
+    # that names no server.
+    _sdes_stun_uris = stun_server_uris()
+    _sdes_ice_server_list = [{"Uris": _sdes_stun_uris}] if _sdes_stun_uris else []
+    _sdes_ice_server_list.extend(_sdes_turn_entries)
+
+    # _psk_value_req was generated before the SDP offer (see above).
+    # Reused here in webrtcReq and webrtcResp for consistency.
+    _compress_sdp_req = functools.partial(compress_sdp_req, device_id)
+
+    _compressed_sdp_req = _compress_sdp_req(sdes_offer_sdp)
+    _webrtc_req_sdes_payload = ipc_envelope(
+        "webrtcReq",
+        device_id,
+        user_id,
+        numeric_uid_raw,
+        seq=_seq(),
+        payload={
+            # Legacy flat fields - older firmware parses payload.peerid directly.
+            "peerid": peer_id,
+            "devId": device_id,
+            "offer": {"type": "offer", "sdp": sdes_offer_sdp},
+            "trackId": 0,
+            # Decompiled reference app (tyrus/o.java) sets dstAddr=deviceId
+            # for webrtcReq.
+            "dstAddr": device_id,
+            "encOffer": 1,
+            "liveMqtt": 1,
+            # powerType / p2pCache ride on the webrtcReq payload, alongside
+            # encOffer and liveMqtt - the same object the reference client
+            # puts them on (LDSMQTTClient.sendSdpOffer, smali :2967-2969,
+            # put at :3017/:3022).  They are STRINGS on the wire there: the
+            # app stringifies the ints it reads from the IPC device info,
+            # and its no-device-info fallback puts the literals "1" / "0".
+            # The DTLS webrtcReq has carried both for a long time
+            # (webrtc_open.py) and sends them as ints; that path is
+            # fleet-proven, so it is deliberately left alone rather than
+            # churned to match.
+            "powerType": str(_live_power_type),
+            "p2pCache": str(_live_p2p_cache),
+            # wPayload: newer firmware parses wPayload for ICE credentials
+            # and PSK.  Fields match reference app o.java (signaling/tyrus).
+            "wPayload": {
+                "peerid": peer_id,
+                "sts": int(time.time() * 1000),
+                "psk": _psk_value_req,
+                "offer": {"type": "offer", "sdp": _compressed_sdp_req},
+            },
+            "IceServerList": _sdes_ice_server_list,
+        },
+    )
+    outgoing_q.put_nowait((webrtc_req_topic, _webrtc_req_sdes_payload))
+    self._cold_phase("webrtcReq (sdes)")
+    _status(f"webrtcReq sent (SDES)  peerid={peer_id}")
+    return _phase_outputs(locals(), ("_compress_sdp_req", "sdp_path"))
+
+
+async def _sdes_open_answer_webrtcreq_echo(self, _in: dict) -> dict:
+    """Phase of the SDES open: answer_webrtcreq_echo.
+
+    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    is the open's ``locals()`` and the result the names the rest of the open
+    reads back (see ``_phase_outputs``).
+    """
+    import asyncio as _asyncio
+
+    if "_audio_sock" in _in:
+        _audio_sock = _in["_audio_sock"]
+    if "_compress_sdp_req" in _in:
+        _compress_sdp_req = _in["_compress_sdp_req"]
+    if "_conn_mode" in _in:
+        _conn_mode = _in["_conn_mode"]
+    if "_psk_value_req" in _in:
+        _psk_value_req = _in["_psk_value_req"]
+    if "_public_ip" in _in:
+        _public_ip = _in["_public_ip"]
+    if "_pwd_a" in _in:
+        _pwd_a = _in["_pwd_a"]
+    if "_pwd_v" in _in:
+        _pwd_v = _in["_pwd_v"]
+    if "_relay_addrs" in _in:
+        _relay_addrs = _in["_relay_addrs"]
+    if "_sdes_turn_entries" in _in:
+        _sdes_turn_entries = _in["_sdes_turn_entries"]
+    if "_seq" in _in:
+        _seq = _in["_seq"]
+    if "_skip_lp" in _in:
+        _skip_lp = _in["_skip_lp"]
+    if "_skip_turn_prealloc" in _in:
+        _skip_turn_prealloc = _in["_skip_turn_prealloc"]
+    if "_status" in _in:
+        _status = _in["_status"]
+    if "_turn_allocate_udp" in _in:
+        _turn_allocate_udp = _in["_turn_allocate_udp"]
+    if "_ufrag_a" in _in:
+        _ufrag_a = _in["_ufrag_a"]
+    if "_ufrag_v" in _in:
+        _ufrag_v = _in["_ufrag_v"]
+    if "_video_sock" in _in:
+        _video_sock = _in["_video_sock"]
+    if "audio_port" in _in:
+        audio_port = _in["audio_port"]
+    if "camera_offer_fut" in _in:
+        camera_offer_fut = _in["camera_offer_fut"]
+    if "device_id" in _in:
+        device_id = _in["device_id"]
+    if "local_ip" in _in:
+        local_ip = _in["local_ip"]
+    if "numeric_uid_raw" in _in:
+        numeric_uid_raw = _in["numeric_uid_raw"]
+    if "outgoing_q" in _in:
+        outgoing_q = _in["outgoing_q"]
+    if "peer_id" in _in:
+        peer_id = _in["peer_id"]
+    if "self" in _in:
+        self = _in["self"]
+    if "srtp_key_audio" in _in:
+        srtp_key_audio = _in["srtp_key_audio"]
+    if "srtp_key_video" in _in:
+        srtp_key_video = _in["srtp_key_video"]
+    if "ts" in _in:
+        ts = _in["ts"]
+    if "u" in _in:
+        u = _in["u"]
+    if "user_id" in _in:
+        user_id = _in["user_id"]
+    if "video_port" in _in:
+        video_port = _in["video_port"]
+    if "webrtc_req_echo_fut" in _in:
+        webrtc_req_echo_fut = _in["webrtc_req_echo_fut"]
+    _echo_fut = (
+        webrtc_req_echo_fut if webrtc_req_echo_fut is not None else camera_offer_fut
+    )
+    _cam_echo_received = False
+    _webrtc_resp_sdes_topic: "Optional[str]" = None
+    _webrtc_resp_sdes: "Optional[str]" = None
+    _sdes_webrtcresp_sent = False  # True once we actually publish the SDES webrtcResp
+    # Only role-reversal models (A001064, _skip_lp False) echo our webrtcReq
+    # and need the webrtcResp built below; for A001513-class (_skip_lp True,
+    # default) the echo never arrives, so don't block ~2s on it.
+    _echo_wait_s = _sdes_echo_wait_timeout(
+        _skip_lp, echo_seen=bool(getattr(self, "_sdes_echo_seen", False))
+    )
+    _echo_wait_t0 = time.monotonic()
+    try:
+        await _asyncio.wait_for(
+            _asyncio.shield(_echo_fut),
+            timeout=_echo_wait_s,
+        )
+        _cam_echo_received = True
+        self._sdes_echo_seen = True
+        _status("camera webrtcReq echo received - building webrtcResp")
+        # Seed _sdes_turn_entries from the echo's IceServerList if the HTTP
+        # ice_config fetch returned nothing (empty list).  The echo carries
+        # our userId TURN credentials - extract them so the hole-punch and
+        # any future relay allocation use the correct server/port.
+        if not _sdes_turn_entries:
+            try:
+                _echo_payload = (
+                    _echo_fut.result()
+                    if (_echo_fut is not None and _echo_fut.done())
+                    else {}
+                )
+                for _e in _echo_payload.get("IceServerList") or []:
+                    _e_uris = _e.get("Uris") or []
+                    if any("turn:" in str(u) for u in _e_uris):
+                        _sdes_turn_entries.append(
+                            {
+                                "Uris": _e_uris,
+                                "Username": _e.get("Username") or "",
+                                "Password": str(_e.get("Password") or ""),
+                            }
+                        )
+            except Exception:
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_sdes_open_answer_webrtcreq_echo",
+                    exc_info=True,
+                )
+        # Allocate TURN relay if not already done before offer build.
+        # When ice_config provided TURN entries, pre-allocation already ran
+        # and _relay_addrs is populated - skip to avoid double-allocation.
+        # Connection mode lan skips it here too: lan means no relay, and an
+        # allocation here was trickled and put in the answer's c= anyway.
+        if not _relay_addrs and not _skip_turn_prealloc:
+            try:
+                _tgt_e = _turn_target(_sdes_turn_entries, user_id)
+                if _tgt_e:
+                    for _alloc_sock_e in (_audio_sock, _video_sock):
+                        _alloc_res_e = await _run_off_loop(
+                            _turn_allocate_udp, _alloc_sock_e, *_tgt_e
+                        )
+                        if _alloc_res_e:
+                            _relay_addrs[_alloc_sock_e] = _turn_relay_record(
+                                _alloc_res_e, *_tgt_e
+                            )
+                            _status(
+                                f"TURN relay allocated (echo fallback): "
+                                f"{'audio' if _alloc_sock_e is _audio_sock else 'video'}"
+                                f" -> {_alloc_res_e[0]}:{_alloc_res_e[1]}"
+                            )
+            except Exception as _relay_early_exc:
+                _LOGGER.warning("TURN relay allocation error: %s", _relay_early_exc)
+        # Answer SDP c= and m= use the TURN relay address when available so
+        # the camera sends SRTP to our relay port.  The TURN server then
+        # wraps each SRTP packet in a Data Indication and delivers it to
+        # audio_sock / video_sock; the bridge thread strips the wrapper and
+        # forwards the inner SRTP to ffmpeg's loopback ports.
+        # For cameras on the same LAN or when relay allocation failed, fall
+        # back to the srflx (public) or local IP.
+        _audio_relay = _relay_addrs.get(_audio_sock)
+        _video_relay = _relay_addrs.get(_video_sock)
+        _ans_audio_ip = _audio_relay[0] if _audio_relay else (_public_ip or local_ip)
+        _ans_audio_port = _audio_relay[1] if _audio_relay else audio_port
+        _ans_video_ip = _video_relay[0] if _video_relay else (_public_ip or local_ip)
+        _ans_video_port = _video_relay[1] if _video_relay else video_port
+        _relay_answer_sdp = (
+            "v=0\r\n"
+            f"o=- {ts} {ts} IN IP4 {local_ip}\r\n"
+            "s=-\r\n"
+            "t=0 0\r\n"
+            f"m=audio {_ans_audio_port} RTP/SAVPF 0 8\r\n"
+            f"c=IN IP4 {_ans_audio_ip}\r\n"
+            "a=sendonly\r\n"
+            "a=mid:0\r\n"
+            f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
+            "a=rtpmap:0 PCMU/8000\r\n"
+            "a=rtpmap:8 PCMA/8000\r\n"
+            "a=rtcp-mux\r\n"
+            f"a=ice-ufrag:{_ufrag_a}\r\n"
+            f"a=ice-pwd:{_pwd_a}\r\n"
+            + _sdes_offer_candidate_lines(
+                _conn_mode,
+                local_ip,
+                audio_port,
+                _public_ip,
+                _relay_addrs.get(_audio_sock),
+            )
+            + f"m=video {_ans_video_port} RTP/SAVPF 96 97\r\n"
+            f"c=IN IP4 {_ans_video_ip}\r\n"
+            "a=sendonly\r\n"
+            "a=mid:1\r\n"
+            f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
+            "a=rtpmap:96 H264/90000\r\n"
+            "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
+            "profile-level-id=42e01f\r\n"
+            "a=rtpmap:97 H265/90000\r\n"
+            "a=fmtp:97 level-id=93\r\n"
+            "a=rtcp-mux\r\n"
+            f"a=ice-ufrag:{_ufrag_v}\r\n"
+            f"a=ice-pwd:{_pwd_v}\r\n"
+            + _sdes_offer_candidate_lines(
+                _conn_mode,
+                local_ip,
+                video_port,
+                _public_ip,
+                _relay_addrs.get(_video_sock),
+            )
+        )
+        _compressed_sdp_ans = _compress_sdp_req(_relay_answer_sdp)
+
+        _webrtc_resp_sdes_topic = f"iot/v1/s/{user_id}/IPC/webrtcResp"
+        _webrtc_resp_sdes = ipc_envelope(
+            "webrtcResp",
+            device_id,
+            user_id,
+            numeric_uid_raw,
+            seq=_seq(),
+            payload={
+                "peerid": peer_id,
+                "devId": device_id,
+                "answer": {"type": "answer", "sdp": _relay_answer_sdp},
+                "trackId": 0,
+                "dstAddr": device_id,
+                "encOffer": 1,
+                "liveMqtt": 1,
+                # wPayload: newer firmware (e.g. LK.IPC.A001064) parses
+                # wPayload to extract ICE credentials and PSK.  Fields match
+                # reference app o.java (signaling/tyrus).
+                "wPayload": {
+                    "peerid": peer_id,
+                    "sts": int(time.time() * 1000),
+                    "psk": _psk_value_req,
+                    "answer": {"type": "answer", "sdp": _compressed_sdp_ans},
+                },
+            },
+        )
+        # Send SDES webrtcResp: camera will send SRTP to our public IP/port
+        # (srflx), which routes through NAT directly to our socket.
+        outgoing_q.put_nowait((_webrtc_resp_sdes_topic, _webrtc_resp_sdes))
+        _sdes_webrtcresp_sent = True
+        _ans_via = "relay" if (_audio_relay or _video_relay) else "srflx"
+        _status(
+            f"webrtcResp sent (SDES, {_ans_via} answer:"
+            f" audio={_ans_audio_ip}:{_ans_audio_port}"
+            f" video={_ans_video_ip}:{_ans_video_port})"
+        )
+    except TimeoutError:
+        # No echo - camera uses a different signalling variant; proceed.
+        # Logged rather than swallowed: `except TimeoutError: pass` is how
+        # 2.0 s of dead time here stayed invisible, and the elapsed line is
+        # what will show it if this wait ever starts being used.
+        _LOGGER.info(
+            "signaling-wait[%s] webrtcReq-echo elapsed=%dms (timeout=%.2fs)",
+            getattr(self, "device_id", "?"),
+            int((time.monotonic() - _echo_wait_t0) * 1000),
+            _echo_wait_s,
+        )
+    return _phase_outputs(
+        locals(),
+        (
+            "_cam_echo_received",
+            "_echo_fut",
+            "_echo_wait_s",
+            "_echo_wait_t0",
+            "_sdes_webrtcresp_sent",
+            "_webrtc_resp_sdes",
+            "_webrtc_resp_sdes_topic",
+            "u",
+        ),
+    )
+
+
+async def _sdes_open_announce_candidates(self, _in: dict) -> dict:
+    """Phase of the SDES open: announce_candidates.
+
+    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    is the open's ``locals()`` and the result the names the rest of the open
+    reads back (see ``_phase_outputs``).
+    """
+    if "_seq" in _in:
+        _seq = _in["_seq"]
+    if "device_id" in _in:
+        device_id = _in["device_id"]
+    if "numeric_uid_raw" in _in:
+        numeric_uid_raw = _in["numeric_uid_raw"]
+    if "outgoing_q" in _in:
+        outgoing_q = _in["outgoing_q"]
+    if "peer_id" in _in:
+        peer_id = _in["peer_id"]
+    if "user_id" in _in:
+        user_id = _in["user_id"]
+    _ice_cand_topic_sdes = f"iot/v1/s/{user_id}/IPC/iceCandidateReq"
+
+    def _send_sdes_ice_cand(cand_str: str, mid: str) -> None:
+        """Publish a single trickle-ICE candidate via MQTT."""
+        _cand_obj = {
+            "candidate": cand_str,
+            "sdpMid": mid,
+            "sdpMLineIndex": int(mid),
+        }
+        _msg = ipc_envelope(
+            "iceCandidateReq",
+            device_id,
+            user_id,
+            numeric_uid_raw,
+            seq=_seq(),
+            payload={
+                # dstAddr routes to the camera device, not the user account.
+                # HAR captures confirm payload.dstAddr = deviceId on every
+                # iceCandidateReq; using user_id causes silent drops by firmware.
+                "dstAddr": device_id,
+                # wPayload is the nested format required by newer firmware
+                # (e.g. LK.IPC.A001064) that parses wPayload.candidate instead
+                # of the flat payload.candidate field.
+                "wPayload": {
+                    "peerid": peer_id,
+                    "candidate": _cand_obj,
+                },
+                # Flat legacy fields retained for older firmware compatibility.
+                "peerid": peer_id,
+                "devId": device_id,
+                "candidate": _cand_obj,
+            },
+        )
+        outgoing_q.put_nowait((_ice_cand_topic_sdes, _msg))
+
+    return _phase_outputs(locals(), ("_send_sdes_ice_cand",))
+
+
+async def _sdes_open_turn_allocation_fallback(self, _in: dict) -> dict:
+    """Phase of the SDES open: turn_allocation_fallback.
+
+    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    is the open's ``locals()`` and the result the names the rest of the open
+    reads back (see ``_phase_outputs``).
+    """
+    if "_audio_sock" in _in:
+        _audio_sock = _in["_audio_sock"]
+    if "_public_ip" in _in:
+        _public_ip = _in["_public_ip"]
+    if "_relay_addrs" in _in:
+        _relay_addrs = _in["_relay_addrs"]
+    if "_sdes_turn_entries" in _in:
+        _sdes_turn_entries = _in["_sdes_turn_entries"]
+    if "_send_sdes_ice_cand" in _in:
+        _send_sdes_ice_cand = _in["_send_sdes_ice_cand"]
+    if "_skip_turn_prealloc" in _in:
+        _skip_turn_prealloc = _in["_skip_turn_prealloc"]
+    if "_status" in _in:
+        _status = _in["_status"]
+    if "_turn_allocate_udp" in _in:
+        _turn_allocate_udp = _in["_turn_allocate_udp"]
+    if "_video_sock" in _in:
+        _video_sock = _in["_video_sock"]
+    if "audio_port" in _in:
+        audio_port = _in["audio_port"]
+    if "local_ip" in _in:
+        local_ip = _in["local_ip"]
+    if "user_id" in _in:
+        user_id = _in["user_id"]
+    if "video_port" in _in:
+        video_port = _in["video_port"]
+    if not _relay_addrs and not _skip_turn_prealloc:
+        try:
+            _tgt_r = _turn_target(_sdes_turn_entries, user_id)
+            if _tgt_r:
+                for _alloc_sock in (_audio_sock, _video_sock):
+                    _alloc_res = await _run_off_loop(
+                        _turn_allocate_udp, _alloc_sock, *_tgt_r
+                    )
+                    if _alloc_res:
+                        _relay_addrs[_alloc_sock] = _turn_relay_record(
+                            _alloc_res, *_tgt_r
+                        )
+                        _status(
+                            f"TURN relay allocated: "
+                            f"{'audio' if _alloc_sock is _audio_sock else 'video'}"
+                            f" -> {_alloc_res[0]}:{_alloc_res[1]}"
+                        )
+                    else:
+                        _LOGGER.warning(
+                            "TURN allocation failed for %s socket",
+                            "audio" if _alloc_sock is _audio_sock else "video",
+                        )
+        except Exception as _relay_exc:
+            _LOGGER.warning("TURN relay allocation error: %s", _relay_exc)
+
+    for _ice_mid, _ice_port in (("0", audio_port), ("1", video_port)):
+        # Host candidate (LAN IP)
+        _send_sdes_ice_cand(
+            f"candidate:1 1 udp 2130706431 {local_ip} {_ice_port} typ host",
+            _ice_mid,
+        )
+        # srflx candidate (public IP) - announced separately so the camera
+        # triggers a new ICE check to our public address even if it already
+        # processed the SDP host candidate.
+        if _public_ip:
+            _send_sdes_ice_cand(
+                f"candidate:2 1 udp 1694498815 {_public_ip} {_ice_port}"
+                f" typ srflx raddr {local_ip} rport {_ice_port}",
+                _ice_mid,
+            )
+        # relay candidate - advertised so the camera can probe us via TURN
+        # when direct and srflx paths are blocked (port-restricted NAT).
+        _relay_sock = _audio_sock if _ice_mid == "0" else _video_sock
+        if _relay_sock in _relay_addrs:
+            _ri = _relay_addrs[_relay_sock]
+            _send_sdes_ice_cand(
+                f"candidate:3 1 udp 16777215 {_ri[0]} {_ri[1]}"
+                f" typ relay raddr {local_ip} rport {_ice_port}",
+                _ice_mid,
+            )
+    _status(
+        f"iceCandidateReq sent  audio={audio_port}  video={video_port}"
+        + (f"  srflx={_public_ip}" if _public_ip else "")
+        + (
+            f"  relay={_relay_addrs[_audio_sock][0]}"
+            if _audio_sock in _relay_addrs
+            else ""
+        )
+    )
+    return _phase_outputs(locals(), ())
+
+
+async def _sdes_open_nat_hole_punch(self, _in: dict) -> dict:
+    """Phase of the SDES open: nat_hole_punch.
+
+    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    is the open's ``locals()`` and the result the names the rest of the open
+    reads back (see ``_phase_outputs``).
+    """
+    if "_audio_sock" in _in:
+        _audio_sock = _in["_audio_sock"]
+    if "_public_ip" in _in:
+        _public_ip = _in["_public_ip"]
+    if "_sdes_turn_entries" in _in:
+        _sdes_turn_entries = _in["_sdes_turn_entries"]
+    if "_status" in _in:
+        _status = _in["_status"]
+    if "_video_sock" in _in:
+        _video_sock = _in["_video_sock"]
+    if "audio_port" in _in:
+        audio_port = _in["audio_port"]
+    if "local_ip" in _in:
+        local_ip = _in["local_ip"]
+    if "self" in _in:
+        self = _in["self"]
+    if "u" in _in:
+        u = _in["u"]
+    if "video_port" in _in:
+        video_port = _in["video_port"]
+    _hp_host = None
+    _hp_port = 3478
+    try:
+        if _sdes_turn_entries:
+            import re as _re_hp
+
+            # Find the first TURN URI in the entry (not just Uris[0], which
+            # may be a stun: URI that the regex won't match).
+            _hp_uri = next(
+                (
+                    str(u)
+                    for u in (_sdes_turn_entries[0].get("Uris") or [])
+                    if "turn:" in str(u)
+                ),
+                "",
+            )
+            _m_hp = _re_hp.search(r"turns?:([^:?]+)(?::(\d+))?", _hp_uri)
+            if _m_hp:
+                _hp_host = _m_hp.group(1)
+                _hp_port = int(_m_hp.group(2) or 3478)
+    except Exception:
+        _LOGGER.debug(
+            "camera %s: swallowed exception in %s",
+            getattr(self, "device_id", "?"),
+            "_sdes_open_nat_hole_punch",
+            exc_info=True,
+        )
+    # When the cloud supplied no TURN entry, fall back to the vendor's TURN
+    # server only to open a NAT mapping.  This sends a STUN packet to a
+    # hardcoded third-party host; AIDOT_SDES_HOLEPUNCH_HOST overrides it
+    # (set it empty to disable the hardcoded fallback entirely).
+    if not _hp_host:
+        _hp_env = settings.read("AIDOT_SDES_HOLEPUNCH_HOST")
+        if _hp_env is not None:
+            _hp_host = _hp_env.strip() or None
+        else:
+            _hp_host = "3.230.182.123"  # fallback: Arnoo TURN server
+            _LOGGER.warning(
+                "camera %s: no TURN entry from cloud; NAT hole-punch will send "
+                "a STUN packet to the hardcoded vendor host %s. Set "
+                "AIDOT_SDES_HOLEPUNCH_HOST to override (empty to disable).",
+                getattr(self, "device_id", "?"),
+                _hp_host,
+            )
+    _hp_stun = b"\x00\x01\x00\x00\x21\x12\xa4\x42" + os.urandom(12)
+    _hp_port2 = 5349
+    if not _hp_host:
+        _status("NAT hole-punch: skipped (no TURN host)")
+    else:
+        for _hp_sock in (_audio_sock, _video_sock):
+            try:
+                _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port))
+            except Exception:
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_sdes_open_nat_hole_punch",
+                    exc_info=True,
+                )
+        # Punch to TURN allocation port (5349) as well so port-restricted NAT
+        # allows traffic from either TURN port (3478 STUN or 5349 allocation).
+        if _hp_port != _hp_port2:
+            for _hp_sock in (_audio_sock, _video_sock):
+                try:
+                    _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port2))
+                except Exception:
+                    _LOGGER.debug(
+                        "camera %s: swallowed exception in %s",
+                        getattr(self, "device_id", "?"),
+                        "_sdes_open_nat_hole_punch",
+                        exc_info=True,
+                    )
+        _status(
+            f"NAT hole-punch: sent from audio={audio_port}"
+            f" video={video_port} -> {_hp_host}:{_hp_port}"
+            + (f" and :{_hp_port2}" if _hp_port != _hp_port2 else "")
+        )
+
+    # The ports our own srflx candidates advertise - the only ports on the
+    # public IP that are actually this host. Anything else there is another
+    # device behind the same NAT, which for this fleet means the camera.
+    _own_srflx_ports = (audio_port, video_port)
+
+    def _is_self_peer_ip(_ip: "Optional[str]", _port: "Optional[int]" = None) -> bool:
+        return _is_self_transport_address(
+            _ip,
+            _port,
+            local_ip=local_ip,
+            public_ip=_public_ip,
+            own_ports=_own_srflx_ports,
+        )
+
+    _selfloop_drop_count = 0
+    _prefer_direct_stun = {_audio_sock: False, _video_sock: False}
+    return _phase_outputs(
+        locals(),
+        (
+            "_hp_host",
+            "_hp_port",
+            "_hp_stun",
+            "_is_self_peer_ip",
+            "_prefer_direct_stun",
+            "_selfloop_drop_count",
+        ),
+    )
+
+
+async def _sdes_open_stun_responder_window(self, _in: dict) -> dict:
+    """Phase of the SDES open: stun_responder_window.
+
+    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    is the open's ``locals()`` and the result the names the rest of the open
+    reads back (see ``_phase_outputs``).
+    """
+    import struct as _struct
+
+    if "_audio_sock" in _in:
+        _audio_sock = _in["_audio_sock"]
+    if "_cam_echo_received" in _in:
+        _cam_echo_received = _in["_cam_echo_received"]
+    if "_echo_fut" in _in:
+        _echo_fut = _in["_echo_fut"]
+    if "_echo_wait_s" in _in:
+        _echo_wait_s = _in["_echo_wait_s"]
+    if "_echo_wait_t0" in _in:
+        _echo_wait_t0 = _in["_echo_wait_t0"]
+    if "_hp_host" in _in:
+        _hp_host = _in["_hp_host"]
+    if "_is_self_peer_ip" in _in:
+        _is_self_peer_ip = _in["_is_self_peer_ip"]
+    if "_open_started_at" in _in:
+        _open_started_at = _in["_open_started_at"]
+    if "_prefer_direct_stun" in _in:
+        _prefer_direct_stun = _in["_prefer_direct_stun"]
+    if "_pwd_a" in _in:
+        _pwd_a = _in["_pwd_a"]
+    if "_pwd_v" in _in:
+        _pwd_v = _in["_pwd_v"]
+    if "_relay_addrs" in _in:
+        _relay_addrs = _in["_relay_addrs"]
+    if "_sdes_webrtcresp_sent" in _in:
+        _sdes_webrtcresp_sent = _in["_sdes_webrtcresp_sent"]
+    if "_selfloop_drop_count" in _in:
+        _selfloop_drop_count = _in["_selfloop_drop_count"]
+    if "_status" in _in:
+        _status = _in["_status"]
+    if "_video_sock" in _in:
+        _video_sock = _in["_video_sock"]
+    if "self" in _in:
+        self = _in["self"]
+    if "x" in _in:
+        x = _in["x"]
+    _STUN_MAGIC = b"\x21\x12\xa4\x42"
+    _stun_count = 0
+    _stun_seen = False
+    _srtp_detected = False
+    _stun_window_pkt_count = 0
+    _turn_only_pkt_count = 0
+    _camera_side_pkt_count = 0
+    if not _cam_echo_received:
+        _stun_max = 2.5
+    elif _sdes_webrtcresp_sent:
+        _stun_max = 20.0  # webrtcResp sent - camera may do ICE; give it time
+    else:
+        _stun_max = 5.0  # webrtcResp suppressed - no STUN expected; exit fast
+    _idle_limit = 1.5  # exit after ICE silence once first STUN seen
+    _pre_stun_idle = 0.5  # exit early if no packet at all (non-ICE camera)
+    _stun_deadline = time.monotonic() + _stun_max
+    _last_pkt_t = time.monotonic()
+    _stun_window_t0 = time.monotonic()
+    for _rsock in (_audio_sock, _video_sock):
+        try:
+            _rsock.setblocking(False)
+        except Exception:
+            _LOGGER.debug(
+                "camera %s: swallowed exception in %s",
+                getattr(self, "device_id", "?"),
+                "_sdes_open_stun_responder_window",
+                exc_info=True,
+            )
+    while time.monotonic() < _stun_deadline:
+        # Answer-exit: the only reason to sit here is that the credentials
+        # the nomination needs have not arrived yet.  Once they have - and
+        # the camera has proved it is running ICE by probing us - waiting
+        # longer just delays USE-CANDIDATE, and the bridge thread below
+        # picks the responder role straight back up.  Checked before the
+        # idle test because the answer usually lands while the camera is
+        # still probing hard, so no idle threshold would ever be crossed.
+        if _stun_window_answer_exit_due(
+            stun_seen=_stun_seen,
+            answer_ready=_answer_ready_for_this_open(
+                getattr(self, "_camera_answer_ice_ready_ts", None), _open_started_at
+            ),
+        ):
+            _status(
+                "STUN window: leaving early after %.2fs - answer ICE"
+                " credentials in hand and camera probing; nominating now"
+                " (%d binding request(s) answered)"
+                % (time.monotonic() - _stun_window_t0, _stun_count)
+            )
+            break
+        # Idle-exit: threshold depends on whether we've seen any STUN yet
+        idle = time.monotonic() - _last_pkt_t
+        if _stun_seen:
+            if idle > _idle_limit:
+                break  # ICE done (silence after STUN) - ffmpeg will pick up SRTP
+        elif not _cam_echo_received and idle > _pre_stun_idle:
+            break  # no STUN at all - non-ICE camera, skip window
+        try:
+            _rlist = await _select_readable([_audio_sock, _video_sock], 0.1)
+        except Exception:
+            break
+        for _sock in _rlist:
+            _last_pkt_t = time.monotonic()
+            try:
+                _pkt, _src = _sock.recvfrom(2048)
+            except OSError:
+                continue
+            _stun_window_pkt_count += 1
+            if _stun_window_pkt_count <= 3 or _stun_window_pkt_count % 50 == 0:
+                _LOGGER.debug(
+                    "STUN window: %d bytes from %s:%d, first4=%s (pkt#%d)",
+                    len(_pkt),
+                    _src[0],
+                    _src[1],
+                    _pkt[:4].hex(),
+                    _stun_window_pkt_count,
+                )
+            # Track packets that are only TURN server control responses
+            # (Allocate/permission challenge/success), which do not indicate
+            # that the camera actually started ICE checks.
+            if _src[0] == _hp_host:
+                _turn_only_pkt_count += 1
+            else:
+                _camera_side_pkt_count += 1
+            # --- TURN Data Indication (type 0x0017): strip wrapper --------- #
+            # Camera ICE probes routed via TURN arrive as Data Indications from
+            # 3.230.182.123:5349 (the control channel, already NAT-mapped).
+            # Strip the TURN envelope to get the inner STUN Binding Request so
+            # we can respond correctly via a TURN Send Indication.
+            _turn_peer_ip_sw: "Optional[str]" = None
+            _turn_peer_port_sw: "Optional[int]" = None
+            if len(_pkt) >= 20 and _pkt[:2] == b"\x00\x17" and _pkt[4:8] == _STUN_MAGIC:
+                _sw_off = 20
+                _sw_inner = None
+                while _sw_off + 4 <= len(_pkt):
+                    _sw_at, _sw_al = _struct.unpack_from("!HH", _pkt, _sw_off)
+                    _sw_av = _pkt[_sw_off + 4 : _sw_off + 4 + _sw_al]
+                    _sw_off += 4 + _sw_al + (-_sw_al % 4)
+                    if _sw_at == 0x0012 and _sw_al >= 8:  # XOR-PEER-ADDRESS
+                        _sw_xp = _struct.unpack_from("!H", _sw_av, 2)[0] ^ 0x2112
+                        _sw_xb = bytes(
+                            a ^ b
+                            for a, b in zip(_sw_av[4:8], _STUN_MAGIC, strict=False)
+                        )
+                        _turn_peer_ip_sw = ".".join(str(b) for b in _sw_xb)
+                        _turn_peer_port_sw = _sw_xp
+                    elif _sw_at == 0x0013:  # DATA
+                        _sw_inner = _sw_av
+                if _sw_inner:
+                    _pkt = _sw_inner  # process inner payload
+                # TURN Data Indication with XOR-PEER-ADDRESS means the
+                # camera (or its relay) is actively talking to us.
+                if _turn_peer_ip_sw:
+                    _camera_side_pkt_count += 1
+
+            if len(_pkt) >= 20 and _pkt[4:8] == _STUN_MAGIC:
+                # STUN packet - only Binding Requests (0x0001) indicate that
+                # ICE is active.  Error/Success responses (e.g. hole-punch
+                # replies) must NOT set _stun_seen or they'd trigger the 1.5s
+                # idle-exit prematurely, before camera probes arrive.
+                if _pkt[:2] == b"\x00\x01":
+                    # Binding Request - reply with Binding Success Response.
+                    # _stun_seen is NOT set here.  A self-loop Data
+                    # Indication - our own address echoed back through the
+                    # relay - is a Binding Request too, and the branch below
+                    # drops it precisely because it is not the camera.
+                    # Setting the flag here made one of those count as "the
+                    # camera has started ICE", which is the one thing the
+                    # answer-exit is gated on.  It is set where a probe is
+                    # actually answered instead.
+                    if _turn_peer_ip_sw is None and _src[0] != _hp_host:
+                        _prefer_direct_stun[_sock] = True
+                    _tid = _pkt[8:20]
+                    try:
+                        # Use TURN peer address for XOR-MAPPED-ADDRESS when
+                        # request arrived via TURN Data Indication.
+                        _resp_src_ip = _turn_peer_ip_sw or _src[0]
+                        _resp_src_port = _turn_peer_port_sw or _src[1]
+                        _resp = _build_stun_binding_success_response(
+                            transaction_id=_tid,
+                            mapped_ip=_resp_src_ip,
+                            mapped_port=_resp_src_port,
+                            mi_password=(_pwd_a if _sock is _audio_sock else _pwd_v),
+                            magic_cookie=_STUN_MAGIC,
+                        )
+                        if _turn_peer_ip_sw and _prefer_direct_stun.get(_sock, False):
+                            pass
+                        elif (
+                            _turn_peer_ip_sw
+                            and _sock in _relay_addrs
+                            and not _is_self_peer_ip(
+                                _turn_peer_ip_sw, _turn_peer_port_sw
+                            )
+                        ):
+                            # Arrived via TURN - respond via Send Indication
+                            _ri_sw = _relay_addrs[_sock]
+                            _t_host_sw, _t_port_sw = _ri_sw[4], _ri_sw[5]
+                            _si_pip = bytes(int(x) for x in _turn_peer_ip_sw.split("."))
+                            _si_xip = bytes(
+                                a ^ b
+                                for a, b in zip(_si_pip, _STUN_MAGIC, strict=False)
+                            )
+                            _si_xport = (_turn_peer_port_sw ^ 0x2112) & 0xFFFF
+                            _si_xpa = (
+                                b"\x00\x01" + _struct.pack("!H", _si_xport) + _si_xip
+                            )
+
+                            _si_body = _stun_attr(0x0012, _si_xpa) + _stun_attr(
+                                0x0013, _resp
+                            )
+                            _send_ind = (
+                                b"\x00\x16"
+                                + _struct.pack("!H", len(_si_body))
+                                + _STUN_MAGIC
+                                + os.urandom(12)
+                                + _si_body
+                            )
+                            _sock.sendto(_send_ind, (_t_host_sw, _t_port_sw))
+                            _stun_seen = True
+                        elif _turn_peer_ip_sw and _is_self_peer_ip(
+                            _turn_peer_ip_sw, _turn_peer_port_sw
+                        ):
+                            # Self-loop Data Indication (peer == our own
+                            # local/srflx address). Responding via TURN
+                            # creates an endless STUN echo loop and no media.
+                            # Drop it and wait for real camera checks.
+                            _selfloop_drop_count += 1
+                            if (
+                                _selfloop_drop_count <= 5
+                                or _selfloop_drop_count % 50 == 0
+                            ):
+                                _LOGGER.debug(
+                                    "STUN window: drop TURN self-loop peer %s:%s"
+                                    " (count=%d)",
+                                    _turn_peer_ip_sw,
+                                    _turn_peer_port_sw,
+                                    _selfloop_drop_count,
+                                )
+                        else:
+                            _sock.sendto(_resp, _src)
+                            _stun_seen = True
+                        _stun_count += 1
+                    except Exception:
+                        _LOGGER.debug(
+                            "camera %s: swallowed exception in %s",
+                            getattr(self, "device_id", "?"),
+                            "_sdes_open_stun_responder_window",
+                            exc_info=True,
+                        )
+            else:
+                # Non-STUN packet = SRTP arriving - ICE is done, hand off to ffmpeg now
+                _srtp_detected = True
+                break  # inner per-socket loop
+        if _srtp_detected:
+            break  # outer while loop
+    # An echo that missed the shortened wait but turned up anyway.  Recorded,
+    # not acted on: the webrtcResp this would have built has to be sent
+    # BEFORE the relay allocation and the ICE window, so building it now
+    # would be a reordering with no camera to measure it against.  What it
+    # does do is make the NEXT open on this device wait the full legacy
+    # window - so a fleet whose echo band is not empty pays the miss once
+    # and says so, instead of losing the branch silently forever.
+    if (
+        not _cam_echo_received
+        and _echo_fut is not None
+        and not getattr(self, "_sdes_echo_seen", False)
+    ):
+        try:
+            _late_echo = _echo_fut.done() and not _echo_fut.cancelled()
+        except Exception:
+            _late_echo = False
+        if _late_echo:
+            self._sdes_echo_seen = True
+            _LOGGER.warning(
+                "camera %s: the webrtcReq echo arrived %.2fs after a %.2fs"
+                " wait expired, so no webrtcResp was built for this open."
+                " Later opens on this camera will wait %.1fs again. Set"
+                " AIDOT_SDES_ECHO_WAIT_S=%.1f to make that permanent.",
+                getattr(self, "device_id", "?"),
+                time.monotonic() - _echo_wait_t0,
+                _echo_wait_s,
+                _SDES_ECHO_WAIT_LEGACY_S,
+                _SDES_ECHO_WAIT_LEGACY_S,
+            )
+    for _rsock in (_audio_sock, _video_sock):
+        try:
+            _rsock.setblocking(True)
+        except Exception:
+            _LOGGER.debug(
+                "camera %s: swallowed exception in %s",
+                getattr(self, "device_id", "?"),
+                "_sdes_open_stun_responder_window",
+                exc_info=True,
+            )
+    if _stun_count:
+        _status(f"ICE: responded to {_stun_count} STUN binding request(s)")
+    elif not _srtp_detected:
+        if _stun_window_pkt_count and _turn_only_pkt_count == _stun_window_pkt_count:
+            _status(
+                "ICE: no camera probes seen in STUN window"
+                f" (received {_stun_window_pkt_count} TURN-server control packet(s) only)"
+            )
+        else:
+            _status(
+                "ICE: 0 camera STUN binding requests in window"
+                f" (total packets={_stun_window_pkt_count})"
+            )
+    if _srtp_detected:
+        _status("SRTP detected - exiting STUN window, handing off to ffmpeg")
+    return _phase_outputs(
+        locals(),
+        (
+            "_STUN_MAGIC",
+            "_camera_side_pkt_count",
+            "_idle_limit",
+            "_last_pkt_t",
+            "_srtp_detected",
+            "_stun_count",
+            "_stun_deadline",
+            "_stun_seen",
+            "a",
+        ),
+    )
+
+
+async def _sdes_open_reconnect_retry_window(self, _in: dict) -> dict:
+    """Phase of the SDES open: reconnect_retry_window.
+
+    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    is the open's ``locals()`` and the result the names the rest of the open
+    reads back (see ``_phase_outputs``).
+    """
+    if "_STUN_MAGIC" in _in:
+        _STUN_MAGIC = _in["_STUN_MAGIC"]
+    if "_audio_sock" in _in:
+        _audio_sock = _in["_audio_sock"]
+    if "_cam_echo_received" in _in:
+        _cam_echo_received = _in["_cam_echo_received"]
+    if "_hp_host" in _in:
+        _hp_host = _in["_hp_host"]
+    if "_hp_port" in _in:
+        _hp_port = _in["_hp_port"]
+    if "_hp_stun" in _in:
+        _hp_stun = _in["_hp_stun"]
+    if "_idle_limit" in _in:
+        _idle_limit = _in["_idle_limit"]
+    if "_last_pkt_t" in _in:
+        _last_pkt_t = _in["_last_pkt_t"]
+    if "_open_started_at" in _in:
+        _open_started_at = _in["_open_started_at"]
+    if "_public_ip" in _in:
+        _public_ip = _in["_public_ip"]
+    if "_pwd_a" in _in:
+        _pwd_a = _in["_pwd_a"]
+    if "_pwd_v" in _in:
+        _pwd_v = _in["_pwd_v"]
+    if "_relay_addrs" in _in:
+        _relay_addrs = _in["_relay_addrs"]
+    if "_sdes_webrtcresp_sent" in _in:
+        _sdes_webrtcresp_sent = _in["_sdes_webrtcresp_sent"]
+    if "_send_sdes_ice_cand" in _in:
+        _send_sdes_ice_cand = _in["_send_sdes_ice_cand"]
+    if "_srtp_detected" in _in:
+        _srtp_detected = _in["_srtp_detected"]
+    if "_status" in _in:
+        _status = _in["_status"]
+    if "_stun_count" in _in:
+        _stun_count = _in["_stun_count"]
+    if "_stun_deadline" in _in:
+        _stun_deadline = _in["_stun_deadline"]
+    if "_stun_seen" in _in:
+        _stun_seen = _in["_stun_seen"]
+    if "_video_sock" in _in:
+        _video_sock = _in["_video_sock"]
+    if "_webrtc_resp_sdes" in _in:
+        _webrtc_resp_sdes = _in["_webrtc_resp_sdes"]
+    if "_webrtc_resp_sdes_topic" in _in:
+        _webrtc_resp_sdes_topic = _in["_webrtc_resp_sdes_topic"]
+    if "audio_port" in _in:
+        audio_port = _in["audio_port"]
+    if "camera_reconnect_ev" in _in:
+        camera_reconnect_ev = _in["camera_reconnect_ev"]
+    if "local_ip" in _in:
+        local_ip = _in["local_ip"]
+    if "outgoing_q" in _in:
+        outgoing_q = _in["outgoing_q"]
+    if "self" in _in:
+        self = _in["self"]
+    if "video_port" in _in:
+        video_port = _in["video_port"]
+    _sdes_retries = 0
+    while (
+        _cam_echo_received
+        and _stun_count == 0
+        and not _srtp_detected
+        and camera_reconnect_ev is not None
+        and _sdes_retries < 2
+    ):
+        await asyncio.sleep(0)  # flush queued callbacks (reconnect_ev.set())
+        if not camera_reconnect_ev.is_set():
+            break
+        camera_reconnect_ev.clear()
+        _sdes_retries += 1
+        _status(
+            f"camera reconnected during SDES ICE window (retry {_sdes_retries})"
+            " - re-sending webrtcResp + ICE candidates"
+        )
+        await asyncio.sleep(0.3)  # let camera re-subscribe before re-send
+        if _webrtc_resp_sdes is not None and _sdes_webrtcresp_sent:
+            # Only re-send webrtcResp if we sent it originally (isDTLS='0').
+            # For dtls_fallback_ok cameras the SDES session was intentionally
+            # suppressed - do not retroactively start one on reconnect.
+            outgoing_q.put_nowait((_webrtc_resp_sdes_topic, _webrtc_resp_sdes))
+        for _ice_mid_r, _ice_port_r in (("0", audio_port), ("1", video_port)):
+            _send_sdes_ice_cand(
+                f"candidate:1 1 udp 2130706431 {local_ip} {_ice_port_r} typ host",
+                _ice_mid_r,
+            )
+            if _public_ip:
+                _send_sdes_ice_cand(
+                    f"candidate:2 1 udp 1694498815 {_public_ip} {_ice_port_r}"
+                    f" typ srflx raddr {local_ip} rport {_ice_port_r}",
+                    _ice_mid_r,
+                )
+            _relay_sock_r = _audio_sock if _ice_mid_r == "0" else _video_sock
+            if _relay_sock_r in _relay_addrs:
+                _ri_r = _relay_addrs[_relay_sock_r]
+                _send_sdes_ice_cand(
+                    f"candidate:3 1 udp 16777215 {_ri_r[0]} {_ri_r[1]}"
+                    f" typ relay raddr {local_ip} rport {_ice_port_r}",
+                    _ice_mid_r,
+                )
+        # Refresh NAT mapping so router allows new inbound STUN from camera
+        for _hp_sock_r in (_audio_sock, _video_sock):
+            try:
+                _hp_sock_r.sendto(_hp_stun, (_hp_host, _hp_port))
+            except Exception:
+                _LOGGER.debug(
+                    "camera %s: swallowed exception in %s",
+                    getattr(self, "device_id", "?"),
+                    "_sdes_open_reconnect_retry_window",
+                    exc_info=True,
+                )
+        # Retry STUN window (8 s)
+        _stun_deadline = time.monotonic() + 8.0
+        _last_pkt_t = time.monotonic()
+        _stun_seen = False
+        while time.monotonic() < _stun_deadline:
+            # Same exit as the first window.  A camera that quickConns after
+            # signalling re-runs ICE here, and without this it sat the full
+            # 8 s on credentials it already had - the same delay the first
+            # window was fixed for, in the window the fix had not reached.
+            if _stun_window_answer_exit_due(
+                stun_seen=_stun_seen,
+                answer_ready=_answer_ready_for_this_open(
+                    getattr(self, "_camera_answer_ice_ready_ts", None),
+                    _open_started_at,
+                ),
+            ):
+                _status(
+                    "STUN window (retry %d): leaving early after %.2fs -"
+                    " answer ICE credentials in hand and camera probing"
+                    % (_sdes_retries, time.monotonic() - (_stun_deadline - 8.0))
+                )
+                break
+            if _stun_seen and time.monotonic() - _last_pkt_t > _idle_limit:
+                break
+            try:
+                _rlist_r = await _select_readable([_audio_sock, _video_sock], 0.1)
+            except Exception:
+                break
+            for _sk_r in _rlist_r:
+                _last_pkt_t = time.monotonic()
+                try:
+                    _pkt_r, _src_r = _sk_r.recvfrom(2048)
+                except OSError:
+                    continue
+                if len(_pkt_r) >= 20 and _pkt_r[4:8] == _STUN_MAGIC:
+                    if _pkt_r[:2] != b"\x00\x01":
+                        continue  # not a Binding Request; don't trigger idle-exit
+                    _tid_r = _pkt_r[8:20]
+                    try:
+                        _resp_r = _build_stun_binding_success_response(
+                            transaction_id=_tid_r,
+                            mapped_ip=_src_r[0],
+                            mapped_port=_src_r[1],
+                            mi_password=(_pwd_a if _sk_r is _audio_sock else _pwd_v),
+                            magic_cookie=_STUN_MAGIC,
+                        )
+                        _sk_r.sendto(_resp_r, _src_r)
+                        _stun_seen = True
+                        _stun_count += 1
+                    except Exception:
+                        _LOGGER.debug(
+                            "camera %s: swallowed exception in %s",
+                            getattr(self, "device_id", "?"),
+                            "_sdes_open_reconnect_retry_window",
+                            exc_info=True,
+                        )
+                else:
+                    _srtp_detected = True
+                    break
+            if _srtp_detected:
+                break
+        if _stun_count:
+            _status(
+                f"ICE retry {_sdes_retries}:"
+                f" responded to {_stun_count} STUN binding request(s)"
+            )
+        if _srtp_detected:
+            _status(
+                f"SRTP detected in retry {_sdes_retries}"
+                " - exiting STUN window, handing off to ffmpeg"
+            )
+    return _phase_outputs(locals(), ("_srtp_detected", "_stun_count"))
+
+
+async def _sdes_open_harvest_answer(self, _in: dict) -> dict:
+    """Phase of the SDES open: harvest_answer.
+
+    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    is the open's ``locals()`` and the result the names the rest of the open
+    reads back (see ``_phase_outputs``).
+    """
+    if "_dc_probe_fp" in _in:
+        _dc_probe_fp = _in["_dc_probe_fp"]
+    if "_status" in _in:
+        _status = _in["_status"]
+    if "answer_fut" in _in:
+        answer_fut = _in["answer_fut"]
+    if "self" in _in:
+        self = _in["self"]
+    if "srtp_key_audio" in _in:
+        srtp_key_audio = _in["srtp_key_audio"]
+    if "srtp_key_video" in _in:
+        srtp_key_video = _in["srtp_key_video"]
+    if "terminal_error_fut" in _in:
+        terminal_error_fut = _in["terminal_error_fut"]
+    await asyncio.sleep(0)
+    # ...but one cycle only helps if the answer had already ARRIVED.  When it
+    # has, the window above now leaves as soon as it is readable and this
+    # harvest is a formality; when it has not, the window ran to its own
+    # deadline and this wait is the whole story.  Either way, wait for it:
+    # the ICE credentials it carries are what the nomination below needs -
+    # without them the camera is never nominated, stays in ICE "Checking",
+    # and never sends SRTP no matter how long the first-media wait runs.
+    # (This comment used to assert the window "closes ~2.4 s before the
+    # camera answers".  That stopped being true when the livePlayReq echo
+    # wait was cut to 0.25 s, and the window then sat on the answer for
+    # seconds - see _stun_window_answer_exit_due.)
+    # shield() so a timeout here cannot cancel the future the real answer
+    # await (and the DTLS-fallback path) still consume further down.
+    # A TERMINAL refusal races the harvest.  A camera at its viewer cap acks
+    # -50002/-50015 about a second after webrtcReq and then, by definition,
+    # never answers - so without this the refusal sat unread for the whole
+    # _PRE_LAUNCH_ANSWER_WAIT_S before the later checks could see it, and we
+    # launched a bridge for a stream the camera had already declined.
+    if not answer_fut.done():
+        _ans_wait_t0 = time.monotonic()
+        try:
+            _harvest_waits = [asyncio.shield(answer_fut)]
+            if terminal_error_fut is not None:
+                _harvest_waits.append(asyncio.shield(terminal_error_fut))
+            _h_done, _h_pending = await asyncio.wait(
+                _harvest_waits,
+                timeout=_PRE_LAUNCH_ANSWER_WAIT_S,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            # Cancel the shield WRAPPERS only; the futures they guard are
+            # owned by the MQTT handler and are still consumed below.
+            for _h in _h_pending:
+                _h.cancel()
+            if terminal_error_fut is not None and terminal_error_fut.done():
+                _code, _desc = terminal_error_fut.result()
+                _status(
+                    f"camera refused: ack {_code} {_desc}"
+                    " - terminal, not launching the bridge"
+                )
+                raise AidotCameraBusy(_code, _desc)
+            if answer_fut.done():
+                _status(
+                    "webrtcResp answer harvested after %.2fs"
+                    % (time.monotonic() - _ans_wait_t0)
+                )
+            else:
+                _status(
+                    "no webrtcResp answer within %.0fs - proceeding without ICE"
+                    " credentials (nomination will retry during the first-media"
+                    " wait)" % _PRE_LAUNCH_ANSWER_WAIT_S
+                )
+        except AidotCameraBusy:
+            raise
+        except Exception:
+            _LOGGER.debug(
+                "camera %s: swallowed exception awaiting answer",
+                getattr(self, "device_id", "?"),
+                exc_info=True,
+            )
+    _pre_launch_answer_sdp: str = ""
+    _our_tx_srtp_key_audio = (
+        srtp_key_audio  # our TX key; set early in case answer absent
+    )
+    _cam_key_audio: str = ""  # camera's answer key; set in SDP parse block below
+    _cam_key_video: str = ""  # camera's video SRTP key; set in SDP parse block below
+    _dc_answer_has_app: bool = False  # set True if camera echoes m=application; init here so bridge closure never sees NameError on late-wake path
+    _sctp: dict = {  # initialized here for the same reason - bridge closure
+        "state": "CLOSED",
+        "local_tag": 0,
+        "peer_tag": 0,
+        "local_tsn": 0,
+        "peer_tsn": 0,
+        "stream_seq": 0,
+    }
+    if answer_fut.done():
+        try:
+            _pre_ans = answer_fut.result()
+            _pre_launch_answer_sdp = (_pre_ans or {}).get("sdp", "")
+        except Exception:
+            _LOGGER.debug(
+                "camera %s: swallowed exception in %s",
+                getattr(self, "device_id", "?"),
+                "_sdes_open_harvest_answer",
+                exc_info=True,
+            )
+    if _pre_launch_answer_sdp:
+        _LOGGER.debug(
+            "_open_sdes_stream: camera webrtcResp answer SDP (len=%d)",
+            len(_pre_launch_answer_sdp),
+        )
+        import re as _re
+
+        def _sdes_key_from_sdp(sdp, media):
+            """Return the inline key from the first a=crypto line in the named m-section."""
+            in_sec = False
+            for ln in sdp.splitlines():
+                if ln.startswith(f"m={media}"):
+                    in_sec = True
+                elif ln.startswith("m=") and in_sec:
+                    break
+                elif in_sec and ln.startswith("a=crypto:"):
+                    _m = _re.search(r"inline:([A-Za-z0-9+/=]+)", ln)
+                    if _m:
+                        return _m.group(1)
+            return ""
+
+        # Probe result: did camera echo back m=application?
+        if _dc_probe_fp:
+            _dc_ans_lines, _in_dc_sec = [], False
+            for _aln in _pre_launch_answer_sdp.splitlines():
+                if _aln.startswith("m=application"):
+                    _in_dc_sec = True
+                elif _aln.startswith("m=") and _in_dc_sec:
+                    break
+                if _in_dc_sec:
+                    _dc_ans_lines.append(_aln)
+            if _dc_ans_lines:
+                # The section carries the camera's a=crypto inline key
+                # (the data channel's SRTP key); it is masked before this
+                # reaches the log.
+                _status(
+                    "DC probe ACCEPTED: camera answered m=application"
+                    f" ({len(_dc_ans_lines)} lines):\n"
+                    + mask_sdp_secrets("\n".join(_dc_ans_lines))
+                )
+            else:
+                _status(
+                    "DC probe REJECTED: camera did not include m=application"
+                    " in its answer - BUNDLE+DTLS unsupported on this firmware"
+                )
+
+        # SCTP DataChannel for SDES cameras.
+        # Source analysis (f0.java g2()) confirmed SESSION_MODE_REQ (5376)
+        # must be sent via DataChannel.send(), NOT raw TUTK 0xC8 UDP.
+        # Camera uses plain SCTP over UDP (same ICE port), no DTLS.
+        # We are the SCTP client (proactive INIT), camera is server.
+        _dc_answer_has_app = "m=application" in _pre_launch_answer_sdp
+        _sctp = {
+            "state": "CLOSED",  # INIT_SENT -> COOKIE_ECHOED -> ESTABLISHED -> DONE
+            "local_tag": 0,  # our verification tag (sent in INIT)
+            "peer_tag": 0,  # camera's verification tag (from INIT-ACK)
+            "local_tsn": 0,  # our TSN counter
+            "peer_tsn": 0,  # camera's Initial TSN (from its INIT/INIT-ACK)
+            "stream_seq": 0,  # stream sequence number
+        }
+
+        _cam_key_audio = _sdes_key_from_sdp(_pre_launch_answer_sdp, "audio")
+        _cam_key_video = _sdes_key_from_sdp(_pre_launch_answer_sdp, "video")
+        if _cam_key_audio and _cam_key_audio != srtp_key_audio:
+            _status("Using camera's audio SRTP key from answer (was our offer key)")
+            srtp_key_audio = _cam_key_audio
+        if _cam_key_video and _cam_key_video != srtp_key_video:
+            _status("Using camera's video SRTP key from answer (was our offer key)")
+            srtp_key_video = _cam_key_video
+    return _phase_outputs(
+        locals(),
+        (
+            "_cam_key_audio",
+            "_code",
+            "_dc_answer_has_app",
+            "_desc",
+            "_our_tx_srtp_key_audio",
+            "_pre_launch_answer_sdp",
+            "_sctp",
+            "srtp_key_audio",
+            "srtp_key_video",
+        ),
+    )
+
+
+async def _sdes_open_sctp_helpers(self, _in: dict) -> dict:
+    """Phase of the SDES open: SCTP helper functions (always defined - even when answer arrives late).
+
+    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    is the open's ``locals()`` and the result the names the rest of the open
+    reads back (see ``_phase_outputs``).
+    """
+    if "_sctp" in _in:
+        _sctp = _in["_sctp"]
+    if "_status" in _in:
+        _status = _in["_status"]
+
+    def _crc32c_fn(data):
+        crc = 0xFFFFFFFF
+        for b in data:
+            crc ^= b
+            for _ in range(8):
+                crc = (crc >> 1) ^ (0x82F63B78 if crc & 1 else 0)
+        return crc ^ 0xFFFFFFFF
+
+    def _sctp_pkt(vtag, *chunks):
+        import struct as _st_sc
+
+        base = _st_sc.pack("!HHII", 5000, 5000, vtag, 0) + b"".join(chunks)
+        crc = _crc32c_fn(base)
+        return (
+            base[:8] + _st_sc.pack("<I", crc) + base[12:]
+        )  # camera usrsctp uses LE CRC32c
+
+    def _sctp_chunk(ctype, flags, data):
+        import struct as _st_sc
+
+        n = 4 + len(data)
+        raw = _st_sc.pack("!BBH", ctype, flags, n) + data
+        return raw + b"\x00" * ((-len(raw)) % 4)
+
+    def _sctp_parse_init(pkt):
+        import struct as _st_sc
+
+        pos = 12
+        while pos + 4 <= len(pkt):
+            ctype, _, clen = _st_sc.unpack_from("!BBH", pkt, pos)
+            if clen < 4:
+                break
+            cdata = pkt[pos + 4 : pos + clen]
+            if ctype == 0x01 and len(cdata) >= 16:
+                peer_tag = _st_sc.unpack_from("!I", cdata)[0]
+                peer_tsn = _st_sc.unpack_from("!I", cdata, 12)[0]
+                _sctp["peer_tag"] = peer_tag
+                _sctp["peer_tsn"] = peer_tsn
+                return peer_tag
+            pos += max(4, (clen + 3) & ~3)
+        return None
+
+    def _sctp_init_ack_pkt():
+        import struct as _st_sc
+        import random as _r_sc
+
+        # RFC 4960 section 5.2.1: reuse local_tag/tsn from our INIT in simultaneous open
+        if _sctp["local_tag"] == 0:
+            _sctp["local_tag"] = _r_sc.randint(1, 0xFFFFFFFF)
+            _sctp["local_tsn"] = _r_sc.randint(1, 0xFFFFFFFF)
+        cookie = _st_sc.pack("!II", _sctp["local_tag"], _sctp["peer_tag"])
+        cookie_param = _st_sc.pack("!HH", 7, 4 + len(cookie)) + cookie
+        body = (
+            _st_sc.pack(
+                "!IIHHI", _sctp["local_tag"], 131072, 1024, 2048, _sctp["local_tsn"]
+            )
+            + cookie_param
+        )
+        return _sctp_pkt(_sctp["peer_tag"], _sctp_chunk(0x02, 0, body))
+
+    def _sctp_cookie_echo(cookie):
+        return _sctp_pkt(_sctp["peer_tag"], _sctp_chunk(0x0A, 0, cookie))
+
+    def _sctp_data(ppid, payload):
+        import struct as _st_sc
+
+        tsn = _sctp["local_tsn"]
+        _sctp["local_tsn"] = (tsn + 1) & 0xFFFFFFFF
+        seq = _sctp["stream_seq"]
+        _sctp["stream_seq"] = (seq + 1) & 0xFFFF
+        body = _st_sc.pack("!IHHI", tsn, 0, seq, ppid) + payload
+        return _sctp_chunk(0x00, 0x03, body)
+
+    def _dcep_open_msg():
+        import struct as _st_sc
+
+        label = b"data"
+        return _st_sc.pack("!BBHIHH", 0x03, 0x00, 256, 0, len(label), 0) + label
+
+    def _session_mode_req_msg():
+        import struct as _st_sc
+        import random as _r_sc
+        import time as _t_sc
+
+        seq = _r_sc.randint(0, 0x7FFFFFFF)
+        ts = int(_t_sc.time() * 1000)
+        return avio_header(seq, 5376, ts, 8, 0) + _st_sc.pack("<IB3x", 0, 1)
+
+    def _sctp_send_living(sock, addr):
+        dcep = _sctp_data(50, _dcep_open_msg())
+        living = _sctp_data(53, _session_mode_req_msg())
+        sock.sendto(_sctp_pkt(_sctp["peer_tag"], dcep), addr)
+        sock.sendto(_sctp_pkt(_sctp["peer_tag"], living), addr)
+        _sctp["state"] = "DONE"
+        _status("SDES DC: sent DATA_CHANNEL_OPEN + SESSION_MODE_REQ(5376) via SCTP")
+
+    return _phase_outputs(
+        locals(),
+        (
+            "_dcep_open_msg",
+            "_sctp_chunk",
+            "_sctp_cookie_echo",
+            "_sctp_data",
+            "_sctp_init_ack_pkt",
+            "_sctp_parse_init",
+            "_sctp_pkt",
+            "_sctp_send_living",
+            "_session_mode_req_msg",
+        ),
+    )
+
+
+async def _sdes_open_ice_controlling_nominate(self, _in: dict) -> dict:
+    """Phase of the SDES open: ice_controlling_nominate.
+
+    Split out of ``_open_sdes_stream_impl`` with its body unchanged; ``_in``
+    is the open's ``locals()`` and the result the names the rest of the open
+    reads back (see ``_phase_outputs``).
+    """
+    if "_audio_sock" in _in:
+        _audio_sock = _in["_audio_sock"]
+    if "_is_self_peer_ip" in _in:
+        _is_self_peer_ip = _in["_is_self_peer_ip"]
+    if "_pre_launch_answer_sdp" in _in:
+        _pre_launch_answer_sdp = _in["_pre_launch_answer_sdp"]
+    if "_public_ip" in _in:
+        _public_ip = _in["_public_ip"]
+    if "_pwd_a" in _in:
+        _pwd_a = _in["_pwd_a"]
+    if "_pwd_v" in _in:
+        _pwd_v = _in["_pwd_v"]
+    if "_relay_addrs" in _in:
+        _relay_addrs = _in["_relay_addrs"]
+    if "_relay_in_c" in _in:
+        _relay_in_c = _in["_relay_in_c"]
+    if "_status" in _in:
+        _status = _in["_status"]
+    if "_ufrag_a" in _in:
+        _ufrag_a = _in["_ufrag_a"]
+    if "_ufrag_v" in _in:
+        _ufrag_v = _in["_ufrag_v"]
+    if "_video_sock" in _in:
+        _video_sock = _in["_video_sock"]
+    if "device_id" in _in:
+        device_id = _in["device_id"]
+    if "self" in _in:
+        self = _in["self"]
+    _cam_ice_ufrag: str
+    _cam_ice_pwd: str
+    _cam_ice_cands: list  # list of (ip, port) tuples
+    _cam_ice_host: tuple
+    # Through the shared parser, not a second copy: the STUN window's early
+    # exit above means "the nomination below will succeed", and it only
+    # means that while both read the same SDP the same way.
+    (_cam_ice_ufrag, _cam_ice_pwd, _cam_ice_cands, _cam_ice_host) = _parse_answer_ice(
+        _pre_launch_answer_sdp
+    )
+
+    _send_use_candidate = functools.partial(
+        send_use_candidate, device_id, _is_self_peer_ip, _relay_addrs
+    )
+
+    # Every candidate this session actually sent USE-CANDIDATE to, in the
+    # order it was nominated.  Instrumentation only, and it exists because
+    # _bridge_uc_info cannot answer the question on the shape that stalls:
+    # on a late answer - measured at +1.3 s, missing the pre-launch snapshot
+    # - it is _nominate_from_answer_sdp below that nominates, and it neither
+    # appends to _bridge_uc_info["cands"] nor flips ["sent"].  Reporting the
+    # stall from that dict alone would print "nominated=none" on an open
+    # that did nominate, and make "the answer carried no ICE credentials"
+    # indistinguishable from "the answer carried one unroutable candidate".
+    _nominated_seen: list = []
+
+    def _nominate_from_answer_sdp(sdp_text) -> int:
+        """Nominate every candidate in ``sdp_text``; see nominate_from_answer_sdp."""
+        return nominate_from_answer_sdp(
+            _turn_install_permissions,
+            _send_use_candidate,
+            (_audio_sock, _video_sock),
+            ((_ufrag_a, _pwd_a), (_ufrag_v, _pwd_v)),
+            _nominated_seen,
+            sdp_text,
+        )
+
+    # Open the TURN relay's door for the camera BEFORE probing it.
+    #
+    # A TURN server drops everything from a peer until a permission exists
+    # for that peer's address (RFC 5766 s9).  We advertise the relay as a
+    # candidate, but the only thing that ever created a permission here was
+    # a Send indication emitted while HANDLING data that had already arrived
+    # through the relay - which cannot happen until the permission exists.
+    # That deadlock made the advertised relay candidate a black hole:
+    # measured on a live A001513 whose host could not be reached directly,
+    # ZERO packets ever arrived from the relay, so the camera had no working
+    # path and sent no media at all, while the same camera streamed to a
+    # host it COULD reach directly.  (The DTLS path never hit this because
+    # aiortc does full TURN.)
+    #
+    # Defined at function scope rather than inside the branch below on
+    # purpose: relay-only battery cams (LAN IP unknown) answer AFTER the
+    # STUN window, so they never enter that branch at all and the bridge
+    # thread is the only place their permissions can be installed.
+    _turn_create_permission = functools.partial(turn_create_permission, _relay_addrs)
+
+    _turn_refresh_allocation = functools.partial(turn_refresh_allocation, _relay_addrs)
+
+    _turn_send_indication = functools.partial(turn_send_indication, _relay_addrs)
+
+    _turn_install_permissions = functools.partial(
+        turn_install_permissions,
+        _turn_create_permission,
+        (_audio_sock, _video_sock),
+        _relay_addrs,
+        _status,
+    )
+
+    # Relay mode only: the camera dials our relay allocation, and its
+    # packets arrive at the TURN server from the house WAN address - OUR
+    # public address - so that address needs a permission or the path is a
+    # black hole.  Deliberately NOT done outside relay mode: a permission
+    # for our own srflx caused TURN self-loop Data Indications and STUN
+    # echo storms when it was installed indiscriminately (see the warning
+    # in the allocation helper).  In relay mode nothing of ours is sent to
+    # our own allocation, so the loop has no driver.
+    if _relay_in_c and _public_ip:
+        _turn_install_permissions([(_public_ip, 9)], "relay-mode WAN")
+
+    if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:
+        # Say it plainly when every address the camera offered is on a
+        # subnet this host is not on. Nothing downstream can recover from
+        # that -- the packets leave by the default gateway and are dropped
+        # -- and the symptom otherwise reads as "first media never
+        # arrived", which sends people looking at the camera.
+        _off = [(_i, _p_) for _i, _p_ in _cam_ice_cands if _candidate_is_off_subnet(_i)]
+        if _off and len(_off) == len(_cam_ice_cands):
+            _LOGGER.warning(
+                "camera %s: every candidate it offered is on a subnet this"
+                " host cannot reach (%s). Direct media is impossible; only"
+                " the relay can carry it. If this camera never streams,"
+                " it is on a different network segment (a mesh node,"
+                " extender or guest SSID) rather than broken.",
+                self.device_id,
+                ", ".join(f"{_i}:{_p_}" for _i, _p_ in _off),
+            )
+        _turn_install_permissions(_cam_ice_cands, "setup")
+
+        for _c_ip, _c_port in _cam_ice_cands:
+            _send_use_candidate(
+                _audio_sock,
+                _ufrag_a,
+                _pwd_a,
+                _cam_ice_ufrag,
+                _cam_ice_pwd,
+                (_c_ip, _c_port),
+            )
+            _send_use_candidate(
+                _video_sock,
+                _ufrag_v,
+                _pwd_v,
+                _cam_ice_ufrag,
+                _cam_ice_pwd,
+                (_c_ip, _c_port),
+            )
+        _status(
+            f"ICE controlling: sent USE-CANDIDATE to"
+            f" {len(_cam_ice_cands)} camera candidate(s)"
+            f" ({_cam_ice_cands[0][0]}:{_cam_ice_cands[0][1]})"
+        )
+        # SCTP client: INIT will be sent from the bridge thread on BindingSucc.
+    else:
+        _status(
+            "ICE controlling: no camera ICE credentials in answer"
+            " (pre-answer or relay-only path)"
+        )
+    return _phase_outputs(
+        locals(),
+        (
+            "_cam_ice_cands",
+            "_cam_ice_pwd",
+            "_cam_ice_ufrag",
+            "_nominate_from_answer_sdp",
+            "_nominated_seen",
+            "_send_use_candidate",
+            "_turn_install_permissions",
+            "_turn_refresh_allocation",
+            "_turn_send_indication",
+        ),
+    )
+
+
 class _SdesOpenMixin:
     async def _open_sdes_stream(self, **kwargs) -> "SdesSession":
         """Allocate-and-hand-off wrapper around _open_sdes_stream_impl.
@@ -5924,111 +8370,12 @@ class _SdesOpenMixin:
         # DTLS-fallback offer that cannot succeed.
         terminal_error_fut=None,
     ) -> "SdesSession":
-        """SDES-SRTP streaming path using a hand-crafted SDP offer and ffmpeg.
-
-        SDES cameras negotiate SRTP keys inline in the SDP (``a=crypto:`` lines)
-        rather than via a DTLS handshake.  aiortc does not support SDES-SRTP, so
-        this path sends a manually constructed SDP offer, waits for the camera's
-        SDP answer, writes it to a temp file, and launches ffmpeg to receive and
-        record the SRTP stream.
-        """
-        # When this open began.  The answer-ready marker lives on the camera
-        # object, not the open, so a marker older than this belongs to a
-        # previous open and must not fire this one's early exit.
-        _open_started_at = time.monotonic()
-        from .client import (
-            CameraMixin,
-            _build_sdes_serve_cmd,
-            _ffmpeg_path,
-            _resolve_serve_input_timeout_s,
-            _spawn_bg,
-        )  # lazy: break client<->sdes_open cycle
-        import base64
+        from .client import CameraMixin
+        from .client import _build_sdes_serve_cmd
+        from .client import _ffmpeg_path
+        from .client import _resolve_serve_input_timeout_s
+        from .client import _spawn_bg
         import subprocess
-
-        # Stop the MQTT signaling thread on ANY abnormal exit from this impl.
-        # The explicit `outgoing_q.put_nowait(None)` calls further down cover the
-        # paths that existed when they were written, but an exception raised
-        # before one of them is reached (AidotCameraBusy on a terminal ack, or a
-        # CancelledError mid-handshake) skipped the sentinel entirely and left
-        # `_mqtt_session_sync` running in an executor thread for its full 3600s.
-        # Those orphans all reconnect with the same stable account clientId, so
-        # they take the session away from later opens and signaling for other
-        # cameras on the account stops being delivered until HA restarts.
-        # The wrapper only closes this stack when the impl did NOT return a
-        # session, so a live session is unaffected.  A duplicate sentinel on the
-        # paths that already send one is harmless - the reader exits on the first.
-        if outgoing_q is not None:
-
-            def _stop_mqtt_thread() -> None:
-                try:
-                    outgoing_q.put_nowait(None)
-                except Exception:
-                    _LOGGER.debug(
-                        "camera %s: could not signal MQTT thread to exit",
-                        getattr(self, "device_id", "?"),
-                        exc_info=True,
-                    )
-
-            _cleanup.callback(_stop_mqtt_thread)
-
-        # SDES path: fast_connect's wait-skips / TURN-strip destabilise the SCTP
-        # handshake (session churns ~every 60-90s -> live view drops to snapshot),
-        # so the SDES path always uses the full, stable handshake.
-
-        user_id = user_id or str(self.user_id)
-
-        # Models confirmed (2026-05-02) to send TUTK-framed data instead of
-        # standard SRTP: camera announces an ASCII-printable fake SDES key and
-        # sends packets with byte0=0xC8 (TUTK audio SFrame header) and an SSRC
-        # that differs from the one advertised in the SDP.  For these models:
-        # (a) ffmpeg SDP uses plain RTP/AVP (no SRTP decryption attempt), and
-        # (b) the bridge thread detects TUTK SFrame headers (0xC8=audio,
-        #     0xC9=video), strips the 12-byte TUTK header, synthesizes a
-        #     standard RTP header from the TUTK timestamp+SSRC fields, and
-        #     forwards the reassembled plain-RTP packet to ffmpeg.
-        # Substring-matched, NOT equality: a revision suffix ("LK.IPC.A001513-1",
-        # the way A000088-1 exists on the DTLS side) is the same firmware and needs
-        # the same framing.  An exact match silently read such a camera as a plain
-        # SRTP model, so ffmpeg tried to decrypt TUTK frames with the announced
-        # fake key and the bridge never stripped the TUTK header - a session that
-        # negotiates and delivers nothing decodable.
-        _model_id = getattr(getattr(self, "info", None), "model_id", None) or ""
-        _use_plain_rtp = any(m in _model_id for m in self._PLAIN_RTP_MODELS)
-        # powerType/p2pCache - IpcServiceImpl.java:B() returns 2 for battery
-        # models; 1 for wired.  Derived from is_battery_camera (see live_power_type)
-        # so the wire value and the battery guards cannot drift apart.  All tested
-        # cameras report p2pCache=2 in their setDevAttrNotif device attributes.
-        # App parity: LivePlayPaylodBean declares these as INT, not String - send
-        # ints so a strict camera JSON parser accepts the livePlayReq (battery cams
-        # appear stricter; a rejected livePlayReq leaves the cam un-armed).
-        _live_power_type = self.live_power_type
-        _live_p2p_cache = 2
-
-        webrtc_req_topic = f"iot/v1/s/{user_id}/IPC/webrtcReq"
-
-        def _seq() -> str:
-            return f"ap{random.randint(1000000, 9999999)}"
-
-        # Register a resource with the wrapper's cleanup stack so it is released
-        # if the cold open is cancelled/raises before the SdesSession takes
-        # ownership.  Each step swallows so ExitStack.close() can never mask the
-        # original CancelledError/exception.  No-op if called without a stack.
-        def _cl(fn, *a):
-            if _cleanup is None:
-                return
-
-            def _run():
-                try:
-                    fn(*a)
-                except Exception:
-                    _LOGGER.debug(
-                        "camera %s: swallowed sdes-open cleanup step",
-                        getattr(self, "device_id", "?"),
-                        exc_info=True,
-                    )
-
-            _cleanup.callback(_run)
 
         def _reap(p):
             # This is a locally-initiated kill (cold open cancelled/raised
@@ -6050,111 +8397,44 @@ class _SdesOpenMixin:
             except Exception:
                 pass
 
+        _o = await _sdes_open_head(self, locals())
+        if "_cl" in _o:
+            _cl = _o["_cl"]
+        if "_live_p2p_cache" in _o:
+            _live_p2p_cache = _o["_live_p2p_cache"]
+        if "_live_power_type" in _o:
+            _live_power_type = _o["_live_power_type"]
+        if "_open_started_at" in _o:
+            _open_started_at = _o["_open_started_at"]
+        if "_seq" in _o:
+            _seq = _o["_seq"]
+        if "_use_plain_rtp" in _o:
+            _use_plain_rtp = _o["_use_plain_rtp"]
+        if "user_id" in _o:
+            user_id = _o["user_id"]
+        if "webrtc_req_topic" in _o:
+            webrtc_req_topic = _o["webrtc_req_topic"]
+
         # --- Allocate UDP ports and determine local IP ---------------------- #
-        import socket as _socket
-
-        _audio_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
-        _widen_media_rcvbuf(_audio_sock, "audio", getattr(self, "device_id", "?"))
-        _audio_sock.bind(("0.0.0.0", 0))
-        audio_port = _audio_sock.getsockname()[1]
-        _cl(_audio_sock.close)  # also unblocks the bridge thread's recv on cleanup
-
-        _video_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
-        _widen_media_rcvbuf(_video_sock, "video", getattr(self, "device_id", "?"))
-        _video_sock.bind(("0.0.0.0", 0))
-        video_port = _video_sock.getsockname()[1]
-        _cl(_video_sock.close)
-
-        # Use the outbound interface toward 8.8.8.8 to find our local IP.
-        # connect() on a UDP socket does not send any packet.
-        with _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM) as _s:
-            _s.connect(("8.8.8.8", 80))
-            local_ip = _s.getsockname()[0]
-
-        # Determine server-reflexive (public) IP from cached getServerUrlConfig.
-        # The Arnoo broker records our outbound IP in the "ip" field; this is the
-        # same address that aiortc discovers via STUN and exposes as srflx
-        # candidates.  Adding it to the SDES offer lets cameras that cannot route
-        # to our LAN IP (WAN cameras, different subnet) send STUN probes to our
-        # public address, which the router NATs to our reservation sockets.
-        _public_ip: Optional[str] = None
-        try:
-            _raw_srv = (self._smarthome_auth or {}).get("raw") or {}
-            _cand_pub = str(_raw_srv.get("ip") or "").strip()
-            if _cand_pub and _cand_pub != local_ip:
-                # Accept any valid IPv4 that differs from our LAN address.
-                _p = _cand_pub.split(".")
-                if len(_p) == 4 and all(x.isdigit() and 0 <= int(x) <= 255 for x in _p):
-                    _public_ip = _cand_pub
-        except Exception:
-            _LOGGER.debug(
-                "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
-                "_open_sdes_stream_impl",
-                exc_info=True,
-            )
-
-        # Build TURN server list for _sdes_ice_server_list from ice_config if
-        # available.  The camera's ICE agent uses these to gather its own relay
-        # candidates; a relay path is the last resort when direct and srflx
-        # connectivity both fail (e.g. symmetric NAT or strict firewall).
-        _sdes_turn_entries: list = []
-        try:
-            if ice_config:
-                # Unwrap common envelope shapes (mirrors DTLS path normalisation).
-                _ic = ice_config
-                for _k in ("data", "payload", "result"):
-                    if (
-                        isinstance(_ic, dict)
-                        and _k in _ic
-                        and isinstance(_ic[_k], dict)
-                    ):
-                        _ic = _ic[_k]
-                        break
-                # Arnoo format: {app: [{uris, id, token}], dev: [...]}
-                for _sect in ("app", "dev"):
-                    for _entry in _ic.get(_sect) or []:
-                        _uris = _entry.get("uris") or _entry.get("Uris") or []
-                        _user = (
-                            _entry.get("id")
-                            or _entry.get("Username")
-                            or _entry.get("username")
-                            or ""
-                        )
-                        _cred = (
-                            _entry.get("token")
-                            or _entry.get("Password")
-                            or _entry.get("password")
-                            or ""
-                        )
-                        if any("turn:" in str(u) for u in _uris):
-                            _sdes_turn_entries.append(
-                                {
-                                    "Uris": _uris,
-                                    "Username": _user,
-                                    "Password": str(_cred),
-                                }
-                            )
-                # W3C format: {iceServers: [{urls, username, credential}]}
-                for _entry in _ic.get("iceServers") or []:
-                    _uris = _entry.get("urls") or _entry.get("uris") or []
-                    if isinstance(_uris, str):
-                        _uris = [_uris]
-                    if any("turn:" in str(u) for u in _uris):
-                        _sdes_turn_entries.append(
-                            {
-                                "Uris": _uris,
-                                "Username": _entry.get("username") or "",
-                                "Password": _entry.get("credential") or "",
-                            }
-                        )
-        except Exception:
-            _LOGGER.debug(
-                "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
-                "_open_sdes_stream_impl",
-                exc_info=True,
-            )
+        _o = await _sdes_open_allocate_ports(self, locals())
+        if "_audio_sock" in _o:
+            _audio_sock = _o["_audio_sock"]
+        if "_public_ip" in _o:
+            _public_ip = _o["_public_ip"]
+        if "_sdes_turn_entries" in _o:
+            _sdes_turn_entries = _o["_sdes_turn_entries"]
+        if "_video_sock" in _o:
+            _video_sock = _o["_video_sock"]
+        if "audio_port" in _o:
+            audio_port = _o["audio_port"]
+        if "local_ip" in _o:
+            local_ip = _o["local_ip"]
+        if "u" in _o:
+            u = _o["u"]
+        if "video_port" in _o:
+            video_port = _o["video_port"]
+        if "x" in _o:
+            x = _o["x"]
 
         # --- TURN relay allocation helper ------------------------------------ #
         # Defined BEFORE the offer so relay IP/port can be embedded in the
@@ -6165,391 +8445,47 @@ class _SdesOpenMixin:
         # All eight fields are required: CreatePermission has to re-authenticate
         # with USERNAME/REALM/NONCE and the long-term-credential key, so any path
         # that stores a shorter tuple silently disables the relay permission.
-        _relay_addrs: dict = {}
-
-        _turn_allocate_udp = turn_allocate_udp
-
-        # --- Early TURN relay allocation (before offer build) --------------- #
-        # Allocate relay now so offer c= and m= carry relay IP/port.
-        # Camera reads offer's c= to know where to send SRTP - relay address
-        # here means SRTP reaches us even through port-restricted / hairpin NAT.
-        # AIDOT_FAST_CONNECT skips this blocking pre-allocation (LAN-direct mode):
-        # the offer goes out immediately with host/srflx candidates and the LAN
-        # path connects without waiting on a cloud TURN Allocate round-trip.
-        # Connection mode "lan" does the same skip for SDES specifically, and
-        # the echo-path and post-offer allocates below honour it too. Either way
-        # the cost is instrumented below so the saving is measurable: grep
-        # ``signaling-wait[`` for sdes-turn-prealloc.
-        _skip_turn_prealloc = self._resolve_sdes_skip_turn()
-        # Which media path to offer (auto | lan | relay).  Resolved once per
-        # open; the candidate blocks below are built from it.  A receipt goes
-        # out whenever it is not the default, because a run that cannot show
-        # the knob was applied cannot tell a result from a coincidence.
-        _conn_mode = self._resolve_sdes_connection_mode()
-        if _conn_mode != "auto" and _status:
-            _status(f"SDES: connection mode {_conn_mode}")
-        _turn_t0 = time.monotonic()
-        _turn_did = False
-        if _sdes_turn_entries and not _skip_turn_prealloc:
-            _turn_did = True
-            try:
-                _tgt_pre = _turn_target(_sdes_turn_entries, user_id)
-                if _tgt_pre:
-                    for _pre_sock, _pre_name in (
-                        (_audio_sock, "audio"),
-                        (_video_sock, "video"),
-                    ):
-                        _pre_res = await _run_off_loop(
-                            _turn_allocate_udp, _pre_sock, *_tgt_pre
-                        )
-                        if _pre_res:
-                            _relay_addrs[_pre_sock] = _turn_relay_record(
-                                _pre_res, *_tgt_pre
-                            )
-                            _status(
-                                f"TURN relay pre-allocated (offer): {_pre_name}"
-                                f" -> {_pre_res[0]}:{_pre_res[1]}"
-                            )
-            except Exception as _pre_exc:
-                _LOGGER.warning("TURN pre-allocation error: %s", _pre_exc)
-        if _skip_turn_prealloc and _sdes_turn_entries:
-            _status(
-                "connection mode lan: skipping TURN relay pre-allocation (~2-3s)"
-                " - host/srflx candidates only"
-            )
-        _LOGGER.info(
-            "signaling-wait[%s] sdes-turn-prealloc elapsed=%dms allocated=%d skipped=%s",
-            self.device_id,
-            int((time.monotonic() - _turn_t0) * 1000),
-            len(_relay_addrs),
-            bool(_skip_turn_prealloc),
-        )
-
-        # PreCon cameras (sptPreconn=1) take SESSION_MODE_REQ over an SCTP data
-        # channel, so the offer carries an m=application section for the camera
-        # to answer. Only its presence matters: the section is keyed by its
-        # a=crypto line, not by a fingerprint (an EC certificate used to be
-        # generated here on every open to decide this boolean).
-        _dc_probe_fp = "present"
+        _o = await _sdes_open_turn_pre_allocation(self, locals())
+        if "_conn_mode" in _o:
+            _conn_mode = _o["_conn_mode"]
+        if "_dc_probe_fp" in _o:
+            _dc_probe_fp = _o["_dc_probe_fp"]
+        if "_relay_addrs" in _o:
+            _relay_addrs = _o["_relay_addrs"]
+        if "_skip_turn_prealloc" in _o:
+            _skip_turn_prealloc = _o["_skip_turn_prealloc"]
+        if "_turn_allocate_udp" in _o:
+            _turn_allocate_udp = _o["_turn_allocate_udp"]
 
         # --- Generate PSK before SDP (must precede SDP building) ------------- #
         # PSK is injected into SDP as a=psk: and into wPayload.psk.
         # Use a CSPRNG: the PSK is media-keying material carried over signaling,
         # so it must not come from the predictable Mersenne-Twister (random).
-        import secrets as _secrets_psk_early
-
-        _psk_charset_req = "123456789abcdef"
-        _psk_value_req = "".join(
-            _secrets_psk_early.choice(_psk_charset_req) for _ in range(64)
-        )
-
-        # --- Build SDES SDP offer ------------------------------------------ #
-        # AES_CM_128_HMAC_SHA1_80: 16-byte key + 14-byte salt = 30 bytes.
-        srtp_key_audio = base64.b64encode(os.urandom(30)).decode()
-        srtp_key_video = base64.b64encode(os.urandom(30)).decode()
-        # DEBUG is not low enough for real key material.  This used to log the
-        # decoded master key AND salt in full hex - the whole secret, not a
-        # prefix - on the reasoning that DEBUG is not "production-level".  But
-        # Home Assistant users turn this integration's logger to debug precisely
-        # when something is wrong, and then paste the log into a public issue.
-        _LOGGER.debug(
-            "sdes: offer key=%s psk=%s",
-            _key_fingerprint(srtp_key_audio),
-            _key_fingerprint(_psk_value_req),
-        )
-        ts = int(time.time())
-        # SDES-SRTP cameras use SIP-era plain SDP (RFC 3264 + RFC 3711).
-        # Use RTP/SAVPF (RFC 4585) - Leedarson firmware expects the feedback
-        # profile and silently ignores offers with plain RTP/SAVP.
-        # Include ICE credentials and a host candidate so that newer PTZ
-        # firmware (e.g. LK.IPC.A001064) that requires ICE for address
-        # discovery will respond.  Older cameras that don't understand ICE
-        # ignore those attributes and use the port in the m= line directly.
-        # ONE pair for the whole offer, not one per m-section - see
-        # _new_ice_credentials for why, and note _compress_sdp_req below keeps
-        # only the first of each attribute anyway.
-        import secrets as _secrets
-
-        # One pair for the whole offer - see _new_ice_credentials. The video
-        # names are kept as aliases rather than removed: they are threaded
-        # through the STUN responder, the nomination and the bridge, and
-        # collapsing 23 call sites would obscure a change whose whole point is
-        # that the two values are now equal.
-        _ufrag_a, _pwd_a = _new_ice_credentials()
-        _ufrag_v = _ufrag_a
-        _pwd_v = _pwd_a
-        # Use srflx (public) IP and direct port in c= and m= for the offer too,
-        # for consistency with the answer.  TURN relay requires CreatePermission
-        # for the camera's public IP which is unknown; relay in c= causes TURN to
-        # drop every camera packet.  Relay is still in a=candidate: for ICE.
-        # For LAN cameras (_public_ip is None) fall back to local_ip directly.
-        _offer_audio_ip, _offer_audio_port, _relay_in_c_a = _sdes_offer_media_endpoint(
-            _conn_mode,
-            _public_ip or local_ip,
-            audio_port,
-            _relay_addrs.get(_audio_sock),
-            _public_ip,
-        )
-        _offer_video_ip, _offer_video_port, _relay_in_c_v = _sdes_offer_media_endpoint(
-            _conn_mode,
-            _public_ip or local_ip,
-            video_port,
-            _relay_addrs.get(_video_sock),
-            _public_ip,
-        )
-        _relay_in_c = _relay_in_c_a or _relay_in_c_v
-        if _conn_mode == "relay" and not _relay_in_c and _status:
-            _status(
-                "SDES: relay mode fell back to the direct endpoint"
-                " (no allocation or no public ip)"
-            )
-        elif _relay_in_c and _status:
-            _status("SDES: c=/m= at the relay allocation (relay mode)")
-        _bundle_hdr_line = (
-            "a=group:BUNDLE 0 1 2\r\n" if _dc_probe_fp else "a=group:BUNDLE 0 1\r\n"
-        )
-        # Outbound talk: a talk-intended open advertises audio as sendrecv WITH an
-        # a=ssrc so the camera builds a receive path for our PCMA (cname required -
-        # _compress_sdp_req keeps a=ssrc lines only when "cname" is present).  Pure
-        # streaming opens keep audio recvonly (the validated 72s/49s path, untouched).
-        _talk_offer = talk
-        _offer_audio_ssrc = int.from_bytes(os.urandom(4), "big") or 1
-        _offer_audio_cname = _secrets.token_urlsafe(12)[:12]
-        _audio_dir_line = "a=sendrecv\r\n" if _talk_offer else "a=recvonly\r\n"
-        _audio_ssrc_line = (
-            f"a=ssrc:{_offer_audio_ssrc} cname:{_offer_audio_cname}\r\n"
-            if _talk_offer
-            else ""
-        )
-        # Shared talk state (only for talk-capable opens).  The bridge fills
-        # src/sock on first inbound audio; SdesSession.async_start_talk sets
-        # provider + sends SPEAKERSTART(848); the talk pump thread reads this to
-        # emit outbound PCMA as SRTP at our offer SSRC.  srtp_key_audio here is
-        # our offer key (captured before it is reassigned to the camera key after
-        # the answer); the immutable str is safe to hold.
-        _talk_state = (
-            {
-                "provider": None,  # set by async_start_talk; cleared on stop/clip-end
-                "src": None,  # camera media addr (bridge sets on first media)
-                "sock": None,  # media socket (bridge)
-                "ssrc": _offer_audio_ssrc,
-                "key": srtp_key_audio,  # our offer key (immutable str; safe to hold)
-                "want_speaker": False,  # async_start/stop_talk flips this
-                "speaker_on": False,  # bridge sets after it sends SPEAKERSTART
-                "spk_eligible_ts": None,  # bridge: first time SPEAKERSTART is eligible
-                "stop": False,
-            }
-            if _talk_offer
-            else None
-        )
-        # Video codec preference, expressed by m-line order (RFC 3264 5.1):
-        # 96 (H.264) first, 97 (H.265) second. The order was an experiment knob
-        # once; the camera answers from its own template whatever the order,
-        # and the bitrate question it served is closed (2026-08-24).
-        _video_pt_list, _video_codec_attrs = _sdes_offer_video_codec_lines()
-        sdes_offer_sdp = (
-            "v=0\r\n"
-            f"o=- {ts} {ts} IN IP4 {local_ip}\r\n"
-            "s=-\r\n"
-            f"t=0 0\r\n{_bundle_hdr_line}"
-            # audio m-section
-            # a=crypto MUST precede ICE attributes (RFC 4568 section 9.1) so that
-            # linear-parsing camera firmware recognises this as an SDES offer
-            # rather than a pure-ICE offer and does not discard the key.
-            f"m=audio {_offer_audio_port} RTP/SAVPF 0 8\r\n"
-            f"c=IN IP4 {_offer_audio_ip}\r\n" + _audio_dir_line + "a=mid:0\r\n"
-            f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
-            "a=rtpmap:0 PCMU/8000\r\n"
-            "a=rtpmap:8 PCMA/8000\r\n"
-            # a=rtcp-mux: multiplexes RTCP onto the RTP port so the camera does
-            # not send RTCP to audio_port+1 (which is never bound), and so that
-            # ffmpeg does not try to open a separate RTCP socket.
-            "a=rtcp-mux\r\n"
-            + _audio_ssrc_line
-            # PSK is sent in wPayload only - real app does NOT inject a=psk: into
-            # the SDP body (confirmed from logcat ground truth 2026-05-22).
-            + f"a=ice-ufrag:{_ufrag_a}\r\n"
-            f"a=ice-pwd:{_pwd_a}\r\n"
-            + _sdes_offer_candidate_lines(
-                _conn_mode,
-                local_ip,
-                audio_port,
-                _public_ip,
-                _relay_addrs.get(_audio_sock),
-            )
-            # video m-section
-            + f"m=video {_offer_video_port} RTP/SAVPF {_video_pt_list}\r\n"
-            f"c=IN IP4 {_offer_video_ip}\r\n" + "a=recvonly\r\n"
-            "a=mid:1\r\n"
-            f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
-            + _video_codec_attrs
-            + "a=rtcp-mux\r\n"
-            f"a=ice-ufrag:{_ufrag_v}\r\n"
-            f"a=ice-pwd:{_pwd_v}\r\n"
-            + _sdes_offer_candidate_lines(
-                _conn_mode,
-                local_ip,
-                video_port,
-                _public_ip,
-                _relay_addrs.get(_video_sock),
-            )
-            # m=application SCTP DataChannel section for SDES cameras.
-            # Ground truth from real Leedarson app logcat (2026-05-22):
-            #   m=application 9 SCTP webrtc-datachannel
-            #   a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{key}
-            # That is ALL - no a=setup, no a=sctp-port, no fingerprint.
-            # Using UDP/DTLS/SCTP or a=setup:active triggers the SCTP deadlock;
-            # plain SCTP lets the camera handle role negotiation internally.
-            # The a=crypto line is required: GetSctpSdesKey0/1 in the camera
-            # firmware parse inline: from this attribute to derive the AES key.
-            + (
-                "m=application 9 SCTP webrtc-datachannel\r\n"
-                "c=IN IP4 0.0.0.0\r\n"
-                "a=mid:2\r\n"
-                f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
-                if _dc_probe_fp
-                else ""
-            )
-        )
-
-        # The default since 1.0.0rc44: NARROW the OFFER to one video codec
-        # (H.264) rather than advertising both 96/97 and letting the camera
-        # decide in its answer.  Distinct from the codec order above, which
-        # only states which of the two we would rather have and leaves both on
-        # the wire; this one takes the other away, which for 97 took the video
-        # with it.
-        #
-        # The offer is the SDP that matters here.  Traced live 2026-08-07 with
-        # every status line printed: this path sends webrtcReq carrying OUR
-        # offer and then reports "Using camera's video SRTP key from answer" -
-        # the camera answers, we do not.  The answer builder further down runs
-        # only on the branch where the camera offers first, which this camera
-        # did not take, so pinning there changed nothing at all while the
-        # arms still came out looking like the pin had worked.  Only
-        # AIDOT_SDES_VIDEO_PT=none leaves the camera its choice.
-        _pin_video_pt = _resolve_sdes_video_pt()
-        if _pin_video_pt is not None:
-            sdes_offer_sdp = narrow_sdp_payload_types(
-                sdes_offer_sdp, keep_video=_pin_video_pt
-            )
-            if _status:
-                _status(f"SDES: offer pinned to video pt={_pin_video_pt}")
-
-        _relay_str = (
-            f"  relay-audio={_relay_addrs[_audio_sock][0]}:{_relay_addrs[_audio_sock][1]}"
-            if _audio_sock in _relay_addrs
-            else ""
-        )
-        _status(
-            f"SDP offer (SDES)  local={local_ip}"
-            + (f"  srflx={_public_ip}" if _public_ip else "")
-            + f"  audio={audio_port}  video={video_port}"
-            + _relay_str
-        )
-
-        # Send livePlayReq before the SDP offer to arm the camera's stream.
-        import random as _random
-
-        _live_req_sdes = ipc_envelope(
-            "livePlayReq",
-            device_id,
-            user_id,
-            numeric_uid_raw,
-            seq=f"ap{_random.randint(1000000, 9999999)}",
-            payload={
-                "peerid": peer_id,
-                "devId": device_id,
-                # Decompiled reference app (tyrus/o.java) sets payload.dstAddr
-                # to the target deviceId for livePlayReq.
-                "dstAddr": device_id,
-                # App payload compatibility fields (decompiled live-play model).
-                "livePlay": 1,
-                "powerType": _live_power_type,
-                "p2pCache": _live_p2p_cache,
-                "dseq": self._next_dseq(),
-            },
-        )
-        _live_play_topic_sdes = f"iot/v1/s/{user_id}/IPC/livePlayReq"
-        outgoing_q.put_nowait((_live_play_topic_sdes, _live_req_sdes))
-        _status(f"livePlayReq sent (SDES)  peerid={peer_id}")
-        import asyncio as _asyncio
-
-        # Wait for the livePlayReq echo from the broker/camera before sending
-        # webrtcReq.  The echo confirms the MQTT pipeline to this device is live
-        # and the broker session is registered.  Fall through after 5 s if it
-        # never arrives (same safety as the old fixed 0.5 s sleep, but adaptive).
-        # SDES fast-liveplay (sdes_fast_liveplay, DEFAULT ON since 0.7.32 - the
-        # official app fire-and-forgets too): instrumentation showed the echo and
-        # livePlayResp waits BOTH always time out for the SDES cameras measured
-        # (echo/resp never arrive) yet streaming succeeds - i.e. ~6 s of dead
-        # padding.  When on (the default), cap the echo wait short and skip the
-        # livePlayResp wait; the full ICE/TURN/SCTP handshake is untouched.  This
-        # is the SDES path's OWN livePlay waits (the DTLS gate above never runs for
-        # SDES: use_sdes is True there).  VALIDATED in a 3 h live soak (15 SDES
-        # opens across battery cameras, 0 churn / 0 fail, ~4.5 s signaling saved)
-        # and shipped default-on across 0.8/0.9.x.  Role-reversal models
-        # (_NO_FAST_LIVEPLAY_MODELS, e.g. A001064) are always excluded; disable
-        # elsewhere via AIDOT_SDES_FAST_LIVEPLAY={0,false,no,off}.
-        _skip_lp = self._resolve_sdes_fast_liveplay()
-        _echo_timeout = _sdes_liveplay_echo_timeout(_skip_lp)
-        _echo_t0 = time.monotonic()
-        try:
-            await _asyncio.wait_for(liveplay_echo_ev.wait(), timeout=_echo_timeout)
-            _status(
-                "livePlayReq echo received - sending webrtcReq, ICE, then launching ffmpeg"
-            )
-        except TimeoutError:
-            _status(
-                f"no livePlayReq echo in {_echo_timeout:.1f}s - sending webrtcReq,"
-                " ICE, then launching ffmpeg anyway"
-            )
-        _LOGGER.info(
-            "signaling-wait[%s] livePlayReq-echo elapsed=%dms (timeout=%.1fs)",
-            self.device_id,
-            int((time.monotonic() - _echo_t0) * 1000),
-            _echo_timeout,
-        )
-        # livePlayResp: explicit camera accept/reject before SDP/ICE.
-        if _skip_lp:
-            _LOGGER.info(
-                "signaling-wait[%s] livePlayResp skipped (sdes_fast_liveplay)",
-                self.device_id,
-            )
-        else:
-            _lp_t0 = time.monotonic()
-            _lp_arrived = False
-            try:
-                _lp_resp_sdes = await _asyncio.wait_for(
-                    _asyncio.shield(liveplay_resp_fut), timeout=1.0
-                )
-                _lp_arrived = True
-                _lp_code_sdes = int(_lp_resp_sdes.get("code", 200))
-                _lp_on_sdes = int(_lp_resp_sdes.get("livePlay", 1))
-                # Only an explicit livePlay=0 is an unambiguous refusal (fast-fail).
-                # Numeric codes (e.g. -50019 "not ready" on a waking battery cam)
-                # are transient - the camera recovers and streams - so log and
-                # proceed rather than abort on a code we can't classify as terminal
-                # (genuine terminal rejects are still caught on the webrtcResp ack).
-                if _lp_on_sdes == 0:
-                    # The sockets and the SDP file are released by the exit stack as this raises.
-                    outgoing_q.put_nowait(None)  # stop MQTT thread
-                    raise RuntimeError(
-                        f"livePlay refused by camera (livePlay=0, code={_lp_code_sdes})"
-                    )
-                elif _lp_code_sdes not in (0, 200):
-                    _status(
-                        f"livePlayResp: non-OK code {_lp_code_sdes}"
-                        f"{' (not ready, transient)' if _lp_code_sdes == _LIVE_PLAY_NOT_READY else ''}"
-                        " - proceeding"
-                    )
-            except TimeoutError:
-                pass
-            _LOGGER.info(
-                "signaling-wait[%s] livePlayResp elapsed=%dms arrived=%s",
-                self.device_id,
-                int((time.monotonic() - _lp_t0) * 1000),
-                _lp_arrived,
-            )
+        _o = await _sdes_open_build_offer(self, locals())
+        if "_psk_value_req" in _o:
+            _psk_value_req = _o["_psk_value_req"]
+        if "_pwd_a" in _o:
+            _pwd_a = _o["_pwd_a"]
+        if "_pwd_v" in _o:
+            _pwd_v = _o["_pwd_v"]
+        if "_relay_in_c" in _o:
+            _relay_in_c = _o["_relay_in_c"]
+        if "_skip_lp" in _o:
+            _skip_lp = _o["_skip_lp"]
+        if "_talk_state" in _o:
+            _talk_state = _o["_talk_state"]
+        if "_ufrag_a" in _o:
+            _ufrag_a = _o["_ufrag_a"]
+        if "_ufrag_v" in _o:
+            _ufrag_v = _o["_ufrag_v"]
+        if "sdes_offer_sdp" in _o:
+            sdes_offer_sdp = _o["sdes_offer_sdp"]
+        if "srtp_key_audio" in _o:
+            srtp_key_audio = _o["srtp_key_audio"]
+        if "srtp_key_video" in _o:
+            srtp_key_video = _o["srtp_key_video"]
+        if "ts" in _o:
+            ts = _o["ts"]
 
         # --- Build local-receiver SDP for ffmpeg ----------------------------- #
         # Built BEFORE sending webrtcReq so ffmpeg is already listening on the
@@ -6568,93 +8504,11 @@ class _SdesOpenMixin:
         # firmware; only this local file (read by ffmpeg) needs SAVP.
         # a=rtcp-mux in the template keeps ffmpeg from binding audio_port+1
         # for RTCP, a separate socket that is never needed here.
-        ffmpeg_sdp = _ffmpeg_rx_sdp(
-            ts=ts,
-            audio_port=audio_port,
-            video_port=video_port,
-            plain_rtp=False,
-            srtp_key_audio=srtp_key_audio,
-            srtp_key_video=srtp_key_video,
-            conn_ip="0.0.0.0",
-            session_name="aidot-sdes-rx",
-        )
-
-        sdp_path = await asyncio.get_running_loop().run_in_executor(
-            # _inject_sprop reads the sprop cache from disk; keep it inside the
-            # executor (not as an eagerly-evaluated arg) so the blocking open()
-            # does not run on the event loop.
-            None,
-            lambda: _make_sdp_tempfile(_inject_sprop(ffmpeg_sdp, self.device_id)),
-        )
-        _cl(os.unlink, sdp_path)  # released with the sockets on a cancelled open
-
-        # --- Send webrtcReq BEFORE releasing reservation sockets ------------- #
-        # ICE cameras (e.g. LK.IPC.A001064) send STUN binding requests to our
-        # ICE candidates immediately after receiving webrtcReq.  We must respond
-        # from the reservation sockets (which own those ports) BEFORE handing
-        # the ports to ffmpeg.  Non-ICE cameras start streaming SRTP straight
-        # away; any early SRTP packets landing on the reservation sockets are
-        # discarded, but the camera keeps streaming once ffmpeg is bound.
-        # IceServerList for SDES path.  Always include STUN so the camera's ICE
-        # agent can gather its own srflx candidate.  Append any TURN entries from
-        # ice_config so the camera can allocate a relay and probe our srflx/host
-        # candidates when direct connectivity fails (e.g. symmetric NAT).
-        # Advertise an ICE server to the camera only when we actually have a
-        # URI for it.  With AIDOT_STUN_SERVERS="" this used to put
-        # {"Uris": []} into webrtcReq - an entry the camera must parse and
-        # that names no server.
-        _sdes_stun_uris = stun_server_uris()
-        _sdes_ice_server_list = [{"Uris": _sdes_stun_uris}] if _sdes_stun_uris else []
-        _sdes_ice_server_list.extend(_sdes_turn_entries)
-
-        # _psk_value_req was generated before the SDP offer (see above).
-        # Reused here in webrtcReq and webrtcResp for consistency.
-        _compress_sdp_req = functools.partial(compress_sdp_req, device_id)
-
-        _compressed_sdp_req = _compress_sdp_req(sdes_offer_sdp)
-        _webrtc_req_sdes_payload = ipc_envelope(
-            "webrtcReq",
-            device_id,
-            user_id,
-            numeric_uid_raw,
-            seq=_seq(),
-            payload={
-                # Legacy flat fields - older firmware parses payload.peerid directly.
-                "peerid": peer_id,
-                "devId": device_id,
-                "offer": {"type": "offer", "sdp": sdes_offer_sdp},
-                "trackId": 0,
-                # Decompiled reference app (tyrus/o.java) sets dstAddr=deviceId
-                # for webrtcReq.
-                "dstAddr": device_id,
-                "encOffer": 1,
-                "liveMqtt": 1,
-                # powerType / p2pCache ride on the webrtcReq payload, alongside
-                # encOffer and liveMqtt - the same object the reference client
-                # puts them on (LDSMQTTClient.sendSdpOffer, smali :2967-2969,
-                # put at :3017/:3022).  They are STRINGS on the wire there: the
-                # app stringifies the ints it reads from the IPC device info,
-                # and its no-device-info fallback puts the literals "1" / "0".
-                # The DTLS webrtcReq has carried both for a long time
-                # (webrtc_open.py) and sends them as ints; that path is
-                # fleet-proven, so it is deliberately left alone rather than
-                # churned to match.
-                "powerType": str(_live_power_type),
-                "p2pCache": str(_live_p2p_cache),
-                # wPayload: newer firmware parses wPayload for ICE credentials
-                # and PSK.  Fields match reference app o.java (signaling/tyrus).
-                "wPayload": {
-                    "peerid": peer_id,
-                    "sts": int(time.time() * 1000),
-                    "psk": _psk_value_req,
-                    "offer": {"type": "offer", "sdp": _compressed_sdp_req},
-                },
-                "IceServerList": _sdes_ice_server_list,
-            },
-        )
-        outgoing_q.put_nowait((webrtc_req_topic, _webrtc_req_sdes_payload))
-        self._cold_phase("webrtcReq (sdes)")
-        _status(f"webrtcReq sent (SDES)  peerid={peer_id}")
+        _o = await _sdes_open_write_ffmpeg_sdp_and_send_webrtcreq(self, locals())
+        if "_compress_sdp_req" in _o:
+            _compress_sdp_req = _o["_compress_sdp_req"]
+        if "sdp_path" in _o:
+            sdp_path = _o["sdp_path"]
 
         # --- Acknowledge camera's webrtcReq echo with webrtcResp ------------- #
         # LK.IPC.A001064 echoes our offer back as webrtcReq before doing ICE.
@@ -6666,191 +8520,23 @@ class _SdesOpenMixin:
         # here.  camera_offer_fut is only set for non-echo (role-reversal) messages
         # where is_echo=False.  The broker echo carries our own srcAddr prefix so
         # is_echo=True, which is exactly what webrtc_req_echo_fut signals.
-        _echo_fut = (
-            webrtc_req_echo_fut if webrtc_req_echo_fut is not None else camera_offer_fut
-        )
-        _cam_echo_received = False
-        _webrtc_resp_sdes_topic: "Optional[str]" = None
-        _webrtc_resp_sdes: "Optional[str]" = None
-        _sdes_webrtcresp_sent = (
-            False  # True once we actually publish the SDES webrtcResp
-        )
-        # Only role-reversal models (A001064, _skip_lp False) echo our webrtcReq
-        # and need the webrtcResp built below; for A001513-class (_skip_lp True,
-        # default) the echo never arrives, so don't block ~2s on it.
-        _echo_wait_s = _sdes_echo_wait_timeout(
-            _skip_lp, echo_seen=bool(getattr(self, "_sdes_echo_seen", False))
-        )
-        _echo_wait_t0 = time.monotonic()
-        try:
-            await _asyncio.wait_for(
-                _asyncio.shield(_echo_fut),
-                timeout=_echo_wait_s,
-            )
-            _cam_echo_received = True
-            self._sdes_echo_seen = True
-            _status("camera webrtcReq echo received - building webrtcResp")
-            # Seed _sdes_turn_entries from the echo's IceServerList if the HTTP
-            # ice_config fetch returned nothing (empty list).  The echo carries
-            # our userId TURN credentials - extract them so the hole-punch and
-            # any future relay allocation use the correct server/port.
-            if not _sdes_turn_entries:
-                try:
-                    _echo_payload = (
-                        _echo_fut.result()
-                        if (_echo_fut is not None and _echo_fut.done())
-                        else {}
-                    )
-                    for _e in _echo_payload.get("IceServerList") or []:
-                        _e_uris = _e.get("Uris") or []
-                        if any("turn:" in str(u) for u in _e_uris):
-                            _sdes_turn_entries.append(
-                                {
-                                    "Uris": _e_uris,
-                                    "Username": _e.get("Username") or "",
-                                    "Password": str(_e.get("Password") or ""),
-                                }
-                            )
-                except Exception:
-                    _LOGGER.debug(
-                        "camera %s: swallowed exception in %s",
-                        getattr(self, "device_id", "?"),
-                        "_open_sdes_stream_impl",
-                        exc_info=True,
-                    )
-            # Allocate TURN relay if not already done before offer build.
-            # When ice_config provided TURN entries, pre-allocation already ran
-            # and _relay_addrs is populated - skip to avoid double-allocation.
-            # Connection mode lan skips it here too: lan means no relay, and an
-            # allocation here was trickled and put in the answer's c= anyway.
-            if not _relay_addrs and not _skip_turn_prealloc:
-                try:
-                    _tgt_e = _turn_target(_sdes_turn_entries, user_id)
-                    if _tgt_e:
-                        for _alloc_sock_e in (_audio_sock, _video_sock):
-                            _alloc_res_e = await _run_off_loop(
-                                _turn_allocate_udp, _alloc_sock_e, *_tgt_e
-                            )
-                            if _alloc_res_e:
-                                _relay_addrs[_alloc_sock_e] = _turn_relay_record(
-                                    _alloc_res_e, *_tgt_e
-                                )
-                                _status(
-                                    f"TURN relay allocated (echo fallback): "
-                                    f"{'audio' if _alloc_sock_e is _audio_sock else 'video'}"
-                                    f" -> {_alloc_res_e[0]}:{_alloc_res_e[1]}"
-                                )
-                except Exception as _relay_early_exc:
-                    _LOGGER.warning("TURN relay allocation error: %s", _relay_early_exc)
-            # Answer SDP c= and m= use the TURN relay address when available so
-            # the camera sends SRTP to our relay port.  The TURN server then
-            # wraps each SRTP packet in a Data Indication and delivers it to
-            # audio_sock / video_sock; the bridge thread strips the wrapper and
-            # forwards the inner SRTP to ffmpeg's loopback ports.
-            # For cameras on the same LAN or when relay allocation failed, fall
-            # back to the srflx (public) or local IP.
-            _audio_relay = _relay_addrs.get(_audio_sock)
-            _video_relay = _relay_addrs.get(_video_sock)
-            _ans_audio_ip = (
-                _audio_relay[0] if _audio_relay else (_public_ip or local_ip)
-            )
-            _ans_audio_port = _audio_relay[1] if _audio_relay else audio_port
-            _ans_video_ip = (
-                _video_relay[0] if _video_relay else (_public_ip or local_ip)
-            )
-            _ans_video_port = _video_relay[1] if _video_relay else video_port
-            _relay_answer_sdp = (
-                "v=0\r\n"
-                f"o=- {ts} {ts} IN IP4 {local_ip}\r\n"
-                "s=-\r\n"
-                "t=0 0\r\n"
-                f"m=audio {_ans_audio_port} RTP/SAVPF 0 8\r\n"
-                f"c=IN IP4 {_ans_audio_ip}\r\n"
-                "a=sendonly\r\n"
-                "a=mid:0\r\n"
-                f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_audio}\r\n"
-                "a=rtpmap:0 PCMU/8000\r\n"
-                "a=rtpmap:8 PCMA/8000\r\n"
-                "a=rtcp-mux\r\n"
-                f"a=ice-ufrag:{_ufrag_a}\r\n"
-                f"a=ice-pwd:{_pwd_a}\r\n"
-                + _sdes_offer_candidate_lines(
-                    _conn_mode,
-                    local_ip,
-                    audio_port,
-                    _public_ip,
-                    _relay_addrs.get(_audio_sock),
-                )
-                + f"m=video {_ans_video_port} RTP/SAVPF 96 97\r\n"
-                f"c=IN IP4 {_ans_video_ip}\r\n"
-                "a=sendonly\r\n"
-                "a=mid:1\r\n"
-                f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{srtp_key_video}\r\n"
-                "a=rtpmap:96 H264/90000\r\n"
-                "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
-                "profile-level-id=42e01f\r\n"
-                "a=rtpmap:97 H265/90000\r\n"
-                "a=fmtp:97 level-id=93\r\n"
-                "a=rtcp-mux\r\n"
-                f"a=ice-ufrag:{_ufrag_v}\r\n"
-                f"a=ice-pwd:{_pwd_v}\r\n"
-                + _sdes_offer_candidate_lines(
-                    _conn_mode,
-                    local_ip,
-                    video_port,
-                    _public_ip,
-                    _relay_addrs.get(_video_sock),
-                )
-            )
-            _compressed_sdp_ans = _compress_sdp_req(_relay_answer_sdp)
-
-            _webrtc_resp_sdes_topic = f"iot/v1/s/{user_id}/IPC/webrtcResp"
-            _webrtc_resp_sdes = ipc_envelope(
-                "webrtcResp",
-                device_id,
-                user_id,
-                numeric_uid_raw,
-                seq=_seq(),
-                payload={
-                    "peerid": peer_id,
-                    "devId": device_id,
-                    "answer": {"type": "answer", "sdp": _relay_answer_sdp},
-                    "trackId": 0,
-                    "dstAddr": device_id,
-                    "encOffer": 1,
-                    "liveMqtt": 1,
-                    # wPayload: newer firmware (e.g. LK.IPC.A001064) parses
-                    # wPayload to extract ICE credentials and PSK.  Fields match
-                    # reference app o.java (signaling/tyrus).
-                    "wPayload": {
-                        "peerid": peer_id,
-                        "sts": int(time.time() * 1000),
-                        "psk": _psk_value_req,
-                        "answer": {"type": "answer", "sdp": _compressed_sdp_ans},
-                    },
-                },
-            )
-            # Send SDES webrtcResp: camera will send SRTP to our public IP/port
-            # (srflx), which routes through NAT directly to our socket.
-            outgoing_q.put_nowait((_webrtc_resp_sdes_topic, _webrtc_resp_sdes))
-            _sdes_webrtcresp_sent = True
-            _ans_via = "relay" if (_audio_relay or _video_relay) else "srflx"
-            _status(
-                f"webrtcResp sent (SDES, {_ans_via} answer:"
-                f" audio={_ans_audio_ip}:{_ans_audio_port}"
-                f" video={_ans_video_ip}:{_ans_video_port})"
-            )
-        except TimeoutError:
-            # No echo - camera uses a different signalling variant; proceed.
-            # Logged rather than swallowed: `except TimeoutError: pass` is how
-            # 2.0 s of dead time here stayed invisible, and the elapsed line is
-            # what will show it if this wait ever starts being used.
-            _LOGGER.info(
-                "signaling-wait[%s] webrtcReq-echo elapsed=%dms (timeout=%.2fs)",
-                getattr(self, "device_id", "?"),
-                int((time.monotonic() - _echo_wait_t0) * 1000),
-                _echo_wait_s,
-            )
+        _o = await _sdes_open_answer_webrtcreq_echo(self, locals())
+        if "_cam_echo_received" in _o:
+            _cam_echo_received = _o["_cam_echo_received"]
+        if "_echo_fut" in _o:
+            _echo_fut = _o["_echo_fut"]
+        if "_echo_wait_s" in _o:
+            _echo_wait_s = _o["_echo_wait_s"]
+        if "_echo_wait_t0" in _o:
+            _echo_wait_t0 = _o["_echo_wait_t0"]
+        if "_sdes_webrtcresp_sent" in _o:
+            _sdes_webrtcresp_sent = _o["_sdes_webrtcresp_sent"]
+        if "_webrtc_resp_sdes" in _o:
+            _webrtc_resp_sdes = _o["_webrtc_resp_sdes"]
+        if "_webrtc_resp_sdes_topic" in _o:
+            _webrtc_resp_sdes_topic = _o["_webrtc_resp_sdes_topic"]
+        if "u" in _o:
+            u = _o["u"]
 
         # --- Announce our ICE candidates via MQTT (iceCandidateReq) ----------- #
         # The iOS app always sends iceCandidateReq after webrtcReq/webrtcResp.
@@ -6861,40 +8547,9 @@ class _SdesOpenMixin:
         # frames.  Non-ICE cameras (e.g. LK.IPC.A001513) ignore iceCandidateReq
         # and begin streaming immediately from the SDP exchange, so sending these
         # messages is safe for all camera models.
-        _ice_cand_topic_sdes = f"iot/v1/s/{user_id}/IPC/iceCandidateReq"
-
-        def _send_sdes_ice_cand(cand_str: str, mid: str) -> None:
-            """Publish a single trickle-ICE candidate via MQTT."""
-            _cand_obj = {
-                "candidate": cand_str,
-                "sdpMid": mid,
-                "sdpMLineIndex": int(mid),
-            }
-            _msg = ipc_envelope(
-                "iceCandidateReq",
-                device_id,
-                user_id,
-                numeric_uid_raw,
-                seq=_seq(),
-                payload={
-                    # dstAddr routes to the camera device, not the user account.
-                    # HAR captures confirm payload.dstAddr = deviceId on every
-                    # iceCandidateReq; using user_id causes silent drops by firmware.
-                    "dstAddr": device_id,
-                    # wPayload is the nested format required by newer firmware
-                    # (e.g. LK.IPC.A001064) that parses wPayload.candidate instead
-                    # of the flat payload.candidate field.
-                    "wPayload": {
-                        "peerid": peer_id,
-                        "candidate": _cand_obj,
-                    },
-                    # Flat legacy fields retained for older firmware compatibility.
-                    "peerid": peer_id,
-                    "devId": device_id,
-                    "candidate": _cand_obj,
-                },
-            )
-            outgoing_q.put_nowait((_ice_cand_topic_sdes, _msg))
+        _o = await _sdes_open_announce_candidates(self, locals())
+        if "_send_sdes_ice_cand" in _o:
+            _send_sdes_ice_cand = _o["_send_sdes_ice_cand"]
 
         # --- TURN relay allocation: fallback for cameras that skip the echo path #
         # Early allocation was done inside the echo handler above.  This block
@@ -6903,65 +8558,7 @@ class _SdesOpenMixin:
         # Skipped in AIDOT_FAST_CONNECT (LAN-direct): no relay alloc, host/srflx
         # candidates only (the synchronous allocate would block the post-offer
         # candidate trickle on a cloud round-trip).
-        if not _relay_addrs and not _skip_turn_prealloc:
-            try:
-                _tgt_r = _turn_target(_sdes_turn_entries, user_id)
-                if _tgt_r:
-                    for _alloc_sock in (_audio_sock, _video_sock):
-                        _alloc_res = await _run_off_loop(
-                            _turn_allocate_udp, _alloc_sock, *_tgt_r
-                        )
-                        if _alloc_res:
-                            _relay_addrs[_alloc_sock] = _turn_relay_record(
-                                _alloc_res, *_tgt_r
-                            )
-                            _status(
-                                f"TURN relay allocated: "
-                                f"{'audio' if _alloc_sock is _audio_sock else 'video'}"
-                                f" -> {_alloc_res[0]}:{_alloc_res[1]}"
-                            )
-                        else:
-                            _LOGGER.warning(
-                                "TURN allocation failed for %s socket",
-                                "audio" if _alloc_sock is _audio_sock else "video",
-                            )
-            except Exception as _relay_exc:
-                _LOGGER.warning("TURN relay allocation error: %s", _relay_exc)
-
-        for _ice_mid, _ice_port in (("0", audio_port), ("1", video_port)):
-            # Host candidate (LAN IP)
-            _send_sdes_ice_cand(
-                f"candidate:1 1 udp 2130706431 {local_ip} {_ice_port} typ host",
-                _ice_mid,
-            )
-            # srflx candidate (public IP) - announced separately so the camera
-            # triggers a new ICE check to our public address even if it already
-            # processed the SDP host candidate.
-            if _public_ip:
-                _send_sdes_ice_cand(
-                    f"candidate:2 1 udp 1694498815 {_public_ip} {_ice_port}"
-                    f" typ srflx raddr {local_ip} rport {_ice_port}",
-                    _ice_mid,
-                )
-            # relay candidate - advertised so the camera can probe us via TURN
-            # when direct and srflx paths are blocked (port-restricted NAT).
-            _relay_sock = _audio_sock if _ice_mid == "0" else _video_sock
-            if _relay_sock in _relay_addrs:
-                _ri = _relay_addrs[_relay_sock]
-                _send_sdes_ice_cand(
-                    f"candidate:3 1 udp 16777215 {_ri[0]} {_ri[1]}"
-                    f" typ relay raddr {local_ip} rport {_ice_port}",
-                    _ice_mid,
-                )
-        _status(
-            f"iceCandidateReq sent  audio={audio_port}  video={video_port}"
-            + (f"  srflx={_public_ip}" if _public_ip else "")
-            + (
-                f"  relay={_relay_addrs[_audio_sock][0]}"
-                if _audio_sock in _relay_addrs
-                else ""
-            )
-        )
+        _o = await _sdes_open_turn_allocation_fallback(self, locals())
 
         # --- NAT hole-punch: create outbound UDP mapping before STUN window --- #
         # Without a prior outbound packet from each socket, most home-router NATs
@@ -6969,102 +8566,19 @@ class _SdesOpenMixin:
         # binding requests from the camera.  Sending a minimal STUN binding-
         # request packet to an external host forces the router to create a NAT
         # entry so the camera's probes are forwarded to our sockets.
-        _hp_host = None
-        _hp_port = 3478
-        try:
-            if _sdes_turn_entries:
-                import re as _re_hp
-
-                # Find the first TURN URI in the entry (not just Uris[0], which
-                # may be a stun: URI that the regex won't match).
-                _hp_uri = next(
-                    (
-                        str(u)
-                        for u in (_sdes_turn_entries[0].get("Uris") or [])
-                        if "turn:" in str(u)
-                    ),
-                    "",
-                )
-                _m_hp = _re_hp.search(r"turns?:([^:?]+)(?::(\d+))?", _hp_uri)
-                if _m_hp:
-                    _hp_host = _m_hp.group(1)
-                    _hp_port = int(_m_hp.group(2) or 3478)
-        except Exception:
-            _LOGGER.debug(
-                "camera %s: swallowed exception in %s",
-                getattr(self, "device_id", "?"),
-                "_open_sdes_stream_impl",
-                exc_info=True,
-            )
-        # When the cloud supplied no TURN entry, fall back to the vendor's TURN
-        # server only to open a NAT mapping.  This sends a STUN packet to a
-        # hardcoded third-party host; AIDOT_SDES_HOLEPUNCH_HOST overrides it
-        # (set it empty to disable the hardcoded fallback entirely).
-        if not _hp_host:
-            _hp_env = settings.read("AIDOT_SDES_HOLEPUNCH_HOST")
-            if _hp_env is not None:
-                _hp_host = _hp_env.strip() or None
-            else:
-                _hp_host = "3.230.182.123"  # fallback: Arnoo TURN server
-                _LOGGER.warning(
-                    "camera %s: no TURN entry from cloud; NAT hole-punch will send "
-                    "a STUN packet to the hardcoded vendor host %s. Set "
-                    "AIDOT_SDES_HOLEPUNCH_HOST to override (empty to disable).",
-                    getattr(self, "device_id", "?"),
-                    _hp_host,
-                )
-        _hp_stun = b"\x00\x01\x00\x00\x21\x12\xa4\x42" + os.urandom(12)
-        _hp_port2 = 5349
-        if not _hp_host:
-            _status("NAT hole-punch: skipped (no TURN host)")
-        else:
-            for _hp_sock in (_audio_sock, _video_sock):
-                try:
-                    _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port))
-                except Exception:
-                    _LOGGER.debug(
-                        "camera %s: swallowed exception in %s",
-                        getattr(self, "device_id", "?"),
-                        "_open_sdes_stream_impl",
-                        exc_info=True,
-                    )
-            # Punch to TURN allocation port (5349) as well so port-restricted NAT
-            # allows traffic from either TURN port (3478 STUN or 5349 allocation).
-            if _hp_port != _hp_port2:
-                for _hp_sock in (_audio_sock, _video_sock):
-                    try:
-                        _hp_sock.sendto(_hp_stun, (_hp_host, _hp_port2))
-                    except Exception:
-                        _LOGGER.debug(
-                            "camera %s: swallowed exception in %s",
-                            getattr(self, "device_id", "?"),
-                            "_open_sdes_stream_impl",
-                            exc_info=True,
-                        )
-            _status(
-                f"NAT hole-punch: sent from audio={audio_port}"
-                f" video={video_port} -> {_hp_host}:{_hp_port}"
-                + (f" and :{_hp_port2}" if _hp_port != _hp_port2 else "")
-            )
-
-        # The ports our own srflx candidates advertise - the only ports on the
-        # public IP that are actually this host. Anything else there is another
-        # device behind the same NAT, which for this fleet means the camera.
-        _own_srflx_ports = (audio_port, video_port)
-
-        def _is_self_peer_ip(
-            _ip: "Optional[str]", _port: "Optional[int]" = None
-        ) -> bool:
-            return _is_self_transport_address(
-                _ip,
-                _port,
-                local_ip=local_ip,
-                public_ip=_public_ip,
-                own_ports=_own_srflx_ports,
-            )
-
-        _selfloop_drop_count = 0
-        _prefer_direct_stun = {_audio_sock: False, _video_sock: False}
+        _o = await _sdes_open_nat_hole_punch(self, locals())
+        if "_hp_host" in _o:
+            _hp_host = _o["_hp_host"]
+        if "_hp_port" in _o:
+            _hp_port = _o["_hp_port"]
+        if "_hp_stun" in _o:
+            _hp_stun = _o["_hp_stun"]
+        if "_is_self_peer_ip" in _o:
+            _is_self_peer_ip = _o["_is_self_peer_ip"]
+        if "_prefer_direct_stun" in _o:
+            _prefer_direct_stun = _o["_prefer_direct_stun"]
+        if "_selfloop_drop_count" in _o:
+            _selfloop_drop_count = _o["_selfloop_drop_count"]
 
         # --- ICE STUN responder (runs while reservation sockets are still open) #
         # Two-phase window:
@@ -7075,291 +8589,25 @@ class _SdesOpenMixin:
         #     exit quickly so the DTLS fallback starts sooner.
         #   SRTP early exit: if a non-STUN packet arrives (SRTP), ICE is done -
         #     close sockets immediately so ffmpeg can bind.
-        import struct as _struct
-
-        _STUN_MAGIC = b"\x21\x12\xa4\x42"
-        _stun_count = 0
-        _stun_seen = False
-        _srtp_detected = False
-        _stun_window_pkt_count = 0
-        _turn_only_pkt_count = 0
-        _camera_side_pkt_count = 0
-        if not _cam_echo_received:
-            _stun_max = 2.5
-        elif _sdes_webrtcresp_sent:
-            _stun_max = 20.0  # webrtcResp sent - camera may do ICE; give it time
-        else:
-            _stun_max = 5.0  # webrtcResp suppressed - no STUN expected; exit fast
-        _idle_limit = 1.5  # exit after ICE silence once first STUN seen
-        _pre_stun_idle = 0.5  # exit early if no packet at all (non-ICE camera)
-        _stun_deadline = time.monotonic() + _stun_max
-        _last_pkt_t = time.monotonic()
-        _stun_window_t0 = time.monotonic()
-        for _rsock in (_audio_sock, _video_sock):
-            try:
-                _rsock.setblocking(False)
-            except Exception:
-                _LOGGER.debug(
-                    "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
-                    "_open_sdes_stream_impl",
-                    exc_info=True,
-                )
-        while time.monotonic() < _stun_deadline:
-            # Answer-exit: the only reason to sit here is that the credentials
-            # the nomination needs have not arrived yet.  Once they have - and
-            # the camera has proved it is running ICE by probing us - waiting
-            # longer just delays USE-CANDIDATE, and the bridge thread below
-            # picks the responder role straight back up.  Checked before the
-            # idle test because the answer usually lands while the camera is
-            # still probing hard, so no idle threshold would ever be crossed.
-            if _stun_window_answer_exit_due(
-                stun_seen=_stun_seen,
-                answer_ready=_answer_ready_for_this_open(
-                    getattr(self, "_camera_answer_ice_ready_ts", None), _open_started_at
-                ),
-            ):
-                _status(
-                    "STUN window: leaving early after %.2fs - answer ICE"
-                    " credentials in hand and camera probing; nominating now"
-                    " (%d binding request(s) answered)"
-                    % (time.monotonic() - _stun_window_t0, _stun_count)
-                )
-                break
-            # Idle-exit: threshold depends on whether we've seen any STUN yet
-            idle = time.monotonic() - _last_pkt_t
-            if _stun_seen:
-                if idle > _idle_limit:
-                    break  # ICE done (silence after STUN) - ffmpeg will pick up SRTP
-            elif not _cam_echo_received and idle > _pre_stun_idle:
-                break  # no STUN at all - non-ICE camera, skip window
-            try:
-                _rlist = await _select_readable([_audio_sock, _video_sock], 0.1)
-            except Exception:
-                break
-            for _sock in _rlist:
-                _last_pkt_t = time.monotonic()
-                try:
-                    _pkt, _src = _sock.recvfrom(2048)
-                except OSError:
-                    continue
-                _stun_window_pkt_count += 1
-                if _stun_window_pkt_count <= 3 or _stun_window_pkt_count % 50 == 0:
-                    _LOGGER.debug(
-                        "STUN window: %d bytes from %s:%d, first4=%s (pkt#%d)",
-                        len(_pkt),
-                        _src[0],
-                        _src[1],
-                        _pkt[:4].hex(),
-                        _stun_window_pkt_count,
-                    )
-                # Track packets that are only TURN server control responses
-                # (Allocate/permission challenge/success), which do not indicate
-                # that the camera actually started ICE checks.
-                if _src[0] == _hp_host:
-                    _turn_only_pkt_count += 1
-                else:
-                    _camera_side_pkt_count += 1
-                # --- TURN Data Indication (type 0x0017): strip wrapper --------- #
-                # Camera ICE probes routed via TURN arrive as Data Indications from
-                # 3.230.182.123:5349 (the control channel, already NAT-mapped).
-                # Strip the TURN envelope to get the inner STUN Binding Request so
-                # we can respond correctly via a TURN Send Indication.
-                _turn_peer_ip_sw: "Optional[str]" = None
-                _turn_peer_port_sw: "Optional[int]" = None
-                if (
-                    len(_pkt) >= 20
-                    and _pkt[:2] == b"\x00\x17"
-                    and _pkt[4:8] == _STUN_MAGIC
-                ):
-                    _sw_off = 20
-                    _sw_inner = None
-                    while _sw_off + 4 <= len(_pkt):
-                        _sw_at, _sw_al = _struct.unpack_from("!HH", _pkt, _sw_off)
-                        _sw_av = _pkt[_sw_off + 4 : _sw_off + 4 + _sw_al]
-                        _sw_off += 4 + _sw_al + (-_sw_al % 4)
-                        if _sw_at == 0x0012 and _sw_al >= 8:  # XOR-PEER-ADDRESS
-                            _sw_xp = _struct.unpack_from("!H", _sw_av, 2)[0] ^ 0x2112
-                            _sw_xb = bytes(
-                                a ^ b
-                                for a, b in zip(_sw_av[4:8], _STUN_MAGIC, strict=False)
-                            )
-                            _turn_peer_ip_sw = ".".join(str(b) for b in _sw_xb)
-                            _turn_peer_port_sw = _sw_xp
-                        elif _sw_at == 0x0013:  # DATA
-                            _sw_inner = _sw_av
-                    if _sw_inner:
-                        _pkt = _sw_inner  # process inner payload
-                    # TURN Data Indication with XOR-PEER-ADDRESS means the
-                    # camera (or its relay) is actively talking to us.
-                    if _turn_peer_ip_sw:
-                        _camera_side_pkt_count += 1
-
-                if len(_pkt) >= 20 and _pkt[4:8] == _STUN_MAGIC:
-                    # STUN packet - only Binding Requests (0x0001) indicate that
-                    # ICE is active.  Error/Success responses (e.g. hole-punch
-                    # replies) must NOT set _stun_seen or they'd trigger the 1.5s
-                    # idle-exit prematurely, before camera probes arrive.
-                    if _pkt[:2] == b"\x00\x01":
-                        # Binding Request - reply with Binding Success Response.
-                        # _stun_seen is NOT set here.  A self-loop Data
-                        # Indication - our own address echoed back through the
-                        # relay - is a Binding Request too, and the branch below
-                        # drops it precisely because it is not the camera.
-                        # Setting the flag here made one of those count as "the
-                        # camera has started ICE", which is the one thing the
-                        # answer-exit is gated on.  It is set where a probe is
-                        # actually answered instead.
-                        if _turn_peer_ip_sw is None and _src[0] != _hp_host:
-                            _prefer_direct_stun[_sock] = True
-                        _tid = _pkt[8:20]
-                        try:
-                            # Use TURN peer address for XOR-MAPPED-ADDRESS when
-                            # request arrived via TURN Data Indication.
-                            _resp_src_ip = _turn_peer_ip_sw or _src[0]
-                            _resp_src_port = _turn_peer_port_sw or _src[1]
-                            _resp = _build_stun_binding_success_response(
-                                transaction_id=_tid,
-                                mapped_ip=_resp_src_ip,
-                                mapped_port=_resp_src_port,
-                                mi_password=(
-                                    _pwd_a if _sock is _audio_sock else _pwd_v
-                                ),
-                                magic_cookie=_STUN_MAGIC,
-                            )
-                            if _turn_peer_ip_sw and _prefer_direct_stun.get(
-                                _sock, False
-                            ):
-                                pass
-                            elif (
-                                _turn_peer_ip_sw
-                                and _sock in _relay_addrs
-                                and not _is_self_peer_ip(
-                                    _turn_peer_ip_sw, _turn_peer_port_sw
-                                )
-                            ):
-                                # Arrived via TURN - respond via Send Indication
-                                _ri_sw = _relay_addrs[_sock]
-                                _t_host_sw, _t_port_sw = _ri_sw[4], _ri_sw[5]
-                                _si_pip = bytes(
-                                    int(x) for x in _turn_peer_ip_sw.split(".")
-                                )
-                                _si_xip = bytes(
-                                    a ^ b
-                                    for a, b in zip(_si_pip, _STUN_MAGIC, strict=False)
-                                )
-                                _si_xport = (_turn_peer_port_sw ^ 0x2112) & 0xFFFF
-                                _si_xpa = (
-                                    b"\x00\x01"
-                                    + _struct.pack("!H", _si_xport)
-                                    + _si_xip
-                                )
-
-                                _si_body = _stun_attr(0x0012, _si_xpa) + _stun_attr(
-                                    0x0013, _resp
-                                )
-                                _send_ind = (
-                                    b"\x00\x16"
-                                    + _struct.pack("!H", len(_si_body))
-                                    + _STUN_MAGIC
-                                    + os.urandom(12)
-                                    + _si_body
-                                )
-                                _sock.sendto(_send_ind, (_t_host_sw, _t_port_sw))
-                                _stun_seen = True
-                            elif _turn_peer_ip_sw and _is_self_peer_ip(
-                                _turn_peer_ip_sw, _turn_peer_port_sw
-                            ):
-                                # Self-loop Data Indication (peer == our own
-                                # local/srflx address). Responding via TURN
-                                # creates an endless STUN echo loop and no media.
-                                # Drop it and wait for real camera checks.
-                                _selfloop_drop_count += 1
-                                if (
-                                    _selfloop_drop_count <= 5
-                                    or _selfloop_drop_count % 50 == 0
-                                ):
-                                    _LOGGER.debug(
-                                        "STUN window: drop TURN self-loop peer %s:%s"
-                                        " (count=%d)",
-                                        _turn_peer_ip_sw,
-                                        _turn_peer_port_sw,
-                                        _selfloop_drop_count,
-                                    )
-                            else:
-                                _sock.sendto(_resp, _src)
-                                _stun_seen = True
-                            _stun_count += 1
-                        except Exception:
-                            _LOGGER.debug(
-                                "camera %s: swallowed exception in %s",
-                                getattr(self, "device_id", "?"),
-                                "_open_sdes_stream_impl",
-                                exc_info=True,
-                            )
-                else:
-                    # Non-STUN packet = SRTP arriving - ICE is done, hand off to ffmpeg now
-                    _srtp_detected = True
-                    break  # inner per-socket loop
-            if _srtp_detected:
-                break  # outer while loop
-        # An echo that missed the shortened wait but turned up anyway.  Recorded,
-        # not acted on: the webrtcResp this would have built has to be sent
-        # BEFORE the relay allocation and the ICE window, so building it now
-        # would be a reordering with no camera to measure it against.  What it
-        # does do is make the NEXT open on this device wait the full legacy
-        # window - so a fleet whose echo band is not empty pays the miss once
-        # and says so, instead of losing the branch silently forever.
-        if (
-            not _cam_echo_received
-            and _echo_fut is not None
-            and not getattr(self, "_sdes_echo_seen", False)
-        ):
-            try:
-                _late_echo = _echo_fut.done() and not _echo_fut.cancelled()
-            except Exception:
-                _late_echo = False
-            if _late_echo:
-                self._sdes_echo_seen = True
-                _LOGGER.warning(
-                    "camera %s: the webrtcReq echo arrived %.2fs after a %.2fs"
-                    " wait expired, so no webrtcResp was built for this open."
-                    " Later opens on this camera will wait %.1fs again. Set"
-                    " AIDOT_SDES_ECHO_WAIT_S=%.1f to make that permanent.",
-                    getattr(self, "device_id", "?"),
-                    time.monotonic() - _echo_wait_t0,
-                    _echo_wait_s,
-                    _SDES_ECHO_WAIT_LEGACY_S,
-                    _SDES_ECHO_WAIT_LEGACY_S,
-                )
-        for _rsock in (_audio_sock, _video_sock):
-            try:
-                _rsock.setblocking(True)
-            except Exception:
-                _LOGGER.debug(
-                    "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
-                    "_open_sdes_stream_impl",
-                    exc_info=True,
-                )
-        if _stun_count:
-            _status(f"ICE: responded to {_stun_count} STUN binding request(s)")
-        elif not _srtp_detected:
-            if (
-                _stun_window_pkt_count
-                and _turn_only_pkt_count == _stun_window_pkt_count
-            ):
-                _status(
-                    "ICE: no camera probes seen in STUN window"
-                    f" (received {_stun_window_pkt_count} TURN-server control packet(s) only)"
-                )
-            else:
-                _status(
-                    "ICE: 0 camera STUN binding requests in window"
-                    f" (total packets={_stun_window_pkt_count})"
-                )
-        if _srtp_detected:
-            _status("SRTP detected - exiting STUN window, handing off to ffmpeg")
+        _o = await _sdes_open_stun_responder_window(self, locals())
+        if "_STUN_MAGIC" in _o:
+            _STUN_MAGIC = _o["_STUN_MAGIC"]
+        if "_camera_side_pkt_count" in _o:
+            _camera_side_pkt_count = _o["_camera_side_pkt_count"]
+        if "_idle_limit" in _o:
+            _idle_limit = _o["_idle_limit"]
+        if "_last_pkt_t" in _o:
+            _last_pkt_t = _o["_last_pkt_t"]
+        if "_srtp_detected" in _o:
+            _srtp_detected = _o["_srtp_detected"]
+        if "_stun_count" in _o:
+            _stun_count = _o["_stun_count"]
+        if "_stun_deadline" in _o:
+            _stun_deadline = _o["_stun_deadline"]
+        if "_stun_seen" in _o:
+            _stun_seen = _o["_stun_seen"]
+        if "a" in _o:
+            a = _o["a"]
 
         # --- Reconnect retry: camera may quickConn during synchronous STUN window #
         # LK.IPC.A001064 performs an MQTT disconnect+reconnect (quickConn) after
@@ -7368,393 +8616,58 @@ class _SdesOpenMixin:
         # processed until asyncio.sleep(0) runs.  After flushing the queue, check
         # for the reconnect and re-send webrtcResp + ICE candidates so the camera
         # can restart its ICE agent.  Allow up to 2 retries.
-        _sdes_retries = 0
-        while (
-            _cam_echo_received
-            and _stun_count == 0
-            and not _srtp_detected
-            and camera_reconnect_ev is not None
-            and _sdes_retries < 2
-        ):
-            await asyncio.sleep(0)  # flush queued callbacks (reconnect_ev.set())
-            if not camera_reconnect_ev.is_set():
-                break
-            camera_reconnect_ev.clear()
-            _sdes_retries += 1
-            _status(
-                f"camera reconnected during SDES ICE window (retry {_sdes_retries})"
-                " - re-sending webrtcResp + ICE candidates"
-            )
-            await asyncio.sleep(0.3)  # let camera re-subscribe before re-send
-            if _webrtc_resp_sdes is not None and _sdes_webrtcresp_sent:
-                # Only re-send webrtcResp if we sent it originally (isDTLS='0').
-                # For dtls_fallback_ok cameras the SDES session was intentionally
-                # suppressed - do not retroactively start one on reconnect.
-                outgoing_q.put_nowait((_webrtc_resp_sdes_topic, _webrtc_resp_sdes))
-            for _ice_mid_r, _ice_port_r in (("0", audio_port), ("1", video_port)):
-                _send_sdes_ice_cand(
-                    f"candidate:1 1 udp 2130706431 {local_ip} {_ice_port_r} typ host",
-                    _ice_mid_r,
-                )
-                if _public_ip:
-                    _send_sdes_ice_cand(
-                        f"candidate:2 1 udp 1694498815 {_public_ip} {_ice_port_r}"
-                        f" typ srflx raddr {local_ip} rport {_ice_port_r}",
-                        _ice_mid_r,
-                    )
-                _relay_sock_r = _audio_sock if _ice_mid_r == "0" else _video_sock
-                if _relay_sock_r in _relay_addrs:
-                    _ri_r = _relay_addrs[_relay_sock_r]
-                    _send_sdes_ice_cand(
-                        f"candidate:3 1 udp 16777215 {_ri_r[0]} {_ri_r[1]}"
-                        f" typ relay raddr {local_ip} rport {_ice_port_r}",
-                        _ice_mid_r,
-                    )
-            # Refresh NAT mapping so router allows new inbound STUN from camera
-            for _hp_sock_r in (_audio_sock, _video_sock):
-                try:
-                    _hp_sock_r.sendto(_hp_stun, (_hp_host, _hp_port))
-                except Exception:
-                    _LOGGER.debug(
-                        "camera %s: swallowed exception in %s",
-                        getattr(self, "device_id", "?"),
-                        "_open_sdes_stream_impl",
-                        exc_info=True,
-                    )
-            # Retry STUN window (8 s)
-            _stun_deadline = time.monotonic() + 8.0
-            _last_pkt_t = time.monotonic()
-            _stun_seen = False
-            while time.monotonic() < _stun_deadline:
-                # Same exit as the first window.  A camera that quickConns after
-                # signalling re-runs ICE here, and without this it sat the full
-                # 8 s on credentials it already had - the same delay the first
-                # window was fixed for, in the window the fix had not reached.
-                if _stun_window_answer_exit_due(
-                    stun_seen=_stun_seen,
-                    answer_ready=_answer_ready_for_this_open(
-                        getattr(self, "_camera_answer_ice_ready_ts", None),
-                        _open_started_at,
-                    ),
-                ):
-                    _status(
-                        "STUN window (retry %d): leaving early after %.2fs -"
-                        " answer ICE credentials in hand and camera probing"
-                        % (_sdes_retries, time.monotonic() - (_stun_deadline - 8.0))
-                    )
-                    break
-                if _stun_seen and time.monotonic() - _last_pkt_t > _idle_limit:
-                    break
-                try:
-                    _rlist_r = await _select_readable([_audio_sock, _video_sock], 0.1)
-                except Exception:
-                    break
-                for _sk_r in _rlist_r:
-                    _last_pkt_t = time.monotonic()
-                    try:
-                        _pkt_r, _src_r = _sk_r.recvfrom(2048)
-                    except OSError:
-                        continue
-                    if len(_pkt_r) >= 20 and _pkt_r[4:8] == _STUN_MAGIC:
-                        if _pkt_r[:2] != b"\x00\x01":
-                            continue  # not a Binding Request; don't trigger idle-exit
-                        _tid_r = _pkt_r[8:20]
-                        try:
-                            _resp_r = _build_stun_binding_success_response(
-                                transaction_id=_tid_r,
-                                mapped_ip=_src_r[0],
-                                mapped_port=_src_r[1],
-                                mi_password=(
-                                    _pwd_a if _sk_r is _audio_sock else _pwd_v
-                                ),
-                                magic_cookie=_STUN_MAGIC,
-                            )
-                            _sk_r.sendto(_resp_r, _src_r)
-                            _stun_seen = True
-                            _stun_count += 1
-                        except Exception:
-                            _LOGGER.debug(
-                                "camera %s: swallowed exception in %s",
-                                getattr(self, "device_id", "?"),
-                                "_open_sdes_stream_impl",
-                                exc_info=True,
-                            )
-                    else:
-                        _srtp_detected = True
-                        break
-                if _srtp_detected:
-                    break
-            if _stun_count:
-                _status(
-                    f"ICE retry {_sdes_retries}:"
-                    f" responded to {_stun_count} STUN binding request(s)"
-                )
-            if _srtp_detected:
-                _status(
-                    f"SRTP detected in retry {_sdes_retries}"
-                    " - exiting STUN window, handing off to ffmpeg"
-                )
+        _o = await _sdes_open_reconnect_retry_window(self, locals())
+        if "_srtp_detected" in _o:
+            _srtp_detected = _o["_srtp_detected"]
+        if "_stun_count" in _o:
+            _stun_count = _o["_stun_count"]
 
         # --- Harvest camera's webrtcResp answer --- #
         # The asyncio event loop was blocked by the synchronous STUN loop.  Any
         # call_soon_threadsafe(answer_fut.set_result, ...) from the MQTT thread is
         # queued but hasn't fired yet.  One asyncio cycle resolves it.
-        await asyncio.sleep(0)
-        # ...but one cycle only helps if the answer had already ARRIVED.  When it
-        # has, the window above now leaves as soon as it is readable and this
-        # harvest is a formality; when it has not, the window ran to its own
-        # deadline and this wait is the whole story.  Either way, wait for it:
-        # the ICE credentials it carries are what the nomination below needs -
-        # without them the camera is never nominated, stays in ICE "Checking",
-        # and never sends SRTP no matter how long the first-media wait runs.
-        # (This comment used to assert the window "closes ~2.4 s before the
-        # camera answers".  That stopped being true when the livePlayReq echo
-        # wait was cut to 0.25 s, and the window then sat on the answer for
-        # seconds - see _stun_window_answer_exit_due.)
-        # shield() so a timeout here cannot cancel the future the real answer
-        # await (and the DTLS-fallback path) still consume further down.
-        # A TERMINAL refusal races the harvest.  A camera at its viewer cap acks
-        # -50002/-50015 about a second after webrtcReq and then, by definition,
-        # never answers - so without this the refusal sat unread for the whole
-        # _PRE_LAUNCH_ANSWER_WAIT_S before the later checks could see it, and we
-        # launched a bridge for a stream the camera had already declined.
-        if not answer_fut.done():
-            _ans_wait_t0 = time.monotonic()
-            try:
-                _harvest_waits = [asyncio.shield(answer_fut)]
-                if terminal_error_fut is not None:
-                    _harvest_waits.append(asyncio.shield(terminal_error_fut))
-                _h_done, _h_pending = await asyncio.wait(
-                    _harvest_waits,
-                    timeout=_PRE_LAUNCH_ANSWER_WAIT_S,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                # Cancel the shield WRAPPERS only; the futures they guard are
-                # owned by the MQTT handler and are still consumed below.
-                for _h in _h_pending:
-                    _h.cancel()
-                if terminal_error_fut is not None and terminal_error_fut.done():
-                    _code, _desc = terminal_error_fut.result()
-                    _status(
-                        f"camera refused: ack {_code} {_desc}"
-                        " - terminal, not launching the bridge"
-                    )
-                    raise AidotCameraBusy(_code, _desc)
-                if answer_fut.done():
-                    _status(
-                        "webrtcResp answer harvested after %.2fs"
-                        % (time.monotonic() - _ans_wait_t0)
-                    )
-                else:
-                    _status(
-                        "no webrtcResp answer within %.0fs - proceeding without ICE"
-                        " credentials (nomination will retry during the first-media"
-                        " wait)" % _PRE_LAUNCH_ANSWER_WAIT_S
-                    )
-            except AidotCameraBusy:
-                raise
-            except Exception:
-                _LOGGER.debug(
-                    "camera %s: swallowed exception awaiting answer",
-                    getattr(self, "device_id", "?"),
-                    exc_info=True,
-                )
-        _pre_launch_answer_sdp: str = ""
-        _our_tx_srtp_key_audio = (
-            srtp_key_audio  # our TX key; set early in case answer absent
-        )
-        _cam_key_audio: str = ""  # camera's answer key; set in SDP parse block below
-        _cam_key_video: str = (
-            ""  # camera's video SRTP key; set in SDP parse block below
-        )
-        _dc_answer_has_app: bool = False  # set True if camera echoes m=application; init here so bridge closure never sees NameError on late-wake path
-        _sctp: dict = {  # initialized here for the same reason - bridge closure
-            "state": "CLOSED",
-            "local_tag": 0,
-            "peer_tag": 0,
-            "local_tsn": 0,
-            "peer_tsn": 0,
-            "stream_seq": 0,
-        }
-        if answer_fut.done():
-            try:
-                _pre_ans = answer_fut.result()
-                _pre_launch_answer_sdp = (_pre_ans or {}).get("sdp", "")
-            except Exception:
-                _LOGGER.debug(
-                    "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
-                    "_open_sdes_stream_impl",
-                    exc_info=True,
-                )
-        if _pre_launch_answer_sdp:
-            _LOGGER.debug(
-                "_open_sdes_stream: camera webrtcResp answer SDP (len=%d)",
-                len(_pre_launch_answer_sdp),
-            )
-            import re as _re
-
-            def _sdes_key_from_sdp(sdp, media):
-                """Return the inline key from the first a=crypto line in the named m-section."""
-                in_sec = False
-                for ln in sdp.splitlines():
-                    if ln.startswith(f"m={media}"):
-                        in_sec = True
-                    elif ln.startswith("m=") and in_sec:
-                        break
-                    elif in_sec and ln.startswith("a=crypto:"):
-                        _m = _re.search(r"inline:([A-Za-z0-9+/=]+)", ln)
-                        if _m:
-                            return _m.group(1)
-                return ""
-
-            # Probe result: did camera echo back m=application?
-            if _dc_probe_fp:
-                _dc_ans_lines, _in_dc_sec = [], False
-                for _aln in _pre_launch_answer_sdp.splitlines():
-                    if _aln.startswith("m=application"):
-                        _in_dc_sec = True
-                    elif _aln.startswith("m=") and _in_dc_sec:
-                        break
-                    if _in_dc_sec:
-                        _dc_ans_lines.append(_aln)
-                if _dc_ans_lines:
-                    # The section carries the camera's a=crypto inline key
-                    # (the data channel's SRTP key); it is masked before this
-                    # reaches the log.
-                    _status(
-                        "DC probe ACCEPTED: camera answered m=application"
-                        f" ({len(_dc_ans_lines)} lines):\n"
-                        + mask_sdp_secrets("\n".join(_dc_ans_lines))
-                    )
-                else:
-                    _status(
-                        "DC probe REJECTED: camera did not include m=application"
-                        " in its answer - BUNDLE+DTLS unsupported on this firmware"
-                    )
-
-            # SCTP DataChannel for SDES cameras.
-            # Source analysis (f0.java g2()) confirmed SESSION_MODE_REQ (5376)
-            # must be sent via DataChannel.send(), NOT raw TUTK 0xC8 UDP.
-            # Camera uses plain SCTP over UDP (same ICE port), no DTLS.
-            # We are the SCTP client (proactive INIT), camera is server.
-            _dc_answer_has_app = "m=application" in _pre_launch_answer_sdp
-            _sctp = {
-                "state": "CLOSED",  # INIT_SENT -> COOKIE_ECHOED -> ESTABLISHED -> DONE
-                "local_tag": 0,  # our verification tag (sent in INIT)
-                "peer_tag": 0,  # camera's verification tag (from INIT-ACK)
-                "local_tsn": 0,  # our TSN counter
-                "peer_tsn": 0,  # camera's Initial TSN (from its INIT/INIT-ACK)
-                "stream_seq": 0,  # stream sequence number
-            }
-
-            _cam_key_audio = _sdes_key_from_sdp(_pre_launch_answer_sdp, "audio")
-            _cam_key_video = _sdes_key_from_sdp(_pre_launch_answer_sdp, "video")
-            if _cam_key_audio and _cam_key_audio != srtp_key_audio:
-                _status("Using camera's audio SRTP key from answer (was our offer key)")
-                srtp_key_audio = _cam_key_audio
-            if _cam_key_video and _cam_key_video != srtp_key_video:
-                _status("Using camera's video SRTP key from answer (was our offer key)")
-                srtp_key_video = _cam_key_video
+        _o = await _sdes_open_harvest_answer(self, locals())
+        if "_cam_key_audio" in _o:
+            _cam_key_audio = _o["_cam_key_audio"]
+        if "_code" in _o:
+            _code = _o["_code"]
+        if "_dc_answer_has_app" in _o:
+            _dc_answer_has_app = _o["_dc_answer_has_app"]
+        if "_desc" in _o:
+            _desc = _o["_desc"]
+        if "_our_tx_srtp_key_audio" in _o:
+            _our_tx_srtp_key_audio = _o["_our_tx_srtp_key_audio"]
+        if "_pre_launch_answer_sdp" in _o:
+            _pre_launch_answer_sdp = _o["_pre_launch_answer_sdp"]
+        if "_sctp" in _o:
+            _sctp = _o["_sctp"]
+        if "srtp_key_audio" in _o:
+            srtp_key_audio = _o["srtp_key_audio"]
+        if "srtp_key_video" in _o:
+            srtp_key_video = _o["srtp_key_video"]
             # (The SDP file is written once, below, after the bridge decides
             # its final form; an earlier rewrite here was always replaced.)
 
         # --- SCTP helper functions (always defined - even when answer arrives late) --- #
-        def _crc32c_fn(data):
-            crc = 0xFFFFFFFF
-            for b in data:
-                crc ^= b
-                for _ in range(8):
-                    crc = (crc >> 1) ^ (0x82F63B78 if crc & 1 else 0)
-            return crc ^ 0xFFFFFFFF
-
-        def _sctp_pkt(vtag, *chunks):
-            import struct as _st_sc
-
-            base = _st_sc.pack("!HHII", 5000, 5000, vtag, 0) + b"".join(chunks)
-            crc = _crc32c_fn(base)
-            return (
-                base[:8] + _st_sc.pack("<I", crc) + base[12:]
-            )  # camera usrsctp uses LE CRC32c
-
-        def _sctp_chunk(ctype, flags, data):
-            import struct as _st_sc
-
-            n = 4 + len(data)
-            raw = _st_sc.pack("!BBH", ctype, flags, n) + data
-            return raw + b"\x00" * ((-len(raw)) % 4)
-
-        def _sctp_parse_init(pkt):
-            import struct as _st_sc
-
-            pos = 12
-            while pos + 4 <= len(pkt):
-                ctype, _, clen = _st_sc.unpack_from("!BBH", pkt, pos)
-                if clen < 4:
-                    break
-                cdata = pkt[pos + 4 : pos + clen]
-                if ctype == 0x01 and len(cdata) >= 16:
-                    peer_tag = _st_sc.unpack_from("!I", cdata)[0]
-                    peer_tsn = _st_sc.unpack_from("!I", cdata, 12)[0]
-                    _sctp["peer_tag"] = peer_tag
-                    _sctp["peer_tsn"] = peer_tsn
-                    return peer_tag
-                pos += max(4, (clen + 3) & ~3)
-            return None
-
-        def _sctp_init_ack_pkt():
-            import struct as _st_sc
-            import random as _r_sc
-
-            # RFC 4960 section 5.2.1: reuse local_tag/tsn from our INIT in simultaneous open
-            if _sctp["local_tag"] == 0:
-                _sctp["local_tag"] = _r_sc.randint(1, 0xFFFFFFFF)
-                _sctp["local_tsn"] = _r_sc.randint(1, 0xFFFFFFFF)
-            cookie = _st_sc.pack("!II", _sctp["local_tag"], _sctp["peer_tag"])
-            cookie_param = _st_sc.pack("!HH", 7, 4 + len(cookie)) + cookie
-            body = (
-                _st_sc.pack(
-                    "!IIHHI", _sctp["local_tag"], 131072, 1024, 2048, _sctp["local_tsn"]
-                )
-                + cookie_param
-            )
-            return _sctp_pkt(_sctp["peer_tag"], _sctp_chunk(0x02, 0, body))
-
-        def _sctp_cookie_echo(cookie):
-            return _sctp_pkt(_sctp["peer_tag"], _sctp_chunk(0x0A, 0, cookie))
-
-        def _sctp_data(ppid, payload):
-            import struct as _st_sc
-
-            tsn = _sctp["local_tsn"]
-            _sctp["local_tsn"] = (tsn + 1) & 0xFFFFFFFF
-            seq = _sctp["stream_seq"]
-            _sctp["stream_seq"] = (seq + 1) & 0xFFFF
-            body = _st_sc.pack("!IHHI", tsn, 0, seq, ppid) + payload
-            return _sctp_chunk(0x00, 0x03, body)
-
-        def _dcep_open_msg():
-            import struct as _st_sc
-
-            label = b"data"
-            return _st_sc.pack("!BBHIHH", 0x03, 0x00, 256, 0, len(label), 0) + label
-
-        def _session_mode_req_msg():
-            import struct as _st_sc
-            import random as _r_sc
-            import time as _t_sc
-
-            seq = _r_sc.randint(0, 0x7FFFFFFF)
-            ts = int(_t_sc.time() * 1000)
-            return avio_header(seq, 5376, ts, 8, 0) + _st_sc.pack("<IB3x", 0, 1)
-
-        def _sctp_send_living(sock, addr):
-            dcep = _sctp_data(50, _dcep_open_msg())
-            living = _sctp_data(53, _session_mode_req_msg())
-            sock.sendto(_sctp_pkt(_sctp["peer_tag"], dcep), addr)
-            sock.sendto(_sctp_pkt(_sctp["peer_tag"], living), addr)
-            _sctp["state"] = "DONE"
-            _status("SDES DC: sent DATA_CHANNEL_OPEN + SESSION_MODE_REQ(5376) via SCTP")
+        _o = await _sdes_open_sctp_helpers(self, locals())
+        if "_dcep_open_msg" in _o:
+            _dcep_open_msg = _o["_dcep_open_msg"]
+        if "_sctp_chunk" in _o:
+            _sctp_chunk = _o["_sctp_chunk"]
+        if "_sctp_cookie_echo" in _o:
+            _sctp_cookie_echo = _o["_sctp_cookie_echo"]
+        if "_sctp_data" in _o:
+            _sctp_data = _o["_sctp_data"]
+        if "_sctp_init_ack_pkt" in _o:
+            _sctp_init_ack_pkt = _o["_sctp_init_ack_pkt"]
+        if "_sctp_parse_init" in _o:
+            _sctp_parse_init = _o["_sctp_parse_init"]
+        if "_sctp_pkt" in _o:
+            _sctp_pkt = _o["_sctp_pkt"]
+        if "_sctp_send_living" in _o:
+            _sctp_send_living = _o["_sctp_send_living"]
+        if "_session_mode_req_msg" in _o:
+            _session_mode_req_msg = _o["_session_mode_req_msg"]
 
         # --- ICE controlling: send STUN Binding Requests with USE-CANDIDATE --- #
         # The camera is a full-ICE controlled agent (RFC 8445).  It sends STUN
@@ -7767,139 +8680,25 @@ class _SdesOpenMixin:
         # Parse camera's ICE credentials and UDP candidates from its answer SDP.
         # Credentials and candidates from the camera's answer.  _cam_ice_host is
         # the typ host candidate, which is what SCTP is addressed to.
-        _cam_ice_ufrag: str
-        _cam_ice_pwd: str
-        _cam_ice_cands: list  # list of (ip, port) tuples
-        _cam_ice_host: tuple
-        # Through the shared parser, not a second copy: the STUN window's early
-        # exit above means "the nomination below will succeed", and it only
-        # means that while both read the same SDP the same way.
-        (_cam_ice_ufrag, _cam_ice_pwd, _cam_ice_cands, _cam_ice_host) = (
-            _parse_answer_ice(_pre_launch_answer_sdp)
-        )
-
-        _send_use_candidate = functools.partial(
-            send_use_candidate, device_id, _is_self_peer_ip, _relay_addrs
-        )
-
-        # Every candidate this session actually sent USE-CANDIDATE to, in the
-        # order it was nominated.  Instrumentation only, and it exists because
-        # _bridge_uc_info cannot answer the question on the shape that stalls:
-        # on a late answer - measured at +1.3 s, missing the pre-launch snapshot
-        # - it is _nominate_from_answer_sdp below that nominates, and it neither
-        # appends to _bridge_uc_info["cands"] nor flips ["sent"].  Reporting the
-        # stall from that dict alone would print "nominated=none" on an open
-        # that did nominate, and make "the answer carried no ICE credentials"
-        # indistinguishable from "the answer carried one unroutable candidate".
-        _nominated_seen: list = []
-
-        def _nominate_from_answer_sdp(sdp_text) -> int:
-            """Nominate every candidate in ``sdp_text``; see nominate_from_answer_sdp."""
-            return nominate_from_answer_sdp(
-                _turn_install_permissions,
-                _send_use_candidate,
-                (_audio_sock, _video_sock),
-                ((_ufrag_a, _pwd_a), (_ufrag_v, _pwd_v)),
-                _nominated_seen,
-                sdp_text,
-            )
-
-        # Open the TURN relay's door for the camera BEFORE probing it.
-        #
-        # A TURN server drops everything from a peer until a permission exists
-        # for that peer's address (RFC 5766 s9).  We advertise the relay as a
-        # candidate, but the only thing that ever created a permission here was
-        # a Send indication emitted while HANDLING data that had already arrived
-        # through the relay - which cannot happen until the permission exists.
-        # That deadlock made the advertised relay candidate a black hole:
-        # measured on a live A001513 whose host could not be reached directly,
-        # ZERO packets ever arrived from the relay, so the camera had no working
-        # path and sent no media at all, while the same camera streamed to a
-        # host it COULD reach directly.  (The DTLS path never hit this because
-        # aiortc does full TURN.)
-        #
-        # Defined at function scope rather than inside the branch below on
-        # purpose: relay-only battery cams (LAN IP unknown) answer AFTER the
-        # STUN window, so they never enter that branch at all and the bridge
-        # thread is the only place their permissions can be installed.
-        _turn_create_permission = functools.partial(
-            turn_create_permission, _relay_addrs
-        )
-
-        _turn_refresh_allocation = functools.partial(
-            turn_refresh_allocation, _relay_addrs
-        )
-
-        _turn_send_indication = functools.partial(turn_send_indication, _relay_addrs)
-
-        _turn_install_permissions = functools.partial(
-            turn_install_permissions,
-            _turn_create_permission,
-            (_audio_sock, _video_sock),
-            _relay_addrs,
-            _status,
-        )
-
-        # Relay mode only: the camera dials our relay allocation, and its
-        # packets arrive at the TURN server from the house WAN address - OUR
-        # public address - so that address needs a permission or the path is a
-        # black hole.  Deliberately NOT done outside relay mode: a permission
-        # for our own srflx caused TURN self-loop Data Indications and STUN
-        # echo storms when it was installed indiscriminately (see the warning
-        # in the allocation helper).  In relay mode nothing of ours is sent to
-        # our own allocation, so the loop has no driver.
-        if _relay_in_c and _public_ip:
-            _turn_install_permissions([(_public_ip, 9)], "relay-mode WAN")
-
-        if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:
-            # Say it plainly when every address the camera offered is on a
-            # subnet this host is not on. Nothing downstream can recover from
-            # that -- the packets leave by the default gateway and are dropped
-            # -- and the symptom otherwise reads as "first media never
-            # arrived", which sends people looking at the camera.
-            _off = [
-                (_i, _p_) for _i, _p_ in _cam_ice_cands if _candidate_is_off_subnet(_i)
-            ]
-            if _off and len(_off) == len(_cam_ice_cands):
-                _LOGGER.warning(
-                    "camera %s: every candidate it offered is on a subnet this"
-                    " host cannot reach (%s). Direct media is impossible; only"
-                    " the relay can carry it. If this camera never streams,"
-                    " it is on a different network segment (a mesh node,"
-                    " extender or guest SSID) rather than broken.",
-                    self.device_id,
-                    ", ".join(f"{_i}:{_p_}" for _i, _p_ in _off),
-                )
-            _turn_install_permissions(_cam_ice_cands, "setup")
-
-            for _c_ip, _c_port in _cam_ice_cands:
-                _send_use_candidate(
-                    _audio_sock,
-                    _ufrag_a,
-                    _pwd_a,
-                    _cam_ice_ufrag,
-                    _cam_ice_pwd,
-                    (_c_ip, _c_port),
-                )
-                _send_use_candidate(
-                    _video_sock,
-                    _ufrag_v,
-                    _pwd_v,
-                    _cam_ice_ufrag,
-                    _cam_ice_pwd,
-                    (_c_ip, _c_port),
-                )
-            _status(
-                f"ICE controlling: sent USE-CANDIDATE to"
-                f" {len(_cam_ice_cands)} camera candidate(s)"
-                f" ({_cam_ice_cands[0][0]}:{_cam_ice_cands[0][1]})"
-            )
-            # SCTP client: INIT will be sent from the bridge thread on BindingSucc.
-        else:
-            _status(
-                "ICE controlling: no camera ICE credentials in answer"
-                " (pre-answer or relay-only path)"
-            )
+        _o = await _sdes_open_ice_controlling_nominate(self, locals())
+        if "_cam_ice_cands" in _o:
+            _cam_ice_cands = _o["_cam_ice_cands"]
+        if "_cam_ice_pwd" in _o:
+            _cam_ice_pwd = _o["_cam_ice_pwd"]
+        if "_cam_ice_ufrag" in _o:
+            _cam_ice_ufrag = _o["_cam_ice_ufrag"]
+        if "_nominate_from_answer_sdp" in _o:
+            _nominate_from_answer_sdp = _o["_nominate_from_answer_sdp"]
+        if "_nominated_seen" in _o:
+            _nominated_seen = _o["_nominated_seen"]
+        if "_send_use_candidate" in _o:
+            _send_use_candidate = _o["_send_use_candidate"]
+        if "_turn_install_permissions" in _o:
+            _turn_install_permissions = _o["_turn_install_permissions"]
+        if "_turn_refresh_allocation" in _o:
+            _turn_refresh_allocation = _o["_turn_refresh_allocation"]
+        if "_turn_send_indication" in _o:
+            _turn_send_indication = _o["_turn_send_indication"]
 
         # --- Bridge thread: keep reservation sockets open for ICE + SRTP ----- #
         # The camera's ICE agent sends STUN Binding Requests to audio_port and

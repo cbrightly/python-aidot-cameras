@@ -18,9 +18,23 @@ test_sdes_fast_liveplay (A001064 -> False, A001513 -> True); this file locks
 skip_liveplay -> wait timeout.
 """
 
+import inspect
 import pytest
 
 from aidot_cameras.camera.sdes_open import _sdes_echo_wait_timeout
+
+
+def _open_source():
+    """The SDES open and the phase coroutines it was split into."""
+    from aidot_cameras.camera import sdes_open as _so
+
+    parts = [inspect.getsource(_so._SdesOpenMixin._open_sdes_stream_impl)]
+    parts += [
+        inspect.getsource(getattr(_so, n))
+        for n in dir(_so)
+        if n.startswith("_sdes_open_")
+    ]
+    return "\n".join(parts)
 
 
 @pytest.fixture(autouse=True)
@@ -88,11 +102,8 @@ def test_a_malformed_value_cannot_break_the_import(monkeypatch):
 def test_the_timeout_is_reported_rather_than_swallowed():
     """`except TimeoutError: pass` is how 2.0 s of dead time stayed invisible
     for as long as it did. The other waits on this path log an elapsed line."""
-    import inspect
 
-    from aidot_cameras.camera.client import CameraMixin
-
-    src = inspect.getsource(CameraMixin._open_sdes_stream_impl)
+    src = _open_source()
     assert "webrtcReq-echo elapsed" in src
 
 
@@ -136,11 +147,8 @@ def test_a_late_echo_is_recorded_so_the_next_open_waits_for_it():
     allocation and the ICE window, so building it after the window would be a
     reordering with no camera to measure it against. Making the NEXT open wait
     is the part that can be done safely."""
-    import inspect
 
-    from aidot_cameras.camera.client import CameraMixin
-
-    src = inspect.getsource(CameraMixin._open_sdes_stream_impl)
+    src = _open_source()
     assert "_sdes_echo_seen" in src
     assert "AIDOT_SDES_ECHO_WAIT_S=%.1f" in src, (
         "the line must name the knob that makes it permanent"
@@ -148,9 +156,6 @@ def test_a_late_echo_is_recorded_so_the_next_open_waits_for_it():
 
 
 def test_the_wait_reads_the_devices_history():
-    import inspect
 
-    from aidot_cameras.camera.client import CameraMixin
-
-    src = inspect.getsource(CameraMixin._open_sdes_stream_impl)
+    src = _open_source()
     assert "echo_seen=" in src

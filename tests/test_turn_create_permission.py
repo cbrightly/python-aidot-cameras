@@ -52,12 +52,16 @@ def _bridge_source():
 
 
 def _impl_source():
-    for cls in vars(so).values():
-        if isinstance(cls, type):
-            fn = cls.__dict__.get("_open_sdes_stream_impl")
-            if fn is not None:
-                return inspect.getsource(fn)
-    raise AssertionError("_open_sdes_stream_impl not found")
+    """The SDES open and the phase coroutines it was split into, dedented."""
+    parts = [
+        textwrap.dedent(inspect.getsource(so._SdesOpenMixin._open_sdes_stream_impl))
+    ]
+    parts += [
+        inspect.getsource(getattr(so, n))
+        for n in dir(so)
+        if n.startswith("_sdes_open_")
+    ]
+    return "\n".join(parts)
 
 
 def test_permission_is_installed_before_every_nomination():

@@ -139,10 +139,17 @@ def test_it_is_not_scoped_to_one_branch_of_the_window():
 # --------------------------------------------------------------------------- #
 
 
-def _open_source() -> str:
-    from aidot_cameras.camera.client import CameraMixin
+def _open_source():
+    """The SDES open and the phase coroutines it was split into."""
+    from aidot_cameras.camera import sdes_open as _so
 
-    return inspect.getsource(CameraMixin._open_sdes_stream_impl)
+    parts = [inspect.getsource(_so._SdesOpenMixin._open_sdes_stream_impl)]
+    parts += [
+        inspect.getsource(getattr(_so, n))
+        for n in dir(_so)
+        if n.startswith("_sdes_open_")
+    ]
+    return "\n".join(parts)
 
 
 def test_the_window_loop_consults_the_exit_helper():
