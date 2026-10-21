@@ -12,7 +12,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from upstream_shapes import (
-    TYPED,
     account_record,
     device_record,
     patch_refresh_token_call,
@@ -38,8 +37,8 @@ def test_is_auth_error_detects_21026_and_login_again():
 
 
 def _make_dc():
-    # Upstream's constructor takes typed models; the camera layer still needs the
-    # raw cloud records, so both are handed over exactly as CameraClient does.
+    # The typed device record plus the raw cloud records, handed over exactly
+    # as CameraClient does.
     dev = {"id": "devX", "modelId": "LK.IPC.A001513", "aesKey": [None]}
     user = {"id": "u1", "accessToken": "stale"}
     return CameraDeviceClient(
@@ -92,15 +91,9 @@ def test_refreshed_token_reaches_camera_clients():
     THAT dict - or a camera that hit a 21026, called async_ensure_token() and
     retried would retry with exactly the token that had just expired.
 
-    How the rotation gets there differs by upstream shape, which is the point of
-    testing it on both:
-
-    * typed shape - ``CloudApi.refresh_token`` writes ``user_info.accessToken``,
-      a dataclass field the camera layer never reads, and fires the
-      token-refreshed callback.  The login_info property getter has to run
-      inside that callback for the dict to pick it up.
-    * dict shape - ``async_refresh_token`` writes straight into ``login_info``,
-      which IS the shared dict, so the sync is already done.
+    Upstream's ``async_refresh_token`` writes straight into ``login_info``,
+    which IS the shared dict (via ``CameraClient``'s property), so the sync is
+    already done - this pins that it stays that way.
 
     _token_fresh_cb is deliberately left UNSET here: the shipped consumers set a
     persist callback that happens to read login_info, which masks the gap.
@@ -124,10 +117,8 @@ def test_refreshed_token_reaches_camera_clients():
     assert dc._user_info["accessToken"] == "stale"
 
     async def _fake_refresh():
-        # Exactly what upstream's refresh call does on success, per shape.
+        # Exactly what upstream's refresh call does on success.
         set_access_token(client, "fresh")
-        if TYPED:
-            client._on_token_refreshed()
         return {"accessToken": "fresh"}
 
     patch_refresh_token_call(client, _fake_refresh)

@@ -43,7 +43,7 @@ def lv():
 
 
 class _FakeClient:
-    """Just the surface the check touches, behaving like upstream's dict shape.
+    """Just the surface the check touches, behaving like upstream's client.
 
     Upstream stores exactly what the refresh response returns
     (``login_info[accessToken] = response[accessToken]``), so the fake does too
@@ -90,13 +90,6 @@ class _FakeClient:
     async def async_post_login(self):
         self.logins += 1
         return self.login_info
-
-
-@pytest.fixture(autouse=True)
-def _dict_shape(monkeypatch):
-    from aidot_cameras import _upstream
-
-    monkeypatch.setattr(_upstream, "HAS_TYPED_ACCOUNT", False)
 
 
 def _check(lv, client):

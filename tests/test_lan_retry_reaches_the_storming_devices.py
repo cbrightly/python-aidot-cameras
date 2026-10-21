@@ -192,9 +192,7 @@ def test_a_discovered_address_still_reaches_a_light():
 
     Upstream's `get_device_client` ends by pushing the discovered LAN IP into
     the client; a light with no IP never logs in at all.  Our branch reproduces
-    that, and reads the address through `CameraDiscover.discovered_device`,
-    which resolves to the shared class dict or the per-instance one depending on
-    which upstream is installed - so this holds on both shapes.
+    that, and reads the address through `CameraDiscover.discovered_device`.
     """
 
     async def _run():

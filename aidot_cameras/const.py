@@ -6,10 +6,10 @@ import site, and so a constant that upstream renames or drops fails loudly here
 keys are defined locally.
 """
 
-# Four of these moved between upstream shapes (API_URL_TEMPLATE, APP_ID,
-# DEFAULT_REGION, PUBLIC_KEY_PEM live in aidot.login_const on 0.3.56 and in
-# aidot.const on 0.3.55).  _upstream resolves that once; the other 31 names
-# below are on aidot.const in both, so they are imported directly and still
+# Four of these have moved before (API_URL_TEMPLATE, APP_ID, DEFAULT_REGION,
+# PUBLIC_KEY_PEM live in aidot.login_const since 0.3.56 and were in aidot.const
+# on 0.3.54-0.3.55), so they come through _upstream; the other 31 names below
+# have always been on aidot.const, so they are imported directly and still
 # fail loudly here, by name, if upstream ever moves one.
 from ._upstream import (  # noqa: F401 - deliberate re-export surface
     API_URL_TEMPLATE,

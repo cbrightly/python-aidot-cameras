@@ -1,10 +1,6 @@
 """One place that knows which upstream ``python-aidot`` is installed.
 
-Upstream ships two incompatible shapes of the same private API, and both are
-live: Home Assistant core pins ``0.3.56`` while this library was written against
-``0.3.55``.  They are not a forward/backward pair - ``0.3.56`` is a **revert** of
-the refactor that ``0.3.54`` introduced and ``0.3.55`` carried, so the "old"
-shape is also the current one:
+Upstream has changed its private API inside patch releases more than once:
 
     0.3.53   dict-based client, ``aes_utils``, ``login_const``      <- shape A
     0.3.54   typed dataclasses, ``api/``, ``utils/crypto``          <- shape B
@@ -13,101 +9,88 @@ shape is also the current one:
     0.3.57   shape A, plus the account back-reference, plus API v35
     0.3.58   same as 0.3.57
 
-The back-reference is a second, independent axis: 0.3.57+ is shape A in every
-respect except that ``DeviceClient.__init__`` also takes the owning
-``AidotClient``.  It has its own flag, ``HAS_DEVICE_CLIENT_BACKREF``, and is not
-a third value of ``UPSTREAM_SHAPE``.  The API version (``API_URL_TEMPLATE``) is
-a third; see ``docs/UPSTREAM.md``.
+The declared range starts at 0.3.56, so only shape A is installable and only
+shape A is supported.  Shape B (0.3.54-0.3.55) stopped being installable when
+the floor moved on 2026-09-23 and its branches have since been removed.  The
+names that used to report it (``HAS_TYPED_ACCOUNT``, ``UPSTREAM_SHAPE``,
+``UserInformation``, ``HAS_READ_DATA_SEAM``, ``HAS_SHARED_DISCOVERY_MAP``,
+``DEVICE_STATE_IS_UPSTREAMS``) are kept as fixed constants because consumers
+import them.  See ``docs/UPSTREAM.md``.
 
-Since 2026-09-23 the declared range starts at 0.3.56, so shape B is no longer
-installable and its branches below are unreachable.  They are left in place
-rather than removed in the same change as the floor bump.
+Two axes are still live within the range and are detected here:
 
-Because upstream has flip-flopped once, neither shape can be assumed permanent,
-so both are supported rather than tracked.  Every difference is resolved here,
-once, at import time; no other module in this package may branch on the upstream
-version.  If you find yourself adding a second ``try: import aidot...`` anywhere
-else, put it here instead.
+* the account back-reference - 0.3.57+ is shape A in every respect except that
+  ``DeviceClient.__init__`` also takes the owning ``AidotClient``
+  (``HAS_DEVICE_CLIENT_BACKREF``);
+* the cloud API version (``API_URL_TEMPLATE``); see ``docs/UPSTREAM.md``.
 
-The detection is by capability (does the name import?), never by parsing a
-version string: upstream shipped shape A under both ``0.3.53`` and ``0.3.56``
-with a five-day excursion in between, so a version comparison would encode the
-excursion rather than the shape.
+Every difference is resolved here, once, at import time; no other module in
+this package may branch on the upstream version.  If you find yourself adding a
+``try: import aidot...`` anywhere else, put it here instead.
+
+Detection is by capability (does the name import, what does the signature
+say?), never by parsing a version string: upstream shipped shape A under both
+``0.3.53`` and ``0.3.56`` with a five-day excursion in between, so a version
+comparison would encode the excursion rather than the shape.
 """
 
 from enum import IntEnum
 from typing import Any, Optional
 
-# --------------------------------------------------------------------------- #
-# Shape detection
-# --------------------------------------------------------------------------- #
-
-try:  # shape B (0.3.54 - 0.3.55): typed account/device dataclasses + CloudApi
-    from aidot.models.auth_model import UserInformation as _UserInformation
-
-    HAS_TYPED_ACCOUNT = True
-except ImportError:  # shape A (<=0.3.53, >=0.3.56): plain dicts
-    _UserInformation = None
-    HAS_TYPED_ACCOUNT = False
-
-#: True when upstream exposes the typed account layer (``user_info``,
-#: ``_cloud_api``, ``UserInformation``).  Prefer the named helpers below to
-#: branching on this directly.
-UPSTREAM_SHAPE = "typed" if HAS_TYPED_ACCOUNT else "dict"
-
-#: Upstream's account record class, or ``None`` on shape A where the account is
-#: a plain dict.  Only used as a type annotation and an isinstance guard.
-UserInformation = _UserInformation
-
+from aidot.aes_utils import (
+    aes_decrypt,
+    aes_decrypt_to_json,
+    aes_encrypt,
+)
+from aidot.login_const import (
+    API_URL_TEMPLATE,
+    APP_ID,
+    DEFAULT_REGION,
+    PUBLIC_KEY_PEM,
+)
+from aidot.models.device_model import DeviceInformation as DeviceRecord
 
 # --------------------------------------------------------------------------- #
-# Constants: four moved from ``aidot.const`` to ``aidot.login_const``
+# Retired shape-B flags
 # --------------------------------------------------------------------------- #
+# Shape B (0.3.54-0.3.55) is no longer supported.  These keep their names and
+# their shape-A values because consumers and tests import them.
 
-try:  # shape B
-    from aidot.const import (
-        API_URL_TEMPLATE,
-        APP_ID,
-        DEFAULT_REGION,
-        PUBLIC_KEY_PEM,
-    )
-except ImportError:  # shape A
-    from aidot.login_const import (
-        API_URL_TEMPLATE,
-        APP_ID,
-        DEFAULT_REGION,
-        PUBLIC_KEY_PEM,
-    )
+#: Always False: the typed account layer (``user_info``, ``_cloud_api``,
+#: ``UserInformation``) existed only on shape B.
+HAS_TYPED_ACCOUNT = False
 
+#: Always ``"dict"``; ``"typed"`` was shape B.
+UPSTREAM_SHAPE = "dict"
 
-# --------------------------------------------------------------------------- #
-# Crypto: ``aidot.utils.crypto`` -> ``aidot.aes_utils``
-# --------------------------------------------------------------------------- #
+#: Always None: upstream's ``UserInformation`` class existed only on shape B.
+UserInformation = None
 
-try:  # shape B
-    from aidot.utils.crypto import (
-        aes_decrypt,
-        aes_decrypt_to_json,
-        aes_encrypt,
-    )
-except ImportError:  # shape A
-    from aidot.aes_utils import (
-        aes_decrypt,
-        aes_decrypt_to_json,
-        aes_encrypt,
-    )
+#: Always False: upstream's own ``DeviceState`` existed only on shape B, so
+#: ``DeviceState`` below is always the local stand-in.
+DEVICE_STATE_IS_UPSTREAMS = False
+
+#: Always False: ``DeviceClient.read_data`` existed only on shape B.  Shape A
+#: inlines the decrypt into ``receive_data``, so there is no seam to hook.
+HAS_READ_DATA_SEAM = False
+
+#: Always False: the process-wide ``Discover.DISCOVERED_DEVICE`` class dict
+#: existed only on shape B.  Shape A keeps the map on the ``Discover``
+#: instance, which upstream's ``get_device_client`` reads straight off
+#: ``self._discover``.
+HAS_SHARED_DISCOVERY_MAP = False
 
 
 def rsa_encrypt(message: str, public_key: Any = None) -> str:
     """RSA/PKCS1v15 encrypt ``message``, returned base64.
 
-    Implemented here rather than re-exported.  Shape B had
-    ``aidot.utils.crypto.rsa_encrypt(message, public_key)``; shape A replaced it
-    with ``aidot.client.rsa_password_encrypt(message)``, which bakes the key in
-    and takes one argument.  Neither signature is available on both shapes, and
-    ``aidot_cameras.crypto.rsa_encrypt`` is public surface the integration repo
-    may import, and public surface is not changed to track an upstream rename,
-    so the two-argument form is kept and satisfied locally.  ``public_key`` defaults to upstream's
+    Implemented here rather than re-exported.  Upstream 0.3.54-0.3.55 had
+    ``aidot.utils.crypto.rsa_encrypt(message, public_key)``; the supported
+    releases have only ``aidot.client.rsa_password_encrypt(message)``, which
+    bakes the key in and takes one argument.  ``aidot_cameras.crypto.rsa_encrypt``
+    is public surface the integration repo may import, and public surface is not
+    changed to track an upstream rename, so the two-argument form is kept and
+    satisfied locally.  ``public_key`` defaults to upstream's
     ``PUBLIC_KEY_PEM``, which is the only key any caller ever passed.
     """
     from cryptography.hazmat.backends import default_backend
@@ -126,92 +109,79 @@ def rsa_encrypt(message: str, public_key: Any = None) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Device record: ``DeviceModel`` (shape B) / ``DeviceInformation`` (shape A)
+# Device record
 # --------------------------------------------------------------------------- #
 
-try:  # shape B
-    from aidot.models.device_model import DeviceModel as DeviceRecord
-except ImportError:  # shape A
-    from aidot.models.device_model import DeviceInformation as DeviceRecord
-
-#: The typed cloud device record.  Both shapes expose ``from_json`` /
-#: ``to_dict`` and the core field set this package reads (``id``, ``modelId``,
-#: ``aesKey``, ``password``, ``product``); shape A drops ~20 fields shape B
-#: carried and defaults everything to ``None`` rather than ``""``/empty, so
-#: never rely on a nested default being present - check for ``None`` first.
+#: The typed cloud device record, upstream's ``DeviceInformation``.  It exposes
+#: ``from_json`` / ``to_dict`` and the core field set this package reads
+#: (``id``, ``modelId``, ``aesKey``, ``password``, ``product``), and defaults
+#: everything to ``None`` rather than ``""``/empty, so never rely on a nested
+#: default being present - check for ``None`` first.
 DeviceModel = DeviceRecord
 
 
 # --------------------------------------------------------------------------- #
-# DeviceState: upstream's LAN session enum, deleted in shape A
+# DeviceState: upstream's old LAN session enum, kept locally
 # --------------------------------------------------------------------------- #
 
-try:  # shape B
-    from aidot.device_client import DeviceState as _DeviceState
 
-    DEVICE_STATE_IS_UPSTREAMS = True
-except ImportError:  # shape A: no state machine, just two booleans
-    DEVICE_STATE_IS_UPSTREAMS = False
+class _DeviceState(IntEnum):
+    """Stand-in for upstream's deleted ``DeviceState``.
 
-    class _DeviceState(IntEnum):
-        """Stand-in for upstream's deleted ``DeviceState``.
+    Upstream tracks the LAN session with ``_connecting`` /
+    ``_connect_and_login`` booleans instead of an enum.  The enum is still
+    re-exported from ``aidot_cameras.device_client`` because the Home
+    Assistant integration annotates and compares against it, and dropping a
+    public name outright would break it at import.
 
-        Shape A tracks the LAN session with ``_connecting`` /
-        ``_connect_and_login`` booleans instead of an enum.  The enum is still
-        re-exported from ``aidot_cameras.device_client`` because the Home
-        Assistant integration annotates and compares against it, and dropping a
-        public name outright would break it at import.
+    Members and values are copied from 0.3.55, the last upstream release that
+    had the enum, so a stored or hard-coded comparison keeps its meaning.
+    Nothing upstream ever *produces* one of these - use
+    ``device_session_authenticated()`` rather than comparing a client's private
+    state against it.
+    """
 
-        Members and values are copied from 0.3.55 so a stored or hard-coded
-        comparison keeps its meaning.  On shape A nothing upstream ever
-        *produces* one of these - use ``device_session_authenticated()`` rather
-        than comparing a client's private state against it.
-        """
-
-        IDLE = 0
-        INITIALIZING = 1
-        CONNECTING = 2
-        CONNECTED = 3
-        CONNECTION_FAILED = 4
-        AUTHENTICATING = 5
-        AUTHENTICATED = 6
-        AUTHENTICATION_FAILED = 7
-        DISCONNECTED = 8
+    IDLE = 0
+    INITIALIZING = 1
+    CONNECTING = 2
+    CONNECTED = 3
+    CONNECTION_FAILED = 4
+    AUTHENTICATING = 5
+    AUTHENTICATED = 6
+    AUTHENTICATION_FAILED = 7
+    DISCONNECTED = 8
 
 
 DeviceState = _DeviceState
 
 
 def device_session_authenticated(device_client: Any) -> bool:
-    """Whether a device client's LAN session is logged in, on either shape.
+    """Whether a device client's LAN session is logged in.
 
-    Shape B exposes ``_state == DeviceState.AUTHENTICATED``; shape A replaced
-    that with the ``connect_and_login`` property.  Consumers that only want the
-    answer should call this instead of touching either private attribute.
+    Upstream reports it through the ``connect_and_login`` property.  Consumers
+    that only want the answer should call this instead of touching upstream's
+    private state.
     """
-    if DEVICE_STATE_IS_UPSTREAMS:
-        return getattr(device_client, "_state", None) == DeviceState.AUTHENTICATED
     return bool(getattr(device_client, "connect_and_login", False))
 
 
 # --------------------------------------------------------------------------- #
-# Reconnect timer handle: ``_reconnect_timer`` -> ``_reconnect_handle``
+# Reconnect timer handle
 # --------------------------------------------------------------------------- #
 
-#: Attribute names a pending reconnect may be parked under, newest first.
+#: Attribute names a pending reconnect may be parked under.
 #: ``CameraClient.async_close`` cancels whichever exists so a closed account
 #: cannot re-open a TCP connection ~45 s later (upstream cancels neither).
-RECONNECT_HANDLE_ATTRS = ("_reconnect_handle", "_reconnect_timer")
+RECONNECT_HANDLE_ATTRS = ("_reconnect_handle",)
 
 
 def cancel_pending_reconnect(device_client: Any) -> bool:
-    """Cancel a device client's pending reconnect, whichever shape it uses.
+    """Cancel a device client's pending reconnect.
 
-    Returns True if something was cancelled.  Deliberately not a silent
-    ``getattr(x, "_reconnect_timer", None)``: that spelling exists only on shape
-    B, so on shape A it would find nothing, cancel nothing, and report success -
-    the leak fix would go quiet instead of failing.  Callers that care should
-    log the False case.
+    Returns True if something was cancelled, and False - never a silent
+    success - when nothing was found, so if upstream renames the handle again
+    (it was ``_reconnect_timer`` on 0.3.54-0.3.55) the leak fix fails visibly
+    instead of going quiet.  Callers that care should log the False case.
 
     ``LanRetryMixin._schedule_reconnect`` (``aidot_cameras.lan_retry``) does not
     use either handle: it replaces upstream's immediate-respawn task with a
@@ -243,59 +213,46 @@ def cancel_pending_reconnect(device_client: Any) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# Account HTTP surface: ``CloudApi`` (shape B) -> client methods (shape A)
+# Account HTTP surface
 # --------------------------------------------------------------------------- #
 
 
 async def api_get_houses(client: Any) -> Optional[list]:
     """List the account's houses."""
-    if HAS_TYPED_ACCOUNT:
-        return await client._cloud_api.get_houses()
     return await client.async_get_houses()
 
 
 async def api_get_devices(client: Any, house_id: str) -> Optional[list]:
     """List one house's devices."""
-    if HAS_TYPED_ACCOUNT:
-        return await client._cloud_api.get_devices(house_id)
     return await client.async_get_devices(house_id)
 
 
 async def api_get_products(client: Any, product_ids: str) -> Optional[list]:
     """Fetch product metadata for a comma-joined id list."""
-    if HAS_TYPED_ACCOUNT:
-        return await client._cloud_api.get_products(product_ids)
     return await client.async_get_products(product_ids)
 
 
 async def api_refresh_token(client: Any) -> Any:
     """Exchange the refresh token for a new access token.
 
-    Both shapes return the response body and raise ``AidotAuthFailed`` when the
-    refresh token itself is rejected; shape B additionally returns ``None`` on
-    some non-auth failures, so callers must treat a falsy return as "no token".
+    Returns the response body and raises ``AidotAuthFailed`` when the refresh
+    token itself is rejected; callers treat a falsy return as "no token".
     """
-    if HAS_TYPED_ACCOUNT:
-        return await client._cloud_api.refresh_token()
     return await client.async_refresh_token()
 
 
 # --------------------------------------------------------------------------- #
-# Account fields: ``user_info`` dataclass (shape B) -> plain attrs (shape A)
+# Account fields
 # --------------------------------------------------------------------------- #
 
 
 def account_region(client: Any) -> str:
     """The account's API region ("us", "eu", ...)."""
-    if HAS_TYPED_ACCOUNT:
-        return getattr(client.user_info, "region", "") or ""
     return getattr(client, "_region", "") or ""
 
 
 def account_refresh_token(client: Any) -> str:
     """The stored refresh token, or "" when there is none."""
-    if HAS_TYPED_ACCOUNT:
-        return getattr(client.user_info, "refreshToken", "") or ""
     from .const import CONF_REFRESH_TOKEN
 
     return (client.login_info or {}).get(CONF_REFRESH_TOKEN) or ""
@@ -303,10 +260,7 @@ def account_refresh_token(client: Any) -> str:
 
 def account_token_ttl(client: Any, default: int = 7200) -> int:
     """Access-token lifetime in seconds, defaulting to the server's 7200."""
-    if HAS_TYPED_ACCOUNT:
-        raw = getattr(client.user_info, "expiresIn", 0)
-    else:
-        raw = (client.login_info or {}).get("expiresIn", 0)
+    raw = (client.login_info or {}).get("expiresIn", 0)
     try:
         return int(raw or default)
     except (TypeError, ValueError):
@@ -316,11 +270,8 @@ def account_token_ttl(client: Any, default: int = 7200) -> int:
 def account_record(client: Any) -> Any:
     """What to pass as a device client's second constructor argument.
 
-    Shape B wants the ``UserInformation`` dataclass; shape A wants the raw
-    ``login_info`` dict.  See ``device_client_args``.
+    The account's raw ``login_info`` dict.  See ``device_client_args``.
     """
-    if HAS_TYPED_ACCOUNT:
-        return client.user_info
     return client.login_info
 
 
@@ -334,21 +285,19 @@ def device_client_args(
 ) -> tuple:
     """The positional args upstream's ``DeviceClient.__init__`` expects.
 
-    Two axes, detected independently:
+    Upstream takes the raw cloud records - ``(dict, dict)`` - natively, so the
+    originals go straight through and no camera-only field is lost to a typed
+    round trip.  ``device_record`` is accepted but unused: the camera layer
+    builds it anyway (it reads ``.id`` / ``.aesKey`` off it), and keeping the
+    signature stable keeps every caller unchanged.
 
-    * **record shape** - ``(DeviceModel, UserInformation)`` typed dataclasses
-      (0.3.54-0.3.55), or ``(dict, dict)`` raw cloud records natively
-      (<=0.3.53, >=0.3.56).
-    * **account back-reference** - 0.3.57+ takes the owning ``AidotClient`` as
-      a third positional and stores it as ``self.client``.
+    ``login_info`` is preferred for the account; ``typed_account`` is the
+    fallback when a caller supplied only that, used as-is when it is a dict and
+    via its ``to_dict()`` when it is a record object.
 
-    Shape A taking raw dicts is why this package carried ``raw_device`` /
-    ``login_info`` alongside the typed models in the first place: the typed
-    round trip drops every camera-only field.  On shape A the originals go
-    straight through and nothing is lost.
-
-    Callers **splat** the result - its length is 2 or 3 depending on what is
-    installed.
+    0.3.57+ also takes the owning ``AidotClient`` as a third positional and
+    stores it as ``self.client``, so callers **splat** the result - its length
+    is 2 or 3 depending on what is installed.
 
     ``client`` is keyword-only with no default on purpose.  Upstream stores it
     unchecked, so a ``None`` that slipped through here would not surface until
@@ -356,79 +305,33 @@ def device_client_args(
     attribute 'async_execute_diff_command'`` - an upstream traceback for our
     bug.  A caller that cannot supply one has to say so explicitly.
     """
-    if HAS_TYPED_ACCOUNT:
-        pair = (device_record, typed_account)
-    else:
-        account = login_info if isinstance(login_info, dict) else None
-        if account is None:
-            account = typed_account if isinstance(typed_account, dict) else {}
-            if not isinstance(typed_account, dict) and hasattr(
-                typed_account, "to_dict"
-            ):
-                account = typed_account.to_dict()
-        pair = (raw_device, account)
+    account = login_info if isinstance(login_info, dict) else None
+    if account is None:
+        account = typed_account if isinstance(typed_account, dict) else {}
+        if not isinstance(typed_account, dict) and hasattr(typed_account, "to_dict"):
+            account = typed_account.to_dict()
+    pair = (raw_device, account)
     return pair + ((client,) if HAS_DEVICE_CLIENT_BACKREF else ())
 
 
 def light_device_client_args(client: Any, raw_device: dict) -> tuple:
     """Positional args for a NON-camera device client, from the account client.
 
-    The camera path builds the typed record itself (the camera layer reads
-    ``.id`` / ``.aesKey`` off it); the light path has only the raw cloud dict.
-    Building the record HERE, and only on the shape that needs one, keeps the
-    dict path handing upstream the untouched original as it does today rather
-    than adding a ``dacite`` parse to every light on the shape Home Assistant
-    actually runs.
+    The light path has only the raw cloud dict, which is exactly what upstream
+    takes, so it is handed through untouched - no typed record is built for a
+    light.
 
     Before this existed the light branch passed the raw dict straight to
-    upstream, bypassing the seam entirely - which is why it raised
-    ``AttributeError: 'dict' object has no attribute 'id'`` on the typed shape
-    (0.3.55, then this package's declared floor) long before 0.3.57 made it
-    fail on every shape.
+    upstream, bypassing the seam entirely - which is why it broke on every
+    release once 0.3.57 added the account back-reference.
     """
-    device_record = (
-        DeviceModel.from_json(data=raw_device) if HAS_TYPED_ACCOUNT else None
-    )
     return device_client_args(
-        device_record,
+        None,
         raw_device,
         account_record(client),
         client.login_info,
         client=client,
     )
-
-
-#: True when upstream's ``DeviceClient`` exposes a ``read_data`` seam - one
-#: decrypted frame at a time, which this package hooks to recover camera-only
-#: attribute keys that upstream's typed ``DeviceAttr`` model drops.  Shape A
-#: inlines the read into ``receive_data``, so there is no seam and the raw JSON
-#: never escapes.  See ``CameraDeviceClient._notify_status_update``.
-try:
-    from aidot.device_client import DeviceClient as _DeviceClient
-
-    HAS_READ_DATA_SEAM = callable(getattr(_DeviceClient, "read_data", None))
-except ImportError:  # pragma: no cover - upstream is a hard dependency
-    HAS_READ_DATA_SEAM = False
-
-
-# --------------------------------------------------------------------------- #
-# Discovery: static ``Discover`` (shape B) -> instance ``Discover`` (shape A)
-# --------------------------------------------------------------------------- #
-
-#: True when upstream's ``Discover`` keeps discovered addresses in the
-#: process-wide ``DISCOVERED_DEVICE`` class dict.  Shape A made discovery
-#: instance-scoped (``self._discover.discovered_device``), which is the shape
-#: this package's ``CameraDiscover`` already presents - so on shape A the map
-#: no longer has to be shared through the base class to reach upstream's
-#: ``get_device_client``.
-try:
-    from aidot.discover import Discover as _Discover
-
-    HAS_SHARED_DISCOVERY_MAP = isinstance(
-        getattr(_Discover, "DISCOVERED_DEVICE", None), dict
-    )
-except ImportError:  # pragma: no cover - upstream is a hard dependency
-    HAS_SHARED_DISCOVERY_MAP = False
 
 
 def _init_takes_account_client(init: Any) -> bool:
@@ -462,8 +365,7 @@ def _init_takes_account_client(init: Any) -> bool:
 #: feeds exactly one upstream method, ``async_set_effect``, which calls
 #: ``client.async_execute_diff_command``; nothing in this package calls it, but
 #: a consumer's light platform may, so the real client is supplied rather than
-#: a placeholder.  Orthogonal to ``HAS_TYPED_ACCOUNT`` - 0.3.58 is the dict
-#: shape *plus* this back-reference, so it is a second axis, not a third shape.
+#: a placeholder.  0.3.56 (Home Assistant core's pin) does not take it.
 try:
     from aidot.device_client import DeviceClient as _DeviceClientForSig
 
@@ -475,14 +377,11 @@ except ImportError:  # pragma: no cover - upstream is a hard dependency
 def broadcast_protocol_args(callback: Any, user_id: str) -> tuple:
     """Positional args for upstream's ``BroadcastProtocol.__init__``.
 
-    Shape B takes ``(callback)`` and has no notion of the account id; shape A
-    takes ``(callback, user_id)`` and uses it to build the request payload.
+    ``(callback, user_id)`` on every supported release; upstream uses the
+    account id to build the request payload.  (0.3.54-0.3.55 took
+    ``(callback)`` alone.)
     """
-    import inspect
-    from aidot.discover import BroadcastProtocol
-
-    params = list(inspect.signature(BroadcastProtocol.__init__).parameters)
-    return (callback, user_id) if "user_id" in params else (callback,)
+    return (callback, user_id)
 
 
 #: Names this module intends as its public surface within the package.

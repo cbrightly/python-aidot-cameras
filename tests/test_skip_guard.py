@@ -3,8 +3,8 @@
 A test that skips is a test that ran nothing. The integration's clip test
 skipped in CI for want of ffmpeg, and a clip losing its first seconds passed
 (2026-10-07). With AIDOT_FAIL_ON_SKIP set - CI sets it - any skip whose reason
-is not one the suite expects (two tests that cover the two shapes of an
-upstream record, say, one of which always skips) fails the run and names the
+is not one the suite expects (a test for an upstream feature the installed
+python-aidot does not have, say) fails the run and names the
 tests. Unset, the guard does nothing, so a developer without ffmpeg still sees
 a green run with skips listed.
 """
@@ -32,7 +32,7 @@ def guarded(pytester, monkeypatch):
             pass
         def test_needs_ffmpeg():
             pytest.skip("no ffmpeg binary")
-        @pytest.mark.skipif(True, reason="dict upstream shape only")
+        @pytest.mark.skipif(True, reason="upstream takes no account client")
         def test_other_shape():
             pass
         def test_needs_av():
@@ -59,7 +59,7 @@ def test_expected_skips_and_an_unset_guard_pass(guarded, monkeypatch):
     guarded.makepyfile(
         test_things="""
         import pytest
-        @pytest.mark.skipif(True, reason="typed upstream shape only")
+        @pytest.mark.skipif(True, reason="upstream DeviceClient takes the account client")
         def test_one_shape():
             pass
         def test_fine():

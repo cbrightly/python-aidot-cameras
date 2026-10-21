@@ -6,6 +6,22 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Removed
+- **Support for upstream `python-aidot` 0.3.54-0.3.55 (the typed "shape B").**
+  The declared range has started at 0.3.56 since 2026-09-23, so none of it
+  could run: the `_cloud_api` / `user_info` account branches, the
+  `aidot.const` and `aidot.utils.crypto` import fallbacks, upstream's
+  `DeviceState` enum, the `read_data` hook and the attribute recovery behind
+  it, the shared `Discover.DISCOVERED_DEVICE` map, the one-argument
+  `BroadcastProtocol` form, the `_reconnect_timer` spelling and the
+  conditional `_on_token_refreshed` override, plus the tests that only ran on
+  that shape (they skipped on every supported install). Checked against
+  0.3.56 through 0.3.59: none of those names exist there. The flags that
+  reported the shape (`HAS_TYPED_ACCOUNT`, `UPSTREAM_SHAPE`, `UserInformation`,
+  `HAS_READ_DATA_SEAM`, `HAS_SHARED_DISCOVERY_MAP`, `DEVICE_STATE_IS_UPSTREAMS`)
+  stay importable from `aidot_cameras._upstream` with their fixed values, and
+  `DeviceState` stays the local enum, so consumers are unaffected.
+
 ## [1.0.0rc57]
 
 ### Fixed
@@ -37,7 +53,6 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   use it). The check added in rc53 warned and then returned a client it had
   not created, raising `UnboundLocalError` where it used to raise
   `AttributeError`.
-
 ## [1.0.0rc56]
 
 ### Fixed
