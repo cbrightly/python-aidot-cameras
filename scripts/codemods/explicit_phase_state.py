@@ -105,8 +105,7 @@ FAMILIES = (
 )
 
 # The state parameter's name. Fixed, not picked, so a regeneration on a later
-# base always spells it the same way (tests/source_parts.without_state strips
-# exactly this prefix).
+# base always spells it the same way.
 STATE_NAME = "ps"
 SIGNALS = ("_PhaseReturn", "_LoopContinue", "_LoopBreak")
 GENERATED_BY = "scripts/codemods/explicit_phase_state.py"
