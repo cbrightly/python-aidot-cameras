@@ -24,6 +24,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import aidot_cameras.camera.sdes_open as so
 
+from tests.source_parts import without_state
+
 _STUN_MAGIC = b"\x21\x12\xa4\x42"
 
 
@@ -48,16 +50,18 @@ def _extract_helper(src, name):
 
 def _bridge_source():
     """The bridge thread's body, built by make_sdes_bridge for each open."""
-    return inspect.getsource(so.make_sdes_bridge)
+    return without_state(inspect.getsource(so.make_sdes_bridge))
 
 
 def _impl_source():
     """The SDES open and the phase coroutines it was split into, dedented."""
     parts = [
-        textwrap.dedent(inspect.getsource(so._SdesOpenMixin._open_sdes_stream_impl))
+        textwrap.dedent(
+            without_state(inspect.getsource(so._SdesOpenMixin._open_sdes_stream_impl))
+        )
     ]
     parts += [
-        inspect.getsource(getattr(so, n))
+        without_state(inspect.getsource(getattr(so, n)))
         for n in dir(so)
         if n.startswith("_sdes_open_")
     ]
@@ -78,7 +82,7 @@ def test_permission_is_installed_before_every_nomination():
     """
     src = _impl_source()
     regions = {
-        "answer": inspect.getsource(so.nominate_from_answer_sdp),
+        "answer": without_state(inspect.getsource(so.nominate_from_answer_sdp)),
         "setup": src[
             src.index("if _cam_ice_ufrag and _cam_ice_pwd and _cam_ice_cands:") :
         ][:2000],
@@ -102,7 +106,7 @@ def test_permission_is_installed_before_every_nomination():
 
 
 def test_permission_helper_covers_every_candidate_on_both_sockets():
-    body = inspect.getsource(so.turn_install_permissions)
+    body = without_state(inspect.getsource(so.turn_install_permissions))
     assert "for _c_ip, _c_port in _ip_cands" in body, "must cover every candidate"
     assert "for _p_sock in socks" in body
     bound = _impl_source()
@@ -256,7 +260,7 @@ def test_trickled_candidates_are_permissioned_not_just_the_answer_sdp():
     assert "ice_cands_seen" in src, (
         "the SDES path must observe the camera's trickled ICE candidates"
     )
-    trickle = inspect.getsource(so.consume_camera_trickle)
+    trickle = without_state(inspect.getsource(so.consume_camera_trickle))
     assert "install_permissions(" in trickle, (
         "every trickled candidate needs a relay permission"
     )
@@ -306,7 +310,7 @@ def test_trickle_regex_parses_real_camera_candidates():
 
 def test_nomination_set_is_rebound_not_mutated():
     """The bridge thread iterates this list; mutating it under them raises."""
-    trickle = inspect.getsource(so.consume_camera_trickle)
+    trickle = without_state(inspect.getsource(so.consume_camera_trickle))
     assert 'uc_info["cands"] = [' in trickle, (
         "rebind the candidate list to a new object so the bridge thread never "
         "sees it mutate mid-iteration"
@@ -318,7 +322,9 @@ def test_nomination_set_is_rebound_not_mutated():
 
 def test_trickle_observer_does_not_consume_the_dtls_queue():
     """SDES must not steal candidates the DTLS fallback still needs."""
-    wo = inspect.getsource(sys.modules["aidot_cameras.camera.webrtc_open"])
+    wo = without_state(
+        inspect.getsource(sys.modules["aidot_cameras.camera.webrtc_open"])
+    )
     hook = wo[wo.index('cand = inner.get("candidate")') :][:400]
     assert "ice_cands_seen.append(cand)" in hook, "observer must record it"
     assert "ice_q.put_nowait" in hook, (

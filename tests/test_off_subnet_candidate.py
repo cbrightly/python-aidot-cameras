@@ -11,6 +11,8 @@ from unittest import mock
 
 from aidot_cameras.camera import sdes_open
 
+from tests.source_parts import without_state
+
 
 def _on(net):
     import ipaddress
@@ -61,12 +63,12 @@ class TestItOnlyWarnsWhenEveryCandidateIsUnreachable:
         warning must not fire on a mixed set."""
         import inspect
 
-        src = inspect.getsource(sdes_open)
+        src = without_state(inspect.getsource(sdes_open))
         assert "if _off and len(_off) == len(_cam_ice_cands):" in src
 
     def test_the_message_names_the_network_not_the_camera(self):
         import inspect
 
-        src = inspect.getsource(sdes_open)
+        src = without_state(inspect.getsource(sdes_open))
         assert "different network segment" in src
         assert "rather than broken" in src

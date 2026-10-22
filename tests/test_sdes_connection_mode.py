@@ -30,6 +30,7 @@ The pieces existed but did not compose into a choice a user could make:
 # (no pytest fixtures needed; plain asserts)
 
 from aidot_cameras.camera.sdes_open import _sdes_offer_candidate_lines
+from tests.source_parts import without_state
 
 
 def _client_with(mode=None, env=None, monkeypatch=None, battery=False):
@@ -176,12 +177,14 @@ def test_the_offer_builder_uses_the_helper():
     """
     import pathlib
 
-    src = (
-        pathlib.Path(__file__).resolve().parents[1]
-        / "aidot_cameras"
-        / "camera"
-        / "sdes_open.py"
-    ).read_text()
+    src = without_state(
+        (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "aidot_cameras"
+            / "camera"
+            / "sdes_open.py"
+        ).read_text()
+    )
     assert src.count("_sdes_offer_candidate_lines(") >= 3, (
         "expected the offer builder to emit audio and video candidate blocks "
         "through _sdes_offer_candidate_lines (definition + at least two calls)"
@@ -239,12 +242,14 @@ def test_the_offer_uses_the_endpoint_helper_and_prearms_the_permission():
     """Source guard: relay-in-c= without the early permission is a black hole."""
     import pathlib
 
-    src = (
-        pathlib.Path(__file__).resolve().parents[1]
-        / "aidot_cameras"
-        / "camera"
-        / "sdes_open.py"
-    ).read_text()
+    src = without_state(
+        (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "aidot_cameras"
+            / "camera"
+            / "sdes_open.py"
+        ).read_text()
+    )
     assert src.count("_sdes_offer_media_endpoint(") >= 3, (
         "audio and video endpoints must both come from the helper"
     )
@@ -271,12 +276,14 @@ def test_lan_mode_gates_every_turn_allocate_in_the_open():
     import ast
     import pathlib
 
-    src = (
-        pathlib.Path(__file__).resolve().parents[1]
-        / "aidot_cameras"
-        / "camera"
-        / "sdes_open.py"
-    ).read_text()
+    src = without_state(
+        (
+            pathlib.Path(__file__).resolve().parents[1]
+            / "aidot_cameras"
+            / "camera"
+            / "sdes_open.py"
+        ).read_text()
+    )
     tree = ast.parse(src)
     parents = {}
     for node in ast.walk(tree):

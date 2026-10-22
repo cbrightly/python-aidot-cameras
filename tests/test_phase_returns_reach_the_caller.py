@@ -1,10 +1,11 @@
 """A ``return`` in a phase or region comes back out of the method it was split from.
 
 The opens and the serve loops hand their work to phase and region coroutines
-(see ``tests/source_parts.py``). A phase's ``return`` is the method's
-``return``: the phase hands back ``_PhaseReturn(value)`` and the method returns
-``value``. A ``return`` left bare in a phase is read by the method as its
-outputs dict and dropped.
+(see ``tests/source_parts.py``) that share a state object and hand back only a
+control signal. A phase's ``return`` is the method's ``return``: the phase
+hands back ``_PhaseReturn(value)`` and the method returns ``value``. A phase
+that returns anything else (``return session``) has its value dropped by the
+method, which only looks for the signals.
 
 1.0.0rc58's first cut did exactly that with the DTLS open's last statement,
 ``return WebRTCSession(...)``, which sat at the phase's own top level where the
@@ -18,6 +19,7 @@ recording passed.
 import ast
 import importlib
 import inspect
+import re
 import textwrap
 
 import pytest
@@ -25,7 +27,6 @@ import pytest
 from tests.source_parts import PARTS
 
 _SIGNALS = {"_PhaseReturn", "_LoopContinue", "_LoopBreak"}
-_WRAPPERS = _SIGNALS | {"_phase_outputs"}
 
 
 def _parts():
@@ -51,6 +52,8 @@ def _own_returns(fn: ast.AST):
 
 def _wrapper_of(ret: ast.Return):
     v = ret.value
+    if v is None or (isinstance(v, ast.Constant) and v.value is None):
+        return "None"
     if isinstance(v, ast.Call) and isinstance(v.func, ast.Name):
         return v.func.id
     return None
@@ -69,7 +72,7 @@ def test_every_return_in_a_part_is_wrapped(method, name, tree):
     bare = [
         f"line {r.lineno}: return {ast.unparse(r.value) if r.value else ''}"
         for r in _own_returns(fn)
-        if _wrapper_of(r) not in _WRAPPERS
+        if _wrapper_of(r) not in _SIGNALS | {"None"}
     ]
     assert not bare, (
         f"{name} returns without a wrapper, so {method} drops the value: {bare}"
@@ -88,13 +91,14 @@ def test_every_part_that_can_return_is_checked_where_it_is_called(method):
     src = textwrap.dedent(inspect.getsource(getattr(CameraMixin, method)))
     missing = []
     for name, emitted in signals.items():
-        call = f"_o = await {name}(self, locals())"
-        assert src.count(call) == 1, f"{method} should call {name} once"
-        after = src.split(call, 1)[1].split("_o = await ", 1)[0]
+        found = re.findall(rf"^( *)(_o = )?await {name}\(self, \w+\)$", src, re.M)
+        assert len(found) == 1, f"{method} should call {name} once"
+        if not emitted:
+            continue
+        assert found[0][1], f"{method} drops what {name} hands back"
+        after = re.split(rf"_o = await {name}\(self, \w+\)", src, maxsplit=1)[1]
+        after = after.split("await ", 1)[0]
         for signal in sorted(emitted):
-            if f"isinstance(_o, {signal})" not in after and not (
-                signal in ("_LoopContinue", "_LoopBreak")
-                and "isinstance(_o, (_LoopContinue, _LoopBreak))" in after
-            ):
+            if f"isinstance(_o, {signal})" not in after:
                 missing.append(f"{name} -> {signal}")
     assert not missing, f"{method} ignores what these parts hand back: {missing}"

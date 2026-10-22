@@ -14,6 +14,7 @@ git history, and the CHANGELOG still names them where it cites them.
 | [TESTING.md](TESTING.md) | The test tiers (unit, e2e against fakes, live against real cameras) and how CI runs them. |
 | [CI-RUNNER.md](CI-RUNNER.md) | The self-hosted runner that validates each release against real cameras. |
 | [UPSTREAM.md](UPSTREAM.md) | How a new `python-aidot` release is taken in, and the two record shapes the code supports. |
+| [CODEMODS.md](CODEMODS.md) | The source rewrites kept as scripts, and how to run one again on a new base. |
 | [ROAD-TO-1.0.md](ROAD-TO-1.0.md) | What 1.0.0 asserts, the one open item (the two-week soak) and how its clock is set, and the closed items with where their evidence lives. |
 
 ## Design notes - current behaviour, written when it was decided

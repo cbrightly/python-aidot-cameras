@@ -25,6 +25,8 @@ from aidot_cameras.camera.controls import (
 
 from test_mqtt_session_reconnect import _FakeMsg, _install_fake_client
 
+from tests.source_parts import without_state
+
 
 def _dormant_candidate():
     """A CameraMixin with only the fields the release path touches."""
@@ -72,31 +74,37 @@ async def test_a_missing_ffmpeg_is_named_not_retried(caplog):
 
 def test_both_loops_route_unexpected_errors_to_the_release():
     for fn in (CameraMixin._dtls_serve_loop, CameraMixin._sdes_keepalive_loop):
-        src = inspect.getsource(fn)
+        src = without_state(inspect.getsource(fn))
         assert "except asyncio.CancelledError:" in src
         assert "_release_after_loop_error(" in src
 
 
 def test_no_bare_env_float_remains_in_the_camera_client():
-    src = inspect.getsource(camera_client)
+    src = without_state(inspect.getsource(camera_client))
     assert 'float(os.environ.get("AIDOT_' not in src
 
 
 def test_the_jpeg_watchdog_starts_each_session_with_a_fresh_clock():
-    src = inspect.getsource(CameraMixin._jpeg_loop if hasattr(CameraMixin, "_jpeg_loop") else camera_client)
+    src = without_state(
+        inspect.getsource(
+            CameraMixin._jpeg_loop
+            if hasattr(CameraMixin, "_jpeg_loop")
+            else camera_client
+        )
+    )
     i = src.index("_open_time = asyncio.get_running_loop().time()")
     assert "self._last_frame_time = 0.0" in src[i - 300 : i]
 
 
 def test_start_keepalive_waits_for_a_dormant_loop_instead_of_dropping_the_view():
-    src = inspect.getsource(CameraMixin.start_keepalive)
+    src = without_state(inspect.getsource(CameraMixin.start_keepalive))
     i = src.index("if self._stream_task is not None and not self._stream_task.done():")
     assert "if self._streaming_active:" in src[i : i + 200]
     assert "asyncio.shield(self._stream_task)" in src[i : i + 600]
 
 
 def test_async_speak_closes_its_own_session_on_every_exit():
-    src = inspect.getsource(CameraMixin.async_speak)
+    src = without_state(inspect.getsource(CameraMixin.async_speak))
     i = src.index("started = bool(await session.async_start_talk(_provider))")
     tail = src[i:]
     assert tail.count("finally:") >= 2
@@ -104,9 +112,11 @@ def test_async_speak_closes_its_own_session_on_every_exit():
 
 
 def test_dtls_publish_thread_reports_any_exception():
-    src = inspect.getsource(rtsp_publish.dtls_rtp_publish_run)
+    src = without_state(inspect.getsource(rtsp_publish.dtls_rtp_publish_run))
     assert "except RtspPublishError as exc:" in src
-    assert "except Exception as exc:" in src.split("except RtspPublishError as exc:", 1)[1]
+    assert (
+        "except Exception as exc:" in src.split("except RtspPublishError as exc:", 1)[1]
+    )
 
 
 def test_sdes_module_imports_with_an_empty_grace_value(monkeypatch):
@@ -126,19 +136,19 @@ def test_sdes_module_imports_with_an_empty_grace_value(monkeypatch):
 
 
 def test_sdes_bridge_thread_logs_an_unexpected_error():
-    src = inspect.getsource(sdes_open)
+    src = without_state(inspect.getsource(sdes_open))
     assert "SDES bridge ended by an unexpected error" in src
     i = src.index("_cp_ip_b = _cp_socket.inet_aton(_cp_peer_ip)")
     assert "except OSError:" in src[i : i + 200]
 
 
 def test_lan_mode_gates_the_turn_preallocation():
-    src = inspect.getsource(sdes_open)
+    src = without_state(inspect.getsource(sdes_open))
     assert "if not _relay_addrs and not _skip_turn_prealloc:" in src
 
 
 def test_dtls_signaling_wait_watches_the_refusal_future():
-    src = inspect.getsource(webrtc_open)
+    src = without_state(inspect.getsource(webrtc_open))
     i = src.index("_init_pending: set = {")
     assert "terminal_error_fut" in src[i : i + 200]
     j = src.index("_rr_done, _rr_pending = _init_done, _init_pending")
@@ -207,7 +217,13 @@ def test_mqtt_session_publishes_while_the_inbox_is_busy(monkeypatch):
 
     _install_fake_client(monkeypatch, driver)
     proto._mqtt_session_sync(
-        "wss://broker.example/mqtt", "u", "p", "cid", ["t/a"], [], 5.0,
+        "wss://broker.example/mqtt",
+        "u",
+        "p",
+        "cid",
+        ["t/a"],
+        [],
+        5.0,
         outgoing_queue=outgoing,
     )
     assert "out/1" in published

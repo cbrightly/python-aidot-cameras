@@ -103,6 +103,13 @@ test = [
     "pyflakes",
 ]
 
+# Rewriting with scripts/codemods/explicit_phase_state.py needs libcst; its
+# --check and --awaits modes need only the standard library. Not needed to use
+# or test the library. See docs/CODEMODS.md.
+codemod = [
+    "libcst>=1.1",
+]
+
 [project.scripts]
 # Standalone bridge: stream an AiDot camera into go2rtc (or any RTSP/HTTP
 # consumer) without Home Assistant. Streaming needs the `webrtc` extra

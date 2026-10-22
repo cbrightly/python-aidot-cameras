@@ -149,11 +149,21 @@ def _open_self(refused):
     )
 
 
+def _empty_open_state():
+    # The phase reads and writes the open's state object; every field
+    # starts unset, as the locals of the open did.
+    from aidot_cameras.camera.webrtc_open import _DtlsOpenState
+
+    return _DtlsOpenState.__new__(_DtlsOpenState)
+
+
 def test_the_open_raises_the_refusal():
     from aidot_cameras.camera.webrtc_open import _dtls_open_credentials_and_mqtt_setup
 
     with pytest.raises(AidotPlaintextMqttRefused) as ei:
-        asyncio.run(_dtls_open_credentials_and_mqtt_setup(_open_self("ws"), {}))
+        asyncio.run(
+            _dtls_open_credentials_and_mqtt_setup(_open_self("ws"), _empty_open_state())
+        )
     err = ei.value
     assert err.scheme == "ws"
     assert "AIDOT_ALLOW_PLAINTEXT_MQTT" in str(err)
@@ -166,7 +176,9 @@ def test_the_open_without_a_refusal_says_no_url():
     from aidot_cameras.camera.webrtc_open import _dtls_open_credentials_and_mqtt_setup
 
     with pytest.raises(AidotMqttUnavailable) as ei:
-        asyncio.run(_dtls_open_credentials_and_mqtt_setup(_open_self(None), {}))
+        asyncio.run(
+            _dtls_open_credentials_and_mqtt_setup(_open_self(None), _empty_open_state())
+        )
     assert not isinstance(ei.value, AidotPlaintextMqttRefused)
 
 

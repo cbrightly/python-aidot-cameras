@@ -16,6 +16,8 @@ from aidot_cameras.camera import client as camera_client
 from aidot_cameras.camera import sdes_open, webrtc_open
 from aidot_cameras.camera.protocol import mask_sdp_secrets
 
+from tests.source_parts import without_state
+
 _SDP = (
     "v=0\r\n"
     "m=audio 9 RTP/SAVPF 8\r\n"
@@ -52,7 +54,7 @@ def test_mask_sdp_secrets_leaves_an_innocent_sdp_alone():
 
 
 def test_sdes_open_logs_the_psk_as_a_fingerprint():
-    src = inspect.getsource(sdes_open)
+    src = without_state(inspect.getsource(sdes_open))
     i = src.index('"sdes: offer key=%s psk=%s"')
     call = src[i : i + 200]
     assert "_key_fingerprint(_psk_value_req)" in call
@@ -60,32 +62,32 @@ def test_sdes_open_logs_the_psk_as_a_fingerprint():
 
 
 def test_sdes_open_masks_the_echoed_data_channel_section():
-    src = inspect.getsource(sdes_open)
+    src = without_state(inspect.getsource(sdes_open))
     i = src.index("DC probe ACCEPTED: camera answered m=application")
     assert "mask_sdp_secrets(" in src[i : i + 300]
 
 
 def test_sdes_open_redacts_the_ffmpeg_argv():
-    src = inspect.getsource(sdes_open)
+    src = without_state(inspect.getsource(sdes_open))
     i = src.index('"SDES ffmpeg cmd: %s"')
     assert "redact_url(t)" in src[i : i + 200]
 
 
 def test_webrtc_open_never_logs_a_payload_body():
-    src = inspect.getsource(webrtc_open)
+    src = without_state(inspect.getsource(webrtc_open))
     assert "%.400s" not in src
     i = src.index('"webrtc rx  topic=%s')
     assert "len(payload_str)" in src[i : i + 120]
 
 
 def test_webrtc_open_masks_the_answer_sdp_it_logs_on_failure():
-    src = inspect.getsource(webrtc_open)
+    src = without_state(inspect.getsource(webrtc_open))
     i = src.index("--- camera answer SDP ---")
     assert "mask_sdp_secrets(_ans_sdp)" in src[i : i + 300]
 
 
 def test_device_detail_bodies_are_logged_as_keys():
-    src = inspect.getsource(camera_client)
+    src = without_state(inspect.getsource(camera_client))
     assert "returned no UID for %s. body=%s" not in src
 
 
@@ -112,7 +114,11 @@ def test_sdp_redaction_masks_all_three_credential_attributes():
         "a=mid:0\r\n"
     )
     out = redact_sdp_secrets(sdp)
-    for secret in ("tl5mID0sjY2OjnmVLs50er", "Zm9vYmFyYmF6cXV1eA==", "deadbeef1234567890"):
+    for secret in (
+        "tl5mID0sjY2OjnmVLs50er",
+        "Zm9vYmFyYmF6cXV1eA==",
+        "deadbeef1234567890",
+    ):
         assert secret not in out
     # Everything that is not key material survives, so the log stays useful.
     assert "a=ice-ufrag:xu0G" in out
@@ -166,6 +172,6 @@ def test_the_offer_log_line_masks_at_the_call_site_too():
     the intent to anyone reading the code."""
     import inspect
 
-    src = inspect.getsource(webrtc_open)
+    src = without_state(inspect.getsource(webrtc_open))
     i = src.index("webrtc: SDP offer (first 500 chars)")
     assert "mask_sdp_secrets(" in src[i : i + 200]

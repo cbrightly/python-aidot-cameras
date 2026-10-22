@@ -37,16 +37,16 @@ async def test_the_loop_follows_the_signal(monkeypatch, loop, first, prefix, sig
     )
     calls = []
 
-    async def _first(self, _in):
+    async def _first(self, state):
         calls.append(first)
         if len(calls) > 1:
             # A second pass means the loop went round again: stop it there.
             cam._streaming_active = False
             return client._PhaseReturn("again")
         flow = _LoopBreak if signal == "break" else _LoopContinue
-        return flow({"_not_ready_burst": 7})
+        return flow()
 
-    async def _later(self, _in):
+    async def _later(self, state):
         calls.append("later region")
         return client._PhaseReturn("fell through")
 

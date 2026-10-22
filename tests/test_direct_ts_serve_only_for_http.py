@@ -8,6 +8,8 @@ import inspect
 from aidot_cameras.camera import client
 from aidot_cameras.camera.client import _is_http_serve_url
 
+from tests.source_parts import without_state
+
 
 def test_only_http_urls_are_direct_ts_serves():
     assert _is_http_serve_url("http://127.0.0.1:18600/aidot_x.ts")
@@ -18,5 +20,5 @@ def test_only_http_urls_are_direct_ts_serves():
 
 
 def test_the_serve_loop_gates_the_direct_ts_serve_on_http():
-    src = inspect.getsource(client)
+    src = without_state(inspect.getsource(client))
     assert "elif _is_http_serve_url(serve_url):" in src
