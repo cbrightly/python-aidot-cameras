@@ -6,6 +6,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc60]
+
+Soak: resets the clock. The SDES open now stops a failed ffmpeg off the event
+loop and the serve loops check a break before a continue, both on default
+paths. The reference installation is still off the network, so this costs no
+soak time.
+
 ### Added
 - A `test` extra: `pip install -e ".[test]"` installs what both test tiers
   need (the `webrtc` extra, pytest, pytest-asyncio, pytest-timeout,
