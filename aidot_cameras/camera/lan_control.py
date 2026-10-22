@@ -33,6 +33,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from ..crypto import aes_encrypt, aes_decrypt
+from ..exceptions import CameraLanError, CameraLanLoginRejected
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -166,30 +167,6 @@ async def discover_subnet(
 
     await asyncio.gather(*(probe(f"{cidr24}.{n}") for n in range(1, 255)))
     return found
-
-
-class CameraLanError(Exception):
-    """A local control operation failed (connect, login, or protocol error)."""
-
-
-class CameraLanLoginRejected(CameraLanError):
-    """The device advertised local control and then refused our login.
-
-    Separate from its parent because the two mean opposite things to a caller.
-    A device that does not offer local control is ordinary and should be quiet;
-    a device that offers it, accepts the connection, decrypts our request with
-    its own key, and STILL answers with a non-200 ack is a defect - either in
-    what we send or in the device - and the caller should be able to say so out
-    loud rather than logging it at the same level as "not supported here".
-
-    ``ack`` is the device's own code, because the refusals differ by family and
-    the number is the only handle on which one happened: A000088 cameras answer
-    4352, A001497 lights and A001535 plugs 4354, A001493 lights 400.
-    """
-
-    def __init__(self, message: str, ack: Any = None) -> None:
-        super().__init__(message)
-        self.ack = ack
 
 
 class CameraLanClient:

@@ -34,6 +34,8 @@ from .constants import (
     GETSTREAMCTRL_CMD,  # noqa: F401 - re-exported for back-compat (public pair; unused in-module)
     SDES_SPEAKERSTART_DELAY,  # noqa: F401 - used by the sdes_open mixin; kept re-exported
     aidot_api_base,
+    mqtt_fallback_url,
+    plaintext_mqtt_scheme,
     smarthome_base,
 )
 from .constants import (  # noqa: F401 - re-exported for device_client / back-compat
@@ -61,7 +63,6 @@ from .sd_listing import _CameraSdMixin
 from .webrtc_open import _WebRTCOpenMixin
 from .sdes_open import (
     _SdesOpenMixin,
-    _sdes_max_session_s,
     _session_cap_reached,
 )
 from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixin; kept re-exported for back-compat
@@ -1243,119 +1244,6 @@ def _stable_terminal_id(seed: "Optional[str]" = None, width: int = 6) -> str:
 
         _TERMINAL_ID = os.urandom(16).hex()
     return _TERMINAL_ID[:width]
-
-
-#: Measurement scaffolding, OFF unless an operator names a file - see the note
-#: on EXPT_CAP_FILE. A published library must not open a Home Assistant config
-#: path on the event loop, and with no env var set this knob does no I/O at all.
-EXPT_PEERID_FILE = os.environ.get("AIDOT_EXPT_PEERID_FILE")
-
-
-#: Screening knob for the peer id's CLIENT CLASS only, off unless set.
-#: `_expt_peer_id_fields` covers the same ground but reads a file, and the
-#: live-validation harness can only pass environment variables - so an arm that
-#: has to run there needs this route.
-EXPT_PEERID_CLASS = "AIDOT_EXPT_PEERID_CLASS"
-
-
-def _expt_peer_id_class():
-    """One hex character to pin field 2's first character, or None.
-
-    The camera takes its client class from that character
-    (``client_type = field2[0] - '0'``). Pinning it to ``'0'`` (APP_ANDROID)
-    was tried and reverted - it breaks the A000088, which accepts the session
-    and then sends nothing. The vendor WEB app sends ``'2'``, and that arm has
-    never been screened; this exists to screen it.
-
-    **Pins the class character and nothing else.** The three trailing integers
-    encode transport, and an SDES tail pushed at a DTLS camera is silently
-    discarded - the failure mode an earlier unscoped knob produced. Those stay
-    exactly as computed.
-
-    Fails closed: anything that is not a single hex digit is ignored rather
-    than applied, because a peer id of the wrong shape is rejected outright and
-    would break every open rather than one arm of an experiment.
-    """
-    raw = (os.environ.get(EXPT_PEERID_CLASS) or "").strip()
-    if len(raw) != 1 or raw not in "0123456789abcdef":
-        return None
-    return raw
-
-
-def _expt_peer_id_fields(device_id=None, path=None):
-    """Experiment override for one device's peer-id fields, or None.
-
-    The camera parses the peer id with ``%[^_]_%[^_]_%d_%d_%d`` (`parse_peer_id`
-    at 0x298ef8 in the A001064 image) and takes its client class from the FIRST
-    CHARACTER of field 2: ``client_type = field2[0] - '0'``, against
-    ``EN_WEBRTC_CLIENT_TYPE_{APP_ANDROID,APP_IOS,WEB,ALEXA,GOOGLE_HOME}`` = 0..4.
-    The vendor app hard-codes a leading ``'0'`` there; we generate six random hex
-    digits, so we announce a uniformly random class and an out-of-range one 11
-    times in 16.  This exists to pin that character on the live camera.
-
-    Scoped to ONE device, like ``_sdes_max_session_s``.  The scoping is not
-    cosmetic: this override also sets the three trailing integers, and an
-    unscoped file would push an SDES ``_2_0_1`` tail at the DTLS cameras, which
-    silently discard a peer id with the wrong transport digit.  An earlier
-    unscoped experiment knob hit a battery camera and forced it to ~30x its
-    normal wake rate.
-
-    File format, one line::
-
-        <device_id>:[<terminal>_]<live_type>_<stream_id>_<version>
-
-    Three integers set the integers only.  A leading terminal also pins field 2,
-    the field that carries the client class, and comes in two widths:
-
-      * **one hex character** - pins only field 2's FIRST character (the class)
-        and leaves the other five random.  This is the arm you almost always
-        want: it reproduces the observed condition, "class is 4, tail varies",
-        without also making every session's peer id identical.
-      * **six hex characters** - pins the whole of field 2.  Field 1 is already
-        stable per process, so this makes every peer id byte-identical across
-        opens, which is cross-session peer-id REUSE.  The camera has a
-        session-dedup path keyed on the peer id, so a result obtained this way
-        cannot separate the client class from the reuse.  Use it only when reuse
-        is the thing under test.
-
-    FAILS CLOSED on anything it cannot parse, on a device mismatch, and on a
-    caller that passes no device id.  A malformed peer id is rejected by the
-    camera outright, so a half-written override file must never reach the wire.
-    """
-    if not device_id:
-        return None
-    path = path if path is not None else EXPT_PEERID_FILE
-    if not path:
-        return None
-    try:
-        with open(path) as _fh:
-            raw = _fh.read().strip()
-    except OSError:
-        return None
-    head, sep, tail = raw.partition(":")
-    if not sep or head.strip() != device_id:
-        return None
-    parts = tail.strip().split("_")
-    # Three fields sets the integers only; four also pins the terminal id, so
-    # that field can be screened as well.
-    terminal = None
-    if len(parts) == 4:
-        terminal, parts = parts[0], parts[1:]
-        # One hex character (pin the class, keep the tail random) or exactly six
-        # (pin all of field 2). Any other width would change the peer id's shape,
-        # and the camera rejects a malformed peer id outright.
-        if len(terminal) not in (1, 6) or any(
-            c not in "0123456789abcdef" for c in terminal
-        ):
-            return None
-    elif len(parts) != 3:
-        return None
-    out = []
-    for q in parts:
-        if not q.isdigit():
-            return None
-        out.append(int(q))
-    return (terminal, out[0], out[1], out[2])
 
 
 #: How long to leave between waking a battery camera and sending the command.
@@ -2589,11 +2477,10 @@ async def _sdes_keepalive_prepare_session(self, _in: dict) -> dict:
     _done = asyncio.ensure_future(session.wait_done())  # noqa: RUF006 - read back by the watch region
     _stalled = False
     _ice_dead = False
-    # Measurement scaffolding, off by default and device-scoped: end a
-    # session after its allotted media time so a pass costs the same
-    # wall clock as a stall and a RATE can be sampled.  Anchored on
-    # media, never on the open.
-    _cap_s = _sdes_max_session_s(self.device_id)
+    # The per-device session cap was file-driven measurement
+    # scaffolding and is gone; 0 keeps the cap check below inert until the
+    # loop plumbing that carries it is retired.
+    _cap_s = 0.0
     _first_media_at = None
     _capped = False
     _idle_release = False
@@ -3044,6 +2931,8 @@ class CameraMixin(
         self._region: str = user_info.get("region", "us")
         # Cache slot for MQTT broker URL, fetched lazily on first playback call
         self._mqtt_url: Optional[str] = None
+        # The scheme of a broker URL refused for having no TLS, else None.
+        self._mqtt_url_refused_scheme: Optional[str] = None
         # Cache slot for Leedarson smarthome auth (mqttUser, mqttPassword, userId)
         # Fetched lazily via _async_get_smarthome_auth()
         self._smarthome_auth: Optional[dict] = None
@@ -3753,7 +3642,23 @@ class CameraMixin(
                     "using regional fallback. keys=%s",
                     sorted(data),
                 )
-                mqtt_host = f"wss://{self._region}-mqtt.arnoo.com:8443/mqtt"
+                mqtt_host = mqtt_fallback_url(self._region)
+
+            # The connection carries the account's MQTT password: refuse a
+            # non-TLS broker URL unless the operator opted in. Nothing is
+            # cached, so every caller sees None (and the open path raises
+            # AidotPlaintextMqttRefused from the scheme recorded here).
+            _plain = plaintext_mqtt_scheme(mqtt_host)
+            if _plain and not settings.read("AIDOT_ALLOW_PLAINTEXT_MQTT"):
+                self._mqtt_url_refused_scheme = _plain
+                _LOGGER.error(
+                    "getServerUrlConfig named a non-TLS MQTT broker (%s://); "
+                    "refusing to send the MQTT password over it. Set "
+                    "AIDOT_ALLOW_PLAINTEXT_MQTT=1 to allow it.",
+                    _plain,
+                )
+                return None
+            self._mqtt_url_refused_scheme = None
 
             self._mqtt_url = (
                 mqtt_host
@@ -7883,7 +7788,7 @@ class CameraMixin(
         (LIVE=0, SDCARD=1, PRE_LINK=2) and we send 2 = PRE_LINK for a live view;
         field 4 is a literal 0 in the app.  All three are left alone for now:
         they are demonstrably not what the camera classifies a client by (that
-        is field 2's first character - see ``_expt_peer_id_fields``), and
+        is field 2's first character - see the note in the body), and
         changing a digit the cameras currently accept, on a guess, is how the
         stream stops working.
         """
@@ -7946,9 +7851,8 @@ class CameraMixin(
         # was out of range 11 times in 16. Note class 2 is NOT one of the
         # smart-home classes (3, 4) that skip the camera's keepalive watchdog,
         # so this changes what we claim to be and nothing about how the session
-        # is policed. Screen any future change with `_expt_peer_id_class` (env)
-        # or `_expt_peer_id_fields` (file, per device), and get evidence from
-        # EACH model - the A000088's firmware has never been disassembled.
+        # is policed. Screen any future change on EACH model with a patched
+        # build - the A000088's firmware has never been disassembled.
         # Field 2 = client class + 5 random. '2' is EN_WEBRTC_CLIENT_TYPE_WEB,
         # what the vendor web app announces. See the note above for why this
         # is '2' and never '0'. The tail stays random: pinning all six would
@@ -7956,22 +7860,6 @@ class CameraMixin(
         # reuse the camera dedups on.
         rand6 = "2" + os.urandom(3).hex()[1:]
         version = 1 if sdes else 2
-        # Experiment override (off by default, fails closed, scoped to one
-        # device): the camera reads its client class from field 2's first
-        # character - see _expt_peer_id_fields.  Without a device id the
-        # override never applies.
-        # Class-only screening knob (env), applied before the file override so
-        # a file naming this device still wins.
-        _cls = _expt_peer_id_class()
-        if _cls:
-            rand6 = _cls + rand6[1:]
-        _fields = _expt_peer_id_fields(device_id)
-        if _fields is not None:
-            _term, live_type, stream_id, version = _fields
-            if _term:
-                # One character pins the class and keeps the tail random; six
-                # pins the whole field. Never let the id change length.
-                rand6 = _term if len(_term) == 6 else _term + rand6[1:]
         return f"{session}_{rand6}_{live_type}_{stream_id}_{version}"
 
     async def async_open_webrtc_stream(

@@ -2,7 +2,7 @@
 
 Every `AIDOT_*` variable the library reads that is **not** in the README's
 tables, in four groups: the streaming knobs, the deeper internals, the ffmpeg
-serve and the recordings, and the endpoint overrides and measurement seams.
+serve and the recordings, and the endpoint overrides and test seams.
 The code's own copy of this inventory is `aidot_cameras/settings.py`: every
 variable, its default and how it parses, grouped the same way, and a test that
 fails when a variable is missing from these tables or a row names no variable.
@@ -88,7 +88,7 @@ sessions and any camera with `AIDOT_DIRECT_PUBLISH=0`.
 | `AIDOT_REORDER_SLACK_TICKS` | How far the DTLS A/V mux shifts video presentation ahead of decode, in 90 kHz ticks; audio is shifted by the same time so the two start together. | `180000` (2 s) |
 | `AIDOT_FFMPEG` | The ffmpeg binary the decoder-capability probe (`hwaccel.probe_decoder`) runs. | `ffmpeg` |
 
-## Endpoints, test seams and measurement scaffolding
+## Endpoints and test seams
 
 Unset in every normal installation.
 
@@ -96,9 +96,6 @@ Unset in every normal installation.
 | --- | --- | --- |
 | `AIDOT_API_BASE_TEMPLATE` | Override for the platform API base; `{region}` is substituted. | the vendor's `prod-{region}-api` host |
 | `AIDOT_SMARTHOME_URL_TEMPLATE` | Override for the smart-home API base; `{region}` is substituted. | the vendor's `{region}-smarthome` host |
-| `AIDOT_MQTT_URL` | Point the whole client at a local MQTT broker (`ws://127.0.0.1:PORT/mqtt`) without any cloud call. A test seam. | unset |
+| `AIDOT_MQTT_URL` | Point the whole client at a local MQTT broker (`ws://127.0.0.1:PORT/mqtt`) without any cloud call. A test seam. You set it yourself, so the refusal of a non-TLS broker URL from the cloud (see `AIDOT_ALLOW_PLAINTEXT_MQTT` in the README) does not apply to it. | unset |
 | `AIDOT_STUN_SERVERS` | Comma-separated STUN URIs for ICE gathering; an empty value (`AIDOT_STUN_SERVERS=`) disables STUN. | a public STUN server |
 | `AIDOT_TURN_SERVERS` | TURN relay URIs appended when the cloud's ICE config carries none; an empty value disables the hardcoded vendor fallback. | the vendor's relay |
-| `AIDOT_EXPT_CAP_FILE` | Name a file holding `<device_id>:<seconds>` and that one SDES camera's sessions are capped at that length, so a measurement arm whose sessions would otherwise run for tens of minutes keeps producing samples. Scoped to one device on purpose and fails closed: anything it cannot attribute caps nothing. No I/O at all when unset. | unset |
-| `AIDOT_EXPT_PEERID_FILE` | Name a file holding peer-id fields to announce instead of the library's own, for a measurement arm. No I/O when unset. | unset |
-| `AIDOT_EXPT_PEERID_CLASS` | The same for the peer id's client class alone, as an environment value, because the live-validation harness can only pass environment variables. | unset |

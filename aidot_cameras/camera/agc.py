@@ -13,8 +13,9 @@ version every default path has run since 1.0.0rc52 and was checked live.
 from __future__ import annotations
 
 import math
-import os
 from typing import Optional
+
+from .. import settings
 
 # --------------------------------------------------------------------------- #
 # Audio gain on A-law bytes                                                    #
@@ -105,18 +106,14 @@ class AlawAgc:
     """
 
     def __init__(self, env=None):
-        env = os.environ if env is None else env
-
         def _f(name, default):
-            try:
-                val = float(env.get(name, default))
-            except (TypeError, ValueError):
-                return float(default)
-            # "inf"/"nan" parse as floats and then poison the gain: a
+            # The registry owns the default (``default`` is kept in the call
+            # for the reader) and the parse: unset, unparseable or non-finite
+            # reads as the default. "inf"/"nan" must never get through - a
             # non-finite gain reaches math.log() when the translate table is
             # keyed and raises *inside the publish loop*, taking the stream
             # down. The per-sample path this replaced merely saturated.
-            return val if math.isfinite(val) else float(default)
+            return float(settings.read(name, env))
 
         self.enabled = True
         self.target = _db2amp(_f("AIDOT_AUDIO_TARGET_DBFS", -15)) * 32767.0

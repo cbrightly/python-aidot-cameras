@@ -25,9 +25,39 @@ Everything in `aidot_cameras.__all__`, importable as
 | `configure_stream_limits` | fleet-wide concurrency limits |
 | `AidotError` and the other exception types in `__all__` | see `aidot_cameras.exceptions` below |
 
-`AidotCameraWrongCodec` (raised when a camera pinned to one codec sends the
-other) lives in `aidot_cameras.exceptions` and is covered by that row; adding it
-to the root `__all__` is in progress.
+### Exceptions
+
+Every exception type is defined in `aidot_cameras.exceptions` and exported from
+the package root. `AidotError` is the base of all of them except upstream's
+`AidotOSError`, so `except AidotError` catches whatever the library raises on
+purpose.
+
+| Name | Base(s) | Raised when |
+| --- | --- | --- |
+| `AidotError` | `Exception` | base of the hierarchy (from upstream python-aidot) |
+| `AidotAuthFailed`, `AidotAuthTokenExpired`, `AidotNotLogin`, `AidotUserOrPassIncorrect` | `AidotError` | account login and token failures (from upstream) |
+| `HTTPError`, `InvalidHost`, `InvalidURL` | `AidotError` | upstream's HTTP-level errors |
+| `AidotOSError` | `Exception` | upstream's OS-level error; not an `AidotError` (upstream's choice) |
+| `AidotCameraBusy` | `AidotError` | the camera refused the stream with a terminal code; do not retry |
+| `AidotCameraNotReady` | `AidotError` | the camera answered but its media pipeline is not up yet; retry soon |
+| `AidotCameraNoMedia` | `AidotError` | the camera answered and sent no media; abandon to the retry |
+| `AidotCameraWrongCodec` | `AidotCameraNoMedia` | a camera pinned to one codec sent the other |
+| `AidotStreamOpenError` | `AidotError`, `RuntimeError` | base of the open-path errors below |
+| `AidotMqttUnavailable` | `AidotStreamOpenError` | no MQTT broker URL, or the broker connection failed |
+| `AidotPlaintextMqttRefused` | `AidotMqttUnavailable` | the cloud named a non-TLS broker URL and `AIDOT_ALLOW_PLAINTEXT_MQTT` is not set |
+| `AidotLivePlayRefused` | `AidotStreamOpenError` | the camera answered `livePlay=0` |
+| `AidotNoWebrtcAnswer` | `AidotStreamOpenError` | no `webrtcResp` within the open timeout |
+| `AidotNegotiationFailed` | `AidotStreamOpenError` | the camera's SDP could not be applied, or ICE did not connect |
+| `AidotFfmpegMissing` | `AidotStreamOpenError` | ffmpeg is needed and not installed |
+| `AidotUnknownRegion` | `AidotError`, `ValueError` | the account region is not a known one (see `AIDOT_EXTRA_REGIONS`) |
+| `CameraLanError` | `AidotError` | a LAN control operation failed (also in `aidot_cameras.camera.lan_control`) |
+| `CameraLanLoginRejected` | `CameraLanError` | the device offered LAN control and refused the login |
+| `RtspPublishError` | `AidotError`, `RuntimeError` | the RTSP server refused or dropped a publish (also in `aidot_cameras.camera.rtsp_publish`) |
+
+The open-path errors replaced bare `RuntimeError` raises, and `RtspPublishError`
+was a `RuntimeError` before it was an `AidotError`, which is why each keeps
+`RuntimeError` as a base: `except RuntimeError` written against an earlier
+release still catches them.
 
 ### Modules and members
 

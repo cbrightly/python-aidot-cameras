@@ -69,7 +69,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 import re
 import signal
 import sys
@@ -77,6 +76,7 @@ from typing import Optional
 
 import aiohttp
 
+from . import settings
 from .client import AidotClient
 from .cloud_auth import (  # noqa: F401  (re-exported for callers and tests)
     CloudAuthUnavailable,
@@ -116,14 +116,9 @@ def _env_bool(name: str) -> bool | None:
     a word spelling reads as true whatever it says; passing one of those through
     here would hand the library an override it disagrees with.  Check the
     resolver before adding a knob to ``cmd_stream``."""
-    # Unset and unreadable are the same answer, so let the default reach the
-    # tuples rather than branching on it separately.
-    val = os.environ.get(name, "").strip().lower()
-    if val in ("1", "true", "yes", "on"):
-        return True
-    if val in ("0", "false", "no", "off"):
-        return False
-    return None
+    # Unset and unreadable are the same answer; the registry's tri-state reader
+    # also refuses a name it does not know.
+    return settings.tristate(name)
 
 
 async def _cameras(client: AidotClient) -> list[dict]:

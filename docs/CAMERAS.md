@@ -735,5 +735,5 @@ Every `AIDOT_*` variable the library reads that is not in the
 [README's table](../README.md#camera-streaming--tuning) is documented in one
 place, [`ENVIRONMENT.md`](ENVIRONMENT.md): the streaming knobs, the deeper
 internals (idle release, PLI cadence, retry spacing, audio normalisation), the
-ffmpeg serve's input settings, and the endpoint overrides and measurement seams.
+ffmpeg serve's input settings, and the endpoint overrides and test seams.
 The table that used to sit here moved there so the two could not drift apart.

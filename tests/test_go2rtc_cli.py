@@ -46,21 +46,21 @@ def test_env_bool_unset_is_none(monkeypatch):
     consults before the environment - so it would outrank the library's whole
     chain and silence a default it owns.
     """
-    monkeypatch.delenv("AIDOT_X", raising=False)
-    assert _env_bool("AIDOT_X") is None
+    monkeypatch.delenv("AIDOT_FAST_CONNECT", raising=False)
+    assert _env_bool("AIDOT_FAST_CONNECT") is None
 
 
 @pytest.mark.parametrize("raw", ["1", "true", "TRUE", "yes", "on", " On "])
 def test_env_bool_accepts_every_spelling_the_library_accepts(monkeypatch, raw):
     """`AIDOT_FAST_CONNECT=true` is documented and must not read as "off"."""
-    monkeypatch.setenv("AIDOT_X", raw)
-    assert _env_bool("AIDOT_X") is True
+    monkeypatch.setenv("AIDOT_FAST_CONNECT", raw)
+    assert _env_bool("AIDOT_FAST_CONNECT") is True
 
 
 @pytest.mark.parametrize("raw", ["0", "false", "No", "off", " OFF "])
 def test_env_bool_falsy_spellings_match_the_library(monkeypatch, raw):
-    monkeypatch.setenv("AIDOT_X", raw)
-    assert _env_bool("AIDOT_X") is False
+    monkeypatch.setenv("AIDOT_FAST_CONNECT", raw)
+    assert _env_bool("AIDOT_FAST_CONNECT") is False
 
 
 @pytest.mark.parametrize("raw", ["", "  ", "2", "enabled"])
@@ -70,8 +70,8 @@ def test_env_bool_defers_on_anything_it_cannot_read(monkeypatch, raw):
     `AIDOT_SDES_SERVE_AUDIO=` with no value - an empty systemd `Environment=` or
     compose entry - would otherwise drop audio the library was going to serve.
     """
-    monkeypatch.setenv("AIDOT_X", raw)
-    assert _env_bool("AIDOT_X") is None
+    monkeypatch.setenv("AIDOT_FAST_CONNECT", raw)
+    assert _env_bool("AIDOT_FAST_CONNECT") is None
 
 
 @pytest.mark.parametrize("raw", ["1", "on", "0", "off"])
@@ -135,3 +135,10 @@ def test_go2rtc_source_pairs_each_transport_with_its_output_argument():
     """
     assert _go2rtc_source("dev1", True) == "exec:aidot-go2rtc dev1 {output}"
     assert _go2rtc_source("dev2", False) == "exec:aidot-go2rtc dev2 -"
+
+
+def test_env_bool_refuses_an_unregistered_name():
+    """The tri-state reader goes through the settings registry, so a name the
+    registry does not know is a programming error rather than a silent None."""
+    with pytest.raises(KeyError):
+        _env_bool("AIDOT_NOT_A_KNOB")

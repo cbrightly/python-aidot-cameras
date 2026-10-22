@@ -16,6 +16,8 @@ import logging
 import os
 import stat
 
+from . import settings
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -30,7 +32,7 @@ def _xdg_config_home() -> str:
 _CONFIG_DIR = os.path.join(_xdg_config_home(), "aidot")
 _DEFAULT_CREDS_FILE = os.path.join(_CONFIG_DIR, "credentials.json")
 _ENC_FILE = os.path.join(_CONFIG_DIR, "credentials.enc")
-_KEY_FILE = os.environ.get("AIDOT_CRED_KEY_FILE") or os.path.join(_CONFIG_DIR, ".key")
+_KEY_FILE = settings.read("AIDOT_CRED_KEY_FILE") or os.path.join(_CONFIG_DIR, ".key")
 
 
 # -- Public API ---------------------------------------------------------------
@@ -43,13 +45,13 @@ def load_credentials(creds_path: str | None = None) -> dict:
     Raises FileNotFoundError / ValueError if nothing is found.
     """
     # Priority 1: environment variables
-    env_user = os.environ.get("AIDOT_USERNAME")
-    env_pass = os.environ.get("AIDOT_PASSWORD")
+    env_user = settings.read("AIDOT_USERNAME")
+    env_pass = settings.read("AIDOT_PASSWORD")
     if env_user and env_pass:
         return {
             "username": env_user,
             "password": env_pass,
-            "country": os.environ.get("AIDOT_COUNTRY", "US"),
+            "country": settings.read("AIDOT_COUNTRY"),
         }
 
     # Priority 2: Fernet-encrypted file

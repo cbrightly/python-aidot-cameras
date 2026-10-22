@@ -179,7 +179,7 @@ def test_not_ready_never_aborts_an_open():
     assert _idx != -1, "the SDES open no longer references the not-ready code"
     # The only refusal branch keys on livePlay == 0, not on the code.
     assert "if _lp_on_sdes == 0:" in _body
-    assert "raise RuntimeError" in _body
+    assert "raise AidotLivePlayRefused" in _body
 
 
 def test_constant_matches_the_documented_wire_code():
