@@ -15,7 +15,7 @@ to ~26/hour, and removes the outcome-coupled sampling entirely.
 
 Off by default, and SCOPED TO ONE DEVICE. That scoping is not cosmetic: an
 unscoped cap hit every camera on the SDES path, including a battery one
-(338603b50fce, battery=True) that normally opens about twice an hour. Capping it
+(5555eeee6666, battery=True) that normally opens about twice an hour. Capping it
 forced a reconnect every ~110 s - roughly 30x its normal wake rate - which is a
 real cost to a battery device that has nothing to do with the experiment.
 
@@ -31,8 +31,8 @@ from aidot_cameras.camera.sdes_open import (
 )
 
 
-CAM = "12b144cb12da4994945bffd4f1acfd0c"
-OTHER = "338603b50fce43a61785a53a944ba06e"
+CAM = "1111aaaa2222bbbb3333cccc4444dddd"
+OTHER = "5555eeee6666aaaa9999bbbb8888cccc"
 
 
 class TestCapValue:
@@ -115,7 +115,7 @@ class TestTheKnobIsOffInAPublishedLibrary:
             return real_open(*a, **k)
 
         monkeypatch.setattr("builtins.open", _spy)
-        assert m._sdes_max_session_s("12b144cb12da4994945bffd4f1acfd0c") == 0.0
+        assert m._sdes_max_session_s("1111aaaa2222bbbb3333cccc4444dddd") == 0.0
         assert opened == [], f"opened {opened!r} with the knob off"
 
     def test_an_explicit_path_still_works_for_screening(self, tmp_path, monkeypatch):
@@ -123,7 +123,7 @@ class TestTheKnobIsOffInAPublishedLibrary:
 
         monkeypatch.setattr(m, "EXPT_CAP_FILE", None)
         f = tmp_path / "cap"
-        f.write_text("12b144cb12da4994945bffd4f1acfd0c:250")
+        f.write_text("1111aaaa2222bbbb3333cccc4444dddd:250")
         assert (
-            m._sdes_max_session_s("12b144cb12da4994945bffd4f1acfd0c", str(f)) == 250.0
+            m._sdes_max_session_s("1111aaaa2222bbbb3333cccc4444dddd", str(f)) == 250.0
         )

@@ -16,11 +16,12 @@ the flag forced OFF - the deviation - and compare:
 
 Usage
 -----
-  # one-shot over the current HA log buffer (remote box)
-  ssh root@homeassistant 'ha core logs' | python scripts/sdes_soak_monitor.py
+  # one-shot over the current HA log buffer (remote box; HA_SSH_TARGET is
+  # your own ssh destination for the HA host, there is no default)
+  ssh "$HA_SSH_TARGET" 'ha core logs' | python scripts/sdes_soak_monitor.py
 
   # live soak: stream logs and print a summary every 60s and on Ctrl-C
-  ssh root@homeassistant 'ha core logs --follow' | python scripts/sdes_soak_monitor.py --follow
+  ssh "$HA_SSH_TARGET" 'ha core logs --follow' | python scripts/sdes_soak_monitor.py --follow
 
   # from a captured file
   python scripts/sdes_soak_monitor.py soak.log

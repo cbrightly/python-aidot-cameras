@@ -24,8 +24,8 @@ from aidot_cameras.camera.client import CameraMixin
 from aidot_cameras.camera import client as client_mod
 
 SHAPE = re.compile(r"^[0-9a-f]{32}_[0-9a-f]{6}_(\d+)_(\d+)_(\d+)$")
-DEV = "12b144cb12da4994945bffd4f1acfd0c"
-OTHER = "338603b50fce46ef8d2545fc7362c967"
+DEV = "1111aaaa2222bbbb3333cccc4444dddd"
+OTHER = "5555eeee6666ffff7777000088881111"
 
 
 def _gen(**kw):

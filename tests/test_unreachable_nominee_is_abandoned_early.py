@@ -1,8 +1,8 @@
 """A nominated candidate that never answers must not burn the whole wait.
 
-Seen on an A001513 (camera b5284...) on 2026-09-15: its answer advertised a
-single host candidate, 192.168.0.159, on the host's own /24 (Home Assistant at
-192.168.0.114). _candidate_is_off_subnet cannot flag that - the address IS on
+Seen on an A001513 on 2026-09-15: its answer advertised a
+single host candidate, 10.0.0.159, on the host's own /24 (Home Assistant at
+10.0.0.114). _candidate_is_off_subnet cannot flag that - the address IS on
 our subnet, and it is the camera's real one (ARP resolves it to the camera's
 MAC; ICMP to it comes and goes, a battery camera dozing). Nothing we nominated
 answered (zero STUN Binding Success, no media), and the session spent its whole
