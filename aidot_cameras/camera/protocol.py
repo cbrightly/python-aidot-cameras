@@ -1677,10 +1677,6 @@ def _battery_cap_spans_sessions_due(
     return (now - last_known_viewer) > unknown_cap_s
 
 
-#: Default for ``AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S``.
-_BATTERY_UNKNOWN_RELEASE_S = 300.0
-
-
 def _battery_unknown_release_s(env=None) -> float:
     """How long a battery camera may stream with its viewers unknown, seconds.
 
@@ -1688,10 +1684,6 @@ def _battery_unknown_release_s(env=None) -> float:
     ``<= 0`` disables the cap (unknown never releases). A malformed or
     non-finite value falls back to the default with one debug line."""
     return settings.read("AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S", env)
-
-
-#: Default for ``AIDOT_STREAM_STARTUP_GRACE_S``.
-_STREAM_STARTUP_GRACE_S = 60.0
 
 
 def _stream_startup_grace_s(env=None) -> float:
@@ -2873,39 +2865,6 @@ async def _mqtt_get_playback_server_info(
         on_message=_check,
     )
     return result_holder[0] if result_holder else None
-
-
-async def _mqtt_listen(
-    mqtt_url: str,
-    mqtt_user: str,
-    mqtt_pwd: str,
-    client_id: str,
-    device_id: str,
-    duration: float = 60.0,
-    on_message=None,
-) -> list:
-    """Subscribe to all device/user MQTT topics and collect messages for *duration* seconds.
-
-    Returns a list of (topic, payload_str) tuples.
-    *on_message(topic, payload_str)* is called for each message as it arrives.
-    """
-    user_id = mqtt_user or "0"
-    return await _mqtt_session(
-        mqtt_url,
-        mqtt_user,
-        mqtt_pwd,
-        client_id,
-        subscribe_topics=[
-            f"iot/v1/cb/{device_id}/#",
-            f"iot/v1/c/{user_id}/#",
-            f"lds/v1/cb/{device_id}/#",
-            f"lds/v1/c/{user_id}/#",
-            f"iot/v1/s/{user_id}/#",
-        ],
-        publish_items=[],
-        duration=duration,
-        on_message=on_message,
-    )
 
 
 def _ip_looks_ascii_garbled(ip_str) -> bool:

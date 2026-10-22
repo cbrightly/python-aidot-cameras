@@ -11,6 +11,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   `async_open_webrtc_stream`. It has warned with a `DeprecationWarning` since
   1.0.0b9 and said it would be removed in 1.0.0; it was never listed in
   docs/API-STABILITY.md. Call `async_open_webrtc_stream` instead.
+- Code that nothing in the library or the reference integration calls:
+  `camera/sd_playback.py` (the SD-card playcontrol request builder and reply
+  decoder, which no session ever used) and its tests; `protocol._mqtt_listen`;
+  `protocol._BATTERY_UNKNOWN_RELEASE_S` and `protocol._STREAM_STARTUP_GRACE_S`,
+  copies of defaults the settings registry owns; and in `camera/constants.py`
+  `_LEEDARSON_APP_KEY`, the playback TCP framing constants (`_HDR_*`,
+  `_CMD_*`, `_SF_HDR_SIZE`) and `_AUDIO_CODEC_G711A`.
 
 ### Fixed
 - **A region that breaks out of a serve loop ends it.** `_LoopBreak`
