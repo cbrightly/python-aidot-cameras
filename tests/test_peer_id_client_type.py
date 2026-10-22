@@ -41,7 +41,9 @@ class TestDefault:
 
 
 class TestEveryCallSitePassesADeviceId:
-    """The scoping is worthless if a call site drops the device id."""
+    """Every call site still names the camera. The device id no longer changes
+    the peer id (the per-device override that used it is gone), but keeping it
+    at every call site keeps the signature honest for whatever needs it next."""
 
     def test_no_bare_call_survives_in_the_source(self):
         import inspect

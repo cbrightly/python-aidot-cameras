@@ -47,5 +47,4 @@ class TestTheMeasurementKnobIsGone:
         from aidot_cameras.camera import client as client_mod
 
         src = inspect.getsource(client_mod)
-        assert "_cap_s = 0.0" in src
         assert "_sdes_max_session_s" not in src

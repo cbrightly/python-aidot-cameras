@@ -168,3 +168,25 @@ def test_the_open_without_a_refusal_says_no_url():
     with pytest.raises(AidotMqttUnavailable) as ei:
         asyncio.run(_dtls_open_credentials_and_mqtt_setup(_open_self(None), {}))
     assert not isinstance(ei.value, AidotPlaintextMqttRefused)
+
+
+def test_a_repeated_refusal_is_logged_loudly_once(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """Nothing is cached, so every poll refetches; only the first refusal of a
+    scheme is an ERROR, the rest are DEBUG."""
+    import logging
+
+    monkeypatch.delenv("AIDOT_ALLOW_PLAINTEXT_MQTT", raising=False)
+    dc = _client(
+        monkeypatch, make_camera_device_client, "ws://broker.example.invalid/m"
+    )
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(3):
+            assert asyncio.run(dc._async_get_mqtt_url()) is None
+    refusals = [r for r in caplog.records if "non-TLS MQTT broker" in r.getMessage()]
+    assert [r.levelno for r in refusals] == [
+        logging.ERROR,
+        logging.DEBUG,
+        logging.DEBUG,
+    ]

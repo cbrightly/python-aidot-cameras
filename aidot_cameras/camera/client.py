@@ -3650,8 +3650,16 @@ class CameraMixin(
             # AidotPlaintextMqttRefused from the scheme recorded here).
             _plain = plaintext_mqtt_scheme(mqtt_host)
             if _plain and not settings.read("AIDOT_ALLOW_PLAINTEXT_MQTT"):
+                # Every poll refetches (nothing is cached), so say it loudly
+                # once per change and quietly after that.
+                _level = (
+                    logging.DEBUG
+                    if self._mqtt_url_refused_scheme == _plain
+                    else logging.ERROR
+                )
                 self._mqtt_url_refused_scheme = _plain
-                _LOGGER.error(
+                _LOGGER.log(
+                    _level,
                     "getServerUrlConfig named a non-TLS MQTT broker (%s://); "
                     "refusing to send the MQTT password over it. Set "
                     "AIDOT_ALLOW_PLAINTEXT_MQTT=1 to allow it.",

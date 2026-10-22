@@ -648,7 +648,8 @@ knob is in
 Opt-in knobs that tighten the camera transport. Defaults preserve current
 behavior (the firmware's signaling doesn't carry verifiable material, so strict
 modes are off until you pin a value), and the library warns in its log when one
-is left at the permissive default.
+is left at the permissive default. The two exceptions are strict by default and
+loosen only when set: `AIDOT_ALLOW_PLAINTEXT_MQTT` and `AIDOT_EXTRA_REGIONS`.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
