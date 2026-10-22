@@ -1,7 +1,9 @@
 version: 2
 updates:
-  # Keep the SHA-pinned GitHub Actions in ci.yml / publish.yml current. Dependabot
-  # opens PRs that bump the pinned SHA and update the trailing version comment.
+  # Meant to keep the SHA-pinned GitHub Actions in the workflows current. This
+  # repository is a fork, and Dependabot version updates do not run on forks
+  # unless enabled for the fork, so as configured this file does nothing and
+  # the pins are bumped by hand. It is kept so the policy is in one place.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

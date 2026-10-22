@@ -1,4 +1,4 @@
-# Byte-compiled / optimized / DLL files
+# Byte-compiled / optimized files
 __pycache__/
 *.py[cod]
 *$py.class
@@ -26,12 +26,6 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
-
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
@@ -51,172 +45,33 @@ coverage.xml
 .pytest_cache/
 cover/
 
-# Translations
-*.mo
-*.pot
+# Linters and type checkers
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
 
-# Django stuff:
+# Logs
 *.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-.pybuilder/
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
-# .python-version
-
-# pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
-#Pipfile.lock
-
-# poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
-#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
-#poetry.lock
-
-# pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
-#pdm.lock
-#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
-#   in version control.
-#   https://pdm.fming.dev/#use-with-ide
-.pdm.toml
-
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
-__pypackages__/
-
-# Celery stuff
-celerybeat-schedule
-celerybeat.pid
-
-# SageMath parsed files
-*.sage.py
 
 # Environments
 .env
 .venv
+.venv/
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
 
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# pytype static type analyzer
-.pytype/
-
-# Cython debug symbols
-cython_debug/
-
-# PyCharm
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
-
-# macOS artifacts
+# macOS
 .DS_Store
-**/.DS_Store
 
-# Development environment
-__INIT_VENV__
-venv/
-.venv/
 
-# Test captures and scratch files
+# Packet captures
 *.pcap
-a.txt
-camera_tests/
-camera_stream.*
-camera_traffic.*
 
-# Development utility scripts (local only)
-copy_to_macbook.sh
-extract.sh
-test-*.sh
-camera_test_runner.sh
-research/tutk_bridge/android-bionic/aosp_arm64-exp-RP1A/system.img
-
-# Local venv rebuild snapshot (dev artifact)
-requirements-venv-snapshot.txt
-
-# Reverse-engineering artifacts (decompiled APK, SDK headers, binary analysis)
-# kept locally, purged from git history 2026-05-30
-research/
-
-# Manual camera exerciser (local dev/diagnostic script, not shipped)
-test_camera.py
-
-# Live-device integration tests (contain per-device credentials and LAN IPs)
-tutk_test.py
-beta_test.py
-
-# Development/diagnostic scripts (contain hardcoded paths and LAN IPs)
-tools/
-
-# Experimental sidecar / research artifacts (Go binary, compiled bytecode)
-sidecar/
-
-# Internal development planning notes
-plan.md
-
-# Reverse-engineering and validation docs (contain LAN IPs and internal architecture notes)
-docs/APK_DTLS_WEBRTC.md
-docs/CAMERA_LIFECYCLE_PARITY.md
-docs/DTLS_ICE_NOMINATION_FIX.md
-docs/EXPERIMENT_DC_ONLY_HANDOFF.md
-docs/ICE_DTLS_ROOT_CAUSE.md
-docs/SIDECAR_SCOPE.md
-docs/VALIDATION_2026-05-30.md
-docs/WEBRTC_BASELINE.md
-docs/official_camera_network_calls.md
-
-# aidot-go2rtc bridge: local secrets / generated artifacts -- never commit
+# aidot-go2rtc: local secrets and generated artifacts - never commit
 auto.crt
 auto.key
 *.crt

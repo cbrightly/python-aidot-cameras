@@ -11,16 +11,17 @@ concurrency:
   cancel-in-progress: true
 
 # Third-party actions are pinned to full commit SHAs (not moving tags); the
-# trailing comment records the human-readable version. Dependabot
-# (github-actions ecosystem) proposes SHA bumps.
+# trailing comment records the human-readable version. This repository is a
+# fork, and Dependabot version updates do not run on it, so the pins are bumped
+# by hand: resolve the new tag to its commit SHA and update the comment.
 jobs:
   # Lint is pure-Python; run it on Ubuntu (fast). node24-runtime actions.
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24)
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6 (node24)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1      # v7.0.1 (node24)
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0 (node24)
         with:
           python-version: "3.13"
       - run: pip install ruff
@@ -39,10 +40,10 @@ jobs:
     name: Type check (mypy, informational)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1      # v7.0.1 (node24)
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6 (node24)
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0 (node24)
         with:
           python-version: "3.13"
       - run: pip install mypy
@@ -73,8 +74,8 @@ jobs:
     name: Build & check package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24)
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6 (node24)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1      # v7.0.1 (node24)
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0 (node24)
         with:
           python-version: "3.13"
       - name: Build sdist + wheel and check metadata
@@ -117,7 +118,7 @@ jobs:
           # `experimental: true` makes an arm advisory - for example a new
           # upstream release under evaluation before it is admitted as gating.
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24, mandatory in a musl container)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1      # v7.0.1 (node24, mandatory in a musl container)
       # git for checkout; ffmpeg for the mux-path tests (tests/test_audio_mux_offline.py
       # and friends exercise the real libavformat pipeline); small build toolchain as a
       # safety net for any transitive dep that lacks a musllinux wheel (the heavy ones
@@ -195,7 +196,7 @@ jobs:
     runs-on: ubuntu-latest
     container: python:3.13-alpine
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24, mandatory in a musl container)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1      # v7.0.1 (node24, mandatory in a musl container)
       - name: System deps
         run: apk add --no-cache git curl ffmpeg gcc musl-dev libffi-dev
       - name: Install package + test deps
@@ -224,7 +225,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the library (this PR)
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1      # v7.0.1 (node24)
         with:
           path: library
       # Pinned to a RELEASE TAG, not a moving branch: this job is a required
@@ -234,14 +235,18 @@ jobs:
       # library must keep working with (and note that a contract test added on
       # the integration's main only starts running here once it is tagged).
       - name: Check out the integration
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1      # v7.0.1 (node24)
         with:
           repository: cbrightly/hass-aidot-cameras
-          ref: v2.10.2
+          ref: v2.37.15
           path: integration
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6 (node24)
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0 (node24)
         with:
           python-version: "3.13"
+      # The integration's suite at v2.37.15 has a clip-proxy test that runs
+      # ffmpeg, and AIDOT_FAIL_ON_SKIP turns its "no ffmpeg" skip into a failure.
+      - name: Install ffmpeg
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
       - name: Install the integration's test deps + THIS library
         run: |
           set -euo pipefail
@@ -284,8 +289,8 @@ jobs:
           - ha: "dev"
             experimental: true
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd      # v5 (node24)
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6 (node24)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1      # v7.0.1 (node24)
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0 (node24)
         with:
           python-version: "3.13"
       - name: Resolve and install against HA's constraints
