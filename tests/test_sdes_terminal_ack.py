@@ -55,22 +55,21 @@ def test_sdes_open_path_checks_the_terminal_future():
     assert "AidotCameraBusy" in sdes_branch
 
 
-def test_sdes_keepalive_loop_backs_off_on_camera_busy():
-    from tests.source_parts import full_source
+def test_sdes_keepalive_loop_backs_off_on_camera_busy(
+    monkeypatch, make_camera_device_client
+):
+    """A camera refusal waits out the release window (_BUSY_BACKOFF_S, measured:
+    2 s is refused, 8 s reopens), not the short open-failure backoff and not
+    the 300 s the refusal used to cost."""
+    from aidot_cameras.camera.client import _BUSY_BACKOFF_S
+    from aidot_cameras.exceptions import AidotCameraBusy
+    from tests.keepalive_driver import SdesKeepaliveRun
 
-    loop_src = full_source("_sdes_keepalive_loop_inner")
-    assert "except AidotCameraBusy" in loop_src, (
-        "the SDES keepalive loop must honour a camera refusal instead of "
-        "retrying on the short backoff"
-    )
-    busy_at = loop_src.index("except AidotCameraBusy")
-    assert "_BUSY_BACKOFF_S" in loop_src[busy_at : busy_at + 1600], (
-        "a camera refusal must wait out the release window rather than "
-        "retrying on the short backoff"
-    )
-    assert "_MAX_DELAY" not in loop_src[busy_at : busy_at + 1600], (
-        "the refusal wait used to be _MAX_DELAY (300s) on the belief that the "
-        "camera releases slowly. Measured 2026-08-07: 2s is refused, 8s "
-        "reopens cleanly. A camera that clears in seconds must not cost "
-        "minutes - see _BUSY_BACKOFF_S"
-    )
+    cam = make_camera_device_client("A001513")
+    run = SdesKeepaliveRun(
+        monkeypatch, cam, [AidotCameraBusy(-50002, "max streams")] * 3
+    ).run()
+
+    assert run.sleeps == [_BUSY_BACKOFF_S] * 3
+    assert 0 < _BUSY_BACKOFF_S < 300.0
+    assert len(run.opens) == 4 and run.dormant == []

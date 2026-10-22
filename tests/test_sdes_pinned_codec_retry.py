@@ -73,28 +73,25 @@ def test_the_abandon_is_a_no_media_abandon_that_names_both_codecs():
     assert "97" in str(err) and "96" in str(err)
 
 
-def _loop_source() -> str:
-    from tests.source_parts import full_source
+def test_the_keepalive_retries_a_wrong_codec_without_no_media_accounting(
+    monkeypatch, make_camera_device_client
+):
+    """A camera that sent the other codec delivered media: it is re-opened at
+    once, never counted towards the futile-keepalive abandon, and never paced
+    like a camera that sent nothing."""
+    import aidot_cameras.camera.client as cc
+    from tests.keepalive_driver import SdesKeepaliveRun
 
-    return full_source("_sdes_keepalive_loop_inner")
+    cam = make_camera_device_client("A001513")
+    assert cam.is_battery_camera
+    tries = cc._FUTILE_KEEPALIVE_LIMIT + 3
+    run = SdesKeepaliveRun(
+        monkeypatch, cam, [AidotCameraWrongCodec(98, 96) for _ in range(tries)]
+    ).run()
 
-
-def test_the_keepalive_retries_a_wrong_codec_without_no_media_accounting():
-    import re
-
-    src = _loop_source()
-    assert "except AidotCameraWrongCodec" in src
-    assert src.index("except AidotCameraWrongCodec") < src.index(
-        "except AidotCameraNoMedia"
-    ), "the more specific handler must come first, or it is never reached"
-    head = re.search(r"^( *)except AidotCameraWrongCodec", src, re.M)
-    i, indent = head.start(), head.group(1)
-    m = re.search(rf"\n{indent}except ", src[i + 1 :])
-    branch = src[i : i + 1 + m.start()]
-    assert "_next_no_media_streak" not in branch
-    assert "_should_abandon_keepalive" not in branch
-    # A `continue` of the loop comes back from the region as _LoopContinue.
-    assert "continue" in branch or "_LoopContinue(" in branch
+    assert len(run.opens) == tries + 1, "every wrong-codec open is retried"
+    assert run.dormant == [], "a wrong codec must not trip the no-media abandon"
+    assert run.sleeps == [1.0] * tries
 
 
 def test_the_camera_knows_whether_a_ts_reader_is_expected(monkeypatch):

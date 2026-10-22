@@ -72,11 +72,37 @@ async def test_a_missing_ffmpeg_is_named_not_retried(caplog):
     assert any("install ffmpeg" in r.getMessage() for r in caplog.records)
 
 
-def test_both_loops_route_unexpected_errors_to_the_release():
-    for fn in (CameraMixin._dtls_serve_loop, CameraMixin._sdes_keepalive_loop):
-        src = without_state(inspect.getsource(fn))
-        assert "except asyncio.CancelledError:" in src
-        assert "_release_after_loop_error(" in src
+@pytest.mark.parametrize("which", ["_sdes_keepalive_loop", "_dtls_serve_loop"])
+def test_both_loops_route_unexpected_errors_to_the_release(
+    which, make_camera_device_client
+):
+    """An exception out of a loop body releases the camera like the idle
+    release does; a cancellation still propagates as one."""
+    cam = make_camera_device_client("A001064" if "sdes" in which else "A000088")
+    inner = which + "_inner"
+    released = []
+
+    async def _boom():
+        raise RuntimeError("malformed environment")
+
+    async def _release(what, exc):
+        released.append((what, exc))
+        cam._streaming_active = False
+
+    cam._streaming_active = True
+    cam._keepalive_rtsp_url = None  # no relay
+    setattr(cam, inner, _boom)
+    cam._release_after_loop_error = _release
+    asyncio.run(getattr(cam, which)())
+    assert len(released) == 1 and isinstance(released[0][1], RuntimeError)
+
+    async def _cancelled():
+        raise asyncio.CancelledError
+
+    setattr(cam, inner, _cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(getattr(cam, which)())
+    assert len(released) == 1, "a cancellation is not an error to release on"
 
 
 def test_no_bare_env_float_remains_in_the_camera_client():

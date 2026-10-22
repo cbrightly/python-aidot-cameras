@@ -26,18 +26,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import aidot_cameras.camera.client as cc
 
 
-def test_the_sdes_keepalive_loop_opens_talk_capable():
-    from tests.source_parts import full_source
+def test_the_sdes_keepalive_loop_opens_talk_capable(
+    monkeypatch, make_camera_device_client
+):
+    """Every open of the live-view loop asks for talk, or the session it
+    publishes as _stream_session cannot carry any and async_speak opens a
+    second camera session."""
+    from tests.keepalive_driver import FakeSession, SdesKeepaliveRun, no_media
 
-    src = full_source("_sdes_keepalive_loop_inner")
-    # The loop has exactly one async_open_webrtc_stream call; it must ask for
-    # talk, or the session it publishes as _stream_session cannot carry any.
-    assert src.count("async_open_webrtc_stream") == 1, (
-        "this test assumes a single open call in the loop - re-read it if that changed"
-    )
-    assert "talk=True" in src, (
-        "the live-view session must be talk-capable or async_speak can never reuse it"
-    )
+    cam = make_camera_device_client("A001064")
+    run = SdesKeepaliveRun(monkeypatch, cam, no_media(2) + [FakeSession(life=20)]).run()
+
+    assert len(run.opens) == 4
+    assert all(o.get("talk") is True for o in run.opens), run.opens
 
 
 class _Session:

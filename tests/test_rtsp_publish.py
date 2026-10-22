@@ -1618,18 +1618,25 @@ def test_both_sdes_serve_launches_go_through_the_spawn_helper():
     assert src.count("subprocess.Popen(") == 1
 
 
-def test_dtls_serve_loop_checks_publish_before_the_direct_ts_serve():
-    """Source guard: with an rtsp:// destination the direct TS serve would
-    try to bind go2rtc's own RTSP port, so the publish branch must win."""
-    import inspect
+@pytest.mark.parametrize(
+    "url, target",
+    [("rtsp://127.0.0.1:8554/cam", "publish"), ("http://127.0.0.1:18558/x.ts", "mux")],
+)
+def test_dtls_serve_loop_checks_publish_before_the_direct_ts_serve(
+    monkeypatch, make_camera_device_client, url, target
+):
+    """With an rtsp:// destination the direct TS serve would try to bind
+    go2rtc's own RTSP port, so the publish branch must win."""
+    from tests.keepalive_driver import DtlsServeRun, FakeDtlsSession
 
-    from aidot_cameras.camera import client
-
-    src = without_state(inspect.getsource(client))
-    i_pub = src.index("_publishing = direct_publish_enabled() and is_publishable_url(")
-    i_ts = src.index("elif _is_http_serve_url(serve_url):")
-    assert i_pub < i_ts
-    assert "target=dtls_rtp_publish_run" in src
+    monkeypatch.setenv("AIDOT_DIRECT_PUBLISH", "1")
+    cam = make_camera_device_client("A000088")
+    cam._stream_idle_opt = 0.0
+    run = DtlsServeRun(
+        monkeypatch, cam, [FakeDtlsSession()], url=url, timeout=0.5
+    ).run()
+    assert run.mux_targets[:1] == [target]
+    assert bool(run.direct) is (target == "mux")
 
 
 # --------------------------------------------------------------------------- #
