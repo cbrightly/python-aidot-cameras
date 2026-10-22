@@ -1,7 +1,8 @@
 """Ask a camera what recordings it holds, and write down exactly what it says.
 
-SD-card retrieval is the one real feature gap left (ROAD-TO-1.0 item 6). Reading
-the decompiled client answered everything about it except one thing:
+Written when SD-card retrieval was the one feature gap left; listing has since
+shipped. Reading the decompiled client answered everything about it except one
+thing:
 
   * the command ids are known - LISTEVENT 0x318 with response 0x319,
     HASLISTEVENT 0x4b5 with response 0x4b6;

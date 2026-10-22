@@ -325,6 +325,17 @@ def test_read_by_name_uses_the_registry_and_an_injected_env(monkeypatch):
         settings.read("AIDOT_NOT_A_KNOB")
 
 
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("0", 0.1), ("-3", 0.1), ("0.01", 0.1), ("nan", 5.0), ("0.5", 0.5), ("5", 5.0)],
+)
+def test_the_slow_probe_step_cannot_be_zero(raw, expected):
+    """``_slow_probe_sleep`` sleeps in steps of this size until its interval
+    is up; a step of 0 or less made it spin on ``asyncio.sleep(0)``."""
+    env = {"AIDOT_DTLS_SLOW_PROBE_CHUNK_S": raw}
+    assert settings.read("AIDOT_DTLS_SLOW_PROBE_CHUNK_S", env) == expected
+
+
 def test_default_by_name():
     assert settings.default("AIDOT_BUSY_BACKOFF_S") == 20.0
 

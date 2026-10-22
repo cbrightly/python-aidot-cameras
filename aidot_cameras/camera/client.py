@@ -7,7 +7,6 @@ from urllib.parse import urlparse
 import os
 import time
 import asyncio
-import warnings
 from typing import TYPE_CHECKING, Any, Callable, List, NamedTuple, Optional, Union
 
 if TYPE_CHECKING:  # annotation only; keeps av off the import path
@@ -1436,8 +1435,17 @@ class _LoopContinue:
         self.outputs = outputs
 
 
-class _LoopBreak(_LoopContinue):
-    """A region breaking out of the loop, with what it bound first."""
+class _LoopBreak:
+    """A region breaking out of the loop, with what it bound first.
+
+    Not a subclass of ``_LoopContinue``: the loops test for a continue with
+    ``isinstance``, and a break that matched it would continue instead.
+    """
+
+    __slots__ = ("outputs",)
+
+    def __init__(self, outputs):
+        self.outputs = outputs
 
 
 async def _dtls_serve_loop_open_attempt(self, _in: dict) -> dict:
@@ -4055,11 +4063,11 @@ class CameraMixin(
             elif isinstance(body, dict):
                 data = body.get("data") or {}
                 # Keys, never values: this response can carry the per-device
-                # streaming credentials (tutkAccount / tutkPassword - see
-                # docs/DEFERRED_FEATURES.md), and the warning below is logged
-                # at default level, so a whole-body dump lands in every user's
-                # home-assistant.log.  The matched-device log further down
-                # already prints keys only; these two did not.
+                # streaming credentials (tutkAccount / tutkPassword), and the
+                # warning below is logged at default level, so a whole-body
+                # dump lands in every user's home-assistant.log.  The
+                # matched-device log further down already prints keys only;
+                # these two did not.
                 if data:
                     _LOGGER.debug(
                         "batchGetDeviceUserInfo response for %s (status=%d):"
@@ -6648,6 +6656,8 @@ class CameraMixin(
                 _peer_reuses = _o["_peer_reuses"]
             if "session" in _o:
                 session = _o["session"]
+            if isinstance(_flow, _LoopBreak):
+                break
             if isinstance(_flow, _LoopContinue):
                 continue
 
@@ -7531,6 +7541,8 @@ class CameraMixin(
                 session = _o["session"]
             if "vq" in _o:
                 vq = _o["vq"]
+            if isinstance(_flow, _LoopBreak):
+                break
             if isinstance(_flow, _LoopContinue):
                 continue
 
@@ -8030,23 +8042,6 @@ class CameraMixin(
                             exc_info=True,
                         )
                 raise
-
-    async def async_open_kvs_stream(self, *args: Any, **kwargs: Any):
-        """Deprecated alias for :meth:`async_open_webrtc_stream`.
-
-        The name predates the rename and is used by nothing in this project, in
-        its tests, or in the reference integration. It was never listed in
-        docs/API-STABILITY.md, so it was never promised - but it has been
-        importable, so it gets a release of warning rather than vanishing.
-        Scheduled for removal in 1.0.0.
-        """
-        warnings.warn(
-            "async_open_kvs_stream is deprecated and will be removed in 1.0.0; "
-            "use async_open_webrtc_stream instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return await self.async_open_webrtc_stream(*args, **kwargs)
 
     # ------------------------------------------------------------------ #
     # SDES-SRTP streaming path (cameras with isDTLS == '0')

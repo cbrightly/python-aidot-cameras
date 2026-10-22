@@ -6,6 +6,45 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+- A `test` extra: `pip install -e ".[test]"` installs what both test tiers
+  need (the `webrtc` extra, pytest, pytest-asyncio, pytest-timeout,
+  pytest-xdist, amqtt and pyflakes).
+
+### Removed
+- **`async_open_kvs_stream`**, the pre-rename alias of
+  `async_open_webrtc_stream`. It has warned with a `DeprecationWarning` since
+  1.0.0b9 and said it would be removed in 1.0.0; it was never listed in
+  docs/API-STABILITY.md. Call `async_open_webrtc_stream` instead.
+- Code that nothing in the library or the reference integration calls:
+  `camera/sd_playback.py` (the SD-card playcontrol request builder and reply
+  decoder, which no session ever used) and its tests; `protocol._mqtt_listen`;
+  `protocol._BATTERY_UNKNOWN_RELEASE_S` and `protocol._STREAM_STARTUP_GRACE_S`,
+  copies of defaults the settings registry owns; and in `camera/constants.py`
+  `_LEEDARSON_APP_KEY`, the playback TCP framing constants (`_HDR_*`,
+  `_CMD_*`, `_SF_HDR_SIZE`) and `_AUDIO_CODEC_G711A`.
+
+### Fixed
+- **A region that breaks out of a serve loop ends it.** `_LoopBreak`
+  subclassed `_LoopContinue` and the SDES keepalive and DTLS serve loops
+  tested for a continue first, so a break would have gone round the loop
+  again. No region breaks today, so nothing changed in behaviour; the two
+  signals are separate classes now and both loops test for a break first.
+- **Stopping ffmpeg in an SDES open no longer stalls the event loop.** When
+  the camera's answer carried different SRTP keys (ffmpeg restarts with
+  them) and when no answer came at all (the open falls back to DTLS), the
+  open waited up to 2 s for ffmpeg to exit with a blocking `wait` on the
+  event loop, holding up every other camera and Home Assistant itself. The
+  wait runs in an executor now, as the TURN allocates have since 1.0.0rc56,
+  and a cancelled open still kills the process.
+- **`AIDOT_DTLS_SLOW_PROBE_CHUNK_S` has a floor of 0.1 s.** The DTLS serve
+  loop's slow-probe wait sleeps in steps of this size; set to 0 or below it
+  slept 0 s per step and spun for the whole interval. A value under 0.1 now
+  reads as 0.1.
+- **`AidotCameraWrongCodec` is importable from the package root**, like every
+  other exception type docs/API-STABILITY.md promises. It was only reachable
+  as `aidot_cameras.exceptions.AidotCameraWrongCodec`.
+
 ## [1.0.0rc59]
 
 ### Fixed
