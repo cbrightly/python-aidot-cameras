@@ -162,8 +162,8 @@ DEFAULT_COOLDOWN_S = 180.0
 # nobody has done. The numbers below are sized against the camera, not against
 # comfort:
 #
-# * an A001064 ends its own streaming session roughly every 60-85 s (see
-#   docs/DESIGN-session-continuity.md), and a teardown landing inside the second
+# * an A001064 ends its own streaming session roughly every 60-85 s, and a
+#   teardown landing inside the second
 #   window is indistinguishable from a successful halving. 3+12+2+12 = 29 s of
 #   media leaves the measurement finished well inside the shortest lifetime
 #   observed (62 s);

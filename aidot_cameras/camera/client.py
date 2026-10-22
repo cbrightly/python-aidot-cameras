@@ -4063,11 +4063,11 @@ class CameraMixin(
             elif isinstance(body, dict):
                 data = body.get("data") or {}
                 # Keys, never values: this response can carry the per-device
-                # streaming credentials (tutkAccount / tutkPassword - see
-                # docs/DEFERRED_FEATURES.md), and the warning below is logged
-                # at default level, so a whole-body dump lands in every user's
-                # home-assistant.log.  The matched-device log further down
-                # already prints keys only; these two did not.
+                # streaming credentials (tutkAccount / tutkPassword), and the
+                # warning below is logged at default level, so a whole-body
+                # dump lands in every user's home-assistant.log.  The
+                # matched-device log further down already prints keys only;
+                # these two did not.
                 if data:
                     _LOGGER.debug(
                         "batchGetDeviceUserInfo response for %s (status=%d):"
