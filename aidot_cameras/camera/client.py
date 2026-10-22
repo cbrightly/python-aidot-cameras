@@ -7,7 +7,6 @@ from urllib.parse import urlparse
 import os
 import time
 import asyncio
-import warnings
 from typing import TYPE_CHECKING, Any, Callable, List, NamedTuple, Optional, Union
 
 if TYPE_CHECKING:  # annotation only; keeps av off the import path
@@ -8030,23 +8029,6 @@ class CameraMixin(
                             exc_info=True,
                         )
                 raise
-
-    async def async_open_kvs_stream(self, *args: Any, **kwargs: Any):
-        """Deprecated alias for :meth:`async_open_webrtc_stream`.
-
-        The name predates the rename and is used by nothing in this project, in
-        its tests, or in the reference integration. It was never listed in
-        docs/API-STABILITY.md, so it was never promised - but it has been
-        importable, so it gets a release of warning rather than vanishing.
-        Scheduled for removal in 1.0.0.
-        """
-        warnings.warn(
-            "async_open_kvs_stream is deprecated and will be removed in 1.0.0; "
-            "use async_open_webrtc_stream instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return await self.async_open_webrtc_stream(*args, **kwargs)
 
     # ------------------------------------------------------------------ #
     # SDES-SRTP streaming path (cameras with isDTLS == '0')

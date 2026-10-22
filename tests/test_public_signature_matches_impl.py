@@ -58,13 +58,3 @@ def test_internals_stay_unadvertised():
     """The underscore kwargs must not appear in the public signature."""
     wrapper = set(_params(CameraDeviceClient.async_open_webrtc_stream))
     assert not {n for n in wrapper if n.startswith("_")}
-
-
-def test_the_deprecated_alias_warns_and_is_not_a_bare_alias():
-    """A plain `x = y` alias cannot warn, so it must be its own function."""
-    assert (
-        CameraDeviceClient.async_open_kvs_stream
-        is not CameraDeviceClient.async_open_webrtc_stream
-    )
-    src = inspect.getsource(CameraDeviceClient.async_open_kvs_stream)
-    assert "DeprecationWarning" in src

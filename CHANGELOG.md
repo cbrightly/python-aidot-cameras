@@ -6,6 +6,12 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Removed
+- **`async_open_kvs_stream`**, the pre-rename alias of
+  `async_open_webrtc_stream`. It has warned with a `DeprecationWarning` since
+  1.0.0b9 and said it would be removed in 1.0.0; it was never listed in
+  docs/API-STABILITY.md. Call `async_open_webrtc_stream` instead.
+
 ## [1.0.0rc59]
 
 ### Fixed
