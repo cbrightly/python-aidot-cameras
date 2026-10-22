@@ -25,6 +25,10 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   event loop, holding up every other camera and Home Assistant itself. The
   wait runs in an executor now, as the TURN allocates have since 1.0.0rc56,
   and a cancelled open still kills the process.
+- **`AIDOT_DTLS_SLOW_PROBE_CHUNK_S` has a floor of 0.1 s.** The DTLS serve
+  loop's slow-probe wait sleeps in steps of this size; set to 0 or below it
+  slept 0 s per step and spun for the whole interval. A value under 0.1 now
+  reads as 0.1.
 
 ## [1.0.0rc59]
 

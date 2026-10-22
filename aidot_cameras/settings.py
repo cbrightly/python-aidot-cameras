@@ -308,7 +308,8 @@ KNOBS: "dict[str, Knob]" = _registry(
     Knob("AIDOT_DTLS_SLOW_PROBE_THRESHOLD", 5, "int"),
     Knob("AIDOT_DTLS_SLOW_PROBE_INTERVAL_S", 600.0, "float"),
     Knob("AIDOT_DTLS_SLOW_PROBE_LOG_EVERY", 6, "int"),
-    Knob("AIDOT_DTLS_SLOW_PROBE_CHUNK_S", 5.0, "float"),
+    # Floored: at 0 or below the slow-probe wait slept 0 s per step and spun.
+    Knob("AIDOT_DTLS_SLOW_PROBE_CHUNK_S", 5.0, "float", minimum=0.1),
     Knob("AIDOT_GOP_PLI_S", 2.0, "float"),
     Knob("AIDOT_STALL_PLI_S", 1.0, "float"),
     Knob(
