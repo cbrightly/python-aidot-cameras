@@ -128,14 +128,51 @@ def test_a_signalling_source_never_falls_back():
     assert srv._legacy_sync_ok(_ts(AUDIO_PID, rai=True)) is False
 
 
-def test_mux_forwards_the_signal_only_to_sinks_that_understand_it():
-    """The fail-flag wrapper must not raise on an os pipe, which has no hook."""
-    import inspect
+def _mux_into(sink):
+    """Run the real DTLS mux over one H.264 keyframe into ``sink``."""
+    import queue
+    import threading
+    import time
 
-    from aidot_cameras.camera import protocol
+    from aidot_cameras.camera.protocol import _dtls_av_mux_run
 
-    src = inspect.getsource(protocol._dtls_av_mux_run)
-    assert "wsink.mark_keyframe()" in src, "the mux must announce keyframes"
-    assert 'getattr(self._f, "mark_keyframe", None)' in src, (
-        "forwarding must be optional - the ffmpeg path's sink is a pipe"
+    vq, aq = queue.Queue(), queue.Queue()
+    idr = b"\x00\x00\x00\x01\x67\x42\x00\x0a" + b"\x00\x00\x00\x01\x65" + b"\x88" * 40
+    for i in range(3):
+        vq.put((idr, i * 3000, True))
+    stop = threading.Event()
+    t = threading.Thread(
+        target=_dtls_av_mux_run,
+        args=(vq, aq, sink, [time.monotonic()], stop),
+        daemon=True,
     )
+    t.start()
+    deadline = time.monotonic() + 10
+    while not vq.empty() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.3)
+    stop.set()
+    t.join(timeout=10)
+    assert not t.is_alive(), "the mux thread must end once stopped"
+
+
+def test_mux_forwards_the_signal_only_to_sinks_that_understand_it():
+    """The mux announces each keyframe to a sink that can take it (the direct
+    TS server), and the fail-flag wrapper must not raise on one that cannot
+    (the ffmpeg path's pipe has no hook)."""
+    import io
+
+    class _Signalling(io.BytesIO):
+        marks = 0
+
+        def mark_keyframe(self):
+            self.marks += 1
+
+    signalling = _Signalling()
+    _mux_into(signalling)
+    assert signalling.marks >= 1, "the mux must announce keyframes"
+    assert signalling.getvalue(), "and still write the stream"
+
+    plain = io.BytesIO()
+    _mux_into(plain)  # no mark_keyframe: must neither raise nor stop the mux
+    assert plain.getvalue()

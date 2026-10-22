@@ -106,13 +106,51 @@ def test_permission_is_installed_before_every_nomination():
 
 
 def test_permission_helper_covers_every_candidate_on_both_sockets():
-    body = without_state(inspect.getsource(so.turn_install_permissions))
-    assert "for _c_ip, _c_port in _ip_cands" in body, "must cover every candidate"
-    assert "for _p_sock in socks" in body
-    bound = _impl_source()
-    bound = bound[bound.index("_turn_install_permissions = functools.partial(") :][:400]
-    assert "(_audio_sock, _video_sock)" in bound, (
-        "audio and video have separate relay allocations; both need permissions"
+    """Audio and video have separate relay allocations; every camera candidate
+    needs a permission on each."""
+    asked = []
+
+    def _create(sock, ip, port):
+        asked.append((sock, ip, port))
+        return True
+
+    cands = [("10.0.0.5", 4000), ("203.0.113.7", 4001)]
+    n = so.turn_install_permissions(
+        _create, ("audio", "video"), [object()], lambda m: None, cands, "test"
+    )
+    assert n == 4
+    assert sorted(asked) == sorted(
+        (s, ip, port) for ip, port in cands for s in ("audio", "video")
+    )
+
+
+def test_the_answer_path_installs_the_permission_before_it_nominates():
+    """The answer path's half of the invariant below, driven: the relay's door
+    is opened for every candidate before the first USE-CANDIDATE goes out."""
+    events = []
+    sdp = "\r\n".join(
+        [
+            "v=0",
+            "a=ice-ufrag:camU",
+            "a=ice-pwd:camPwdcamPwdcamPwd",
+            "a=candidate:1 1 udp 2130706431 10.0.0.5 4000 typ host",
+            "a=candidate:2 1 udp 1694498815 203.0.113.7 4001 typ srflx",
+        ]
+    )
+    seen = []
+    n = so.nominate_from_answer_sdp(
+        lambda cands, why: events.append(("perm", tuple(cands))),
+        lambda sock, *a: events.append(("nominate", sock, a[-1])),
+        ("a-sock", "v-sock"),
+        (("ua", "pa"), ("uv", "pv")),
+        seen,
+        sdp,
+    )
+    assert n == 2
+    assert events[0] == ("perm", (("10.0.0.5", 4000), ("203.0.113.7", 4001)))
+    assert [e[0] for e in events[1:]] == ["nominate"] * 4
+    assert seen == [("10.0.0.5", 4000), ("203.0.113.7", 4001)], (
+        "what it nominated is recorded for the stall report"
     )
 
 
@@ -246,34 +284,31 @@ def test_stale_nonce_is_refreshed_and_retried():
     )
 
 
-def test_trickled_candidates_are_permissioned_not_just_the_answer_sdp():
+def test_trickled_candidates_are_permissioned_not_just_the_answer_sdp(monkeypatch):
     """The answer SDP only carries the camera's private host candidate.
 
     A TURN permission is matched against the peer's source address as the
     relay sees it, so a permission for an RFC1918 host candidate authorises an
-    address that can never arrive. Measured on a live A001513: CreatePermission
-    for the host candidate returned success and still yielded zero
-    relay-carried inbound packets. The reachable addresses (srflx, relay) only
-    ever arrive by iceCandidateReq trickle.
+    address that can never arrive. The reachable addresses (srflx, relay) only
+    ever arrive by trickle, and none of them may be filtered out by type.
     """
-    src = _impl_source()
-    assert "ice_cands_seen" in src, (
-        "the SDES path must observe the camera's trickled ICE candidates"
-    )
-    trickle = without_state(inspect.getsource(so.consume_camera_trickle))
-    assert "install_permissions(" in trickle, (
-        "every trickled candidate needs a relay permission"
-    )
+    from tests.open_helpers import drive_trickle
 
-    # No candidate-type filter between parsing the type and installing: srflx
-    # and relay are precisely the addresses the TURN server can match, so a
-    # guard that skipped them would reinstate the original black hole.
-    body = trickle[trickle.index("_tk_typ = ") : trickle.index("install_permissions(")]
-    for guard in ("_tk_typ ==", "_tk_typ !=", "_tk_typ in", "_tk_typ not in"):
-        assert guard not in body, (
-            f"candidate type is filtered by `{guard}` before the permission is "
-            "installed; srflx and relay must not be skipped"
-        )
+    lines = [
+        "candidate:1 1 udp 2130706431 192.168.1.20 40000 typ host",
+        "candidate:2 1 udp 1694498815 203.0.113.7 40001 typ srflx",
+        "candidate:3 1 udp 16777215 198.51.100.9 40002 typ relay",
+        "candidate:3 1 udp 16777215 198.51.100.9 40002 typ relay",  # repeat
+    ]
+    installed, uc, _orig = drive_trickle(monkeypatch, lines)
+    assert [(ip, port) for ip, port, _w in installed] == [
+        ("192.168.1.20", 40000),
+        ("203.0.113.7", 40001),
+        ("198.51.100.9", 40002),
+    ]
+    assert uc["cands"] == [(ip, port) for ip, port, _w in installed], (
+        "and each one joins the nomination set"
+    )
 
 
 def test_trickle_regex_parses_real_camera_candidates():
@@ -308,25 +343,40 @@ def test_trickle_regex_parses_real_camera_candidates():
         assert _parse_candidate_line("a=" + line) == parsed
 
 
-def test_nomination_set_is_rebound_not_mutated():
+def test_nomination_set_is_rebound_not_mutated(monkeypatch):
     """The bridge thread iterates this list; mutating it under them raises."""
-    trickle = without_state(inspect.getsource(so.consume_camera_trickle))
-    assert 'uc_info["cands"] = [' in trickle, (
-        "rebind the candidate list to a new object so the bridge thread never "
-        "sees it mutate mid-iteration"
+    from tests.open_helpers import drive_trickle
+
+    host = ("192.168.1.20", 40000)
+    _inst, uc, original = drive_trickle(
+        monkeypatch,
+        ["candidate:2 1 udp 1694498815 203.0.113.7 40001 typ srflx"],
+        uc_cands=[host],
     )
-    assert 'uc_info["cands"].append' not in trickle, (
-        "appending in place races the bridge thread's iteration"
-    )
+    assert original == [host], "the list the bridge held was never mutated"
+    assert uc["cands"] is not original
+    assert uc["cands"] == [host, ("203.0.113.7", 40001)]
 
 
 def test_trickle_observer_does_not_consume_the_dtls_queue():
-    """SDES must not steal candidates the DTLS fallback still needs."""
-    wo = without_state(
-        inspect.getsource(sys.modules["aidot_cameras.camera.webrtc_open"])
+    """SDES must not steal candidates the DTLS fallback still needs: the
+    handler records each trickled candidate AND still queues it for DTLS."""
+    import json
+
+    from tests.open_helpers import mqtt_handler
+
+    handler, _owner, loop, seen = mqtt_handler(peer_id="pid-1")
+    cand = {"candidate": "candidate:2 1 udp 1 203.0.113.7 40001 typ srflx"}
+    handler(
+        "iot/v1/c/user-1/IPC/iceCandidateReq",
+        json.dumps(
+            {
+                "method": "iceCandidateReq",
+                "payload": {"peerid": "pid-1", "candidate": cand},
+            }
+        ),
     )
-    hook = wo[wo.index('cand = inner.get("candidate")') :][:400]
-    assert "ice_cands_seen.append(cand)" in hook, "observer must record it"
-    assert "ice_q.put_nowait" in hook, (
-        "the DTLS queue must still receive every candidate"
+    assert seen == [cand], "the SDES observer records it"
+    assert any(args == (cand,) for _fn, args in loop.calls), (
+        "and the DTLS queue still receives it"
     )

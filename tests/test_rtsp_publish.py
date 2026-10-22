@@ -2345,11 +2345,33 @@ def test_agc_reads_the_same_knobs_as_the_mux():
     )
 
 
-def test_the_dtls_runner_conditions_its_audio():
-    import inspect
+def _quiet_pcma(dbfs: float = -45.0) -> bytes:
+    """160 bytes of A-law at a steady ``dbfs`` - a quiet room."""
+    amp = int(32767 * 10 ** (dbfs / 20))
+    return bytes([linear2alaw(amp), linear2alaw(-amp)]) * 80
 
-    src = without_state(inspect.getsource(rp.dtls_rtp_publish_run))
-    assert "agc = AlawAgc()" in src and "agc.process(adata)" in src
+
+def _alaw_dbfs(payload: bytes) -> float:
+    import math
+
+    vals = [rp._alaw_to_linear(b) for b in payload]
+    rms = (sum(v * v for v in vals) / len(vals)) ** 0.5
+    return 20 * math.log10(rms / 32767 + 1e-12)
+
+
+def test_the_dtls_runner_conditions_its_audio(go2rtc, monkeypatch):
+    """A quiet camera is published lifted toward the target, not as it came."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    quiet = _quiet_pcma()
+
+    def feed(vq, aq):
+        for i in range(100):
+            aq.put((quiet, 160 + 160 * i))
+
+    _run_dtls(go2rtc, feed, secs=1.5)
+    audio = [rp.parse_rtp(p)[4] for ch, p in go2rtc.frames if ch == 2]
+    assert len(audio) >= 50
+    assert _alaw_dbfs(b"".join(audio[-20:])) > _alaw_dbfs(quiet) + 15.0
 
 
 def test_gap_warn_threshold_env():
@@ -2715,19 +2737,36 @@ def test_sdes_tee_is_not_held_up_by_dropped_re_sent_frames(go2rtc, monkeypatch):
         proc.wait(3)
 
 
-def test_the_sdes_publisher_conditions_its_audio_too():
+def test_the_sdes_publisher_conditions_its_audio_too(go2rtc, monkeypatch):
     """The SDES direct publisher ran only a fixed trim; measured 2026-10-14,
-    that published two cameras' rooms as digital zero. Both publishers now
-    run the same conditioning, and the trim is an offset after it."""
-    import inspect
+    that published two cameras' rooms as digital zero. It now conditions the
+    level first and trims after: a pre-trim would push a quiet room further
+    under the gate, where the normalizer could never bring it back.
 
-    src = without_state(inspect.getsource(rp.LoopbackRtpPublisher._send))
-    assert "self._agc.process(payload)" in src
-    # Conditioned first, trimmed second: a pre-trim would push a quiet room
-    # further under the gate and the normalizer could never bring it back.
-    assert src.index("self._agc.process(payload)") < src.index(
-        "payload.translate(self._gain)"
+    -45 dBFS in with an -8 dB trim: conditioned first it comes out near
+    -23 dBFS; trimmed first, about -31; not conditioned at all, about -53.
+    """
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), audio_gain_db=-8.0
     )
+    quiet = _quiet_pcma()
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for i in range(100):
+            tx.sendto(
+                rp.build_rtp(8, False, 1 + i, 160 * (i + 1), 1, quiet),
+                ("127.0.0.1", a_port),
+            )
+            time.sleep(0.002)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) >= 80)
+        out = b"".join(rp.parse_rtp(p)[4] for _ch, p in go2rtc.frames[-20:])
+        assert -27.0 < _alaw_dbfs(out) < -19.0, _alaw_dbfs(out)
+    finally:
+        proc.kill()
 
 
 def test_loopback_publisher_lifts_a_quiet_camera(go2rtc, monkeypatch):

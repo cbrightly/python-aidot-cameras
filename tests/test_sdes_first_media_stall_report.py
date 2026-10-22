@@ -326,20 +326,32 @@ def _first_media_wait_block() -> str:
     return src[start:end]
 
 
-def test_the_stall_path_calls_the_report_helper_at_warning():
-    # The local emitter forwards to the module function, which is where the
-    # builder is called and the WARNING is written.
-    block = inspect.getsource(sdes_open.report_first_media_stall)
-    assert "_first_media_stall_report(" in block, (
-        "the first-media wait can expire without saying why - the report "
-        "helper is not called between the wait and the serve launch"
-    )
-    warn = block.index("_LOGGER.warning(")
-    call = block.index("_first_media_stall_report(")
-    assert warn < call < warn + 400, (
-        "the report must be emitted through _LOGGER.warning, not _status "
-        "(which is INFO at best and DEBUG when a status callback is wired)"
-    )
+def _emit_stall_report(caplog, *, nominated_seen=(), uc_cands=()):
+    import types
+
+    bridge = types.SimpleNamespace()
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger=sdes_open.__name__):
+        sdes_open.report_first_media_stall(
+            "cam-1",
+            "",
+            None,
+            bridge,
+            list(nominated_seen),
+            {"cands": list(uc_cands), "prflx": [], "sent": False},
+            None,
+            75.0,
+        )
+    return [r for r in caplog.records if r.name == sdes_open.__name__]
+
+
+def test_the_stall_path_calls_the_report_helper_at_warning(caplog):
+    """One WARNING, not _status (INFO at best, DEBUG when a status callback is
+    wired): an open that waited out the first-media window says why."""
+    records = _emit_stall_report(caplog)
+    warnings = [r for r in records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, [(r.levelno, r.getMessage()) for r in records]
+    assert "cam-1" in warnings[0].getMessage()
 
 
 def test_the_report_is_gated_on_the_wait_actually_having_failed():
@@ -366,25 +378,31 @@ def test_the_report_is_gated_on_the_wait_actually_having_failed():
         )
 
 
-def test_the_report_sees_the_candidates_the_answer_peek_path_nominated():
+def test_the_report_sees_the_candidates_the_answer_peek_path_nominated(caplog):
     """The failing shape's own nomination path does not touch _bridge_uc_info.
 
-    On a late answer -- item 3's measured shape, answer at +1.3s, missing the
-    pre-launch snapshot -- it is `_nominate_from_answer_sdp` inside the wait
-    that nominates, and it neither appends to `_bridge_uc_info["cands"]` nor
-    flips `["sent"]`. Sourcing the report from that dict alone would print
-    `nominated=none; use-candidate=not-sent` on an open that DID nominate, and
-    collapse the "answer carried no ICE credentials" row into the "answer
-    carried one unroutable candidate" row -- two different diagnoses.
+    On a late answer it is `_nominate_from_answer_sdp` inside the wait that
+    nominates, and it neither appends to `_bridge_uc_info["cands"]` nor flips
+    `["sent"]`. Sourcing the report from that dict alone would print
+    `nominated=none; use-candidate=not-sent` on an open that DID nominate.
     """
-    body = inspect.getsource(sdes_open.nominate_from_answer_sdp)
-    assert "nominated_seen" in body[: body.index("return len(_cands)")], (
-        "_nominate_from_answer_sdp nominates without recording what it "
-        "nominated, so the stall report cannot see it"
+    seen = []
+    sdes_open.nominate_from_answer_sdp(
+        lambda cands, why: None,
+        lambda *a: None,
+        ("a", "v"),
+        (("ua", "pa"), ("uv", "pv")),
+        seen,
+        "a=ice-ufrag:u\r\na=ice-pwd:pppppppppppppppppppppp\r\n"
+        "a=candidate:1 1 udp 1 203.0.113.7 4001 typ srflx",
     )
-    assert "_nominated_seen" in _first_media_wait_block(), (
-        "the stall report does not read the answer-peek path's nominations"
-    )
+    assert seen == [("203.0.113.7", 4001)], "the answer path records what it nominated"
+    (line,) = [
+        r.getMessage()
+        for r in _emit_stall_report(caplog, nominated_seen=seen)
+        if r.levelno == logging.WARNING
+    ]
+    assert "nominated=203.0.113.7:4001" in line and "use-candidate=sent" in line, line
 
 
 def test_the_dropped_probe_count_is_distinct_sources_not_packets():

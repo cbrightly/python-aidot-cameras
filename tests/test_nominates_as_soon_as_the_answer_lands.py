@@ -179,18 +179,30 @@ def test_the_early_exit_says_so_in_the_log():
     assert "STUN window: leaving early" in src
 
 
+def _answer_msg(src_addr, sdp=_ANSWER, peer_id="pid-1"):
+    import json
+
+    return json.dumps(
+        {
+            "method": "webrtcResp",
+            "srcAddr": src_addr,
+            "payload": {"peerid": peer_id, "answer": {"type": "answer", "sdp": sdp}},
+        }
+    )
+
+
 def test_the_readiness_flag_is_stamped_off_the_loop_thread():
     """The window blocks the event loop, so call_soon_threadsafe(set_result) is
-    only QUEUED while it runs and answer_fut.done() stays False throughout -
-    which is why the window could not see the answer in the first place.  The
-    marker therefore has to be written by the MQTT thread directly."""
-    from aidot_cameras.camera.webrtc_open import make_mqtt_message_handler
+    only QUEUED while it runs and answer_fut.done() stays False throughout.
+    The marker is therefore written by the MQTT thread itself, before anything
+    the loop would have to run - and only for an answer that can nominate."""
+    from tests.open_helpers import mqtt_handler
 
-    # The MQTT handler is built by a module-level factory; its body is where
-    # the marker is written.
-    src = inspect.getsource(make_mqtt_message_handler)
-    assert "_camera_answer_ice_ready_ts" in src
-    assert "_answer_sdp_can_nominate" in src
+    handler, owner, _loop, _seen = mqtt_handler()
+    handler("iot/v1/c/user-1/IPC/webrtcResp", _answer_msg("2.camera", sdp="v=0"))
+    assert owner._camera_answer_ice_ready_ts is None, "nothing to nominate yet"
+    handler("iot/v1/c/user-1/IPC/webrtcResp", _answer_msg("2.camera"))
+    assert owner._camera_answer_ice_ready_ts is not None
 
 
 def test_the_flag_is_cleared_for_each_open():
@@ -263,10 +275,12 @@ def test_an_answer_with_no_srcaddr_keeps_the_prior_behaviour():
 
 
 def test_the_stamp_consults_the_sender_check():
-    from aidot_cameras.camera.webrtc_open import make_mqtt_message_handler
+    """Our own webrtcResp, echoed by the broker, must not arm the exit."""
+    from tests.open_helpers import mqtt_handler
 
-    src = inspect.getsource(make_mqtt_message_handler)
-    assert "_answer_is_from_the_camera" in src
+    handler, owner, _loop, _seen = mqtt_handler(user_id=_USER)
+    handler(f"iot/v1/c/{_USER}/IPC/webrtcResp", _answer_msg(f"0.{_USER}"))
+    assert owner._camera_answer_ice_ready_ts is None
 
 
 def test_the_retry_window_leaves_early_too():
@@ -288,14 +302,25 @@ def test_a_corrupt_candidate_line_is_still_rejected():
         assert _parse_answer_ice(bad)[2] == [], bad
 
 
-def test_the_trickle_path_reads_candidates_through_the_same_parser():
+def test_the_trickle_path_reads_candidates_through_the_same_parser(monkeypatch):
     """It kept its own copy of the pattern, so the two could disagree about the
-    same line - which is the gap the collapse exists to close."""
-    from aidot_cameras.camera.sdes_open import consume_camera_trickle
+    same line - which is the gap the collapse exists to close. The trickle
+    consumer takes exactly the candidates the shared parser takes."""
+    from aidot_cameras.camera.sdes_open import _parse_candidate_line
+    from tests.open_helpers import drive_trickle
 
-    trickle = inspect.getsource(consume_camera_trickle)
-    assert "_parse_candidate_line" in trickle
-    assert "_re_ice" not in trickle and "_re_ice" not in _open_source()
+    lines = [
+        "candidate:1 1 udp 2130706431 192.168.1.20 40000 typ host",
+        "a=candidate:2 1 udp 1694498815 203.0.113.7 40001 typ srflx raddr 0.0.0.0",
+        "candidate:3 1 udp 1 198.51.100.9 40002 typ",
+        "candidate:1 1 udp 1 1.2.3.4 5 typo host",
+        "candidate:1 1 udp 1 1.2.3.4 6 typhoon",
+        "garbage",
+    ]
+    installed, _uc, _orig = drive_trickle(monkeypatch, lines)
+    expected = [p[:2] for p in map(_parse_candidate_line, lines) if p]
+    assert expected, "the premise: the shared parser accepts some of these"
+    assert [(ip, port) for ip, port, _why in installed] == expected
 
 
 def test_the_candidate_parse_accepts_a_line_that_ends_at_typ():

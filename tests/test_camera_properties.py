@@ -6,6 +6,8 @@ as unknown, never as a set of switched-off features.
 """
 
 import asyncio
+import json
+import logging
 
 from aidot_cameras.camera.controls import _CameraControlsMixin
 
@@ -116,6 +118,63 @@ class TestSdCardInfo:
         assert asyncio.run(_Cam(None).async_get_sd_card_info()) is None
 
 
+class _Pm:
+    """A persistent MQTT connection that answers with scripted replies."""
+
+    def __init__(self, replies):
+        self.replies = replies
+        self.requests = []
+
+    async def request(self, *, publish_items, subscribe_topics, timeout):
+        self.requests.append(publish_items)
+        seq = json.loads(publish_items[0][1])["seq"]
+        msgs = [
+            (topic, json.dumps(body(seq) if callable(body) else body))
+            for topic, body in self.replies
+        ]
+        return msgs, {}
+
+
+def _querying_camera(monkeypatch, make_camera_device_client, replies):
+    """A real client whose query rides a fake persistent connection; a fresh
+    MQTT session would fail the test."""
+    from aidot_cameras.camera import client as client_mod
+
+    cam = make_camera_device_client("A001064")
+    pm = _Pm(replies)
+
+    async def _creds():
+        return "u", "p", "app-user-1"
+
+    async def _url():
+        return "mqtts://broker.invalid:8883"
+
+    async def _get_pm():
+        return pm
+
+    async def _fresh_session(*a, **k):
+        raise AssertionError("opened a second session on the account's client id")
+
+    cam._mqtt_credentials = _creds
+    cam._async_get_mqtt_url = _url
+    cam._resolve_persistent_mqtt = lambda: True
+    cam._get_persistent_mqtt = _get_pm
+    monkeypatch.setattr(client_mod, "_mqtt_session_with_status", _fresh_session)
+    return cam, pm
+
+
+def _reply(dev, out, seq=None, action="getWifiInfo"):
+    def build(our_seq):
+        msg = {"payload": {"devId": dev, "action": action, "out": out}}
+        if seq == "ours":
+            msg["seq"] = our_seq
+        elif seq is not None:
+            msg["seq"] = seq
+        return msg
+
+    return ("iot/v1/c/user-1/device/devActionResp", build)
+
+
 class TestItDoesNotFightTheIntegrationsConnection:
     """The query must reuse the persistent MQTT connection when there is one.
 
@@ -126,33 +185,24 @@ class TestItDoesNotFightTheIntegrationsConnection:
     exactly like "this camera does not support the action".
     """
 
-    def test_the_query_prefers_the_persistent_connection(self):
-        import inspect
-        from aidot_cameras.camera import client as client_mod
+    def test_the_query_prefers_the_persistent_connection(
+        self, monkeypatch, make_camera_device_client
+    ):
+        cam, pm = _querying_camera(monkeypatch, make_camera_device_client, [])
+        pm.replies = [_reply(cam.device_id, {"ssid": "x"}, seq="ours")]
+        got = asyncio.run(cam.async_query_device_action("getWifiInfo"))
+        assert got == {"ssid": "x"}
+        assert len(pm.requests) == 1
 
-        src = inspect.getsource(client_mod.CameraMixin.async_query_device_action)
-        assert "_get_persistent_mqtt" in src, (
-            "the query opens its own MQTT session again - that duplicates the "
-            "client id and the reply is lost inside Home Assistant"
-        )
-        assert "_resolve_persistent_mqtt" in src
-
-    def test_a_missing_reply_is_logged_not_silent(self):
-        import inspect
-        from aidot_cameras.camera import client as client_mod
-
-        src = inspect.getsource(client_mod.CameraMixin.async_query_device_action)
-        assert "no reply from" in src
-        # INFO, not debug: a silent None is what hid this failure. Find the
-        # logging call that owns the message rather than guessing at a
-        # character window near it.
-        import re
-
-        call = re.search(r'_LOGGER\.(\w+)\(\s*\n?\s*"[^"]*no reply from', src)
-        assert call is not None, "the no-reply message is not a logging call"
-        assert call.group(1) == "info", (
-            f"the no-reply message logs at {call.group(1)}, not info"
-        )
+    def test_a_missing_reply_is_logged_not_silent(
+        self, monkeypatch, make_camera_device_client, caplog
+    ):
+        """INFO, not debug: a silent None is what hid this failure."""
+        cam, _pm = _querying_camera(monkeypatch, make_camera_device_client, [])
+        with caplog.at_level(logging.DEBUG, logger="aidot_cameras.camera.client"):
+            assert asyncio.run(cam.async_query_device_action("getWifiInfo")) is None
+        hits = [r for r in caplog.records if "no reply from" in r.getMessage()]
+        assert [r.levelno for r in hits] == [logging.INFO]
 
 
 class TestRepliesAreMatchedToTheRightCamera:
@@ -163,25 +213,30 @@ class TestRepliesAreMatchedToTheRightCamera:
     arrived first.
     """
 
-    def test_it_filters_on_the_device_id(self):
-        import inspect
-        from aidot_cameras.camera import client as client_mod
+    def test_it_filters_on_the_device_id(self, monkeypatch, make_camera_device_client):
+        cam, pm = _querying_camera(monkeypatch, make_camera_device_client, [])
+        pm.replies = [
+            _reply("another-camera", {"sd": "theirs"}, seq="ours"),
+            _reply(cam.device_id, {"sd": "ours"}),
+        ]
+        assert asyncio.run(cam.async_query_device_action("getWifiInfo")) == {
+            "sd": "ours"
+        }
+        pm.replies = [_reply("another-camera", {"sd": "theirs"}, seq="ours")]
+        assert asyncio.run(cam.async_query_device_action("getWifiInfo")) is None
 
-        src = inspect.getsource(client_mod.CameraMixin.async_query_device_action)
-        assert 'body.get("devId")' in src
-        assert "!= device_id" in src
-
-    def test_seq_is_a_preference_not_a_filter(self):
+    def test_seq_is_a_preference_not_a_filter(
+        self, monkeypatch, make_camera_device_client
+    ):
         """Requiring the seq discards every reply from a camera that does not
         echo it -- seen live as "no reply (4 messages seen)" on a camera that
         had in fact answered four times."""
-        import inspect
-        from aidot_cameras.camera import client as client_mod
-
-        src = inspect.getsource(client_mod.CameraMixin.async_query_device_action)
-        assert 'msg.get("seq") == seq' in src, "seq should still be preferred"
-        # The rejecting form must be gone.
-        assert "_rseq != seq" not in src
-        assert "if _rseq and" not in src
-        # A reply without a matching seq must still be usable.
-        assert "good" in src
+        cam, pm = _querying_camera(monkeypatch, make_camera_device_client, [])
+        dev = cam.device_id
+        pm.replies = [_reply(dev, {"n": 1}, seq="someone-else")]
+        assert asyncio.run(cam.async_query_device_action("getWifiInfo")) == {"n": 1}
+        pm.replies = [
+            _reply(dev, {"n": 1}, seq="someone-else"),
+            _reply(dev, {"n": 2}, seq="ours"),
+        ]
+        assert asyncio.run(cam.async_query_device_action("getWifiInfo")) == {"n": 2}

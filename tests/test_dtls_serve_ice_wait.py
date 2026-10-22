@@ -41,15 +41,27 @@ def test_serve_ice_wait_defaults_to_the_old_thirty_seconds(monkeypatch):
 
 
 def test_the_constant_is_wired_to_the_env_var_it_documents():
-    # The parse helper is generic, so exercising it proves nothing about the
-    # wiring. Pin the wiring itself: a constant reading the wrong env name is
-    # exactly the bug a _parse_env_float test cannot see.
-    import inspect
+    """The parse helper is generic, so exercising it proves nothing about the
+    wiring: a constant reading the wrong env name is exactly the bug a
+    _parse_env_float test cannot see. The constant is bound at import, so ask
+    a fresh interpreter with the variable set."""
+    import os
+    import subprocess
+    import sys
 
-    src = inspect.getsource(camera_client)
-    assert (
-        '_DTLS_SERVE_ICE_WAIT_S = settings.read("AIDOT_DTLS_SERVE_ICE_WAIT_S")' in src
+    env = {**os.environ, "AIDOT_DTLS_SERVE_ICE_WAIT_S": "7.5"}
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import aidot_cameras.camera.client as c; print(c._DTLS_SERVE_ICE_WAIT_S)",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
     )
+    assert float(out.stdout.strip()) == 7.5
 
 
 def test_ice_budget_never_extends_the_callers_own_timeout():
