@@ -15,7 +15,6 @@ code comments, and they explain decisions that are still in force.
 | [CI-RUNNER.md](CI-RUNNER.md) | The self-hosted runner that validates each release against real cameras. |
 | [UPSTREAM.md](UPSTREAM.md) | How a new `python-aidot` release is taken in, and the two record shapes the code supports. |
 | [ROAD-TO-1.0.md](ROAD-TO-1.0.md) | What 1.0.0 asserts, the one open item (the two-week soak) and how its clock is set, and the closed items with where their evidence lives. |
-| [DEFERRED_FEATURES.md](DEFERRED_FEATURES.md) | Things the cameras can do that the library deliberately does not expose yet, with the reason for each. |
 
 ## Design notes - current behaviour, written when it was decided
 
