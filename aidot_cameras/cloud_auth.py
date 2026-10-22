@@ -22,6 +22,7 @@ import tempfile
 
 import aiohttp
 
+from . import settings
 from .client import AidotClient
 
 _LOGGER = logging.getLogger("aidot.cloud_auth")
@@ -33,9 +34,10 @@ def _default_country() -> str:
     This used to be a module-level constant bound at import, which made a
     caller's later os.environ tweak silently ineffective: a creds file with a
     non-US country logged in as US on the password path. Reading it when the
-    client is built keeps environment and parameters equivalent.
+    client is built keeps environment and parameters equivalent. The default
+    ("US") is the settings registry's.
     """
-    return os.environ.get("AIDOT_COUNTRY", "US")
+    return settings.read("AIDOT_COUNTRY")
 
 
 class CloudAuthUnavailable(RuntimeError):
@@ -140,11 +142,11 @@ async def _make_client(
     nor a username/password pair is available.
     """
     loop = asyncio.get_running_loop()
-    token_file = os.environ.get("AIDOT_TOKEN_FILE")
+    token_file = settings.read("AIDOT_TOKEN_FILE")
     if username is None:
-        username = os.environ.get("AIDOT_USERNAME")
+        username = settings.read("AIDOT_USERNAME")
     if password is None:
-        password = os.environ.get("AIDOT_PASSWORD")
+        password = settings.read("AIDOT_PASSWORD")
     if country is None:
         country = _default_country()
 

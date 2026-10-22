@@ -20,7 +20,15 @@ from typing import TYPE_CHECKING, Callable, Optional
 if TYPE_CHECKING:  # import cost stays out of the runtime path
     from av import VideoFrame as AvVideoFrame
 
-from ..exceptions import AidotCameraBusy, AidotCameraNotReady
+from ..exceptions import (
+    AidotCameraBusy,
+    AidotCameraNotReady,
+    AidotLivePlayRefused,
+    AidotMqttUnavailable,
+    AidotNegotiationFailed,
+    AidotNoWebrtcAnswer,
+    AidotPlaintextMqttRefused,
+)
 from .constants import _LIVE_PLAY_NOT_READY, fallback_turn_uris, stun_server_uris
 from .sdes_open import _answer_sdp_can_nominate
 from .webrtc import WebRTCSession
@@ -1287,9 +1295,12 @@ async def _dtls_open_head(self, _in: dict) -> dict:
     ImportError
         If ``aiortc`` is not installed (DTLS path only).
         (``pip install python-aidot[webrtc]``).
-    RuntimeError
-        If the MQTT connection fails or ICE does not complete within
-        ``timeout`` seconds.
+    AidotStreamOpenError
+        If the MQTT connection fails, the camera refuses or does not answer,
+        or ICE does not complete within ``timeout`` seconds. Each subclass
+        (``AidotMqttUnavailable``, ``AidotLivePlayRefused``,
+        ``AidotNoWebrtcAnswer``, ``AidotNegotiationFailed``,
+        ``AidotFfmpegMissing``) is also a ``RuntimeError``.
     """
     # Cold-start instrumentation: stamp t0 so phase markers below (and in the
     # bridge/serve threads) log elapsed-ms.  Grep ``cold-start[``.
@@ -1502,7 +1513,11 @@ async def _dtls_open_credentials_and_mqtt_setup(self, _in: dict) -> dict:
     # The camera validates srcAddr against active MQTT sessions; "0.{userId}" matches nothing.
     mqtt_url = await self._async_get_mqtt_url()
     if not mqtt_url:
-        raise RuntimeError("async_open_webrtc_stream: no MQTT URL available")
+        # A refused plaintext broker URL is the more useful error to surface.
+        _refused = getattr(self, "_mqtt_url_refused_scheme", None)
+        if isinstance(_refused, str) and _refused:
+            raise AidotPlaintextMqttRefused(_refused)
+        raise AidotMqttUnavailable("async_open_webrtc_stream: no MQTT URL available")
 
     # Fetch camera's registered numeric userId.  Used for:
     # 1. Additional MQTT subscriptions (cameras may route webrtcResp by numeric ID)
@@ -1985,7 +2000,9 @@ async def _dtls_open_ice_config_and_user_info(self, _in: dict) -> dict:
             or _mqtt_conn_status.get("rc_str")
             or f"rc={_mqtt_conn_status.get('rc')}"
         )
-        raise RuntimeError(f"async_open_webrtc_stream: MQTT connection failed: {_err}")
+        raise AidotMqttUnavailable(
+            f"async_open_webrtc_stream: MQTT connection failed: {_err}"
+        )
     _status(f"MQTT connected (clientId={mqtt_cid})")
     return _phase_outputs(locals(), ("mqtt_fut",))
 
@@ -2293,7 +2310,7 @@ async def _dtls_open_wake_and_liveplay(self, _in: dict) -> dict:
                 # there would spuriously kill otherwise-good streams.
                 if _lp_on == 0:
                     outgoing_q.put_nowait(None)  # stop MQTT thread (avoid orphan)
-                    raise RuntimeError(
+                    raise AidotLivePlayRefused(
                         f"livePlay refused by camera (livePlay=0, code={_lp_code})"
                     )
                 elif _lp_code not in (0, 200):
@@ -2349,7 +2366,7 @@ async def _dtls_open_wake_and_liveplay(self, _in: dict) -> dict:
                 _lp_on2 = int(_lp_resp2.get("livePlay", 1))
                 if _lp_on2 == 0:
                     outgoing_q.put_nowait(None)  # stop MQTT thread (avoid orphan)
-                    raise RuntimeError(
+                    raise AidotLivePlayRefused(
                         f"livePlay refused by camera (livePlay=0, code={_lp_code2})"
                     )
                 elif _lp_code2 not in (0, 200):
@@ -3673,7 +3690,7 @@ async def _dtls_open_offer_and_answer(self, _in: dict) -> dict:
         await _raise_if_refused(set())
         _status(f"no webrtcResp in {timeout}s")
         await _abort_open()
-        raise RuntimeError(
+        raise AidotNoWebrtcAnswer(
             f"async_open_webrtc_stream: no webrtcResp received within {timeout}s"
         )
 
@@ -3832,7 +3849,7 @@ async def _dtls_open_offer_and_answer(self, _in: dict) -> dict:
         except Exception as _rr_srd_exc:
             _status(f"role-reversal: early setRemoteDescription failed: {_rr_srd_exc}")
             await _abort_open()
-            raise RuntimeError(
+            raise AidotNegotiationFailed(
                 f"async_open_webrtc_stream: setRemoteDescription failed: {_rr_srd_exc}"
             ) from _rr_srd_exc
         # APK parity: do NOT pre-seed cam_ip_q for synthetic candidate injection
@@ -4437,7 +4454,7 @@ async def _dtls_open_offer_and_answer(self, _in: dict) -> dict:
             )
             _status(f"setRemoteDescription failed: {exc}")
             await _abort_open()
-            raise RuntimeError(
+            raise AidotNegotiationFailed(
                 f"async_open_webrtc_stream: setRemoteDescription failed: {exc}"
             ) from exc
 
@@ -4765,7 +4782,7 @@ async def _dtls_open_ice_candidates_and_connect(self, _in: dict) -> dict:
             # cap is the camera declining, not a transport fault, and the
             # generic 15s-gated retry is the wrong response to it.
             raise AidotCameraNotReady(self.device_id)
-        raise RuntimeError(
+        raise AidotNegotiationFailed(
             f"async_open_webrtc_stream: ICE connection not established "
             f"(connState={pc.connectionState}"
             f"  iceState={pc.iceConnectionState}) within {_ice_timeout}s"

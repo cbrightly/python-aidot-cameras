@@ -648,10 +648,13 @@ knob is in
 Opt-in knobs that tighten the camera transport. Defaults preserve current
 behavior (the firmware's signaling doesn't carry verifiable material, so strict
 modes are off until you pin a value), and the library warns in its log when one
-is left at the permissive default.
+is left at the permissive default. The two exceptions are strict by default and
+loosen only when set: `AIDOT_ALLOW_PLAINTEXT_MQTT` and `AIDOT_EXTRA_REGIONS`.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
+| `AIDOT_ALLOW_PLAINTEXT_MQTT` | Accept an MQTT broker URL from the cloud that has no TLS (`ws://`, `tcp://`, `mqtt://`, `http://`). The broker connection carries the account's MQTT password, so such a URL is refused by default: control calls fail with an error in the log and a stream open raises `AidotPlaintextMqttRefused`. A URL with no scheme is still treated as `wss://`. Does not affect `AIDOT_MQTT_URL`, which you set yourself. | unset (refuse) |
+| `AIDOT_EXTRA_REGIONS` | Comma-separated account regions to accept beyond the known `us`, `eu` and `jp`. The region is put into the cloud hostnames, so an unknown one is refused with `AidotUnknownRegion`; set this only if the AiDot cloud has started serving a new region. Each entry must be a hostname label (letters, digits, hyphens). | unset |
 | `AIDOT_ALLOW_LAN_SERVE` | Silences the warning emitted when decrypted media is served on a non-loopback bind (e.g. `0.0.0.0`), where any host on the LAN can read the unencrypted stream. Set when an exposed bind is intentional. | unset (warn on non-loopback) |
 | `AIDOT_CRED_KEY_FILE` | Path to the Fernet key file for stored credentials. Point it outside the config dir (ideally a separate secret store) so the key isn't co-located with the ciphertext. Applies to the default credentials path only (ignored when an explicit `creds_path` is passed). | `$XDG_CONFIG_HOME/aidot/.key` (falls back to `~/.config/aidot/.key`) |
 | `AIDOT_DTLS_PINNED_FP` | Pin the DTLS camera's certificate to this `sha-256` fingerprint. Unset, a DTLS camera's certificate is **not** independently verified (see below). Set, a camera presenting any other certificate, or none, fails the handshake. Case and `:` separators are ignored. | unset (no independent check; warns when the certificate is accepted as presented) |

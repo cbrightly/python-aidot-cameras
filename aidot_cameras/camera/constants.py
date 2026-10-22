@@ -4,7 +4,11 @@ Extracted verbatim from client.py (behavior-preserving). client.py
 re-imports these names, so the public/runtime surface is unchanged.
 """
 
+import re
+from typing import Optional
+
 from .. import settings
+from ..exceptions import AidotUnknownRegion
 
 # APP_ID sent in smarthome HTTP headers - value from MainActivity.java SharedPrefs
 # (SharePreferenceUtils.setPrefString(this, "APP_ID", "1392315867093508098")).
@@ -31,16 +35,93 @@ _AIDOT_API_BASE_TEMPLATE = "https://prod-{region}-api.arnoo.com"
 # broker, which is real egress with test credentials from CI.
 
 
+# --------------------------------------------------------------------------- #
+# Regions.
+#
+# The account's region is formatted into every cloud hostname
+# (``prod-{region}-api``, ``{region}-smarthome``, ``{region}-mqtt``), and it
+# comes from stored login data rather than from this library, so it is checked
+# before it reaches a URL: a value that is not a plain hostname label, or not a
+# region the AiDot cloud is known to serve, is refused rather than sent.
+#
+# Where the list comes from (every source agrees; none names a fourth region):
+#   * upstream python-aidot's country table (``aidot.const``), whose ``region``
+#     column holds only US, EU and JP, lowercased by upstream at login;
+#   * the vendor Android app's bundled region table, whose region codes are
+#     only US, EU and JP;
+#   * cloud hosts recorded in captures (``prod-us-api``, ``us-smarthome``,
+#     ``eu-smarthome``).
+# A region the cloud adds later can be accepted without a release through
+# AIDOT_EXTRA_REGIONS.
+KNOWN_REGIONS = frozenset({"us", "eu", "jp"})
+
+# One hostname label: lowercase letters, digits and inner hyphens, at most 32.
+_REGION_SHAPE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?")
+
+
+def _extra_regions() -> "frozenset[str]":
+    """AIDOT_EXTRA_REGIONS, lowercased; entries of the wrong shape dropped."""
+    return frozenset(
+        r.lower()
+        for r in settings.read("AIDOT_EXTRA_REGIONS")
+        if _REGION_SHAPE.fullmatch(r.lower())
+    )
+
+
+def validate_region(region: object) -> str:
+    """``region`` normalised to lowercase, or :class:`AidotUnknownRegion`.
+
+    Hostnames are case-insensitive, so ``"US"`` from an older stored login is
+    the same region as ``"us"``; anything else must be a known region (or one
+    named in AIDOT_EXTRA_REGIONS) and shaped like a hostname label.
+    """
+    if not isinstance(region, str):
+        raise AidotUnknownRegion(region)
+    norm = region.lower()
+    if not _REGION_SHAPE.fullmatch(norm):
+        raise AidotUnknownRegion(region)
+    if norm not in KNOWN_REGIONS and norm not in _extra_regions():
+        raise AidotUnknownRegion(region)
+    return norm
+
+
 def smarthome_base(region: str) -> str:
     """Smarthome API base for ``region`` (AIDOT_SMARTHOME_URL_TEMPLATE override)."""
     tmpl = settings.read("AIDOT_SMARTHOME_URL_TEMPLATE") or _SMARTHOME_URL_TEMPLATE
-    return tmpl.format(region=region)
+    return tmpl.format(region=validate_region(region))
 
 
 def aidot_api_base(region: str) -> str:
     """Platform API base for ``region`` (AIDOT_API_BASE_TEMPLATE override)."""
     tmpl = settings.read("AIDOT_API_BASE_TEMPLATE") or _AIDOT_API_BASE_TEMPLATE
-    return tmpl.format(region=region)
+    return tmpl.format(region=validate_region(region))
+
+
+def mqtt_fallback_url(region: str) -> str:
+    """The regional broker URL used when the cloud names none."""
+    return f"wss://{validate_region(region)}-mqtt.arnoo.com:8443/mqtt"
+
+
+# --------------------------------------------------------------------------- #
+# MQTT broker URL schemes.
+#
+# The broker connection carries the account's MQTT password, and the URL comes
+# from the cloud (getServerUrlConfig). paho connects over websockets and turns
+# TLS on only for a TLS scheme, so a ``ws://`` URL would send the password in
+# the clear. These are refused unless AIDOT_ALLOW_PLAINTEXT_MQTT opts in.
+PLAINTEXT_MQTT_SCHEMES = frozenset({"ws", "tcp", "mqtt", "http"})
+_URL_SCHEME = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*)://")
+
+
+def plaintext_mqtt_scheme(url: str) -> "Optional[str]":
+    """The URL's scheme, lowercased, if it is a known non-TLS one; else None.
+
+    A bare host (no scheme) is not plaintext: the caller prefixes ``wss://``.
+    """
+    m = _URL_SCHEME.match(url or "")
+    if m and m.group(1).lower() in PLAINTEXT_MQTT_SCHEMES:
+        return m.group(1).lower()
+    return None
 
 
 def _ice_uris_from_env(var: str, default: list) -> list:

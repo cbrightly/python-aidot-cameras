@@ -6,6 +6,56 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+Held for after 1.0.0. Touches the cloud connection (MQTT broker URL, region
+hosts) and the open path's error types, so it wants a live-validation run on
+its own head before it ships.
+
+### Added
+- **`AIDOT_ALLOW_PLAINTEXT_MQTT`** (default off). See Changed.
+- **`AIDOT_EXTRA_REGIONS`**: comma-separated account regions to accept beyond
+  `us`, `eu` and `jp`, for a region the AiDot cloud adds after this release.
+- **Exception types for the open path**, all exported from the package root:
+  `AidotStreamOpenError` (the base), `AidotMqttUnavailable`,
+  `AidotPlaintextMqttRefused`, `AidotLivePlayRefused`, `AidotNoWebrtcAnswer`,
+  `AidotNegotiationFailed` and `AidotFfmpegMissing`. Each is an `AidotError`
+  and also a `RuntimeError`. Also `AidotUnknownRegion` (`AidotError` and
+  `ValueError`).
+- `settings.snapshot()` dumps the effective settings with credentials
+  redacted, and `Knob.secret` marks `AIDOT_USERNAME`, `AIDOT_PASSWORD`,
+  `AIDOT_TOKEN_FILE` and `AIDOT_CRED_KEY_FILE`; the registry never logs a
+  secret knob's value.
+
+### Changed
+- **A non-TLS MQTT broker URL from the cloud is refused.** The connection
+  carries the account's MQTT password; a `ws://`, `tcp://`, `mqtt://` or
+  `http://` URL from `getServerUrlConfig` used to be accepted as-is (`ws://`)
+  or mangled into `wss://tcp://...`. Now control calls log an error and a
+  stream open raises `AidotPlaintextMqttRefused`, unless
+  `AIDOT_ALLOW_PLAINTEXT_MQTT=1`. `wss://` URLs, bare hosts (still given
+  `wss://`) and the regional fallback are unchanged, and `AIDOT_MQTT_URL`,
+  which the operator sets, is not checked.
+- **The account region is validated before it goes into a hostname.** It must
+  be a hostname label (lowercase letters, digits, inner hyphens; an uppercase
+  stored value is lowercased) and one of `us`, `eu`, `jp` or an
+  `AIDOT_EXTRA_REGIONS` entry; anything else raises `AidotUnknownRegion` when
+  a cloud URL is built.
+- **The open path raises AidotError subclasses instead of bare
+  `RuntimeError`.** `except RuntimeError` still catches every one of them.
+- **`CameraLanError`, `CameraLanLoginRejected` and `RtspPublishError` are
+  `AidotError` subclasses**, defined in `aidot_cameras.exceptions` and exported
+  from the package root. They are still importable from
+  `camera.lan_control` / `camera.rtsp_publish`, and `RtspPublishError` is still
+  a `RuntimeError`.
+- Every `AIDOT_*` read now goes through `aidot_cameras.settings`, including the
+  credentials, `AIDOT_COUNTRY` (default `US`, as before), the CLI's tri-state
+  flags and the audio level normalizer. Defaults and parsing are unchanged.
+
+### Removed
+- The measurement knobs **`AIDOT_EXPT_CAP_FILE`**, **`AIDOT_EXPT_PEERID_FILE`**
+  and **`AIDOT_EXPT_PEERID_CLASS`** and the code behind them. They were off by
+  default and documented only in docs/ENVIRONMENT.md, which promises no
+  stability for them; nothing in the library's scripts used them.
+
 ## [1.0.0rc60]
 
 Soak: resets the clock. The SDES open now stops a failed ffmpeg off the event

@@ -34,6 +34,11 @@ changed: ``bool_zero`` (anything but the literal ``"0"`` is on, so
 is on).
 
 ``env`` is injectable everywhere so a test never has to touch ``os.environ``.
+
+Credentials are knobs like any other, marked ``secret``. A secret knob's value
+is never logged by this module (a rejected value is named as ``<redacted>``)
+and :func:`snapshot`, the one supported way to dump the effective settings for
+a diagnostic, reports only whether it is set.
 """
 
 from __future__ import annotations
@@ -91,10 +96,17 @@ class Knob:
     #: shipped rule is "a negative is a mistake, keep the default".
     reject_below: Optional[float] = None
     note: str = ""
+    #: A credential (or the path to one). Its value never appears in a log
+    #: line from this module or in :func:`snapshot`.
+    secret: bool = False
+
+
+REDACTED = "<redacted>"
 
 
 def _rejected(knob: Knob, raw: str, why: str) -> None:
-    _LOGGER.debug("%s=%r %s; using %r", knob.name, raw, why, knob.default)
+    shown = REDACTED if knob.secret else repr(raw)
+    _LOGGER.debug("%s=%s %s; using %r", knob.name, shown, why, knob.default)
 
 
 def _parse_float(raw: str, knob: Knob) -> float:
@@ -174,6 +186,39 @@ def read_or_none(name: str, env: Optional[Mapping[str, str]] = None) -> Any:
     return read_knob(KNOBS[name], _env)
 
 
+def tristate(name: str, env: Optional[Mapping[str, str]] = None) -> Optional[bool]:
+    """A registered boolean knob as True, False or None ("no opinion").
+
+    A recognised truthy token is True and a recognised falsy one is False;
+    unset, blank or anything else is None. For a caller that must defer to
+    the default wherever it lives rather than apply one (the CLI's per-camera
+    options; see ``__main__._env_bool``). Unknown names raise ``KeyError``."""
+    knob = KNOBS[name]
+    if knob.kind not in BOOL_KINDS:
+        raise ValueError(f"{name} is not a boolean knob")
+    _env = os.environ if env is None else env
+    val = (_env.get(name) or "").strip().lower()
+    if val in _TRUTHY:
+        return True
+    if val in _FALSY:
+        return False
+    return None
+
+
+def snapshot(env: Optional[Mapping[str, str]] = None) -> "dict[str, Any]":
+    """The effective value of every knob that is set, for a diagnostic dump.
+
+    Unset knobs are left out (their value is the documented default). A secret
+    knob that is set reads as ``"<redacted>"``, never as its value."""
+    _env = os.environ if env is None else env
+    out: "dict[str, Any]" = {}
+    for name, knob in KNOBS.items():
+        if _env.get(name) is None:
+            continue
+        out[name] = REDACTED if knob.secret else read_knob(knob, _env)
+    return out
+
+
 def default(name: str) -> Any:
     return KNOBS[name].default
 
@@ -195,26 +240,19 @@ def _registry(*knobs: Knob) -> "dict[str, Knob]":
 
 #: The inventory. Grouped as docs/ENVIRONMENT.md groups them; the README's
 #: user-facing table is the first group. Defaults match the call sites they
-#: replaced, measured or not. A note naming a module means that module still
-#: reads the raw value itself (credentials, endpoint templates, the measurement
-#: seams); everything else is read through :func:`read`.
+#: replaced, measured or not. Every read goes through this module.
 KNOBS: "dict[str, Knob]" = _registry(
     # --- credentials and the account (README) ------------------------------
-    Knob("AIDOT_USERNAME", None, "str", note="raw read: credentials.py, cloud_auth.py"),
-    Knob("AIDOT_PASSWORD", None, "str", note="raw read: credentials.py, cloud_auth.py"),
-    Knob("AIDOT_COUNTRY", "US", "str", note="raw read: credentials.py, cloud_auth.py"),
+    Knob("AIDOT_USERNAME", None, "str", secret=True),
+    Knob("AIDOT_PASSWORD", None, "str", secret=True),
     Knob(
-        "AIDOT_TOKEN_FILE",
-        None,
+        "AIDOT_COUNTRY",
+        "US",
         "str",
-        note="raw read: cloud_auth.py; the CLI's token cache",
+        note="read per login; an empty value is passed through as empty",
     ),
-    Knob(
-        "AIDOT_CRED_KEY_FILE",
-        None,
-        "str",
-        note="raw read: credentials.py; Fernet key path",
-    ),
+    Knob("AIDOT_TOKEN_FILE", None, "str", secret=True, note="the CLI's token cache"),
+    Knob("AIDOT_CRED_KEY_FILE", None, "str", secret=True, note="Fernet key path"),
     Knob(
         "AIDOT_INCLUDE_SHARED_HOUSES",
         False,
@@ -242,6 +280,18 @@ KNOBS: "dict[str, Knob]" = _registry(
     Knob("AIDOT_ALLOW_LAN_SERVE", False, "bool_off"),
     Knob("AIDOT_DTLS_PINNED_FP", None, "str"),
     Knob(
+        "AIDOT_ALLOW_PLAINTEXT_MQTT",
+        False,
+        "bool_off",
+        note="accept a non-TLS MQTT broker URL from the cloud",
+    ),
+    Knob(
+        "AIDOT_EXTRA_REGIONS",
+        [],
+        "list",
+        note="regions accepted beyond us, eu, jp; each must be a hostname label",
+    ),
+    Knob(
         "AIDOT_SDES_HOLEPUNCH_HOST",
         None,
         "str",
@@ -252,7 +302,7 @@ KNOBS: "dict[str, Knob]" = _registry(
         "AIDOT_FAST_CONNECT",
         False,
         "bool_off",
-        note="DTLS only; per-camera option wins; the CLI also reads it raw as a tri-state (__main__.py)",
+        note="DTLS only; per-camera option wins; the CLI also reads it as a tri-state (__main__.py)",
     ),
     Knob("AIDOT_FAST_CONNECT_HOST_ONLY", False, "bool_one"),
     Knob("AIDOT_SDES_FAST_LIVEPLAY", True, "bool_on"),
@@ -280,7 +330,7 @@ KNOBS: "dict[str, Knob]" = _registry(
         "AIDOT_SDES_SERVE_AUDIO",
         True,
         "bool_on",
-        note="the CLI also reads it raw as a tri-state (__main__.py)",
+        note="the CLI also reads it as a tri-state (__main__.py)",
     ),
     Knob(
         "AIDOT_SDES_NACK", True, "bool_on_blank_off", note="an empty value turns it off"
@@ -349,7 +399,7 @@ KNOBS: "dict[str, Knob]" = _registry(
         "AIDOT_REORDER_SLACK_TICKS", 180000, "int", note="negative reads as the default"
     ),
     Knob("AIDOT_FFMPEG", "ffmpeg", "str"),
-    # --- endpoints, test seams and measurement scaffolding (ENVIRONMENT.md) --
+    # --- endpoints and test seams (ENVIRONMENT.md) --------------------------
     Knob("AIDOT_API_BASE_TEMPLATE", None, "str"),
     Knob("AIDOT_SMARTHOME_URL_TEMPLATE", None, "str"),
     Knob("AIDOT_MQTT_URL", None, "str"),
@@ -358,23 +408,5 @@ KNOBS: "dict[str, Knob]" = _registry(
         "AIDOT_TURN_SERVERS",
         ["stun:3.230.182.123:3478", "turn:3.230.182.123:5349"],
         "list",
-    ),
-    Knob(
-        "AIDOT_EXPT_CAP_FILE",
-        None,
-        "str",
-        note="raw read: sdes_open.py; measurement seam",
-    ),
-    Knob(
-        "AIDOT_EXPT_PEERID_FILE",
-        None,
-        "str",
-        note="raw read: client.py; measurement seam",
-    ),
-    Knob(
-        "AIDOT_EXPT_PEERID_CLASS",
-        None,
-        "str",
-        note="raw read: client.py; measurement seam",
     ),
 )

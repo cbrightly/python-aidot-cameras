@@ -60,6 +60,7 @@ from .agc import (  # re-exported: the publishers' callers and tests use these n
 from .rtp_h264 import H264Depacketizer
 
 from .. import settings
+from ..exceptions import RtspPublishError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -143,10 +144,6 @@ def _gap_log_level(gaps_before: int) -> int:
 def _publish_gap_warn_s() -> float:
     """Seconds without a frame to publish before saying so; 0 disables."""
     return settings.read("AIDOT_PUBLISH_GAP_WARN_S")
-
-
-class RtspPublishError(RuntimeError):
-    """The RTSP server refused or dropped the publish."""
 
 
 # --------------------------------------------------------------------------- #

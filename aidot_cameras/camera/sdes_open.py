@@ -19,7 +19,13 @@ import struct as _struct_mod
 import time
 from typing import Callable, Optional  # noqa: F401 - method annotations
 
-from ..exceptions import AidotCameraBusy, AidotCameraNoMedia, AidotCameraWrongCodec
+from ..exceptions import (
+    AidotCameraBusy,
+    AidotCameraNoMedia,
+    AidotCameraWrongCodec,
+    AidotFfmpegMissing,
+    AidotLivePlayRefused,
+)
 from .constants import (
     _LIVE_PLAY_NOT_READY,
     SDES_SPEAKERSTART_DELAY,
@@ -55,8 +61,6 @@ from .protocol import (
     _save_sprop,
     _write_text_file,
 )
-
-import os as _os
 
 from .. import settings
 
@@ -716,17 +720,6 @@ def _send_video_nack(
     )
 
 
-#: Measurement scaffolding, OFF unless an operator names a file.
-#:
-#: This used to be the hardcoded string "/config/aidot_expt_cap", which meant a
-#: published library opened a Home Assistant path on the event loop for every
-#: session - Home Assistant's own blocking-call detector reports it, and a
-#: transport library has no business knowing where HA keeps its config. Reading
-#: the env var at import costs nothing and leaves the knob available to whoever
-#: is screening a camera.
-EXPT_CAP_FILE = _os.environ.get("AIDOT_EXPT_CAP_FILE")
-
-
 #: How long to wait for the broker to echo our own livePlayReq back before
 #: proceeding. Was 5.0 s (1.5 s with fast-liveplay), and it is pure latency:
 #: across 22 h of one deployment the wait ran 169 times and timed out 169 times,
@@ -755,40 +748,6 @@ def _sdes_liveplay_echo_timeout(fast_liveplay: bool) -> float:
     # The fast-liveplay path was measured on 2026-09-03 to behave exactly like
     # the ordinary one (22 of 22 timed out at the same point), so one value.
     return _LIVEPLAY_ECHO_S
-
-
-def _sdes_max_session_s(device_id: str, path: "Optional[str]" = None) -> float:
-    """Seconds of media after which to end THIS device's session.  0 = off.
-
-    Measurement scaffolding.  The 80.2 s cliff is decided once per session, so a
-    session that reaches 90 s has already passed it and the next twenty minutes
-    carry no information.  Session throughput is coupled to the outcome - a stall
-    yields a fresh session every ~110 s, a pass yields none for tens of minutes -
-    so without a cap the arm that works starves its own sample.
-
-    The file names one device: ``<device_id>:<seconds>``.  The scoping is not
-    cosmetic: an unscoped cap hits every camera on the SDES path, one of which is
-    a battery device that normally opens about twice an hour and was forced to
-    ~30x that rate before this was caught.  So it FAILS CLOSED - anything that
-    cannot be attributed to a specific device caps nothing.
-    """
-    path = path if path is not None else EXPT_CAP_FILE
-    if not path:
-        # The overwhelmingly common case: no scaffolding, no file I/O at all.
-        return 0.0
-    try:
-        with open(path) as _fh:
-            raw = _fh.read().strip()
-    except OSError:
-        return 0.0
-    head, sep, tail = raw.partition(":")
-    if not sep or not head.strip() or head.strip() != device_id:
-        return 0.0
-    try:
-        seconds = float(tail.strip())
-    except ValueError:
-        return 0.0
-    return seconds if seconds > 0.0 else 0.0
 
 
 def _session_cap_reached(first_media_ts, now: float, cap_s: float) -> bool:
@@ -6589,7 +6548,7 @@ async def _sdes_open_build_offer(self, _in: dict) -> dict:
             if _lp_on_sdes == 0:
                 # The sockets and the SDP file are released by the exit stack as this raises.
                 outgoing_q.put_nowait(None)  # stop MQTT thread
-                raise RuntimeError(
+                raise AidotLivePlayRefused(
                     f"livePlay refused by camera (livePlay=0, code={_lp_code_sdes})"
                 )
             elif _lp_code_sdes not in (0, 200):
@@ -9698,7 +9657,7 @@ class _SdesOpenMixin:
             # before launching (avoids a cryptic FileNotFoundError).
             # The sockets and the SDP file are released by the exit stack as this raises.
             outgoing_q.put_nowait(None)  # stop MQTT thread
-            raise RuntimeError(
+            raise AidotFfmpegMissing(
                 "ffmpeg not found - install ffmpeg to stream SDES-SRTP cameras.\n"
                 "  Ubuntu/Debian:  sudo apt install ffmpeg\n"
                 "  macOS (Homebrew): brew install ffmpeg\n"
@@ -9712,7 +9671,7 @@ class _SdesOpenMixin:
             # ffmpeg is not installed - clean up and surface a clear error.
             # The sockets and the SDP file are released by the exit stack as this raises.
             outgoing_q.put_nowait(None)  # stop MQTT thread
-            raise RuntimeError(
+            raise AidotFfmpegMissing(
                 "ffmpeg not found - install ffmpeg to stream SDES-SRTP cameras.\n"
                 "  Ubuntu/Debian:  sudo apt install ffmpeg\n"
                 "  macOS (Homebrew): brew install ffmpeg\n"

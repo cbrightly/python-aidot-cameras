@@ -391,28 +391,100 @@ def test_per_call_helpers_read_the_registry_with_an_injected_env():
     assert protocol._reorder_slack({"AIDOT_REORDER_SLACK_TICKS": "9"}) == 9
 
 
-def test_the_registry_says_which_reads_are_still_raw():
-    """Every os.environ read of an AIDOT_ variable that bypasses settings.read
-    is pinned here by file and name, so a new raw read fails this test and a
-    migrated one has to be struck off. The eight named sites are the
-    credential reads and the three measurement seams, which stay raw by design
-    and say so in their Knob notes; the ninth is the CLI's tri-state bool
-    helper, which takes the name as a parameter and must return None rather
-    than a default (see its docstring)."""
-    assert _raw_read_sites() == {
-        ("aidot_cameras/__main__.py", "<name>"),
-        ("aidot_cameras/camera/client.py", "AIDOT_EXPT_PEERID_CLASS"),
-        ("aidot_cameras/camera/client.py", "AIDOT_EXPT_PEERID_FILE"),
-        ("aidot_cameras/camera/sdes_open.py", "AIDOT_EXPT_CAP_FILE"),
-        ("aidot_cameras/cloud_auth.py", "AIDOT_COUNTRY"),
-        ("aidot_cameras/cloud_auth.py", "AIDOT_PASSWORD"),
-        ("aidot_cameras/cloud_auth.py", "AIDOT_TOKEN_FILE"),
-        ("aidot_cameras/cloud_auth.py", "AIDOT_USERNAME"),
-        ("aidot_cameras/credentials.py", "AIDOT_COUNTRY"),
-        ("aidot_cameras/credentials.py", "AIDOT_CRED_KEY_FILE"),
-        ("aidot_cameras/credentials.py", "AIDOT_PASSWORD"),
-        ("aidot_cameras/credentials.py", "AIDOT_USERNAME"),
+def test_no_aidot_variable_is_read_around_the_registry():
+    """Every AIDOT_ read goes through settings: the credentials, the CLI's
+    tri-state helper and the AGC included. A raw read would skip the parser,
+    the inventory and the secret redaction, so none is allowed."""
+    assert _raw_read_sites() == set()
+    assert not [n for n, k in settings.KNOBS.items() if k.note.startswith("raw read")]
+
+
+def _environ_uses() -> "list[tuple[str, int, str]]":
+    """Every use of os.environ / os.getenv in the package's CODE (comments and
+    docstrings excluded), as (file, line, source line). Catches an alias too:
+    ``env = os.environ`` followed by ``env.get("AIDOT_...")`` is found at the
+    alias."""
+    import ast
+
+    out = []
+    for rel, text in _package_sources():
+        lines = text.splitlines()
+        for node in ast.walk(ast.parse(text)):
+            hit = (
+                isinstance(node, ast.Attribute)
+                and node.attr in ("environ", "getenv")
+                and isinstance(node.value, ast.Name)
+                and node.value.id in ("os", "_os")
+            ) or (isinstance(node, ast.Name) and node.id in ("environ", "getenv"))
+            if hit:
+                out.append((rel, node.lineno, lines[node.lineno - 1].strip()))
+    return out
+
+
+def test_only_settings_touches_the_environment_for_aidot_names():
+    """The one allowed environment read outside settings.py is the XDG base
+    directory (not an AIDOT_ name, and defined by the XDG spec)."""
+    stray = [u for u in _environ_uses() if "XDG_CONFIG_HOME" not in u[2]]
+    assert not stray, f"environment read outside settings.py: {stray}"
+
+
+def test_secret_knobs_are_the_credentials():
+    secret = sorted(n for n, k in settings.KNOBS.items() if k.secret)
+    assert secret == [
+        "AIDOT_CRED_KEY_FILE",
+        "AIDOT_PASSWORD",
+        "AIDOT_TOKEN_FILE",
+        "AIDOT_USERNAME",
+    ]
+
+
+def test_snapshot_redacts_secrets_and_reports_set_knobs():
+    env = {
+        "AIDOT_USERNAME": "someone@example.invalid",
+        "AIDOT_PASSWORD": "hunter2-not-real",
+        "AIDOT_TOKEN_FILE": "/somewhere/token.json",
+        "AIDOT_COUNTRY": "DE",
+        "AIDOT_HEALTH_LINE_S": "30",
     }
-    # The knobs read raw by design say so in the table.
-    raw = sorted(n for n, k in settings.KNOBS.items() if k.note.startswith("raw read"))
-    assert raw == sorted({n for _f, n in _raw_read_sites() if n.startswith("AIDOT_")})
+    snap = settings.snapshot(env)
+    assert snap == {
+        "AIDOT_USERNAME": settings.REDACTED,
+        "AIDOT_PASSWORD": settings.REDACTED,
+        "AIDOT_TOKEN_FILE": settings.REDACTED,
+        "AIDOT_COUNTRY": "DE",
+        "AIDOT_HEALTH_LINE_S": 30.0,
+    }
+    dumped = repr(snap)
+    for secret in ("someone@example.invalid", "hunter2-not-real", "token.json"):
+        assert secret not in dumped
+
+
+def test_a_rejected_secret_value_is_not_logged(caplog):
+    import logging
+
+    knob = settings.Knob("AIDOT_FAKE_SECRET", 1, "int", secret=True)
+    with caplog.at_level(logging.DEBUG, logger="aidot_cameras.settings"):
+        assert settings.read_knob(knob, {"AIDOT_FAKE_SECRET": "s3cret-value"}) == 1
+    assert "s3cret-value" not in caplog.text
+    assert settings.REDACTED in caplog.text
+
+
+def test_credentials_keep_their_semantics():
+    assert settings.read("AIDOT_COUNTRY", {}) == "US"
+    assert settings.read("AIDOT_COUNTRY", {"AIDOT_COUNTRY": ""}) == ""
+    assert settings.read("AIDOT_USERNAME", {}) is None
+    assert settings.read("AIDOT_PASSWORD", {"AIDOT_PASSWORD": " p "}) == " p "
+
+
+def test_tristate_reader():
+    assert settings.tristate("AIDOT_FAST_CONNECT", {}) is None
+    assert settings.tristate("AIDOT_FAST_CONNECT", {"AIDOT_FAST_CONNECT": "Yes"})
+    assert (
+        settings.tristate("AIDOT_FAST_CONNECT", {"AIDOT_FAST_CONNECT": "off"}) is False
+    )
+    assert settings.tristate("AIDOT_FAST_CONNECT", {"AIDOT_FAST_CONNECT": "2"}) is None
+
+    with pytest.raises(KeyError):
+        settings.tristate("AIDOT_NOT_A_KNOB", {})
+    with pytest.raises(ValueError):
+        settings.tristate("AIDOT_HEALTH_LINE_S", {})
