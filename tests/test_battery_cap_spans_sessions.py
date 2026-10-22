@@ -47,19 +47,21 @@ def test_sessions_that_end_on_their_own_cannot_outrun_the_cap(
 ):
     """The anchor is set once per keepalive, and checked after every session.
 
-    Each session here ends on its own after 40 s with the viewers unknown, so no
-    single session ever reaches the 300 s cap. Anchored per session, the cap
-    would never fire and a battery camera would be re-woken for as long as the
-    cause lasted; anchored on the keepalive, the session that ends past the cap
-    is the last one.
+    Each session here ends on its own after 4 s - inside the loop's first 5 s
+    poll, so no session ever asks about viewers at all - with the viewers
+    unknown. Anchored per session, the cap would never fire and a battery
+    camera would be re-woken for as long as the cause lasted; anchored on the
+    keepalive and checked after each session, the session that ends past the
+    cap is the last one.
     """
     run = _short_sessions(
-        monkeypatch, make_camera_device_client, "A001513", lambda now: None, 40.0
+        monkeypatch, make_camera_device_client, "A001513", lambda now: None, 4.0
     )
     cap = 300.0
+    assert run.viewer_asks == [], "the premise: only the after-session check runs"
     assert run.dormant == [{"release_url": True, "why": "idle release"}]
     start = run.open_times[0]
-    assert cap <= run.dormant_at[0] - start < cap + 60.0, run.dormant_at
+    assert cap <= run.dormant_at[0] - start < cap + 30.0, run.dormant_at
     # released where the ended session is checked: no further open after it
     assert run.open_times[-1] < run.dormant_at[0]
 
