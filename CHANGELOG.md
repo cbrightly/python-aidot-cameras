@@ -6,6 +6,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc61]
+
+Soak: resets the clock. Both stream opens and both serve loops are rewritten
+(see Changed), and the cloud MQTT and region checks are new on the open path.
+The reference installation is still off the network, so this costs no soak
+time.
+
 Held for after 1.0.0. Touches the cloud connection (MQTT broker URL, region
 hosts) and the open path's error types, so it wants a live-validation run on
 its own head before it ships.
@@ -26,6 +33,12 @@ its own head before it ships.
   secret knob's value.
 
 ### Changed
+- **The stream opens and serve loops pass state between their phases
+  through explicit state objects** instead of `locals()` dictionaries, with no
+  intended behaviour change (every await runs in the same order; validated on
+  real cameras). A test holds every field to being written before it is read.
+  The internal session-cap plumbing left over from a removed measurement knob
+  is gone.
 - **A non-TLS MQTT broker URL from the cloud is refused.** The connection
   carries the account's MQTT password; a `ws://`, `tcp://`, `mqtt://` or
   `http://` URL from `getServerUrlConfig` used to be accepted as-is (`ws://`)

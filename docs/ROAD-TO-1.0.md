@@ -19,11 +19,11 @@ understood and its shape has settled:
 - the release that becomes 1.0.0 has run in ordinary use for two weeks without
   a streaming-breaking release replacing it.
 
-Where things stand: the library is at `1.0.0rc60` on PyPI. `1.0.0rc58` is
+Where things stand: the library is at `1.0.0rc61` on PyPI. `1.0.0rc58` is
 yanked: in it a successful DTLS open returned `None` instead of its session;
 `rc59` fixed that and `rc60` adds a test that holds every phase of both opens
-to exporting what later phases read. The Home Assistant integration `2.37.16`
-requires `>=1.0.0rc60`.
+to exporting what later phases read. The Home Assistant integration `2.37.17`
+requires `>=1.0.0rc61`.
 
 ## Open
 
@@ -38,8 +38,8 @@ ten days; that was an inconsistency, not a change of bar.
 
 **Day zero.** The reference installation has been off the network since
 2026-10-13. Day zero is the day it returns running the newest rc (currently
-`1.0.0rc60`) and the integration release that requires it (currently
-`2.37.16`). The installed files must match the released ones: a soak measured
+`1.0.0rc61`) and the integration release that requires it (currently
+`2.37.17`). The installed files must match the released ones: a soak measured
 on hot-patched files measures nothing, so that check is part of dating day
 zero.
 
