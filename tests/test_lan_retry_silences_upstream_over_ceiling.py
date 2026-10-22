@@ -113,7 +113,7 @@ def test_attempts_continue_but_upstream_stops_logging_over_the_ceiling(caplog):
     extra = 4
 
     async def _run():
-        c = _Client("dev-a", "192.168.1.254")
+        c = _Client("dev-a", "10.0.1.254")
         for _ in range(_LOGIN_RETRY_LIMIT + extra):
             await c.async_login()
         return c
@@ -135,8 +135,8 @@ def test_attempts_continue_but_upstream_stops_logging_over_the_ceiling(caplog):
 
 def test_another_device_is_not_silenced(caplog):
     async def _run():
-        a = _Client("dev-a", "192.168.1.254")
-        b = _Client("dev-b", "192.168.1.17")
+        a = _Client("dev-a", "10.0.1.254")
+        b = _Client("dev-b", "10.0.1.17")
         for _ in range(_LOGIN_RETRY_LIMIT + 2):
             await a.async_login()
         for _ in range(2):
@@ -149,11 +149,11 @@ def test_another_device_is_not_silenced(caplog):
 
 def test_a_new_address_lifts_the_silence(caplog):
     async def _run():
-        c = _Client("dev-a", "192.168.1.254")
+        c = _Client("dev-a", "10.0.1.254")
         for _ in range(_LOGIN_RETRY_LIMIT + 2):
             await c.async_login()
         before = len(_upstream_errors(caplog, "dev-a"))
-        c.update_ip_address("192.168.0.50")
+        c.update_ip_address("10.0.0.50")
         await c.async_login()
         return before
 
@@ -163,7 +163,7 @@ def test_a_new_address_lifts_the_silence(caplog):
     assert len(after) == _LOGIN_RETRY_LIMIT + 1
     # The attempt at the new address is logged in full, its connect line too.
     assert any(
-        r.getMessage() == "dev-a:connect device: 192.168.0.50"
+        r.getMessage() == "dev-a:connect device: 10.0.0.50"
         for r in caplog.records
         if r.name == "aidot.device_client"
     )
@@ -171,7 +171,7 @@ def test_a_new_address_lifts_the_silence(caplog):
 
 def test_a_login_that_gets_through_lifts_the_silence(caplog):
     async def _run():
-        c = _Client("dev-a", "192.168.1.254")
+        c = _Client("dev-a", "10.0.1.254")
         for _ in range(_LOGIN_RETRY_LIMIT + 2):
             await c.async_login()
         c.succeed = True

@@ -37,7 +37,7 @@ def _record(msg, level=logging.WARNING):
 @pytest.mark.parametrize(
     "msg,level",
     [
-        ("dev-a:connect device: 192.168.1.254", logging.WARNING),
+        ("dev-a:connect device: 10.0.1.254", logging.WARNING),
         ("dev-a:login result: {'ack': {'code': 403}}", logging.WARNING),
         ("dev-a:login error, code: 403", logging.ERROR),
         ("dev-a login read status error Connection reset", logging.ERROR),
@@ -80,7 +80,7 @@ def test_the_timeout_warning_is_debug_past_the_ceiling(caplog):
 class _Fake:
     def __init__(self):
         self.device_id = "dev-a"
-        self._ip_address = "192.168.1.254"
+        self._ip_address = "10.0.1.254"
         self._connecting = False
         self._connect_and_login = False
         self._is_close = False
@@ -111,7 +111,7 @@ def test_an_address_change_resets_the_backoff_and_the_giving_up_line():
     c._connect_failures = 6
     c._gave_up_logged = True
     lan_retry._OVER_CEILING.add("dev-a")
-    c.update_ip_address("192.168.0.40")
+    c.update_ip_address("10.0.0.40")
     assert (c._login_attempt, c._connect_failures, c._gave_up_logged) == (0, 0, False)
     assert "dev-a" not in lan_retry._OVER_CEILING
 

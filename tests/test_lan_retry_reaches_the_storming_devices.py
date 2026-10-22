@@ -52,7 +52,7 @@ def _device(dev_id, model_id):
 
 
 # One of the six devices from the storming run, by model shape: a light.
-STORMING_LIGHT = _device("0dc8fcf9bb74", "lk.WIFI-CCTLight-D0001")
+STORMING_LIGHT = _device("0c0d0e0f1a1b", "lk.WIFI-CCTLight-D0001")
 
 
 def _dispatch(device):

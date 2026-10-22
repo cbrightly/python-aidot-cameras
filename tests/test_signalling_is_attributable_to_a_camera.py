@@ -31,12 +31,12 @@ from aidot_cameras.camera.webrtc_open import (
 
 DEV = "a9b8c7d6e5f40312213243546576879a"
 OTHER = "00112233445566778899aabbccddeeff"
-UID = "5354ad296b414fe9be581c7116f246e0"
+UID = "9999aaaa8888bbbb7777cccc6666dddd"
 
 SERVER_ACK_TOPIC = f"iot/v1/c/{UID}/IPCAM/lowPowerActiveStateResp"
 SERVER_ACK = {
     "ack": {"code": 200, "desc": "Success."},
-    "clientId": "server-6a9f72d1901fc6fe2698a1ad84a0e715",
+    "clientId": "server-0f0e0d0c0b0a09080706050403020100",
     "method": "lowPowerActiveStateResp",
     "service": "IPCAM",
     "srcAddr": f"9.{UID}",

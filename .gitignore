@@ -186,7 +186,7 @@ research/tutk_bridge/android-bionic/aosp_arm64-exp-RP1A/system.img
 requirements-venv-snapshot.txt
 
 # Reverse-engineering artifacts (decompiled APK, SDK headers, binary analysis)
-# kept locally, purged from git history 2026-05-30 (backup: ~/aidot-research-backup-20260530)
+# kept locally, purged from git history 2026-05-30
 research/
 
 # Manual camera exerciser (local dev/diagnostic script, not shipped)
@@ -216,7 +216,7 @@ docs/VALIDATION_2026-05-30.md
 docs/WEBRTC_BASELINE.md
 docs/official_camera_network_calls.md
 
-# aidot-go2rtc bridge: local secrets / generated artifacts — never commit
+# aidot-go2rtc bridge: local secrets / generated artifacts -- never commit
 auto.crt
 auto.key
 *.crt

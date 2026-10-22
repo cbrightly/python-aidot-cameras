@@ -45,15 +45,15 @@ class _Client(LanRetryMixin, _FakeUpstream):
 
 
 def test_a_fresh_client_reports_its_address_and_no_failures():
-    c = _Client("dev-a", "192.168.1.254")
-    assert c.lan_address == "192.168.1.254"
+    c = _Client("dev-a", "10.0.1.254")
+    assert c.lan_address == "10.0.1.254"
     assert c.lan_login_failures == 0
     assert c.lan_login_over_ceiling is False
 
 
 def test_failures_count_up_to_and_past_the_ceiling():
     async def _run():
-        c = _Client("dev-a", "192.168.1.254")
+        c = _Client("dev-a", "10.0.1.254")
         for _ in range(_LOGIN_RETRY_LIMIT - 1):
             await c.async_login()
         assert c.lan_login_failures == _LOGIN_RETRY_LIMIT - 1
@@ -69,7 +69,7 @@ def test_failures_count_up_to_and_past_the_ceiling():
 
 def test_a_login_that_gets_through_clears_the_count():
     async def _run():
-        c = _Client("dev-a", "192.168.1.254")
+        c = _Client("dev-a", "10.0.1.254")
         for _ in range(_LOGIN_RETRY_LIMIT + 1):
             await c.async_login()
         c.succeed = True

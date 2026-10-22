@@ -80,7 +80,7 @@ class _FakeUpstream:
 
     def __init__(self):
         self.device_id = "dev-a"
-        self._ip_address = "192.168.1.50"
+        self._ip_address = "10.0.1.50"
         self._connecting = False
         self._connect_and_login = False
         self._is_close = False
@@ -301,7 +301,7 @@ class _FakeUpstreamWithRealConnectGate:
 
     def __init__(self):
         self.device_id = "dev-a"
-        self._ip_address = "192.168.1.50"
+        self._ip_address = "10.0.1.50"
         self._connecting = False
         self._connect_and_login = False
         self._is_close = False

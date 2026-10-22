@@ -34,13 +34,13 @@ from aidot_cameras.camera.sdes_open import (
 _ANSWER = "\r\n".join(
     [
         "v=0",
-        "o=- 0 0 IN IP4 192.168.0.124",
+        "o=- 0 0 IN IP4 10.0.0.124",
         "s=-",
         "t=0 0",
         "m=audio 35488 RTP/SAVP 8",
         "a=ice-ufrag:CAMufrag",
         "a=ice-pwd:CAMpwdCAMpwdCAMpwd",
-        "a=candidate:1 1 udp 2130706431 192.168.0.124 35488 typ host",
+        "a=candidate:1 1 udp 2130706431 10.0.0.124 35488 typ host",
         "a=candidate:2 1 udp 1694498815 81.2.3.4 51820 typ srflx",
         "m=video 35490 RTP/SAVP 96",
     ]
@@ -56,22 +56,22 @@ def test_it_reads_the_credentials_and_candidates_the_nomination_addresses():
     ufrag, pwd, cands, host = _parse_answer_ice(_ANSWER)
     assert ufrag == "CAMufrag"
     assert pwd == "CAMpwdCAMpwdCAMpwd"
-    assert cands == [("192.168.0.124", 35488), ("81.2.3.4", 51820)]
-    assert host == ("192.168.0.124", 35488)
+    assert cands == [("10.0.0.124", 35488), ("81.2.3.4", 51820)]
+    assert host == ("10.0.0.124", 35488)
 
 
 def test_the_host_candidate_is_the_first_typ_host_not_merely_the_first():
     """SCTP is addressed to the host candidate.  An answer that lists srflx
     first must not hand back the srflx address as the host one."""
     srflx_first = _ANSWER.replace(
-        "a=candidate:1 1 udp 2130706431 192.168.0.124 35488 typ host\r\n"
+        "a=candidate:1 1 udp 2130706431 10.0.0.124 35488 typ host\r\n"
         "a=candidate:2 1 udp 1694498815 81.2.3.4 51820 typ srflx",
         "a=candidate:2 1 udp 1694498815 81.2.3.4 51820 typ srflx\r\n"
-        "a=candidate:1 1 udp 2130706431 192.168.0.124 35488 typ host",
+        "a=candidate:1 1 udp 2130706431 10.0.0.124 35488 typ host",
     )
     _u, _p, cands, host = _parse_answer_ice(srflx_first)
     assert cands[0] == ("81.2.3.4", 51820)
-    assert host == ("192.168.0.124", 35488)
+    assert host == ("10.0.0.124", 35488)
 
 
 def test_an_empty_or_absent_sdp_yields_nothing():
@@ -223,11 +223,11 @@ _OUR_ANSWER = "\r\n".join(
         "m=audio 39641 RTP/SAVPF 8",
         "a=ice-ufrag:OURufrag",
         "a=ice-pwd:OURpwdOURpwdOURpwd",
-        "a=candidate:1 1 udp 2130706431 192.168.0.114 39641 typ host",
+        "a=candidate:1 1 udp 2130706431 10.0.0.114 39641 typ host",
     ]
 )
 
-_USER = "76adc6bd26f516d0fb06e804ee3cf85e"
+_USER = "2222cccc3333dddd4444eeee5555ffff"
 
 
 def test_our_own_answer_would_otherwise_pass_the_nomination_check():
@@ -243,7 +243,7 @@ def test_our_own_echoed_answer_is_not_treated_as_the_cameras():
 def test_the_cameras_answer_is():
     assert (
         _answer_is_from_the_camera(
-            src_addr="2.338603b50fce46ef8d2545fc7362c967", user_id=_USER
+            src_addr="2.5555eeee6666ffff7777000088881111", user_id=_USER
         )
         is True
     )
@@ -302,9 +302,9 @@ def test_the_candidate_parse_accepts_a_line_that_ends_at_typ():
     """Two of the four parses this collapsed ended at a bare `typ` and captured
     no type token. The shared regex must not reject a line either of them would
     have taken."""
-    sdp = "a=candidate:1 1 udp 2130706431 192.168.0.124 35488 typ"
+    sdp = "a=candidate:1 1 udp 2130706431 10.0.0.124 35488 typ"
     _u, _p, cands, host = _parse_answer_ice(sdp)
-    assert cands == [("192.168.0.124", 35488)]
+    assert cands == [("10.0.0.124", 35488)]
     assert host == ()
 
 
@@ -402,7 +402,7 @@ _ONE_PAIR_ANSWER = "\r\n".join(
         "m=video 9 RTP/SAVP 96",
         "a=ice-ufrag:9z7F",
         "a=ice-pwd:mDe5uxBe1msnVNMlu8BwzQPy",
-        "a=candidate:1 1 udp 2130706431 192.168.0.124 33912 typ host",
+        "a=candidate:1 1 udp 2130706431 10.0.0.124 33912 typ host",
         "m=audio 9 RTP/SAVP 8",
         "a=ice-ufrag:9z7F",
         "a=ice-pwd:mDe5uxBe1msnVNMlu8BwzQPy",
@@ -418,7 +418,7 @@ def test_the_first_credential_pair_is_the_only_pair():
     ufrag, pwd, cands, _host = _parse_answer_ice(_ONE_PAIR_ANSWER)
     assert ufrag == "9z7F"
     assert pwd == "mDe5uxBe1msnVNMlu8BwzQPy"
-    assert cands == [("192.168.0.124", 33912)]
+    assert cands == [("10.0.0.124", 33912)]
 
     pairs = {
         (

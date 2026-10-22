@@ -164,21 +164,19 @@ def test_remove_stream():
 
 
 def test_rtsp_url():
-    c = Go2rtcClient(_FakeSession(), base_url="http://homeassistant.local:1984")
-    assert c.rtsp_url("rear") == "rtsp://homeassistant.local:8554/rear"
-    assert (
-        c.rtsp_url("rear", rtsp_port=18554) == "rtsp://homeassistant.local:18554/rear"
-    )
+    c = Go2rtcClient(_FakeSession(), base_url="http://ha.example.test:1984")
+    assert c.rtsp_url("rear") == "rtsp://ha.example.test:8554/rear"
+    assert c.rtsp_url("rear", rtsp_port=18554) == "rtsp://ha.example.test:18554/rear"
 
 
 def test_prefer_go2rtc_registers_and_returns_url():
     s = _FakeSession(api_status=200, put_status=200)
     url = asyncio.run(
         prefer_go2rtc(
-            s, "rear", "rtsp://cam/src", base_url="http://homeassistant.local:1984"
+            s, "rear", "rtsp://cam/src", base_url="http://ha.example.test:1984"
         )
     )
-    assert url == "rtsp://homeassistant.local:8554/rear"
+    assert url == "rtsp://ha.example.test:8554/rear"
 
 
 def test_prefer_go2rtc_falls_back_when_unavailable():
@@ -205,10 +203,10 @@ def test_prefer_go2rtc_uses_a_stream_go2rtc_kept_despite_a_400():
     s = _FakeSession(api_status=200, put_status=400, streams={"rear": {}})
     url = asyncio.run(
         prefer_go2rtc(
-            s, "rear", "rtsp://cam/src", base_url="http://homeassistant.local:1984"
+            s, "rear", "rtsp://cam/src", base_url="http://ha.example.test:1984"
         )
     )
-    assert url == "rtsp://homeassistant.local:8554/rear"
+    assert url == "rtsp://ha.example.test:8554/rear"
 
 
 if __name__ == "__main__":
