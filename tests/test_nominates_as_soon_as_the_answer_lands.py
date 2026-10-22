@@ -298,7 +298,7 @@ def test_the_trickle_path_reads_candidates_through_the_same_parser(monkeypatch):
     from tests.open_helpers import drive_trickle
 
     lines = [
-        "candidate:1 1 udp 2130706431 192.168.1.20 40000 typ host",
+        "candidate:1 1 udp 2130706431 192.0.2.20 40000 typ host",
         "a=candidate:2 1 udp 1694498815 203.0.113.7 40001 typ srflx raddr 0.0.0.0",
         "candidate:3 1 udp 1 198.51.100.9 40002 typ",
         "candidate:1 1 udp 1 1.2.3.4 5 typo host",

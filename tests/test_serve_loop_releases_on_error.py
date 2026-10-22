@@ -290,7 +290,9 @@ def test_sdes_bridge_thread_logs_an_unexpected_error():
 def test_a_malformed_candidate_address_is_not_a_permission():
     """The candidate pattern admits "1.2.3.4.5"; CreatePermission for it is
     declined, not raised into the bridge thread."""
-    relay = {"sock": ("1.1.1.1", 3478, "realm", "nonce", "1.1.1.1", 3478, b"k", "user")}
+    relay = {
+        "sock": ("192.0.2.1", 3478, "realm", "nonce", "192.0.2.1", 3478, b"k", "user")
+    }
     assert sdes_open.turn_create_permission(relay, "sock", "1.2.3.4.5", 4000) is False
 
 

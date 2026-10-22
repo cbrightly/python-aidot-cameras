@@ -190,7 +190,7 @@ def test_permission_helper_covers_every_candidate_on_both_sockets():
         asked.append((sock, ip, port))
         return True
 
-    cands = [("10.0.0.5", 4000), ("203.0.113.7", 4001)]
+    cands = [("192.0.2.5", 4000), ("203.0.113.7", 4001)]
     n = so.turn_install_permissions(
         _create, ("audio", "video"), [object()], lambda m: None, cands, "test"
     )
@@ -209,7 +209,7 @@ def test_the_answer_path_installs_the_permission_before_it_nominates():
             "v=0",
             "a=ice-ufrag:camU",
             "a=ice-pwd:camPwdcamPwdcamPwd",
-            "a=candidate:1 1 udp 2130706431 10.0.0.5 4000 typ host",
+            "a=candidate:1 1 udp 2130706431 192.0.2.5 4000 typ host",
             "a=candidate:2 1 udp 1694498815 203.0.113.7 4001 typ srflx",
         ]
     )
@@ -223,9 +223,9 @@ def test_the_answer_path_installs_the_permission_before_it_nominates():
         sdp,
     )
     assert n == 2
-    assert events[0] == ("perm", (("10.0.0.5", 4000), ("203.0.113.7", 4001)))
+    assert events[0] == ("perm", (("192.0.2.5", 4000), ("203.0.113.7", 4001)))
     assert [e[0] for e in events[1:]] == ["nominate"] * 4
-    assert seen == [("10.0.0.5", 4000), ("203.0.113.7", 4001)], (
+    assert seen == [("192.0.2.5", 4000), ("203.0.113.7", 4001)], (
         "what it nominated is recorded for the stall report"
     )
 
@@ -326,14 +326,14 @@ def test_trickled_candidates_are_permissioned_not_just_the_answer_sdp(monkeypatc
     from tests.open_helpers import drive_trickle
 
     lines = [
-        "candidate:1 1 udp 2130706431 192.168.1.20 40000 typ host",
+        "candidate:1 1 udp 2130706431 192.0.2.20 40000 typ host",
         "candidate:2 1 udp 1694498815 203.0.113.7 40001 typ srflx",
         "candidate:3 1 udp 16777215 198.51.100.9 40002 typ relay",
         "candidate:3 1 udp 16777215 198.51.100.9 40002 typ relay",  # repeat
     ]
     installed, uc, _orig = drive_trickle(monkeypatch, lines)
     assert [(ip, port) for ip, port, _w in installed] == [
-        ("192.168.1.20", 40000),
+        ("192.0.2.20", 40000),
         ("203.0.113.7", 40001),
         ("198.51.100.9", 40002),
     ]
@@ -378,7 +378,7 @@ def test_nomination_set_is_rebound_not_mutated(monkeypatch):
     """The bridge thread iterates this list; mutating it under them raises."""
     from tests.open_helpers import drive_trickle
 
-    host = ("192.168.1.20", 40000)
+    host = ("192.0.2.20", 40000)
     _inst, uc, original = drive_trickle(
         monkeypatch,
         ["candidate:2 1 udp 1694498815 203.0.113.7 40001 typ srflx"],
