@@ -207,7 +207,7 @@ actually sends was pulled out of `KVSWebRTCChannel` and named against
 | id | name | do we send it |
 |----|------|---------------|
 | 0x318 / 792 | `USER_IPCAM_LISTEVENT_REQ` | **yes** - lists what a card holds |
-| 0x31a / 794 | `USER_IPCAM_RECORD_PLAYCONTROL` | wire format only - see below |
+| 0x31a / 794 | `USER_IPCAM_RECORD_PLAYCONTROL` | no - not feasible, see below |
 | 0x320 / 800 | `USER_IPCAM_SETSTREAMCTRL_REQ` | yes |
 | 0x322 / 802 | `USER_IPCAM_GETSTREAMCTRL_REQ` | yes |
 | 0x350 / 848 | SPEAKERSTART | yes |
@@ -221,7 +221,8 @@ actually sends was pulled out of `KVSWebRTCChannel` and named against
 | 0x1500 / 5376 | `AVIO_CTRL_SESSION_MODE` | yes, always mode 1 (LIVING) - see below |
 
 **On-device playback (`0x31a`) was investigated to a conclusion and is not
-feasible - closed 2026-08-13.** The wire format is implemented and correct, and
+feasible - closed 2026-08-13.** The wire format was worked out (the request
+builder and reply decoder were later removed, since no session used them), and
 the session it needs is fully understood: an SD-mode peerId, an offer with no
 local audio sender, and `0x1500` carrying mode **2 (SD)** rather than the 1
 (LIVING) this library sends for every session. A camera accepts all of that and

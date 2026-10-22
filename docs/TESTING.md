@@ -9,7 +9,9 @@
 >
 > The fake lab needs `amqtt`, `pytest-asyncio` and `pytest-timeout`, which the
 > unit tier does not install; `tests/e2e/conftest.py` skips the whole tier when
-> `amqtt` is missing rather than erroring at collection.
+> `amqtt` is missing rather than erroring at collection. The `test` extra
+> (`pip install -e ".[test]"`) installs them along with everything else both
+> tiers need.
 
 Streaming breaks in ways unit tests structurally cannot see: the cloud accepts
 the call, signaling looks healthy, and only the media tells the truth. So the
@@ -145,6 +147,16 @@ turns on `pytest-socket` and every socket-using test here fails with
 `SocketBlockedError`; run with `-p no:homeassistant -p no:socket`.
 
 ## Running the whole suite on a workstation
+
+Install the library with its `test` extra first:
+
+```
+pip install -e ".[test]"
+```
+
+That brings the `webrtc` extra, pytest, pytest-asyncio, pytest-timeout,
+pytest-xdist, amqtt and pyflakes. `ffmpeg` and go2rtc are not Python packages
+and come from the system.
 
 CI runs with `AIDOT_FAIL_ON_SKIP=1`, so a test that skips for a missing tool
 fails the run. To match it locally you need `ffmpeg`, a go2rtc binary

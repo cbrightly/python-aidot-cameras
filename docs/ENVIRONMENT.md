@@ -59,7 +59,7 @@ out of the box.
 | `AIDOT_DTLS_SLOW_PROBE_THRESHOLD` | After this many consecutive failed opens of a served DTLS camera (a camera gone from the network, say), the serve loop widens its retry interval and stops warning on every attempt. Resets the moment an open succeeds. | `5` |
 | `AIDOT_DTLS_SLOW_PROBE_INTERVAL_S` | The widened retry interval, in seconds. | `600` |
 | `AIDOT_DTLS_SLOW_PROBE_LOG_EVERY` | While slow-probing, one INFO summary every this many attempts instead of a WARNING per attempt. | `6` |
-| `AIDOT_DTLS_SLOW_PROBE_CHUNK_S` | Sleep increment inside the slow-probe wait, so a `stop()` is not held up by the whole interval. | `5` |
+| `AIDOT_DTLS_SLOW_PROBE_CHUNK_S` | Sleep increment inside the slow-probe wait, so a `stop()` is not held up by the whole interval. Floor 0.1 s: a smaller value, including `0`, reads as `0.1`. | `5` |
 | `AIDOT_GOP_PLI_S` | Interval, in seconds, between PLI (keyframe) requests. | `2.0` |
 | `AIDOT_STALL_PLI_S` | If muxed frames stall for this many seconds (a dropped GOP on a jittery link), request an IDR keyframe immediately instead of waiting out the full `AIDOT_GOP_PLI_S` cadence. Mains DTLS cameras only; `0` disables. | `1.0` |
 | `AIDOT_SDES_PLI_GAPS` | Comma-separated second offsets for the early PLI burst on SDES cameras, to pull the first keyframe in faster on cold start. | `0,1.5,2,3` |
