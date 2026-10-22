@@ -2244,6 +2244,33 @@ def report_first_media_stall(
         )
 
 
+def _stop_proc(proc, timeout: float = 2.0) -> None:
+    """Terminate ``proc``, give it ``timeout`` seconds to exit, then kill it."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except Exception:
+        proc.kill()
+
+
+async def _stop_proc_off_loop(proc, timeout: float = 2.0) -> None:
+    """:func:`_stop_proc` in the executor, so its wait does not stall the loop.
+
+    The wait for ffmpeg to exit after SIGTERM can take the whole ``timeout``;
+    on the event loop that held up every other camera and Home Assistant
+    itself for that long. If the caller is cancelled meanwhile the process is
+    still killed, as it was when the wait ran inline.
+    """
+    try:
+        await _run_off_loop(_stop_proc, proc, timeout)
+    except BaseException:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise
+
+
 async def _run_off_loop(fn, *args):
     """Run a blocking ``fn(*args)`` in the default executor and return its result.
 
@@ -9900,11 +9927,7 @@ class _SdesOpenMixin:
                         # (below) so a later, genuine crash of the restarted
                         # ffmpeg is not silently swallowed as "expected teardown".
                         _teardown_holder[0] = True
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=2)
-                        except Exception:
-                            proc.kill()
+                        await _stop_proc_off_loop(proc)
                         _ts2 = int(time.time())
                         # Transport and payload-type selection both live in
                         # _build_restart_sdp, where they are unit-tested against
@@ -9978,11 +10001,7 @@ class _SdesOpenMixin:
                 # the resulting signal death.  Nothing continues to use this
                 # proc/holder afterward, so no reset is needed here.
                 _teardown_holder[0] = True
-                proc.terminate()
-                try:
-                    proc.wait(timeout=2)
-                except Exception:
-                    proc.kill()
+                await _stop_proc_off_loop(proc)
                 # The sockets and the SDP file are released by the exit stack as this raises.
                 outgoing_q.put_nowait(None)  # signal MQTT thread to exit
                 raise CameraMixin._SdesNoAnswerError()

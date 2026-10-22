@@ -18,6 +18,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   tested for a continue first, so a break would have gone round the loop
   again. No region breaks today, so nothing changed in behaviour; the two
   signals are separate classes now and both loops test for a break first.
+- **Stopping ffmpeg in an SDES open no longer stalls the event loop.** When
+  the camera's answer carried different SRTP keys (ffmpeg restarts with
+  them) and when no answer came at all (the open falls back to DTLS), the
+  open waited up to 2 s for ffmpeg to exit with a blocking `wait` on the
+  event loop, holding up every other camera and Home Assistant itself. The
+  wait runs in an executor now, as the TURN allocates have since 1.0.0rc56,
+  and a cancelled open still kills the process.
 
 ## [1.0.0rc59]
 

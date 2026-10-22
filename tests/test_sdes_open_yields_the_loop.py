@@ -194,3 +194,69 @@ async def test_a_cancelled_caller_waits_out_the_blocking_call():
 
 async def test_the_result_comes_back():
     assert await _run_off_loop(lambda a, b: a + b, 2, 3) == 5
+
+
+class _FakeProc:
+    """A Popen stand-in whose wait takes ``exit_after`` seconds of real time."""
+
+    def __init__(self, exit_after):
+        self.exit_after = exit_after
+        self.calls = []
+
+    def terminate(self):
+        self.calls.append("terminate")
+
+    def wait(self, timeout=None):
+        import subprocess
+
+        self.calls.append("wait")
+        if self.exit_after > timeout:
+            time.sleep(timeout)
+            raise subprocess.TimeoutExpired("ffmpeg", timeout)
+        time.sleep(self.exit_after)
+        return 0
+
+    def kill(self):
+        self.calls.append("kill")
+
+
+async def test_stopping_ffmpeg_does_not_stall_the_loop():
+    """The key-restart and no-answer paths waited up to 2 s for ffmpeg to
+    exit with a blocking ``proc.wait`` on the event loop."""
+    proc = _FakeProc(exit_after=1.0)
+    _, gap = await _max_gap_while(sdes_open._stop_proc_off_loop(proc, 0.3))
+    assert gap < 0.1, f"the loop stood still for {gap:.3f} s"
+    assert proc.calls == ["terminate", "wait", "kill"]
+
+
+async def test_ffmpeg_that_exits_in_time_is_not_killed():
+    proc = _FakeProc(exit_after=0.05)
+    await sdes_open._stop_proc_off_loop(proc, 0.3)
+    assert proc.calls == ["terminate", "wait"]
+
+
+async def test_a_cancelled_stop_still_kills_ffmpeg():
+    proc = _FakeProc(exit_after=0.2)
+    task = asyncio.create_task(sdes_open._stop_proc_off_loop(proc, 0.3))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert proc.calls[0] == "terminate"
+    assert "kill" in proc.calls
+
+
+def test_the_open_coroutine_does_not_wait_on_a_process():
+    calls = [c for n in _open_impl_nodes() for c in _calls_on_the_coroutine_body(n)]
+    blocking = [
+        c.lineno
+        for c in calls
+        if _name(c) == "wait"
+        and isinstance(c.func, ast.Attribute)
+        and ast.unparse(c.func.value) != "asyncio"
+        and any(k.arg == "timeout" for k in c.keywords)
+    ]
+    assert not blocking, (
+        "a blocking process wait on the event loop inside the SDES open at "
+        f"lines {blocking}; use _stop_proc_off_loop"
+    )
