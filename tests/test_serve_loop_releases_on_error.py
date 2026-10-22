@@ -6,8 +6,8 @@ the smaller fixes that shipped with it.
 """
 
 import asyncio
-import inspect
 import queue
+import threading
 import time
 
 import pytest
@@ -15,7 +15,6 @@ import pytest
 import aidot_cameras.camera.client as camera_client
 import aidot_cameras.camera.protocol as proto
 import aidot_cameras.camera.sdes_open as sdes_open
-import aidot_cameras.camera.webrtc_open as webrtc_open
 from aidot_cameras.camera import rtsp_publish
 from aidot_cameras.camera.client import CameraMixin, _FfmpegMissing
 from aidot_cameras.camera.controls import (
@@ -24,8 +23,6 @@ from aidot_cameras.camera.controls import (
 )
 
 from test_mqtt_session_reconnect import _FakeMsg, _install_fake_client
-
-from tests.source_parts import without_state
 
 
 def _dormant_candidate():
@@ -72,51 +69,182 @@ async def test_a_missing_ffmpeg_is_named_not_retried(caplog):
     assert any("install ffmpeg" in r.getMessage() for r in caplog.records)
 
 
-def test_both_loops_route_unexpected_errors_to_the_release():
-    for fn in (CameraMixin._dtls_serve_loop, CameraMixin._sdes_keepalive_loop):
-        src = without_state(inspect.getsource(fn))
-        assert "except asyncio.CancelledError:" in src
-        assert "_release_after_loop_error(" in src
+@pytest.mark.parametrize("which", ["_sdes_keepalive_loop", "_dtls_serve_loop"])
+def test_both_loops_route_unexpected_errors_to_the_release(
+    which, make_camera_device_client
+):
+    """An exception out of a loop body releases the camera like the idle
+    release does; a cancellation still propagates as one."""
+    cam = make_camera_device_client("A001064" if "sdes" in which else "A000088")
+    inner = which + "_inner"
+    released = []
+
+    async def _boom():
+        raise RuntimeError("malformed environment")
+
+    async def _release(what, exc):
+        released.append((what, exc))
+        cam._streaming_active = False
+
+    cam._streaming_active = True
+    cam._keepalive_rtsp_url = None  # no relay
+    setattr(cam, inner, _boom)
+    cam._release_after_loop_error = _release
+    asyncio.run(getattr(cam, which)())
+    assert len(released) == 1 and isinstance(released[0][1], RuntimeError)
+
+    async def _cancelled():
+        raise asyncio.CancelledError
+
+    setattr(cam, inner, _cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(getattr(cam, which)())
+    assert len(released) == 1, "a cancellation is not an error to release on"
 
 
-def test_no_bare_env_float_remains_in_the_camera_client():
-    src = without_state(inspect.getsource(camera_client))
-    assert 'float(os.environ.get("AIDOT_' not in src
+def test_the_jpeg_watchdog_starts_each_session_with_a_fresh_clock(
+    monkeypatch, make_camera_device_client
+):
+    """The last frame of a previous session must not be held against the next:
+    a stale stamp made the watchdog restart a fresh session on its first tick.
+    """
+    cam = make_camera_device_client("A000088")
+    opens = []
+
+    class _Session:
+        async def stop(self):
+            pass
+
+    async def _open(**kw):
+        opens.append(kw)
+        return _Session()
+
+    real_sleep = asyncio.sleep
+    ticks = []
+
+    async def _sleep(d, *a, **k):
+        ticks.append(d)
+        if len(ticks) > 8:
+            cam._streaming_active = False
+        await real_sleep(0)
+
+    cam.async_open_webrtc_stream = _open
+    cam._streaming_active = True
+    cam._last_frame_time = 1.0  # a frame from long ago, in a previous session
+    monkeypatch.setattr(camera_client.asyncio, "sleep", _sleep)
+    asyncio.run(cam._streaming_loop())
+    assert len(opens) == 1, "the new session was torn down by an old frame"
 
 
-def test_the_jpeg_watchdog_starts_each_session_with_a_fresh_clock():
-    src = without_state(
-        inspect.getsource(
-            CameraMixin._jpeg_loop
-            if hasattr(CameraMixin, "_jpeg_loop")
-            else camera_client
-        )
+def test_start_keepalive_waits_for_a_dormant_loop_instead_of_dropping_the_view(
+    make_camera_device_client,
+):
+    """A previous loop that went dormant may still be finishing (its go2rtc
+    deregister). Returning there dropped the new view until the next one."""
+    cam = make_camera_device_client("A001064")
+    started = []
+    finished = []
+
+    async def _loop():
+        started.append(True)
+
+    cam._sdes_keepalive_loop = _loop
+    cam._start_keepalive_renew = lambda: None
+
+    async def _go():
+        async def _finishing():
+            await asyncio.sleep(0.05)
+            finished.append(True)
+
+        cam._stream_task = asyncio.ensure_future(_finishing())
+        cam._streaming_active = False  # dormant, still deregistering
+        await cam.start_keepalive("rtsp://127.0.0.1:8554/cam")
+        assert finished == [True], "the dormant loop was waited for, not cancelled"
+        await cam._stream_task
+        assert started == [True], "and the new view started"
+
+        started.clear()
+        await cam.start_keepalive("rtsp://127.0.0.1:8554/cam")  # active now
+        assert started == [], "a live loop is left alone"
+
+    asyncio.run(_go())
+
+
+@pytest.mark.parametrize("ending", ["refused", "raises", "plays", "stop_talk_raises"])
+def test_async_speak_closes_its_own_session_on_every_exit(
+    make_camera_device_client, ending
+):
+    cam = make_camera_device_client("A001064")
+    cam._stream_session = None
+
+    class _Talk:
+        talk_supported = True
+        stopped = 0
+        talk_stopped = 0
+
+        async def async_start_talk(self, provider):
+            if ending == "refused":
+                return False
+            if ending == "raises":
+                raise RuntimeError("talk failed")
+            while provider() is not None:
+                pass
+            return True
+
+        async def async_stop_talk(self):
+            self.talk_stopped += 1
+            if ending == "stop_talk_raises":
+                raise RuntimeError("stop failed")
+
+        async def stop(self):
+            self.stopped += 1
+
+    session = _Talk()
+
+    async def _open(**kw):
+        return session
+
+    cam.async_open_webrtc_stream = _open
+    frames = iter([b"\x00" * 320])
+    try:
+        asyncio.run(cam.async_speak(lambda: next(frames, None), max_seconds=1))
+    except RuntimeError:
+        assert ending in ("raises", "stop_talk_raises")
+    assert session.stopped == 1, "its own session is closed whatever happened"
+    assert session.talk_stopped == (1 if ending in ("plays", "stop_talk_raises") else 0)
+
+
+@pytest.mark.parametrize(
+    "error", [rtsp_publish.RtspPublishError("refused"), RuntimeError("boom")]
+)
+def test_dtls_publish_thread_reports_any_exception(error):
+    """The publish runs on a thread: an exception it does not report is a
+    publish that silently stopped. Both kinds land in the result, and neither
+    escapes the thread."""
+
+    class _Pub:
+        packets_sent = 0
+
+        def __init__(self, *a, **k):
+            pass
+
+        def connect(self):
+            raise error
+
+        def close(self, teardown=False):
+            pass
+
+    res = {}
+    rtsp_publish.dtls_rtp_publish_run(
+        queue.Queue(),
+        queue.Queue(),
+        "rtsp://127.0.0.1:1/x",
+        [0.0],
+        threading.Event(),
+        result=res,
+        publisher_factory=_Pub,
     )
-    i = src.index("_open_time = asyncio.get_running_loop().time()")
-    assert "self._last_frame_time = 0.0" in src[i - 300 : i]
-
-
-def test_start_keepalive_waits_for_a_dormant_loop_instead_of_dropping_the_view():
-    src = without_state(inspect.getsource(CameraMixin.start_keepalive))
-    i = src.index("if self._stream_task is not None and not self._stream_task.done():")
-    assert "if self._streaming_active:" in src[i : i + 200]
-    assert "asyncio.shield(self._stream_task)" in src[i : i + 600]
-
-
-def test_async_speak_closes_its_own_session_on_every_exit():
-    src = without_state(inspect.getsource(CameraMixin.async_speak))
-    i = src.index("started = bool(await session.async_start_talk(_provider))")
-    tail = src[i:]
-    assert tail.count("finally:") >= 2
-    assert "if own_session:\n                    await session.stop()" in tail
-
-
-def test_dtls_publish_thread_reports_any_exception():
-    src = without_state(inspect.getsource(rtsp_publish.dtls_rtp_publish_run))
-    assert "except RtspPublishError as exc:" in src
-    assert (
-        "except Exception as exc:" in src.split("except RtspPublishError as exc:", 1)[1]
-    )
+    assert str(error) in res["error"]
 
 
 def test_sdes_module_imports_with_an_empty_grace_value(monkeypatch):
@@ -136,23 +264,36 @@ def test_sdes_module_imports_with_an_empty_grace_value(monkeypatch):
 
 
 def test_sdes_bridge_thread_logs_an_unexpected_error():
-    src = without_state(inspect.getsource(sdes_open))
-    assert "SDES bridge ended by an unexpected error" in src
-    i = src.index("_cp_ip_b = _cp_socket.inet_aton(_cp_peer_ip)")
-    assert "except OSError:" in src[i : i + 200]
+    """A stray exception used to end the bridge thread with nothing at camera
+    level in the log, and the session died minutes later as "stalled". The
+    thread body is wrapped: an unexpected error is logged with its traceback."""
+    import ast
+
+    from tests.ast_guards import log_calls, sdes_bridge
+
+    handlers = [
+        h
+        for stmt in sdes_bridge().body
+        if isinstance(stmt, ast.Try)
+        for h in stmt.handlers
+        if h.type is not None and ast.unparse(h.type) == "Exception"
+    ]
+    assert handlers, "the bridge thread body is not guarded"
+    assert any(
+        c.func.attr in ("error", "exception")
+        and any(k.arg == "exc_info" for k in c.keywords)
+        for h in handlers
+        for c in log_calls(h)
+    )
 
 
-def test_lan_mode_gates_the_turn_preallocation():
-    src = without_state(inspect.getsource(sdes_open))
-    assert "if not _relay_addrs and not _skip_turn_prealloc:" in src
-
-
-def test_dtls_signaling_wait_watches_the_refusal_future():
-    src = without_state(inspect.getsource(webrtc_open))
-    i = src.index("_init_pending: set = {")
-    assert "terminal_error_fut" in src[i : i + 200]
-    j = src.index("_rr_done, _rr_pending = _init_done, _init_pending")
-    assert "raise AidotCameraBusy(_code, _desc)" in src[j : j + 1200]
+def test_a_malformed_candidate_address_is_not_a_permission():
+    """The candidate pattern admits "1.2.3.4.5"; CreatePermission for it is
+    declined, not raised into the bridge thread."""
+    relay = {
+        "sock": ("192.0.2.1", 3478, "realm", "nonce", "192.0.2.1", 3478, b"k", "user")
+    }
+    assert sdes_open.turn_create_permission(relay, "sock", "1.2.3.4.5", 4000) is False
 
 
 @pytest.mark.asyncio

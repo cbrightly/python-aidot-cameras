@@ -66,11 +66,21 @@ class TestTheOverride:
 
 class TestItIsWiredIn:
     def test_the_open_path_uses_the_resolver_not_a_literal(self):
-        import inspect
-        from aidot_cameras.camera import sdes_open
+        """The echo wait is not back to a hardcoded timeout: every value the
+        open assigns to it comes from the resolver."""
+        import ast
 
-        src = inspect.getsource(sdes_open)
-        assert "_echo_timeout = _sdes_liveplay_echo_timeout(" in src, (
-            "the echo wait is back to a hardcoded timeout"
-        )
-        assert "_echo_timeout = 1.5 if" not in src
+        from tests.ast_guards import name_of, sdes_open_family
+
+        values = [
+            n.value
+            for fn in sdes_open_family()
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Assign)
+            and any(getattr(t, "id", None) == "_echo_timeout" for t in n.targets)
+        ]
+        assert values, "the echo wait is no longer resolved in the open"
+        assert all(
+            isinstance(v, ast.Call) and name_of(v) == "_sdes_liveplay_echo_timeout"
+            for v in values
+        ), [ast.unparse(v) for v in values]

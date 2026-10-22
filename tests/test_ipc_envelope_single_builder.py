@@ -63,15 +63,21 @@ def test_the_builder_matches_the_previous_literal(
 
 
 def test_no_envelope_is_spelled_out_inline():
-    import pathlib
+    """The open paths build every IPC envelope through ipc_envelope: no dict
+    literal there carries the envelope's millisecond `tst` field by hand. (The
+    MQTT connect and the wake request have their own, smaller shapes.)"""
+    import ast
 
-    cam = pathlib.Path(__file__).resolve().parent.parent / "aidot_cameras" / "camera"
+    from tests.ast_guards import module_tree
+
     inline = [
-        f"{p.name}:{n}"
-        for p in (cam / "webrtc_open.py", cam / "sdes_open.py")
-        for n, line in enumerate(p.read_text().splitlines(), 1)
-        if '"tst": int(time.time() * 1000)' in line
+        f"{mod}:{n.lineno}"
+        for mod in (
+            "aidot_cameras.camera.webrtc_open",
+            "aidot_cameras.camera.sdes_open",
+        )
+        for n in ast.walk(module_tree(mod))
+        if isinstance(n, ast.Dict)
+        and any(isinstance(k, ast.Constant) and k.value == "tst" for k in n.keys)
     ]
-    # The MQTT `connect` and the wake request have their own, smaller shapes
-    # and are not envelopes in this sense.
     assert not inline, inline

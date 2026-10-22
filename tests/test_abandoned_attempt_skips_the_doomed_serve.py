@@ -27,7 +27,7 @@ retry when the camera said -50019, and the ordinary unhealthy-session delay
 otherwise. Never the open-failure escalation.
 """
 
-import inspect
+import ast
 import os
 import sys
 
@@ -37,22 +37,6 @@ import pytest
 
 from aidot_cameras.exceptions import AidotCameraBusy, AidotCameraNoMedia, AidotError
 from aidot_cameras.camera.sdes_open import _should_skip_doomed_serve
-from tests.source_parts import without_state
-
-
-def _open_source():
-    """The SDES open and the phase coroutines it was split into."""
-    from aidot_cameras.camera import sdes_open as _so
-
-    parts = [
-        without_state(inspect.getsource(_so._SdesOpenMixin._open_sdes_stream_impl))
-    ]
-    parts += [
-        without_state(inspect.getsource(getattr(_so, n)))
-        for n in dir(_so)
-        if n.startswith("_sdes_open_")
-    ]
-    return "\n".join(parts)
 
 
 def _s(**kw):
@@ -121,48 +105,86 @@ def test_it_is_catchable_as_a_plain_exception_too():
 # --------------------------------------------------------------------------- #
 
 
-def _loop_source() -> str:
-    from tests.source_parts import full_source
+def test_a_battery_camera_that_never_delivers_is_abandoned_by_the_futile_guard(
+    monkeypatch, make_camera_device_client
+):
+    """The no-media exception feeds the futile-keepalive guard.
 
-    return full_source("_sdes_keepalive_loop_inner")
+    The guard is what stops a battery camera being woken forever ("a unit has
+    already been drained to 5% that way"). If the generic open-failure handler
+    caught the exception instead, nothing would count the streak and the loop
+    would retry for ever.
+    """
+    import aidot_cameras.camera.client as cc
+    from tests.keepalive_driver import SdesKeepaliveRun, no_media
 
+    cam = make_camera_device_client("A001513")
+    assert cam.is_battery_camera
+    limit = cc._FUTILE_KEEPALIVE_LIMIT
+    run = SdesKeepaliveRun(monkeypatch, cam, no_media(limit + 3)).run()
 
-def test_the_no_media_branch_is_handled_before_the_generic_one():
-    """Order matters: `except Exception` would swallow AidotCameraNoMedia and
-    pace it with the open-failure backoff, which is the regression this whole
-    change exists to avoid."""
-    src = _loop_source()
-    assert "except AidotCameraNoMedia" in src
-    assert src.index("except AidotCameraNoMedia") < src.index("except Exception")
-
-
-def _no_media_branch() -> str:
-    """The handler body, sliced at the NEXT `except ` at the same indent.
-
-    The old version sliced to `except Exception`, which silently mis-slices the
-    moment the branch is reordered or another handler is added between them."""
-    import re
-
-    src = _loop_source()
-    head = re.search(r"^( *)except AidotCameraNoMedia", src, re.M)
-    i, indent = head.start(), head.group(1)
-    m = re.search(rf"\n{indent}except ", src[i + 1 :])
-    return src[i : i + 1 + m.start()] if m else src[i:]
+    assert len(run.opens) == limit, "it retried, then stopped at the limit"
+    assert run.dormant == [{"release_url": False, "why": "abandon"}]
+    assert run.deregistered == 1
+    assert cam._streaming_active is False
 
 
-def test_the_no_media_branch_feeds_the_futile_keepalive_guard():
-    """The guard at the bottom of the loop is what stops a battery camera being
-    woken forever, and its own comment says why: "a unit has already been
-    drained to 5% that way". Continuing straight to the next attempt bypasses
-    it, because the accounting only runs after a session object exists. This
-    branch has to do that accounting itself."""
-    branch = _no_media_branch()
-    assert "_next_no_media_streak" in branch, (
-        "the streak must advance, or the circuit breaker never trips"
-    )
-    assert "_should_abandon_keepalive" in branch, (
-        "the branch must be able to stop the keepalive, as the loop bottom can"
-    )
+def test_a_generic_open_failure_is_not_counted_as_no_media(
+    monkeypatch, make_camera_device_client
+):
+    """The other side of the ordering: only the no-media exception is a
+    session that ended without media; an open that failed outright is paced by
+    the open-failure backoff and never trips the abandon."""
+    import aidot_cameras.camera.client as cc
+    from tests.keepalive_driver import SdesKeepaliveRun
+
+    cam = make_camera_device_client("A001513")
+    limit = cc._FUTILE_KEEPALIVE_LIMIT
+    run = SdesKeepaliveRun(
+        monkeypatch, cam, [RuntimeError("signalling failed")] * (limit + 3)
+    ).run()
+
+    assert len(run.opens) == limit + 4  # every scripted failure, then the stop
+    assert run.dormant == []
+
+
+def test_the_no_media_retry_takes_the_fast_wake_burst_then_the_pacer(
+    monkeypatch, make_camera_device_client
+):
+    """Paced as a session that ended without media - which is what it is.
+
+    A camera that said -50019 (still waking) gets the bounded fast burst; once
+    the burst is spent the retry falls back to session_end_delay(healthy=False),
+    which escalates from the 10 s floor. Never the open-failure escalation
+    straight away, which would be worse than the doomed serve this replaced.
+    """
+    from aidot_cameras.camera.client import _PEERID_MAX_REUSE
+    from tests.keepalive_driver import SdesKeepaliveRun, no_media
+
+    monkeypatch.setenv("AIDOT_FUTILE_KEEPALIVE_LIMIT", "0")
+    cam = make_camera_device_client("A001513")
+    cam._live_play_not_ready = lambda: True
+    run = SdesKeepaliveRun(monkeypatch, cam, no_media(_PEERID_MAX_REUSE + 2)).run()
+
+    burst = run.sleeps[:_PEERID_MAX_REUSE]
+    assert all(d < 10.0 for d in burst), run.sleeps
+    assert all(d >= 10.0 for d in run.sleeps[_PEERID_MAX_REUSE:]), run.sleeps
+
+
+def test_a_mains_camera_keeps_retrying_an_open_that_delivers_nothing(
+    monkeypatch, make_camera_device_client
+):
+    """The no-media branch loops round to another attempt; only the battery
+    guard ever stops it, and a mains camera has no charge to protect."""
+    from tests.keepalive_driver import SdesKeepaliveRun, no_media
+
+    cam = make_camera_device_client("A001064")
+    assert not cam.is_battery_camera
+    run = SdesKeepaliveRun(monkeypatch, cam, no_media(12)).run()
+
+    assert len(run.opens) == 13
+    assert run.dormant == []
+    assert all(d >= 10.0 for d in run.sleeps), "no fast burst on a mains camera"
 
 
 def test_the_guard_actually_trips_for_a_run_of_no_media_attempts():
@@ -183,32 +205,6 @@ def test_the_guard_actually_trips_for_a_run_of_no_media_attempts():
         _should_abandon_keepalive(_next_no_media_streak(streak, True), is_battery=True)
         is False
     )
-
-
-def test_the_no_media_branch_paces_as_a_session_that_ended_without_media():
-    """Which is what it is - it just ended before the serve rather than after.
-
-    The earlier version asserted `fail_delay` was absent and called that
-    "not the escalating backoff". That was wrong: session_end_delay(healthy=False)
-    escalates the same shared attempt counter, marginally sooner than
-    fail_delay() does. The escalation is deliberate - a camera that never
-    delivers should back off - so the test now says what is true."""
-    branch = _no_media_branch()
-    assert "_not_ready_retry_delay" in branch, (
-        "a merely-slow camera keeps the fast not-ready burst"
-    )
-    assert "session_end_delay" in branch, (
-        "everything else paces as an ended session, escalation included"
-    )
-
-
-def test_the_no_media_branch_retries_rather_than_giving_up():
-    """It must loop round to another attempt - except when the futile-keepalive
-    guard deliberately stops, which is a `return`, not a failure to retry."""
-    branch = _no_media_branch()
-    # The branch lives in a region coroutine of the loop, where a `continue`
-    # of the loop is returned to it as the _LoopContinue sentinel.
-    assert "continue" in branch or "_LoopContinue(" in branch
 
 
 # --------------------------------------------------------------------------- #
@@ -260,11 +256,25 @@ def test_a_talk_or_snapshot_open_is_never_abandoned():
 
 
 def test_the_gate_only_fires_when_a_serve_is_actually_being_built():
+    """The skip gate must be told whether this open builds a serve at all,
+    or a talk/snapshot open would be abandoned for want of video.
 
-    src = _open_source()
-    assert "serving=bool(rtsp_push_url or output_path)" in src, (
-        "the gate must be told whether this open builds a serve at all"
+    The open cannot be driven in a unit test; this reads its AST: every call
+    of _should_skip_doomed_serve passes ``serving=`` derived from the two
+    serve destinations.
+    """
+    from tests.ast_guards import calls_to, module_tree, names_in
+
+    calls = calls_to(
+        module_tree("aidot_cameras.camera.sdes_open"), "_should_skip_doomed_serve"
     )
+    assert calls, "the open no longer consults the skip gate"
+    for call in calls:
+        serving = {k.arg: k.value for k in call.keywords}.get("serving")
+        assert serving is not None, f"line {call.lineno}: no serving= argument"
+        assert {"rtsp_push_url", "output_path"} <= names_in(serving), ast.unparse(
+            serving
+        )
 
 
 def test_the_backstop_case_still_skips():

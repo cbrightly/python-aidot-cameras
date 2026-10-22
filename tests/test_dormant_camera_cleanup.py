@@ -20,23 +20,83 @@ from aidot_cameras.camera.sdes_open import (
 )
 import logging
 
-from tests.source_parts import full_source
+import pytest
 
 
-def _src(name):
-    return full_source(name)
+def test_dtls_idle_release_goes_dormant(monkeypatch, make_camera_device_client):
+    from tests.keepalive_driver import dtls_view as _dtls_view
+
+    run = _dtls_view(monkeypatch, make_camera_device_client, lambda e: False)
+    assert run.dormant == [{"release_url": True, "why": "idle release"}]
+    assert run.deregistered == 1
+    assert run.client._streaming_active is False
+    assert run.client._keepalive_rtsp_url is None
 
 
-def test_sdes_idle_release_goes_dormant():
-    src = _src("_sdes_keepalive_loop_inner")
-    idle = src[src.index("if _idle_release:") :]
-    assert "_go_dormant(release_url=True" in idle
+@pytest.mark.parametrize("exit_", ["idle-release", "video-abandon"])
+def test_every_dtls_exit_that_stops_streaming_also_deregisters(
+    monkeypatch, make_camera_device_client, exit_
+):
+    """The DTLS serve's exits, the same rule as the SDES ones above."""
+    from tests.keepalive_driver import dtls_view as _dtls_view
+
+    if exit_ == "video-abandon":
+        monkeypatch.setenv("AIDOT_DTLS_VIDEO_GRACE_S", "0.2")
+        monkeypatch.setenv("AIDOT_DTLS_FUTILE_VIDEO_LIMIT", "1")
+        run = _dtls_view(
+            monkeypatch, make_camera_device_client, lambda e: True, video=False
+        )
+    else:
+        run = _dtls_view(monkeypatch, make_camera_device_client, lambda e: False)
+    assert len(run.dormant) == 1, run.dormant
+    assert run.client._streaming_active is False
+    assert run.deregistered == 1
 
 
-def test_dtls_idle_release_goes_dormant():
-    src = _src("_dtls_serve_loop_inner")
-    idle = src[src.index("if idle_release:") :]
-    assert "_go_dormant(release_url=True" in idle
+def test_sdes_idle_release_goes_dormant(monkeypatch, make_camera_device_client):
+    from tests.keepalive_driver import FakeSession, SdesKeepaliveRun
+
+    cam = make_camera_device_client("A001064")
+    run = SdesKeepaliveRun(
+        monkeypatch, cam, [FakeSession(life=None)], viewer=lambda now: False
+    ).run()
+    assert run.dormant == [{"release_url": True, "why": "idle release"}]
+    assert run.deregistered == 1
+    assert cam._streaming_active is False and cam._keepalive_rtsp_url is None
+    assert run.sessions[0].stopped >= 1
+
+
+@pytest.mark.parametrize(
+    "outcomes",
+    [
+        pytest.param("idle", id="idle-release"),
+        pytest.param("open-abandon", id="no-media-open-abandon"),
+        pytest.param("session-abandon", id="no-media-session-abandon"),
+    ],
+)
+def test_every_sdes_exit_that_stops_streaming_also_deregisters(
+    monkeypatch, make_camera_device_client, outcomes
+):
+    """Every way the SDES keepalive stops streaming takes the stream out of
+    go2rtc too - the futile-keepalive abandon once returned without it, leaving
+    a dormant camera's stream pointed at a dead serve port."""
+    from tests.keepalive_driver import FakeSession, SdesKeepaliveRun, no_media
+
+    cam = make_camera_device_client("A001513")
+    limit = cc._FUTILE_KEEPALIVE_LIMIT
+    script, viewer = {
+        "idle": ([FakeSession(life=None)], lambda now: False),
+        "open-abandon": (no_media(limit), lambda now: None),
+        "session-abandon": (
+            [FakeSession(media=False, life=10) for _ in range(limit)],
+            lambda now: None,
+        ),
+    }[outcomes]
+    run = SdesKeepaliveRun(monkeypatch, cam, script, viewer=viewer).run()
+
+    assert len(run.dormant) == 1, run.dormant
+    assert cam._streaming_active is False
+    assert run.deregistered == 1
 
 
 class _Dormant:
@@ -100,70 +160,3 @@ def test_real_failures_still_warn():
     assert _classify_ffmpeg_exit(-9, teardown_requested=False) == logging.WARNING
     # ...but an expected teardown is quiet.
     assert _classify_ffmpeg_exit(-9, teardown_requested=True) == logging.DEBUG
-
-
-def test_every_exit_that_stops_streaming_also_deregisters():
-    """Enumerate the exits instead of slicing to one of them.
-
-    The tests above slice from `if _idle_release:` to the end of the source, so
-    they can only ever see that one exit. A second exit was added later - the
-    futile-keepalive abandon - and it returned without deregistering, leaving a
-    dormant camera's stream pointed at a dead serve port. No test could see it,
-    because no test looked anywhere else.
-
-    This walks the function instead: every `return` that follows
-    `self._streaming_active = False` must have a `_deregister_go2rtc` call
-    between the two. It fails on the next exit added carelessly, which the
-    slicing form cannot.
-
-    Since the exits share `_go_dormant`, which sets the flag and deregisters
-    in one call, a call to it counts as both; a bare `_streaming_active =
-    False` in a loop is still checked the old way.
-    """
-    import ast
-    import textwrap
-
-    for name in ("_sdes_keepalive_loop_inner", "_dtls_serve_loop_inner"):
-        # The loop and its region coroutines, parsed together as a module.
-        fn = ast.parse(textwrap.dedent(_src(name)))
-
-        stops = []  # (lineno of `_streaming_active = False`)
-        dormants = [
-            n.lineno
-            for n in ast.walk(fn)
-            if isinstance(n, ast.Attribute) and n.attr == "_go_dormant"
-        ]
-        for node in ast.walk(fn):
-            if not isinstance(node, ast.Assign):
-                continue
-            for t in node.targets:
-                if (
-                    isinstance(t, ast.Attribute)
-                    and t.attr == "_streaming_active"
-                    and isinstance(node.value, ast.Constant)
-                    and node.value.value is False
-                ):
-                    stops.append(node.lineno)
-
-        assert stops or dormants, f"{name}: nothing in it ever stops streaming"
-
-        deregs = dormants + [
-            n.lineno
-            for n in ast.walk(fn)
-            if isinstance(n, ast.Attribute) and n.attr == "_deregister_go2rtc"
-        ]
-        returns = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Return)]
-
-        for stop in stops:
-            # The return that this stop falls through to.
-            after = [r for r in returns if r > stop]
-            if not after:
-                continue  # falls through to the loop, not an exit
-            exit_line = min(after)
-            between = [d for d in deregs if stop < d < exit_line]
-            assert between, (
-                f"{name}: the exit at line {exit_line} sets _streaming_active="
-                f"False (line {stop}) and returns without calling "
-                f"_deregister_go2rtc. A dormant camera's go2rtc stream is left "
-                f"pointing at a serve port with nothing listening."
-            )

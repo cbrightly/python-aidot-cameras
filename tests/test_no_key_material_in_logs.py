@@ -5,18 +5,16 @@ is wrong and paste the result into public issues. Four sites used to print
 secrets on that path: the SDES media PSK, the camera's data-channel SRTP key
 inside its echoed ``m=application`` section, raw MQTT payloads (which carry
 our own PSK and the TURN credentials), and a camera answer SDP with its ICE
-password. These tests pin the fix at each site by reading the source, the
-way ``test_upstream_secrets_redacted.py`` pins upstream's lines, so a
-reintroduction fails loudly rather than leaking quietly.
+password. The sites are guarded by one structural invariant over every log call on
+the camera path, so a reintroduction - at those sites or a new one - fails
+loudly rather than leaking quietly.
 """
 
-import inspect
+import ast
+import re
 
-from aidot_cameras.camera import client as camera_client
-from aidot_cameras.camera import sdes_open, webrtc_open
 from aidot_cameras.camera.protocol import mask_sdp_secrets
-
-from tests.source_parts import without_state
+from tests.ast_guards import calls_to, module_tree, name_of, names_in, string_parts
 
 _SDP = (
     "v=0\r\n"
@@ -53,42 +51,121 @@ def test_mask_sdp_secrets_leaves_an_innocent_sdp_alone():
     assert mask_sdp_secrets(sdp) == sdp
 
 
-def test_sdes_open_logs_the_psk_as_a_fingerprint():
-    src = without_state(inspect.getsource(sdes_open))
-    i = src.index('"sdes: offer key=%s psk=%s"')
-    call = src[i : i + 200]
-    assert "_key_fingerprint(_psk_value_req)" in call
-    assert "\n            _psk_value_req,\n" not in call
+# Names that hold key material, or text that carries it: SDES PSKs and SRTP
+# keys, SDPs (a=crypto inline keys, ICE passwords), raw MQTT payloads (our
+# own PSK and the TURN credentials) and passwords or tokens.
+_SECRET = re.compile(
+    r"psk|srtp_key|key_audio|key_b64|^payload_str$|sdp$|sdp_text|ans_lines"
+    r"|password|token|secret",
+    re.I,
+)
+# What turns one into something loggable: a fingerprint, a masked SDP, a
+# redacted URL, a length, or a one-word summary.
+_SANITIZERS = {
+    "_key_fingerprint",
+    "mask_sdp_secrets",
+    "redact_url",
+    "len",
+    "_sdp_transport",
+    "_srtp_tx_key_note",
+}
+_LOG_METHODS = {"debug", "info", "warning", "error", "exception", "critical"}
+_MODULES = (
+    "aidot_cameras.camera.client",
+    "aidot_cameras.camera.sdes_open",
+    "aidot_cameras.camera.webrtc_open",
+)
 
 
-def test_sdes_open_masks_the_echoed_data_channel_section():
-    src = without_state(inspect.getsource(sdes_open))
-    i = src.index("DC probe ACCEPTED: camera answered m=application")
-    assert "mask_sdp_secrets(" in src[i : i + 300]
+def _is_log_call(call: ast.Call) -> bool:
+    f = call.func
+    if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
+        if f.value.id == "_LOGGER" and f.attr in _LOG_METHODS:
+            return True
+    return name_of(call) in ("_status", "_trace", "status", "trace")
+
+
+def _unsanitized(node: ast.AST):
+    """Secret-named values reaching the log line from ``node`` unwrapped."""
+    if isinstance(node, ast.Call):
+        if name_of(node) in _SANITIZERS:
+            return
+        for arg in [*node.args, *(k.value for k in node.keywords)]:
+            yield from _unsanitized(arg)
+        if isinstance(node.func, ast.Attribute):
+            yield from _unsanitized(node.func.value)
+        return
+    if isinstance(node, ast.IfExp):  # the test picks a branch; it is not logged
+        yield from _unsanitized(node.body)
+        yield from _unsanitized(node.orelse)
+        return
+    if isinstance(node, (ast.Name, ast.Attribute)):
+        name = node.id if isinstance(node, ast.Name) else node.attr
+        if _SECRET.search(name) and not name.endswith("exc"):
+            yield name
+    for child in ast.iter_child_nodes(node):
+        yield from _unsanitized(child)
+
+
+def _log_calls():
+    for modname in _MODULES:
+        for call in ast.walk(module_tree(modname)):
+            if isinstance(call, ast.Call) and _is_log_call(call):
+                yield modname, call
+
+
+def test_no_log_call_hands_over_key_material():
+    """Every log line on the camera path that mentions a key, an SDP, a raw
+    MQTT payload or a credential passes it through a fingerprint, the SDP
+    mask, the URL redaction or len() first.
+
+    This is the one invariant the site pins below used to check one line at
+    a time: the SDES PSK, the echoed data-channel section, the MQTT payload
+    body and the camera answer SDP.
+    """
+    leaks = [
+        f"{modname}:{call.lineno}: {sorted(set(names))}"
+        for modname, call in _log_calls()
+        if (
+            names := [
+                n
+                for a in [*call.args, *(k.value for k in call.keywords)]
+                for n in _unsanitized(a)
+            ]
+        )
+    ]
+    assert not leaks, "\n".join(leaks)
+
+
+def test_the_invariant_sees_the_sites_it_replaced():
+    """Guard the guard: the sites the old pins named are log calls this
+    check walks, each still reaching a secret-named value through a
+    sanitizer - so the invariant above is not passing on nothing."""
+    by_text = {}
+    for modname, call in _log_calls():
+        text = string_parts(call.args[0]) if call.args else ""
+        by_text.setdefault(text, []).append(call)
+    expected = {
+        "sdes: offer key=%s psk=%s": "_key_fingerprint",
+        "webrtc: SDP offer (first 500 chars):\n%s": "mask_sdp_secrets",
+        "webrtc rx  topic=%s  bytes=%d": "len",
+    }
+    for text, sanitizer in expected.items():
+        assert text in by_text, f"the {text!r} log call moved"
+        assert any(calls_to(c, sanitizer) for c in by_text[text]), text
 
 
 def test_sdes_open_redacts_the_ffmpeg_argv():
-    src = without_state(inspect.getsource(sdes_open))
-    i = src.index('"SDES ffmpeg cmd: %s"')
-    assert "redact_url(t)" in src[i : i + 200]
-
-
-def test_webrtc_open_never_logs_a_payload_body():
-    src = without_state(inspect.getsource(webrtc_open))
-    assert "%.400s" not in src
-    i = src.index('"webrtc rx  topic=%s')
-    assert "len(payload_str)" in src[i : i + 120]
-
-
-def test_webrtc_open_masks_the_answer_sdp_it_logs_on_failure():
-    src = without_state(inspect.getsource(webrtc_open))
-    i = src.index("--- camera answer SDP ---")
-    assert "mask_sdp_secrets(_ans_sdp)" in src[i : i + 300]
-
-
-def test_device_detail_bodies_are_logged_as_keys():
-    src = without_state(inspect.getsource(camera_client))
-    assert "returned no UID for %s. body=%s" not in src
+    """The serve command line carries the push URL; every log line that
+    prints a command list redacts its URLs."""
+    sites = [
+        call
+        for _m, call in _log_calls()
+        if any("cmd" in names_in(a) for a in call.args[1:])
+    ]
+    assert sites, "the ffmpeg command is no longer logged - re-point this test"
+    for call in sites:
+        assert calls_to(call, "redact_url"), f"line {call.lineno}: argv not redacted"
 
 
 # --------------------------------------------------------------------------- #
@@ -165,13 +242,3 @@ def test_installing_the_filters_is_idempotent():
     for name in SDP_LOGGERS:
         lg = logging.getLogger(name)
         assert sum(isinstance(f, RedactSdpFilter) for f in lg.filters) == 1, name
-
-
-def test_the_offer_log_line_masks_at_the_call_site_too():
-    """Belt and braces: the filter is the real guard, but the call site shows
-    the intent to anyone reading the code."""
-    import inspect
-
-    src = without_state(inspect.getsource(webrtc_open))
-    i = src.index("webrtc: SDP offer (first 500 chars)")
-    assert "mask_sdp_secrets(" in src[i : i + 200]

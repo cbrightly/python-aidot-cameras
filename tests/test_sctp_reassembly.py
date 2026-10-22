@@ -12,6 +12,8 @@ aiortc reassembles for the DTLS path, which is why SD listing worked there and
 never on SDES.
 """
 
+import ast
+
 from aidot_cameras.camera.sdes_open import (
     _SCTP_REASSEMBLY_CAP,
     _sctp_reassemble,
@@ -88,20 +90,19 @@ class TestItRefusesToGuess:
 
 class TestItIsWiredIntoTheReceivePath:
     def test_the_data_branch_reassembles_before_it_parses(self):
-        import inspect
-        import re
-        from aidot_cameras.camera import sdes_open
+        """Fragments parsed one by one drop a large SD listing reply, reported
+        as 'the camera did not answer'. Reassembly comes before the command
+        id is read."""
+        from tests.ast_guards import calls_to, sctp_data_branch
 
-        src = inspect.getsource(sdes_open)
-        m = re.search(
-            r'elif _pd_ct8 == 0x00 and _sct == "DONE":(.*?)_sc_answered', src, re.S
-        )
-        assert m, "the inbound SCTP DATA branch has moved or gone"
-        branch = m.group(1)
-        assert "_sctp_reassemble" in branch, (
-            "fragments are parsed individually again - a large SD listing reply "
-            "will be dropped and reported as 'the camera did not answer'"
-        )
-        assert branch.index("_sctp_reassemble") < branch.index("_sc_cmd"), (
-            "reassembly must happen before the command id is read"
-        )
+        branch = sctp_data_branch()
+        reassemble = calls_to(branch, "_sctp_reassemble")
+        assert reassemble, "fragments are parsed individually again"
+        cmd_reads = [
+            n.lineno
+            for n in ast.walk(branch)
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "_sc_cmd" for t in n.targets)
+        ]
+        assert cmd_reads
+        assert min(c.lineno for c in reassemble) < min(cmd_reads)

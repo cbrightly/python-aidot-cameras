@@ -164,15 +164,18 @@ def test_restart_sdp_is_byte_identical_for_both_transports():
 
 
 def test_no_template_is_spelled_out_twice():
-    import pathlib
+    """The ffmpeg-facing receive SDP has one builder (_ffmpeg_rx_sdp); no
+    other literal in the open spells its session line out again. (The
+    camera-facing offer and answer keep their own templates.)"""
+    import ast
 
-    src = (
-        pathlib.Path(__file__).resolve().parent.parent
-        / "aidot_cameras"
-        / "camera"
-        / "sdes_open.py"
-    ).read_text()
-    # The camera-facing offer and answer keep their own templates (ICE, mids,
-    # candidates); only the ffmpeg-facing one is checked here.
-    assert src.count('"s=aidot-sdes-rx\\r\\n"') == 0
-    assert src.count('"s=aidot-tutk-rx\\r\\n"') == 0
+    from tests.ast_guards import module_tree
+
+    spelled = [
+        n.lineno
+        for n in ast.walk(module_tree("aidot_cameras.camera.sdes_open"))
+        if isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and ("s=aidot-sdes-rx" in n.value or "s=aidot-tutk-rx" in n.value)
+    ]
+    assert not spelled, f"a receive-SDP template is spelled out at {spelled}"

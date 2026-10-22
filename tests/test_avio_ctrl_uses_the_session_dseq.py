@@ -28,11 +28,6 @@ framing difference from the app; it is not expected to change any behaviour,
 and the PTZ pan must still work afterwards.
 """
 
-import pathlib
-import re
-
-_SRC = pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras" / "camera"
-
 
 def _client_cls():
     import aidot_cameras.camera.client as cc
@@ -61,24 +56,28 @@ def test_control_commands_and_live_play_share_one_counter():
 
 
 def test_the_avio_control_frame_no_longer_uses_a_random_dseq():
-    """Binds the test to the real send site, which lives in a closure.
+    """Binds the test to the real send site, a closure in the bridge: the
+    persistent AVIO command sender takes its dSeq from the session counter
+    (_next_dseq), the way livePlayReq already does, never from randint."""
+    import ast
 
-    Without this the unit tests above would still pass with the production
-    frame builder untouched -- the same reason the media-counter gate has a
-    source guard.
-    """
-    src = (_SRC / "sdes_open.py").read_text()
-    m = re.search(r"def _persistent_sdes_cmd\(.*?\n(?P<body>(?:.*\n){0,12})", src)
-    assert m, "could not find the persistent AVIO command sender"
-    body = m.group("body")
-    assert "randint" not in body, (
-        "the AVIO control frame still fills the dSeq slot with a random number; "
-        "the app fills it with the live-play counter"
+    from tests.ast_guards import calls_to, function, module_tree
+
+    sender = function(
+        module_tree("aidot_cameras.camera.sdes_open"), "_persistent_sdes_cmd"
     )
-    assert "_next_dseq" in body, (
-        "the AVIO control frame must take its dSeq from the session counter "
-        "(_next_dseq), the way livePlayReq already does"
-    )
+    assert not calls_to(sender, "randint"), "the AVIO control frame uses a random dSeq"
+    seqs = [
+        n
+        for n in ast.walk(sender)
+        if isinstance(n, ast.Assign) and calls_to(n.value, "_next_dseq")
+    ]
+    assert seqs, "the AVIO control frame must take its dSeq from _next_dseq"
+    used = {t.id for n in seqs for t in n.targets if isinstance(t, ast.Name)}
+    header = calls_to(sender, "avio_header")
+    assert header and any(
+        isinstance(h.args[0], ast.Name) and h.args[0].id in used for h in header
+    ), "and pack it in the header's dSeq slot"
 
 
 def test_the_header_layout_is_unchanged():
@@ -91,5 +90,3 @@ def test_the_header_layout_is_unchanged():
     assert avio_header(1, 5376, 2, 28) == struct.pack("<IIqII4x", 1, 5376, 2, 28, 0), (
         "the 28-byte little-endian AVIO header must not change"
     )
-    src = (_SRC / "sdes_open.py").read_text()
-    assert "avio_header(" in src, "the SDES senders must pack through the one helper"

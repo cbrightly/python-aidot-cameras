@@ -28,11 +28,19 @@ def test_a_packed_header_parses_back():
 
 
 def test_no_sender_hand_rolls_the_layout():
+    """The 28-byte AVIO header has one layout, in protocol.py: no other camera
+    module packs or parses it with its own struct format."""
+    import ast
+
+    from tests.ast_guards import package_modules
+
     offenders = [
-        f"{p.name}:{n}"
-        for p in sorted(CAMERA.glob("*.py"))
-        if p.name != "protocol.py"
-        for n, line in enumerate(p.read_text().splitlines(), 1)
-        if "IIqII4x" in line
+        f"{p.name}:{n.lineno}"
+        for p in package_modules()
+        if p.parent.name == "camera" and p.name != "protocol.py"
+        for n in ast.walk(ast.parse(p.read_text()))
+        if isinstance(n, ast.Constant)
+        and isinstance(n.value, str)
+        and "IIqII4x" in n.value
     ]
     assert not offenders, offenders

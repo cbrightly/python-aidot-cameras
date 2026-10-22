@@ -7,6 +7,8 @@ never probed at all, so nothing was ever nominated and the unreachable-nominee
 grace never started. Both ran the full budget; the next attempt served in 5 s.
 """
 
+import ast
+
 import pytest
 
 from aidot_cameras.camera.sdes_open import (
@@ -87,31 +89,45 @@ def test_trigger_rule_disabled_by_a_zero_grace():
 
 
 def test_the_bridge_stamps_when_living_is_first_sent():
-    """The loop times the trigger rule from this stamp; it must exist and be monotonic."""
-    import inspect
+    """The loop times the trigger rule from this stamp: initialised to None,
+    then set once from the monotonic clock where the trigger goes out."""
+    from tests.ast_guards import sdes_bridge
 
-    from aidot_cameras.camera import sdes_open
-
-    # Whitespace-free, so the formatter's line wrapping cannot break it.
-    src = "".join(inspect.getsource(sdes_open).split())
-    assert "_bridge_fn._br_trigger_sent_ts=None" in src
-    # The bridge body is built by make_sdes_bridge; the stamp is written there.
-    assert "_bridge_fn._br_trigger_sent_ts=_time_br.monotonic()" in src
+    stamps = [
+        n
+        for n in ast.walk(sdes_bridge())
+        if isinstance(n, ast.Assign)
+        and any(
+            isinstance(t, ast.Attribute) and t.attr == "_br_trigger_sent_ts"
+            for t in n.targets
+        )
+    ]
+    values = sorted(ast.unparse(n.value) for n in stamps)
+    assert "None" in values, "the stamp is initialised per bridge"
+    assert any(v.endswith(".monotonic()") for v in values), values
 
 
 def test_tutk_framed_media_is_counted_for_the_trigger_rule():
-    """TUTK SFrame media leaves the branch before _br_media_pkts is counted.
+    """TUTK SFrame media leaves the branch before _br_media_pkts is counted,
+    so the branch keeps its own count - from zero, advancing from itself -
+    and the loop's trigger rule adds it in."""
+    from tests.ast_guards import attr_writes, calls_to, module_tree, sdes_bridge
 
-    Not observed on the reference fleet (0 TUTK-framed media lines on the box
-    or in 28 live-validation runs), but if a camera did send it, the trigger
-    rule would read zero media while media flowed, so the branch keeps its own
-    count and the loop adds it in.
-    """
-    import inspect
-
-    from aidot_cameras.camera import sdes_open
-
-    src = inspect.getsource(sdes_open)
-    assert "_bridge_fn._br_tutk_media = 0" in src
-    assert 'getattr(_bridge_fn, "_br_tutk_media", 0) + 1' in src
-    assert 'int(getattr(_bridge_fn, "_br_tutk_media", 0))' in src
+    bridge = sdes_bridge()
+    assert "_br_tutk_media" in attr_writes(bridge, "_bridge_fn")
+    advances = [
+        n
+        for n in ast.walk(bridge)
+        if isinstance(n, ast.Assign)
+        and any(getattr(t, "attr", None) == "_br_tutk_media" for t in n.targets)
+        and isinstance(n.value, ast.BinOp)
+    ]
+    assert advances, "the TUTK media count no longer advances"
+    readers = [
+        c
+        for c in calls_to(module_tree("aidot_cameras.camera.sdes_open"), "getattr")
+        if len(c.args) >= 2
+        and ast.unparse(c.args[1]) == "'_br_tutk_media'"
+        and c not in set(ast.walk(bridge))
+    ]
+    assert readers, "nothing outside the bridge reads the TUTK media count"

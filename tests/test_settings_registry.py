@@ -4,12 +4,13 @@ parser for them.
 Two kinds of test here. The parsing tests pin the malformed-value rules that
 used to differ per call site (a bare float() stopped the library importing on
 an empty value; `nan` made two grace rules fire at once). The inventory tests
-walk the package source and the docs so a variable cannot be added in one
+walk the package AST and the docs so a variable cannot be added in one
 place and forgotten in the other.
 """
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 
@@ -22,13 +23,13 @@ PKG = os.path.join(
 )
 DOCS = os.path.dirname(PKG)
 
-_LITERAL = re.compile(r"""["'](AIDOT_[A-Z0-9_]+)["']""")
+_NAME = re.compile(r"AIDOT_[A-Z0-9_]+")
 
 
-def _package_sources() -> list[tuple[str, str]]:
-    """(path relative to the repo, text) for every module in the package,
-    excluding the vendored tree and the registry itself."""
-    out: list[tuple[str, str]] = []
+def _package_trees() -> list[tuple[str, ast.Module]]:
+    """(path relative to the repo, parsed module) for every module in the
+    package, excluding the vendored tree and the registry itself."""
+    out: list[tuple[str, ast.Module]] = []
     for root, _dirs, files in os.walk(PKG):
         if "_vendor" in root:
             continue
@@ -37,48 +38,62 @@ def _package_sources() -> list[tuple[str, str]]:
                 continue
             path = os.path.join(root, f)
             with open(path, encoding="utf-8") as fh:
-                out.append((os.path.relpath(path, DOCS), fh.read()))
+                out.append((os.path.relpath(path, DOCS), ast.parse(fh.read())))
     return out
 
 
 def _source_names() -> set[str]:
-    """Every AIDOT_* string literal in the package."""
-    names: set[str] = set()
-    for _rel, text in _package_sources():
-        names.update(_LITERAL.findall(text))
-    return names
+    """Every AIDOT_* name the package spells as a string literal."""
+    return {
+        node.value
+        for _rel, tree in _package_trees()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and _NAME.fullmatch(node.value)
+    }
 
 
-_RAW_READ = re.compile(
-    r"\b_?os\.(?:environ\.get|getenv|environ)\s*[\(\[]\s*([^,\)\]]+)"
-)
+_ENV_READS = {"os.environ.get", "_os.environ.get", "os.getenv", "_os.getenv"}
+_ENVIRON = {"os.environ", "_os.environ"}
 
 
 def _raw_read_sites() -> set[tuple[str, str]]:
     """Every os.environ read in the package that names an AIDOT_ variable, as
-    (file, name). A literal argument is the name; an identifier is resolved
-    through a `NAME = "AIDOT_..."` assignment in the same file; an argument
-    that is a plain variable (the CLI's helper takes the name as a parameter)
-    is recorded as `<variable>` so the site is still pinned."""
+    (file, name): ``os.environ.get(x)``, ``os.getenv(x)`` and
+    ``os.environ[x]``. A literal argument is the name; an identifier is
+    resolved through a ``NAME = "AIDOT_..."`` assignment in the same file; an
+    argument that is a plain variable (the CLI's helper takes the name as a
+    parameter) is recorded as ``<variable>`` so the site is still pinned."""
     sites: set[tuple[str, str]] = set()
-    for rel, text in _package_sources():
-        for arg in _RAW_READ.findall(text):
-            arg = arg.strip()
-            lit = _LITERAL.fullmatch(arg)
-            if lit:
-                sites.add((rel, lit.group(1)))
+    for rel, tree in _package_trees():
+        consts = {
+            t.id: n.value.value
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Assign) and isinstance(n.value, ast.Constant)
+            for t in n.targets
+            if isinstance(t, ast.Name) and isinstance(n.value.value, str)
+        }
+        for node in ast.walk(tree):
+            arg = None
+            if isinstance(node, ast.Call) and ast.unparse(node.func) in _ENV_READS:
+                arg = node.args[0] if node.args else None
+            elif (
+                isinstance(node, ast.Subscript) and ast.unparse(node.value) in _ENVIRON
+            ):
+                arg = node.slice
+            if arg is None:
                 continue
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", arg):
-                assigned = re.search(
-                    r"^\s*%s\s*=\s*%s" % (re.escape(arg), _LITERAL.pattern),
-                    text,
-                    re.M,
-                )
-                if assigned:
-                    sites.add((rel, assigned.group(1)))
-                else:
-                    sites.add((rel, f"<{arg}>"))
-            # A literal that is not an AIDOT_ name (XDG_CONFIG_HOME) is not ours.
+            if isinstance(arg, ast.Constant):
+                if isinstance(arg.value, str) and _NAME.fullmatch(arg.value):
+                    sites.add((rel, arg.value))
+                # A literal that is not an AIDOT_ name (XDG_CONFIG_HOME) is not ours.
+            elif isinstance(arg, ast.Name):
+                value = consts.get(arg.id)
+                if value and _NAME.fullmatch(value):
+                    sites.add((rel, value))
+                elif value is None:
+                    sites.add((rel, f"<{arg.id}>"))
     return sites
 
 
@@ -401,23 +416,28 @@ def test_no_aidot_variable_is_read_around_the_registry():
 
 def _environ_uses() -> "list[tuple[str, int, str]]":
     """Every use of os.environ / os.getenv in the package's CODE (comments and
-    docstrings excluded), as (file, line, source line). Catches an alias too:
-    ``env = os.environ`` followed by ``env.get("AIDOT_...")`` is found at the
-    alias."""
-    import ast
-
+    docstrings excluded), as (file, line, the use with the call it feeds).
+    Catches an alias too: ``env = os.environ`` followed by
+    ``env.get("AIDOT_...")`` is found at the alias."""
     out = []
-    for rel, text in _package_sources():
-        lines = text.splitlines()
-        for node in ast.walk(ast.parse(text)):
+    for rel, tree in _package_trees():
+        parent = {c: p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
+        for node in ast.walk(tree):
             hit = (
                 isinstance(node, ast.Attribute)
                 and node.attr in ("environ", "getenv")
                 and isinstance(node.value, ast.Name)
                 and node.value.id in ("os", "_os")
             ) or (isinstance(node, ast.Name) and node.id in ("environ", "getenv"))
-            if hit:
-                out.append((rel, node.lineno, lines[node.lineno - 1].strip()))
+            if not hit:
+                continue
+            use = node
+            up = parent.get(use)
+            if isinstance(up, ast.Attribute) and isinstance(parent.get(up), ast.Call):
+                use = parent[up]
+            elif isinstance(up, ast.Call) and up.func is node:
+                use = up
+            out.append((rel, node.lineno, ast.unparse(use)))
     return out
 
 

@@ -26,7 +26,6 @@ import pytest
 from aidot_cameras.camera import rtsp_publish as rp
 from aidot_cameras.g711 import linear2alaw
 
-from tests.source_parts import without_state
 
 # --------------------------------------------------------------------------- #
 # fake go2rtc                                                                  #
@@ -1586,50 +1585,81 @@ def test_sdes_direct_publish_decision(monkeypatch):
 
 
 def test_the_open_passes_the_plain_rtp_decision_through():
-    import inspect
+    """The direct-publish decision the serve acts on is told whether the media
+    reaches it decrypted and which video codec was negotiated: a decision made
+    without them publishes SRTP ciphertext or an unvalidated codec."""
+    import ast
 
-    from aidot_cameras.camera import sdes_open
+    from tests.ast_guards import calls_to, names_in, sdes_open_family
 
-    src = without_state(inspect.getsource(sdes_open))
-    assert (
-        "_direct_publish = _should_direct_publish(\n"
-        "            rtsp_push_url, output_path, max_seconds, _use_plain_rtp, _keep_v\n"
-    ) in src
+    decisions = [
+        n.value
+        for fn in sdes_open_family()
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Assign)
+        and any(getattr(t, "id", None) == "_direct_publish" for t in n.targets)
+        and calls_to(n.value, "_should_direct_publish")
+    ]
+    assert len(decisions) == 1, "the open's direct-publish decision moved"
+    args = decisions[0].args
+    assert len(args) == 5
+    assert "_use_plain_rtp" in names_in(args[3]) and "_keep_v" in names_in(args[4])
 
 
 def test_both_sdes_serve_launches_go_through_the_spawn_helper():
-    """Source guard: the first launch AND the SRTP key-change relaunch must
-    both use ``_spawn_serve`` - a raw ``subprocess.Popen`` left at either site
-    would silently bring ffmpeg back with direct publish on."""
-    import inspect
+    """The first launch AND the SRTP key-change relaunch both use
+    ``_spawn_serve`` - a raw ``subprocess.Popen`` left at either site would
+    silently bring ffmpeg back with direct publish on - and the helper reads
+    the SDP through the executor, never with a blocking open() on the loop."""
+    import ast
 
-    from aidot_cameras.camera import sdes_open
+    from tests.ast_guards import (
+        calls_to,
+        function,
+        module_tree,
+        name_of,
+        sdes_open_family,
+    )
 
-    src = without_state(inspect.getsource(sdes_open))
-    assert src.count("proc = await _spawn_serve()") == 2
-    # The SDP read goes through the executor: Home Assistant flags a blocking
-    # open() in the event loop, and this one runs on the open's hot path.
-    assert 'with open(sdp_path, encoding="utf-8") as _f_dp' not in src
-    assert "_dp_sdp = await asyncio.get_running_loop().run_in_executor(" in src
-    body = src[src.index("def _spawn_serve():") :]
-    body = body[: body.index("# Do not launch the publisher")]
-    assert "LoopbackRtpPublisher(" in body and "subprocess.Popen(" in body
-    # The serve Popen exists only inside the helper now.
-    assert src.count("subprocess.Popen(") == 1
+    family = sdes_open_family()
+    launches = [
+        n
+        for fn in family
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Await) and name_of(n.value) == "_spawn_serve"
+    ]
+    assert len(launches) == 2
+    spawn = function(module_tree("aidot_cameras.camera.sdes_open"), "_spawn_serve")
+    assert calls_to(spawn, "LoopbackRtpPublisher") and calls_to(spawn, "Popen")
+    popens = [c for fn in family for c in calls_to(fn, "Popen")]
+    assert all(c in set(ast.walk(spawn)) for c in popens), (
+        "the serve Popen exists only inside the helper"
+    )
+    assert not [
+        c for c in ast.walk(spawn) if isinstance(c, ast.Call) and name_of(c) == "open"
+    ]
+    assert calls_to(spawn, "run_in_executor"), "the SDP read goes through the executor"
 
 
-def test_dtls_serve_loop_checks_publish_before_the_direct_ts_serve():
-    """Source guard: with an rtsp:// destination the direct TS serve would
-    try to bind go2rtc's own RTSP port, so the publish branch must win."""
-    import inspect
+@pytest.mark.parametrize(
+    "url, target",
+    [("rtsp://127.0.0.1:8554/cam", "publish"), ("http://127.0.0.1:18558/x.ts", "mux")],
+)
+def test_dtls_serve_loop_checks_publish_before_the_direct_ts_serve(
+    monkeypatch, make_camera_device_client, url, target
+):
+    """With an rtsp:// destination the direct TS serve would try to bind
+    go2rtc's own RTSP port, so the publish branch must win."""
+    from tests.keepalive_driver import DtlsServeRun, FakeDtlsSession
 
-    from aidot_cameras.camera import client
-
-    src = without_state(inspect.getsource(client))
-    i_pub = src.index("_publishing = direct_publish_enabled() and is_publishable_url(")
-    i_ts = src.index("elif _is_http_serve_url(serve_url):")
-    assert i_pub < i_ts
-    assert "target=dtls_rtp_publish_run" in src
+    monkeypatch.setenv("AIDOT_DIRECT_PUBLISH", "1")
+    cam = make_camera_device_client("A000088")
+    cam._stream_idle_opt = 0.0
+    run = DtlsServeRun(
+        monkeypatch, cam, [FakeDtlsSession()], url=url, timeout=0.5
+    ).run()
+    assert run.mux_targets[:1] == [target]
+    assert bool(run.direct) is (target == "mux")
 
 
 # --------------------------------------------------------------------------- #
@@ -2256,18 +2286,6 @@ def test_direct_publish_is_gated_to_the_validated_codec(monkeypatch):
     assert _should_direct_publish(url, None, None, True, None)
 
 
-def test_the_open_passes_the_narrowed_codec_to_the_decision():
-    import inspect
-
-    from aidot_cameras.camera import sdes_open
-
-    src = without_state(inspect.getsource(sdes_open))
-    assert (
-        "_direct_publish = _should_direct_publish(\n"
-        "            rtsp_push_url, output_path, max_seconds, _use_plain_rtp, _keep_v\n"
-    ) in src
-
-
 # --------------------------------------------------------------------------- #
 # DTLS audio conditioning                                                      #
 # --------------------------------------------------------------------------- #
@@ -2338,11 +2356,33 @@ def test_agc_reads_the_same_knobs_as_the_mux():
     )
 
 
-def test_the_dtls_runner_conditions_its_audio():
-    import inspect
+def _quiet_pcma(dbfs: float = -45.0) -> bytes:
+    """160 bytes of A-law at a steady ``dbfs`` - a quiet room."""
+    amp = int(32767 * 10 ** (dbfs / 20))
+    return bytes([linear2alaw(amp), linear2alaw(-amp)]) * 80
 
-    src = without_state(inspect.getsource(rp.dtls_rtp_publish_run))
-    assert "agc = AlawAgc()" in src and "agc.process(adata)" in src
+
+def _alaw_dbfs(payload: bytes) -> float:
+    import math
+
+    vals = [rp._alaw_to_linear(b) for b in payload]
+    rms = (sum(v * v for v in vals) / len(vals)) ** 0.5
+    return 20 * math.log10(rms / 32767 + 1e-12)
+
+
+def test_the_dtls_runner_conditions_its_audio(go2rtc, monkeypatch):
+    """A quiet camera is published lifted toward the target, not as it came."""
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    quiet = _quiet_pcma()
+
+    def feed(vq, aq):
+        for i in range(100):
+            aq.put((quiet, 160 + 160 * i))
+
+    _run_dtls(go2rtc, feed, secs=1.5)
+    audio = [rp.parse_rtp(p)[4] for ch, p in go2rtc.frames if ch == 2]
+    assert len(audio) >= 50
+    assert _alaw_dbfs(b"".join(audio[-20:])) > _alaw_dbfs(quiet) + 15.0
 
 
 def test_gap_warn_threshold_env():
@@ -2708,19 +2748,36 @@ def test_sdes_tee_is_not_held_up_by_dropped_re_sent_frames(go2rtc, monkeypatch):
         proc.wait(3)
 
 
-def test_the_sdes_publisher_conditions_its_audio_too():
+def test_the_sdes_publisher_conditions_its_audio_too(go2rtc, monkeypatch):
     """The SDES direct publisher ran only a fixed trim; measured 2026-10-14,
-    that published two cameras' rooms as digital zero. Both publishers now
-    run the same conditioning, and the trim is an offset after it."""
-    import inspect
+    that published two cameras' rooms as digital zero. It now conditions the
+    level first and trims after: a pre-trim would push a quiet room further
+    under the gate, where the normalizer could never bring it back.
 
-    src = without_state(inspect.getsource(rp.LoopbackRtpPublisher._send))
-    assert "self._agc.process(payload)" in src
-    # Conditioned first, trimmed second: a pre-trim would push a quiet room
-    # further under the gate and the normalizer could never bring it back.
-    assert src.index("self._agc.process(payload)") < src.index(
-        "payload.translate(self._gain)"
+    -45 dBFS in with an -8 dB trim: conditioned first it comes out near
+    -23 dBFS; trimmed first, about -31; not conditioned at all, about -53.
+    """
+    monkeypatch.setenv("AIDOT_PUBLISH_AAC", "0")
+    a_port, v_port = _free_udp_ports(2)
+    proc = rp.LoopbackRtpPublisher(
+        _serve_sdp(a_port, v_port), go2rtc.url(), audio_gain_db=-8.0
     )
+    quiet = _quiet_pcma()
+    try:
+        assert _wait(lambda: "RECORD" in go2rtc.requests)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for i in range(100):
+            tx.sendto(
+                rp.build_rtp(8, False, 1 + i, 160 * (i + 1), 1, quiet),
+                ("127.0.0.1", a_port),
+            )
+            time.sleep(0.002)
+        tx.close()
+        assert _wait(lambda: len(go2rtc.frames) >= 80)
+        out = b"".join(rp.parse_rtp(p)[4] for _ch, p in go2rtc.frames[-20:])
+        assert -27.0 < _alaw_dbfs(out) < -19.0, _alaw_dbfs(out)
+    finally:
+        proc.kill()
 
 
 def test_loopback_publisher_lifts_a_quiet_camera(go2rtc, monkeypatch):

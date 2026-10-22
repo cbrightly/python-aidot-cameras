@@ -335,22 +335,25 @@ def test_a_url_without_a_port_yields_none():
     assert _serve_port("not a url") is None
 
 
-def test_the_serve_loop_binds_the_advertised_port_when_there_is_no_relay():
+def test_the_serve_loop_binds_the_advertised_port_when_there_is_no_relay(
+    monkeypatch, make_camera_device_client
+):
     """The bug this fixes.
 
     `_DirectTsServer(_ff_port or 0)` bound port 0 - a random ephemeral port -
     whenever no relay was running, because `_ff_port` is only set on the relay
     branch. go2rtc was pointed at the advertised URL, found nothing listening,
-    and answered DESCRIBE with 404. The component was fine the whole time: it
-    describes cleanly (`rc: 0, h264,video`) when go2rtc is pointed at the port
-    it actually bound.
+    and answered DESCRIBE with 404.
     """
-    from tests.source_parts import full_source
+    from tests.keepalive_driver import DtlsServeRun, FakeDtlsSession
 
-    src = full_source("_dtls_serve_loop_inner")
-    assert "_DirectTsServer(_ff_port or 0)" not in src, (
-        "binds a random port when no relay holds the public one"
-    )
-    assert "_serve_port(serve_url)" in src, (
-        "the advertised port must come from the serve URL"
-    )
+    cam = make_camera_device_client("A000088")
+    cam._stream_idle_opt = 0.0
+    run = DtlsServeRun(
+        monkeypatch,
+        cam,
+        [FakeDtlsSession()],
+        url="http://127.0.0.1:18556/cam.ts",
+        timeout=0.5,
+    ).run()
+    assert [s.port for s in run.direct] == [18556]

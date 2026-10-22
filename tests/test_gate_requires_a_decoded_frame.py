@@ -88,31 +88,18 @@ def test_no_media_still_fails_whatever_the_probe_says(result):
     assert lv._passes(result, media_ok=False) is False
 
 
-def test_the_verdict_site_uses_the_gate():
-    """A gate nothing calls is not a gate.
+@pytest.mark.parametrize("decoded, verdict", [(25, "PASS"), (0, "NO_MEDIA")])
+async def test_the_verdict_site_uses_the_gate(tmp_path, monkeypatch, decoded, verdict):
+    """A gate nothing calls is not a gate: an attempt whose session streamed
+    and recorded is judged by what came out of the decoder."""
+    from test_live_validate_policy import _gate
 
-    The attempt loop cannot be driven in a unit test, so this asserts the call
-    exists at the verdict - the same species of guard as the keepalive-exit and
-    sprop checks, and it fails if the verdict goes back to reading `ok` alone.
-    """
-    import ast
-    import pathlib
+    dc, _events, _made = _gate(lv, monkeypatch)
 
-    src = pathlib.Path(lv.__file__).read_text()
-    verdicts = [
-        n
-        for n in ast.walk(ast.parse(src))
-        if isinstance(n, ast.Assign)
-        and any(getattr(t, "slice", None) is not None for t in n.targets)
-    ]
-    calls = [
-        n
-        for n in ast.walk(ast.parse(src))
-        if isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Name)
-        and n.func.id == "_passes"
-    ]
-    assert calls, (
-        "_passes is never called - the verdict is not gated on a decoded frame"
-    )
-    assert verdicts, "no subscript assignment found; has the verdict site moved?"
+    async def _probe(path, timeout=60.0):
+        return {"decoded_frames": decoded, "decode_errors": 0}
+
+    monkeypatch.setattr(lv, "_decode_probe", _probe)
+    result = await lv._attempt(dc, 0, str(tmp_path), 1)
+    assert result["recorded_bytes"] > 0, "the attempt streamed and recorded"
+    assert result["verdict"] == verdict, result

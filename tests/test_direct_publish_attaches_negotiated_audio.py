@@ -8,9 +8,8 @@ direct publish does not, because go2rtc takes an announced track whose first
 packet arrives late. So it attaches audio from the answer and skips the grace.
 """
 
-import inspect
+import ast
 
-from aidot_cameras.camera import sdes_open
 from aidot_cameras.camera.sdes_open import audio_pt_from_answer_sdp
 
 ANSWER = (
@@ -48,23 +47,46 @@ def test_no_audio_section_or_unserved_codec_gives_none():
 
 
 def test_the_open_uses_it_only_for_direct_publish_and_skips_the_grace():
-    src = inspect.getsource(sdes_open)
-    i = src.index("_answer_apt = None")
-    block = src[i : src.index("_vpt = _first_video_pt[0]", i)]
-    # gated on the direct publish decision, never on the ffmpeg serve
-    assert "_should_direct_publish(" in block
-    assert "audio_pt_from_answer_sdp(" in block
-    # the grace wait only runs when no negotiated PT was taken
-    assert "and _answer_apt is None:" in block
-    assert (
-        "_apt = _first_audio_pt[0] if _first_audio_pt[0] is not None else _answer_apt"
-        in src
-    )
+    """The negotiated audio PT is taken from the answer only on the direct
+    publish (never the ffmpeg serve, which needs a packet in hand), and the
+    audio grace wait runs only when no negotiated PT was taken."""
+    from tests.ast_guards import calls_to, names_in, sdes_open_family
+
+    family = sdes_open_family()
+    takes = [
+        n
+        for fn in family
+        for n in ast.walk(fn)
+        if isinstance(n, ast.If)
+        and calls_to(n, "audio_pt_from_answer_sdp")
+        and not calls_to(n.test, "audio_pt_from_answer_sdp")
+    ]
+    assert takes, "the open no longer reads the answer's audio PT"
+    assert all(calls_to(t.test, "_should_direct_publish") for t in takes)
+    graces = [
+        n
+        for fn in family
+        for n in ast.walk(fn)
+        if isinstance(n, ast.If)
+        and any(
+            isinstance(s, ast.Assign)
+            and any(getattr(t, "id", None) == "_apt_deadline" for t in s.targets)
+            for s in n.body
+        )
+    ]
+    assert graces and all("_answer_apt" in names_in(g.test) for g in graces)
 
 
 def test_key_restart_keeps_the_audio_narrowing():
     """The SRTP key-change relaunch rebuilds the SDP; without the negotiated
-    PT the audio line would be left unnarrowed and the publisher would take
-    PCMU (first listed) and drop every PCMA packet."""
-    src = inspect.getsource(sdes_open)
-    assert "else _keep_a" in src[src.index("_build_restart_sdp(\n") :]
+    PT the audio line is left unnarrowed and the publisher takes PCMU (first
+    listed) and drops every PCMA packet."""
+    from tests.ast_guards import calls_to, names_in, sdes_open_family
+
+    rebuilds = [
+        c for fn in sdes_open_family() for c in calls_to(fn, "_build_restart_sdp")
+    ]
+    assert rebuilds
+    for call in rebuilds:
+        audio = {k.arg: k.value for k in call.keywords}.get("first_audio_pt")
+        assert audio is not None and "_keep_a" in names_in(audio)

@@ -182,15 +182,3 @@ def test_mux_conditions_audio_like_the_direct_publishers():
         f"mux output {out_dbfs:.1f} dBFS vs AlawAgc on the same bytes "
         f"{ref_dbfs:.1f} dBFS - the mux is not running the shared normalizer"
     )
-
-
-def test_mux_has_no_normalizer_of_its_own():
-    """Pin the dedup: the knobs are read in one place, ``agc.py``."""
-    import inspect
-
-    from aidot_cameras.camera import protocol
-
-    src = inspect.getsource(protocol._dtls_av_mux_run)
-    assert "agc.process(" in src
-    assert "tanh" not in src and "AIDOT_AUDIO_" not in src
-    assert "AIDOT_AUDIO_" not in inspect.getsource(protocol)

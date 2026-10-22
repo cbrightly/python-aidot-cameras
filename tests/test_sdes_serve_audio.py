@@ -126,12 +126,28 @@ def test_gain_explicit_setting_wins_on_either_path(monkeypatch):
 
 
 def test_the_direct_publisher_asks_for_the_zero_default():
-    """Measured 2026-10-14: with the -8 trim on raw A-law, an A001064 and an
-    A001513 published digital zero. The direct publisher conditions the level
-    first, so its trim must default to no offset."""
-    import inspect
+    """Measured 2026-10-14: with the -8 trim on raw A-law two cameras published
+    digital zero. The direct publisher conditions the level first, so the trim
+    it is handed defaults to no offset."""
+    import ast
 
-    from aidot_cameras.camera import sdes_open
+    from tests.ast_guards import calls_to, name_of, sdes_open_family
 
-    src = inspect.getsource(sdes_open)
-    assert "_resolve_sdes_audio_gain_db(default=0.0)" in src
+    family = sdes_open_family()
+    publishers = [c for fn in family for c in calls_to(fn, "LoopbackRtpPublisher")]
+    assert publishers, "the open no longer builds the direct publisher"
+    for pub in publishers:
+        gain = {k.arg: k.value for k in pub.keywords}.get("audio_gain_db")
+        assert isinstance(gain, ast.Name), "the publisher's trim must be resolved"
+        sources = [
+            n.value
+            for fn in family
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Assign)
+            and any(getattr(t, "id", None) == gain.id for t in n.targets)
+        ]
+        assert sources and all(
+            name_of(s) == "_resolve_sdes_audio_gain_db"
+            and [ast.unparse(k) for k in s.keywords] == ["default=0.0"]
+            for s in sources
+        ), [ast.unparse(s) for s in sources]

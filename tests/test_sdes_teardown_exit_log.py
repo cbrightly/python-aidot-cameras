@@ -16,10 +16,8 @@ unexpected -> WARNING.
 """
 
 import asyncio
-import inspect
 import logging
 
-import aidot_cameras.camera.sdes_open as sdes_open
 from aidot_cameras.camera.sdes_open import _classify_ffmpeg_exit
 from aidot_cameras.camera.sdes import SdesSession
 
@@ -43,44 +41,73 @@ def test_sigterm_death_during_teardown_is_quiet():
 
 
 def test_reap_sets_teardown_flag_before_kill():
-    # _reap() (the cold-open kill site) is a closure nested deep inside
-    # _open_sdes_stream_impl, so it cannot be called in isolation.  The
-    # other three kill sites (SdesSession.stop(), the key-restart proc
-    # replace, the DTLS-fallback abort) all set _teardown_holder[0] = True
-    # BEFORE terminating the proc, so the bridge thread can never observe
-    # the exit code with the flag still False.  Assert _reap's source
-    # follows the same ordering: the flag-set must appear before p.kill().
-    src = inspect.getsource(sdes_open)
-    start = src.index("def _reap(p):")
-    end = src.index("# --- Allocate UDP ports", start)
-    block = src[start:end]
-    flag_pos = block.index("_teardown_holder[0] = True")
-    kill_pos = block.index("p.kill()")
-    assert flag_pos < kill_pos, (
-        "_reap must set the teardown flag before killing the proc, "
-        "matching the other three locally-initiated kill sites"
-    )
+    """_reap (the cold-open kill site) is a closure deep in the open, so it is
+    checked structurally: like the other three locally-initiated kill sites it
+    sets the teardown flag before it kills, so the bridge thread can never see
+    the exit code with the flag still False."""
+    import ast
+
+    from tests.ast_guards import calls_to, function, module_tree
+
+    reap = function(module_tree("aidot_cameras.camera.sdes_open"), "_reap")
+    flags = [
+        n.lineno
+        for n in ast.walk(reap)
+        if isinstance(n, ast.Assign)
+        and any(ast.unparse(t) == "_teardown_holder[0]" for t in n.targets)
+        and ast.unparse(n.value) == "True"
+    ]
+    kills = [c.lineno for c in calls_to(reap, "kill")]
+    assert flags and kills
+    assert min(flags) < min(kills)
 
 
 def test_the_bridge_exit_log_names_the_camera():
-    """The exit line is emitted from a closure the tests cannot call directly.
+    """Several SDES cameras stream at once; an exit line without a device id
+    cannot be attributed. The bridge's exit lines and the serve's stderr line
+    carry one, and the session is handed the id its own stderr log needs."""
+    import ast
 
-    It is still worth pinning: this account streams several SDES cameras at
-    once, and while these lines carried no device id a burst of exits could not
-    be attributed to a camera at all. Assert the format string takes one, and
-    that the session is handed the id it needs for its own stderr log.
-    """
-    src = inspect.getsource(sdes_open)
-    assert "camera %s: SDES bridge: ffmpeg exited" in src, (
-        "the bridge exit log lost its device id - a burst of these is "
-        "unattributable without it"
-    )
-    assert "camera %s: SDES serve ffmpeg stderr" in src
-    start = src.index("return SdesSession(")
-    assert "device_id=" in src[start : start + 800], (
-        "SdesSession is constructed without a device_id, so its own stderr "
-        "log cannot name the camera"
-    )
+    from tests.ast_guards import calls_to, module_tree, sdes_bridge, string_parts
+
+    tree = module_tree("aidot_cameras.camera.sdes_open")
+    bridge = sdes_bridge()
+    # What each name in the bridge was assigned: the exit line's format is
+    # chosen into a local, and the device id is read into one.
+    assigned = {
+        t.id: n.value
+        for n in ast.walk(bridge)
+        if isinstance(n, ast.Assign)
+        for t in n.targets
+        if isinstance(t, ast.Name)
+    }
+
+    def text(node):
+        node = assigned.get(getattr(node, "id", None), node)
+        if isinstance(node, ast.IfExp):
+            return text(node.body) + text(node.orelse)
+        return string_parts(node)
+
+    exits = []
+    for call in ast.walk(bridge):
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)):
+            continue
+        if call.func.attr not in ("debug", "info", "warning", "error", "log"):
+            continue
+        args = call.args[1:] if call.func.attr == "log" else call.args
+        if args and (
+            "ffmpeg exited" in text(args[0]) or "ffmpeg stderr" in text(args[0])
+        ):
+            exits.append((call, args))
+    assert len(exits) >= 2, "the bridge exit log lines moved"
+    for call, args in exits:
+        assert text(args[0]).startswith("camera %s"), call.lineno
+        dev = assigned.get(getattr(args[1], "id", None), args[1])
+        assert "device_id" in ast.unparse(dev), call.lineno
+    sessions = calls_to(tree, "SdesSession")
+    assert sessions and all(
+        any(k.arg == "device_id" for k in s.keywords) for s in sessions
+    ), "SdesSession is constructed without a device_id"
 
 
 class _FakeProc:

@@ -84,35 +84,27 @@ def test_both_signals_together_still_keep_it_alive():
 # bridge-thread guards do.
 # --------------------------------------------------------------------------- #
 def test_the_wait_loop_wires_the_abandon_with_the_right_signals():
-    import inspect
+    """Timed from nomination, fed the bridge's Binding Success count and the
+    learned relay peers, on the configurable grace."""
+    import ast
 
-    from aidot_cameras.camera import sdes_open
+    from tests.ast_guards import calls_to, names_in, sdes_open_family
 
-    src = inspect.getsource(sdes_open)
-
-    # Timed from nomination, seeded from the pre-launch case at setup.
-    assert "_nominated_at = _media_wait_started if _early_nominated else None" in src, (
-        "the nomination timestamp is gone; the grace would measure from the open"
-    )
-
-    # The wait loop calls the policy (a call site, not the definition)...
-    calls = [
-        i
-        for i in range(len(src))
-        if src.startswith("_no_answer_abandon_due(", i)
-        and not src[:i].rstrip().endswith("def")
+    family = sdes_open_family()
+    seeds = [
+        n
+        for fn in family
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Assign)
+        and any(getattr(t, "id", None) == "_nominated_at" for t in n.targets)
+        and "_media_wait_started" in names_in(n.value)
     ]
+    assert seeds, "the nomination timestamp is not seeded from the wait's start"
+    calls = [c for fn in family for c in calls_to(fn, "_no_answer_abandon_due")]
     assert calls, "the first-media wait never calls _no_answer_abandon_due"
-
-    # ...fed the bridge's binding-success count and the learned relay peers,
-    # keyed on the env-configurable grace.
-    call = src[calls[0] : calls[0] + 500]
-    assert "_br_binding_success_count" in call, (
-        "the abandon must read the bridge's binding-success count, or it cannot "
-        "tell a silent nominee from a working one"
-    )
-    assert "prflx" in call, (
-        "the abandon must consult the learned relay peer, or it would cut the "
-        "relay-observed-peer recovery"
-    )
-    assert "_UNREACHABLE_NOMINEE_GRACE_S" in call
+    for call in calls:
+        kw = {k.arg: names_in(k.value) | {ast.unparse(k.value)} for k in call.keywords}
+        assert "_nominated_at" in kw["nominated_since_s"]
+        assert any("_br_binding_success_count" in s for s in kw["binding_success"])
+        assert any("prflx" in s for s in kw["prflx_learned"])
+        assert "_UNREACHABLE_NOMINEE_GRACE_S" in kw["grace_s"]

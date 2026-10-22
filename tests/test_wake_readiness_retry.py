@@ -134,52 +134,63 @@ def test_spent_burst_hands_back_to_the_pacer():
     assert _fast is False
 
 
-def test_burst_stays_inside_one_peerid_window():
-    # The loop passes burst_max=_PEERID_MAX_REUSE so the whole burst re-offers on
-    # the SAME peerid; a fresh one registers another camera-side session, which
-    # the camera frees only slowly (0.12.16).
-    from tests.source_parts import full_source
+def _waking_battery_run(monkeypatch, make_camera_device_client, attempts):
+    from tests.keepalive_driver import SdesKeepaliveRun, no_media
 
-    _body = full_source("_sdes_keepalive_loop_inner")
-    # One module-level bound so this loop and its tests share a number. It is
-    # NOT shared with the DTLS serve loop, which does not reuse peer ids across
-    # attempts at all - that was tried and reverted, see the constant.
+    monkeypatch.setenv("AIDOT_FUTILE_KEEPALIVE_LIMIT", "0")
+    cam = make_camera_device_client("A001513")
+    cam._live_play_not_ready = lambda: True  # every open answered -50019
+    return SdesKeepaliveRun(monkeypatch, cam, no_media(attempts)).run()
+
+
+def test_burst_stays_inside_one_peerid_window(monkeypatch, make_camera_device_client):
+    """The fast burst is as long as one peerid is reused, so the whole burst
+    re-offers on the SAME peerid; a fresh one registers another camera-side
+    session, which the camera frees only slowly (0.12.16)."""
     assert cc._PEERID_MAX_REUSE == 3
-    assert "burst_max=_PEERID_MAX_REUSE" in _body
+    run = _waking_battery_run(monkeypatch, make_camera_device_client, 8)
+    fast = [d for d in run.sleeps if d < 10.0]
+    assert len(fast) == cc._PEERID_MAX_REUSE, run.sleeps
+    assert run.sleeps[: len(fast)] == fast, "the burst comes first"
 
 
-def test_fast_retry_is_much_shorter_than_the_pacer_floor():
-    # The whole point: the pacer's floor is 10 s and escalates to 300 s; a waking
-    # camera should be re-tried well inside that.
-    from tests.source_parts import full_source
-
-    _body = full_source("_sdes_keepalive_loop_inner")
-    assert "_MIN_DELAY = 10.0" in _body
-    _delay, _fast = _CAM._not_ready_retry_delay(1, burst_max=3)
-    assert _fast is True and _delay < 10.0
+def test_fast_retry_is_much_shorter_than_the_pacer_floor(
+    monkeypatch, make_camera_device_client
+):
+    """The pacer's floor is 10 s and escalates to 300 s; a waking camera is
+    re-tried well inside that, then handed back to the pacer."""
+    run = _waking_battery_run(monkeypatch, make_camera_device_client, 6)
+    burst, rest = run.sleeps[:3], run.sleeps[3:]
+    assert max(burst) < 10.0 / 2, run.sleeps
+    assert rest and min(rest) >= 10.0, run.sleeps
 
 
 # --- what must NOT change ---------------------------------------------------- #
 
 
 def test_not_ready_never_aborts_an_open():
-    # 0.12.15: -50019 is benign and the camera recovers via ICE. Only an explicit
-    # livePlay=0 is a refusal. Guard the SDES open against a regression that turns
-    # the code back into a fast-fail.
-    import inspect
-    import aidot_cameras.camera.sdes_open as so
+    """0.12.15: -50019 is benign and the camera recovers via ICE. Only an
+    explicit livePlay=0 is a refusal: the open raises under that test and
+    under no test that reads the not-ready code."""
+    import ast
 
-    # The open and the phase coroutines it was split into.
-    _body = inspect.getsource(so._SdesOpenMixin) + "".join(
-        inspect.getsource(getattr(so, n))
-        for n in dir(so)
-        if n.startswith("_sdes_open_")
-    )
-    _idx = _body.find("_LIVE_PLAY_NOT_READY")
-    assert _idx != -1, "the SDES open no longer references the not-ready code"
-    # The only refusal branch keys on livePlay == 0, not on the code.
-    assert "if _lp_on_sdes == 0:" in _body
-    assert "raise AidotLivePlayRefused" in _body
+    from tests.ast_guards import enclosing, names_in, parents, sdes_open_family
+
+    refusals, on_code = [], []
+    for fn in sdes_open_family():
+        pm = parents(fn)
+        for r in ast.walk(fn):
+            if not isinstance(r, ast.Raise):
+                continue
+            tests = [i.test for i in enclosing(r, pm, ast.If)]
+            if any("_LIVE_PLAY_NOT_READY" in names_in(t) for t in tests):
+                on_code.append(r.lineno)
+            if any(ast.unparse(t) == "_lp_on_sdes == 0" for t in tests):
+                refusals.append(r)
+    assert refusals, "the livePlay=0 refusal is gone"
+    # The refusal is the typed error, not a bare RuntimeError.
+    assert all("AidotLivePlayRefused" in names_in(r.exc) for r in refusals)
+    assert not on_code, f"the not-ready code aborts the open at {on_code}"
 
 
 def test_constant_matches_the_documented_wire_code():

@@ -62,22 +62,33 @@ def test_media_stats_carries_the_path():
 
 
 def test_the_bridge_stamps_it_where_the_media_address_is_captured():
-    """Source guard: the bridge learns the source once, at first media."""
-    import pathlib
+    """The bridge learns the source once, at first media: the media path is
+    classified in the same block that captures the camera's media address,
+    because later sites race the first stats read."""
+    import ast
 
-    src = (
-        pathlib.Path(__file__).resolve().parents[1]
-        / "aidot_cameras"
-        / "camera"
-        / "sdes_open.py"
-    ).read_text()
-    i = src.index("_bridge_fn._cam_srtp_src = _bsrc")
-    window = src[i - 2000 : i + 600]
-    assert "_classify_media_path(" in window, (
-        "the media path must be classified at the same site that captures the "
-        "camera's media address - later sites race the first stats read"
-    )
-    assert "_media_path[0]" in window
+    from tests.ast_guards import calls_to, sdes_bridge
+
+    blocks = []
+    for node in ast.walk(sdes_bridge()):
+        for field in ("body", "orelse"):
+            stmts = getattr(node, field, None)
+            if not isinstance(stmts, list):
+                continue
+            captures = [
+                s
+                for s in stmts
+                if isinstance(s, ast.Assign)
+                and any(getattr(t, "attr", None) == "_cam_srtp_src" for t in s.targets)
+            ]
+            if captures:
+                blocks.append(stmts)
+    assert blocks, "the media address capture moved"
+    for stmts in blocks:
+        here = ast.Module(body=stmts, type_ignores=[])
+        assert calls_to(here, "_classify_media_path"), (
+            "the media path must be classified where the address is captured"
+        )
 
 
 def test_turn_ips_come_from_the_uris_the_entries_actually_carry():

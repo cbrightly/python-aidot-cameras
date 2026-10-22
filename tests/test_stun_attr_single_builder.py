@@ -5,19 +5,11 @@ Send-indication builders, both STUN responders and the USE-CANDIDATE
 USERNAME) packed the same type-length-value with 4-byte padding.
 """
 
-import pathlib
 import struct
 
 import pytest
 
 from aidot_cameras.camera.sdes_open import _stun_attr
-
-SRC = (
-    pathlib.Path(__file__).resolve().parent.parent
-    / "aidot_cameras"
-    / "camera"
-    / "sdes_open.py"
-)
 
 
 def _previous(t, v):
@@ -38,6 +30,24 @@ def test_the_result_is_padded_to_a_word():
 
 
 def test_no_hand_rolled_copy_remains():
-    src = SRC.read_text()
-    assert src.count('pack("!HH", _t, len(_v))') == 0
-    assert src.count("_stun_attr(") >= 20, "the builders call the shared helper"
+    """Every STUN attribute goes through _stun_attr: nothing else packs the
+    `!HH` type/length header of an attribute by hand."""
+    import ast
+
+    from tests.ast_guards import calls_to, function, module_tree
+
+    tree = module_tree("aidot_cameras.camera.sdes_open")
+    builder = set(ast.walk(function(tree, "_stun_attr")))
+    hand_rolled = [
+        c.lineno
+        for c in calls_to(tree, "pack")
+        if c not in builder
+        and c.args
+        and isinstance(c.args[0], ast.Constant)
+        and c.args[0].value == "!HH"
+        and len(c.args) == 3
+        and isinstance(c.args[2], ast.Call)
+        and getattr(c.args[2].func, "id", None) == "len"
+    ]
+    assert not hand_rolled, f"hand-rolled STUN attribute headers at {hand_rolled}"
+    assert calls_to(tree, "_stun_attr"), "the builders call the shared helper"

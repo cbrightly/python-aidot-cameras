@@ -62,30 +62,46 @@ def test_stderr_none_is_safe() -> None:
 def test_every_piped_spawn_installs_the_drain() -> None:
     """A serve spawned with an un-drained ``stderr=PIPE`` is the outage itself.
 
-    There are two serve-spawn sites (cold open and key-restart), and the bug
-    shipped because a pipe was opened at one of them with nothing reading it.
-    A third site, or a drain call deleted from an existing one, reintroduces it
-    exactly - and no behavioural test can see the difference until ffmpeg has
-    written ~64KB, which is far past where a unit test looks. Pin the source.
+    The pipe fills at ~64KB and blocks ffmpeg on its next write, far past where
+    a unit test looks. Every spawn in the SDES open that pipes stderr hands the
+    process to the drain in the same block.
     """
-    import inspect
+    import ast
 
-    from aidot_cameras.camera import sdes_open
+    from tests.ast_guards import calls_to, module_tree
 
-    src = inspect.getsource(sdes_open).splitlines()
-    spawns = [i for i, line in enumerate(src) if "stderr=subprocess.PIPE" in line]
-    assert spawns, (
-        "no piped spawn found in sdes_open - if the serve stopped using a pipe "
-        "this guard is obsolete, but do not delete it without checking why"
-    )
-    for line_no in spawns:
-        window = "\n".join(src[line_no : line_no + 12])
-        assert "_start_serve_stderr_drain(" in window, (
-            f"{sdes_open.__name__}:{line_no + 1} spawns with stderr=PIPE and "
-            "nothing drains it within the next few lines. An un-drained pipe "
-            "fills at ~64KB and blocks ffmpeg on its next write, which kills "
-            "the RTSP publisher and 404s every viewer"
-        )
+    tree = module_tree("aidot_cameras.camera.sdes_open")
+    spawns = 0
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            stmts = getattr(node, field, None)
+            if not isinstance(stmts, list):
+                continue
+            for i, stmt in enumerate(stmts):
+                piped = [
+                    c
+                    for c in ast.walk(stmt)
+                    if isinstance(c, ast.Call)
+                    and any(
+                        k.arg == "stderr" and ast.unparse(k.value) == "subprocess.PIPE"
+                        for k in c.keywords
+                    )
+                ]
+                if not piped or not isinstance(stmt, ast.Assign):
+                    continue
+                spawns += 1
+                proc = ast.unparse(stmt.targets[0])
+                drained = [
+                    c
+                    for later in stmts[i + 1 :]
+                    for c in calls_to(later, "_start_serve_stderr_drain")
+                    if c.args and ast.unparse(c.args[0]) == proc
+                ]
+                assert drained, (
+                    f"line {stmt.lineno} spawns with stderr=PIPE and nothing "
+                    "drains it - the pipe fills and ffmpeg blocks"
+                )
+    assert spawns, "no piped spawn found - if the serve stopped piping, re-check"
 
 
 class _TornDownProc:

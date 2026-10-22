@@ -61,8 +61,13 @@ def test_open_webrtc_stream_does_not_annotate_on_frame_as_the_dataclass():
         f"on_frame is annotated {ann!r}, which resolves to the library dataclass"
     )
 
-    src = path.read_text()
-    assert (
-        f"from av import VideoFrame as {inner}" in src
-        or "from av import VideoFrame" in src
-    ), f"on_frame is annotated {inner!r} but that name is not imported from av"
+    from_av = {
+        alias.asname or alias.name
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.ImportFrom) and node.module == "av"
+        for alias in node.names
+        if alias.name == "VideoFrame"
+    }
+    assert inner in from_av, (
+        f"on_frame is annotated {inner!r} but that name is not imported from av"
+    )

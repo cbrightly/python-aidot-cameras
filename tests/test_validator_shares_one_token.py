@@ -30,23 +30,66 @@ blind.
 
 import os
 import pathlib
-import re
 
 _REPO = pathlib.Path(__file__).resolve().parents[1]
 
 
-def _source() -> str:
-    return (_REPO / "scripts" / "live_validate.py").read_text()
+def _validator():
+    import importlib.util
+    import sys
 
-
-def test_the_validator_authenticates_through_the_shared_helper():
-    src = _source()
-    assert re.search(r"from aidot_cameras\.cloud_auth import .*_make_client", src), (
-        "live_validate must authenticate through aidot_cameras.cloud_auth so a "
-        "shared AIDOT_TOKEN_FILE is honoured; its own async_post_login() call "
-        "invalidates any token another process is holding"
+    spec = importlib.util.spec_from_file_location(
+        "live_validate_auth", _REPO / "scripts" / "live_validate.py"
     )
-    assert "_make_client(" in src
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["live_validate_auth"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class _Stop(Exception):
+    pass
+
+
+def _run_validator_login(monkeypatch):
+    """Run the validator up to its login and return what the login saw."""
+    import argparse
+    import asyncio
+
+    lv = _validator()
+    for k in ("AIDOT_USERNAME", "AIDOT_PASSWORD", "AIDOT_COUNTRY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(
+        lv,
+        "load_credentials",
+        lambda: {"username": "user@example.invalid", "password": "pw", "country": "US"},
+    )
+    seen = {}
+
+    async def _login(http, **kw):
+        seen["kw"] = kw
+        seen["env"] = {
+            k: os.environ.get(k) for k in ("AIDOT_USERNAME", "AIDOT_PASSWORD")
+        }
+        raise _Stop
+
+    monkeypatch.setattr(lv, "_make_client", _login)
+    try:
+        asyncio.run(lv._run(argparse.Namespace(json_out=None, list=True)))
+    except _Stop:
+        pass
+    return lv, seen
+
+
+def test_the_validator_authenticates_through_the_shared_helper(monkeypatch):
+    """live_validate must authenticate through aidot_cameras.cloud_auth so a
+    shared AIDOT_TOKEN_FILE is honoured; its own async_post_login() call
+    invalidates any token another process is holding."""
+    from aidot_cameras import cloud_auth
+
+    assert _validator()._make_client is cloud_auth._make_client
+    _lv, seen = _run_validator_login(monkeypatch)
+    assert "kw" in seen, "the validator never authenticated through the helper"
 
 
 def test_the_helper_is_the_one_the_cli_uses():
@@ -129,21 +172,17 @@ def test_the_repo_ships_no_token_file_path_by_default():
     assert os.environ.get("AIDOT_TOKEN_FILE") in (None, "")
 
 
-def test_credentials_travel_as_parameters_not_environment():
+def test_credentials_travel_as_parameters_not_environment(monkeypatch):
     """The validator must not publish secrets into os.environ.
 
     The first version of the token branch did exactly that - three
     setdefault calls so _make_client could re-read the same values - which
-    handed the decrypted password to every spawned child (ffmpeg included)
-    and carried a dead country assignment, because cloud_auth's old
-    module-level country default was bound at import time.
+    handed the decrypted password to every spawned child (ffmpeg included).
     """
-    src = _source()
-    assert 'os.environ.setdefault("AIDOT_USERNAME"' not in src
-    assert 'os.environ.setdefault("AIDOT_PASSWORD"' not in src
-    assert re.search(r"_make_client\(\s*\n?\s*http,\s*\n\s*username=", src), (
-        "credentials must be passed to _make_client as parameters"
-    )
+    _lv, seen = _run_validator_login(monkeypatch)
+    assert seen["kw"]["username"] == "user@example.invalid"
+    assert seen["kw"]["password"] == "pw"
+    assert seen["env"] == {"AIDOT_USERNAME": None, "AIDOT_PASSWORD": None}
 
 
 def test_an_explicit_country_beats_the_environment(tmp_path, monkeypatch):

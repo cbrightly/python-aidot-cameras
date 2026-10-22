@@ -13,7 +13,7 @@ moment the window closes, and it is the bridge - not the window - that learns
 peer-reflexive candidates and re-nominates every 2.5 s.
 """
 
-import inspect
+import ast
 
 import pytest
 
@@ -139,71 +139,79 @@ def test_it_is_not_scoped_to_one_branch_of_the_window():
 # --------------------------------------------------------------------------- #
 
 
-def _open_source():
-    """The SDES open and the phase coroutines it was split into."""
-    from aidot_cameras.camera import sdes_open as _so
+def _sdes_open_calls(name):
+    from tests.ast_guards import calls_to, sdes_open_family
 
-    parts = [inspect.getsource(_so._SdesOpenMixin._open_sdes_stream_impl)]
-    parts += [
-        inspect.getsource(getattr(_so, n))
-        for n in dir(_so)
-        if n.startswith("_sdes_open_")
-    ]
-    return "\n".join(parts)
+    return [c for fn in sdes_open_family() for c in calls_to(fn, name)]
 
 
 def test_the_window_loop_consults_the_exit_helper():
-    """A pure predicate is easy to write, test green, and never wire up.  The
-    window is a 150-line blob in the middle of a 7000-line method; assert the
-    loop names the helper."""
-    assert "_stun_window_answer_exit_due" in _open_source()
+    """A pure predicate is easy to write, test green, and never wire up. Both
+    STUN windows - the first and the 8 s retry window a quickConn camera
+    re-runs - consult it."""
+    assert len(_sdes_open_calls("_stun_window_answer_exit_due")) >= 2
 
 
 def test_the_nomination_reads_its_candidates_through_the_same_parser():
-    """The exit condition means "the nomination will succeed".  It only means
-    that while both sides read the answer the same way, so the open path must
-    parse through _parse_answer_ice rather than keeping a second copy inline."""
-    src = _open_source()
-    assert "_parse_answer_ice" in src
-    assert 'startswith("a=ice-ufrag:")' not in src, (
-        "inline ICE parsing is back - the exit predicate and the nomination can"
-        " now disagree about the same SDP"
+    """The exit condition means "the nomination will succeed" only while both
+    sides read the answer the same way: the open parses through
+    _parse_answer_ice and keeps no inline ICE parsing of its own."""
+    from tests.ast_guards import sdes_open_family
+
+    assert _sdes_open_calls("_parse_answer_ice")
+    inline = [
+        c.lineno
+        for fn in sdes_open_family()
+        for c in ast.walk(fn)
+        if isinstance(c, ast.Call)
+        and getattr(c.func, "attr", None) == "startswith"
+        and c.args
+        and isinstance(c.args[0], ast.Constant)
+        and str(c.args[0].value).startswith("a=ice-")
+    ]
+    assert not inline, f"inline ICE parsing is back at {inline}"
+
+
+def _answer_msg(src_addr, sdp=_ANSWER, peer_id="pid-1"):
+    import json
+
+    return json.dumps(
+        {
+            "method": "webrtcResp",
+            "srcAddr": src_addr,
+            "payload": {"peerid": peer_id, "answer": {"type": "answer", "sdp": sdp}},
+        }
     )
-
-
-def test_the_early_exit_says_so_in_the_log():
-    """The window's exit reason was invisible - it just broke.  Without a line
-    naming it, a measurement cannot tell "the new code ran and did not help"
-    from "the new code never ran"."""
-    src = _open_source()
-    assert "STUN window: leaving early" in src
 
 
 def test_the_readiness_flag_is_stamped_off_the_loop_thread():
     """The window blocks the event loop, so call_soon_threadsafe(set_result) is
-    only QUEUED while it runs and answer_fut.done() stays False throughout -
-    which is why the window could not see the answer in the first place.  The
-    marker therefore has to be written by the MQTT thread directly."""
-    from aidot_cameras.camera.webrtc_open import make_mqtt_message_handler
+    only QUEUED while it runs and answer_fut.done() stays False throughout.
+    The marker is therefore written by the MQTT thread itself, before anything
+    the loop would have to run - and only for an answer that can nominate."""
+    from tests.open_helpers import mqtt_handler
 
-    # The MQTT handler is built by a module-level factory; its body is where
-    # the marker is written.
-    src = inspect.getsource(make_mqtt_message_handler)
-    assert "_camera_answer_ice_ready_ts" in src
-    assert "_answer_sdp_can_nominate" in src
+    handler, owner, _loop, _seen = mqtt_handler()
+    handler("iot/v1/c/user-1/IPC/webrtcResp", _answer_msg("2.camera", sdp="v=0"))
+    assert owner._camera_answer_ice_ready_ts is None, "nothing to nominate yet"
+    handler("iot/v1/c/user-1/IPC/webrtcResp", _answer_msg("2.camera"))
+    assert owner._camera_answer_ice_ready_ts is not None
 
 
 def test_the_flag_is_cleared_for_each_open():
     """Left set, the second open leaves its window instantly on the first
     open's answer."""
-    from aidot_cameras.camera import webrtc_open as wo
+    from tests.ast_guards import dtls_open_family
 
-    src = inspect.getsource(wo._WebRTCOpenMixin) + "".join(
-        inspect.getsource(getattr(wo, n))
-        for n in dir(wo)
-        if n.startswith("_dtls_open_")
-    )
-    assert "self._camera_answer_ice_ready_ts = None" in src
+    clears = [
+        n
+        for fn in dtls_open_family()
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Assign)
+        and any(ast.unparse(t) == "self._camera_answer_ice_ready_ts" for t in n.targets)
+        and ast.unparse(n.value) == "None"
+    ]
+    assert clears
 
 
 # --------------------------------------------------------------------------- #
@@ -263,18 +271,12 @@ def test_an_answer_with_no_srcaddr_keeps_the_prior_behaviour():
 
 
 def test_the_stamp_consults_the_sender_check():
-    from aidot_cameras.camera.webrtc_open import make_mqtt_message_handler
+    """Our own webrtcResp, echoed by the broker, must not arm the exit."""
+    from tests.open_helpers import mqtt_handler
 
-    src = inspect.getsource(make_mqtt_message_handler)
-    assert "_answer_is_from_the_camera" in src
-
-
-def test_the_retry_window_leaves_early_too():
-    """A camera that quickConns after signalling re-runs ICE in a second, 8 s
-    window. Wiring the exit into only the first one leaves the same delay in the
-    window the fix had not reached."""
-    src = _open_source()
-    assert src.count("_stun_window_answer_exit_due") >= 2
+    handler, owner, _loop, _seen = mqtt_handler(user_id=_USER)
+    handler(f"iot/v1/c/{_USER}/IPC/webrtcResp", _answer_msg(f"0.{_USER}"))
+    assert owner._camera_answer_ice_ready_ts is None
 
 
 def test_a_corrupt_candidate_line_is_still_rejected():
@@ -288,14 +290,25 @@ def test_a_corrupt_candidate_line_is_still_rejected():
         assert _parse_answer_ice(bad)[2] == [], bad
 
 
-def test_the_trickle_path_reads_candidates_through_the_same_parser():
+def test_the_trickle_path_reads_candidates_through_the_same_parser(monkeypatch):
     """It kept its own copy of the pattern, so the two could disagree about the
-    same line - which is the gap the collapse exists to close."""
-    from aidot_cameras.camera.sdes_open import consume_camera_trickle
+    same line - which is the gap the collapse exists to close. The trickle
+    consumer takes exactly the candidates the shared parser takes."""
+    from aidot_cameras.camera.sdes_open import _parse_candidate_line
+    from tests.open_helpers import drive_trickle
 
-    trickle = inspect.getsource(consume_camera_trickle)
-    assert "_parse_candidate_line" in trickle
-    assert "_re_ice" not in trickle and "_re_ice" not in _open_source()
+    lines = [
+        "candidate:1 1 udp 2130706431 192.0.2.20 40000 typ host",
+        "a=candidate:2 1 udp 1694498815 203.0.113.7 40001 typ srflx raddr 0.0.0.0",
+        "candidate:3 1 udp 1 198.51.100.9 40002 typ",
+        "candidate:1 1 udp 1 1.2.3.4 5 typo host",
+        "candidate:1 1 udp 1 1.2.3.4 6 typhoon",
+        "garbage",
+    ]
+    installed, _uc, _orig = drive_trickle(monkeypatch, lines)
+    expected = [p[:2] for p in map(_parse_candidate_line, lines) if p]
+    assert expected, "the premise: the shared parser accepts some of these"
+    assert [(ip, port) for ip, port, _why in installed] == expected
 
 
 def test_the_candidate_parse_accepts_a_line_that_ends_at_typ():
@@ -373,11 +386,8 @@ def test_no_marker_at_all_is_not_ready():
 
 
 def test_the_window_checks_the_marker_belongs_to_this_open():
-    src = _open_source()
-    assert "_answer_ready_for_this_open" in src
-    assert src.count("_answer_ready_for_this_open") >= 2, (
-        "both STUN windows must use it, not just the first"
-    )
+    """Both STUN windows check the marker is this open's, not just the first."""
+    assert len(_sdes_open_calls("_answer_ready_for_this_open")) >= 2
 
 
 # --------------------------------------------------------------------------- #

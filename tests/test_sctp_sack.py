@@ -18,8 +18,6 @@ and SD listing stop answering about a minute into every session - they all ride
 this channel.
 """
 
-import re
-
 from aidot_cameras.camera.sdes_open import (
     _sctp_advance_cum_tsn,
     _sctp_sack_chunk,
@@ -81,18 +79,17 @@ class TestItIsActuallyWiredIn:
     is exactly the state this file was written to end."""
 
     def test_the_inbound_data_branch_sacks_before_it_dispatches(self):
-        import inspect
-        from aidot_cameras.camera import sdes_open
+        """Inbound DATA must be acknowledged, or the camera ABORTs the
+        association (the 80.2 s cliff). The SACK is built from the advanced
+        cumulative TSN and actually sent."""
+        from tests.ast_guards import calls_to, sctp_data_branch
 
-        src = inspect.getsource(sdes_open)
-        m = re.search(
-            r'elif _pd_ct8 == 0x00 and _sct == "DONE":(.*?)_sc_pay =', src, re.S
-        )
-        assert m, "the inbound SCTP DATA branch has moved or gone"
-        branch = m.group(1)
-        assert "_sctp_sack_chunk" in branch, (
-            "inbound DATA is not acknowledged - the camera will ABORT the "
-            "association and the 80.2 s cliff comes back"
-        )
-        assert "_sctp_advance_cum_tsn" in branch
-        assert "_br_send_to_cam" in branch, "the SACK is built but never sent"
+        branch = sctp_data_branch()
+        sack = calls_to(branch, "_sctp_sack_chunk")
+        assert sack, "inbound DATA is not acknowledged"
+        assert calls_to(branch, "_sctp_advance_cum_tsn")
+        sends = calls_to(branch, "_br_send_to_cam")
+        assert sends, "the SACK is built but never sent"
+        assert min(s.lineno for s in sends) < min(
+            c.lineno for c in calls_to(branch, "_sctp_reassemble")
+        ), "acknowledge before dispatch"

@@ -262,30 +262,40 @@ def test_period_knob(raw, expected):
 # session); as the neighbouring loop tests do, check the source for the calls.
 
 
-def test_the_sdes_keepalive_loop_ticks_a_reporter_every_poll():
-    from tests.source_parts import full_source
+def test_the_sdes_keepalive_loop_ticks_a_reporter_every_poll(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """One health line per period, carrying the session's counters and this
+    loop's viewer answer."""
+    from tests.keepalive_driver import FakeSession, SdesKeepaliveRun
 
-    src = full_source("_sdes_keepalive_loop_inner")
-    made = src.index("_health = HealthReporter(self.device_id)")
-    wait = src.index("_fin, _ = await asyncio.wait({_done}, timeout=5.0)")
-    tick = src.index("_health.tick(", wait)
-    assert made < wait < tick, "the reporter is made once and ticked after every poll"
-    assert "session.media_stats()" in src[tick : tick + 300]
-    assert "_health_viewer = _present" in src
+    monkeypatch.setenv("AIDOT_HEALTH_LINE_S", "10")
+    cam = make_camera_device_client("A001064")
+    with caplog.at_level(logging.INFO, logger=health.__name__):
+        SdesKeepaliveRun(
+            monkeypatch, cam, [FakeSession(life=61)], viewer=lambda n: True
+        ).run()
+    lines = [r.getMessage() for r in caplog.records if r.name == health.__name__]
+    assert len(lines) >= 4, lines
+    assert all(f"camera {cam.device_id}: health" in m for m in lines)
+    assert "viewers=present" in lines[-1] and "packets=" in lines[-1]
 
 
-def test_the_dtls_serve_loop_reports_on_its_own_cadence():
-    from tests.source_parts import full_source
+def test_the_dtls_serve_loop_reports_on_its_own_cadence(
+    monkeypatch, make_camera_device_client, caplog
+):
+    from tests.keepalive_driver import DtlsServeRun, FakeDtlsSession
 
-    src = full_source("_dtls_serve_loop_inner")
-    made = src.index("_health_dtls = HealthReporter(self.device_id)")
-    due = src.index("if _health_dtls.due(_now):")
-    assert made < due
-    body = src[due : due + 900]
-    assert "_dtls_snapshot(" in body
-    assert "progress[0]" in body and "_watching_dtls" in body
-    assert "except Exception" in body, "a failed report must never end the session"
-    assert "_watching_dtls = _watching" in src
+    monkeypatch.setenv("AIDOT_HEALTH_LINE_S", "0.15")  # the DTLS loop is on real time
+    cam = make_camera_device_client("A000088")
+    cam._stream_idle_opt = 30.0
+    with caplog.at_level(logging.INFO, logger=health.__name__):
+        DtlsServeRun(
+            monkeypatch, cam, [FakeDtlsSession()], viewer=lambda e: True, timeout=1.0
+        ).run()
+    lines = [r.getMessage() for r in caplog.records if r.name == health.__name__]
+    assert len(lines) >= 2, lines
+    assert "viewers=present" in lines[-1]
 
 
 def test_fmt_bytes():

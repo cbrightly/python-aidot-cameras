@@ -85,6 +85,7 @@ If the script refuses on the new base, a fix introduced a shape it does not
 convert safely; adjust the fix (or the script) on the base first rather than
 editing the generated output.
 
-Source-pinning tests read the split methods through
-`tests/source_parts.without_state` (or `full_source`, which applies it), which
-drops the `ps.` prefix, so their pins hold in both forms.
+The structural tests on the split methods match on names in the AST
+(`tests/ast_guards.py`), never on source text, so a `ps.` prefix does not move
+them; the behaviours the methods carry are tested by driving them
+(`tests/keepalive_driver.py`, `tests/open_helpers.py`).
