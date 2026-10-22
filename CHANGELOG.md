@@ -12,6 +12,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   1.0.0b9 and said it would be removed in 1.0.0; it was never listed in
   docs/API-STABILITY.md. Call `async_open_webrtc_stream` instead.
 
+### Fixed
+- **A region that breaks out of a serve loop ends it.** `_LoopBreak`
+  subclassed `_LoopContinue` and the SDES keepalive and DTLS serve loops
+  tested for a continue first, so a break would have gone round the loop
+  again. No region breaks today, so nothing changed in behaviour; the two
+  signals are separate classes now and both loops test for a break first.
+
 ## [1.0.0rc59]
 
 ### Fixed

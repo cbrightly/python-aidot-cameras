@@ -1435,8 +1435,17 @@ class _LoopContinue:
         self.outputs = outputs
 
 
-class _LoopBreak(_LoopContinue):
-    """A region breaking out of the loop, with what it bound first."""
+class _LoopBreak:
+    """A region breaking out of the loop, with what it bound first.
+
+    Not a subclass of ``_LoopContinue``: the loops test for a continue with
+    ``isinstance``, and a break that matched it would continue instead.
+    """
+
+    __slots__ = ("outputs",)
+
+    def __init__(self, outputs):
+        self.outputs = outputs
 
 
 async def _dtls_serve_loop_open_attempt(self, _in: dict) -> dict:
@@ -6647,6 +6656,8 @@ class CameraMixin(
                 _peer_reuses = _o["_peer_reuses"]
             if "session" in _o:
                 session = _o["session"]
+            if isinstance(_flow, _LoopBreak):
+                break
             if isinstance(_flow, _LoopContinue):
                 continue
 
@@ -7530,6 +7541,8 @@ class CameraMixin(
                 session = _o["session"]
             if "vq" in _o:
                 vq = _o["vq"]
+            if isinstance(_flow, _LoopBreak):
+                break
             if isinstance(_flow, _LoopContinue):
                 continue
 
