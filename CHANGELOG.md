@@ -29,6 +29,9 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   loop's slow-probe wait sleeps in steps of this size; set to 0 or below it
   slept 0 s per step and spun for the whole interval. A value under 0.1 now
   reads as 0.1.
+- **`AidotCameraWrongCodec` is importable from the package root**, like every
+  other exception type docs/API-STABILITY.md promises. It was only reachable
+  as `aidot_cameras.exceptions.AidotCameraWrongCodec`.
 
 ## [1.0.0rc59]
 
