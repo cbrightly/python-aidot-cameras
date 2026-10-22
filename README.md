@@ -599,11 +599,13 @@ copying `custom_components/aidot/`).
 
 ## Environment variables
 
-The ones below are the ones a user may set. The rest - tuning knobs added
-during investigations, most of them for one camera model, all of them with
-defaults that were measured - are listed in
-[docs/ENVIRONMENT.md](https://github.com/cbrightly/python-aidot-cameras/blob/main/docs/ENVIRONMENT.md),
-with the release each may be removed in.
+The ones below are the ones a user may set, and they are part of the
+library's public surface. The rest - tuning knobs added during
+investigations, most of them for one camera model, all of them with defaults
+that were measured - are listed in
+[docs/ENVIRONMENT.md](https://github.com/cbrightly/python-aidot-cameras/blob/main/docs/ENVIRONMENT.md);
+they are not part of that surface and may be removed once the behaviour they
+tune has settled.
 
 The library reads the following environment variables.
 
@@ -618,6 +620,7 @@ stored credentials file. See [`aidot_cameras/credentials.py`](https://github.com
 | `AIDOT_PASSWORD` | AiDot account password. Used with `AIDOT_USERNAME`. | (none) |
 | `AIDOT_COUNTRY` | Account region/country code. | `US` |
 | `AIDOT_TOKEN_FILE` | Path of a JSON file that caches the login across restarts; token rotations are written back to it. Used by the `aidot-go2rtc` CLI (see [Installing](#installing)); one file shared by every process on the account, since a second login invalidates the first's token. | (none) |
+| `AIDOT_INCLUDE_SHARED_HOUSES` | Also list houses this account does not own (the cameras a shared-home member sees). The live-validation account is such a member and sets it; unset, those houses are skipped. | `0` |
 
 ### Camera streaming / tuning
 
@@ -631,6 +634,7 @@ knob is in
 | `AIDOT_VIDEO_DECODER` | Force a video decoder instead of measuring one: a decoder name (`h264_v4l2m2m`), or an acceleration method prefixed with `hwaccel:` (`hwaccel:videotoolbox`). The prefix is required because the two are not interchangeable - VideoToolbox and VAAPI have no decoder to name. | (measured) |
 | `AIDOT_DISABLE_HWACCEL` | Keep to software decoding and skip the measurement entirely. | (unset) |
 | `AIDOT_MAX_CONCURRENT_STREAMS` | Caps how many cameras stream at once. | `3` |
+| `AIDOT_MAX_CONCURRENT_OPENS` | Caps how many stream opens run concurrently across all cameras. | `2` |
 | `AIDOT_SDES_CONNECTION_MODE` | Which media path the SDES offer proposes: `auto` (default - every reachable candidate, and ICE priority prefers the LAN with the relay as last resort; measured on the full fleet, six of seven cameras stream direct and only the unit with no route to us rides the relay), `lan` (no relay at all, though battery cameras keep the relay regardless because a cloud-woken camera has no other path back), or `relay` (EXPERIMENTAL, and on the reference fleet it does not steer: even with `c=`/`m=` moved to the relay allocation and the WAN permission pre-installed, an A001064 and an A001513 both dialed our host address directly, learning it from our own ICE probes - forcing the relay for real would mean suppressing every direct-path outbound, which is unbuilt). Per-open `sdes_connection_mode` beats the env. Every session reports the path its media actually took as `media_stats().media_path` (`direct`/`relay`). | unset (`auto`) |
 | `AIDOT_SDES_VIDEO_PT` | Pin the SDES offer to ONE video codec by payload type, so the camera cannot choose. The offer advertises 96 (H264) and 97 (H265) and the camera decides which to send; on an A001064 that means the same request comes back h264 1280x720 most sessions and hevc 2560x1440 occasionally, at a third of the bitrate. Set to `96` for H264 only (measured h264 720p in 4 of 4 sessions). **Do not set it to `97`** - an H265-only offer returned no video at all in 3 of 3 rounds; narrowing to H265 removes the option rather than selecting it. | `96` (H.264; `none` leaves the camera its choice) |
 | `AIDOT_PERSISTENT_MQTT` | Reuse ONE account-level persistent MQTT connection for commands, attribute fetches, and stream-open signaling (matching the official app) instead of connecting per operation. **On by default** (live soaks cut SDES NO_MEDIA from ~57% to ~11-19%); set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
@@ -643,10 +647,32 @@ knob is in
 
 Opt-in knobs that tighten the camera transport. Defaults preserve current
 behavior (the firmware's signaling doesn't carry verifiable material, so strict
-modes are off until you pin a value); each emits a one-time warning when left at
-the permissive default.
+modes are off until you pin a value), and the library warns in its log when one
+is left at the permissive default.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `AIDOT_ALLOW_LAN_SERVE` | Silences the warning emitted when decrypted media is served on a non-loopback bind (e.g. `0.0.0.0`), where any host on the LAN can read the unencrypted stream. Set when an exposed bind is intentional. | unset (warn on non-loopback) |
 | `AIDOT_CRED_KEY_FILE` | Path to the Fernet key file for stored credentials. Point it outside the config dir (ideally a separate secret store) so the key isn't co-located with the ciphertext. Applies to the default credentials path only (ignored when an explicit `creds_path` is passed). | `$XDG_CONFIG_HOME/aidot/.key` (falls back to `~/.config/aidot/.key`) |
+| `AIDOT_DTLS_PINNED_FP` | Pin the DTLS camera's certificate to this `sha-256` fingerprint. Unset, a DTLS camera's certificate is **not** independently verified (see below). Set, a camera presenting any other certificate, or none, fails the handshake. Case and `:` separators are ignored. | unset (no independent check; warns when the certificate is accepted as presented) |
+| `AIDOT_SDES_HOLEPUNCH_HOST` | Override the NAT hole-punch target used when the cloud supplies no TURN entry. By default a STUN packet goes to a hardcoded vendor TURN host; set this to a host of your choice, or empty (`AIDOT_SDES_HOLEPUNCH_HOST=`) to disable the hardcoded fallback entirely. | unset (hardcoded vendor host + warn) |
+
+**DTLS cameras' certificates are not verified unless `AIDOT_DTLS_PINNED_FP`
+is set.** This applies to the DTLS models (the A000088 family); SDES cameras
+key their media through signaling and have no certificate to check. Without a
+pin there is nothing independent to check the camera's certificate against:
+in the role-reversal handshake the camera echoes our own fingerprint back, and
+some answers carry an empty fingerprint line, so in those cases the library
+accepts whatever certificate the camera presents and logs a warning on that
+open saying so. When an answer does carry a fingerprint, the certificate is
+checked against it, but that value arrives over the same cloud signaling and
+proves no more than the signaling does. Either way the media is encrypted but
+not authenticated against something on the path standing in for the camera.
+
+With a pin set, every DTLS open checks the certificate the camera actually
+presents and fails closed: a different certificate, no certificate, or an
+error reading it ends the open instead of accepting the camera. A mismatch is
+logged with the fingerprint the camera presented. The value is read on every
+open and applies to every DTLS camera the process opens, so it fits a process
+that streams one camera (the `aidot-go2rtc` CLI) or cameras that share a
+certificate.
