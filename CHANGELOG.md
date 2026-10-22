@@ -6,6 +6,11 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+- A `test` extra: `pip install -e ".[test]"` installs what both test tiers
+  need (the `webrtc` extra, pytest, pytest-asyncio, pytest-timeout,
+  pytest-xdist, amqtt and pyflakes).
+
 ### Removed
 - **`async_open_kvs_stream`**, the pre-rename alias of
   `async_open_webrtc_stream`. It has warned with a `DeprecationWarning` since
