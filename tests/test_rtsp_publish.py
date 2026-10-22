@@ -26,7 +26,6 @@ import pytest
 from aidot_cameras.camera import rtsp_publish as rp
 from aidot_cameras.g711 import linear2alaw
 
-from tests.source_parts import without_state
 
 # --------------------------------------------------------------------------- #
 # fake go2rtc                                                                  #
@@ -1586,36 +1585,60 @@ def test_sdes_direct_publish_decision(monkeypatch):
 
 
 def test_the_open_passes_the_plain_rtp_decision_through():
-    import inspect
+    """The direct-publish decision the serve acts on is told whether the media
+    reaches it decrypted and which video codec was negotiated: a decision made
+    without them publishes SRTP ciphertext or an unvalidated codec."""
+    import ast
 
-    from aidot_cameras.camera import sdes_open
+    from tests.ast_guards import calls_to, names_in, sdes_open_family
 
-    src = without_state(inspect.getsource(sdes_open))
-    assert (
-        "_direct_publish = _should_direct_publish(\n"
-        "            rtsp_push_url, output_path, max_seconds, _use_plain_rtp, _keep_v\n"
-    ) in src
+    decisions = [
+        n.value
+        for fn in sdes_open_family()
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Assign)
+        and any(getattr(t, "id", None) == "_direct_publish" for t in n.targets)
+        and calls_to(n.value, "_should_direct_publish")
+    ]
+    assert len(decisions) == 1, "the open's direct-publish decision moved"
+    args = decisions[0].args
+    assert len(args) == 5
+    assert "_use_plain_rtp" in names_in(args[3]) and "_keep_v" in names_in(args[4])
 
 
 def test_both_sdes_serve_launches_go_through_the_spawn_helper():
-    """Source guard: the first launch AND the SRTP key-change relaunch must
-    both use ``_spawn_serve`` - a raw ``subprocess.Popen`` left at either site
-    would silently bring ffmpeg back with direct publish on."""
-    import inspect
+    """The first launch AND the SRTP key-change relaunch both use
+    ``_spawn_serve`` - a raw ``subprocess.Popen`` left at either site would
+    silently bring ffmpeg back with direct publish on - and the helper reads
+    the SDP through the executor, never with a blocking open() on the loop."""
+    import ast
 
-    from aidot_cameras.camera import sdes_open
+    from tests.ast_guards import (
+        calls_to,
+        function,
+        module_tree,
+        name_of,
+        sdes_open_family,
+    )
 
-    src = without_state(inspect.getsource(sdes_open))
-    assert src.count("proc = await _spawn_serve()") == 2
-    # The SDP read goes through the executor: Home Assistant flags a blocking
-    # open() in the event loop, and this one runs on the open's hot path.
-    assert 'with open(sdp_path, encoding="utf-8") as _f_dp' not in src
-    assert "_dp_sdp = await asyncio.get_running_loop().run_in_executor(" in src
-    body = src[src.index("def _spawn_serve():") :]
-    body = body[: body.index("# Do not launch the publisher")]
-    assert "LoopbackRtpPublisher(" in body and "subprocess.Popen(" in body
-    # The serve Popen exists only inside the helper now.
-    assert src.count("subprocess.Popen(") == 1
+    family = sdes_open_family()
+    launches = [
+        n
+        for fn in family
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Await) and name_of(n.value) == "_spawn_serve"
+    ]
+    assert len(launches) == 2
+    spawn = function(module_tree("aidot_cameras.camera.sdes_open"), "_spawn_serve")
+    assert calls_to(spawn, "LoopbackRtpPublisher") and calls_to(spawn, "Popen")
+    popens = [c for fn in family for c in calls_to(fn, "Popen")]
+    assert all(c in set(ast.walk(spawn)) for c in popens), (
+        "the serve Popen exists only inside the helper"
+    )
+    assert not [
+        c for c in ast.walk(spawn) if isinstance(c, ast.Call) and name_of(c) == "open"
+    ]
+    assert calls_to(spawn, "run_in_executor"), "the SDP read goes through the executor"
 
 
 @pytest.mark.parametrize(
@@ -2261,18 +2284,6 @@ def test_direct_publish_is_gated_to_the_validated_codec(monkeypatch):
     assert not _should_direct_publish(url, None, None, True, 97)  # H.265
     # Codec not known yet (no narrowing): the caller decides later.
     assert _should_direct_publish(url, None, None, True, None)
-
-
-def test_the_open_passes_the_narrowed_codec_to_the_decision():
-    import inspect
-
-    from aidot_cameras.camera import sdes_open
-
-    src = without_state(inspect.getsource(sdes_open))
-    assert (
-        "_direct_publish = _should_direct_publish(\n"
-        "            rtsp_push_url, output_path, max_seconds, _use_plain_rtp, _keep_v\n"
-    ) in src
 
 
 # --------------------------------------------------------------------------- #

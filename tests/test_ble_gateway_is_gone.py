@@ -36,16 +36,24 @@ def test_it_cannot_be_imported():
 
 
 def test_nothing_in_the_package_still_references_it():
+    """No import, name or attribute in the package refers to the removed BLE
+    gateway (comments and prose do not count)."""
+    import ast
+
+    from tests.ast_guards import package_modules
+
     offenders = []
-    for root, _dirs, files in os.walk(PACKAGE):
-        for fn in files:
-            if not fn.endswith(".py"):
-                continue
-            path = os.path.join(root, fn)
-            with open(path, encoding="utf-8") as fh:
-                for lineno, line in enumerate(fh, 1):
-                    if "ble_gateway" in line or "BleMesh" in line:
-                        offenders.append(
-                            "%s:%d" % (os.path.relpath(path, PACKAGE), lineno)
-                        )
+    for path in package_modules():
+        for node in ast.walk(ast.parse(path.read_text())):
+            names = []
+            if isinstance(node, ast.Name):
+                names = [node.id]
+            elif isinstance(node, ast.Attribute):
+                names = [node.attr]
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = [a.name for a in node.names] + [
+                    getattr(node, "module", "") or ""
+                ]
+            if any("ble_gateway" in n or "BleMesh" in n for n in names):
+                offenders.append(f"{path.name}:{node.lineno}")
     assert not offenders, "stale references: %s" % offenders

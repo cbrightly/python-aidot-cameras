@@ -169,23 +169,26 @@ def test_fast_retry_is_much_shorter_than_the_pacer_floor(
 
 
 def test_not_ready_never_aborts_an_open():
-    # 0.12.15: -50019 is benign and the camera recovers via ICE. Only an explicit
-    # livePlay=0 is a refusal. Guard the SDES open against a regression that turns
-    # the code back into a fast-fail.
-    import inspect
-    import aidot_cameras.camera.sdes_open as so
+    """0.12.15: -50019 is benign and the camera recovers via ICE. Only an
+    explicit livePlay=0 is a refusal: the open raises under that test and
+    under no test that reads the not-ready code."""
+    import ast
 
-    # The open and the phase coroutines it was split into.
-    _body = inspect.getsource(so._SdesOpenMixin) + "".join(
-        inspect.getsource(getattr(so, n))
-        for n in dir(so)
-        if n.startswith("_sdes_open_")
-    )
-    _idx = _body.find("_LIVE_PLAY_NOT_READY")
-    assert _idx != -1, "the SDES open no longer references the not-ready code"
-    # The only refusal branch keys on livePlay == 0, not on the code.
-    assert "if _lp_on_sdes == 0:" in _body
-    assert "raise RuntimeError" in _body
+    from tests.ast_guards import enclosing, names_in, parents, sdes_open_family
+
+    refusals, on_code = [], []
+    for fn in sdes_open_family():
+        pm = parents(fn)
+        for r in ast.walk(fn):
+            if not isinstance(r, ast.Raise):
+                continue
+            tests = [i.test for i in enclosing(r, pm, ast.If)]
+            if any("_LIVE_PLAY_NOT_READY" in names_in(t) for t in tests):
+                on_code.append(r.lineno)
+            if any(ast.unparse(t) == "_lp_on_sdes == 0" for t in tests):
+                refusals.append(r.lineno)
+    assert refusals, "the livePlay=0 refusal is gone"
+    assert not on_code, f"the not-ready code aborts the open at {on_code}"
 
 
 def test_constant_matches_the_documented_wire_code():

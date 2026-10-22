@@ -30,13 +30,26 @@ source-level guard that the stall path actually calls them (same shape as
 ``test_reap_sets_teardown_flag_before_kill``).
 """
 
+import ast
 import inspect
-import re
 import logging
 
 import pytest
 
 import aidot_cameras.camera.sdes_open as sdes_open
+from tests.ast_guards import (
+    attr_writes,
+    calls_to,
+    enclosing,
+    function,
+    log_calls,
+    module_tree,
+    names_in,
+    parents,
+    sdes_bridge,
+    sdes_open_family,
+    string_parts,
+)
 from aidot_cameras.camera.sdes_open import (
     _first_media_stall_report,
     _probe_source_verdict,
@@ -280,20 +293,45 @@ def test_a_wait_no_rule_abandoned_leaves_the_line_unchanged():
 @pytest.mark.parametrize(
     "rule, reason",
     [
-        ("_stale_offer_abandon_due(", "stale-offer"),
-        ("_no_answer_abandon_due(", "unreachable-nominee"),
-        ("_no_probe_abandon_due(", "no-probe"),
-        ("_trigger_unacked_abandon_due(", "trigger-unacked"),
+        ("_stale_offer_abandon_due", "stale-offer"),
+        ("_no_answer_abandon_due", "unreachable-nominee"),
+        ("_no_probe_abandon_due", "no-probe"),
+        ("_trigger_unacked_abandon_due", "trigger-unacked"),
     ],
 )
 def test_each_abandon_rule_records_its_reason_for_the_report(rule, reason):
-    block = _first_media_wait_block()
-    at = block.index("if " + rule)
-    brk = block.index("break", at)
-    assert '_abandoned_by = "%s"' % reason in block[at:brk], (
-        "the %s branch must record %r before breaking out" % (rule, reason)
-    )
-    assert "abandoned_by=_abandoned_by" in block
+    """The open cannot be driven here; its AST must show each abandon branch
+    recording its reason before it breaks out, and the report taking it."""
+    family = sdes_open_family()
+    branches = [
+        n
+        for fn in family
+        for n in ast.walk(fn)
+        if isinstance(n, ast.If) and calls_to(n.test, rule)
+    ]
+    assert branches, f"no branch is gated on {rule}"
+    for branch in branches:
+        records = [
+            s
+            for s in ast.walk(branch)
+            if isinstance(s, ast.Assign)
+            and any(getattr(t, "id", None) == "_abandoned_by" for t in s.targets)
+            and isinstance(s.value, ast.Constant)
+            and s.value.value == reason
+        ]
+        assert records, f"the {rule} branch must record {reason!r}"
+        breaks = [s.lineno for s in ast.walk(branch) if isinstance(s, ast.Break)]
+        assert not breaks or records[0].lineno < min(breaks)
+    reports = [
+        c
+        for fn in family
+        for c in calls_to(fn, "report_first_media_stall")
+        if any(
+            k.arg == "abandoned_by" and getattr(k.value, "id", "") == "_abandoned_by"
+            for k in c.keywords
+        )
+    ]
+    assert reports, "the report is not handed the recorded reason"
 
 
 def test_a_truncated_probe_list_says_how_many_it_dropped():
@@ -319,11 +357,98 @@ def test_the_report_carries_no_key_material_shaped_field():
 # the two bridge-thread facts have to be published where the stall path can
 # read them.
 # --------------------------------------------------------------------------- #
-def _first_media_wait_block() -> str:
-    src = inspect.getsource(sdes_open)
-    start = src.index("_media_deadline = time.monotonic() + _FIRST_MEDIA_WAIT_S")
-    end = src.index("cmd = _build_sdes_serve_cmd(", start)
-    return src[start:end]
+def test_the_report_is_gated_on_the_wait_actually_having_failed():
+    """A working open must emit nothing new above DEBUG. Both ways out of the
+    wait without media - expiry and a caller cancelling - emit the report, and
+    every one of those calls is gated on the wait's own unmet exit condition."""
+    sites = [
+        c
+        for fn in sdes_open_family()
+        for c in calls_to(fn, "_report_first_media_stall")
+    ]
+    assert len(sites) >= 2, "both the expiry and the cancellation path must report"
+    for fn in sdes_open_family():
+        pm = parents(fn)
+        for call in calls_to(fn, "_report_first_media_stall"):
+            gates = [ast.unparse(i.test) for i in enclosing(call, pm, ast.If)]
+            assert any("_first_video_pt[0] is None" in g for g in gates), (
+                f"line {call.lineno}: a stall report not gated on the wait failing"
+            )
+
+
+def test_every_bridge_counter_the_report_reads_is_published():
+    """The report reads the bridge's counters with getattr defaults, so one
+    that is a thread-local and never published reads as 0 or False for ever -
+    the trigger flag, the Binding Success count, the probe verdicts. Every
+    attribute it reads must be one the bridge assigns on itself."""
+    report = function(
+        module_tree("aidot_cameras.camera.sdes_open"), "report_first_media_stall"
+    )
+    read = {
+        c.args[1].value
+        for c in calls_to(report, "getattr")
+        if len(c.args) >= 2
+        and getattr(c.args[0], "id", None) == "bridge"
+        and isinstance(c.args[1], ast.Constant)
+    }
+    assert {
+        "_tutk_trigger_sent",
+        "_br_binding_success_count",
+        "_br_probe_verdicts",
+    } <= read
+    published = attr_writes(sdes_bridge(), "_bridge_fn") | attr_writes(
+        function(module_tree("aidot_cameras.camera.sdes_open"), "make_sdes_bridge"),
+        "_bridge_fn",
+    )
+    assert not read - published, sorted(read - published)
+
+
+def test_the_binding_success_counter_is_not_an_alias_for_the_trigger_flag():
+    """'No Binding Success ever arrived' and 'one arrived and the trigger still
+    did not go' are different diagnoses: the counter is incremented outside the
+    trigger's own gate."""
+    bridge = sdes_bridge()
+    pm = parents(bridge)
+    bumps = [
+        n
+        for n in ast.walk(bridge)
+        if isinstance(n, ast.AugAssign)
+        and getattr(n.target, "id", None) == "_br_binding_success_count"
+    ]
+    assert bumps, "the Binding Success counter is gone"
+    for bump in bumps:
+        gates = [names_in(i.test) for i in enclosing(bump, pm, ast.If)]
+        assert not any("_tutk_trigger_sent" in g for g in gates), (
+            "the counter increments inside the trigger gate"
+        )
+
+
+def test_the_dropped_probe_count_is_distinct_sources_not_packets():
+    """One unrecorded source probing 50 times is one source, not 50: the
+    overflow is a set of source labels, never a per-packet counter."""
+    bridge = sdes_bridge()
+    adds = [
+        c
+        for c in calls_to(bridge, "add")
+        if ast.unparse(c.func) == "_br_probe_overflow.add"
+    ]
+    assert adds, "the overflow tracker must collect distinct probe-source labels"
+    assert not [
+        n
+        for n in ast.walk(bridge)
+        if isinstance(n, ast.AugAssign) and "_br_probe_overflow" in names_in(n.target)
+    ], "a bare += counts packets"
+
+
+def test_the_per_probe_veto_stays_out_of_the_per_packet_log_level():
+    """The self-loop drop fires per packet; it stays at DEBUG so the single
+    stall WARNING is not drowned."""
+    calls = [
+        c
+        for c in log_calls(sdes_bridge())
+        if c.args and "self-loop STUN peer" in string_parts(c.args[0])
+    ]
+    assert calls and {c.func.attr for c in calls} == {"debug"}
 
 
 def _emit_stall_report(caplog, *, nominated_seen=(), uc_cands=()):
@@ -354,30 +479,6 @@ def test_the_stall_path_calls_the_report_helper_at_warning(caplog):
     assert "cam-1" in warnings[0].getMessage()
 
 
-def test_the_report_is_gated_on_the_wait_actually_having_failed():
-    """A working open must emit nothing new above DEBUG.
-
-    There are now two ways out of the wait without media - it expires, or a
-    caller cancels first - so both call the same local emitter and BOTH have to
-    be gated. Asserting on the emitter's call sites rather than on the builder's
-    single call inside it, because the builder now lives in a closure defined
-    before the wait, where no guard could precede it.
-    """
-    block = _first_media_wait_block()
-    sites = [m.start() for m in re.finditer(r"_report_first_media_stall\(", block)]
-    # The definition itself is not a call site.
-    sites = [i for i in sites if "def " not in block[max(0, i - 12) : i]]
-    assert len(sites) >= 2, (
-        "both the expiry and the cancellation path must emit the report"
-    )
-    for call in sites:
-        guard = block.rfind("if _first_video_pt[0] is None:", 0, call)
-        assert guard != -1 and guard < call, (
-            "every stall report must be gated on the wait's own unmet exit "
-            "condition, or a healthy open emits a WARNING"
-        )
-
-
 def test_the_report_sees_the_candidates_the_answer_peek_path_nominated(caplog):
     """The failing shape's own nomination path does not touch _bridge_uc_info.
 
@@ -403,61 +504,6 @@ def test_the_report_sees_the_candidates_the_answer_peek_path_nominated(caplog):
         if r.levelno == logging.WARNING
     ]
     assert "nominated=203.0.113.7:4001" in line and "use-candidate=sent" in line, line
-
-
-def test_the_dropped_probe_count_is_distinct_sources_not_packets():
-    """One unrecorded source probing 50 times is one source, not 50.
-
-    A per-packet counter renders as '(+50 more source(s))' and someone will
-    reason from that number.
-    """
-    src = inspect.getsource(sdes_open)
-    assert "_br_probe_overflow.add(" in src, (
-        "the overflow tracker must collect distinct probe-source labels; a "
-        "bare += counts packets and reports a wrong number"
-    )
-    assert "_br_probe_overflow += 1" not in src
-
-
-def test_the_bridge_publishes_the_trigger_flag_and_the_binding_success_count():
-    src = inspect.getsource(sdes_open)
-    for attr in (
-        "_bridge_fn._tutk_trigger_sent",
-        "_bridge_fn._br_binding_success_count",
-        "_bridge_fn._br_stun_resp_count",
-        "_bridge_fn._br_probe_verdicts",
-    ):
-        assert attr in src, (
-            f"{attr} is a bridge-thread local with no publication; the stall "
-            "path in the main coroutine cannot see it"
-        )
-
-
-def test_the_binding_success_counter_is_not_an_alias_for_the_trigger_flag():
-    """Counting inside the trigger's own guard collapses two facts into one.
-
-    'no Binding Success ever arrived' and 'one arrived and the trigger still
-    did not go' are different diagnoses. The counter must be incremented before
-    the ``_use_plain_rtp and not _tutk_trigger_sent`` gate, not inside it.
-    """
-    src = inspect.getsource(sdes_open)
-    gate = src.index("and not _tutk_trigger_sent")
-    bump = src.index("_br_binding_success_count += 1")
-    assert bump < gate, (
-        "the inbound Binding Success counter increments inside the trigger "
-        "gate, so it can never report 'binding-success=1, trigger=not-sent'"
-    )
-
-
-def test_the_per_probe_veto_stays_out_of_the_per_packet_log_level():
-    """One WARNING on the stall path, not a stream of them."""
-    src = inspect.getsource(sdes_open)
-    start = src.index("bridge: drop TURN self-loop STUN peer")
-    head = src[max(0, start - 300) : start]
-    assert "_LOGGER.debug(" in head and "_LOGGER.warning(" not in head, (
-        "the per-probe self-loop drop must stay at DEBUG - it fires per "
-        "packet and would drown the single stall report"
-    )
 
 
 def test_the_report_helper_is_pure_and_takes_no_camera():

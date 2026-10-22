@@ -10,16 +10,15 @@ Assistant's own loop, stood still for that long on every SDES open (review
 
 import ast
 import asyncio
-import inspect
 import socket
 import time
 
 import pytest
 
+from tests.ast_guards import name_of
+
 from aidot_cameras.camera import sdes_open
 from aidot_cameras.camera.sdes_open import _run_off_loop, _select_readable
-
-from tests.source_parts import without_state
 
 
 def _udp_pair():
@@ -104,15 +103,9 @@ async def test_a_closed_socket_raises_like_select_did():
 
 def _open_impl_nodes():
     """The open coroutine and the phase coroutines it was split into."""
-    tree = ast.parse(without_state(inspect.getsource(sdes_open)))
-    found = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.AsyncFunctionDef)
-        and (
-            node.name == "_open_sdes_stream_impl" or node.name.startswith("_sdes_open_")
-        )
-    ]
+    from tests.ast_guards import sdes_open_family
+
+    found = [n for n in sdes_open_family() if isinstance(n, ast.AsyncFunctionDef)]
     assert any(n.name == "_open_sdes_stream_impl" for n in found)
     return found
 
@@ -168,8 +161,7 @@ def test_the_allocates_still_happen_off_the_loop():
         for c in calls
         if _name(c) == "_run_off_loop"
         and c.args
-        and isinstance(c.args[0], ast.Name)
-        and c.args[0].id == "_turn_allocate_udp"
+        and name_of(c.args[0]) == "_turn_allocate_udp"
     ]
     assert len(via_executor) == 3
 

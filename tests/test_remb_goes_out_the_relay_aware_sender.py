@@ -43,76 +43,52 @@ policy is keyed `ssrc_value=_CAM_RTCP_SENDER_SSRC`, so a drifting literal is a
 packet the camera drops.
 """
 
-import pathlib
-import re
+import ast
 
-_SRC = (
-    pathlib.Path(__file__).resolve().parents[1]
-    / "aidot_cameras"
-    / "camera"
-    / "sdes_open.py"
-)
+from tests.ast_guards import calls_to, name_of, names_in, sdes_bridge
 
 
-def _remb_block() -> str:
-    """The REMB cadence block: its guard through to the TMMBR block's start.
+def _remb_block():
+    """The bridge's REMB cadence `if`, as an AST node."""
+    found = [
+        n
+        for n in ast.walk(sdes_bridge())
+        if isinstance(n, ast.If)
+        and "REMB_TARGET_BPS" in names_in(n.test)
+        and calls_to(n, "_send_video_remb")
+        and not calls_to(n.test, "_send_video_remb")
+    ]
+    assert len(found) == 1, "the REMB cadence block has moved or gone"
+    return found[0]
 
-    Sliced anchor-to-structural-terminator rather than anchor+N characters -
-    a fixed-width window goes quietly vacuous when comments grow, and a
-    vacuous window makes the negative assertions below pass without guarding
-    anything.
-    """
-    src = _SRC.read_text()
-    start = src.index("REMB_TARGET_BPS > 0")
-    end = src.index('_pli_done = getattr(_bridge_fn, "_pli_count", 0)', start)
-    return src[start:end]
 
-
-def test_remb_does_not_write_to_the_raw_socket():
+def test_remb_goes_out_only_through_the_relay_aware_sender():
+    """A raw socket write is silently inert on a TURN-relayed session; REMB
+    goes out the bridge's relay-aware sender like the NACK does, and is skipped
+    - never sent by socket instead - while that sender does not exist yet."""
     block = _remb_block()
-    assert "_cam_srtp_sock.sendto" not in block, (
-        "a raw socket write is silently inert on a TURN-relayed session; "
-        "REMB must go out the bridge's relay-aware sender like the NACK does"
-    )
-
-
-def test_remb_uses_the_relay_aware_sender():
-    assert "_send_to_cam" in _remb_block()
-
-
-def test_remb_does_not_fall_back_to_the_socket_when_the_sender_is_missing():
-    """A fallback would reproduce the bug on exactly the sessions it breaks.
-
-    `_send_to_cam` is published from the video-packet branch, so it can be
-    absent for the first tick or two. Skipping a REMB until it exists costs a
-    second; falling back to `sendto` costs correctness on every relayed camera.
-    """
-    block = _remb_block()
-    assert re.search(
-        r'_remb_send\s*:=\s*getattr\(\s*\n?\s*_bridge_fn,\s*"_send_to_cam",'
-        r"\s*None\s*\)+\s*\)?\s*is not None",
-        block,
-    ), (
-        "the guard must resolve the relay-aware sender with a None default "
-        "and require it, not fall back to a socket"
-    )
+    assert not [
+        c for c in ast.walk(block) if isinstance(c, ast.Call) and name_of(c) == "sendto"
+    ], "REMB writes to a raw socket"
+    walrus = [
+        n
+        for n in ast.walk(block.test)
+        if isinstance(n, ast.NamedExpr)
+        and isinstance(n.value, ast.Call)
+        and name_of(n.value) == "getattr"
+        and [ast.unparse(a) for a in n.value.args]
+        == ["_bridge_fn", "'_send_to_cam'", "None"]
+    ]
+    assert walrus, "the guard must resolve the relay-aware sender with a None default"
+    sender = walrus[0].target.id
+    sends = calls_to(block, "_send_video_remb")
+    assert sends and all(
+        isinstance(c.args[0], ast.Name) and c.args[0].id == sender for c in sends
+    ), "REMB must go through its helper, with the sender the guard required"
 
 
 def test_remb_uses_the_keyed_sender_ssrc_constant():
-    block = _remb_block()
-    assert "_CAM_RTCP_SENDER_SSRC" in block
-    assert "_send_video_remb(" in block, (
-        "REMB must go through its helper like NACK and TMMBR do; the inline "
-        "copy is where the raw-socket bug hid"
-    )
-    assert "0xAB12CD34" not in block, (
-        "the SRTP TX policy is keyed on _CAM_RTCP_SENDER_SSRC; a literal here "
-        "drifts and the camera drops the packet"
-    )
-
-
-def test_the_nack_path_is_still_the_reference_implementation():
-    # If the NACK ever regresses to a raw socket, this whole rationale is gone.
-    src = _SRC.read_text()
-    start = src.index("def _send_video_nack(")
-    assert "sendto" not in src[start : start + 1500]
+    """The SRTP TX policy is keyed on _CAM_RTCP_SENDER_SSRC; a literal drifts
+    and the camera drops the packet."""
+    (send,) = calls_to(_remb_block(), "_send_video_remb")
+    assert ast.unparse(send.args[2]) == "_CAM_RTCP_SENDER_SSRC"

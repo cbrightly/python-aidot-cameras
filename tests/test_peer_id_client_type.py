@@ -189,23 +189,20 @@ class TestEveryCallSitePassesADeviceId:
     """The scoping is worthless if a call site drops the device id."""
 
     def test_no_bare_call_survives_in_the_source(self):
-        import inspect
-        from aidot_cameras.camera import client as c, webrtc_open as w
+        """Every call of generate_webrtc_peer_id in the client and the open
+        scopes the peer id to a device."""
+        from tests.ast_guards import calls_to, module_tree
 
-        for mod in (c, w):
-            src = inspect.getsource(mod)
-            for i, line in enumerate(src.splitlines()):
-                if "generate_webrtc_peer_id(" not in line:
-                    continue
-                if line.lstrip().startswith(("#", "*", '"', "'")):
-                    continue
-                if "def generate_webrtc_peer_id" in line:
-                    continue
-                call = "\n".join(src.splitlines()[i : i + 4])
-                assert "device_id=" in call, (
-                    f"{mod.__name__} line {i + 1} calls generate_webrtc_peer_id "
-                    f"without a device_id:\n{call}"
-                )
+        for mod in ("aidot_cameras.camera.client", "aidot_cameras.camera.webrtc_open"):
+            calls = calls_to(module_tree(mod), "generate_webrtc_peer_id")
+            bare = [
+                c.lineno
+                for c in calls
+                if not any(k.arg == "device_id" for k in c.keywords)
+            ]
+            assert not bare, (
+                f"{mod} calls generate_webrtc_peer_id without a device_id at {bare}"
+            )
 
 
 class TestTheClassCharacterIsWeb:

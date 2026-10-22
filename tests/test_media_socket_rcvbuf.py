@@ -17,8 +17,6 @@ from aidot_cameras.camera.sdes_open import (
     _widen_media_rcvbuf,
 )
 
-from tests.source_parts import without_state
-
 
 def test_the_request_clears_a_keyframe_burst():
     # 190 KB is the largest keyframe measured on the A001064; the request has to
@@ -55,18 +53,27 @@ def test_failure_is_survivable():
 
 
 def test_both_media_sockets_are_widened_before_bind():
-    """Pin the call sites: a socket widened after bind may already have dropped.
+    """A socket widened after bind may already have dropped. The open cannot be
+    called in isolation, so its AST must widen each media socket before that
+    socket's own bind."""
+    import ast
 
-    The open path is one long method that cannot be called in isolation, so
-    assert on its source - both the audio and video sockets must be widened, and
-    each before its own bind.
-    """
-    import inspect
+    from tests.ast_guards import calls_to, name_of, sdes_open_family
 
-    from aidot_cameras.camera import sdes_open
-
-    src = without_state(inspect.getsource(sdes_open))
     for kind in ("_audio_sock", "_video_sock"):
-        widen = src.index(f"_widen_media_rcvbuf({kind}")
-        bind = src.index(f"{kind}.bind(")
-        assert widen < bind, f"{kind} is bound before its receive buffer is set"
+        widen = [
+            c.lineno
+            for fn in sdes_open_family()
+            for c in calls_to(fn, "_widen_media_rcvbuf")
+            if c.args and name_of(c.args[0]) == kind
+        ]
+        binds = [
+            c.lineno
+            for fn in sdes_open_family()
+            for c in calls_to(fn, "bind")
+            if isinstance(c.func, ast.Attribute) and name_of(c.func.value) == kind
+        ]
+        assert widen and binds, kind
+        assert min(widen) < min(binds), (
+            f"{kind} is bound before its receive buffer is set"
+        )

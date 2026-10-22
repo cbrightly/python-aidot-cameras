@@ -186,37 +186,28 @@ def test_every_auth_retry_passes_the_body_it_classified():
     self._async_refresh_auth_token(...)`. If the second call is bare, the code
     that decides between a refresh and a full login never sees the response and
     every code falls back to refresh-first - the exact behaviour this change
-    exists to end.
+    exists to end. Checked on the AST of every such `and`.
     """
-    import re
+    import ast
 
-    src_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "aidot_cameras",
-        "camera",
-        "client.py",
-    )
-    src = open(src_path, encoding="utf-8").read()
+    from tests.ast_guards import module_tree, name_of
 
-    pattern = re.compile(
-        r"_is_auth_error\((?P<body>\w+)\)\s+and\s+await\s+"
-        r"self\._async_refresh_auth_token\((?P<arg>[^)]*)\)"
-    )
-    sites = list(pattern.finditer(src))
+    sites = []
+    for node in ast.walk(module_tree("aidot_cameras.camera.client")):
+        if not (isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And)):
+            continue
+        for first, second in zip(node.values, node.values[1:], strict=False):
+            if (
+                isinstance(first, ast.Call)
+                and name_of(first) == "_is_auth_error"
+                and isinstance(second, ast.Await)
+                and name_of(second.value) == "_async_refresh_auth_token"
+            ):
+                sites.append((first, second.value))
     assert sites, "no auth-retry call sites found - did the shape change?"
-
-    bare = [m.group("body") for m in sites if not m.group("arg").strip()]
-    assert not bare, (
-        "%d of %d auth-retry sites still call _async_refresh_auth_token() with "
-        "no body, so 21027/21041 cannot route to a full login: %s"
-        % (len(bare), len(sites), bare)
-    )
-
-    mismatched = [
-        (m.group("body"), m.group("arg"))
-        for m in sites
-        if m.group("arg").strip() != m.group("body")
+    wrong = [
+        (ast.unparse(cls), ast.unparse(ref))
+        for cls, ref in sites
+        if [ast.unparse(a) for a in ref.args] != [ast.unparse(a) for a in cls.args]
     ]
-    assert not mismatched, (
-        "a retry site classified one body and refreshed on another: %s" % mismatched
-    )
+    assert not wrong, f"a retry site refreshed without the body it classified: {wrong}"

@@ -13,27 +13,41 @@ packets` - loss that never happened, on a hop where the kernel counters showed
 zero drops. Measured on the box: 0 drops on every socket in the path while
 ffmpeg reported 21 new missed-packet lines in one window.
 
-These tests read the source because the bridge is one long closure that cannot
-be called in isolation.
+The bridge is a thread body that cannot be driven in a unit test, so these
+are structural checks on its AST.
 """
 
-import inspect
-import re
+import ast
 
-from aidot_cameras.camera import sdes_open
-
-_SRC = inspect.getsource(sdes_open)
+from tests.ast_guards import attr_writes, module_tree, name_of, names_in, sdes_bridge
 
 
-def _assigned_attrs() -> set:
-    """Every `_bridge_fn.X = ...` attribute assigned anywhere in the module."""
-    return set(re.findall(r"_bridge_fn\.([A-Za-z_][A-Za-z0-9_]*)\s*=[^=]", _SRC))
+def _hasattr_guards():
+    """(If node, attribute) for every `if not hasattr(_bridge_fn, "x"):`."""
+    out = []
+    for node in ast.walk(sdes_bridge()):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            test = test.operand
+        if (
+            isinstance(test, ast.Call)
+            and name_of(test) == "hasattr"
+            and len(test.args) == 2
+            and isinstance(test.args[0], ast.Name)
+            and test.args[0].id == "_bridge_fn"
+            and isinstance(test.args[1], ast.Constant)
+        ):
+            out.append((node, test.args[1].value))
+    return out
 
 
 def test_every_hasattr_sentinel_is_a_name_something_assigns():
-    guarded = set(re.findall(r"hasattr\(_bridge_fn,\s*'([^']+)'\)", _SRC))
-    assigned = _assigned_attrs()
-    orphans = sorted(guarded - assigned)
+    guards = _hasattr_guards()
+    assert guards, "no hasattr guards found - has the bridge changed shape?"
+    assigned = attr_writes(module_tree("aidot_cameras.camera.sdes_open"), "_bridge_fn")
+    orphans = sorted({attr for _n, attr in guards} - assigned)
     assert not orphans, (
         "these hasattr guards name attributes nothing ever assigns, so they are "
         f"true on every packet and reset their state each time: {orphans}"
@@ -41,29 +55,30 @@ def test_every_hasattr_sentinel_is_a_name_something_assigns():
 
 
 def test_the_tutk_sequence_counters_survive_between_packets():
-    """The specific regression: a constant RTP sequence number.
-
-    Pin the guard to a counter the block assigns, so a reset-per-packet cannot
-    come back by renaming one side of the pair.
-    """
-    block = re.search(
-        r'if not hasattr\(_bridge_fn,\s*"([^"]+)"\):\s*\n'
-        r"\s*_bridge_fn\._tutk_seq_a = 0\s*\n"
-        r"\s*_bridge_fn\._tutk_seq_v = 0",
-        _SRC,
-    )
-    assert block, "the TUTK sequence init block moved - re-point this test"
-    sentinel = block.group(1)
-    assert sentinel in ("_tutk_seq_a", "_tutk_seq_v"), (
-        f"the guard tests {sentinel!r}, which is not one of the counters it "
-        "initialises - the counters will reset on every packet and every "
-        "synthesized packet will carry the same sequence number"
-    )
+    """The specific regression: a constant RTP sequence number. The guard
+    that initialises the two counters must test one of them."""
+    blocks = [
+        (node, attr)
+        for node, attr in _hasattr_guards()
+        if {"_tutk_seq_a", "_tutk_seq_v"} <= attr_writes(node, "_bridge_fn")
+    ]
+    assert blocks, "the TUTK sequence init block moved - re-point this test"
+    for _node, attr in blocks:
+        assert attr in ("_tutk_seq_a", "_tutk_seq_v"), (
+            f"the guard tests {attr!r}, which is not one of the counters it "
+            "initialises - the counters will reset on every packet"
+        )
 
 
 def test_the_counters_increment_rather_than_being_reassigned():
-    """Both counters must advance from their previous value, not restart."""
+    """Both counters advance from their previous value, not restart."""
     for name in ("_tutk_seq_a", "_tutk_seq_v"):
-        assert re.search(
-            rf"_bridge_fn\.{name} = \(\s*_bridge_fn\.{name} \+ 1\s*\) & 0xFFFF", _SRC
-        ), f"{name} no longer advances from its own previous value"
+        advances = [
+            n
+            for n in ast.walk(sdes_bridge())
+            if isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Attribute) and t.attr == name for t in n.targets)
+            and isinstance(n.value, ast.BinOp)
+            and name in names_in(n.value)
+        ]
+        assert advances, f"{name} no longer advances from its own previous value"

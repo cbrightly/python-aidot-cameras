@@ -28,12 +28,6 @@ def _impl_signature():
     raise AssertionError("impl not found")
 
 
-def _fn_source(qualname):
-    from tests.source_parts import full_source
-
-    return full_source(qualname)
-
-
 def test_impl_accepts_reuse_peer_id_defaulting_to_none():
     p = _impl_signature().parameters.get("reuse_peer_id")
     assert p is not None, "impl must accept reuse_peer_id"
@@ -41,11 +35,23 @@ def test_impl_accepts_reuse_peer_id_defaulting_to_none():
 
 
 def test_impl_uses_reuse_peer_id_verbatim_when_given():
-    src = _fn_source("_async_open_webrtc_stream_impl")
-    # peer_id = reuse_peer_id or generate_webrtc_peer_id(...)
-    assert "reuse_peer_id or" in src, (
-        "when a peerid is supplied it must be used as-is, not regenerated"
-    )
+    """A supplied peerid is used as-is, not regenerated: the open's peer id is
+    ``reuse_peer_id or <fresh one>``."""
+    import ast
+
+    from tests.ast_guards import dtls_open_family, name_of
+
+    picks = [
+        n.value
+        for fn in dtls_open_family()
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Assign)
+        and isinstance(n.value, ast.BoolOp)
+        and isinstance(n.value.op, ast.Or)
+        and name_of(n.value.values[0]) == "reuse_peer_id"
+    ]
+    assert picks, "when a peerid is supplied it must be used as-is"
+    assert any(name_of(p.values[-1]) == "generate_webrtc_peer_id" for p in picks)
 
 
 def test_sdes_keepalive_loop_holds_and_rotates_one_peerid(

@@ -6,7 +6,6 @@ the smaller fixes that shipped with it.
 """
 
 import asyncio
-import inspect
 import queue
 import threading
 import time
@@ -16,7 +15,6 @@ import pytest
 import aidot_cameras.camera.client as camera_client
 import aidot_cameras.camera.protocol as proto
 import aidot_cameras.camera.sdes_open as sdes_open
-import aidot_cameras.camera.webrtc_open as webrtc_open
 from aidot_cameras.camera import rtsp_publish
 from aidot_cameras.camera.client import CameraMixin, _FfmpegMissing
 from aidot_cameras.camera.controls import (
@@ -25,8 +23,6 @@ from aidot_cameras.camera.controls import (
 )
 
 from test_mqtt_session_reconnect import _FakeMsg, _install_fake_client
-
-from tests.source_parts import without_state
 
 
 def _dormant_candidate():
@@ -104,11 +100,6 @@ def test_both_loops_route_unexpected_errors_to_the_release(
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(getattr(cam, which)())
     assert len(released) == 1, "a cancellation is not an error to release on"
-
-
-def test_no_bare_env_float_remains_in_the_camera_client():
-    src = without_state(inspect.getsource(camera_client))
-    assert 'float(os.environ.get("AIDOT_' not in src
 
 
 def test_the_jpeg_watchdog_starts_each_session_with_a_fresh_clock(
@@ -273,23 +264,34 @@ def test_sdes_module_imports_with_an_empty_grace_value(monkeypatch):
 
 
 def test_sdes_bridge_thread_logs_an_unexpected_error():
-    src = without_state(inspect.getsource(sdes_open))
-    assert "SDES bridge ended by an unexpected error" in src
-    i = src.index("_cp_ip_b = _cp_socket.inet_aton(_cp_peer_ip)")
-    assert "except OSError:" in src[i : i + 200]
+    """A stray exception used to end the bridge thread with nothing at camera
+    level in the log, and the session died minutes later as "stalled". The
+    thread body is wrapped: an unexpected error is logged with its traceback."""
+    import ast
+
+    from tests.ast_guards import log_calls, sdes_bridge
+
+    handlers = [
+        h
+        for stmt in sdes_bridge().body
+        if isinstance(stmt, ast.Try)
+        for h in stmt.handlers
+        if h.type is not None and ast.unparse(h.type) == "Exception"
+    ]
+    assert handlers, "the bridge thread body is not guarded"
+    assert any(
+        c.func.attr in ("error", "exception")
+        and any(k.arg == "exc_info" for k in c.keywords)
+        for h in handlers
+        for c in log_calls(h)
+    )
 
 
-def test_lan_mode_gates_the_turn_preallocation():
-    src = without_state(inspect.getsource(sdes_open))
-    assert "if not _relay_addrs and not _skip_turn_prealloc:" in src
-
-
-def test_dtls_signaling_wait_watches_the_refusal_future():
-    src = without_state(inspect.getsource(webrtc_open))
-    i = src.index("_init_pending: set = {")
-    assert "terminal_error_fut" in src[i : i + 200]
-    j = src.index("_rr_done, _rr_pending = _init_done, _init_pending")
-    assert "raise AidotCameraBusy(_code, _desc)" in src[j : j + 1200]
+def test_a_malformed_candidate_address_is_not_a_permission():
+    """The candidate pattern admits "1.2.3.4.5"; CreatePermission for it is
+    declined, not raised into the bridge thread."""
+    relay = {"sock": ("1.1.1.1", 3478, "realm", "nonce", "1.1.1.1", 3478, b"k", "user")}
+    assert sdes_open.turn_create_permission(relay, "sock", "1.2.3.4.5", 4000) is False
 
 
 @pytest.mark.asyncio

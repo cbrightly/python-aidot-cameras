@@ -38,13 +38,11 @@ trip at the grace deadline on a stream that is working, and
 camera.  Hence the two-term predicate.
 """
 
-import inspect
-import re
+import ast
 
 import aidot_cameras.camera.sdes_open as sdes_open
 from aidot_cameras.camera.sdes_open import _should_count_media
-
-_SRC = inspect.getsource(sdes_open)
+from tests.ast_guards import calls_to, enclosing, names_in, parents, sdes_bridge
 
 
 # --------------------------------------------------------------------- #
@@ -89,70 +87,64 @@ def test_returns_a_bool_not_a_truthy_value():
 # still pass with the production gate deleted.
 # --------------------------------------------------------------------- #
 
-# The gate may carry additional conditions ahead of the helper (a late
-# retransmission is dropped rather than forwarded, and must not be counted
-# either), so allow a prefix -- but the helper itself, with both its terms,
-# stays mandatory.
-_FWD_COUNTER = re.compile(
-    r"if [^\n]*_should_count_media\((?P<args>[^)]*)\):\s*\n"
-    r"\s*_media_progress\[0\] = _time_br\.monotonic\(\)\s*\n"
-    r"\s*_media_counts\[0\] \+= 1\s*\n"
-    r"\s*_media_counts\[1\] \+= len\(_fwd_pkt\)"
-)
+
+def _media_stamps():
+    """Assignments of the media-liveness stamp in the bridge."""
+    return [
+        n
+        for n in ast.walk(sdes_bridge())
+        if isinstance(n, ast.Assign)
+        and any(ast.unparse(t) == "_media_progress[0]" for t in n.targets)
+    ]
+
+
+def _gates(node):
+    """The `if` tests above ``node`` in the bridge."""
+    return [p.test for p in enclosing(node, parents(sdes_bridge()), ast.If)]
 
 
 def test_the_srtp_forward_site_is_gated_on_the_helper():
-    m = _FWD_COUNTER.search(_SRC)
-    assert m, (
-        "the bridge's SRTP forward site does not gate its media counters on "
-        "_should_count_media - every packet it forwards counts as delivered "
-        "media, including ciphertext ffmpeg discards, so is_stalled never "
-        "trips and the session reports healthy while the viewer sees black"
+    """The SRTP forward's counters run only when _should_count_media says the
+    consumer can use what was forwarded - with BOTH terms: _decrypted alone
+    zeroes the counters for every RTP/SAVP camera, where ffmpeg owns SRTP."""
+    fwd = [
+        n
+        for n in ast.walk(sdes_bridge())
+        if isinstance(n, ast.AugAssign)
+        and ast.unparse(n.target) == "_media_counts[1]"
+        and "_fwd_pkt" in names_in(n.value)
+    ]
+    assert len(fwd) == 1, "expected one _fwd_pkt counter site"
+    calls = [c for t in _gates(fwd[0]) for c in calls_to(t, "_should_count_media")]
+    assert calls, (
+        "the bridge's SRTP forward counts every packet it forwards, including "
+        "ciphertext ffmpeg discards - is_stalled never trips"
     )
-    args = m.group("args")
-    assert "_decrypted" in args and "_use_plain_rtp" in args, (
-        "the gate must take BOTH terms: _decrypted alone zeroes the counters "
-        f"for every RTP/SAVP camera, where ffmpeg owns the SRTP. Got: {args!r}"
-    )
+    assert {"_decrypted", "_use_plain_rtp"} <= names_in(calls[0])
 
 
 def test_only_the_two_known_counter_sites_exist():
-    """Every place that stamps media-liveness must be one we have reasoned about.
-
-    ``_media_progress[0] = _time_br.monotonic()`` is the stamp ``is_stalled``
-    and ``_healthy`` read, so a third one appearing anywhere in the bridge is a
-    third claim that media flowed - and this whole defect was one such claim
-    being made for packets ffmpeg discards.  There are exactly two: the TUTK
-    audio forward (plaintext it decrypted itself, ungated by design) and the
-    SRTP forward the test above pins to the gate.  A new one fails here rather
-    than silently re-opening the hole.
-    """
-    stamps = re.findall(r"_media_progress\[0\] = _time_br\.monotonic\(\)", _SRC)
-    assert len(stamps) == 2, (
-        f"expected exactly 2 media-liveness stamps in the bridge, found "
-        f"{len(stamps)} - a new one must be shown to fire only for media the "
-        "consumer can actually use, then this count updated"
-    )
-    fwd_sites = re.findall(r"_media_counts\[1\] \+= len\(_fwd_pkt\)", _SRC)
-    assert len(fwd_sites) == 1, (
-        f"expected exactly one _fwd_pkt counter site, found {len(fwd_sites)} - "
-        "re-point the gate test above and check each one is gated"
-    )
+    """Every media-liveness stamp is a claim that media flowed. There are
+    exactly two: the TUTK audio forward (plaintext it decrypted itself) and
+    the gated SRTP forward. A third fails here rather than reopening the hole."""
+    assert len(_media_stamps()) == 2
 
 
 def test_the_tutk_counter_site_is_deliberately_left_ungated():
-    """Scope pin: the TUTK audio forward sends bytes it already decrypted.
-
-    That site hands ffmpeg ``_rtp_hdr + _pd_plain`` -- plaintext PCMA it
-    produced itself, on a path that reaches ``continue`` long before
-    ``_decrypted`` exists.  Widening the gate to cover it would under-report a
-    camera whose audio arrives over TUTK, which is a bug this repo has already
-    fixed once.
-    """
-    assert "_media_counts[1]+=len(_rtp_hdr)+len(_pd_plain)" in "".join(_SRC.split()), (
-        "the TUTK audio counter site moved or was gated - it forwards "
-        "plaintext and must keep counting"
-    )
+    """The TUTK audio forward hands ffmpeg plaintext it produced itself, on a
+    path that never computes _decrypted; gating it would under-report a camera
+    whose audio arrives over TUTK."""
+    tutk = [
+        n
+        for n in ast.walk(sdes_bridge())
+        if isinstance(n, ast.AugAssign)
+        and ast.unparse(n.target) == "_media_counts[1]"
+        and "_pd_plain" in names_in(n.value)
+    ]
+    assert len(tutk) == 1, "the TUTK audio counter site moved"
+    assert not [
+        c for t in _gates(tutk[0]) for c in calls_to(t, "_should_count_media")
+    ], "the TUTK audio counter must keep counting"
 
 
 # --------------------------------------------------------------------- #

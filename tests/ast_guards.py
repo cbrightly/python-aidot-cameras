@@ -90,3 +90,87 @@ def package_modules(root: str = "aidot_cameras") -> list[pathlib.Path]:
     spec = importlib.util.find_spec(root)
     base = pathlib.Path(spec.origin).parent
     return sorted(p for p in base.rglob("*.py") if "_vendor" not in p.parts)
+
+
+def sdes_bridge() -> ast.AST:
+    """The SDES bridge thread's body (``_bridge_fn`` in ``make_sdes_bridge``)."""
+    return function(module_tree("aidot_cameras.camera.sdes_open"), "_bridge_fn")
+
+
+def open_family(modname: str, impl: str, prefix: str) -> list[ast.AST]:
+    """An open's impl method and the phase coroutines it was split into."""
+    tree = module_tree(modname)
+    return [
+        n
+        for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and n.name.startswith(prefix)
+    ] + functions(tree, impl)
+
+
+def sdes_open_family() -> list[ast.AST]:
+    return open_family(
+        "aidot_cameras.camera.sdes_open", "_open_sdes_stream_impl", "_sdes_open_"
+    )
+
+
+def dtls_open_family() -> list[ast.AST]:
+    return open_family(
+        "aidot_cameras.camera.webrtc_open",
+        "_async_open_webrtc_stream_impl",
+        "_dtls_open_",
+    )
+
+
+def attr_writes(tree: ast.AST, owner: str) -> set[str]:
+    """Attributes assigned on ``owner`` (``owner.x = ...``) anywhere in ``tree``."""
+    out = set()
+    for n in ast.walk(tree):
+        targets = []
+        if isinstance(n, ast.Assign):
+            targets = n.targets
+        elif isinstance(n, (ast.AugAssign, ast.AnnAssign)):
+            targets = [n.target]
+        for t in targets:
+            if (
+                isinstance(t, ast.Attribute)
+                and isinstance(t.value, ast.Name)
+                and t.value.id == owner
+            ):
+                out.add(t.attr)
+    return out
+
+
+def log_calls(tree: ast.AST) -> list[ast.Call]:
+    """``_LOGGER.<level>(...)`` calls in ``tree``."""
+    return [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and isinstance(n.func.value, ast.Name)
+        and n.func.value.id == "_LOGGER"
+    ]
+
+
+def string_parts(node: ast.AST) -> str:
+    """The literal text of a str constant or f-string, placeholders dropped."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(string_parts(v) for v in node.values)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return string_parts(node.left) + string_parts(node.right)
+    return ""
+
+
+def sctp_data_branch() -> ast.AST:
+    """The bridge's inbound SCTP DATA branch, as an AST node."""
+    found = [
+        n
+        for n in ast.walk(sdes_bridge())
+        if isinstance(n, ast.If)
+        and ast.unparse(n.test) == "_pd_ct8 == 0 and _sct == 'DONE'"
+    ]
+    assert len(found) == 1, "the inbound SCTP DATA branch has moved or gone"
+    return found[0]

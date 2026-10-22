@@ -18,23 +18,39 @@ test_sdes_fast_liveplay (A001064 -> False, A001513 -> True); this file locks
 skip_liveplay -> wait timeout.
 """
 
-import inspect
+import ast
 import pytest
 
 from aidot_cameras.camera.sdes_open import _sdes_echo_wait_timeout
 
 
-def _open_source():
-    """The SDES open and the phase coroutines it was split into."""
-    from aidot_cameras.camera import sdes_open as _so
+def test_a_late_echo_is_recorded_so_the_next_open_waits_for_it():
+    """Recorded, not acted on: the open marks the device as one that echoes,
+    so the NEXT open waits for it."""
+    from tests.ast_guards import sdes_open_family
 
-    parts = [inspect.getsource(_so._SdesOpenMixin._open_sdes_stream_impl)]
-    parts += [
-        inspect.getsource(getattr(_so, n))
-        for n in dir(_so)
-        if n.startswith("_sdes_open_")
+    marks = [
+        n
+        for fn in sdes_open_family()
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Assign)
+        and any(ast.unparse(t) == "self._sdes_echo_seen" for t in n.targets)
+        and ast.unparse(n.value) == "True"
     ]
-    return "\n".join(parts)
+    assert len(marks) >= 2, "both the in-window and the late echo must record it"
+
+
+def test_the_wait_reads_the_devices_history():
+    from tests.ast_guards import calls_to, names_in, sdes_open_family
+
+    calls = [
+        c for fn in sdes_open_family() for c in calls_to(fn, "_sdes_echo_wait_timeout")
+    ]
+    assert calls
+    for call in calls:
+        echo_seen = {k.arg: k.value for k in call.keywords}.get("echo_seen")
+        assert echo_seen is not None and "_sdes_echo_seen" in ast.unparse(echo_seen)
+        assert names_in(echo_seen)
 
 
 @pytest.fixture(autouse=True)
@@ -100,11 +116,21 @@ def test_a_malformed_value_cannot_break_the_import(monkeypatch):
 
 
 def test_the_timeout_is_reported_rather_than_swallowed():
-    """`except TimeoutError: pass` is how 2.0 s of dead time stayed invisible
-    for as long as it did. The other waits on this path log an elapsed line."""
+    """`except TimeoutError: pass` is how 2.0 s of dead time stayed invisible:
+    the echo wait's timeout handler logs how long it waited."""
+    from tests.ast_guards import log_calls, names_in, sdes_open_family
 
-    src = _open_source()
-    assert "webrtcReq-echo elapsed" in src
+    handlers = [
+        h
+        for fn in sdes_open_family()
+        for t in ast.walk(fn)
+        if isinstance(t, ast.Try) and any("_echo_fut" in names_in(s) for s in t.body)
+        for h in t.handlers
+        if h.type is not None and "TimeoutError" in ast.unparse(h.type)
+    ]
+    assert handlers, "the echo wait no longer has a timeout handler"
+    for h in handlers:
+        assert log_calls(h), f"line {h.lineno}: the echo-wait timeout is swallowed"
 
 
 # --------------------------------------------------------------------------- #
@@ -140,22 +166,3 @@ def test_an_explicit_override_still_wins_over_the_history(monkeypatch):
 def test_the_history_defaults_off_so_the_first_open_is_still_fast():
     """Callers that predate the flag must not start paying 2.0 s."""
     assert _sdes_echo_wait_timeout(False) == 0.25
-
-
-def test_a_late_echo_is_recorded_so_the_next_open_waits_for_it():
-    """Recorded, not acted on: the webrtcResp has to be sent before the relay
-    allocation and the ICE window, so building it after the window would be a
-    reordering with no camera to measure it against. Making the NEXT open wait
-    is the part that can be done safely."""
-
-    src = _open_source()
-    assert "_sdes_echo_seen" in src
-    assert "AIDOT_SDES_ECHO_WAIT_S=%.1f" in src, (
-        "the line must name the knob that makes it permanent"
-    )
-
-
-def test_the_wait_reads_the_devices_history():
-
-    src = _open_source()
-    assert "echo_seen=" in src

@@ -11,8 +11,6 @@ from unittest import mock
 
 from aidot_cameras.camera import sdes_open
 
-from tests.source_parts import without_state
-
 
 def _on(net):
     import ipaddress
@@ -60,15 +58,24 @@ class TestItNeverCondemnsWhatItCannotJudge:
 class TestItOnlyWarnsWhenEveryCandidateIsUnreachable:
     def test_the_guard_requires_all_candidates_off_subnet(self):
         """One reachable candidate means the session can still work, so the
-        warning must not fire on a mixed set."""
-        import inspect
+        warning fires only when the off-subnet list is every candidate."""
+        import ast
 
-        src = without_state(inspect.getsource(sdes_open))
-        assert "if _off and len(_off) == len(_cam_ice_cands):" in src
+        from tests.ast_guards import calls_to, log_calls, sdes_open_family
 
-    def test_the_message_names_the_network_not_the_camera(self):
-        import inspect
-
-        src = without_state(inspect.getsource(sdes_open))
-        assert "different network segment" in src
-        assert "rather than broken" in src
+        warns = [
+            n
+            for fn in sdes_open_family()
+            for n in ast.walk(fn)
+            if isinstance(n, ast.If)
+            and any(c.func.attr == "warning" for c in log_calls(n))
+            and calls_to(n.test, "len")
+            and "_off" in {getattr(x, "id", None) for x in ast.walk(n.test)}
+        ]
+        assert len(warns) == 1, "the off-subnet warning moved"
+        test = warns[0].test
+        assert isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And)
+        compare = [v for v in test.values if isinstance(v, ast.Compare)]
+        assert compare and isinstance(compare[0].ops[0], ast.Eq)
+        sides = {ast.unparse(compare[0].left), ast.unparse(compare[0].comparators[0])}
+        assert "len(_off)" in sides and any("_cam_ice_cands" in s for s in sides)

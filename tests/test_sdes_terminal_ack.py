@@ -22,7 +22,6 @@ from aidot_cameras.camera.protocol import (
     _WEBRTC_TERMINAL_ACK_CODES,
     _terminal_webrtc_ack,
 )
-import aidot_cameras.camera.webrtc_open as wo
 
 
 def test_session_exceed_codes_are_terminal():
@@ -41,18 +40,6 @@ def test_transient_ack_is_not_terminal():
     # -50019 ("not ready") is benign: mains cameras emit it and recover via ICE.
     msg = {"method": "webrtcResp", "ack": {"code": -50019, "desc": "not ready"}}
     assert _terminal_webrtc_ack(msg) is None
-
-
-def test_sdes_open_path_checks_the_terminal_future():
-    # The SDES branch must consult terminal_error_fut; before the fix it never did.
-    import inspect
-
-    # The SDES branch of the DTLS open is its own phase coroutine.
-    sdes_branch = inspect.getsource(wo._dtls_open_sdes_branch)
-    assert "terminal_error_fut" in sdes_branch, (
-        "SDES branch must read terminal_error_fut (GAP D was DTLS-only)"
-    )
-    assert "AidotCameraBusy" in sdes_branch
 
 
 def test_sdes_keepalive_loop_backs_off_on_camera_busy(

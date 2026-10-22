@@ -98,16 +98,25 @@ def test_a_failing_abort_does_not_replace_the_open_error():
 def _impl_function():
     # The open and the phase coroutines it was split into, as one module: the
     # abort is defined in one phase and called from the later ones.
-    from tests.source_parts import full_source
+    from tests.ast_guards import dtls_open_family
 
-    return ast.parse(full_source("_async_open_webrtc_stream_impl"))
+    return ast.Module(body=dtls_open_family(), type_ignores=[])
 
 
 def test_the_open_registers_its_abort_and_clears_it_on_hand_off():
+    from tests.ast_guards import calls_to, name_of, names_in
+
     fn = _impl_function()
-    src = ast.unparse(fn)
-    assert "_abort_holder.append(_abort_open)" in src
-    assert "_abort_holder.clear()" in src
+    appends = [
+        c
+        for c in calls_to(fn, "append")
+        if name_of(c.func.value) == "_abort_holder"
+        and [name_of(a) for a in c.args] == ["_abort_open"]
+    ]
+    assert appends, "the open does not register its abort"
+    assert [
+        c for c in calls_to(fn, "clear") if name_of(c.func.value) == "_abort_holder"
+    ]
     abort = next(
         n
         for n in ast.walk(fn)
@@ -115,21 +124,29 @@ def test_the_open_registers_its_abort_and_clears_it_on_hand_off():
     )
     # Idempotent: the first statement after the docstring returns if it ran.
     first = abort.body[1]
-    assert isinstance(first, ast.If) and "_aborted" in ast.unparse(first.test)
+    assert isinstance(first, ast.If) and "_aborted" in names_in(first.test)
 
 
 def test_the_media_declined_exit_goes_through_the_abort():
+    from tests.ast_guards import calls_to, name_of
+
     fn = _impl_function()
     branch = next(
         n
         for n in ast.walk(fn)
-        if isinstance(n, ast.If) and ast.unparse(n.test) == "_media_declined[0]"
+        if isinstance(n, ast.If)
+        and isinstance(n.test, ast.Subscript)
+        and name_of(n.test.value) == "_media_declined"
     )
-    body = "\n".join(ast.unparse(s) for s in branch.body)
-    assert "await _abort_open()" in body, (
-        "the DC-only exit must stop the recorder like every other exit"
+    body = ast.Module(body=branch.body, type_ignores=[])
+    assert [
+        a
+        for a in ast.walk(body)
+        if isinstance(a, ast.Await) and name_of(a.value) == "_abort_open"
+    ], "the DC-only exit must stop the recorder like every other exit"
+    assert not [c for c in calls_to(body, "close") if name_of(c.func.value) == "pc"], (
+        "no second hand-rolled teardown"
     )
-    assert "pc.close()" not in body, "no second hand-rolled teardown"
 
 
 def test_the_sdes_to_dtls_fallback_carries_the_holder():

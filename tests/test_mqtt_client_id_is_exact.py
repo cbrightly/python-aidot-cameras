@@ -11,35 +11,48 @@ because the helper in use returns messages and drops the transport status.
 This test is cheaper than the fourth investigation.
 """
 
-import pathlib
 import re
 
-SRC = pathlib.Path(__file__).resolve().parents[1] / "aidot_cameras"
+
+_CLIENT_ID = re.compile(r"^_?(base_cid|[a-z_]*client_?id|mqtt_cid)$")
 
 
-def _python_files():
-    return [p for p in SRC.rglob("*.py") if "_vendor" not in p.parts]
+def _is_client_id(node) -> bool:
+    import ast
+
+    name = getattr(node, "id", None) or getattr(node, "attr", None) or ""
+    return isinstance(node, (ast.Name, ast.Attribute)) and bool(_CLIENT_ID.match(name))
 
 
 def test_no_client_id_is_built_by_appending_to_the_registered_one():
+    """No f-string or concatenation in the package builds a client id from the
+    registered one plus anything else."""
+    import ast
+
+    from tests.ast_guards import package_modules
+
     offenders = []
-    # A client id assembled from the registered one plus anything else.
-    patterns = [
-        re.compile(r'f"\{_?base_cid\}[^"]+"'),
-        re.compile(r'f"\{[a-z_]*client_?id\}[^"]+"'),
-        re.compile(r'(?:_base_cid|client_id|mqtt_cid)\s*\+\s*["\']'),
-    ]
-    for path in _python_files():
-        for n, line in enumerate(path.read_text().splitlines(), 1):
-            if line.lstrip().startswith("#"):
-                continue  # comments explain the defect; they are not it
-            for pat in patterns:
-                if pat.search(line):
-                    offenders.append(f"{path.name}:{n}: {line.strip()[:90]}")
+    for path in package_modules():
+        for node in ast.walk(ast.parse(path.read_text())):
+            # The registered id followed by anything: f"{client_id}-cmd" or
+            # client_id + "-cmd". An id quoted inside a message is not one.
+            if isinstance(node, ast.JoinedStr):
+                head = node.values[0] if node.values else None
+                if (
+                    isinstance(head, ast.FormattedValue)
+                    and _is_client_id(head.value)
+                    and len(node.values) > 1
+                ):
+                    offenders.append(f"{path.name}:{node.lineno}")
+            elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                if _is_client_id(node.left) and isinstance(
+                    node.right, (ast.Constant, ast.JoinedStr)
+                ):
+                    offenders.append(f"{path.name}:{node.lineno}")
     assert not offenders, (
         "an MQTT client id is being built by appending to the registered "
-        "mqttClientId; the broker refuses that connect with rc=4 and the "
-        "caller sees silence:\n  " + "\n  ".join(offenders)
+        "mqttClientId; the broker refuses that connect with rc=4: "
+        + ", ".join(offenders)
     )
 
 

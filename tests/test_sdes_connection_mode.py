@@ -30,7 +30,6 @@ The pieces existed but did not compose into a choice a user could make:
 # (no pytest fixtures needed; plain asserts)
 
 from aidot_cameras.camera.sdes_open import _sdes_offer_candidate_lines
-from tests.source_parts import without_state
 
 
 def _client_with(mode=None, env=None, monkeypatch=None, battery=False):
@@ -170,25 +169,16 @@ def test_candidate_lines_end_with_crlf_and_nothing_else():
 
 
 def test_the_offer_builder_uses_the_helper():
-    """Source guard: the tests above pass with the production offer untouched.
+    """The video and audio m-sections both take their candidate block from the
+    helper, or the mode steers one media stream and not the other."""
+    from tests.ast_guards import calls_to, sdes_open_family
 
-    The video and audio m-sections must both take their candidate block from
-    the helper, or the mode steers one media stream and not the other.
-    """
-    import pathlib
-
-    src = without_state(
-        (
-            pathlib.Path(__file__).resolve().parents[1]
-            / "aidot_cameras"
-            / "camera"
-            / "sdes_open.py"
-        ).read_text()
-    )
-    assert src.count("_sdes_offer_candidate_lines(") >= 3, (
-        "expected the offer builder to emit audio and video candidate blocks "
-        "through _sdes_offer_candidate_lines (definition + at least two calls)"
-    )
+    calls = [
+        c
+        for fn in sdes_open_family()
+        for c in calls_to(fn, "_sdes_offer_candidate_lines")
+    ]
+    assert len(calls) >= 2, "expected audio and video candidate blocks from the helper"
 
 
 # -- the c=/m= endpoint (relay forcing that firmware cannot ignore) -----------
@@ -239,75 +229,53 @@ def test_relay_mode_without_a_public_ip_stays_direct():
 
 
 def test_the_offer_uses_the_endpoint_helper_and_prearms_the_permission():
-    """Source guard: relay-in-c= without the early permission is a black hole."""
-    import pathlib
+    """Relay-in-c= without the early permission is a black hole: both media
+    endpoints come from the helper, and relay mode installs the permission for
+    our own public address at setup."""
+    import ast
 
-    src = without_state(
-        (
-            pathlib.Path(__file__).resolve().parents[1]
-            / "aidot_cameras"
-            / "camera"
-            / "sdes_open.py"
-        ).read_text()
-    )
-    assert src.count("_sdes_offer_media_endpoint(") >= 3, (
-        "audio and video endpoints must both come from the helper"
-    )
-    # The permission for OUR public address, installed at the setup phase and
-    # gated to relay mode (indiscriminate installs caused TURN self-loop
-    # storms - the allocation helper carries the warning).
-    j = src.index("if _relay_in_c and _public_ip:")
-    window = src[j : j + 300]
-    assert "_turn_install_permissions" in window and "relay-mode WAN" in window, (
-        "relay-in-c= must install the permission for our public address, or "
-        "the relayed path is a black hole"
-    )
+    from tests.ast_guards import calls_to, names_in, sdes_open_family
+
+    family = sdes_open_family()
+    assert sum(len(calls_to(fn, "_sdes_offer_media_endpoint")) for fn in family) >= 2
+    prearm = [
+        n
+        for fn in family
+        for n in ast.walk(fn)
+        if isinstance(n, ast.If)
+        and {"_relay_in_c", "_public_ip"} <= names_in(n.test)
+        and calls_to(n, "_turn_install_permissions")
+    ]
+    assert prearm, "relay-in-c= must install the permission for our public address"
 
 
 def test_lan_mode_gates_every_turn_allocate_in_the_open():
-    """Source guard (2026-10-15 review, 1b.12): lan must mean no relay.
+    """Lan must mean no relay (2026-10-15 review, 1b.12).
 
     rc53 gated the pre-offer and post-offer allocates on the lan skip but not
-    the one in the webrtcReq-echo branch, so an echoing camera (the A001064)
-    in lan mode still allocated a relay after the offer, trickled it, and put
-    it in the answer's c= line. Every call that runs ``_turn_allocate_udp``
-    must sit under an ``if`` whose test reads ``_skip_turn_prealloc``.
+    the one in the webrtcReq-echo branch, so an echoing camera in lan mode
+    still allocated a relay after the offer, trickled it, and put it in the
+    answer's c= line. Every call that runs ``_turn_allocate_udp`` must sit
+    under an ``if`` whose test reads ``_skip_turn_prealloc``.
     """
     import ast
-    import pathlib
 
-    src = without_state(
-        (
-            pathlib.Path(__file__).resolve().parents[1]
-            / "aidot_cameras"
-            / "camera"
-            / "sdes_open.py"
-        ).read_text()
-    )
-    tree = ast.parse(src)
-    parents = {}
-    for node in ast.walk(tree):
-        for child in ast.iter_child_nodes(node):
-            parents[child] = node
+    from tests.ast_guards import enclosing, module_tree, name_of, names_in, parents
 
+    tree = module_tree("aidot_cameras.camera.sdes_open")
+    pm = parents(tree)
     sites = [
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
-        and any(
-            isinstance(a, ast.Name) and a.id == "_turn_allocate_udp" for a in node.args
-        )
+        and any(name_of(a) == "_turn_allocate_udp" for a in node.args)
     ]
     assert len(sites) >= 3, "expected the three allocate sites in the SDES open"
     for call in sites:
-        node, gated = call, False
-        while node in parents:
-            node = parents[node]
-            if isinstance(node, ast.If) and "_skip_turn_prealloc" in ast.unparse(
-                node.test
-            ):
-                gated = True
-                break
+        gated = any(
+            "_skip_turn_prealloc" in names_in(i.test)
+            for i in enclosing(call, pm, ast.If)
+        )
         assert gated, (
             f"_turn_allocate_udp at line {call.lineno} runs in lan mode: gate "
             "it on _skip_turn_prealloc"

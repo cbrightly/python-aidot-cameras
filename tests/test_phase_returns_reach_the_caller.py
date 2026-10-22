@@ -19,7 +19,6 @@ recording passed.
 import ast
 import importlib
 import inspect
-import re
 import textwrap
 
 import pytest
@@ -88,17 +87,48 @@ def test_every_part_that_can_return_is_checked_where_it_is_called(method):
         for m, name, tree in _ALL
         if m == method
     }
-    src = textwrap.dedent(inspect.getsource(getattr(CameraMixin, method)))
+    orch = ast.parse(textwrap.dedent(inspect.getsource(getattr(CameraMixin, method))))
+    # Every statement list in the orchestrator, so "what follows the call"
+    # means the statements after it in its own block.
+    blocks = [
+        stmts
+        for node in ast.walk(orch)
+        for field in ("body", "orelse")
+        if isinstance(stmts := getattr(node, field, None), list)
+    ]
     missing = []
     for name, emitted in signals.items():
-        found = re.findall(rf"^( *)(_o = )?await {name}\(self, \w+\)$", src, re.M)
-        assert len(found) == 1, f"{method} should call {name} once"
+        sites = [
+            (stmts, i)
+            for stmts in blocks
+            for i, s in enumerate(stmts)
+            if isinstance(s, (ast.Assign, ast.Expr))
+            and isinstance(s.value, ast.Await)
+            and isinstance(s.value.value, ast.Call)
+            and getattr(s.value.value.func, "id", None) == name
+        ]
+        assert len(sites) == 1, f"{method} should call {name} once"
+        stmts, i = sites[0]
+        call = stmts[i]
+        args = call.value.value.args
+        assert len(args) == 2 and ast.unparse(args[0]) == "self", ast.unparse(call)
         if not emitted:
             continue
-        assert found[0][1], f"{method} drops what {name} hands back"
-        after = re.split(rf"_o = await {name}\(self, \w+\)", src, maxsplit=1)[1]
-        after = after.split("await ", 1)[0]
-        for signal in sorted(emitted):
-            if f"isinstance(_o, {signal})" not in after:
-                missing.append(f"{name} -> {signal}")
+        assert isinstance(call, ast.Assign) and ast.unparse(call.targets[0]) == "_o", (
+            f"{method} drops what {name} hands back"
+        )
+        after = []
+        for s in stmts[i + 1 :]:
+            if any(isinstance(a, ast.Await) for a in ast.walk(s)):
+                break
+            after.append(s)
+        checked = {
+            ast.unparse(c.args[1])
+            for s in after
+            for c in ast.walk(s)
+            if isinstance(c, ast.Call)
+            and getattr(c.func, "id", None) == "isinstance"
+            and ast.unparse(c.args[0]) == "_o"
+        }
+        missing += [f"{name} -> {sig}" for sig in sorted(emitted - checked)]
     assert not missing, f"{method} ignores what these parts hand back: {missing}"

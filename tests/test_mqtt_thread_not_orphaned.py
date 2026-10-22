@@ -13,30 +13,35 @@ symptom as the uncancellable drain fixed alongside this.
 """
 
 import asyncio
-import inspect
 import queue
 import time
 
-from aidot_cameras.camera import webrtc_open
 from aidot_cameras.camera.client import CameraMixin
-
-from tests.source_parts import without_state
 
 
 def test_both_mqtt_branches_register_with_the_backstop():
-    """Whichever transport runs, something must be able to reap its thread."""
-    src = without_state(inspect.getsource(webrtc_open))
-    start = src.index("_pm_stream = (")
-    end = src.index("# Wait for MQTT to be connected and subscribed", start)
-    both = src[start:end]
-    assert both.count("self._stream_mqtt_drain = ") == 2, (
-        "one of the two MQTT branches does not register its worker with "
-        "_reap_stream_drain; a cancelled open will orphan that thread"
-    )
-    assert both.count("self._stream_mqtt_outq = outgoing_q") == 2, (
-        "the queue must be registered too - without it the reaper has no way "
-        "to push the sentinel that actually releases the thread"
-    )
+    """Whichever transport runs - the shared persistent connection or a
+    per-open session - its worker and its queue are registered, so a cancelled
+    open can be reaped (the queue is how the reaper pushes the sentinel that
+    actually releases the thread)."""
+    import ast
+
+    from tests.ast_guards import attr_writes, dtls_open_family, names_in
+
+    forks = [
+        n
+        for fn in dtls_open_family()
+        for n in ast.walk(fn)
+        if isinstance(n, ast.If) and "_pm_stream" in names_in(n.test) and n.orelse
+    ]
+    assert forks, "the MQTT transport fork moved"
+    for fork in forks:
+        for branch in (fork.body, fork.orelse):
+            writes = attr_writes(ast.Module(body=branch, type_ignores=[]), "self")
+            assert {"_stream_mqtt_drain", "_stream_mqtt_outq"} <= writes, (
+                f"line {branch[0].lineno}: an MQTT branch does not register "
+                "its worker and queue with _reap_stream_drain"
+            )
 
 
 def test_the_backstop_releases_a_blocked_worker():
