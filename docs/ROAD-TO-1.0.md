@@ -36,12 +36,16 @@ installation and nothing streaming-breaking has had to ship in that time.
 Two weeks is the bar as originally set. Some later entries in this file said
 ten days; that was an inconsistency, not a change of bar.
 
-**Day zero.** The reference installation has been off the network since
-2026-10-13. Day zero is the day it returns running the newest rc (currently
-`1.0.0rc61`) and the integration release that requires it (currently
-`2.37.17`). The installed files must match the released ones: a soak measured
-on hot-patched files measures nothing, so that check is part of dating day
-zero.
+**Day zero.** The original reference installation has been off the network
+since 2026-10-13, so on 2026-10-22 the reference moved to a Home Assistant
+Container (2026.10.2) on a Raspberry Pi 4 on the cameras' network, running
+`1.0.0rc61` and integration `2.37.17` with their released files (checked by
+hash against the wheel and the release). That day had installs and restarts,
+so it is provocation; the first counting day is **2026-10-23** and the target
+is **2026-11-06**. The installed files must match the released ones: a soak
+measured on hot-patched files measures nothing, so that check is part of
+dating day zero. Live validation during the soak runs on a separate runner,
+not on the reference host.
 
 **What counts as soak.** Ordinary use with nobody driving the box. A day with
 releases being installed, Home Assistant restarts, forced opens or probes is
