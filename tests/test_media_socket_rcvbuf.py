@@ -17,6 +17,8 @@ from aidot_cameras.camera.sdes_open import (
     _widen_media_rcvbuf,
 )
 
+from tests.source_parts import without_state
+
 
 def test_the_request_clears_a_keyframe_burst():
     # 190 KB is the largest keyframe measured on the A001064; the request has to
@@ -63,7 +65,7 @@ def test_both_media_sockets_are_widened_before_bind():
 
     from aidot_cameras.camera import sdes_open
 
-    src = inspect.getsource(sdes_open)
+    src = without_state(inspect.getsource(sdes_open))
     for kind in ("_audio_sock", "_video_sock"):
         widen = src.index(f"_widen_media_rcvbuf({kind}")
         bind = src.index(f"{kind}.bind(")

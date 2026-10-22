@@ -20,10 +20,12 @@ import time
 from aidot_cameras.camera import webrtc_open
 from aidot_cameras.camera.client import CameraMixin
 
+from tests.source_parts import without_state
+
 
 def test_both_mqtt_branches_register_with_the_backstop():
     """Whichever transport runs, something must be able to reap its thread."""
-    src = inspect.getsource(webrtc_open)
+    src = without_state(inspect.getsource(webrtc_open))
     start = src.index("_pm_stream = (")
     end = src.index("# Wait for MQTT to be connected and subscribed", start)
     both = src[start:end]

@@ -26,6 +26,8 @@ import pytest
 from aidot_cameras.camera import rtsp_publish as rp
 from aidot_cameras.g711 import linear2alaw
 
+from tests.source_parts import without_state
+
 # --------------------------------------------------------------------------- #
 # fake go2rtc                                                                  #
 # --------------------------------------------------------------------------- #
@@ -1588,7 +1590,7 @@ def test_the_open_passes_the_plain_rtp_decision_through():
 
     from aidot_cameras.camera import sdes_open
 
-    src = inspect.getsource(sdes_open)
+    src = without_state(inspect.getsource(sdes_open))
     assert (
         "_direct_publish = _should_direct_publish(\n"
         "            rtsp_push_url, output_path, max_seconds, _use_plain_rtp, _keep_v\n"
@@ -1603,7 +1605,7 @@ def test_both_sdes_serve_launches_go_through_the_spawn_helper():
 
     from aidot_cameras.camera import sdes_open
 
-    src = inspect.getsource(sdes_open)
+    src = without_state(inspect.getsource(sdes_open))
     assert src.count("proc = await _spawn_serve()") == 2
     # The SDP read goes through the executor: Home Assistant flags a blocking
     # open() in the event loop, and this one runs on the open's hot path.
@@ -1623,7 +1625,7 @@ def test_dtls_serve_loop_checks_publish_before_the_direct_ts_serve():
 
     from aidot_cameras.camera import client
 
-    src = inspect.getsource(client)
+    src = without_state(inspect.getsource(client))
     i_pub = src.index("_publishing = direct_publish_enabled() and is_publishable_url(")
     i_ts = src.index("elif _is_http_serve_url(serve_url):")
     assert i_pub < i_ts
@@ -2259,7 +2261,7 @@ def test_the_open_passes_the_narrowed_codec_to_the_decision():
 
     from aidot_cameras.camera import sdes_open
 
-    src = inspect.getsource(sdes_open)
+    src = without_state(inspect.getsource(sdes_open))
     assert (
         "_direct_publish = _should_direct_publish(\n"
         "            rtsp_push_url, output_path, max_seconds, _use_plain_rtp, _keep_v\n"
@@ -2339,7 +2341,7 @@ def test_agc_reads_the_same_knobs_as_the_mux():
 def test_the_dtls_runner_conditions_its_audio():
     import inspect
 
-    src = inspect.getsource(rp.dtls_rtp_publish_run)
+    src = without_state(inspect.getsource(rp.dtls_rtp_publish_run))
     assert "agc = AlawAgc()" in src and "agc.process(adata)" in src
 
 
@@ -2712,7 +2714,7 @@ def test_the_sdes_publisher_conditions_its_audio_too():
     run the same conditioning, and the trim is an offset after it."""
     import inspect
 
-    src = inspect.getsource(rp.LoopbackRtpPublisher._send)
+    src = without_state(inspect.getsource(rp.LoopbackRtpPublisher._send))
     assert "self._agc.process(payload)" in src
     # Conditioned first, trimmed second: a pre-trim would push a quiet room
     # further under the gate and the normalizer could never bring it back.

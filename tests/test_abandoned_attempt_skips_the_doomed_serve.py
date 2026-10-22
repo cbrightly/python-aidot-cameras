@@ -37,15 +37,18 @@ import pytest
 
 from aidot_cameras.exceptions import AidotCameraBusy, AidotCameraNoMedia, AidotError
 from aidot_cameras.camera.sdes_open import _should_skip_doomed_serve
+from tests.source_parts import without_state
 
 
 def _open_source():
     """The SDES open and the phase coroutines it was split into."""
     from aidot_cameras.camera import sdes_open as _so
 
-    parts = [inspect.getsource(_so._SdesOpenMixin._open_sdes_stream_impl)]
+    parts = [
+        without_state(inspect.getsource(_so._SdesOpenMixin._open_sdes_stream_impl))
+    ]
     parts += [
-        inspect.getsource(getattr(_so, n))
+        without_state(inspect.getsource(getattr(_so, n)))
         for n in dir(_so)
         if n.startswith("_sdes_open_")
     ]

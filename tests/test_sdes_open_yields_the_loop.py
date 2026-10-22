@@ -19,6 +19,8 @@ import pytest
 from aidot_cameras.camera import sdes_open
 from aidot_cameras.camera.sdes_open import _run_off_loop, _select_readable
 
+from tests.source_parts import without_state
+
 
 def _udp_pair():
     a = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -102,7 +104,7 @@ async def test_a_closed_socket_raises_like_select_did():
 
 def _open_impl_nodes():
     """The open coroutine and the phase coroutines it was split into."""
-    tree = ast.parse(inspect.getsource(sdes_open))
+    tree = ast.parse(without_state(inspect.getsource(sdes_open)))
     found = [
         node
         for node in ast.walk(tree)
