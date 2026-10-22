@@ -428,10 +428,10 @@ change touched, walk this list and fix what the release makes untrue.
 
 | File | What goes stale |
 | --- | --- |
-| `CHANGELOG.md` | The `[Unreleased]` heading becomes the version; entries describe behaviour, not commits |
+| `CHANGELOG.md` | The `[Unreleased]` heading becomes the version; entries describe behaviour, not commits. Before 1.0.0, also whether this release resets the soak clock, and why (rules in `docs/ROAD-TO-1.0.md`) |
 | `README.md` | Measured numbers (cold-open timings, CPU), option names and defaults, supported models |
 | `docs/CAMERAS.md` | Per-model behaviour and anything a new model or transport changed |
-| `docs/ROAD-TO-1.0.md` | The soak clock: say explicitly whether this release resets it, and why |
+| `docs/ROAD-TO-1.0.md` | Day zero and the current rc, when a release resets the soak clock |
 | `docs/TESTING.md` | New markers, fixtures, or a test that now needs real hardware |
 | `docs/CI-RUNNER.md` | Gate coverage: a new code path the live gate does **not** exercise belongs in a "not gated" section |
 | Design docs (e.g. `DESIGN-direct-publish.md`) | The status line, the phase reached, and results that a live run has now superseded |
