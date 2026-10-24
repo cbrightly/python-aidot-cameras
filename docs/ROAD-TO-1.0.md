@@ -41,8 +41,10 @@ since 2026-10-13, so on 2026-10-22 the reference moved to a Home Assistant
 Container (2026.10.2) on a Raspberry Pi 4 on the cameras' network, running
 `1.0.0rc61` and integration `2.37.17` with their released files (checked by
 hash against the wheel and the release). Those days had installs and restarts
-(2026-10-23 added the viewing schedule below), so they are provocation; the
-first counting day is **2026-10-24** and the target is **2026-11-07**. The installed files must match the released ones: a soak
+(2026-10-23 added the viewing schedule below; on 2026-10-24 the go2rtc that
+SDES cameras publish into was found stopped after a host reboot and was made a
+boot-persistent service), so they are provocation; the first counting day is
+**2026-10-25** and the target is **2026-11-08**. The installed files must match the released ones: a soak
 measured on hot-patched files measures nothing, so that check is part of
 dating day zero. Live validation during the soak runs on a separate runner,
 not on the reference host.
