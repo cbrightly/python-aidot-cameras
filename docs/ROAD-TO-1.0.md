@@ -40,14 +40,20 @@ ten days; that was an inconsistency, not a change of bar.
 since 2026-10-13, so on 2026-10-22 the reference moved to a Home Assistant
 Container (2026.10.2) on a Raspberry Pi 4 on the cameras' network, running
 `1.0.0rc61` and integration `2.37.17` with their released files (checked by
-hash against the wheel and the release). That day had installs and restarts,
-so it is provocation; the first counting day is **2026-10-23** and the target
-is **2026-11-06**. The installed files must match the released ones: a soak
+hash against the wheel and the release). Those days had installs and restarts
+(2026-10-23 added the viewing schedule below), so they are provocation; the
+first counting day is **2026-10-24** and the target is **2026-11-07**. The installed files must match the released ones: a soak
 measured on hot-patched files measures nothing, so that check is part of
 dating day zero. Live validation during the soak runs on a separate runner,
 not on the reference host.
 
-**What counts as soak.** Ordinary use with nobody driving the box. A day with
+**What counts as soak.** Ordinary use with nobody driving the box. Ordinary
+use includes one fixed viewing schedule, set before the first counting day so
+that it cannot be tuned to the result: every camera is viewed for 60 s through
+Home Assistant's own stream path (`camera.record`), one camera after another,
+at 09:05, 14:05 and 20:05 local time. Without it a battery camera, which
+streams only while viewed, would never open during the soak. Viewing a camera
+by hand is ordinary use too. A day with
 releases being installed, Home Assistant restarts, forced opens or probes is
 provocation, not soak, and does not count towards the two weeks. Days the box
 is off the network count as neither, and push the target out.
