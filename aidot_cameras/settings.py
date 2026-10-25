@@ -344,6 +344,7 @@ KNOBS: "dict[str, Knob]" = _registry(
     Knob("AIDOT_DTLS_FUTILE_VIDEO_LIMIT", 5, "int"),
     Knob("AIDOT_LOGIN_RETRY_CAP_S", 60.0, "float"),
     Knob("AIDOT_LOGIN_CONNECT_TIMEOUT_S", 20.0, "float"),
+    Knob("AIDOT_LAN_STABLE_SESSION_S", 60.0, "float", minimum=0.0),
     # --- deeper internals (ENVIRONMENT.md) ----------------------------------
     Knob("AIDOT_STREAM_IDLE_S", 120.0, "float"),
     Knob("AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S", 300.0, "float"),

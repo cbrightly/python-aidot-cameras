@@ -38,6 +38,7 @@ once the behaviour it tunes has settled, and the CHANGELOG will say so.
 | `AIDOT_DTLS_FUTILE_VIDEO_LIMIT` | Consecutive video-less DTLS sessions after which the serve loop stops re-opening. Noticing alone is not enough: a video-less session is otherwise a clean open, so a loop that simply re-opened would clear its backoff each time and wake the camera every 15 s indefinitely. `0` keeps retrying forever. | `5` |
 | `AIDOT_LOGIN_RETRY_CAP_S` | Ceiling on the exponential delay between the LAN login retries that `AIDOT_LOGIN_RETRY_LIMIT` (README) counts. | `60` |
 | `AIDOT_LOGIN_CONNECT_TIMEOUT_S` | Ceiling on one LAN connect+login attempt. A device that completes the TCP handshake and then stops answering is abandoned and its socket closed rather than parking the attempt forever. | `20` |
+| `AIDOT_LAN_STABLE_SESSION_S` | How long a LAN session must stay up after a successful login before it counts as working. A device that closes the session sooner (for example because another controller took the light's only LAN session) is retried on the same backoff and ceiling as a failed login, instead of being logged back in every second. | `60` |
 
 ## Deeper internals
 
