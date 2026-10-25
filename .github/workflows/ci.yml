@@ -47,6 +47,17 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install mypy
+      # Incremental mypy state for both runs (this change and its baseline).
+      # A fresh checkout has new mtimes, so mypy falls back to content hashes
+      # and still reuses every unchanged module. Keyed per commit so each run
+      # saves its own state; restore-keys picks up the most recent one.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9         # v6.1.0 (node24)
+        with:
+          path: |
+            .mypy_cache
+            ../mypy-base/.mypy_cache
+          key: mypy-${{ runner.os }}-${{ github.sha }}
+          restore-keys: mypy-${{ runner.os }}-
       - name: Mypy (non-blocking)
         run: |
           mypy aidot_cameras/ > mypy-head.txt || true
@@ -103,6 +114,8 @@ jobs:
     name: Unit tests (Alpine / musl, python-aidot ${{ matrix.upstream }})
     runs-on: ubuntu-latest
     container: python:3.13-alpine
+    env:
+      PIP_CACHE_DIR: /root/.cache/pip
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
@@ -125,6 +138,16 @@ jobs:
       # all have them).
       - name: System deps
         run: apk add --no-cache git curl ffmpeg gcc musl-dev libffi-dev
+      # No setup-python in the container, so the pip cache is wired up by hand:
+      # PIP_CACHE_DIR (job env) is pinned to a path inside the container, which
+      # holds both downloaded wheels and any wheel built from source on musl.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9         # v6.1.0 (node24, mandatory in a musl container)
+        with:
+          path: /root/.cache/pip
+          key: pip-alpine-py3.13-${{ github.job }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            pip-alpine-py3.13-${{ github.job }}-
+            pip-alpine-py3.13-
       - name: go2rtc (the publish tests run against a real one)
         # Without it tests/test_rtsp_publish_go2rtc.py skipped - nine tests of
         # the direct publish path that never ran in CI until 2026-10-08. The
@@ -195,10 +218,22 @@ jobs:
     name: E2E (fake cloud / fake cameras)
     runs-on: ubuntu-latest
     container: python:3.13-alpine
+    env:
+      PIP_CACHE_DIR: /root/.cache/pip
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1      # v7.0.1 (node24, mandatory in a musl container)
       - name: System deps
         run: apk add --no-cache git curl ffmpeg gcc musl-dev libffi-dev
+      # No setup-python in the container, so the pip cache is wired up by hand:
+      # PIP_CACHE_DIR (job env) is pinned to a path inside the container, which
+      # holds both downloaded wheels and any wheel built from source on musl.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9         # v6.1.0 (node24, mandatory in a musl container)
+        with:
+          path: /root/.cache/pip
+          key: pip-alpine-py3.13-${{ github.job }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            pip-alpine-py3.13-${{ github.job }}-
+            pip-alpine-py3.13-
       - name: Install package + test deps
         run: |
           python -m pip install --upgrade pip
@@ -243,6 +278,10 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0 (node24)
         with:
           python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            library/pyproject.toml
+            integration/requirements_test.txt
       # The integration's suite at v2.37.15 has a clip-proxy test that runs
       # ffmpeg, and AIDOT_FAIL_ON_SKIP turns its "no ffmpeg" skip into a failure.
       - name: Install ffmpeg
@@ -293,6 +332,11 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0 (node24)
         with:
           python-version: "3.13"
+          cache: pip
+          # Only job keyed on pyproject.toml alone: setup-python's key has no job
+          # name in it, so a second job with the same dependency path would share
+          # (and could pre-empt) this cache.
+          cache-dependency-path: pyproject.toml
       - name: Resolve and install against HA's constraints
         run: |
           set -euo pipefail
