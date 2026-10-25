@@ -128,7 +128,7 @@ def test_a_dtls_camera_gets_a_stable_url_before_its_session_exists(monkeypatch):
     ("model", "pin", "eligible"),
     [
         ("LK.IPC.A001064", "96", True),
-        ("LK.IPC.A001513", "96", True),
+        ("LK.IPC.A001513", "96", False),  # battery: see the test below
         ("LK.IPC.A001064", "none", False),  # unpinned: might answer H.265
         ("LK.IPC.A001064", "97", False),
         ("LK.IPC.A009999", "96", False),  # media reaches the serve encrypted
@@ -145,6 +145,33 @@ def test_an_sdes_camera_gets_the_ts_only_when_every_session_feeds_it(
     cam = _cam(sdes=True, model=model)
     assert (cam.hls_ts_url() is not None) is eligible
     assert (cam._hls_ts_session() is not None) is eligible
+
+
+@pytest.mark.parametrize(
+    ("sdes", "model", "battery_level", "eligible"),
+    [
+        (True, "LK.IPC.A001513", None, False),  # battery SDES model
+        (True, "LK.IPC.A001064", 80, False),  # battery by its own cloud data
+        (True, "LK.IPC.A001064", None, True),  # mains SDES
+        (False, "LK.IPC.A000088", None, True),  # mains DTLS
+    ],
+)
+def test_a_battery_camera_never_gets_the_ts(
+    monkeypatch, sdes, model, battery_level, eligible
+):
+    # A battery link loses 15-25% of packets and the TS starts a reader only on
+    # a complete keyframe, so under that loss it wrote nothing for longer than
+    # Home Assistant's open timeout while go2rtc had the frames (2026-10-25).
+    # With no URL, Home Assistant's HLS view and recordings read go2rtc's RTSP.
+    _on(monkeypatch)
+    monkeypatch.setenv("AIDOT_SDES_VIDEO_PT", "96")
+    cam = _cam(sdes=sdes, model=model)
+    if battery_level is not None:
+        cam._raw_device = {"properties": {"Battery_remaining": battery_level}}
+    assert cam.is_battery_camera is not eligible
+    assert (cam.hls_ts_url() is not None) is eligible
+    assert (cam._hls_ts_session() is not None) is eligible
+    assert cam._hls_ts_expected() is eligible
 
 
 def test_the_dtls_publisher_gets_a_fresh_session_only_when_on(monkeypatch):

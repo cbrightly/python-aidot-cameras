@@ -6,6 +6,22 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **Battery cameras open reliably in Home Assistant's player and recordings.**
+  `hls_ts_url()` now returns None for a battery camera, so Home Assistant's
+  HLS view and `camera.record` read go2rtc's RTSP instead of the in-sync
+  MPEG-TS. A battery link loses 15-25% of packets, and the in-sync TS starts
+  a reader only on a complete keyframe (SPS and IDR in one loss-free access
+  unit), so under that loss it could send nothing for longer than Home
+  Assistant waits to open a stream: the stream failed with "Error opening
+  stream" while go2rtc was receiving the camera's video. The trade-off: a
+  battery camera's recordings now use go2rtc's stream, so their sound is not
+  frame-aligned the way the in-sync stream aligns it (it can start 0.1-0.75 s
+  late). Mains cameras keep the in-sync stream. A battery camera's sessions no
+  longer feed the TS, and a pinned battery camera that answers H.265 is now
+  served as it came rather than re-opened (`AIDOT_PINNED_CODEC_RETRIES` applies
+  only to cameras that get the TS).
+
 ## [1.0.0rc61]
 
 Soak: resets the clock. Both stream opens and both serve loops are rewritten

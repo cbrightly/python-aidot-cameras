@@ -5790,7 +5790,8 @@ class CameraMixin(
         """The camera's in-sync MPEG-TS URL for Home Assistant's HLS, or None.
 
         Set when ``AIDOT_HLS_DIRECT_TS`` (with direct publish and the AAC track)
-        is on, for cameras whose session is sure to feed it (``_hls_ts_eligible``).
+        is on, for cameras whose session is sure to feed it (``_hls_ts_eligible``;
+        never a battery camera).
         Unlike go2rtc's RTSP, a consumer joining this
         stream at any moment gets sound and picture in step. The URL exists
         before the camera's session does and stays the same while the listener
@@ -5829,7 +5830,16 @@ class CameraMixin(
         on. An SDES camera does only on a model whose media the bridge decrypts
         (``_PLAIN_RTP_MODELS``) and with its offer pinned to H.264
         (``AIDOT_SDES_VIDEO_PT=96``): an H.265 session keeps the ffmpeg serve.
+
+        A battery camera never gets it. Its link loses 15-25% of packets, and
+        the TS starts a reader only on a complete keyframe (SPS and IDR in one
+        loss-free access unit), so under that loss it can write nothing for
+        longer than Home Assistant waits to open a stream, while go2rtc passes
+        the frames it has straight through. Its HLS view and recordings read
+        go2rtc's RTSP instead.
         """
+        if self.is_battery_camera:
+            return False
         if not self.is_sdes_camera:
             return True
         model = getattr(getattr(self, "info", None), "model_id", None) or ""
