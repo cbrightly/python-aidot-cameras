@@ -6,6 +6,39 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+Soak: does not reset the clock. Light LAN control only (`lan_retry.py`); no
+camera, stream, publish or serve path runs this code.
+
+### Added
+- **`AIDOT_LAN_STABLE_SESSION_S`** (default 60): how long a light's LAN session
+  must stay up after its login before the login counts as working. See Fixed.
+- `lan_session_unstable` on every device client: True while the device keeps
+  closing its LAN session soon after login.
+
+### Fixed
+- **A light that accepts the LAN login and then closes the session is no
+  longer logged back in every two seconds.** Every login that got through
+  reset the retry backoff, so a light that answered the login with a 200 ack
+  and closed the socket a second later was retried at the first backoff step
+  forever, and never reached `AIDOT_LOGIN_RETRY_LIMIT`. Four lights did this
+  on the reference installation: 54,000 upstream `read status error` ERROR
+  lines in a day. The backoff now resets only once a session has lasted
+  `AIDOT_LAN_STABLE_SESSION_S`; a session that ends sooner counts toward the
+  same backoff and ceiling as a refused login, and discovery stops kicking
+  the light at the ceiling until its address changes, as it does for refused
+  logins. A light that drops after a stable session still gets the prompt
+  one-second retry.
+- **One dead LAN socket no longer costs two or three backoff steps.**
+  Upstream calls `reset()` from the receive loop and again from the ping or
+  send that hit the same socket; only the first now re-arms the retry.
+- **Upstream's per-close ERROR lines are kept to one per outage, as a
+  WARNING.** The first session-end line upstream logs for a light
+  (`read status error`, `ping error`, `writer/reader close error`, ...) is let
+  through at WARNING; while the light keeps closing its session early, the
+  rest are dropped and the library logs one WARNING saying what is happening
+  (most often another controller holding the light's only LAN session), then
+  one at the ceiling.
+
 ## [1.0.0rc61]
 
 Soak: resets the clock. Both stream opens and both serve loops are rewritten

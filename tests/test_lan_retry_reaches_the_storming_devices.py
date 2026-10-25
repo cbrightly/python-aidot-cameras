@@ -215,22 +215,30 @@ def test_a_light_that_recovers_starts_its_next_failure_run_from_zero():
     """Without this, an intermittent light climbs to the ceiling and stops.
 
     The ceiling counts CONSECUTIVE failures.  A device that drops once an hour
-    and recovers must never accumulate its way to being abandoned.
+    and recovers must never accumulate its way to being abandoned.  Recovering
+    means a session that stays up for the stable window, not merely a login
+    that got through: a login the device closes a second later is no recovery
+    (tests/test_lan_retry_short_sessions.py).
     """
+
+    async def _logs_in(self, ip_address):
+        self._connect_and_login = True
 
     async def _run():
         dc = CameraClient(None, country_code="US").get_device_client(STORMING_LIGHT)
         dc._ip_address = "192.0.2.10"
         dc._login_attempt = _LOGIN_RETRY_LIMIT - 1
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(_UpstreamDeviceClient, "connect", _logs_in)
+            mp.setattr(type(dc), "_lan_stable_session_s", 0.02, raising=False)
+            await dc.async_login()
+            right_after_login = dc._login_attempt
+            await asyncio.sleep(0.1)
+        return right_after_login, dc._login_attempt
 
-        async def _connects(ip_address):
-            dc._connect_and_login = True
-
-        dc.connect = _connects
-        await dc.async_login()
-        return dc._login_attempt
-
-    assert asyncio.run(_run()) == 0
+    right_after_login, once_stable = asyncio.run(_run())
+    assert right_after_login == _LOGIN_RETRY_LIMIT - 1
+    assert once_stable == 0
 
 
 def test_a_light_that_stops_answering_does_not_park_the_attempt():
