@@ -45,12 +45,14 @@ stand-in's AiDot integration was disabled on 2026-10-25 and the original is the
 reference again. Days with installs, restarts or two installations are
 provocation, not soak.
 
-**The count is paused (since 2026-10-24).** The first day of scheduled viewing
-found that battery cameras mostly failed to open in Home Assistant's own
-player, which `rc62` fixes, plus repeated reconnects on two mains cameras that
-may be the two installations competing. Day zero is the first ordinary day the
-reference installation runs `rc62` and `2.37.18` with nothing else driving the
-devices, and the target is two weeks later. The installed files must match the
+**Day zero is 2026-10-26; the target is 2026-11-09.** The reference
+installation (Home Assistant 2026.10.1 on HA OS) runs `1.0.0rc62` and
+integration `2.37.18` since 2026-10-25, with their released files checked by
+hash against the wheel and the release; the stand-in's AiDot integration is
+disabled, so nothing else drives the devices. 2026-10-25 had installs and
+restarts, so it is provocation. The count had been paused since 2026-10-24
+for what the first day of scheduled viewing found: battery cameras mostly
+failed to open in Home Assistant's own player, which `rc62` fixes. The installed files must match the
 released ones: a soak measured on hot-patched files measures nothing, so that
 check is part of dating day zero. Live validation during the soak runs on a separate runner,
 not on the reference host.
