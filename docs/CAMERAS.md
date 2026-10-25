@@ -354,7 +354,9 @@ its own template and sent H.265 in 15 of 107 pinned opens (2026-08-26). Since
 type 97 against an offer pinned to 96 ... re-opening [n of 2]` at WARNING -
 up to `AIDOT_PINNED_CODEC_RETRIES` times in a row, then served as it came with
 a warning that the in-sync stream gets no video that session. Without the pin,
-or without the in-sync option, nothing changes.
+or without the in-sync option, nothing changes. A battery camera never gets
+the in-sync TS (its packet loss can keep the TS empty past Home Assistant's
+open timeout), so it is never re-opened for this either.
 
 ### A failed go2rtc registration silently downgrades to HLS
 
