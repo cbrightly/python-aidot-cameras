@@ -62,7 +62,12 @@ def test_vendored_aiortc_matches_its_manifest():
 
 
 def test_the_manifest_covers_the_files_vendor_md_names():
-    # The two files VENDOR.md says differ from upstream must be pinned too.
+    # The files VENDOR.md says differ from upstream must be pinned too.
     recorded = _recorded()
-    for rel in ("contrib/signaling.py", "rate.py"):
+    for rel in (
+        "contrib/signaling.py",
+        "rate.py",
+        "rtcicetransport.py",
+        "rtcpeerconnection.py",
+    ):
         assert rel in recorded

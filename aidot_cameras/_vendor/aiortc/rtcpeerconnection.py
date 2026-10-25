@@ -319,6 +319,8 @@ class RTCPeerConnection(AsyncIOEventEmitter):
         self.__iceConnectionState = "new"
         self.__iceGatheringState = "new"
         self.__isClosed: Optional[asyncio.Future[bool]] = None
+        # aidot: the __connect tasks, so close() can stop them (see VENDOR.md).
+        self.__connectTasks: set[asyncio.Future[None]] = set()
         self.__signalingState = "stable"
 
         self.__currentLocalDescription: Optional[sdp.SessionDescription] = None
@@ -519,6 +521,10 @@ class RTCPeerConnection(AsyncIOEventEmitter):
             return
         self.__isClosed = asyncio.Future()
         self.__setSignalingState("closed")
+
+        # aidot: stop the connect tasks before the transports they drive are
+        # stopped, so none reaches a stopped transport (see VENDOR.md).
+        await self.__stopConnect()
 
         # stop senders / receivers
         for transceiver in self.__transceivers:
@@ -850,7 +856,7 @@ class RTCPeerConnection(AsyncIOEventEmitter):
                 add_transport_description(media, self.__sctp.transport)
 
         # connect
-        asyncio.ensure_future(self.__connect())
+        self.__startConnect()
 
         # replace description
         if description.type == "answer":
@@ -1039,7 +1045,7 @@ class RTCPeerConnection(AsyncIOEventEmitter):
             self.emit("track", event.track)
 
         # connect
-        asyncio.ensure_future(self.__connect())
+        self.__startConnect()
 
         # update signaling state
         if description.type == "offer":
@@ -1053,6 +1059,20 @@ class RTCPeerConnection(AsyncIOEventEmitter):
             self.__pendingRemoteDescription = None
         else:
             self.__pendingRemoteDescription = description
+
+    def __startConnect(self) -> None:
+        # aidot: upstream fires __connect and forgets it (see VENDOR.md).
+        task = asyncio.ensure_future(self.__connect())
+        self.__connectTasks.add(task)
+        task.add_done_callback(self.__connectTasks.discard)
+
+    async def __stopConnect(self) -> None:
+        current = asyncio.current_task()
+        tasks = [t for t in self.__connectTasks if t is not current and not t.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def __connect(self) -> None:
         for transceiver in self.__transceivers:

@@ -6,6 +6,22 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+Soak: does not reset the clock. The change is confined to closing a peer
+connection whose ICE never completed (a failed or aborted open); on a session
+that connected, the connect task and the connectivity checks have already
+finished and the change does nothing. No default streaming path changes.
+
+### Fixed
+- **A failed or aborted WebRTC open no longer leaves ICE work running.**
+  Closing the peer connection while ICE was still checking left the
+  connectivity checks retrying on closed sockets, which logged
+  `Exception in callback Transaction.__retry()` (`'NoneType' object has no
+  attribute 'sendto'`) a dozen times per failure, plus `Task exception was
+  never retrieved ... RTCIceTransport is closed` from the connect task. Each
+  such failure also leaked a check loop that polled every 20 ms until Home
+  Assistant restarted. The vendored aiortc now cancels and awaits the connect
+  task and the checks on close (see `_vendor/aiortc/VENDOR.md`).
+
 ## [1.0.0rc61]
 
 Soak: resets the clock. Both stream opens and both serve loops are rewritten

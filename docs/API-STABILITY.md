@@ -111,7 +111,8 @@ interchangeable beyond that.
   function or attribute. Much of the interesting behaviour lives in
   `_open_sdes_stream_impl`, `_bridge_fn` and friends; none of it is stable.
 - `aidot_cameras._vendor.*`. A vendored aiortc 1.14.0, differing from upstream
-  only by three import rewrites - the exact delta and the re-vendoring procedure
+  by three import rewrites and one fix to closing a peer connection mid-ICE -
+  the exact delta and the re-vendoring procedure
   are in `aidot_cameras/_vendor/aiortc/VENDOR.md`, and upstream's BSD licence
   ships beside it. It tracks
   upstream on our schedule and is not part of the contract.

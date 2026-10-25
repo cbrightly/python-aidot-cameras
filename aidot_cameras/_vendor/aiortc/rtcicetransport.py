@@ -337,9 +337,12 @@ class RTCIceTransport(AsyncIOEventEmitter):
         try:
             await self._connection.connect()
         except ConnectionError:
-            self.__setState("failed")
+            # aidot: a transport stopped meanwhile stays "closed" (VENDOR.md).
+            if self.state != "closed":
+                self.__setState("failed")
         else:
-            self.__setState("completed")
+            if self.state != "closed":
+                self.__setState("completed")
         self.__start.set()
 
     async def stop(self) -> None:
@@ -348,10 +351,26 @@ class RTCIceTransport(AsyncIOEventEmitter):
         """
         if self.state != "closed":
             self.__setState("closed")
+            # aidot: end the in-flight connectivity checks before their sockets
+            # close, and again after in case an inbound check started one
+            # meanwhile; aioice's close() leaves them running (VENDOR.md).
+            await self.__cancelChecks()
             await self._connection.close()
+            await self.__cancelChecks()
             if self.__monitor_task is not None:
                 await self.__monitor_task
                 self.__monitor_task = None
+
+    async def __cancelChecks(self) -> None:
+        tasks = [
+            pair.task
+            for pair in self._connection._check_list
+            if pair.task is not None and not pair.task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _monitor(self) -> None:
         while True:
