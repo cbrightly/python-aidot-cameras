@@ -6,6 +6,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc62]
+
+Soak: resets the clock. Battery cameras now give Home Assistant go2rtc's
+stream instead of the in-sync TS, a change on a default streaming path. The
+other two fixes do not reset it on their own: the ICE clean-up only runs when
+an open fails, and the LAN backoff is the light control path.
+
 ### Added
 - **`AIDOT_LAN_STABLE_SESSION_S`** (default 60): how long a light's LAN session
   must stay up after its login before the login counts as working. See Fixed.

@@ -19,11 +19,12 @@ understood and its shape has settled:
 - the release that becomes 1.0.0 has run in ordinary use for two weeks without
   a streaming-breaking release replacing it.
 
-Where things stand: the library is at `1.0.0rc61` on PyPI. `1.0.0rc58` is
+Where things stand: the library is at `1.0.0rc62` on PyPI. `1.0.0rc58` is
 yanked: in it a successful DTLS open returned `None` instead of its session;
 `rc59` fixed that and `rc60` adds a test that holds every phase of both opens
-to exporting what later phases read. The Home Assistant integration `2.37.17`
-requires `>=1.0.0rc61`.
+to exporting what later phases read. `rc62` fixes what the first day of
+scheduled viewing found (see below). The Home Assistant integration `2.37.18`
+requires `>=1.0.0rc62`.
 
 ## Open
 
@@ -36,24 +37,22 @@ installation and nothing streaming-breaking has had to ship in that time.
 Two weeks is the bar as originally set. Some later entries in this file said
 ten days; that was an inconsistency, not a change of bar.
 
-**Day zero.** The original reference installation has been off the network
-since 2026-10-13, so on 2026-10-22 the reference moved to a Home Assistant
-Container (2026.10.2) on a Raspberry Pi 4 on the cameras' network, running
-`1.0.0rc61` and integration `2.37.17` with their released files (checked by
-hash against the wheel and the release). Those days had installs and restarts
-(2026-10-23 added the viewing schedule below; on 2026-10-24 the go2rtc that
-SDES cameras publish into was found stopped after a host reboot and was made a
-boot-persistent service), so they are provocation.
+**Day zero.** The original reference installation was off the network from
+2026-10-13 to about 2026-10-23, and a Home Assistant Container on a Raspberry
+Pi 4 stood in for it from 2026-10-22. When the original came back it ran the
+integration too, so two installations drove the same cameras and lights; the
+stand-in's AiDot integration was disabled on 2026-10-25 and the original is the
+reference again. Days with installs, restarts or two installations are
+provocation, not soak.
 
-**The count is paused (2026-10-24).** The first day of scheduled viewing found
-that battery cameras mostly fail to deliver first media when viewed, plus
-repeated reconnects on two mains cameras and noisy tracebacks from aborted
-opens. These are being investigated; if the battery failure is a library
-defect its fix changes a default streaming path and resets the clock anyway,
-so no days count until it is understood. Day zero will be the first ordinary
-day after that, and the target two weeks later. The installed files must match the released ones: a soak
-measured on hot-patched files measures nothing, so that check is part of
-dating day zero. Live validation during the soak runs on a separate runner,
+**The count is paused (since 2026-10-24).** The first day of scheduled viewing
+found that battery cameras mostly failed to open in Home Assistant's own
+player, which `rc62` fixes, plus repeated reconnects on two mains cameras that
+may be the two installations competing. Day zero is the first ordinary day the
+reference installation runs `rc62` and `2.37.18` with nothing else driving the
+devices, and the target is two weeks later. The installed files must match the
+released ones: a soak measured on hot-patched files measures nothing, so that
+check is part of dating day zero. Live validation during the soak runs on a separate runner,
 not on the reference host.
 
 **What counts as soak.** Ordinary use with nobody driving the box. Ordinary
