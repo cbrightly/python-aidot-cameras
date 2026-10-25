@@ -137,7 +137,9 @@ jobs:
       # safety net for any transitive dep that lacks a musllinux wheel (the heavy ones
       # all have them).
       - name: System deps
-        run: apk add --no-cache git curl ffmpeg gcc musl-dev libffi-dev
+        run: apk add --no-cache git curl ffmpeg gcc musl-dev libffi-dev tar zstd
+      # actions/cache shells out to GNU tar (busybox tar rejects --posix and the
+      # save fails), hence tar + zstd in the system deps above.
       # No setup-python in the container, so the pip cache is wired up by hand:
       # PIP_CACHE_DIR (job env) is pinned to a path inside the container, which
       # holds both downloaded wheels and any wheel built from source on musl.
@@ -223,7 +225,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1      # v7.0.1 (node24, mandatory in a musl container)
       - name: System deps
-        run: apk add --no-cache git curl ffmpeg gcc musl-dev libffi-dev
+        run: apk add --no-cache git curl ffmpeg gcc musl-dev libffi-dev tar zstd
+      # actions/cache shells out to GNU tar (busybox tar rejects --posix and the
+      # save fails), hence tar + zstd in the system deps above.
       # No setup-python in the container, so the pip cache is wired up by hand:
       # PIP_CACHE_DIR (job env) is pinned to a path inside the container, which
       # holds both downloaded wheels and any wheel built from source on musl.
