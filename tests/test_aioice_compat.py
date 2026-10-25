@@ -1,11 +1,14 @@
 """Guard: the private aioice internals we monkeypatch / read still exist.
 
-We reach into aioice's non-public API in two places:
+We reach into aioice's non-public API in three places:
 
   * ``protocol._install_highport_nomination_patch`` overrides
     ``Connection.build_request(self, pair, nominate)`` and reads
     ``self._check_list`` / ``self.ice_controlling`` (the A000088 high-port
     nomination fix);
+  * the vendored aiortc's ``RTCIceTransport.stop()`` cancels each
+    ``Connection._check_list`` pair's ``task`` (close mid-ICE, see
+    ``_vendor/aiortc/VENDOR.md``);
   * ``WebRTCSession._ice_path`` reads ``Connection._nominated`` and each
     ``CandidatePair``'s ``local_candidate`` / ``remote_candidate`` and the
     candidate ``type`` / ``host`` / ``port`` / ``transport`` (stream diagnostics).
@@ -55,3 +58,12 @@ def test_highport_patch_installs_cleanly():
     assert getattr(ice.Connection, "_aidot_highport_patched", False) is True
     # second call is a no-op that still reports active
     assert _install_highport_nomination_patch() is True
+
+
+def test_pair_task_used_by_vendored_ice_stop():
+    # RTCIceTransport.stop() cancels pair.task for each pair in _check_list.
+    conn = ice.Connection(ice_controlling=True)
+    assert isinstance(conn._check_list, list)
+    cand = ice.Candidate.from_sdp("1 1 udp 2130706431 192.0.2.5 50000 typ host")
+    pair = ice.CandidatePair(protocol=None, remote_candidate=cand)
+    assert pair.task is None
