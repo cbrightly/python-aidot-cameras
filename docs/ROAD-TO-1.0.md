@@ -43,8 +43,15 @@ Container (2026.10.2) on a Raspberry Pi 4 on the cameras' network, running
 hash against the wheel and the release). Those days had installs and restarts
 (2026-10-23 added the viewing schedule below; on 2026-10-24 the go2rtc that
 SDES cameras publish into was found stopped after a host reboot and was made a
-boot-persistent service), so they are provocation; the first counting day is
-**2026-10-25** and the target is **2026-11-08**. The installed files must match the released ones: a soak
+boot-persistent service), so they are provocation.
+
+**The count is paused (2026-10-24).** The first day of scheduled viewing found
+that battery cameras mostly fail to deliver first media when viewed, plus
+repeated reconnects on two mains cameras and noisy tracebacks from aborted
+opens. These are being investigated; if the battery failure is a library
+defect its fix changes a default streaming path and resets the clock anyway,
+so no days count until it is understood. Day zero will be the first ordinary
+day after that, and the target two weeks later. The installed files must match the released ones: a soak
 measured on hot-patched files measures nothing, so that check is part of
 dating day zero. Live validation during the soak runs on a separate runner,
 not on the reference host.
