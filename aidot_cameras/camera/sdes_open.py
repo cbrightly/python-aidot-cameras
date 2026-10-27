@@ -1075,6 +1075,12 @@ def _sd_session_mode(sd_playback) -> int:
 def _session_mode_req(seq: int, ts: int, mode: int, *, avstream: bool) -> bytes:
     """One SESSION_MODE_REQ (5376) frame, for every path that sends one.
 
+    ``seq`` comes from the client's ``_next_dseq`` counter, as the app's
+    sendCtrl takes it.  The firmware of every owned model (A001064, A000088
+    V1 and V2, A001513; read 2026-10-27) ignores a SESSION_MODE whose seq is
+    not above the last one it accepted, and still answers it - so a random
+    seq silently dropped about half of the mode requests sent.
+
     ``avstream`` is the 28-byte AVStream body the 0xC8 trigger and the stall
     nudge carry (mode in its third word); otherwise the 8-byte body the SCTP
     data channel sends.  One builder so a playback open cannot say SD on one
@@ -4023,10 +4029,8 @@ def make_sdes_bridge(
                 def _resend_avio_living(
                     _tb=_trigger_bs, _tsrc=_trigger_bsrc, _tpeer=_trigger_peer
                 ) -> None:
-                    import random as _r_re2
-
                     _re_ts = int(_time_br.time() * 1000)
-                    _re_seq = _r_re2.randint(0, 0x7FFFFFFF)
+                    _re_seq = self._next_dseq()
                     _re_plain = _session_mode_req(
                         _re_seq, _re_ts, _session_mode, avstream=True
                     )  # 56B
@@ -4490,10 +4494,8 @@ def make_sdes_bridge(
                             _bridge_fn._tutk_trigger_sent = True
                             if getattr(_bridge_fn, "_br_trigger_sent_ts", None) is None:
                                 _bridge_fn._br_trigger_sent_ts = _time_br.monotonic()
-                            import random as _rand_tk
-
                             _ts_ms = int(_time_br.time() * 1000)
-                            _tk_seq = _rand_tk.randint(0, 0x7FFFFFFF)
+                            _tk_seq = self._next_dseq()
                             _avio_plain = _session_mode_req(
                                 _tk_seq, _ts_ms, _session_mode, avstream=True
                             )  # 28B AVIO header + 28B AVStream = 56B
@@ -7844,10 +7846,9 @@ async def _sdes_open_sctp_helpers(self, ps: _SdesOpenState) -> None:
     ps._dcep_open_msg = _dcep_open_msg
 
     def _session_mode_req_msg():
-        import random as _r_sc
         import time as _t_sc
 
-        seq = _r_sc.randint(0, 0x7FFFFFFF)
+        seq = self._next_dseq()
         ts = int(_t_sc.time() * 1000)
         return _session_mode_req(
             seq, ts, _sd_session_mode(ps.sd_playback), avstream=False
