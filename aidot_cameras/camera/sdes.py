@@ -60,6 +60,7 @@ class SdesSession(AvioRequestMixin):
         device_id=None,
         responses=None,
         abort_chan=None,
+        playback_waiter=None,
     ) -> None:
         # Which camera this session belongs to, for logging only.  Optional so
         # an existing caller that does not pass it still works; the logs then
@@ -125,6 +126,9 @@ class SdesSession(AvioRequestMixin):
         # the last thing the association ever sees.  None when the caller
         # supplied no holder - teardown then behaves exactly as it did before.
         self._abort_chan = abort_chan if abort_chan is not None else [None]
+        # The pending RECORD_PLAYCONTROL reply when this session was opened to
+        # play an SD recording; None for live.  Read with playback_reply().
+        self._playback_waiter = playback_waiter
         # Shared talk state (dict) for outbound two-way audio, or None when the
         # session was not opened talk-capable (offer stayed recvonly).  Populated
         # by the bridge (camera audio addr) and by async_start_talk (provider).
@@ -141,10 +145,21 @@ class SdesSession(AvioRequestMixin):
         if fn is None:
             return False
         try:
-            fn(cmd, payload)
-            return True
+            # The SDES sender says False when its socket is not up yet.
+            return fn(cmd, payload) is not False
         except Exception:
             return False
+
+    async def playback_reply(self, timeout: float = 3.0):
+        """The camera's RECORD_PLAYCONTROL reply to the open's PLAY_START.
+
+        An ``AvioResponse`` (its payload reads with
+        ``sd_playback.decode_playcontrol_reply``), or
+        None for a live session or a camera that did not answer in time.
+        """
+        if self._playback_waiter is None:
+            return None
+        return await self._playback_waiter.result(timeout)
 
     @property
     def talk_supported(self) -> bool:

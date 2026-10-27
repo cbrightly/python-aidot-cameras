@@ -26,6 +26,7 @@ from ..exceptions import (
     AidotCameraWrongCodec,
     AidotFfmpegMissing,
     AidotLivePlayRefused,
+    AidotSdPlaybackUnavailable,
 )
 from .constants import (
     _LIVE_PLAY_NOT_READY,
@@ -1055,6 +1056,72 @@ _UNREACHABLE_NOMINEE_GRACE_S = settings.read("AIDOT_SDES_UNREACHABLE_NOMINEE_GRA
 # once. The rules live in ``settings``.
 _ANSWER_PROBE_GRACE_S = settings.read("AIDOT_SDES_ANSWER_PROBE_GRACE_S")
 _TRIGGER_GRACE_S = settings.read("AIDOT_SDES_TRIGGER_GRACE_S")
+
+
+def _sd_session_mode(sd_playback) -> int:
+    """The SESSION_MODE the data channel opens with: LIVING, or SD for playback.
+
+    The vendor app's SD screen sends mode 2 as the first command on the data
+    channel. Switching a live session to SD afterwards stops the live video
+    and never starts the recording, measured on an A001064 2026-10-27.
+    """
+    from .sd_playback import SESSION_MODE_LIVING
+
+    if sd_playback is None:
+        return SESSION_MODE_LIVING
+    return int(sd_playback.session_mode)
+
+
+def _session_mode_req(seq: int, ts: int, mode: int, *, avstream: bool) -> bytes:
+    """One SESSION_MODE_REQ (5376) frame, for every path that sends one.
+
+    ``avstream`` is the 28-byte AVStream body the 0xC8 trigger and the stall
+    nudge carry (mode in its third word); otherwise the 8-byte body the SCTP
+    data channel sends.  One builder so a playback open cannot say SD on one
+    path and LIVING on another - the camera then plays nothing.
+    """
+    if avstream:
+        body = _struct_mod.pack("<IIIIIII", 0, 0, mode, 0, 0, 0, 0)
+    else:
+        body = _struct_mod.pack("<IB3x", 0, mode)
+    return avio_header(seq, 5376, ts, len(body), 0) + body
+
+
+def _session_mode_echoed(frame: bytes) -> "Optional[int]":
+    """The mode a SESSION_MODE_RESP (5377) frame reports, or None if unreadable.
+
+    The 12-byte reply carries the mode in its third word: 1 after LIVING, 2
+    after SD, on every A001064 run of 2026-10-26/27.
+    """
+    resp = parse_avio_response(frame)
+    if resp is None or resp.command != 5377 or len(resp.payload) < 12:
+        return None
+    return int.from_bytes(resp.payload[8:12], "little")
+
+
+def _sd_playback_unservable(sd_playback, answer_sdp: str) -> bool:
+    """Whether the camera's answer leaves no way to send PLAY_START.
+
+    PLAY_START goes out on the data channel; an answer without
+    m=application has none, and in SD mode the camera then sends nothing.
+    """
+    return bool(sd_playback is not None and answer_sdp) and (
+        "m=application" not in answer_sdp
+    )
+
+
+def _sd_playback_start_due(
+    sd_playback, *, already_sent: bool, cmd_chan_ready: bool, mode_acked: bool
+) -> bool:
+    """Whether the open should send its PLAYCONTROL request now.
+
+    Only once: the camera echoes a second PLAY_START by restarting the clip.
+    Only after the camera answered the session mode, because a play command
+    that overtakes the mode switch is acknowledged and then plays nothing.
+    """
+    return bool(
+        sd_playback is not None and not already_sent and cmd_chan_ready and mode_acked
+    )
 
 
 def _stale_offer_abandon_due(
@@ -3400,6 +3467,7 @@ def make_sdes_bridge(
     get_srtp_key_audio,
     get_cam_key_audio,
     get_dc_answer_has_app,
+    _session_mode=1,
     _br_first_di_logged=False,
     _br_first_srtp_logged=False,
     _br_first_req_dumped=False,
@@ -3890,10 +3958,13 @@ def make_sdes_bridge(
                                     avio_header(_seq, _cmd, _ts, len(_extra), 0)
                                     + _extra
                                 )
+                                # True once handed to the socket, so a
+                                # caller that must not lose the command
+                                # (PLAY_START) can try again.
                                 _csock = _sctp.get("dcep_sock")
                                 _csrc = _sctp.get("dcep_src")
                                 if _csock is None or _csrc is None:
-                                    return
+                                    return False
                                 try:
                                     _chunk = _sctp_data(53, _avio)
                                     _csock.sendto(
@@ -3909,6 +3980,8 @@ def make_sdes_bridge(
                                         "_persistent_sdes_cmd",
                                         exc_info=True,
                                     )
+                                    return False
+                                return True
 
                             def _persistent_sdes_abort():
                                 """ABORT the association from the same socket the commands use.
@@ -3950,14 +4023,13 @@ def make_sdes_bridge(
                 def _resend_avio_living(
                     _tb=_trigger_bs, _tsrc=_trigger_bsrc, _tpeer=_trigger_peer
                 ) -> None:
-                    import struct as _st_re2
                     import random as _r_re2
 
                     _re_ts = int(_time_br.time() * 1000)
                     _re_seq = _r_re2.randint(0, 0x7FFFFFFF)
-                    _re_plain = avio_header(
-                        _re_seq, 5376, _re_ts, 28, 0
-                    ) + _st_re2.pack("<IIIIIII", 0, 0, 1, 0, 0, 0, 0)  # 56B
+                    _re_plain = _session_mode_req(
+                        _re_seq, _re_ts, _session_mode, avstream=True
+                    )  # 56B
                     _re_enc = None
                     try:
                         from Crypto.Cipher import AES as _AES_re2
@@ -4032,7 +4104,7 @@ def make_sdes_bridge(
                             # hostage to the 30s PLI cadence.
                             _bridge_fn._last_pli_ts = 0.0
                             _status("SDES: media resumed after stall - PLI re-armed")
-                    elif _stall_nudge_due(
+                    elif _session_mode == 1 and _stall_nudge_due(
                         silence_s=_stall_silence,
                         nudges_sent=_stall_nudges_sent,
                         since_last_nudge_s=(_time_br.time() - _stall_last_nudge),
@@ -4418,15 +4490,12 @@ def make_sdes_bridge(
                             _bridge_fn._tutk_trigger_sent = True
                             if getattr(_bridge_fn, "_br_trigger_sent_ts", None) is None:
                                 _bridge_fn._br_trigger_sent_ts = _time_br.monotonic()
-                            import struct as _st_tk
                             import random as _rand_tk
 
                             _ts_ms = int(_time_br.time() * 1000)
                             _tk_seq = _rand_tk.randint(0, 0x7FFFFFFF)
-                            _avio_plain = avio_header(
-                                _tk_seq, 5376, _ts_ms, 28, 0
-                            ) + _st_tk.pack(
-                                "<IIIIIII", 0, 0, 1, 0, 0, 0, 0
+                            _avio_plain = _session_mode_req(
+                                _tk_seq, _ts_ms, _session_mode, avstream=True
                             )  # 28B AVIO header + 28B AVStream = 56B
 
                             # AES-128-CBC: key=our_inline[:16] ASCII, IV=cam_inline[:16] ASCII.
@@ -5037,6 +5106,12 @@ def make_sdes_bridge(
                                                     0,
                                                 )
                                                 + 1
+                                            )
+                                            # Which mode it says the session
+                                            # is in: a playback open waits for
+                                            # SD here, not for any reply.
+                                            _bridge_fn._br_session_mode_echo = (
+                                                _session_mode_echoed(_sc_pay)
                                             )
                                         _sc_answered = _dispatch_sctp_avio(
                                             _avio_responses, _sc_pay
@@ -5862,6 +5937,8 @@ class _SdesOpenState:
     rtsp_push_url: "Optional[str]"
     talk: "bool"
     terminal_error_fut: "Any"
+    #: An SD playback request (``sd_playback.SdPlaybackStart``); None for live.
+    sd_playback: "Any" = None
     _open_started_at: "Any" = dataclasses.field(init=False)  # head
     _use_plain_rtp: "Any" = dataclasses.field(init=False)  # head
     _live_power_type: "Any" = dataclasses.field(init=False)  # head
@@ -6446,7 +6523,10 @@ async def _sdes_open_build_offer(self, ps: _SdesOpenState) -> None:
     # did not take, so pinning there changed nothing at all while the
     # arms still came out looking like the pin had worked.  Only
     # AIDOT_SDES_VIDEO_PT=none leaves the camera its choice.
-    _pin_video_pt = _resolve_sdes_video_pt()
+    # SD playback offers both codecs: the camera only creates the H265
+    # transceiver recorded H265 is sent to when the offer names two
+    # (u8VideoCodecCnt >= 2 in its codec decision).
+    _pin_video_pt = None if ps.sd_playback is not None else _resolve_sdes_video_pt()
     if _pin_video_pt is not None:
         ps.sdes_offer_sdp = narrow_sdp_payload_types(
             ps.sdes_offer_sdp, keep_video=_pin_video_pt
@@ -7764,13 +7844,14 @@ async def _sdes_open_sctp_helpers(self, ps: _SdesOpenState) -> None:
     ps._dcep_open_msg = _dcep_open_msg
 
     def _session_mode_req_msg():
-        import struct as _st_sc
         import random as _r_sc
         import time as _t_sc
 
         seq = _r_sc.randint(0, 0x7FFFFFFF)
         ts = int(_t_sc.time() * 1000)
-        return avio_header(seq, 5376, ts, 8, 0) + _st_sc.pack("<IB3x", 0, 1)
+        return _session_mode_req(
+            seq, ts, _sd_session_mode(ps.sd_playback), avstream=False
+        )
 
     ps._session_mode_req_msg = _session_mode_req_msg
 
@@ -7990,6 +8071,7 @@ class _SdesOpenMixin:
         # -50002/-50015 instead of waiting out its budget and then paying for a
         # DTLS-fallback offer that cannot succeed.
         terminal_error_fut=None,
+        sd_playback=None,
     ) -> "SdesSession":
         ps = _SdesOpenState(
             _cleanup=_cleanup,
@@ -8010,6 +8092,7 @@ class _SdesOpenMixin:
             rtsp_push_url=rtsp_push_url,
             talk=talk,
             terminal_error_fut=terminal_error_fut,
+            sd_playback=sd_playback,
         )
         from .client import CameraMixin
         from .client import _build_sdes_serve_cmd
@@ -8379,6 +8462,7 @@ class _SdesOpenMixin:
             get_srtp_key_audio=lambda: ps.srtp_key_audio,
             get_cam_key_audio=lambda: ps._cam_key_audio,
             get_dc_answer_has_app=lambda: ps._dc_answer_has_app,
+            _session_mode=_sd_session_mode(ps.sd_playback),
         )
         _bridge_thread = _threading_br.Thread(
             target=_bridge_fn, daemon=True, name="sdes-bridge"
@@ -8545,8 +8629,51 @@ class _SdesOpenMixin:
                 _cancelled=_cancelled,
             )
 
+        _sd_start_waiter = None
+        _sd_start_failed = False
+        _sd_unservable = False
         try:
             while _first_video_pt[0] is None and time.monotonic() < _media_deadline:
+                if _sd_playback_start_due(
+                    ps.sd_playback,
+                    already_sent=_sd_start_waiter is not None,
+                    cmd_chan_ready=_cmd_chan[0] is not None,
+                    # The camera's echo of SD, not any SESSION_MODE_RESP: a
+                    # play command that overtakes the switch plays nothing.
+                    mode_acked=(
+                        getattr(_bridge_fn, "_br_session_mode_echo", None)
+                        == _sd_session_mode(ps.sd_playback)
+                    ),
+                ):
+                    from .sd_playback import RECORD_PLAYCONTROL_REQ_CMD
+                    from .sd_playback import RECORD_PLAYCONTROL_RESP_CMD
+
+                    # Registered before the send: the reply can beat the
+                    # sending call back.
+                    _sd_start_waiter = _avio_responses.expect(
+                        RECORD_PLAYCONTROL_RESP_CMD
+                    )
+                    try:
+                        _sd_sent = _cmd_chan[0](
+                            RECORD_PLAYCONTROL_REQ_CMD, ps.sd_playback.request
+                        )
+                        _sd_why = "the data channel was not ready"
+                    except Exception as _sd_exc:
+                        _sd_sent = False
+                        _sd_why = str(_sd_exc)
+                    if _sd_sent:
+                        ps._status("SD playback: PLAY_START sent")
+                    else:
+                        # Withdrawn so the next pass sends it again: nothing
+                        # plays in SD mode until PLAY_START arrives.
+                        _sd_start_waiter.cancel()
+                        _sd_start_waiter = None
+                        if not _sd_start_failed:
+                            _sd_start_failed = True
+                            ps._status(
+                                f"SD playback: PLAY_START not sent ({_sd_why})"
+                                " - retrying"
+                            )
                 if _first_seen_ts is None and _seen_at_start is None:
                     _first_seen_ts = getattr(self, "_camera_device_seen_ts", None)
                 if _stale_offer_abandon_due(
@@ -8696,6 +8823,9 @@ class _SdesOpenMixin:
                             _pk_sdp = (ps.answer_fut.result() or {}).get(
                                 "sdp", ""
                             ) or ""
+                            _sd_unservable = _sd_playback_unservable(
+                                ps.sd_playback, _pk_sdp
+                            )
                             if _pk_sdp:
                                 _answer_pt_kinds.update(answer_pt_kinds(_pk_sdp))
                                 _answer_video_pt[0] = video_pt_from_answer_sdp(_pk_sdp)
@@ -8717,6 +8847,15 @@ class _SdesOpenMixin:
                             getattr(self, "device_id", "?"),
                             "_open_sdes_stream_impl",
                             exc_info=True,
+                        )
+                    if _sd_unservable:
+                        ps._status(
+                            "SD playback: the answer has no data channel to send"
+                            " PLAY_START on - abandoning the first-media wait"
+                        )
+                        raise AidotSdPlaybackUnavailable(
+                            "the camera's answer has no data channel, so the"
+                            " recording cannot be asked to play"
                         )
                 if (
                     not _early_nominated
@@ -9526,4 +9665,8 @@ class _SdesOpenMixin:
             device_id=getattr(self, "device_id", None),
             responses=_avio_responses,
             abort_chan=_abort_chan,
+            # The PLAYCONTROL reply usually lands alongside the first media;
+            # the session hands it out on request rather than the open
+            # holding the started stream back for it.
+            playback_waiter=_sd_start_waiter,
         )

@@ -29,6 +29,7 @@ from ..exceptions import (
     AidotNegotiationFailed,
     AidotNoWebrtcAnswer,
     AidotPlaintextMqttRefused,
+    AidotSdPlaybackUnavailable,
 )
 from .constants import _LIVE_PLAY_NOT_READY, fallback_turn_uris, stun_server_uris
 from .sdes_open import _answer_sdp_can_nominate
@@ -1229,6 +1230,8 @@ class _DtlsOpenState:
     reuse_peer_id: "Optional[str]"
     _ice_wait_timeout_s: "Optional[float]"
     _abort_holder: "Optional[list[Any]]"
+    #: An SD playback request (``sd_playback.SdPlaybackStart``); None for live.
+    _sd_playback: "Any" = None
     use_sdes: "Any" = dataclasses.field(init=False)  # head
     _fast_connect: "Any" = dataclasses.field(init=False)  # head
     RTCPeerConnection: "Any" = dataclasses.field(init=False)  # head
@@ -1399,6 +1402,13 @@ async def _dtls_open_head(self, ps: _DtlsOpenState) -> None:
     self._cold_open_t0 = time.monotonic()
 
     ps.use_sdes = ps.force_sdes if ps.force_sdes is not None else self.is_sdes_camera
+    if ps._sd_playback is not None and not ps.use_sdes:
+        # The DTLS data channel opens in LIVING and nothing here sends
+        # PLAY_START, and recorded H265 needs a raw capture aiortc's decoder
+        # does not give: a session opened anyway would be the live view.
+        raise AidotSdPlaybackUnavailable(
+            "SD playback is not supported on the DTLS transport yet"
+        )
 
     # One line, once per camera, naming the decisions that determine whether
     # media can arrive at all.  This failure class - a session that negotiates
@@ -2344,6 +2354,7 @@ async def _dtls_open_sdes_branch(self, ps: _DtlsOpenState) -> _PhaseReturn | Non
                 talk=ps.talk,
                 ice_cands_seen=ps.ice_cands_seen,
                 terminal_error_fut=ps.terminal_error_fut,
+                sd_playback=ps._sd_playback,
             )
             # Success: the SdesSession now owns outgoing_q + mqtt_fut and
             # reaps them on stop(); clear the backstop slot so a concurrent
@@ -2398,6 +2409,9 @@ async def _dtls_open_sdes_branch(self, ps: _DtlsOpenState) -> _PhaseReturn | Non
                     # silently reverts to `timeout` on this path.
                     _ice_wait_timeout_s=ps._ice_wait_timeout_s,
                     _abort_holder=ps._abort_holder,
+                    # Carried so the DTLS open refuses it rather than
+                    # handing a playback caller the live stream.
+                    _sd_playback=ps._sd_playback,
                 )
             )
     return None
@@ -4578,6 +4592,7 @@ class _WebRTCOpenMixin:
         reuse_peer_id: Optional[str] = None,
         _ice_wait_timeout_s: Optional[float] = None,
         _abort_holder: "Optional[list]" = None,
+        _sd_playback=None,
     ) -> "WebRTCSession":
         ps = _DtlsOpenState(
             on_frame=on_frame,
@@ -4596,6 +4611,7 @@ class _WebRTCOpenMixin:
             reuse_peer_id=reuse_peer_id,
             _ice_wait_timeout_s=_ice_wait_timeout_s,
             _abort_holder=_abort_holder,
+            _sd_playback=_sd_playback,
         )
         await _dtls_open_head(self, ps)
 

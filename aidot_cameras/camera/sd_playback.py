@@ -26,6 +26,7 @@ The reply (0x31b) is read the way the app's handler reads it:
     off 12  8B    the record's STimeDay, echoed
 """
 
+import dataclasses
 import datetime
 import struct
 from typing import Any, NamedTuple, Optional
@@ -52,6 +53,24 @@ _REPLY_LEN = 20
 
 _MIN_SD_CHANNEL = 1
 _MAX_SD_CHANNEL = 26
+
+#: ``E_CMD_AVIO_CTRL_SESSION_MODE_REQ`` modes (KVSWebRTCChannel's q enum).
+SESSION_MODE_LIVING = 1
+SESSION_MODE_SD = 2
+
+
+@dataclasses.dataclass(frozen=True)
+class SdPlaybackStart:
+    """What an open needs to play a recording instead of streaming live.
+
+    ``request`` is the PLAYCONTROL payload the open sends itself once the camera
+    has acknowledged ``session_mode`` on the data channel, before it waits for
+    media - because in SD mode the camera sends nothing until it is asked to
+    play.
+    """
+
+    request: bytes
+    session_mode: int = SESSION_MODE_SD
 
 
 class PlaycontrolReply(NamedTuple):

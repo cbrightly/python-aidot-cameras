@@ -49,6 +49,7 @@ purpose.
 | `AidotNoWebrtcAnswer` | `AidotStreamOpenError` | no `webrtcResp` within the open timeout |
 | `AidotNegotiationFailed` | `AidotStreamOpenError` | the camera's SDP could not be applied, or ICE did not connect |
 | `AidotFfmpegMissing` | `AidotStreamOpenError` | ffmpeg is needed and not installed |
+| `AidotSdPlaybackUnavailable` | `AidotStreamOpenError` | an SD recording was asked for on a path that cannot play one (the DTLS transport, or an answer with no data channel) |
 | `AidotUnknownRegion` | `AidotError`, `ValueError` | the account region is not a known one (see `AIDOT_EXTRA_REGIONS`) |
 | `CameraLanError` | `AidotError` | a LAN control operation failed (also in `aidot_cameras.camera.lan_control`) |
 | `CameraLanLoginRejected` | `CameraLanError` | the device offered LAN control and refused the login |

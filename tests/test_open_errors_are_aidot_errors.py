@@ -25,6 +25,7 @@ OPEN_ERRORS = [
     exc.AidotNoWebrtcAnswer,
     exc.AidotNegotiationFailed,
     exc.AidotFfmpegMissing,
+    exc.AidotSdPlaybackUnavailable,
 ]
 
 
@@ -64,6 +65,7 @@ def test_the_unknown_region_error_is_a_value_error():
         "AidotNoWebrtcAnswer",
         "AidotNegotiationFailed",
         "AidotFfmpegMissing",
+        "AidotSdPlaybackUnavailable",
         "AidotUnknownRegion",
         "CameraLanError",
         "CameraLanLoginRejected",

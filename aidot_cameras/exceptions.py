@@ -152,6 +152,14 @@ class AidotFfmpegMissing(AidotStreamOpenError):
     """ffmpeg is needed for this stream and is not installed."""
 
 
+class AidotSdPlaybackUnavailable(AidotStreamOpenError):
+    """An SD recording was asked for on a path that cannot play one.
+
+    Raised instead of handing back a live session: the DTLS transport, and an
+    SDES answer with no data channel to send PLAY_START on.
+    """
+
+
 # --------------------------------------------------------------------------- #
 # Account and endpoint errors.
 
