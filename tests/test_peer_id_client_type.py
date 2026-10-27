@@ -125,3 +125,29 @@ class TestTheMeasurementOverridesAreGone:
             pid = _gen(device_id=DEV)
             assert pid.split("_")[1][0] == "2"
             assert SHAPE.match(pid).groups() == ("2", "0", "1")
+
+
+class TestPlaybackFields:
+    """SD playback asks for the app's client class and the main stream; the
+    defaults every live open uses stay byte-for-byte what they were."""
+
+    def test_client_class_is_field_twos_first_character(self):
+        pid = _gen(device_id=DEV, client_class=0)
+        assert pid.split("_")[1][0] == "0"
+        assert SHAPE.match(pid), pid
+
+    def test_the_default_class_is_still_web(self):
+        assert _gen(device_id=DEV).split("_")[1][0] == "2"
+
+    def test_stream_replaces_the_trailing_field(self):
+        assert SHAPE.match(_gen(device_id=DEV, live_type=1, stream=0)).groups() == (
+            "1",
+            "0",
+            "0",
+        )
+
+    def test_a_class_that_is_not_one_digit_is_refused(self):
+        import pytest
+
+        with pytest.raises(ValueError):
+            _gen(device_id=DEV, client_class=10)
