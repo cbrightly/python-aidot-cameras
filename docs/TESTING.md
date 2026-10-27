@@ -116,7 +116,7 @@ See "Direct publish" in [`CI-RUNNER.md`](CI-RUNNER.md).
 lists a camera's card over a short live session, plays one recording through
 `async_open_sd_playback` into a file, and reports the decode, the audio
 seconds against wall time and the largest frame and audio gaps. It is not part
-of the gate; only the A001064 has been played.
+of the gate; the A001064 and the A001513 have been played.
 
 Note that the two transports report media differently, and anything asserting
 "is it streaming?" has to handle both: the DTLS path decodes in-process and

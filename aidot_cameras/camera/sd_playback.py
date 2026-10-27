@@ -160,6 +160,27 @@ def answers(command: int):
     return _match
 
 
+def session_mode_of(payload: Optional[bytes]) -> Optional[int]:
+    """The mode a SESSION_MODE_RESP (5377) payload reports, or None.
+
+    The 12-byte reply carries it in the third word: 1 after LIVING, 2 after
+    SD, on every A001064 run of 2026-10-26/27 and the A000088 of 2026-10-27.
+    """
+    data = bytes(payload or b"")
+    if len(data) < 12:
+        return None
+    return struct.unpack_from("<I", data, 8)[0]
+
+
+def session_mode_is(mode: int):
+    """A reply match for SESSION_MODE_RESP (5377) reporting ``mode``."""
+
+    def _match(resp: Any) -> bool:
+        return session_mode_of(getattr(resp, "payload", None)) == mode
+
+    return _match
+
+
 def decode_playcontrol_reply(data: Optional[bytes]) -> Optional[PlaycontrolReply]:
     """Read a 0x31b reply, or None if it cannot be read.
 
@@ -189,8 +210,13 @@ PLAY_CMD_SDCARD = 1
 #: Field 5, the StreamID the firmware logs: 0 is the main stream.
 PLAYBACK_STREAM = 0
 
-#: Shared with the DTLS open's own refusal, so the two cannot drift apart.
-DTLS_PLAYBACK_UNSUPPORTED = "SD playback is not supported on the DTLS transport yet"
+#: The DTLS open's refusal: there, a recording is taken raw into the MPEG-TS
+#: recorder, so playback needs a .ts output_path and takes no on_frame or
+#: rtsp_push_url (nothing decodes or serves the H265).
+DTLS_PLAYBACK_UNSUPPORTED = (
+    "SD playback on a DTLS camera records to a .ts output_path only"
+    " (no on_frame, no rtsp_push_url)"
+)
 
 
 class _CameraSdPlaybackMixin:
@@ -211,16 +237,20 @@ class _CameraSdPlaybackMixin:
         """Open a session that plays ``record`` instead of the live view.
 
         ``record`` is an ``SdEvent`` from ``async_get_sd_recordings``. Returns
-        an ``SdesSession`` carrying the recording, served the way a live
-        session is (``output_path``, ``rtsp_push_url``, ``on_frame``), with the
+        the session carrying the recording - an ``SdesSession`` served the way
+        a live one is (``output_path``, ``rtsp_push_url``, ``on_frame``), or on
+        a DTLS camera a ``WebRTCSession`` recording to ``output_path`` - with the
         camera's answer to PLAY_START from ``await session.playback_reply()``.
         ``async_sd_pause()``, ``async_sd_resume()`` and ``async_sd_seek(s)`` on
         the session control it; ``session.stop()`` ends it.
 
         Raises ``AidotSdPlaybackUnavailable`` rather than returning the live
-        view on a camera this cannot play on: a DTLS camera, or an answer with
-        no data channel. Proven on the A001064 (2026-10-27); the A000088 and
-        A001513 firmware follow the same rule but neither has been played live.
+        view where it cannot play: an answer with no data channel, or a DTLS
+        camera without a ``.ts`` ``output_path`` (over DTLS the recording is
+        taken raw into the MPEG-TS recorder; there is no ``on_frame`` decode or
+        serve). Played live on the A001064 and the A001513 (2026-10-27); the
+        DTLS path (A000088) has not been played on hardware - none here has a
+        card.
 
         The session is not kept alive or reopened: a recording that ends or
         drops is reopened by calling this again. It needs the camera's one
@@ -229,8 +259,6 @@ class _CameraSdPlaybackMixin:
         """
         from ..exceptions import AidotSdPlaybackUnavailable
 
-        if not self.is_sdes_camera:
-            raise AidotSdPlaybackUnavailable(DTLS_PLAYBACK_UNSUPPORTED)
         stream_task = getattr(self, "_stream_task", None)
         if (stream_task is not None and not stream_task.done()) or getattr(
             self, "has_live_session", False
@@ -252,7 +280,7 @@ class _CameraSdPlaybackMixin:
             # Field 4, a literal 0 in the app - not the StreamID, which is
             # field 5 (``stream``).
             stream_id=0,
-            sdes=True,
+            sdes=bool(self.is_sdes_camera),
             device_id=self.device_id,
             client_class=PLAYBACK_CLIENT_CLASS,
             stream=PLAYBACK_STREAM,
@@ -266,4 +294,282 @@ class _CameraSdPlaybackMixin:
             rtsp_push_url=rtsp_push_url,
             reuse_peer_id=peer_id,
             _sd_playback=start,
+        )
+
+
+# --- DTLS (A000088): the recording's H265 is taken raw ----------------------
+#
+# aiortc has no H265, and the camera sends a recording it holds as H265 on a
+# second video section that only a class 0/1 viewer whose offer names two
+# codecs gets (the iOS app's capture against an A000088, 2026-05-02: audio,
+# H264 PT 127, H265 PT 98, data channel). The offer names H265 next to H264,
+# aiortc keeps its three sections, and the H265 packets - which it would
+# discard as unrouted - are taken at its RTP router, assembled into access
+# units here and recorded as HEVC. Not yet played on hardware: no A000088
+# here has a card.
+
+_NAL_SC = b"\x00\x00\x00\x01"
+
+
+def offer_with_h265(sdp: str) -> "tuple[str, Optional[int]]":
+    """``sdp`` with an H265 payload type added to its video section.
+
+    The firmware's codec decision counts the codecs the offer names
+    (u8VideoCodecCnt); only with two does a class 0/1 viewer get the H265
+    transceiver. Returns the new SDP and the payload type used (None when
+    the offer has no video section or no free dynamic payload type).
+    """
+    lines = sdp.split("\r\n")
+    vi = next((i for i, ln in enumerate(lines) if ln.startswith("m=video ")), None)
+    if vi is None:
+        return sdp, None
+    # Free in EVERY section: the sections share one BUNDLE transport, and the
+    # audio section's opus takes 96 in aiortc's offer.
+    used = {
+        int(t)
+        for ln in lines
+        if ln.startswith("m=")
+        for t in ln.split()[3:]
+        if t.isdigit()
+    }
+    pt = next((p for p in range(96, 128) if p not in used), None)
+    if pt is None:
+        return sdp, None
+    lines[vi] = f"{lines[vi]} {pt}"
+    end = next(
+        (i for i in range(vi + 1, len(lines)) if lines[i].startswith("m=")),
+        len(lines),
+    )
+    # After the section's last rtpmap/fmtp, or at its end.
+    at = max(
+        (
+            i + 1
+            for i in range(vi, end)
+            if lines[i].startswith(("a=rtpmap:", "a=fmtp:"))
+        ),
+        default=end,
+    )
+    while at > vi + 1 and lines[at - 1] == "":
+        at -= 1
+    lines.insert(at, f"a=rtpmap:{pt} H265/90000")
+    return "\r\n".join(lines), pt
+
+
+def answer_h265_pt(sdp: str) -> "Optional[int]":
+    """The payload type the camera's answer gives H265, or None."""
+    for ln in sdp.replace("\r\n", "\n").split("\n"):
+        if ln.startswith("a=rtpmap:") and " H265/" in ln.upper().replace(
+            "HEVC", "H265"
+        ):
+            head = ln[len("a=rtpmap:") :].split(" ", 1)[0]
+            if head.isdigit():
+                return int(head)
+    return None
+
+
+def _h265_header_ok(b0: int, b1: int) -> bool:
+    return b0 & 0x81 == 0 and b1 & 0x07 >= 1
+
+
+def starts_h265_stream(payload: bytes) -> bool:
+    """Whether an RTP payload (RFC 7798) opens an H265 stream: a VPS, SPS or
+    PPS, or an IRAP slice - alone, first in an aggregation packet, or as the
+    start of a fragmentation unit.
+
+    Strict on purpose: it is what the DTLS tap learns an unnamed payload type
+    from, and a two-byte header check alone also passes H264 FU-A packets.
+    """
+    if len(payload) < 3 or not _h265_header_ok(payload[0], payload[1]):
+        return False
+    t = (payload[0] >> 1) & 0x3F
+    if 32 <= t <= 34 or 16 <= t <= 21:
+        return True
+    if t == 48 and len(payload) >= 6:
+        return (
+            _h265_header_ok(payload[4], payload[5])
+            and 32 <= (payload[4] >> 1) & 0x3F <= 34
+        )
+    if t == 49:
+        return bool(payload[2] & 0x80) and 16 <= payload[2] & 0x3F <= 21
+    return False
+
+
+def answer_h265_parameter_sets(sdp: str, pt: Optional[int]) -> "list[bytes]":
+    """VPS, SPS and PPS the answer carries out of band for ``pt``
+    (``a=fmtp:<pt> sprop-vps=...;sprop-sps=...;sprop-pps=...``), in that
+    order; empty when it carries none."""
+    import base64
+
+    if pt is None:
+        return []
+    out = []
+    for ln in sdp.replace("\r\n", "\n").split("\n"):
+        if not ln.startswith(f"a=fmtp:{pt} "):
+            continue
+        params = dict(
+            kv.strip().split("=", 1)
+            for kv in ln.split(" ", 1)[1].split(";")
+            if "=" in kv
+        )
+        for key in ("sprop-vps", "sprop-sps", "sprop-pps"):
+            for b64 in filter(None, params.get(key, "").split(",")):
+                try:
+                    out.append(base64.b64decode(b64))
+                except Exception:
+                    continue
+    return out
+
+
+class H265AccessUnits:
+    """RTP payloads (RFC 7798) in, Annex B access units out.
+
+    ``feed`` takes one packet's sequence number, RTP timestamp, marker bit and
+    payload, and returns the access units it completed as
+    ``(bytes, rtp_timestamp, is_keyframe)`` - the shape the DTLS recorder's
+    video queue takes. A unit with a sequence gap in it is dropped rather than
+    handed on damaged. ``parameter_sets`` (from the answer's fmtp) go in front
+    of a keyframe that does not carry its own VPS.
+    """
+
+    def __init__(self, parameter_sets: "Optional[list[bytes]]" = None) -> None:
+        self.parameter_sets = list(parameter_sets or [])
+        self._ts: "Optional[int]" = None
+        self._nals: "list[bytes]" = []
+        self._fu: "Optional[bytearray]" = None
+        self._last_seq: "Optional[int]" = None
+        self._broken = False
+        self.dropped = 0
+
+    def _emit(self) -> "list[tuple[bytes, int, bool]]":
+        out = []
+        if self._fu is not None:
+            self._broken = True  # a fragment never finished
+        if self._nals and not self._broken and self._ts is not None:
+            types = [(n[0] >> 1) & 0x3F for n in self._nals if n]
+            kf = any(16 <= t <= 21 for t in types)
+            nals = self._nals
+            if kf and 32 not in types and self.parameter_sets:
+                nals = self.parameter_sets + nals
+            out.append((b"".join(_NAL_SC + n for n in nals), self._ts, kf))
+        elif self._nals or self._broken:
+            self.dropped += 1
+        self._nals, self._fu, self._broken = [], None, False
+        return out
+
+    def feed(
+        self, seq: int, ts: int, marker: bool, payload: bytes
+    ) -> "list[tuple[bytes, int, bool]]":
+        out = []
+        gap = self._last_seq is not None and (seq - self._last_seq) & 0xFFFF != 1
+        if self._ts is not None and ts != self._ts:
+            # What went missing before this packet was the end of the unit
+            # in hand (or whole units between): that unit is the damaged one.
+            if gap:
+                self._broken = True
+            out += self._emit()
+        elif gap:
+            self._broken = True
+            self._fu = None
+        self._last_seq, self._ts = seq, ts
+        if len(payload) >= 2:
+            t = (payload[0] >> 1) & 0x3F
+            if t < 48:
+                self._nals.append(bytes(payload))
+            elif t == 48:  # aggregation packet
+                i = 2
+                while i + 2 <= len(payload):
+                    n = struct.unpack_from("!H", payload, i)[0]
+                    self._nals.append(bytes(payload[i + 2 : i + 2 + n]))
+                    i += 2 + n
+            elif t == 49 and len(payload) >= 3:  # fragmentation unit
+                fu = payload[2]
+                if fu & 0x80:
+                    hdr = bytes([(payload[0] & 0x81) | ((fu & 0x3F) << 1), payload[1]])
+                    self._fu = bytearray(hdr + payload[3:])
+                elif self._fu is not None:
+                    self._fu += payload[3:]
+                else:
+                    self._broken = True
+                if fu & 0x40 and self._fu is not None:
+                    self._nals.append(bytes(self._fu))
+                    self._fu = None
+        if marker:
+            out += self._emit()
+        return out
+
+
+class _PlaybackControls:
+    """Pause, resume, seek and the PLAY_START reply, on either session type.
+
+    The session sets ``_sd_playback`` (the SdPlaybackStart it was opened with,
+    or None for live), ``_playback_waiter`` and ``_sd_seek_count``, and has
+    ``async_avio_request``.
+    """
+
+    _sd_playback: Any = None
+    _playback_waiter: Any = None
+    _sd_seek_count = 0
+
+    async def playback_reply(self, timeout: float = 10.0):
+        """The camera's RECORD_PLAYCONTROL reply to the open's PLAY_START.
+
+        An ``AvioResponse`` (its payload reads with
+        ``decode_playcontrol_reply``), or None for a live session or a camera
+        that did not answer in time.
+
+        It arrives after the recording has started: 6.1-6.2 s after PLAY_START
+        on an A001064, in four of four runs on 2026-10-27, when the session
+        opens in SD mode. A wait that times out keeps listening, so asking
+        again later still gets a reply that came late.
+        """
+        if self._playback_waiter is None:
+            return None
+        return await self._playback_waiter.result(timeout, keep=True)
+
+    async def _sd_control(self, command: int, *, param=0, offset_s=0, timeout=8.0):
+        """Send one RECORD_PLAYCONTROL for this session's record; its reply.
+
+        A ``PlaycontrolReply``, or None: a live session, or no answer in time.
+        Replies are matched on the playback command they echo, so a late reply
+        to PLAY_START or to another control is never taken for this one.
+        """
+        start = self._sd_playback
+        if start is None or start.record is None:
+            return None
+        resp = await self.async_avio_request(  # type: ignore[attr-defined]
+            RECORD_PLAYCONTROL_REQ_CMD,
+            playcontrol_payload(
+                command,
+                start.record,
+                sd_channel=start.sd_channel,
+                param=param,
+                offset_s=offset_s,
+            ),
+            response_cmd=RECORD_PLAYCONTROL_RESP_CMD,
+            timeout=timeout,
+            # Every playback command's reply has the one AVIO id; take only
+            # the one that echoes this command.
+            match=answers(command),
+        )
+        return decode_playcontrol_reply(bytes(resp.payload)) if resp else None
+
+    async def async_sd_pause(self):
+        """Pause the recording this session plays (PLAY_PAUSE)."""
+        return await self._sd_control(PLAY_PAUSE)
+
+    async def async_sd_resume(self):
+        """Resume a paused recording (PLAY_RESUME)."""
+        return await self._sd_control(PLAY_RESUME)
+
+    async def async_sd_seek(self, offset_s: float):
+        """Play from ``offset_s`` seconds into the recording (PLAY_SEEKTIME).
+
+        As the app sends it: the time field is the record's start plus the
+        offset, and ``param`` a counter that goes up by one per seek, 1..255.
+        """
+        if self._sd_playback is None:
+            return None
+        self._sd_seek_count = self._sd_seek_count % 255 + 1
+        return await self._sd_control(
+            PLAY_SEEKTIME, param=self._sd_seek_count, offset_s=offset_s
         )

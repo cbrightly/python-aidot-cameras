@@ -83,11 +83,12 @@ def test_the_serving_options_reach_the_open():
     assert (kw["max_seconds"], kw["timeout"]) == (60, 20)
 
 
-def test_a_dtls_camera_is_refused_before_anything_is_sent():
+def test_a_dtls_camera_plays_into_a_ts_file():
     cam = _Camera(sdes=False)
-    with pytest.raises(AidotSdPlaybackUnavailable):
-        _open(cam)
-    assert cam.opens == []
+    assert _open(cam, output_path="/tmp/x.ts") == "session"
+    ((_, kw),) = cam.opens
+    # Field 5 is the StreamID either way; the transport digit is not sent.
+    assert PEER.match(kw["reuse_peer_id"]).groups() == ("0", "1", "0", "0")
 
 
 @pytest.mark.parametrize("busy", [{"live": True}, {"streaming": True}])

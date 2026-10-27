@@ -282,6 +282,67 @@ def answer_section_stub(
     return _block
 
 
+def _install_sd_h265_tap(pc, h265, status) -> int:
+    """Take a playback session's H265 raw from aiortc's RTP router.
+
+    aiortc has no H265, so the section a recording held as H265 arrives on is
+    one it never negotiated, and its packets are discarded unrouted. The tap
+    (``RtpRouter.raw_tap``, see the vendored VENDOR.md) sees them first and
+    hands each completed access unit to the recorder as ``"hevc"``. The
+    payload type is the camera answer's H265 one; with none, the first
+    payload type no aiortc receiver takes whose payload is an H265 NAL. An
+    A000088 answered its extra video section on PT 0 (2026-10-27) - static
+    PCMU by number, but its answer's audio was PCMA alone, so nothing else
+    claims it. Returns the routers tapped.
+    """
+    from .sd_playback import starts_h265_stream
+
+    if h265 is None:
+        return 0
+    import queue as _q
+
+    routers = []
+    for t in pc.getTransceivers():
+        router = getattr(getattr(t.receiver, "transport", None), "_rtp_router", None)
+        if router is not None and router not in routers:
+            routers.append(router)
+
+    def _make(router):
+        def _tap(packet) -> None:
+            pt = h265["pt"]
+            if pt is None:
+                if packet.payload_type in router.payload_type_table or not (
+                    starts_h265_stream(packet.payload)
+                ):
+                    return
+                h265["pt"] = pt = packet.payload_type
+                status(f"SD playback: taking pt={pt} as the recording's H265")
+            if packet.payload_type != pt:
+                return
+            units = h265["units"]
+            lost_before = units.dropped
+            for data, ts, kf in units.feed(
+                packet.sequence_number,
+                packet.timestamp,
+                bool(packet.marker),
+                packet.payload,
+            ):
+                try:
+                    h265["recorder"].vq.put_nowait((data, ts, kf, "hevc"))
+                except _q.Full:
+                    h265["dropped"] += 1
+                    if h265["dropped"] == 1:
+                        status("SD playback: the recorder fell behind - H265 dropped")
+            if units.dropped and not lost_before:
+                status("SD playback: an H265 frame with a lost packet was dropped")
+
+        return _tap
+
+    for router in routers:
+        router.raw_tap = _make(router)
+    return len(routers)
+
+
 def build_aiortc_answer(
     stub,
     media_declined,
@@ -1232,6 +1293,10 @@ class _DtlsOpenState:
     _abort_holder: "Optional[list[Any]]"
     #: An SD playback request (``sd_playback.SdPlaybackStart``); None for live.
     _sd_playback: "Any" = None
+    #: SD playback over DTLS: the PLAY_START reply waiter, and the H265 tap's
+    #: state ({"pt", "units", "recorder", "dropped"}). None for live.
+    _sd_start_waiter: "Any" = dataclasses.field(init=False, default=None)
+    _sd_h265: "Any" = dataclasses.field(init=False, default=None)
     use_sdes: "Any" = dataclasses.field(init=False)  # head
     _fast_connect: "Any" = dataclasses.field(init=False)  # head
     RTCPeerConnection: "Any" = dataclasses.field(init=False)  # head
@@ -1403,12 +1468,21 @@ async def _dtls_open_head(self, ps: _DtlsOpenState) -> None:
 
     ps.use_sdes = ps.force_sdes if ps.force_sdes is not None else self.is_sdes_camera
     if ps._sd_playback is not None and not ps.use_sdes:
-        # The DTLS data channel opens in LIVING and nothing here sends
-        # PLAY_START, and recorded H265 needs a raw capture aiortc's decoder
-        # does not give: a session opened anyway would be the live view.
+        # Over DTLS a recording held as H265 is taken raw from aiortc's RTP
+        # router into the MPEG-TS recorder (sd_playback.H265AccessUnits);
+        # there is no decode for on_frame and no serve, so playback needs a
+        # .ts output_path here. Not yet played on hardware (no A000088 with a
+        # card).
+        from .recording import is_ts_path
         from .sd_playback import DTLS_PLAYBACK_UNSUPPORTED
 
-        raise AidotSdPlaybackUnavailable(DTLS_PLAYBACK_UNSUPPORTED)
+        if (
+            not ps.output_path
+            or not is_ts_path(ps.output_path)
+            or ps.on_frame is not None
+            or ps.rtsp_push_url
+        ):
+            raise AidotSdPlaybackUnavailable(DTLS_PLAYBACK_UNSUPPORTED)
 
     # One line, once per camera, naming the decisions that determine whether
     # media can arrive at all.  This failure class - a session that negotiates
@@ -2756,18 +2830,80 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
     # the channel) or pc.on("datachannel") (camera initiated DCEP).
     def _send_avio_living(_dc_ref, _label_for_log: str) -> None:
         try:
-            from .sdes_open import _session_mode_req
+            from .sd_playback import session_mode_is
+            from .sdes_open import _sd_session_mode, _session_mode_req
 
+            _mode = _sd_session_mode(ps._sd_playback)
+            # SD playback: wait for the camera to echo SD before PLAY_START,
+            # as the SDES open does - a play that overtakes the switch plays
+            # nothing. Registered before the send; the echo can beat it back.
+            _echo = (
+                ps._avio_responses.expect(5377, session_mode_is(_mode))
+                if ps._sd_playback is not None
+                else None
+            )
             # The counter, not a random seq: see _session_mode_req.
             _seq = self._next_dseq()
-            _frame = _session_mode_req(_seq, int(time.time() * 1000), 1, avstream=False)
+            _frame = _session_mode_req(
+                _seq, int(time.time() * 1000), _mode, avstream=False
+            )
             _dc_ref.send(_frame)
             ps._status(
-                f"DC[{_label_for_log}] OPEN -> sent AVIO LIVING (5376)"
-                f" {len(_frame)}B seq=0x{_seq:08x}"
+                f"DC[{_label_for_log}] OPEN -> sent AVIO SESSION_MODE {_mode}"
+                f" (5376) {len(_frame)}B seq=0x{_seq:08x}"
             )
+            if _echo is not None:
+                _spawn_bg(_sd_play_after_echo(_dc_ref, _echo))
         except Exception as _dc_send_exc:
             ps._status(f"DC[{_label_for_log}] LIVING send failed: {_dc_send_exc}")
+
+    async def _sd_play_after_echo(_dc_ref, _echo) -> None:
+        """PLAY_START once the camera has confirmed SD mode - retried, as the
+        SDES open retries, since in SD mode nothing plays without it."""
+        from .sd_playback import RECORD_PLAYCONTROL_REQ_CMD, session_mode_is
+        from .sdes_open import _sd_session_mode, _session_mode_req
+
+        _mode = _sd_session_mode(ps._sd_playback)
+        for _ask in range(3):
+            if await _echo.result(5.0) is not None:
+                break
+            if _ask == 2:
+                ps._status(
+                    "SD playback: the camera did not confirm SD mode - PLAY_START"
+                    " not sent"
+                )
+                return
+            # Asked again with a fresh seq: the firmware ignores a mode
+            # request whose seq is not above the last it accepted.
+            _echo = ps._avio_responses.expect(5377, session_mode_is(_mode))
+            _seq = self._next_dseq()
+            try:
+                _dc_ref.send(
+                    _session_mode_req(
+                        _seq, int(time.time() * 1000), _mode, avstream=False
+                    )
+                )
+            except Exception:
+                pass
+            ps._status("SD playback: SD mode not confirmed - asking again")
+        _req = ps._sd_playback.request
+        for _try in range(3):
+            try:
+                _dc_ref.send(
+                    avio_header(
+                        self._next_dseq(),
+                        RECORD_PLAYCONTROL_REQ_CMD,
+                        int(time.time() * 1000),
+                        len(_req),
+                        0,
+                    )
+                    + _req
+                )
+                ps._status("SD playback: PLAY_START sent")
+                return
+            except Exception as _ps_exc:
+                ps._status(f"SD playback: PLAY_START send failed: {_ps_exc}")
+                await asyncio.sleep(0.5)
 
     def _send_avio_heartbeat(_dc_ref) -> None:
         # CMD_AVIO_CTRL_HEARTHEAT_REQ = 5156 (AVIOCTRLDEFs.java:119).
@@ -2837,6 +2973,14 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
     # handlers below are registered while the session does not exist yet;
     # it is handed to the session at the end so both sides share one.
     ps._avio_responses = AvioResponseRouter()
+    if ps._sd_playback is not None:
+        from .sd_playback import PLAY_START, RECORD_PLAYCONTROL_RESP_CMD, answers
+
+        # Registered now, before anything can answer: PLAY_START goes out
+        # from the data channel's open, and its reply comes ~6 s later.
+        ps._sd_start_waiter = ps._avio_responses.expect(
+            RECORD_PLAYCONTROL_RESP_CMD, answers(PLAY_START)
+        )
 
     # Camera-initiated DCEP path: KVS firmware on A000088 doesn't include
     # m=application in its answer SDP, suggesting the data channel may
@@ -2997,7 +3141,23 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
             track,
         )
 
-    ps.recorder = self._attach_file_recorder(ps.pc, ps.output_path, ps.on_frame)
+    ps.recorder = self._attach_file_recorder(
+        ps.pc,
+        ps.output_path,
+        ps.on_frame,
+        # SD playback: H264 or H265, whichever the recording is; the first
+        # keyframe names it.
+        video_codec=None if ps._sd_playback is not None else "h264",
+    )
+    if ps._sd_playback is not None and ps.recorder is not None:
+        from .sd_playback import H265AccessUnits
+
+        ps._sd_h265 = {
+            "pt": None,
+            "units": H265AccessUnits(),
+            "recorder": ps.recorder,
+            "dropped": 0,
+        }
     _aborted = [False]
 
     async def _abort_open() -> None:
@@ -3146,6 +3306,14 @@ async def _dtls_open_offer_and_answer(self, ps: _DtlsOpenState) -> None:
     # A001064's MQTT receive buffer and the camera quickConn-resets the
     # broker session before processing the request.
     _compressed_offer_sdp = _compress_sdp_for_camera(_offer_sdp)
+    if ps._sd_playback is not None:
+        from .sd_playback import offer_with_h265
+
+        # Name H265 next to H264: only then does a class 0/1 viewer get the
+        # H265 track a recording held as H265 is sent on. aiortc never sees
+        # it (_offer_video_pts below reads aiortc's own offer).
+        _compressed_offer_sdp, _h265_pt = offer_with_h265(_compressed_offer_sdp)
+        ps._status(f"SD playback: offered H265 as pt={_h265_pt}")
 
     webrtc_req_payload = ipc_envelope(
         "webrtcReq",
@@ -3587,6 +3755,7 @@ async def _dtls_open_offer_and_answer(self, ps: _DtlsOpenState) -> None:
             await ps.pc.setRemoteDescription(
                 ps.RTCSessionDescription(sdp=_rr_synth_sdp, type="answer")
             )
+            _install_sd_h265_tap(ps.pc, ps._sd_h265, ps._status)
             ps._status(
                 "role-reversal: setRemoteDescription from counter-offer"
                 " - ICE now checking"
@@ -3714,6 +3883,21 @@ async def _dtls_open_offer_and_answer(self, ps: _DtlsOpenState) -> None:
         # ---- NORMAL path: camera sent webrtcResp ---------------------------- #
         answer = ps.answer_fut.result()
         _ans_sdp = answer["sdp"]
+        if ps._sd_h265 is not None:
+            from .sd_playback import answer_h265_pt
+
+            ps._sd_h265["pt"] = answer_h265_pt(_ans_sdp)
+            from .sd_playback import answer_h265_parameter_sets
+
+            ps._sd_h265["units"].parameter_sets = answer_h265_parameter_sets(
+                _ans_sdp, ps._sd_h265["pt"]
+            )
+            ps._status(
+                "SD playback: the answer names H265 as pt=%s" % ps._sd_h265["pt"]
+                if ps._sd_h265["pt"] is not None
+                else "SD playback: the answer names no H265 rtpmap - the tap"
+                " will take the first unrouted H265 payload type"
+            )
         _ans_mlines = [ln for ln in _ans_sdp.splitlines() if ln.startswith("m=")]
         ps._status(
             f"webrtcResp received - m=video={_sdp_transport(_ans_sdp, 'video')}"
@@ -4075,6 +4259,7 @@ async def _dtls_open_offer_and_answer(self, ps: _DtlsOpenState) -> None:
                     type=answer.get("type", "answer"),
                 )
             )
+            _install_sd_h265_tap(ps.pc, ps._sd_h265, ps._status)
             # Diag: per-transceiver DTLS/ICE state immediately after
             # setRemoteDescription returns.  If dtls.state already !=
             # "new" here, aiortc has kicked off DTLS handshake on the
@@ -4486,13 +4671,15 @@ async def _dtls_open_ice_candidates_and_connect(
             talk_track=ps._talk_track,
             talk_holder=ps._talk_holder,
             responses=ps._avio_responses,
+            playback_waiter=ps._sd_start_waiter,
+            playback=ps._sd_playback,
         )
     )
     return None
 
 
 class _WebRTCOpenMixin:
-    def _attach_file_recorder(self, pc, output_path, on_frame):
+    def _attach_file_recorder(self, pc, output_path, on_frame, video_codec="h264"):
         """The recorder for a DTLS ``output_path``, wired to ``pc``'s tracks.
 
         MPEG-TS paths copy the camera's own streams (``TsCopyRecorder``): the
@@ -4511,7 +4698,9 @@ class _WebRTCOpenMixin:
         if is_ts_path(output_path):
             try:
                 recorder = TsCopyRecorder(
-                    output_path, device_id=getattr(self, "device_id", None)
+                    output_path,
+                    device_id=getattr(self, "device_id", None),
+                    video_codec=video_codec,
                 )
             except OSError as exc:
                 _LOGGER.warning(

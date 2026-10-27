@@ -674,11 +674,26 @@ owned model and played live on an A001064 (2026-10-27):
   mode, and PLAY_START goes out once the camera echoes SD. Switching a live
   session to SD stops the live video and never starts the recording.
 
-`AidotSdPlaybackUnavailable` is raised rather than a live session returned on
-a DTLS camera (the A000088's transport: its H265 track needs a raw capture
-the aiortc path does not have yet), or when the answer has no data channel to
-send PLAY_START on. The A001513 is SDES and should play, but neither it nor
-an A000088 has been played live; neither has had a card with recordings.
+Played live on the A001064 and the A001513 (2026-10-27: the L2 sent
+2560x1920 H265 from 5 s before the record's listed time, 0 decode errors,
+~15 fps outside the recording's own holes).
+
+**DTLS cameras (A000088) record playback to a `.ts` file only.** aiortc has no
+H265, so the offer names H265 beside H264 for the camera alone, aiortc keeps
+its three sections, and the extra video section's packets - which aiortc
+would discard unrouted - are taken raw at its RTP router (`RtpRouter.raw_tap`
+in the vendored aiortc), assembled into access units and recorded as HEVC.
+The recorder's video codec is set by the recording's first keyframe, so an
+H264 recording (camera encoder setting 2) is recorded as H264 from aiortc's
+own track. There is no `on_frame` decode and no serve on this path. On an
+A000088 with no card (2026-10-27) the whole exchange ran: H265 offered, the
+answer's extra section named H265 on PT 0, aiortc connected, SD mode was
+confirmed and PLAY_START answered (refused - no card). **The recorded media
+itself has not been seen on this path**: no A000088 here has a card.
+
+`AidotSdPlaybackUnavailable` is raised rather than a live session returned
+when the answer has no data channel to send PLAY_START on, on a DTLS camera
+without a `.ts` `output_path`, or while this client streams the camera live.
 Pause, resume and seek send what the app sends (`KVSWebRTCChannel` T2, V2,
 W2): PLAY_PAUSE, PLAY_RESUME, and PLAY_SEEKTIME with the time field set to the
 record's start plus the offset and a per-seek counter. Each returns the

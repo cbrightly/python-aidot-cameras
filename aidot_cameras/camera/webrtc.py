@@ -18,6 +18,7 @@ from .protocol import (
     AvioResponseRouter,
     _speaker_opened,
 )
+from .sd_playback import _PlaybackControls
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ _LOGGER = logging.getLogger(__name__)
 _STOP_MQTT_WAIT_S = 5.0
 
 
-class WebRTCSession(AvioRequestMixin):
+class WebRTCSession(_PlaybackControls, AvioRequestMixin):
     """Active WebRTC live-stream session for a liveType=2 AiDot camera.
 
     Obtain via ``await DeviceClient.async_open_webrtc_stream(...)``.
@@ -45,6 +46,8 @@ class WebRTCSession(AvioRequestMixin):
         talk_track: Any = None,
         talk_holder: Any = None,
         responses: Any = None,
+        playback_waiter: Any = None,
+        playback: Any = None,
     ) -> None:
         self._pc = pc
         self._outgoing_q = outgoing_q
@@ -65,6 +68,10 @@ class WebRTCSession(AvioRequestMixin):
         self._talk_holder = (
             talk_holder if talk_holder is not None else {"provider": None}
         )
+        # SD playback (see sd_playback._PlaybackControls); None for live.
+        self._playback_waiter = playback_waiter
+        self._sd_playback = playback
+        self._sd_seek_count = 0
 
     def _avio_cmd(self, cmd: int, payload: bytes = b"") -> bool:
         """Send an AVIO IOCtrl command via the DTLS SCTP DataChannel.

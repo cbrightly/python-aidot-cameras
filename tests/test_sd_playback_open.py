@@ -206,19 +206,28 @@ def test_the_dtls_fallback_carries_the_request_so_dtls_can_refuse_it():
         assert any(k.arg == "_sd_playback" for k in call.keywords), call.lineno
 
 
-def test_the_dtls_open_refuses_playback():
+def test_the_dtls_open_refuses_playback_without_a_ts_file():
+    # Over DTLS the recording is taken raw into the MPEG-TS recorder, so there
+    # is nothing to hand on_frame or a serve: a .ts output_path or nothing.
+    tree = module_tree("aidot_cameras.camera.webrtc_open")
+    up = parents(tree)
     raises = [
         n
-        for n in ast.walk(module_tree("aidot_cameras.camera.webrtc_open"))
-        if isinstance(n, ast.If)
-        and any(
-            isinstance(b, ast.Raise) and name_of(b.exc) == "AidotSdPlaybackUnavailable"
-            for b in n.body
-        )
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Raise) and name_of(n.exc) == "AidotSdPlaybackUnavailable"
     ]
     assert len(raises) == 1
-    test = ast.unparse(raises[0].test)
-    assert "_sd_playback" in test and "use_sdes" in test
+    tests = " ".join(ast.unparse(i.test) for i in enclosing(raises[0], up, ast.If))
+    # The transport the open chose (use_sdes honours force_sdes), and nothing
+    # that would need the H265 decoded or served.
+    for needed in (
+        "_sd_playback",
+        "use_sdes",
+        "is_ts_path",
+        "on_frame",
+        "rtsp_push_url",
+    ):
+        assert needed in tests, tests
 
 
 class TestNoPinOnPlayback:

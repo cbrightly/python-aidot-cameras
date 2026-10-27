@@ -1099,10 +1099,12 @@ def _session_mode_echoed(frame: bytes) -> "Optional[int]":
     The 12-byte reply carries the mode in its third word: 1 after LIVING, 2
     after SD, on every A001064 run of 2026-10-26/27.
     """
+    from .sd_playback import session_mode_of
+
     resp = parse_avio_response(frame)
-    if resp is None or resp.command != 5377 or len(resp.payload) < 12:
+    if resp is None or resp.command != 5377:
         return None
-    return int.from_bytes(resp.payload[8:12], "little")
+    return session_mode_of(resp.payload)
 
 
 #: How many packets a playback open holds for its serve (see _new_media_hold).

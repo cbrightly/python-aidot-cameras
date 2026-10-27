@@ -16,6 +16,7 @@ from .protocol import (
     AvioResponseRouter,
     _speaker_ack_accepted,
 )
+from .sd_playback import _PlaybackControls
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ _STOP_MQTT_WAIT_S = 5.0
 SDES_SPEAKER_ACK_TIMEOUT_S = SDES_SPEAKERSTART_DELAY + SPEAKER_ACK_TIMEOUT_S
 
 
-class SdesSession(AvioRequestMixin):
+class SdesSession(_PlaybackControls, AvioRequestMixin):
     """Active SDES-SRTP stream session managed by an ffmpeg subprocess.
 
     Obtain via ``await DeviceClient.async_open_webrtc_stream(...)`` when the
@@ -154,84 +155,6 @@ class SdesSession(AvioRequestMixin):
             return fn(cmd, payload) is not False
         except Exception:
             return False
-
-    async def playback_reply(self, timeout: float = 10.0):
-        """The camera's RECORD_PLAYCONTROL reply to the open's PLAY_START.
-
-        An ``AvioResponse`` (its payload reads with
-        ``sd_playback.decode_playcontrol_reply``), or
-        None for a live session or a camera that did not answer in time.
-
-        It arrives after the recording has started: 6.1-6.2 s after PLAY_START
-        on an A001064, in four of four runs on 2026-10-27, when the session
-        opens in SD mode. A wait that times out keeps listening, so asking
-        again later still gets a reply that came late.
-        """
-        if self._playback_waiter is None:
-            return None
-        return await self._playback_waiter.result(timeout, keep=True)
-
-    async def _sd_control(self, command: int, *, param=0, offset_s=0, timeout=8.0):
-        """Send one RECORD_PLAYCONTROL for this session's record; its reply.
-
-        A ``PlaycontrolReply``, or None: a live session, or no answer in time.
-        Replies are matched on the playback command they echo, so a late reply
-        to PLAY_START or to another control is never taken for this one.
-        """
-        start = self._sd_playback
-        if start is None or start.record is None:
-            return None
-        from .sd_playback import (
-            RECORD_PLAYCONTROL_REQ_CMD,
-            RECORD_PLAYCONTROL_RESP_CMD,
-            answers,
-            decode_playcontrol_reply,
-            playcontrol_payload,
-        )
-
-        resp = await self.async_avio_request(
-            RECORD_PLAYCONTROL_REQ_CMD,
-            playcontrol_payload(
-                command,
-                start.record,
-                sd_channel=start.sd_channel,
-                param=param,
-                offset_s=offset_s,
-            ),
-            response_cmd=RECORD_PLAYCONTROL_RESP_CMD,
-            timeout=timeout,
-            # Every playback command's reply has the one AVIO id; take only
-            # the one that echoes this command.
-            match=answers(command),
-        )
-        return decode_playcontrol_reply(bytes(resp.payload)) if resp else None
-
-    async def async_sd_pause(self):
-        """Pause the recording this session plays (PLAY_PAUSE)."""
-        from .sd_playback import PLAY_PAUSE
-
-        return await self._sd_control(PLAY_PAUSE)
-
-    async def async_sd_resume(self):
-        """Resume a paused recording (PLAY_RESUME)."""
-        from .sd_playback import PLAY_RESUME
-
-        return await self._sd_control(PLAY_RESUME)
-
-    async def async_sd_seek(self, offset_s: float):
-        """Play from ``offset_s`` seconds into the recording (PLAY_SEEKTIME).
-
-        As the app sends it: the time field is the record's start plus the
-        offset, and ``param`` a counter that goes up by one per seek, 1..255.
-        """
-        from .sd_playback import PLAY_SEEKTIME
-
-        if self._sd_playback is None:
-            return None
-        self._sd_seek_count = self._sd_seek_count % 255 + 1
-        return await self._sd_control(
-            PLAY_SEEKTIME, param=self._sd_seek_count, offset_s=offset_s
-        )
 
     @property
     def talk_supported(self) -> bool:

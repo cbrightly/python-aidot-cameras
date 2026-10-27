@@ -1788,7 +1788,15 @@ def video_pts_dts(state: dict, pts: int, slack: int) -> tuple:
 
 
 def _dtls_av_mux_run(
-    vq, aq, out_fileobj, progress, stop_flag, *, align_audio_start=False, state=None
+    vq,
+    aq,
+    out_fileobj,
+    progress,
+    stop_flag,
+    *,
+    align_audio_start=False,
+    state=None,
+    video_codec="h264",
 ) -> None:
     """Mux tapped video (H.264 copy) + audio (PCMA->AAC) to ``out_fileobj`` as
     RTP-timestamped MPEG-TS.  Runs in a worker thread; the serve's ffmpeg reads
@@ -1810,7 +1818,14 @@ def _dtls_av_mux_run(
       the serve's timing is unchanged.
     - ``state``, if given, gets ``state["failed"] = True`` when a write failed
       and the mux ended early.
+    - ``video_codec`` is the video stream's codec. None leaves it to the first
+      keyframe: a queue item may carry its codec as a fourth element
+      (``"hevc"`` from the SD playback H265 tap), and a three-element item is
+      H.264. Only with ``align_audio_start``, which writes nothing before the
+      first keyframe, so the stream can still be added then.
     """
+    if video_codec is None and not align_audio_start:
+        raise ValueError("video_codec=None needs align_audio_start")
     import time as _t
     import queue as _q
     from fractions import Fraction
@@ -1880,8 +1895,10 @@ def _dtls_av_mux_run(
     except Exception as exc:
         _LOGGER.warning("DTLS A/V mux: av.open failed: %s", exc)
         return
-    vs = out.add_stream("h264")
-    vs.time_base = Fraction(1, 90000)
+    vs = None
+    if video_codec is not None:
+        vs = out.add_stream(video_codec)
+        vs.time_base = Fraction(1, 90000)
     try:
         adec = av.CodecContext.create("pcm_alaw", "r")
         adec.sample_rate = 8000
@@ -1922,16 +1939,32 @@ def _dtls_av_mux_run(
     # ffmpeg at its input probe so it never bound its -listen port.  One dead
     # write -> exit the thread and leave the queues alone.
     mux_dead = [False]
+    vs_box = [vs]
+    vcodec_box = [video_codec]
 
     def _flush_video():
         while True:
             try:
-                data, ts, kf = vq.get_nowait()
+                item = vq.get_nowait()
             except _q.Empty:
                 break
+            data, ts, kf = item[:3]
+            _codec = item[3] if len(item) > 3 else "h264"
+            if vs_box[0] is not None and video_codec is None:
+                # Lazy mode: a camera sending both tracks must not put the
+                # other codec into this stream. Compared by the name it was
+                # added under: the stream reports its encoder (libx265).
+                if vcodec_box[0] != _codec:
+                    continue
             if not vstarted[0]:
                 if not kf:
                     continue  # begin on a keyframe so the GOP is decodable
+                if vs_box[0] is None:
+                    # The first keyframe says what the recording is.
+                    _vs = out.add_stream(_codec)
+                    _vs.time_base = Fraction(1, 90000)
+                    vs_box[0] = _vs
+                    vcodec_box[0] = _codec
                 vstarted[0] = True
                 v0[0] = ts
             _rel = ts - v0[0]
@@ -1941,7 +1974,7 @@ def _dtls_av_mux_run(
                 # is_resent_video_frame. Dropping costs no media time.
                 continue
             pkt = av.Packet(data)
-            pkt.stream = vs
+            pkt.stream = vs_box[0]
             pkt.pts, pkt.dts = video_pts_dts(_ts_state, _rel, _slack)
             pkt.time_base = Fraction(1, 90000)
             if kf:

@@ -16,8 +16,10 @@ open, live included.
   `rtsp_push_url`, `on_frame`). It opens as the vendor app's SD screen does:
   client class 0 in the peer id, playCmd 1, StreamID 0, both video codecs
   offered, SESSION_MODE 2 at the data channel's open, then PLAY_START. Played
-  live on an A001064; the A000088 and A001513 firmware follow the same rule
-  but have not been played. See CAMERAS.md. The whole clip is served from its
+  live on an A001064 and an A001513. On a DTLS camera (A000088) it records to
+  a `.ts` file, taking the recording's H265 raw from aiortc's RTP router;
+  signalling checked on an A000088, recorded media not yet seen (no card).
+  See CAMERAS.md. The whole clip is served from its
   first frame: until the serve is listening the bridge holds what it forwards,
   and the serve keeps what ffmpeg reads while probing the input (both for
   playback only; live is unchanged).
@@ -27,8 +29,9 @@ open, live included.
   which an A001064 sends about 6 s after the recording has started.
 - `scripts/sd_playback_validate.py`, the live check for playback.
 - **`AidotSdPlaybackUnavailable`**, raised instead of returning the live view
-  when a recording is asked for where it cannot play: a DTLS camera, an answer
-  with no data channel, or a camera this client is already streaming live.
+  when a recording is asked for where it cannot play: a DTLS camera without a
+  `.ts` output_path, an answer with no data channel, or a camera this client
+  is already streaming live.
 
 ### Fixed
 - **SESSION_MODE requests are no longer silently dropped about half the
