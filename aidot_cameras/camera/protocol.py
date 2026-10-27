@@ -3166,10 +3166,22 @@ class _AvioWaiter:
     look silent.
     """
 
-    def __init__(self, router: "AvioResponseRouter", command: int) -> None:
+    def __init__(self, router: "AvioResponseRouter", command: int, match=None) -> None:
         self._router = router
         self._command = command
+        # Optional predicate on the reply: a command whose replies all share
+        # one AVIO id (RECORD_PLAYCONTROL echoes the playback command in its
+        # payload) can then have several questions out at once.
+        self._match = match
         self._future = _cfutures.Future()
+
+    def _accepts(self, resp) -> bool:
+        if self._match is None:
+            return True
+        try:
+            return bool(self._match(resp))
+        except Exception:
+            return False
 
     def cancel(self) -> None:
         """Withdraw the question - used when the command could not be sent."""
@@ -3239,13 +3251,16 @@ class AvioResponseRouter:
         self._lock = threading.Lock()
         self._waiting: "dict[int, list[_AvioWaiter]]" = {}
 
-    def expect(self, command: int) -> _AvioWaiter:
+    def expect(self, command: int, match=None) -> _AvioWaiter:
         """Register interest in the next response carrying ``command``.
+
+        ``match``, when given, narrows that to a response it returns True for;
+        a response no waiter accepts is not answered to anyone.
 
         Call this before sending the request: the camera can answer before the
         sender returns, and a registration made afterwards would miss the reply.
         """
-        waiter = _AvioWaiter(self, command)
+        waiter = _AvioWaiter(self, command, match)
         with self._lock:
             self._waiting.setdefault(command, []).append(waiter)
         return waiter
@@ -3264,11 +3279,15 @@ class AvioResponseRouter:
             with self._lock:
                 queue = self._waiting.get(resp.command)
                 waiter = None
-                while queue:
-                    candidate = queue.pop(0)
-                    if not candidate._future.done():
-                        waiter = candidate
-                        break
+                if queue:
+                    # Oldest first, skipping questions already settled and
+                    # any whose match turns this reply down.
+                    queue[:] = [w for w in queue if not w._future.done()]
+                    for candidate in queue:
+                        if candidate._accepts(resp):
+                            waiter = candidate
+                            queue.remove(candidate)
+                            break
                 if queue is not None and not queue:
                     self._waiting.pop(resp.command, None)
             if waiter is None:
@@ -3764,6 +3783,7 @@ class AvioRequestMixin:
         *,
         response_cmd: int,
         timeout: float = AVIO_RESPONSE_TIMEOUT_S,
+        match=None,
     ) -> "Optional[AvioResponse]":
         """Send ``cmd`` and return the camera's ``response_cmd`` reply, or None.
 
@@ -3771,7 +3791,7 @@ class AvioRequestMixin:
         not a failure: this firmware may implement a request without a response,
         and no reply at all points at the channel rather than the firmware.
         """
-        waiter = self._avio_responses.expect(response_cmd)
+        waiter = self._avio_responses.expect(response_cmd, match)
         # Registered BEFORE the send: a camera on the LAN can answer before the
         # sending call returns, and a reply that arrives with nobody listening
         # would be reported as silence.

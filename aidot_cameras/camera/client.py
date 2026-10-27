@@ -865,6 +865,7 @@ def _build_sdes_serve_cmd(
     push_video_only: bool = False,
     video_decoder: Optional[list] = None,
     input_timeout_s: Optional[int] = None,
+    keep_probe_packets: bool = False,
 ) -> list:
     """Build the ffmpeg argv for the SDES bridge serve.
 
@@ -1045,8 +1046,15 @@ def _build_sdes_serve_cmd(
             if _SERVE_ARRIVAL_TS and not max_seconds
             else []
         ),
+        # ``nobuffer`` drops what ffmpeg reads while probing the input (up to
+        # -analyzeduration / -probesize) - latency a live view does not want.
+        # A recording's opening seconds are not latency, they are the clip:
+        # at 2560x1440 H265 the probe took its first ~3 s (A001064,
+        # 2026-10-27), so SD playback keeps them (``keep_probe_packets``).
         "-fflags",
-        "+nobuffer+genpts+discardcorrupt",
+        "+genpts+discardcorrupt"
+        if keep_probe_packets
+        else "+nobuffer+genpts+discardcorrupt",
         "-analyzeduration",
         "2000000",
         "-probesize",

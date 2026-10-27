@@ -17,9 +17,12 @@ open, live included.
   client class 0 in the peer id, playCmd 1, StreamID 0, both video codecs
   offered, SESSION_MODE 2 at the data channel's open, then PLAY_START. Played
   live on an A001064; the A000088 and A001513 firmware follow the same rule
-  but have not been played. See CAMERAS.md. Known limitation: the first ~2 s
-  of a clip are not served (the serve starts on the first video packet, which
-  only comes after PLAY_START).
+  but have not been played. See CAMERAS.md. The whole clip is served from its
+  first frame: until the serve is listening the bridge holds what it forwards,
+  and the serve keeps what ffmpeg reads while probing the input (both for
+  playback only; live is unchanged).
+- `async_sd_pause()`, `async_sd_resume()` and `async_sd_seek(seconds)` on a
+  playback session, sent as the app sends them; tried live on an A001064.
 - `SdesSession.playback_reply()`: the camera's answer to that PLAY_START,
   which an A001064 sends about 6 s after the recording has started.
 - `scripts/sd_playback_validate.py`, the live check for playback.

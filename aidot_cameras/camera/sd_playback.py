@@ -10,9 +10,12 @@ The request is the vendor app's own encoder,
 
     off 0   u32   0 (always 0 in the app's call)
     off 4   u32   command (PLAY_START, PLAY_STOP, ...)
-    off 8   u32   param (the seek target for PLAY_SEEKTIME, otherwise 0)
-    off 12  8B    STimeDay of the record, UTC: u16 year, month, day, wday,
-                  hour, minute, second; wday is Calendar.DAY_OF_WEEK, Sunday = 1
+    off 8   u32   param: 0, except PLAY_SEEKTIME, where the app sends a seek
+                  counter (1..255, one more per seek)
+    off 12  8B    STimeDay, UTC: u16 year, month, day, wday, hour, minute,
+                  second; wday is Calendar.DAY_OF_WEEK, Sunday = 1. The record's
+                  start, except PLAY_SEEKTIME, where it is the seek target
+                  (the record's start plus the offset; KVSWebRTCChannel W2)
     off 20  u8    playback channel, allocated 1..26 by the app
     off 21  u8    the record's event type, as LISTEVENT reported it
     off 22  2B    0
@@ -71,6 +74,10 @@ class SdPlaybackStart:
 
     request: bytes
     session_mode: int = SESSION_MODE_SD
+    #: The record being played and its playback channel, for the session's
+    #: pause, resume and seek (they name the same record and channel).
+    record: Any = None
+    sd_channel: int = 1
 
 
 class PlaycontrolReply(NamedTuple):
@@ -96,11 +103,18 @@ def _java_day_of_week(year: int, month: int, day: int) -> int:
 
 
 def playcontrol_payload(
-    command: int, record: Any, *, sd_channel: int = 1, param: int = 0
+    command: int,
+    record: Any,
+    *,
+    sd_channel: int = 1,
+    param: int = 0,
+    offset_s: float = 0,
 ) -> bytes:
     """The 24 bytes for one playback command against one record.
 
     ``record`` is an ``SdEvent`` (anything with the date fields and ``event``).
+    ``offset_s`` moves the time field that many seconds past the record's
+    start - the seek target, for PLAY_SEEKTIME. The field holds whole seconds.
     ``sd_channel`` must be 1..26, the range the app allocates; a value outside it
     is a caller bug and raises rather than being clamped, because a silently
     changed channel is a request the camera answers while sending nothing.
@@ -109,17 +123,23 @@ def playcontrol_payload(
         raise ValueError(
             f"sd_channel must be {_MIN_SD_CHANNEL}..{_MAX_SD_CHANNEL}, got {sd_channel}"
         )
+    if offset_s < 0:
+        raise ValueError(f"offset_s must not be negative, got {offset_s}")
     head = struct.pack("<III", 0, command, param)
-    when = struct.pack(
-        "<HBBBBBB",
+    y, mo, d, h, mi, s = (
         record.year,
         record.month,
         record.day,
-        _java_day_of_week(record.year, record.month, record.day),
         record.hour,
         record.minute,
         record.second,
     )
+    if offset_s:
+        t = datetime.datetime(y, mo, d, h, mi, s) + datetime.timedelta(
+            seconds=int(offset_s)
+        )
+        y, mo, d, h, mi, s = t.year, t.month, t.day, t.hour, t.minute, t.second
+    when = struct.pack("<HBBBBBB", y, mo, d, _java_day_of_week(y, mo, d), h, mi, s)
     tail = struct.pack("<BB", sd_channel, int(getattr(record, "event", 0)) & 0xFF)
     return (
         head
@@ -127,6 +147,17 @@ def playcontrol_payload(
         + tail
         + b"\x00" * (_PAYLOAD_LEN - len(head) - len(when) - len(tail))
     )
+
+
+def answers(command: int):
+    """A reply match for one playback command: the 0x31b reply echoes it in its
+    first word, and every playback command shares that one reply id."""
+
+    def _match(resp: Any) -> bool:
+        data = bytes(getattr(resp, "payload", b"") or b"")
+        return len(data) >= 4 and struct.unpack_from("<I", data)[0] == command
+
+    return _match
 
 
 def decode_playcontrol_reply(data: Optional[bytes]) -> Optional[PlaycontrolReply]:
@@ -183,7 +214,8 @@ class _CameraSdPlaybackMixin:
         an ``SdesSession`` carrying the recording, served the way a live
         session is (``output_path``, ``rtsp_push_url``, ``on_frame``), with the
         camera's answer to PLAY_START from ``await session.playback_reply()``.
-        ``session.stop()`` ends it.
+        ``async_sd_pause()``, ``async_sd_resume()`` and ``async_sd_seek(s)`` on
+        the session control it; ``session.stop()`` ends it.
 
         Raises ``AidotSdPlaybackUnavailable`` rather than returning the live
         view on a camera this cannot play on: a DTLS camera, or an answer with
@@ -211,7 +243,9 @@ class _CameraSdPlaybackMixin:
                 " stop it with async_stop_streaming() first"
             )
         start = SdPlaybackStart(
-            request=playcontrol_payload(PLAY_START, record, sd_channel=sd_channel)
+            request=playcontrol_payload(PLAY_START, record, sd_channel=sd_channel),
+            record=record,
+            sd_channel=sd_channel,
         )
         peer_id = self.generate_webrtc_peer_id(
             live_type=PLAY_CMD_SDCARD,

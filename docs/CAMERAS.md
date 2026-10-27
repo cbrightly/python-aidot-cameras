@@ -647,7 +647,9 @@ session = await device_client.async_open_sd_playback(
     result.records[-1], rtsp_push_url="rtsp://127.0.0.1:8554/playback"
 )
 reply = await session.playback_reply()  # AvioResponse or None
-...
+await session.async_sd_pause()
+await session.async_sd_resume()
+await session.async_sd_seek(40)  # seconds into the recording
 await session.stop()
 ```
 
@@ -677,16 +679,23 @@ a DTLS camera (the A000088's transport: its H265 track needs a raw capture
 the aiortc path does not have yet), or when the answer has no data channel to
 send PLAY_START on. The A001513 is SDES and should play, but neither it nor
 an A000088 has been played live; neither has had a card with recordings.
-Seek, pause and resume are not implemented.
+Pause, resume and seek send what the app sends (`KVSWebRTCChannel` T2, V2,
+W2): PLAY_PAUSE, PLAY_RESUME, and PLAY_SEEKTIME with the time field set to the
+record's start plus the offset and a per-seek counter. Each returns the
+camera's `PlaycontrolReply`, or None. Measured on an A001064 2026-10-27: each
+answered in 30-50 ms, pause stopped the media (0 packets in 5 s), resume
+restarted it, and a seek to +40 s showed the target's burned-in time.
 
-**The first ~2 s of a clip are not served.** The camera starts the clip the
-moment PLAY_START arrives, and the open only launches its serve once it has
-seen the first video packet (it serves the payload type it observes); in SD
-mode nothing arrives before PLAY_START, so the clip's opening seconds reach a
-loopback port with no reader yet. Measured on an A001064 2026-10-27: the first
-served frame's burned-in time was 2 s after the record's. The rest of the clip
-plays at the camera's rate with audio continuous (four runs: 20 fps, 0-4 decode
-errors, all before the first parameter sets).
+**The whole clip is served, from its first frame.** Two things had cut the
+opening seconds, both now off for playback only: the serve is launched on the
+first video packet, and the camera starts the clip the moment PLAY_START lands,
+so the bridge holds what it forwards until the serve is listening; and the
+serve's `-fflags nobuffer` discards what ffmpeg reads while probing the input,
+which at 2560x1440 H265 was the clip's first ~3 s. With both, the first served
+frame matches the camera's own first frame in the same session (including the
+~2 s the camera sends from before the record's listed time). The recordings
+themselves have short holes in both tracks near their start (0.4-0.5 s, at
+the same offsets on every play).
 
 ## Local (LAN-direct) streaming
 

@@ -12,13 +12,11 @@ Assistant's AiDot entry first.
   AIDOT_TOKEN_FILE=~/.config/aidot/token.json \
   python scripts/sd_playback_validate.py --device 12b144cb --out /tmp/sdplay
 
-Measured on an A001064 2026-10-27 (4 runs, one 60 s clip): 594-645 HEVC frames
-at 2560x1440 and 20 fps, 0-4 decode errors (all before the first parameter
-sets), audio 30.1-32.6 s per run. Each run holds the session for the
-PLAY_START reply wait (about 6 s) plus --seconds; ``wall_s`` is that whole span. Two 450-500 ms frame gaps at the
-same offsets in every run are in that recording, not in the delivery. The
-first served frame is ~2 s into the clip (see CAMERAS.md, "Playing a
-recording").
+Measured on an A001064 2026-10-27: HEVC 2560x1440 at 20 fps, audio
+continuous, 0 decode errors once the serve kept the clip's opening packets;
+the first served frame matches the camera's own first frame. Short holes in
+both tracks near a clip's start (0.4-0.5 s, same offsets on every play) are in
+the recordings.
 """
 
 import argparse

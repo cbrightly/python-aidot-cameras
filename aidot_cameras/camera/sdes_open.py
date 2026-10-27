@@ -1105,6 +1105,90 @@ def _session_mode_echoed(frame: bytes) -> "Optional[int]":
     return int.from_bytes(resp.payload[8:12], "little")
 
 
+#: How many packets a playback open holds for its serve (see _new_media_hold).
+#: The serve is up within a second; ~70 packets/s on an A001064 recording.
+_MEDIA_HOLD_MAX = 4000
+
+
+class _MediaHold:
+    """Packets for the serve, held in order until it is listening.
+
+    ``send`` is called by the bridge thread for every packet bound for a
+    loopback port; ``release`` by the open once the serve is bound. The first
+    ``send`` (or ``flush``) after the release hands over everything held -
+    still on the bridge thread, so nothing can overtake it.
+    """
+
+    def __init__(self, limit: int = 0) -> None:
+        self._held: "Optional[list]" = []
+        self._released = False
+        self._limit = limit or _MEDIA_HOLD_MAX
+        self.dropped = 0
+
+    def release(self) -> None:
+        self._released = True
+
+    def pending_flush(self) -> bool:
+        return self._released and self._held is not None
+
+    def send(self, sock, pkt: bytes, port: int, *, pace=None, log=None) -> None:
+        if self._held is not None:
+            if not self._released:
+                if len(self._held) < self._limit:
+                    self._held.append((sock, pkt, port))
+                else:
+                    self.dropped += 1
+                return
+            self.flush(pace=pace, log=log)
+        sock.sendto(pkt, ("127.0.0.1", port))
+
+    def flush(self, *, pace=None, log=None) -> int:
+        """Send what was held, in order; paced 16 packets at a time, since the
+        first keyframe alone is ~130 packets and one burst of all of them can
+        overrun the serve's socket. Returns how many were sent."""
+        held, self._held = self._held or [], None
+        sent = 0
+        for i, (sock, pkt, port) in enumerate(held):
+            try:
+                sock.sendto(pkt, ("127.0.0.1", port))
+                sent += 1
+                if pace is not None and i % 16 == 15:
+                    pace(0.002)
+            except Exception:
+                # One packet, never the rest of the clip's opening.
+                continue
+        if log is not None:
+            try:
+                log(
+                    f"bridge: released {sent} held packet(s) to the serve"
+                    + (
+                        f" ({self.dropped} over the cap dropped)"
+                        if self.dropped
+                        else ""
+                    )
+                )
+            except Exception:
+                pass
+        return sent
+
+
+def _new_media_hold(sd_playback) -> "Optional[_MediaHold]":
+    """A buffer the bridge holds the serve's packets in until it is listening.
+
+    SD playback only. The camera starts the clip the moment PLAY_START lands,
+    and the serve is launched on the first video packet, so the opening
+    packets - the H265 parameter sets and first keyframe among them - reached
+    a loopback port nothing had bound yet. Nothing then decoded until the
+    camera repeated them: the first served frame was ~4 s into a clip whose
+    raw capture starts 2 s before the record's time (A001064, 2026-10-27).
+    A live session joins a stream already running and keeps forwarding as
+    before (None).
+    """
+    if sd_playback is None:
+        return None
+    return _MediaHold()
+
+
 def _pinned_video_pt(sd_playback) -> "Optional[int]":
     """The video payload type this open pins, or None for SD playback.
 
@@ -3486,6 +3570,7 @@ def make_sdes_bridge(
     get_cam_key_audio,
     get_dc_answer_has_app,
     _session_mode=1,
+    _media_hold=None,
     _br_first_di_logged=False,
     _br_first_srtp_logged=False,
     _br_first_req_dumped=False,
@@ -3579,8 +3664,20 @@ def make_sdes_bridge(
         _br_exit_logged = False
         _lo_a = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
         _lo_v = _socket_br.socket(_socket_br.AF_INET, _socket_br.SOCK_DGRAM)
+
+        def _br_lo_send(_sock, _pkt, _port):
+            """Send one packet to the serve's loopback port - or, while a
+            playback open waits for the serve to listen, hold it."""
+            if _media_hold is None:
+                _sock.sendto(_pkt, ("127.0.0.1", _port))
+            else:
+                _media_hold.send(_sock, _pkt, _port, pace=_time_br.sleep, log=_status)
+
         try:
             while True:
+                if _media_hold is not None and _media_hold.pending_flush():
+                    # Released with nothing new arriving: flush on the tick.
+                    _media_hold.flush(pace=_time_br.sleep, log=_status)
                 try:
                     _rl, _, _ = _sel_br.select([_audio_sock, _video_sock], [], [], 0.5)
                 except Exception:
@@ -5278,9 +5375,8 @@ def make_sdes_bridge(
                                 # arrived on it.
                                 if _fwd_cmd not in _avio_cmds:
                                     try:
-                                        _lo_a.sendto(
-                                            _rtp_hdr + _pd_plain,
-                                            ("127.0.0.1", _lo_audio_port),
+                                        _br_lo_send(
+                                            _lo_a, _rtp_hdr + _pd_plain, _lo_audio_port
                                         )
                                         # Count it: media_stats() documents
                                         # itself as "media actually forwarded
@@ -5377,7 +5473,7 @@ def make_sdes_bridge(
                             # For SDES cameras (non-plain-rtp) ffmpeg uses
                             # SAVP and handles SRTCP itself - forward as-is.
                             try:
-                                _lo_a.sendto(_bpkt, ("127.0.0.1", _lo_audio_port))
+                                _br_lo_send(_lo_a, _bpkt, _lo_audio_port)
                             except Exception:
                                 _LOGGER.debug(
                                     "camera %s: swallowed exception in %s",
@@ -5386,7 +5482,7 @@ def make_sdes_bridge(
                                     exc_info=True,
                                 )
                             try:
-                                _lo_v.sendto(_bpkt, ("127.0.0.1", _lo_video_port))
+                                _br_lo_send(_lo_v, _bpkt, _lo_video_port)
                             except Exception:
                                 _LOGGER.debug(
                                     "camera %s: swallowed exception in %s",
@@ -5790,7 +5886,7 @@ def make_sdes_bridge(
                             _fwd_pkt = rewrite_rtp_payload_type(_fwd_pkt, _pt_out)
                         try:
                             if not _nk_late:
-                                _lo_target.sendto(_fwd_pkt, ("127.0.0.1", _btgt))
+                                _br_lo_send(_lo_target, _fwd_pkt, _btgt)
                             # Forward unconditionally - ciphertext ffmpeg
                             # discards is inert, and a `continue` here would
                             # change loop control flow for the whole SDES
@@ -8417,6 +8513,9 @@ class _SdesOpenMixin:
             # read there too, so no cross-thread ordering to reason about.
             "prflx": [],
         }
+        # SD playback: the bridge holds what it would forward to the serve
+        # until the serve is listening (released after the bind wait below).
+        _media_hold = _new_media_hold(ps.sd_playback)
 
         _bridge_fn = make_sdes_bridge(
             self=self,
@@ -8476,6 +8575,7 @@ class _SdesOpenMixin:
             get_cam_key_audio=lambda: ps._cam_key_audio,
             get_dc_answer_has_app=lambda: ps._dc_answer_has_app,
             _session_mode=_sd_session_mode(ps.sd_playback),
+            _media_hold=_media_hold,
         )
         _bridge_thread = _threading_br.Thread(
             target=_bridge_fn, daemon=True, name="sdes-bridge"
@@ -8658,13 +8758,16 @@ class _SdesOpenMixin:
                         == _sd_session_mode(ps.sd_playback)
                     ),
                 ):
+                    from .sd_playback import PLAY_START
                     from .sd_playback import RECORD_PLAYCONTROL_REQ_CMD
                     from .sd_playback import RECORD_PLAYCONTROL_RESP_CMD
+                    from .sd_playback import answers
 
                     # Registered before the send: the reply can beat the
-                    # sending call back.
+                    # sending call back. Matched on the echoed command: it
+                    # comes ~6 s later, after any pause or seek answered.
                     _sd_start_waiter = _avio_responses.expect(
-                        RECORD_PLAYCONTROL_RESP_CMD
+                        RECORD_PLAYCONTROL_RESP_CMD, answers(PLAY_START)
                     )
                     try:
                         _sd_sent = _cmd_chan[0](
@@ -9172,6 +9275,8 @@ class _SdesOpenMixin:
             input_timeout_s=_resolve_serve_input_timeout_s(
                 bool(getattr(self, "is_battery_camera", False))
             ),
+            # A recording's first seconds are the clip, not probe overhead.
+            keep_probe_packets=ps.sd_playback is not None,
         )
 
         # Audio matters even more than video here.  A multi-PT m-line makes ffmpeg
@@ -9372,6 +9477,10 @@ class _SdesOpenMixin:
                 " - sleeping 1.5 s as fallback"
             )
             await asyncio.sleep(1.5)
+        if _media_hold is not None:
+            # The serve is listening (or its fallback wait is over): the
+            # bridge hands it what it held, then forwards as usual.
+            _media_hold.release()
 
         # --- Wait for SDP answer -------------------------------------------- #
         # Wait for the camera's SDP answer.  True SDES cameras (e.g.
@@ -9688,4 +9797,5 @@ class _SdesOpenMixin:
             # the session hands it out on request rather than the open
             # holding the started stream back for it.
             playback_waiter=_sd_start_waiter,
+            playback=ps.sd_playback,
         )
