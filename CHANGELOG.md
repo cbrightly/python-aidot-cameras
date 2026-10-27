@@ -6,6 +6,30 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+Soak: resets the clock. SESSION_MODE sequence numbers change on every SDES
+open, live included.
+
+### Added
+- **`async_open_sd_playback(record)`** plays a recording off the camera's own
+  card on an SDES camera: the session it returns carries the recording
+  instead of the live view and is served the same way (`output_path`,
+  `rtsp_push_url`, `on_frame`). It opens as the vendor app's SD screen does:
+  client class 0 in the peer id, playCmd 1, StreamID 0, both video codecs
+  offered, SESSION_MODE 2 at the data channel's open, then PLAY_START. Played
+  live on an A001064; the A000088 and A001513 firmware follow the same rule
+  but have not been played. See CAMERAS.md.
+- `SdesSession.playback_reply()`: the camera's answer to that PLAY_START.
+- **`AidotSdPlaybackUnavailable`**, raised instead of returning the live view
+  when a recording is asked for where it cannot play: a DTLS camera, an answer
+  with no data channel, or a camera this client is already streaming live.
+
+### Fixed
+- **SESSION_MODE requests are no longer silently dropped about half the
+  time.** Every owned model's firmware ignores one whose sequence number is
+  not above the last it accepted, and still answers it; the library sent a
+  random one each time. They now count up from 100, as the app's do, on both
+  transports.
+
 ## [1.0.0rc62]
 
 Soak: resets the clock. Battery cameras now give Home Assistant go2rtc's

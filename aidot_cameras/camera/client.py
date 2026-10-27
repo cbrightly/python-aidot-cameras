@@ -6,6 +6,7 @@ import logging
 from urllib.parse import urlparse
 import os
 import time
+import threading
 import asyncio
 import dataclasses
 from typing import TYPE_CHECKING, Any, Callable, List, NamedTuple, Optional, Union
@@ -61,6 +62,7 @@ from .sdes import (
 )  # re-exported (split into sdes.py); also the SDES return type
 from .controls import _CameraControlsMixin
 from .sd_listing import _CameraSdMixin
+from .sd_playback import _CameraSdPlaybackMixin
 from .webrtc_open import _WebRTCOpenMixin
 from .sdes_open import _SdesOpenMixin
 from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixin; kept re-exported for back-compat
@@ -119,6 +121,9 @@ from .. import settings
 from .health import HealthReporter, dtls_snapshot as _dtls_snapshot
 
 _LOGGER = logging.getLogger(__name__)
+
+#: Guards every client's ``_live_dseq``; see ``_next_dseq``.
+_DSEQ_LOCK = threading.Lock()
 
 
 def _is_transient_cloud_error(exc: BaseException) -> bool:
@@ -2428,7 +2433,11 @@ async def _sdes_keepalive_after_session(
 
 
 class CameraMixin(
-    _CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesOpenMixin
+    _CameraControlsMixin,
+    _CameraSdMixin,
+    _CameraSdPlaybackMixin,
+    _WebRTCOpenMixin,
+    _SdesOpenMixin,
 ):
     """All camera/streaming methods, mixed into DeviceClient via inheritance."""
 
@@ -2770,9 +2779,15 @@ class CameraMixin(
         return getattr(self, "_last_live_play_code", None) == _LIVE_PLAY_NOT_READY
 
     def _next_dseq(self) -> int:
-        """Next livePlayReq dseq (app parity: Q0() starts at 100, increments)."""
-        d = self._live_dseq
-        self._live_dseq += 1
+        """Next livePlayReq dseq (app parity: Q0() starts at 100, increments).
+
+        Taken from the SDES bridge thread (SESSION_MODE, control commands) as
+        well as the event loop (livePlayReq), so read-and-increment is one
+        locked step: a repeated seq is a SESSION_MODE the camera ignores.
+        """
+        with _DSEQ_LOCK:
+            d = self._live_dseq
+            self._live_dseq += 1
         return d
 
     def update_status_from_device(self, device: dict) -> "DeviceStatusData":

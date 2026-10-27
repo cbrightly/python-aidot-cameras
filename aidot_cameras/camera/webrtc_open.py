@@ -1406,9 +1406,9 @@ async def _dtls_open_head(self, ps: _DtlsOpenState) -> None:
         # The DTLS data channel opens in LIVING and nothing here sends
         # PLAY_START, and recorded H265 needs a raw capture aiortc's decoder
         # does not give: a session opened anyway would be the live view.
-        raise AidotSdPlaybackUnavailable(
-            "SD playback is not supported on the DTLS transport yet"
-        )
+        from .sd_playback import DTLS_PLAYBACK_UNSUPPORTED
+
+        raise AidotSdPlaybackUnavailable(DTLS_PLAYBACK_UNSUPPORTED)
 
     # One line, once per camera, naming the decisions that determine whether
     # media can arrive at all.  This failure class - a session that negotiates
@@ -2756,11 +2756,11 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
     # the channel) or pc.on("datachannel") (camera initiated DCEP).
     def _send_avio_living(_dc_ref, _label_for_log: str) -> None:
         try:
-            _seq = random.randint(0, 0x7FFFFFFF)
-            _ts_ms = int(time.time() * 1000)
-            _payload = struct.pack("<IB3x", 0, 1)  # channel=0, mode=LIVING
-            _hdr = avio_header(_seq, 5376, _ts_ms, len(_payload), 0)
-            _frame = _hdr + _payload
+            from .sdes_open import _session_mode_req
+
+            # The counter, not a random seq: see _session_mode_req.
+            _seq = self._next_dseq()
+            _frame = _session_mode_req(_seq, int(time.time() * 1000), 1, avstream=False)
             _dc_ref.send(_frame)
             ps._status(
                 f"DC[{_label_for_log}] OPEN -> sent AVIO LIVING (5376)"

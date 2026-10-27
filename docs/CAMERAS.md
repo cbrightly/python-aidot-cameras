@@ -638,28 +638,46 @@ nobody reported** - four of seven cameras measured carried neither key, includin
 a model whose siblings report normally - so it is NOT evidence that a model
 cannot report. Only an explicit `False` says the slot is empty.
 
-### Playing one back is NOT offered, and that is a finding
+### Playing a recording
 
-Listing what a card holds works. **Playing a recording off the card does not,
-and the library does not pretend to** - `can_play` is False on every SD record.
+```python
+result = await device_client.async_get_sd_recordings(days=7)
+await device_client.async_stop_streaming()  # one media slot per camera
+session = await device_client.async_open_sd_playback(
+    result.records[-1], rtsp_push_url="rtsp://127.0.0.1:8554/playback"
+)
+reply = await session.playback_reply()  # AvioResponse or None
+...
+await session.stop()
+```
 
-This was investigated to a conclusion rather than skipped. The session a
-playback needs is fully understood and reproducible: an SD-mode peer id, an
-offer carrying no local audio sender, and the AVIO session-mode command
-(`0x1500`) set to SD rather than the LIVING every session uses. A camera accepts
-all of it. It then acknowledges the play command in about 50 ms and sends no
-media at all - no video RTP on any payload type, no video RTCP sender report,
-and none of the progress messages the vendor app drives its seek bar from.
+The returned `SdesSession` is served like a live one (`output_path`,
+`rtsp_push_url`, `on_frame`), but it carries the recording. It is not kept
+alive or reopened; to play again, call `async_open_sd_playback` again. While
+this client is streaming the camera live it raises
+`AidotSdPlaybackUnavailable` instead of opening a second session against the
+camera's one media slot.
 
-What was ruled out along the way, so nobody assumes it is one line of work: the
-channel byte, the event-type byte (swept across every plausible value on a card
-whose records all carry event 0), and the codec - this firmware declines to
-negotiate H265 both as an extra payload type in the video section and as a
-section of its own, so a decode path would have nothing to decode.
+What makes the camera send the recording, read from the firmware of every
+owned model and played live on an A001064 (2026-10-27):
 
-If that changes, it will be because someone captures a real playback off the
-wire. Reading the vendor app has been taken as far as it goes.
+- **The peer id announces the Android app (client class 0), playCmd 1 (SD
+  card) and StreamID 0.** Only class 0 or 1 gets H265, and only then does the
+  camera add the second video transceiver that recorded H265 goes out on.
+  With the library's live class (2) an H265-recording camera sends the
+  recording's audio and no video.
+- **The offer names both video codecs**, as the camera only adds that second
+  transceiver when the offer has two.
+- **The session opens in SESSION_MODE 2 (SD)**, on every path that sends a
+  mode, and PLAY_START goes out once the camera echoes SD. Switching a live
+  session to SD stops the live video and never starts the recording.
 
+`AidotSdPlaybackUnavailable` is raised rather than a live session returned on
+a DTLS camera (the A000088's transport: its H265 track needs a raw capture
+the aiortc path does not have yet), or when the answer has no data channel to
+send PLAY_START on. The A001513 is SDES and should play, but neither it nor
+an A000088 has been played live; neither has had a card with recordings.
+Seek, pause and resume are not implemented.
 
 ## Local (LAN-direct) streaming
 

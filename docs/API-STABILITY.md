@@ -68,7 +68,7 @@ release still catches them.
 | `aidot_cameras.device_client.device_session_authenticated` | whether a device client's LAN session is logged in; a module-level function, so the row above does not cover it |
 | `CameraDeviceClient.has_live_session` | whether a stream session is up right now, answered without sending anything |
 | `lan_address`, `lan_login_failures`, `lan_login_over_ceiling` on every device client (`LanRetryMixin`) | the LAN login state, read-only: the address in use, consecutive failures, and whether the retry ceiling has been reached |
-| the session objects returned by `async_open_webrtc_stream` | `stop()`, `async_start_talk`, `async_stop_talk`, `talk_supported`, `is_alive`; statistics as `get_stats()` on a `WebRTCSession` and `media_stats()` on an `SdesSession` |
+| the session objects returned by `async_open_webrtc_stream` | `stop()`, `async_start_talk`, `async_stop_talk`, `talk_supported`, `is_alive`; statistics as `get_stats()` on a `WebRTCSession` and `media_stats()` on an `SdesSession`; `playback_reply()` on the `SdesSession` `async_open_sd_playback` returns |
 | `aidot_cameras.camera.models` | `CameraDeviceInformation`, `CameraStatusData` |
 | `aidot_cameras.camera.lan_control` | LAN-direct control helpers |
 | `aidot_cameras.camera.go2rtc` | the go2rtc bridge helpers |

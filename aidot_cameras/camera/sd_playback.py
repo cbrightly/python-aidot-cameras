@@ -145,3 +145,91 @@ def decode_playcontrol_reply(data: Optional[bytes]) -> Optional[PlaycontrolReply
     return PlaycontrolReply(
         command, result_channel, clip_seconds, year, month, day, hour, minute, second
     )
+
+
+# Peer id fields a playback open announces (generate_webrtc_peer_id).
+#: Field 2's first character: the Android app. The firmware of every owned
+#: model gives H265, and the second video transceiver recorded H265 is sent
+#: to, only to client class 0 or 1; the library's live class (2) gets audio
+#: alone from an H265-recording camera.
+PLAYBACK_CLIENT_CLASS = 0
+#: Field 3, the app's playCmd: LIVE=0, SDCARD=1, PRE_LINK=2.
+PLAY_CMD_SDCARD = 1
+#: Field 5, the StreamID the firmware logs: 0 is the main stream.
+PLAYBACK_STREAM = 0
+
+#: Shared with the DTLS open's own refusal, so the two cannot drift apart.
+DTLS_PLAYBACK_UNSUPPORTED = "SD playback is not supported on the DTLS transport yet"
+
+
+class _CameraSdPlaybackMixin:
+    """Playing a card recording, mixed into CameraMixin."""
+
+    async def async_open_sd_playback(
+        self,
+        record: Any,
+        *,
+        on_frame: Any = None,
+        output_path: Optional[str] = None,
+        max_seconds: Optional[float] = None,
+        rtsp_push_url: Optional[str] = None,
+        status_callback: Any = None,
+        timeout: float = 45.0,
+        sd_channel: int = 1,
+    ) -> Any:
+        """Open a session that plays ``record`` instead of the live view.
+
+        ``record`` is an ``SdEvent`` from ``async_get_sd_recordings``. Returns
+        an ``SdesSession`` carrying the recording, served the way a live
+        session is (``output_path``, ``rtsp_push_url``, ``on_frame``), with the
+        camera's answer to PLAY_START from ``await session.playback_reply()``.
+        ``session.stop()`` ends it.
+
+        Raises ``AidotSdPlaybackUnavailable`` rather than returning the live
+        view on a camera this cannot play on: a DTLS camera, or an answer with
+        no data channel. Proven on the A001064 (2026-10-27); the A000088 and
+        A001513 firmware follow the same rule but neither has been played live.
+
+        The session is not kept alive or reopened: a recording that ends or
+        drops is reopened by calling this again. It needs the camera's one
+        media slot, so it raises the same error while this client is streaming
+        live; ``async_stop_streaming()`` frees it.
+        """
+        from ..exceptions import AidotSdPlaybackUnavailable
+
+        if not self.is_sdes_camera:
+            raise AidotSdPlaybackUnavailable(DTLS_PLAYBACK_UNSUPPORTED)
+        stream_task = getattr(self, "_stream_task", None)
+        if (stream_task is not None and not stream_task.done()) or getattr(
+            self, "has_live_session", False
+        ):
+            # Two sessions on one camera fight for its single media slot: the
+            # live view drops, its keepalive reopens it and pushes the
+            # playback out, or the playback comes up empty.
+            raise AidotSdPlaybackUnavailable(
+                "a live stream holds this camera's media slot;"
+                " stop it with async_stop_streaming() first"
+            )
+        start = SdPlaybackStart(
+            request=playcontrol_payload(PLAY_START, record, sd_channel=sd_channel)
+        )
+        peer_id = self.generate_webrtc_peer_id(
+            live_type=PLAY_CMD_SDCARD,
+            # Field 4, a literal 0 in the app - not the StreamID, which is
+            # field 5 (``stream``).
+            stream_id=0,
+            sdes=True,
+            device_id=self.device_id,
+            client_class=PLAYBACK_CLIENT_CLASS,
+            stream=PLAYBACK_STREAM,
+        )
+        return await self.async_open_webrtc_stream(
+            on_frame,
+            timeout=timeout,
+            output_path=output_path,
+            max_seconds=max_seconds,
+            status_callback=status_callback,
+            rtsp_push_url=rtsp_push_url,
+            reuse_peer_id=peer_id,
+            _sd_playback=start,
+        )
