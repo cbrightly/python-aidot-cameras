@@ -112,6 +112,12 @@ check for that: it opens each camera with `AIDOT_DIRECT_PUBLISH` off and on,
 pushing into a go2rtc the way the integration does, and reads the result back.
 See "Direct publish" in [`CI-RUNNER.md`](CI-RUNNER.md).
 
+`scripts/sd_playback_validate.py` is the live check for SD-card playback: it
+lists a camera's card over a short live session, plays one recording through
+`async_open_sd_playback` into a file, and reports the decode, the audio
+seconds against wall time and the largest frame and audio gaps. It is not part
+of the gate; only the A001064 has been played.
+
 Note that the two transports report media differently, and anything asserting
 "is it streaming?" has to handle both: the DTLS path decodes in-process and
 calls `on_frame`, while **the SDES path never calls `on_frame`** (ffmpeg owns

@@ -679,6 +679,15 @@ send PLAY_START on. The A001513 is SDES and should play, but neither it nor
 an A000088 has been played live; neither has had a card with recordings.
 Seek, pause and resume are not implemented.
 
+**The first ~2 s of a clip are not served.** The camera starts the clip the
+moment PLAY_START arrives, and the open only launches its serve once it has
+seen the first video packet (it serves the payload type it observes); in SD
+mode nothing arrives before PLAY_START, so the clip's opening seconds reach a
+loopback port with no reader yet. Measured on an A001064 2026-10-27: the first
+served frame's burned-in time was 2 s after the record's. The rest of the clip
+plays at the camera's rate with audio continuous (four runs: 20 fps, 0-4 decode
+errors, all before the first parameter sets).
+
 ## Local (LAN-direct) streaming
 
 The camera **media is peer-to-peer**: when the client and the camera are on the

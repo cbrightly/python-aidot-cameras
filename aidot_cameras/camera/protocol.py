@@ -3175,13 +3175,29 @@ class _AvioWaiter:
         """Withdraw the question - used when the command could not be sent."""
         self._router._forget(self)
 
-    async def result(self, timeout: float) -> "Optional[AvioResponse]":
+    async def result(
+        self, timeout: float, *, keep: bool = False
+    ) -> "Optional[AvioResponse]":
         """The camera's reply, or None if it did not answer within ``timeout``.
 
         None is a real answer, not an error: this firmware may not implement a
         response for every command we send, and a control call must never block
         a view while we find out.
+
+        ``keep`` leaves the question open when the wait times out, so a later
+        call still gets a reply that arrives late. For a one-off question held
+        for a session's life (the PLAY_START reply), not for a command sent
+        repeatedly, whose registrations would pile up.
         """
+        if keep and not self._future.done():
+            try:
+                # Shielded: a timed-out wait must not cancel the future the
+                # bridge thread will still set.
+                return await asyncio.wait_for(
+                    asyncio.shield(asyncio.wrap_future(self._future)), timeout
+                )
+            except TimeoutError:
+                return None
         if self._future.done():
             # A wait that timed out cancels its own wrapper, and that
             # cancellation can propagate down to this future - asking again

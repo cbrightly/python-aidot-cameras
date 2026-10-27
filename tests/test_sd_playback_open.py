@@ -35,7 +35,14 @@ from aidot_cameras.camera.sdes_open import (
     _session_mode_req,
 )
 from aidot_cameras.exceptions import AidotSdPlaybackUnavailable, AidotStreamOpenError
-from tests.ast_guards import calls_to, function, module_tree, name_of
+from tests.ast_guards import (
+    calls_to,
+    enclosing,
+    function,
+    module_tree,
+    name_of,
+    parents,
+)
 
 
 def _start():
@@ -212,3 +219,79 @@ def test_the_dtls_open_refuses_playback():
     assert len(raises) == 1
     test = ast.unparse(raises[0].test)
     assert "_sd_playback" in test and "use_sdes" in test
+
+
+class TestNoPinOnPlayback:
+    """The open's codec pin is off for playback, wherever it is read.
+
+    Read from the global pin, the open asked for the recording, received its
+    H265 (pt 97) and then rejected it as the wrong codec against a pin of 96
+    (A001064, 2026-10-27).
+    """
+
+    def test_playback_pins_nothing(self, monkeypatch):
+        from aidot_cameras.camera import sdes_open
+
+        monkeypatch.setattr(sdes_open, "_resolve_sdes_video_pt", lambda: 96)
+        assert sdes_open._pinned_video_pt(_start()) is None
+        assert sdes_open._pinned_video_pt(None) == 96
+
+    def test_the_open_reads_the_pin_only_through_the_helper(self):
+        tree = module_tree("aidot_cameras.camera.sdes_open")
+        up = parents(tree)
+        for call in calls_to(tree, "_resolve_sdes_video_pt"):
+            fns = enclosing(call, up, (ast.FunctionDef, ast.AsyncFunctionDef))
+            assert fns and fns[0].name == "_pinned_video_pt", call.lineno
+
+    def test_a_playback_session_never_feeds_the_live_ts(self):
+        tree = module_tree("aidot_cameras.camera.sdes_open")
+        kws = [
+            k
+            for c in calls_to(tree, "LoopbackRtpPublisher")
+            for k in c.keywords
+            if k.arg == "ts_session"
+        ]
+        assert kws
+        for k in kws:
+            v = k.value
+            assert isinstance(v, ast.IfExp), ast.unparse(v)
+            # `None if <playback> else <the TS>`: the playback branch is None.
+            assert ast.unparse(v.test) == "ps.sd_playback is not None", ast.unparse(v)
+            assert isinstance(v.body, ast.Constant) and v.body.value is None
+
+    def test_a_playback_open_does_not_count_on_the_ts(self):
+        src = ast.unparse(module_tree("aidot_cameras.camera.sdes_open"))
+        assert "ts_expected=ps.sd_playback is None and self._hls_ts_expected()" in src
+
+
+def test_a_reply_that_comes_after_a_timed_out_wait_is_still_handed_out():
+    # The A001064 answers PLAY_START 6.1-6.2 s after it, with the recording
+    # already playing; a caller that asked sooner must not lose it.
+    router = AvioResponseRouter()
+    session = SdesSession(
+        proc=None,
+        sdp_path="",
+        outgoing_q=None,
+        mqtt_fut=None,
+        playback_waiter=router.expect(0x31B),
+    )
+
+    async def _run():
+        early = await session.playback_reply(0.05)
+        router.dispatch(avio_header(9, 0x31B, 0, 4, 0) + bytes(4))
+        late = await session.playback_reply(0.5)
+        again = await session.playback_reply(0.05)
+        return early, late, again
+
+    early, late, again = asyncio.run(_run())
+    assert early is None
+    assert late.command == 0x31B and again.command == 0x31B
+
+
+def test_other_waits_still_stop_listening_on_timeout():
+    # Keepalive commands are asked again and again; a registration left on
+    # each unanswered one would grow for the session's life.
+    router = AvioResponseRouter()
+    waiter = router.expect(0x31B)
+    assert asyncio.run(waiter.result(0.05)) is None
+    assert not router.dispatch(avio_header(9, 0x31B, 0, 4, 0) + bytes(4))

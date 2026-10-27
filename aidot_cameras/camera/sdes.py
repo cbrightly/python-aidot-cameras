@@ -150,16 +150,21 @@ class SdesSession(AvioRequestMixin):
         except Exception:
             return False
 
-    async def playback_reply(self, timeout: float = 3.0):
+    async def playback_reply(self, timeout: float = 10.0):
         """The camera's RECORD_PLAYCONTROL reply to the open's PLAY_START.
 
         An ``AvioResponse`` (its payload reads with
         ``sd_playback.decode_playcontrol_reply``), or
         None for a live session or a camera that did not answer in time.
+
+        It arrives after the recording has started: 6.1-6.2 s after PLAY_START
+        on an A001064, in four of four runs on 2026-10-27, when the session
+        opens in SD mode. A wait that times out keeps listening, so asking
+        again later still gets a reply that came late.
         """
         if self._playback_waiter is None:
             return None
-        return await self._playback_waiter.result(timeout)
+        return await self._playback_waiter.result(timeout, keep=True)
 
     @property
     def talk_supported(self) -> bool:

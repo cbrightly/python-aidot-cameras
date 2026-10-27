@@ -17,8 +17,12 @@ open, live included.
   client class 0 in the peer id, playCmd 1, StreamID 0, both video codecs
   offered, SESSION_MODE 2 at the data channel's open, then PLAY_START. Played
   live on an A001064; the A000088 and A001513 firmware follow the same rule
-  but have not been played. See CAMERAS.md.
-- `SdesSession.playback_reply()`: the camera's answer to that PLAY_START.
+  but have not been played. See CAMERAS.md. Known limitation: the first ~2 s
+  of a clip are not served (the serve starts on the first video packet, which
+  only comes after PLAY_START).
+- `SdesSession.playback_reply()`: the camera's answer to that PLAY_START,
+  which an A001064 sends about 6 s after the recording has started.
+- `scripts/sd_playback_validate.py`, the live check for playback.
 - **`AidotSdPlaybackUnavailable`**, raised instead of returning the live view
   when a recording is asked for where it cannot play: a DTLS camera, an answer
   with no data channel, or a camera this client is already streaming live.

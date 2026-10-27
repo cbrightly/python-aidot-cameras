@@ -1105,6 +1105,18 @@ def _session_mode_echoed(frame: bytes) -> "Optional[int]":
     return int.from_bytes(resp.payload[8:12], "little")
 
 
+def _pinned_video_pt(sd_playback) -> "Optional[int]":
+    """The video payload type this open pins, or None for SD playback.
+
+    A playback open offers both codecs (the camera only adds the H265
+    transceiver recorded H265 goes out on when the offer names two), so every
+    consumer of the pin - the offer, the pinned-codec retry, the serve's
+    payload type - must see none. Read from the global pin, the open rejected
+    the recording it asked for as the wrong codec (A001064, 2026-10-27).
+    """
+    return None if sd_playback is not None else _resolve_sdes_video_pt()
+
+
 def _sd_playback_unservable(sd_playback, answer_sdp: str) -> bool:
     """Whether the camera's answer leaves no way to send PLAY_START.
 
@@ -6528,7 +6540,7 @@ async def _sdes_open_build_offer(self, ps: _SdesOpenState) -> None:
     # SD playback offers both codecs: the camera only creates the H265
     # transceiver recorded H265 is sent to when the offer names two
     # (u8VideoCodecCnt >= 2 in its codec decision).
-    _pin_video_pt = None if ps.sd_playback is not None else _resolve_sdes_video_pt()
+    _pin_video_pt = _pinned_video_pt(ps.sd_playback)
     if _pin_video_pt is not None:
         ps.sdes_offer_sdp = narrow_sdp_payload_types(
             ps.sdes_offer_sdp, keep_video=_pin_video_pt
@@ -9022,12 +9034,13 @@ class _SdesOpenMixin:
             while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:
                 await asyncio.sleep(0.1)
         _vpt = _first_video_pt[0]
-        _pinned = _resolve_sdes_video_pt()
+        _pinned = _pinned_video_pt(ps.sd_playback)
         _mismatches = getattr(self, "_pinned_codec_mismatches", 0)
         if _should_retry_pinned_codec(
             _vpt,
             _pinned,
-            ts_expected=self._hls_ts_expected(),
+            # A playback session never feeds the in-sync TS.
+            ts_expected=ps.sd_playback is None and self._hls_ts_expected(),
             mismatches=_mismatches,
         ):
             # The in-sync TS was promised to Home Assistant on the strength of
@@ -9092,7 +9105,7 @@ class _SdesOpenMixin:
                     "_open_sdes_stream_impl",
                     exc_info=True,
                 )
-            _pin_pt = _resolve_sdes_video_pt()
+            _pin_pt = _pinned_video_pt(ps.sd_playback)
             if _pin_pt is not None:
                 _LOGGER.info(
                     "camera %s: the observed payload type is not one this SDP "
@@ -9113,7 +9126,9 @@ class _SdesOpenMixin:
         # observed beats pinned beats answer -- see _serve_video_pt.  The pin
         # matters here: this camera answers H.265 and sends H.264, so trusting
         # the answer built an hevc-only SDP and killed the serve at startup.
-        _keep_v = _serve_video_pt(_vpt, _answer_video_pt[0], _resolve_sdes_video_pt())
+        _keep_v = _serve_video_pt(
+            _vpt, _answer_video_pt[0], _pinned_video_pt(ps.sd_playback)
+        )
         _keep_a = int(_apt) if _apt in _SDP_AUDIO_PTS else None
         if _serve_audio and _keep_a is None:
             # No audio observed in the window, so the line cannot be narrowed and
@@ -9256,7 +9271,10 @@ class _SdesOpenMixin:
                     device_id=str(getattr(self, "device_id", "?")),
                     include_audio=_direct_audio,
                     # The in-sync HLS TS, when on: a new session per spawn.
-                    ts_session=self._hls_ts_session(),
+                    # Never from a playback session: that TS is the live view.
+                    ts_session=(
+                        None if ps.sd_playback is not None else self._hls_ts_session()
+                    ),
                 )
             _p = subprocess.Popen(
                 cmd,
