@@ -90,3 +90,44 @@ def test_the_header_layout_is_unchanged():
     assert avio_header(1, 5376, 2, 28) == struct.pack("<IIqII4x", 1, 5376, 2, 28, 0), (
         "the 28-byte little-endian AVIO header must not change"
     )
+
+
+def test_the_dtls_session_numbers_its_commands_from_the_client_counter():
+    # Pause, resume, seek, PTZ and the card listing on an A000088 go through
+    # WebRTCSession._avio_cmd; the app numbers each from the same counter.
+    import struct
+
+    from aidot_cameras.camera.webrtc import WebRTCSession
+
+    sent = []
+    dc = type("Dc", (), {"send": lambda self, b: sent.append(bytes(b))})()
+    count = iter(range(100, 200))
+    s = WebRTCSession(
+        pc=None,
+        outgoing_q=None,
+        mqtt_fut=None,
+        recorder=None,
+        track_tasks=[],
+        dc=dc,
+        next_seq=lambda: next(count),
+    )
+    assert s._avio_cmd(0x31A, b"x") and s._avio_cmd(0x1001, b"y")
+    assert [struct.unpack_from("<I", b)[0] for b in sent] == [100, 101]
+
+
+def test_the_dtls_open_hands_the_session_the_counter_and_uses_it():
+    import ast
+
+    from tests.ast_guards import calls_to, function, module_tree
+
+    tree = module_tree("aidot_cameras.camera.webrtc_open")
+    (call,) = calls_to(tree, "WebRTCSession")
+    (kw,) = [k for k in call.keywords if k.arg == "next_seq"]
+    assert ast.unparse(kw.value) == "self._next_dseq"
+    # Every control sender in the open counts, except the heartbeat, which
+    # the app sends without the counter.
+    setup = function(tree, "_dtls_open_peer_connection_setup")
+    for name in ("_send_avio_audiostart", "_send_avio_speaker"):
+        src = ast.unparse(function(setup, name))
+        assert "self._next_dseq()" in src and "randint" not in src, name
+    assert "randint" in ast.unparse(function(setup, "_send_avio_heartbeat"))

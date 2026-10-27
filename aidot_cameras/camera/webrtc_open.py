@@ -2934,7 +2934,7 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
         # streaming regardless of our send state.  8-byte payload of zeros
         # matches the TUTK IOTC path usage in a.java:1126.
         try:
-            _seq = random.randint(0, 0x7FFFFFFF)
+            _seq = self._next_dseq()  # the app numbers control commands
             _ts_ms = int(time.time() * 1000)
             _payload = b"\x00" * 8
             _hdr = avio_header(_seq, 768, _ts_ms, len(_payload), 0)
@@ -2955,7 +2955,7 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
         # SMsgAVIoctrlAVStream.parseContent(0) = 8 bytes, channel=0 LE.
         try:
             _cmd = 848 if start else 849
-            _seq = random.randint(0, 0x7FFFFFFF)
+            _seq = self._next_dseq()  # the app numbers control commands
             _ts_ms = int(time.time() * 1000)
             _payload = b"\x00" * 8  # channel=0
             _hdr = avio_header(_seq, _cmd, _ts_ms, len(_payload), 0)
@@ -4673,6 +4673,7 @@ async def _dtls_open_ice_candidates_and_connect(
             responses=ps._avio_responses,
             playback_waiter=ps._sd_start_waiter,
             playback=ps._sd_playback,
+            next_seq=self._next_dseq,
         )
     )
     return None

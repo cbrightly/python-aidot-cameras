@@ -48,6 +48,7 @@ class WebRTCSession(_PlaybackControls, AvioRequestMixin):
         responses: Any = None,
         playback_waiter: Any = None,
         playback: Any = None,
+        next_seq: "Optional[Callable[[], int]]" = None,
     ) -> None:
         self._pc = pc
         self._outgoing_q = outgoing_q
@@ -72,6 +73,9 @@ class WebRTCSession(_PlaybackControls, AvioRequestMixin):
         self._playback_waiter = playback_waiter
         self._sd_playback = playback
         self._sd_seek_count = 0
+        # The client's dseq counter (``_next_dseq``), as the app's sendCtrl
+        # numbers every control command; a random seq when not given.
+        self._next_seq = next_seq or (lambda: random.randint(0, 0x7FFFFFFF))
 
     def _avio_cmd(self, cmd: int, payload: bytes = b"") -> bool:
         """Send an AVIO IOCtrl command via the DTLS SCTP DataChannel.
@@ -81,7 +85,7 @@ class WebRTCSession(_PlaybackControls, AvioRequestMixin):
         if self._dc is None:
             return False
         try:
-            _seq = random.randint(0, 0x7FFFFFFF)
+            _seq = self._next_seq()
             _ts_ms = int(time.time() * 1000)
             _hdr = avio_header(_seq, cmd, _ts_ms, len(payload), 0)
             self._dc.send(_hdr + payload)
