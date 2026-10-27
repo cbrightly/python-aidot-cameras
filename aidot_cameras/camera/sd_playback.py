@@ -248,9 +248,8 @@ class _CameraSdPlaybackMixin:
         view where it cannot play: an answer with no data channel, or a DTLS
         camera without a ``.ts`` ``output_path`` (over DTLS the recording is
         taken raw into the MPEG-TS recorder; there is no ``on_frame`` decode or
-        serve). Played live on the A001064 and the A001513 (2026-10-27); the
-        DTLS path (A000088) has not been played on hardware - none here has a
-        card.
+        serve). Played live on all three models (2026-10-27): the A001064 and
+        the A001513 over SDES, the A000088 over DTLS.
 
         The session is not kept alive or reopened: a recording that ends or
         drops is reopened by calling this again. It needs the camera's one
@@ -305,8 +304,8 @@ class _CameraSdPlaybackMixin:
 # H264 PT 127, H265 PT 98, data channel). The offer names H265 next to H264,
 # aiortc keeps its three sections, and the H265 packets - which it would
 # discard as unrouted - are taken at its RTP router, assembled into access
-# units here and recorded as HEVC. Not yet played on hardware: no A000088
-# here has a card.
+# units here and recorded as HEVC. Played on an A000088 on 2026-10-27:
+# 2560x1440 HEVC, 0 decode errors, audio continuous.
 
 _NAL_SC = b"\x00\x00\x00\x01"
 

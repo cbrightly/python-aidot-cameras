@@ -686,10 +686,12 @@ in the vendored aiortc), assembled into access units and recorded as HEVC.
 The recorder's video codec is set by the recording's first keyframe, so an
 H264 recording (camera encoder setting 2) is recorded as H264 from aiortc's
 own track. There is no `on_frame` decode and no serve on this path. On an
-A000088 with no card (2026-10-27) the whole exchange ran: H265 offered, the
-answer's extra section named H265 on PT 0, aiortc connected, SD mode was
-confirmed and PLAY_START answered (refused - no card). **The recorded media
-itself has not been seen on this path**: no A000088 here has a card.
+A000088 the answer's extra video section names H265 on PT 0. Played on a
+carded A000088 on 2026-10-27, over a direct LAN path: 638 HEVC frames at
+2560x1440 with 0 decode errors, 41.9 s of audio with no gap over 21 ms, the
+first frame 1 s before the record's listed time; pause answered in 10 ms and
+stopped the recording, resume restarted it, a +20 s seek was answered with
+the target time.
 
 `AidotSdPlaybackUnavailable` is raised rather than a live session returned
 when the answer has no data channel to send PLAY_START on, on a DTLS camera

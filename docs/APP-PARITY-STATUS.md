@@ -231,8 +231,8 @@ offered, SD mode at the data channel's open and PLAY_START once the camera
 echoes SD; the A001064 then sent 2560x1440 H265 from the requested clip, and
 the A001513 2560x1920 H265. Pause, resume and seek are implemented as the app
 sends them and were tried on the A001064. On the A000088 (DTLS) the H265 is
-taken raw at aiortc's RTP router into a `.ts` recording; the signalling was
-checked on one, but none here has a card, so no recording has come through.
+taken raw at aiortc's RTP router into a `.ts` recording, played on a carded
+A000088 on 2026-10-27 (2560x1440, 0 decode errors, controls answered).
 
 **The radar commands are for hardware nobody here owns - closed 2026-08-11.**
 Not "unimplemented", not deferred: unreachable. The cloud device records for all

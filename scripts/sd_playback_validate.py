@@ -247,11 +247,12 @@ def _clock_crops(ts_path, out_dir):
     burn in their clock - for reading the clip's real start and end."""
     crop = "crop=iw/3:ih/10:0:ih*9/10,scale=480:-1"
     made = {}
-    for name, before_input in (("first", []), ("last", ["-sseof", "-3"])):
-        dest = os.path.join(out_dir, f"clock_{name}.jpg")
+    # PNG: a newer ffmpeg will not write limited-range video as JPEG.
+    for name, before_input in (("first", []), ("last", ["-sseof", "-5"])):
+        dest = os.path.join(out_dir, f"clock_{name}.png")
         if os.path.exists(dest):
             os.remove(dest)  # never report an earlier run's crop as this one
-        # "last": decode the final 3 s and keep overwriting one image, so
+        # "last": decode the final 5 s and keep overwriting one image, so
         # whatever decoded last is what remains.
         tail = ["-update", "1"] if name == "last" else ["-frames:v", "1"]
         subprocess.run(

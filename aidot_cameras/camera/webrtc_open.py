@@ -1471,8 +1471,7 @@ async def _dtls_open_head(self, ps: _DtlsOpenState) -> None:
         # Over DTLS a recording held as H265 is taken raw from aiortc's RTP
         # router into the MPEG-TS recorder (sd_playback.H265AccessUnits);
         # there is no decode for on_frame and no serve, so playback needs a
-        # .ts output_path here. Not yet played on hardware (no A000088 with a
-        # card).
+        # .ts output_path here. Played on an A000088, 2026-10-27.
         from .recording import is_ts_path
         from .sd_playback import DTLS_PLAYBACK_UNSUPPORTED
 

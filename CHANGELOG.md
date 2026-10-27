@@ -18,13 +18,14 @@ open, live included.
   offered, SESSION_MODE 2 at the data channel's open, then PLAY_START. Played
   live on an A001064 and an A001513. On a DTLS camera (A000088) it records to
   a `.ts` file, taking the recording's H265 raw from aiortc's RTP router;
-  signalling checked on an A000088, recorded media not yet seen (no card).
+  played live on an A000088 too.
   See CAMERAS.md. The whole clip is served from its
   first frame: until the serve is listening the bridge holds what it forwards,
   and the serve keeps what ffmpeg reads while probing the input (both for
   playback only; live is unchanged).
 - `async_sd_pause()`, `async_sd_resume()` and `async_sd_seek(seconds)` on a
-  playback session, sent as the app sends them; tried live on an A001064.
+  playback session, sent as the app sends them; tried live on an A001064 and
+  an A000088.
 - `SdesSession.playback_reply()`: the camera's answer to that PLAY_START,
   which an A001064 sends about 6 s after the recording has started.
 - `scripts/sd_playback_validate.py`, the live check for playback.

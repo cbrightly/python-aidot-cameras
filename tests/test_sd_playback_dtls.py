@@ -7,8 +7,8 @@ PT 98, data channel). The offer names H265 beside H264, aiortc keeps its own
 three sections, and the H265 packets it would discard are taken at its RTP
 router, assembled and recorded as HEVC.
 
-No A000088 here has a card, so this path has not been played on hardware;
-these tests carry it from encoded HEVC through RTP and back into a file.
+These tests carry the path from encoded HEVC through RTP and back into a
+file; it was played live on a carded A000088 on 2026-10-27.
 """
 
 import ast
