@@ -131,14 +131,29 @@ async def run(args):
         session = await dc.async_open_sd_playback(
             rec,
             output_path=ts_path,
-            max_seconds=args.seconds + 30,
+            # Room for the first-bytes wait, the reply and --controls (~45 s).
+            max_seconds=args.seconds + 120,
             status_callback=status,
         )
-        first_media_s = time.monotonic() - opened
+        open_s = time.monotonic() - opened
+        controls = {}
         try:
+            # SDES returns on the first video packet; DTLS once connected, so
+            # first media is when the recording file first grows.
+            first_bytes_s = None
+            give_up = time.monotonic() + 30
+            while True:
+                if _size(ts_path) > 0:
+                    first_bytes_s = time.monotonic() - opened
+                    break
+                if time.monotonic() > give_up:
+                    break
+                await asyncio.sleep(0.1)
             reply = await session.playback_reply()
             await asyncio.sleep(args.seconds)
-            stats = session.media_stats()
+            if args.controls:
+                controls = await _exercise_controls(session, ts_path, args.seek)
+            stats = await _stats(session)
         finally:
             await session.stop()
         # From the open to the stop: what the recording can at most hold,
@@ -149,7 +164,9 @@ async def run(args):
 
     result = {
         "record": rec.isoformat(),
-        "open_to_first_media_s": round(first_media_s, 2),
+        "transport": "SDES" if dc.is_sdes_camera else "DTLS",
+        "open_returned_s": round(open_s, 2),
+        "first_bytes_s": None if first_bytes_s is None else round(first_bytes_s, 2),
         "play_reply": str(
             decode_playcontrol_reply(bytes(reply.payload)) if reply else None
         ),
@@ -158,8 +175,106 @@ async def run(args):
         "audio": await LV._audio_probe(ts_path, audio_pt=8),
         "timing": _gaps(ts_path),
         "wall_s": round(wall, 2),
+        "controls": controls,
+        # The tap's own account on DTLS: H265 payload type, dropped frames.
+        "playback_status": [ln for ln in log if "SD playback" in ln],
+        "clock_crops": _clock_crops(ts_path, args.out),
     }
     return result, log
+
+
+def _size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+async def _stats(session):
+    """media_stats() on an SdesSession, await get_stats() on a WebRTCSession."""
+    for name in ("media_stats", "get_stats"):
+        fn = getattr(session, name, None)
+        if fn is not None:
+            try:
+                out = fn()
+                if asyncio.iscoroutine(out):
+                    out = await out
+                return out
+            except Exception as exc:
+                return {"error": repr(exc)}
+    return None
+
+
+async def _exercise_controls(session, ts_path, seek_s):
+    """Pause 5 s, resume 5 s, seek to ``seek_s``, run 6 s: each command's reply
+    and how much media arrived meanwhile (a pause should bring ~0).
+
+    Counted in packets where the session counts them (SDES media_stats): the
+    SDES file is written by ffmpeg in 256 KB chunks, too coarse for 5 s. On
+    DTLS the raw H265 reaches no aiortc receiver to be counted, so it is the
+    recording's bytes, which the recorder writes as they come.
+    """
+    out = {"unit": "packets" if hasattr(session, "media_stats") else "bytes"}
+
+    def level():
+        if out["unit"] == "packets":
+            try:
+                return int(session.media_stats().get("packets") or 0)
+            except Exception:
+                return 0
+        return _size(ts_path)
+
+    async def grew(seconds):
+        a = level()
+        await asyncio.sleep(seconds)
+        return level() - a
+
+    t = time.monotonic()
+    out["pause"] = str(await session.async_sd_pause())
+    out["pause_reply_s"] = round(time.monotonic() - t, 2)
+    await asyncio.sleep(1)
+    out["paused_5s"] = await grew(5)
+    out["resume"] = str(await session.async_sd_resume())
+    await asyncio.sleep(1)
+    out["resumed_5s"] = await grew(5)
+    out["seek"] = str(await session.async_sd_seek(seek_s))
+    out["after_seek_6s"] = await grew(6)
+    return out
+
+
+def _clock_crops(ts_path, out_dir):
+    """The bottom-left strip of the first and last frames, where the cameras
+    burn in their clock - for reading the clip's real start and end."""
+    crop = "crop=iw/3:ih/10:0:ih*9/10,scale=480:-1"
+    made = {}
+    for name, before_input in (("first", []), ("last", ["-sseof", "-3"])):
+        dest = os.path.join(out_dir, f"clock_{name}.jpg")
+        if os.path.exists(dest):
+            os.remove(dest)  # never report an earlier run's crop as this one
+        # "last": decode the final 3 s and keep overwriting one image, so
+        # whatever decoded last is what remains.
+        tail = ["-update", "1"] if name == "last" else ["-frames:v", "1"]
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-y",
+                *before_input,
+                "-i",
+                ts_path,
+                "-vf",
+                crop,
+                *tail,
+                dest,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if _size(dest) > 0:
+            made[name] = dest
+    return made
 
 
 def main():
@@ -170,6 +285,13 @@ def main():
     p.add_argument("--days", type=int, default=7)
     p.add_argument("--index", type=int, default=-1)
     p.add_argument("--cooldown", type=float, default=180.0)
+    p.add_argument(
+        "--controls",
+        action="store_true",
+        help="after --seconds, pause 5 s, resume 5 s, seek to --seek, run 6 s;"
+        " reports media that arrived in each window",
+    )
+    p.add_argument("--seek", type=float, default=20.0, help="seek target, seconds")
     args = p.parse_args()
     result, log = asyncio.run(run(args))
     if result is None:

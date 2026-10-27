@@ -698,8 +698,12 @@ Pause, resume and seek send what the app sends (`KVSWebRTCChannel` T2, V2,
 W2): PLAY_PAUSE, PLAY_RESUME, and PLAY_SEEKTIME with the time field set to the
 record's start plus the offset and a per-seek counter. Each returns the
 camera's `PlaycontrolReply`, or None. Measured on an A001064 2026-10-27: each
-answered in 30-50 ms, pause stopped the media (0 packets in 5 s), resume
-restarted it, and a seek to +40 s showed the target's burned-in time.
+answered in 20-50 ms, pause stopped the media (0 packets in 5 s), and a seek
+to +40 s showed the target's burned-in time. Resume restarted the media in
+four of five tries; in the fifth the camera answered it and sent nothing
+until the next seek. A reply is not proof the media moved: a caller that can
+see the media (``media_stats()`` on SDES) and finds it still idle can seek to
+where it paused.
 
 **The whole clip is served, from its first frame.** Two things had cut the
 opening seconds, both now off for playback only: the serve is launched on the
