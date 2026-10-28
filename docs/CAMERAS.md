@@ -1,8 +1,9 @@
 # Camera support
 
-This library adds live streaming, snapshots, cloud recordings, real-time-ish motion
-events, and two-way (push-to-talk) audio for AiDot/Leedarson cameras, on top of
-the upstream lights-only library.
+This library adds live streaming, snapshots, cloud recordings, listing and
+playing the recordings on a camera's own SD card, real-time-ish motion events,
+and two-way (push-to-talk) audio for AiDot/Leedarson cameras, on top of the
+upstream lights-only library.
 
 ## Supported cameras
 
@@ -576,7 +577,8 @@ await device_client.async_stop_motion_polling()
 
 ## On-device (SD card) recordings
 
-What the camera holds on its own card, read over a session that already exists.
+What the camera holds on its own card, read over a session that already exists,
+and - further down, under "Playing a recording" - how to play one.
 
 ```python
 if device_client.has_live_session:  # sends nothing

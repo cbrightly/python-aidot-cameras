@@ -79,15 +79,15 @@ the authoritative table and per-model notes.
 Two behaviours that are measured, understood as far as the evidence allows, and
 not going to change in this release. Neither is a fault to report.
 
-**Recorded video is retrievable only from cloud storage.** Whether a camera
-records to the cloud or to its own SD card is per-camera, not per-model, and the
-device reports it as `IsSupportPlayback`. This library lists cloud recordings
-(`async_get_cloud_recordings`) and resolves a playable HLS URL for one
-(`async_get_event_video_media`); for a camera storing to a card it lists the
-on-device recordings (`async_get_sd_recordings`) and, on an SDES camera, plays
-one (`async_open_sd_playback`, played live on the A001064 only). DTLS cameras
-(the A000088) cannot play from the card yet. See `docs/CAMERAS.md`, "On-device
-(SD card) recordings".
+**Recorded video comes from the cloud or from the camera's own SD card.**
+Whether a camera records to the cloud or to its card is per-camera, not
+per-model, and the device reports it as `IsSupportPlayback`. This library lists
+cloud recordings (`async_get_cloud_recordings`) and resolves a playable HLS URL
+for one (`async_get_event_video_media`); for a camera storing to a card it lists
+the on-device recordings (`async_get_sd_recordings`) and plays one
+(`async_open_sd_playback`), on all three models: an SDES camera (A001064,
+A001513) serves it like a live stream, a DTLS camera (A000088) records it to a
+`.ts` file. See `docs/CAMERAS.md`, "On-device (SD card) recordings".
 
 **The A001064 (PTZ) streams at roughly 2.2 Mbps, about 24% above the vendor
 app.** Measured from a capture of the app on the same camera: it takes about
@@ -463,6 +463,22 @@ payload schema invented here.
 battery camera asleep, or a model without the feature -- returns `None`, and
 treating that as a set of disabled detectors would report a state the camera
 never claimed. A write refuses outright when there is no current list to echo.
+
+### Playing a recording off the SD card
+
+```python
+listing = await device_client.async_get_sd_recordings(session=live_session)
+await device_client.async_stop_streaming()  # the camera has one media slot
+session = await device_client.async_open_sd_playback(
+    listing.records[-1], output_path="/tmp/clip.ts"
+)
+await session.async_sd_seek(20)  # also async_sd_pause() / async_sd_resume()
+# ... session.stop() when done
+```
+
+The camera sends the clip in real time, from a few seconds before the
+record's listed time. On a DTLS camera (A000088) it can only be recorded to a
+`.ts` file. See `docs/CAMERAS.md`, "Playing a recording".
 
 ### WiFi and SD card
 
