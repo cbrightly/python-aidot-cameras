@@ -19,12 +19,15 @@ understood and its shape has settled:
 - the release that becomes 1.0.0 has run in ordinary use for two weeks without
   a streaming-breaking release replacing it.
 
-Where things stand: the library is at `1.0.0rc62` on PyPI. `1.0.0rc58` is
+Where things stand: the library is at `1.0.0rc63` on PyPI. `1.0.0rc58` is
 yanked: in it a successful DTLS open returned `None` instead of its session;
 `rc59` fixed that and `rc60` adds a test that holds every phase of both opens
 to exporting what later phases read. `rc62` fixes what the first day of
-scheduled viewing found (see below). The Home Assistant integration `2.37.18`
-requires `>=1.0.0rc62`.
+scheduled viewing found (see below). `rc63` adds playing recordings off a
+camera's SD card and numbers every SESSION_MODE request from the client's
+counter, which changes every SDES open: it resets the clock below once the
+reference installation runs it, and until then the soak continues on `rc62`.
+The Home Assistant integration `2.37.18` requires `>=1.0.0rc62`.
 
 ## Open
 

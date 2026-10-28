@@ -6,7 +6,9 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
-Soak: resets the clock. SESSION_MODE sequence numbers change on every SDES
+## [1.0.0rc63]
+
+Soak: resets the clock once deployed. SESSION_MODE sequence numbers change on every SDES
 open, live included.
 
 ### Added
