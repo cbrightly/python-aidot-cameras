@@ -1961,7 +1961,17 @@ def _dtls_av_mux_run(
                     continue  # begin on a keyframe so the GOP is decodable
                 if vs_box[0] is None:
                     # The first keyframe says what the recording is.
-                    _vs = out.add_stream(_codec)
+                    # The stream is only muxed into, but PyAV opens an
+                    # encoder for it, and x265 prints its banner straight to
+                    # stderr - into Home Assistant's log on every play.
+                    _vs = out.add_stream(
+                        _codec,
+                        options=(
+                            {"x265-params": "log-level=none"}
+                            if _codec == "hevc"
+                            else None
+                        ),
+                    )
                     _vs.time_base = Fraction(1, 90000)
                     vs_box[0] = _vs
                     vcodec_box[0] = _codec
