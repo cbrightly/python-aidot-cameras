@@ -6,6 +6,7 @@ import logging
 from urllib.parse import urlparse
 import os
 import time
+import threading
 import asyncio
 import dataclasses
 from typing import TYPE_CHECKING, Any, Callable, List, NamedTuple, Optional, Union
@@ -61,6 +62,7 @@ from .sdes import (
 )  # re-exported (split into sdes.py); also the SDES return type
 from .controls import _CameraControlsMixin
 from .sd_listing import _CameraSdMixin
+from .sd_playback import _CameraSdPlaybackMixin
 from .webrtc_open import _WebRTCOpenMixin
 from .sdes_open import _SdesOpenMixin
 from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixin; kept re-exported for back-compat
@@ -119,6 +121,9 @@ from .. import settings
 from .health import HealthReporter, dtls_snapshot as _dtls_snapshot
 
 _LOGGER = logging.getLogger(__name__)
+
+#: Guards every client's ``_live_dseq``; see ``_next_dseq``.
+_DSEQ_LOCK = threading.Lock()
 
 
 def _is_transient_cloud_error(exc: BaseException) -> bool:
@@ -860,6 +865,7 @@ def _build_sdes_serve_cmd(
     push_video_only: bool = False,
     video_decoder: Optional[list] = None,
     input_timeout_s: Optional[int] = None,
+    keep_probe_packets: bool = False,
 ) -> list:
     """Build the ffmpeg argv for the SDES bridge serve.
 
@@ -1040,8 +1046,15 @@ def _build_sdes_serve_cmd(
             if _SERVE_ARRIVAL_TS and not max_seconds
             else []
         ),
+        # ``nobuffer`` drops what ffmpeg reads while probing the input (up to
+        # -analyzeduration / -probesize) - latency a live view does not want.
+        # A recording's opening seconds are not latency, they are the clip:
+        # at 2560x1440 H265 the probe took its first ~3 s (A001064,
+        # 2026-10-27), so SD playback keeps them (``keep_probe_packets``).
         "-fflags",
-        "+nobuffer+genpts+discardcorrupt",
+        "+genpts+discardcorrupt"
+        if keep_probe_packets
+        else "+nobuffer+genpts+discardcorrupt",
         "-analyzeduration",
         "2000000",
         "-probesize",
@@ -2428,7 +2441,11 @@ async def _sdes_keepalive_after_session(
 
 
 class CameraMixin(
-    _CameraControlsMixin, _CameraSdMixin, _WebRTCOpenMixin, _SdesOpenMixin
+    _CameraControlsMixin,
+    _CameraSdMixin,
+    _CameraSdPlaybackMixin,
+    _WebRTCOpenMixin,
+    _SdesOpenMixin,
 ):
     """All camera/streaming methods, mixed into DeviceClient via inheritance."""
 
@@ -2770,9 +2787,15 @@ class CameraMixin(
         return getattr(self, "_last_live_play_code", None) == _LIVE_PLAY_NOT_READY
 
     def _next_dseq(self) -> int:
-        """Next livePlayReq dseq (app parity: Q0() starts at 100, increments)."""
-        d = self._live_dseq
-        self._live_dseq += 1
+        """Next livePlayReq dseq (app parity: Q0() starts at 100, increments).
+
+        Taken from the SDES bridge thread (SESSION_MODE, control commands) as
+        well as the event loop (livePlayReq), so read-and-increment is one
+        locked step: a repeated seq is a SESSION_MODE the camera ignores.
+        """
+        with _DSEQ_LOCK:
+            d = self._live_dseq
+            self._live_dseq += 1
         return d
 
     def update_status_from_device(self, device: dict) -> "DeviceStatusData":
@@ -7109,6 +7132,8 @@ class CameraMixin(
         *,
         sdes: bool = False,
         device_id: "Optional[str]" = None,
+        client_class: int = 2,
+        stream: "Optional[int]" = None,
     ) -> str:
         """Generate a peerId for a WebRTC connection.
 
@@ -7191,14 +7216,27 @@ class CameraMixin(
         # smart-home classes (3, 4) that skip the camera's keepalive watchdog,
         # so this changes what we claim to be and nothing about how the session
         # is policed. Screen any future change on EACH model with a patched
-        # build - the A000088's firmware has never been disassembled.
-        # Field 2 = client class + 5 random. '2' is EN_WEBRTC_CLIENT_TYPE_WEB,
-        # what the vendor web app announces. See the note above for why this
-        # is '2' and never '0'. The tail stays random: pinning all six would
-        # make every peer id identical across opens, which is the cross-session
-        # reuse the camera dedups on.
-        rand6 = "2" + os.urandom(3).hex()[1:]
-        version = 1 if sdes else 2
+        # build.
+        #
+        # The class-0 result is explained now (firmware read 2026-10-27, the
+        # same on the A000088, A001064 and A001513): the per-viewer codec
+        # decision reads field2[0] itself and gives H265 only to class 0 or 1,
+        # and only then adds a second, H265 video transceiver. An A000088 that
+        # decides H265 sends its live video there, which the aiortc path
+        # cannot receive - the session is up and empty. SD playback needs that
+        # transceiver on a camera that records H265, so its open passes
+        # ``client_class=0``; live views keep 2.
+        #
+        # ``stream`` is field 5, which the firmware logs as StreamID (0 = main
+        # stream). The transport default it replaces is what every live open
+        # has always sent.
+        # Field 2 = client class + 5 random. The tail stays random: pinning all
+        # six would make every peer id identical across opens, which is the
+        # cross-session reuse the camera dedups on.
+        if not 0 <= client_class <= 9:
+            raise ValueError(f"client_class must be one digit, got {client_class}")
+        rand6 = str(client_class) + os.urandom(3).hex()[1:]
+        version = (1 if sdes else 2) if stream is None else stream
         return f"{session}_{rand6}_{live_type}_{stream_id}_{version}"
 
     async def async_open_webrtc_stream(

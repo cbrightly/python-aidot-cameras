@@ -6,7 +6,7 @@ import logging
 import os
 import traceback
 from dataclasses import dataclass, field
-from typing import Optional, Protocol, Type, TypeVar, Union
+from typing import Callable, Optional, Protocol, Type, TypeVar, Union  # aidot: Callable
 
 import pylibsrtp
 from cryptography import x509
@@ -253,6 +253,9 @@ class RtpRouter:
         self.mid_table: dict[str, RtpReceiver] = {}
         self.ssrc_table: dict[int, RtpReceiver] = {}
         self.payload_type_table: dict[int, set[RtpReceiver]] = {}
+        # aidot: optional callable shown every RTP packet before routing,
+        # routed or not - SD playback takes H265 this way (see VENDOR.md).
+        self.raw_tap: Optional[Callable[[RtpPacket], None]] = None
 
     def register_receiver(
         self,
@@ -615,6 +618,14 @@ class RTCDtlsTransport(AsyncIOEventEmitter):
         except ValueError as exc:
             self.__log_debug("x RTP parsing failed: %s", exc)
             return
+
+        # aidot: the raw tap sees the packet whether or not it routes.
+        tap = self._rtp_router.raw_tap
+        if tap is not None:
+            try:
+                tap(packet)
+            except Exception as exc:
+                self.__log_debug("x RTP raw tap failed: %s", exc)
 
         # route RTP packet
         receiver = self._rtp_router.route_rtp(packet)

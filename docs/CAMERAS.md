@@ -638,28 +638,85 @@ nobody reported** - four of seven cameras measured carried neither key, includin
 a model whose siblings report normally - so it is NOT evidence that a model
 cannot report. Only an explicit `False` says the slot is empty.
 
-### Playing one back is NOT offered, and that is a finding
+### Playing a recording
 
-Listing what a card holds works. **Playing a recording off the card does not,
-and the library does not pretend to** - `can_play` is False on every SD record.
+```python
+result = await device_client.async_get_sd_recordings(days=7)
+await device_client.async_stop_streaming()  # one media slot per camera
+session = await device_client.async_open_sd_playback(
+    result.records[-1], rtsp_push_url="rtsp://127.0.0.1:8554/playback"
+)
+reply = await session.playback_reply()  # AvioResponse or None
+await session.async_sd_pause()
+await session.async_sd_resume()
+await session.async_sd_seek(40)  # seconds into the recording
+await session.stop()
+```
 
-This was investigated to a conclusion rather than skipped. The session a
-playback needs is fully understood and reproducible: an SD-mode peer id, an
-offer carrying no local audio sender, and the AVIO session-mode command
-(`0x1500`) set to SD rather than the LIVING every session uses. A camera accepts
-all of it. It then acknowledges the play command in about 50 ms and sends no
-media at all - no video RTP on any payload type, no video RTCP sender report,
-and none of the progress messages the vendor app drives its seek bar from.
+The returned `SdesSession` is served like a live one (`output_path`,
+`rtsp_push_url`, `on_frame`), but it carries the recording. It is not kept
+alive or reopened; to play again, call `async_open_sd_playback` again. While
+this client is streaming the camera live it raises
+`AidotSdPlaybackUnavailable` instead of opening a second session against the
+camera's one media slot.
 
-What was ruled out along the way, so nobody assumes it is one line of work: the
-channel byte, the event-type byte (swept across every plausible value on a card
-whose records all carry event 0), and the codec - this firmware declines to
-negotiate H265 both as an extra payload type in the video section and as a
-section of its own, so a decode path would have nothing to decode.
+What makes the camera send the recording, read from the firmware of every
+owned model and played live on an A001064 (2026-10-27):
 
-If that changes, it will be because someone captures a real playback off the
-wire. Reading the vendor app has been taken as far as it goes.
+- **The peer id announces the Android app (client class 0), playCmd 1 (SD
+  card) and StreamID 0.** Only class 0 or 1 gets H265, and only then does the
+  camera add the second video transceiver that recorded H265 goes out on.
+  With the library's live class (2) an H265-recording camera sends the
+  recording's audio and no video.
+- **The offer names both video codecs**, as the camera only adds that second
+  transceiver when the offer has two.
+- **The session opens in SESSION_MODE 2 (SD)**, on every path that sends a
+  mode, and PLAY_START goes out once the camera echoes SD. Switching a live
+  session to SD stops the live video and never starts the recording.
 
+Played live on the A001064 and the A001513 (2026-10-27: the L2 sent
+2560x1920 H265 from 5 s before the record's listed time, 0 decode errors,
+~15 fps outside the recording's own holes).
+
+**DTLS cameras (A000088) record playback to a `.ts` file only.** aiortc has no
+H265, so the offer names H265 beside H264 for the camera alone, aiortc keeps
+its three sections, and the extra video section's packets - which aiortc
+would discard unrouted - are taken raw at its RTP router (`RtpRouter.raw_tap`
+in the vendored aiortc), assembled into access units and recorded as HEVC.
+The recorder's video codec is set by the recording's first keyframe, so an
+H264 recording (camera encoder setting 2) is recorded as H264 from aiortc's
+own track. There is no `on_frame` decode and no serve on this path. On an
+A000088 the answer's extra video section names H265 on PT 0. Played on a
+carded A000088 on 2026-10-27, over a direct LAN path: 638 HEVC frames at
+2560x1440 with 0 decode errors, 41.9 s of audio with no gap over 21 ms, the
+first frame 1 s before the record's listed time; pause answered in 10 ms and
+stopped the recording, resume restarted it, a +20 s seek was answered with
+the target time.
+
+`AidotSdPlaybackUnavailable` is raised rather than a live session returned
+when the answer has no data channel to send PLAY_START on, on a DTLS camera
+without a `.ts` `output_path`, or while this client streams the camera live.
+Pause, resume and seek send what the app sends (`KVSWebRTCChannel` T2, V2,
+W2): PLAY_PAUSE, PLAY_RESUME, and PLAY_SEEKTIME with the time field set to the
+record's start plus the offset and a per-seek counter. Each returns the
+camera's `PlaycontrolReply`, or None. Measured on an A001064 2026-10-27: each
+answered in 20-50 ms, pause stopped the media (0 packets in 5 s), and a seek
+to +40 s showed the target's burned-in time. Resume restarted the media in
+four of five tries; in the fifth the camera answered it and sent nothing
+until the next seek. A reply is not proof the media moved: a caller that can
+see the media (``media_stats()`` on SDES) and finds it still idle can seek to
+where it paused.
+
+**The whole clip is served, from its first frame.** Two things had cut the
+opening seconds, both now off for playback only: the serve is launched on the
+first video packet, and the camera starts the clip the moment PLAY_START lands,
+so the bridge holds what it forwards until the serve is listening; and the
+serve's `-fflags nobuffer` discards what ffmpeg reads while probing the input,
+which at 2560x1440 H265 was the clip's first ~3 s. With both, the first served
+frame matches the camera's own first frame in the same session (including the
+~2 s the camera sends from before the record's listed time). The recordings
+themselves have short holes in both tracks near their start (0.4-0.5 s, at
+the same offsets on every play).
 
 ## Local (LAN-direct) streaming
 

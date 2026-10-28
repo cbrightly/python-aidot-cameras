@@ -16,6 +16,7 @@ from .protocol import (
     AvioResponseRouter,
     _speaker_ack_accepted,
 )
+from .sd_playback import _PlaybackControls
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ _STOP_MQTT_WAIT_S = 5.0
 SDES_SPEAKER_ACK_TIMEOUT_S = SDES_SPEAKERSTART_DELAY + SPEAKER_ACK_TIMEOUT_S
 
 
-class SdesSession(AvioRequestMixin):
+class SdesSession(_PlaybackControls, AvioRequestMixin):
     """Active SDES-SRTP stream session managed by an ffmpeg subprocess.
 
     Obtain via ``await DeviceClient.async_open_webrtc_stream(...)`` when the
@@ -60,6 +61,8 @@ class SdesSession(AvioRequestMixin):
         device_id=None,
         responses=None,
         abort_chan=None,
+        playback_waiter=None,
+        playback=None,
     ) -> None:
         # Which camera this session belongs to, for logging only.  Optional so
         # an existing caller that does not pass it still works; the logs then
@@ -125,6 +128,13 @@ class SdesSession(AvioRequestMixin):
         # the last thing the association ever sees.  None when the caller
         # supplied no holder - teardown then behaves exactly as it did before.
         self._abort_chan = abort_chan if abort_chan is not None else [None]
+        # The pending RECORD_PLAYCONTROL reply when this session was opened to
+        # play an SD recording; None for live.  Read with playback_reply().
+        self._playback_waiter = playback_waiter
+        # The SdPlaybackStart this session was opened with (its record and
+        # channel), for pause, resume and seek; None for live.
+        self._sd_playback = playback
+        self._sd_seek_count = 0
         # Shared talk state (dict) for outbound two-way audio, or None when the
         # session was not opened talk-capable (offer stayed recvonly).  Populated
         # by the bridge (camera audio addr) and by async_start_talk (provider).
@@ -141,8 +151,8 @@ class SdesSession(AvioRequestMixin):
         if fn is None:
             return False
         try:
-            fn(cmd, payload)
-            return True
+            # The SDES sender says False when its socket is not up yet.
+            return fn(cmd, payload) is not False
         except Exception:
             return False
 

@@ -49,6 +49,7 @@ purpose.
 | `AidotNoWebrtcAnswer` | `AidotStreamOpenError` | no `webrtcResp` within the open timeout |
 | `AidotNegotiationFailed` | `AidotStreamOpenError` | the camera's SDP could not be applied, or ICE did not connect |
 | `AidotFfmpegMissing` | `AidotStreamOpenError` | ffmpeg is needed and not installed |
+| `AidotSdPlaybackUnavailable` | `AidotStreamOpenError` | an SD recording was asked for where it cannot play: a DTLS camera without a `.ts` output_path, an answer with no data channel, or a camera this client streams live |
 | `AidotUnknownRegion` | `AidotError`, `ValueError` | the account region is not a known one (see `AIDOT_EXTRA_REGIONS`) |
 | `CameraLanError` | `AidotError` | a LAN control operation failed (also in `aidot_cameras.camera.lan_control`) |
 | `CameraLanLoginRejected` | `CameraLanError` | the device offered LAN control and refused the login |
@@ -67,7 +68,7 @@ release still catches them.
 | `aidot_cameras.device_client.device_session_authenticated` | whether a device client's LAN session is logged in; a module-level function, so the row above does not cover it |
 | `CameraDeviceClient.has_live_session` | whether a stream session is up right now, answered without sending anything |
 | `lan_address`, `lan_login_failures`, `lan_login_over_ceiling` on every device client (`LanRetryMixin`) | the LAN login state, read-only: the address in use, consecutive failures, and whether the retry ceiling has been reached |
-| the session objects returned by `async_open_webrtc_stream` | `stop()`, `async_start_talk`, `async_stop_talk`, `talk_supported`, `is_alive`; statistics as `get_stats()` on a `WebRTCSession` and `media_stats()` on an `SdesSession` |
+| the session objects returned by `async_open_webrtc_stream` | `stop()`, `async_start_talk`, `async_stop_talk`, `talk_supported`, `is_alive`; statistics as `get_stats()` on a `WebRTCSession` and `media_stats()` on an `SdesSession`; `playback_reply()` on the `SdesSession` `async_open_sd_playback` returns |
 | `aidot_cameras.camera.models` | `CameraDeviceInformation`, `CameraStatusData` |
 | `aidot_cameras.camera.lan_control` | LAN-direct control helpers |
 | `aidot_cameras.camera.go2rtc` | the go2rtc bridge helpers |

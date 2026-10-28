@@ -50,8 +50,15 @@ class TsCopyRecorder:
     video to :attr:`vq` and audio to :attr:`aq`.
     """
 
-    def __init__(self, path: str, device_id: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        path: str,
+        device_id: Optional[str] = None,
+        video_codec: Optional[str] = "h264",
+    ) -> None:
         self._path = path
+        # None: the first keyframe names it (SD playback, H264 or H265).
+        self._video_codec = video_codec
         self._device_id = device_id or "?"
         self.vq: "queue.Queue" = queue.Queue(maxsize=_QUEUE_MAX)
         self.aq: "queue.Queue" = queue.Queue(maxsize=_QUEUE_MAX)
@@ -71,7 +78,11 @@ class TsCopyRecorder:
         self._thread = threading.Thread(
             target=_dtls_av_mux_run,
             args=(self.vq, self.aq, self._file, self._progress, self._stop_flag),
-            kwargs={"align_audio_start": True, "state": self._state},
+            kwargs={
+                "align_audio_start": True,
+                "state": self._state,
+                "video_codec": self._video_codec,
+            },
             name="aidot-dtls-record",
             daemon=True,
         )

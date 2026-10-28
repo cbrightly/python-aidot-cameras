@@ -13,7 +13,7 @@ and depend on stock aiortc again once upstream widens the pin.
 
 ## The delta from upstream, exactly
 
-Verified by diffing against the 1.14.0 sdist, not from memory. Four files
+Verified by diffing against the 1.14.0 sdist, not from memory. Five files
 differ. Two are mechanical import rewrites required by vendoring, with no
 behaviour change:
 
@@ -42,6 +42,19 @@ finished, so the fix does nothing there. The aioice internals it reads are
 held by `tests/test_aioice_compat.py`; the behaviour by
 `tests/test_close_mid_ice_leaves_nothing_pending.py`.
 
+One is an addition for SD-card playback, every changed line marked `aidot:`:
+
+    rtcdtlstransport.py    RtpRouter.raw_tap, None by default: when set, it is
+                           called with every RTP packet before routing, routed
+                           or not (its exceptions are logged and dropped)
+
+An A000088 sends a recording it holds as H265 on a second video section that
+aiortc, which has no H265, never negotiates; its packets reach the router and
+are discarded. The playback open sets the tap on its own peer connection's
+transport to take them raw (`sd_playback.H265AccessUnits`). Nothing else sets
+it, so every other session routes exactly as upstream. Held by
+`tests/test_sd_playback_dtls.py`.
+
 One file is not carried over:
 
     py.typed               not vendored, so the vendored package is untyped
@@ -54,7 +67,7 @@ Everything else is byte-identical to the sdist.
     tar xzf aiortc-<version>.tar.gz
     diff -rq --exclude=__pycache__ aiortc-<version>/src/aiortc aidot_cameras/_vendor/aiortc
 
-Reapply the three import rewrites and the close fix above (unless upstream
+Reapply the three import rewrites, the close fix and the raw tap above (unless upstream
 has fixed close mid-ICE itself - run the test named above against the new
 version unpatched to find out), refresh `LICENSE` from the sdist, and update
 this file. If the delta ever grows past import rewrites, say so here -

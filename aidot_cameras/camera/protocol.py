@@ -1788,7 +1788,15 @@ def video_pts_dts(state: dict, pts: int, slack: int) -> tuple:
 
 
 def _dtls_av_mux_run(
-    vq, aq, out_fileobj, progress, stop_flag, *, align_audio_start=False, state=None
+    vq,
+    aq,
+    out_fileobj,
+    progress,
+    stop_flag,
+    *,
+    align_audio_start=False,
+    state=None,
+    video_codec="h264",
 ) -> None:
     """Mux tapped video (H.264 copy) + audio (PCMA->AAC) to ``out_fileobj`` as
     RTP-timestamped MPEG-TS.  Runs in a worker thread; the serve's ffmpeg reads
@@ -1810,7 +1818,14 @@ def _dtls_av_mux_run(
       the serve's timing is unchanged.
     - ``state``, if given, gets ``state["failed"] = True`` when a write failed
       and the mux ended early.
+    - ``video_codec`` is the video stream's codec. None leaves it to the first
+      keyframe: a queue item may carry its codec as a fourth element
+      (``"hevc"`` from the SD playback H265 tap), and a three-element item is
+      H.264. Only with ``align_audio_start``, which writes nothing before the
+      first keyframe, so the stream can still be added then.
     """
+    if video_codec is None and not align_audio_start:
+        raise ValueError("video_codec=None needs align_audio_start")
     import time as _t
     import queue as _q
     from fractions import Fraction
@@ -1880,8 +1895,10 @@ def _dtls_av_mux_run(
     except Exception as exc:
         _LOGGER.warning("DTLS A/V mux: av.open failed: %s", exc)
         return
-    vs = out.add_stream("h264")
-    vs.time_base = Fraction(1, 90000)
+    vs = None
+    if video_codec is not None:
+        vs = out.add_stream(video_codec)
+        vs.time_base = Fraction(1, 90000)
     try:
         adec = av.CodecContext.create("pcm_alaw", "r")
         adec.sample_rate = 8000
@@ -1922,16 +1939,42 @@ def _dtls_av_mux_run(
     # ffmpeg at its input probe so it never bound its -listen port.  One dead
     # write -> exit the thread and leave the queues alone.
     mux_dead = [False]
+    vs_box = [vs]
+    vcodec_box = [video_codec]
 
     def _flush_video():
         while True:
             try:
-                data, ts, kf = vq.get_nowait()
+                item = vq.get_nowait()
             except _q.Empty:
                 break
+            data, ts, kf = item[:3]
+            _codec = item[3] if len(item) > 3 else "h264"
+            if vs_box[0] is not None and video_codec is None:
+                # Lazy mode: a camera sending both tracks must not put the
+                # other codec into this stream. Compared by the name it was
+                # added under: the stream reports its encoder (libx265).
+                if vcodec_box[0] != _codec:
+                    continue
             if not vstarted[0]:
                 if not kf:
                     continue  # begin on a keyframe so the GOP is decodable
+                if vs_box[0] is None:
+                    # The first keyframe says what the recording is.
+                    # The stream is only muxed into, but PyAV opens an
+                    # encoder for it, and x265 prints its banner straight to
+                    # stderr - into Home Assistant's log on every play.
+                    _vs = out.add_stream(
+                        _codec,
+                        options=(
+                            {"x265-params": "log-level=none"}
+                            if _codec == "hevc"
+                            else None
+                        ),
+                    )
+                    _vs.time_base = Fraction(1, 90000)
+                    vs_box[0] = _vs
+                    vcodec_box[0] = _codec
                 vstarted[0] = True
                 v0[0] = ts
             _rel = ts - v0[0]
@@ -1941,7 +1984,7 @@ def _dtls_av_mux_run(
                 # is_resent_video_frame. Dropping costs no media time.
                 continue
             pkt = av.Packet(data)
-            pkt.stream = vs
+            pkt.stream = vs_box[0]
             pkt.pts, pkt.dts = video_pts_dts(_ts_state, _rel, _slack)
             pkt.time_base = Fraction(1, 90000)
             if kf:
@@ -3166,22 +3209,50 @@ class _AvioWaiter:
     look silent.
     """
 
-    def __init__(self, router: "AvioResponseRouter", command: int) -> None:
+    def __init__(self, router: "AvioResponseRouter", command: int, match=None) -> None:
         self._router = router
         self._command = command
+        # Optional predicate on the reply: a command whose replies all share
+        # one AVIO id (RECORD_PLAYCONTROL echoes the playback command in its
+        # payload) can then have several questions out at once.
+        self._match = match
         self._future = _cfutures.Future()
+
+    def _accepts(self, resp) -> bool:
+        if self._match is None:
+            return True
+        try:
+            return bool(self._match(resp))
+        except Exception:
+            return False
 
     def cancel(self) -> None:
         """Withdraw the question - used when the command could not be sent."""
         self._router._forget(self)
 
-    async def result(self, timeout: float) -> "Optional[AvioResponse]":
+    async def result(
+        self, timeout: float, *, keep: bool = False
+    ) -> "Optional[AvioResponse]":
         """The camera's reply, or None if it did not answer within ``timeout``.
 
         None is a real answer, not an error: this firmware may not implement a
         response for every command we send, and a control call must never block
         a view while we find out.
+
+        ``keep`` leaves the question open when the wait times out, so a later
+        call still gets a reply that arrives late. For a one-off question held
+        for a session's life (the PLAY_START reply), not for a command sent
+        repeatedly, whose registrations would pile up.
         """
+        if keep and not self._future.done():
+            try:
+                # Shielded: a timed-out wait must not cancel the future the
+                # bridge thread will still set.
+                return await asyncio.wait_for(
+                    asyncio.shield(asyncio.wrap_future(self._future)), timeout
+                )
+            except TimeoutError:
+                return None
         if self._future.done():
             # A wait that timed out cancels its own wrapper, and that
             # cancellation can propagate down to this future - asking again
@@ -3223,13 +3294,16 @@ class AvioResponseRouter:
         self._lock = threading.Lock()
         self._waiting: "dict[int, list[_AvioWaiter]]" = {}
 
-    def expect(self, command: int) -> _AvioWaiter:
+    def expect(self, command: int, match=None) -> _AvioWaiter:
         """Register interest in the next response carrying ``command``.
+
+        ``match``, when given, narrows that to a response it returns True for;
+        a response no waiter accepts is not answered to anyone.
 
         Call this before sending the request: the camera can answer before the
         sender returns, and a registration made afterwards would miss the reply.
         """
-        waiter = _AvioWaiter(self, command)
+        waiter = _AvioWaiter(self, command, match)
         with self._lock:
             self._waiting.setdefault(command, []).append(waiter)
         return waiter
@@ -3248,11 +3322,15 @@ class AvioResponseRouter:
             with self._lock:
                 queue = self._waiting.get(resp.command)
                 waiter = None
-                while queue:
-                    candidate = queue.pop(0)
-                    if not candidate._future.done():
-                        waiter = candidate
-                        break
+                if queue:
+                    # Oldest first, skipping questions already settled and
+                    # any whose match turns this reply down.
+                    queue[:] = [w for w in queue if not w._future.done()]
+                    for candidate in queue:
+                        if candidate._accepts(resp):
+                            waiter = candidate
+                            queue.remove(candidate)
+                            break
                 if queue is not None and not queue:
                     self._waiting.pop(resp.command, None)
             if waiter is None:
@@ -3748,6 +3826,7 @@ class AvioRequestMixin:
         *,
         response_cmd: int,
         timeout: float = AVIO_RESPONSE_TIMEOUT_S,
+        match=None,
     ) -> "Optional[AvioResponse]":
         """Send ``cmd`` and return the camera's ``response_cmd`` reply, or None.
 
@@ -3755,7 +3834,7 @@ class AvioRequestMixin:
         not a failure: this firmware may implement a request without a response,
         and no reply at all points at the channel rather than the firmware.
         """
-        waiter = self._avio_responses.expect(response_cmd)
+        waiter = self._avio_responses.expect(response_cmd, match)
         # Registered BEFORE the send: a camera on the LAN can answer before the
         # sending call returns, and a reply that arrives with nobody listening
         # would be reported as silence.

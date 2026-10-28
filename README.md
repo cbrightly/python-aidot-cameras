@@ -84,10 +84,10 @@ records to the cloud or to its own SD card is per-camera, not per-model, and the
 device reports it as `IsSupportPlayback`. This library lists cloud recordings
 (`async_get_cloud_recordings`) and resolves a playable HLS URL for one
 (`async_get_event_video_media`); for a camera storing to a card it lists the
-on-device recordings (`async_get_sd_recordings`) but cannot play one back, so
-such a camera records normally and nothing here can show you the video. On the
-reference fleet that is four of seven cameras. Playback from the card is closed
-as not feasible; see `docs/CAMERAS.md`, "On-device (SD card) recordings".
+on-device recordings (`async_get_sd_recordings`) and, on an SDES camera, plays
+one (`async_open_sd_playback`, played live on the A001064 only). DTLS cameras
+(the A000088) cannot play from the card yet. See `docs/CAMERAS.md`, "On-device
+(SD card) recordings".
 
 **The A001064 (PTZ) streams at roughly 2.2 Mbps, about 24% above the vendor
 app.** Measured from a capture of the app on the same camera: it takes about
