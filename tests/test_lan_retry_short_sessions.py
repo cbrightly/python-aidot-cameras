@@ -139,8 +139,21 @@ def test_closed_right_after_login_backs_off_and_reaches_the_ceiling(caplog):
     caplog.set_level(logging.DEBUG, logger="aidot_cameras.lan_retry")
     caplog.set_level(logging.WARNING, logger=UPSTREAM)
 
+    # The delays the retry path asked for, rather than gaps timed between
+    # connects: a timed gap carries the login round-trip, and the first one
+    # carries the whole first login (90-290 ms measured), which made the
+    # growth check fail on main about half the time.
+    delays = []
+    real_delay = lan_retry._next_login_retry_delay
+
+    def _recording_delay(attempt):
+        delay = real_delay(attempt)
+        delays.append(delay)
+        return delay
+
     async def _run():
         with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(lan_retry, "_next_login_retry_delay", _recording_delay)
             light = FakeLight(hold=lambda n: 0.0)
             await light.start(mp)
             dc = await _light_client(mp, stable_s=5.0)
@@ -163,8 +176,13 @@ def test_closed_right_after_login_backs_off_and_reaches_the_ceiling(caplog):
     assert attempt == LIMIT
     assert short == LIMIT + 1
     assert unstable is True
-    gaps = [b - a for a, b in zip(connects, connects[1:])]
-    assert gaps[-1] > gaps[0] * 4, f"the backoff did not grow: {gaps}"
+    # One delay per retry, then the None that stops them.
+    assert delays[-1] is None, delays
+    waits = delays[:-1]
+    assert len(waits) == LIMIT, delays
+    assert waits == sorted(waits), f"the backoff shrank: {waits}"
+    if LIMIT >= 2:
+        assert waits[-1] > waits[0], f"the backoff did not grow: {waits}"
 
     # Upstream's per-close ERRORs: only the first close's get through (the
     # receive loop's line and, racing it, a ping on the dead socket), and as
@@ -194,9 +212,17 @@ def test_closed_right_after_login_backs_off_and_reaches_the_ceiling(caplog):
 
 def test_a_stable_session_that_drops_gets_the_prompt_first_retry(caplog):
     caplog.set_level(logging.DEBUG, logger="aidot_cameras.lan_retry")
+    delays = []
+    real_delay = lan_retry._next_login_retry_delay
+
+    def _recording_delay(attempt):
+        delay = real_delay(attempt)
+        delays.append(delay)
+        return delay
 
     async def _run():
         with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(lan_retry, "_next_login_retry_delay", _recording_delay)
             # First session outlives the stable window, then the light drops
             # it; the next one stays up.
             light = FakeLight(hold=lambda n: 0.3 if n == 0 else 30.0)
@@ -204,7 +230,9 @@ def test_a_stable_session_that_drops_gets_the_prompt_first_retry(caplog):
             dc = await _light_client(mp, stable_s=0.1)
             dc._login_attempt = 5  # earlier failures: next step would be the cap
             await dc.async_login()
-            await asyncio.sleep(0.8)
+            # Room for the reconnect on a loaded runner; the second session
+            # holds for 30 s, so waiting longer changes nothing else.
+            await asyncio.sleep(1.5)
             stats = (list(light.connects), dc._login_attempt, dc._short_sessions)
             await dc.close()
             await light.stop()
@@ -214,7 +242,8 @@ def test_a_stable_session_that_drops_gets_the_prompt_first_retry(caplog):
     assert len(connects) == 2
     # Stable: the backoff was cleared, so the drop got the first step (10 ms
     # here), not the capped one (200 ms) the earlier failures had reached.
-    assert connects[1] - connects[0] < 0.3 + 0.1
+    # Read from the delay asked for: a wall-clock margin failed under load.
+    assert delays == [lan_retry._LOGIN_RETRY_BASE_S], delays
     assert short == 0
     assert attempt == 0  # and the second session is stable too
     assert not _lines(caplog, "closed its LAN session")
