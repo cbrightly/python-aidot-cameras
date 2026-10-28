@@ -655,9 +655,10 @@ await session.async_sd_seek(40)  # seconds into the recording
 await session.stop()
 ```
 
-The returned `SdesSession` is served like a live one (`output_path`,
-`rtsp_push_url`, `on_frame`), but it carries the recording. It is not kept
-alive or reopened; to play again, call `async_open_sd_playback` again. While
+On an SDES camera the returned `SdesSession` is served like a live one
+(`output_path`, `rtsp_push_url`, `on_frame`), but it carries the recording; on
+a DTLS camera it is a `WebRTCSession` recording to a `.ts` file (below). Both
+take the same controls. It is not kept alive or reopened; to play again, call `async_open_sd_playback` again. While
 this client is streaming the camera live it raises
 `AidotSdPlaybackUnavailable` instead of opening a second session against the
 camera's one media slot.
@@ -687,7 +688,11 @@ would discard unrouted - are taken raw at its RTP router (`RtpRouter.raw_tap`
 in the vendored aiortc), assembled into access units and recorded as HEVC.
 The recorder's video codec is set by the recording's first keyframe, so an
 H264 recording (camera encoder setting 2) is recorded as H264 from aiortc's
-own track. There is no `on_frame` decode and no serve on this path. On an
+own track. There is no `on_frame` decode and no serve on this path. A camera
+flagged SDES that answers only DTLS falls back to this path still asking for
+the recording (unreleased; rc63 fell back with a live peer id and recorded
+audio alone). An access unit that lost a packet is dropped, not recorded
+damaged. On an
 A000088 the answer's extra video section names H265 on PT 0. Played on a
 carded A000088 on 2026-10-27, over a direct LAN path: 638 HEVC frames at
 2560x1440 with 0 decode errors, 41.9 s of audio with no gap over 21 ms, the
@@ -716,9 +721,17 @@ so the bridge holds what it forwards until the serve is listening; and the
 serve's `-fflags nobuffer` discards what ffmpeg reads while probing the input,
 which at 2560x1440 H265 was the clip's first ~3 s. With both, the first served
 frame matches the camera's own first frame in the same session (including the
-~2 s the camera sends from before the record's listed time). The recordings
-themselves have short holes in both tracks near their start (0.4-0.5 s, at
-the same offsets on every play).
+~2 s the camera sends from before the record's listed time). If the hold
+fills before the serve listens (4000 packets, far beyond the few seconds it
+normally spans), the overflow is dropped and a warning says the clip has a
+gap. The recordings themselves have short holes in both tracks near their
+start (0.4-0.5 s, at the same offsets on every play).
+
+**An SDES `.ts` carries the G.711 audio as an unlabelled data stream**, not an
+audio track, so a player sees video only. A caller converting the file must
+rebuild the A-law from that stream by timestamp, with silence in its holes:
+copying the bytes straight through left the sound 1.2 s ahead of the picture
+over a 25 s clip (A001064, 2026-10-27). A DTLS `.ts` carries AAC.
 
 ## Local (LAN-direct) streaming
 

@@ -2458,6 +2458,18 @@ async def _dtls_open_sdes_branch(self, ps: _DtlsOpenState) -> _PhaseReturn | Non
                 await asyncio.wait_for(ps.mqtt_fut, timeout=5.0)
             except Exception:
                 pass  # MQTT thread exit errors don't affect the retry
+            # A playback keeps what it asked for across the fallback: its own
+            # peer id rebuilt for DTLS (the live default is class 2 and
+            # PRE_LINK, which an H265-recording camera sends audio alone),
+            # and rtsp_push_url, so the DTLS open refuses what it cannot
+            # serve instead of dropping it. A live open mints a fresh id.
+            _fallback_peer_id = None
+            _fallback_push_url = None
+            if ps._sd_playback is not None:
+                from .sd_playback import playback_peer_id
+
+                _fallback_peer_id = playback_peer_id(self, sdes=False)
+                _fallback_push_url = ps.rtsp_push_url
             # Call the UNGATED impl, not the public async_open_webrtc_stream:
             # we are already holding the global open-gate permit (acquired in
             # async_open_webrtc_stream), and the gate's semaphore is not
@@ -2472,8 +2484,11 @@ async def _dtls_open_sdes_branch(self, ps: _DtlsOpenState) -> _PhaseReturn | Non
                     stream_id=ps.stream_id,
                     timeout=ps.timeout,
                     output_path=ps.output_path,
+                    max_seconds=ps.max_seconds,
                     status_callback=ps.status_callback,
                     force_sdes=False,
+                    rtsp_push_url=_fallback_push_url,
+                    reuse_peer_id=_fallback_peer_id,
                     _skip_ice_config=True,
                     _ice_config=(
                         ps.ice_config_fut.result() if ps.ice_config_fut.done() else None

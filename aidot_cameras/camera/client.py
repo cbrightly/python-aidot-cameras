@@ -2792,6 +2792,12 @@ class CameraMixin(
         Taken from the SDES bridge thread (SESSION_MODE, control commands) as
         well as the event loop (livePlayReq), so read-and-increment is one
         locked step: a repeated seq is a SESSION_MODE the camera ignores.
+
+        Starting again at 100 in every new client is safe: the camera keeps
+        the last accepted seq per session, not per camera. Back-to-back
+        playbacks from fresh clients, each counting from 100 where the one
+        before had already gone past it, had SD mode echoed every time on all
+        three models (2026-10-27), as the app's own restarts rely on.
         """
         with _DSEQ_LOCK:
             d = self._live_dseq

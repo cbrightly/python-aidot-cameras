@@ -115,8 +115,13 @@ See "Direct publish" in [`CI-RUNNER.md`](CI-RUNNER.md).
 `scripts/sd_playback_validate.py` is the live check for SD-card playback: it
 lists a camera's card over a short live session, plays one recording through
 `async_open_sd_playback` into a file, and reports the decode, the audio
-seconds against wall time and the largest frame and audio gaps. It is not part
-of the gate; the A001064 and the A001513 have been played.
+seconds against wall time and the largest frame and audio gaps, on either
+transport. `--controls` adds pause, resume and a seek to `--seek` seconds,
+reporting the media that arrived in each window, and saves a crop of the
+burned-in clock at each step to check the seek landed. The script spends the
+camera's one media slot and waits `--cooldown` (180 s) between its two
+sessions: stop Home Assistant's AiDot entry first. It is not part of the gate;
+all three models have been played (2026-10-27).
 
 Note that the two transports report media differently, and anything asserting
 "is it streaming?" has to handle both: the DTLS path decodes in-process and

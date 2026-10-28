@@ -10,13 +10,16 @@ Nothing else may hold the camera's media slot while this runs: stop Home
 Assistant's AiDot entry first.
 
   AIDOT_TOKEN_FILE=~/.config/aidot/token.json \
-  python scripts/sd_playback_validate.py --device 12b144cb --out /tmp/sdplay
+  python scripts/sd_playback_validate.py --device <device id prefix> --out /tmp/sdplay
+
+Add --controls to pause, resume and seek (--seek) after --seconds; --index
+picks the record (default the newest). Works on SDES and DTLS cameras.
 
 Measured on an A001064 2026-10-27: HEVC 2560x1440 at 20 fps, audio
 continuous, 0 decode errors once the serve kept the clip's opening packets;
 the first served frame matches the camera's own first frame. Short holes in
 both tracks near a clip's start (0.4-0.5 s, same offsets on every play) are in
-the recordings.
+the recordings. Also played on an A001513 and, over DTLS, an A000088.
 """
 
 import argparse

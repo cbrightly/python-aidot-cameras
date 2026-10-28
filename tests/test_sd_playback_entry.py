@@ -31,7 +31,7 @@ class _Task:
 
 
 class _Camera(_CameraSdPlaybackMixin):
-    device_id = "12b144cb12da"
+    device_id = "0123456789ab"
     generate_webrtc_peer_id = staticmethod(CameraMixin.generate_webrtc_peer_id)
 
     def __init__(self, sdes=True, live=False, streaming=False):
@@ -110,3 +110,47 @@ def test_every_camera_client_has_it():
     assert CameraMixin.async_open_sd_playback is (
         _CameraSdPlaybackMixin.async_open_sd_playback
     )
+
+
+def test_the_dtls_fallback_keeps_the_playback_peer_id_and_its_options():
+    # An SDES-flagged camera that answers only DTLS: the retry must still
+    # ask for the recording (class 0, SD card), not open a live view.
+    from aidot_cameras.camera.webrtc_open import _dtls_open_sdes_branch
+
+    class _Fut:
+        def done(self):
+            return False
+
+    class _Ps:
+        use_sdes = True
+        terminal_error_fut = _Fut()
+        ice_config_fut = _Fut()
+        mqtt_fut = None
+        output_path = "clip.part.ts"
+        max_seconds = 70.0
+        rtsp_push_url = "rtsp://127.0.0.1:1/x"
+        _sd_playback = SdPlaybackStart(request=b"", record=REC)
+
+        def _status(self, _msg):
+            pass
+
+        def __getattr__(self, _name):
+            return None
+
+    class _Cam(_Camera):
+        async def _open_sdes_stream(self, **_kw):
+            raise CameraMixin._SdesNoAnswerError()
+
+        async def _async_open_webrtc_stream_impl(self, on_frame, **kw):
+            self.opens.append((on_frame, kw))
+            return "dtls"
+
+    cam = _Cam()
+    got = asyncio.run(_dtls_open_sdes_branch(cam, _Ps()))
+    assert got.value == "dtls"
+    ((_, kw),) = cam.opens
+    assert kw["force_sdes"] is False
+    assert PEER.match(kw["reuse_peer_id"]).groups()[:3] == ("0", "1", "0")
+    assert kw["max_seconds"] == 70.0
+    # Carried so the DTLS open refuses it rather than dropping it.
+    assert kw["rtsp_push_url"] == "rtsp://127.0.0.1:1/x"
