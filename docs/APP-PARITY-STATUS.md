@@ -207,7 +207,7 @@ actually sends was pulled out of `KVSWebRTCChannel` and named against
 | id | name | do we send it |
 |----|------|---------------|
 | 0x318 / 792 | `USER_IPCAM_LISTEVENT_REQ` | **yes** - lists what a card holds |
-| 0x31a / 794 | `USER_IPCAM_RECORD_PLAYCONTROL` | **yes** - PLAY_START, from `async_open_sd_playback` (SDES); see below |
+| 0x31a / 794 | `USER_IPCAM_RECORD_PLAYCONTROL` | **yes** - PLAY_START from `async_open_sd_playback`, and PAUSE, RESUME, SEEKTIME from the session's controls, on both transports; see below |
 | 0x320 / 800 | `USER_IPCAM_SETSTREAMCTRL_REQ` | yes |
 | 0x322 / 802 | `USER_IPCAM_GETSTREAMCTRL_REQ` | yes |
 | 0x350 / 848 | SPEAKERSTART | yes |
@@ -220,8 +220,8 @@ actually sends was pulled out of `KVSWebRTCChannel` and named against
 | 0x1424 / 5156 | heartbeat | yes |
 | 0x1500 / 5376 | `AVIO_CTRL_SESSION_MODE` | yes: 1 (LIVING) for live, 2 (SD) for playback - see below |
 
-**On-device playback (`0x31a`) works on the A001064 - reopened and solved
-2026-10-27.** The August attempt had the session right (an SD-mode peerId and
+**On-device playback (`0x31a`) works on all three owned models - reopened and
+solved 2026-10-27, shipped in 1.0.0rc63.** The August attempt had the session right (an SD-mode peerId and
 `0x1500` mode **2 (SD)**) but announced the library's client class 2. The
 firmware of every owned model gives H265, and the second video transceiver
 recorded H265 is sent to, only to class 0 or 1 when the offer names both codecs,

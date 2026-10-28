@@ -415,3 +415,42 @@ def test_the_sd_mode_echo_has_one_parser():
         == _session_mode_echoed(avio_header(1, 5377, 0, 12, 0) + body)
     )
     assert session_mode_of(b"\x00" * 8) is None
+
+
+def test_a_lost_head_drops_the_new_unit_not_the_one_already_emitted():
+    aus = _hevc_access_units(5)
+    units = H265AccessUnits()
+    got, seq = [], 300
+    for i, au in enumerate(aus):
+        pkts = _packetize(au, i * 6000, seq, mtu=200)
+        seq += len(pkts)
+        for j, p in enumerate(pkts):
+            if i == 1 and j == 0:
+                continue  # unit 1 loses its first packet, after 0's marker
+            got += units.feed(*p)
+    assert units.dropped == 1
+    assert [ts for _, ts, _ in got] == [0, 12000, 18000, 24000]
+
+
+def test_a_gap_wider_than_the_lost_marker_drops_both_units():
+    aus = _hevc_access_units(5)
+    units = H265AccessUnits()
+    got, seq = [], 900
+    for i, au in enumerate(aus):
+        pkts = _packetize(au, i * 6000, seq, mtu=200)
+        seq += len(pkts)
+        for j, p in enumerate(pkts):
+            if (i == 0 and j == len(pkts) - 1) or (i == 1 and j == 0):
+                continue  # 0's marker and 1's head, back to back
+            got += units.feed(*p)
+    assert units.dropped == 2
+    assert [ts for _, ts, _ in got] == [12000, 18000, 24000]
+
+
+def test_a_truncated_aggregation_packet_breaks_its_unit():
+    units = H265AccessUnits()
+    vps = bytes([32 << 1, 1, 0x0C])
+    ap = bytes([48 << 1, 1]) + struct.pack("!H", 3) + vps + struct.pack("!H", 1200)
+    ap += bytes([19 << 1, 1]) + b"\x00" * 298
+    assert units.feed(1, 0, True, ap) == []
+    assert units.dropped == 1

@@ -26,8 +26,9 @@ to exporting what later phases read. `rc62` fixes what the first day of
 scheduled viewing found (see below). `rc63` adds playing recordings off a
 camera's SD card and numbers every SESSION_MODE request from the client's
 counter, which changes every SDES open: it resets the clock below once the
-reference installation runs it, and until then the soak continues on `rc62`.
-The Home Assistant integration `2.37.18` requires `>=1.0.0rc62`.
+reference installation runs it. The Home Assistant integration `2.37.18`
+requires `>=1.0.0rc62`; the integration release that plays card recordings
+will require `>=1.0.0rc63` and is not out yet.
 
 ## Open
 
@@ -59,6 +60,14 @@ failed to open in Home Assistant's own player, which `rc62` fixes. The installed
 released ones: a soak measured on hot-patched files measures nothing, so that
 check is part of dating day zero. Live validation during the soak runs on a separate runner,
 not on the reference host.
+
+**The `rc62` count has ended.** On 2026-10-28 the reference installation
+(by then on Home Assistant 2026.10.4) was given `rc63` and the unreleased
+card-playback integration branch for a live test, which is provocation and
+puts a clock-resetting release on the box; about two minutes later the host
+shut itself down and has been off the network since. Day zero is re-dated
+once the box is back and runs released `rc63` (or later) with a released
+integration, checked by hash as above.
 
 **What counts as soak.** Ordinary use with nobody driving the box. Ordinary
 use includes one fixed viewing schedule, set before the first counting day so
@@ -117,9 +126,11 @@ number. The full record of each is in this file's git history.
    `RedactSdpFilter` masks key material in any SDP that reaches a log.
    Evidence: CHANGELOG `1.0.0rc53`, `1.0.0rc54`.
 6. **SD-card recordings** - closed 2026-08-11. SD event listing works over the
-   ordinary WebRTC AVIO channel; no P2P stack is needed. Evidence: CHANGELOG
-   `1.0.0b5` (`async_get_sd_recordings`); [CAMERAS.md](CAMERAS.md);
-   `scripts/sd_event_probe.py`.
+   ordinary WebRTC AVIO channel; no P2P stack is needed. Playing a recording
+   followed in `1.0.0rc63` (`async_open_sd_playback`), on the same channel.
+   Evidence: CHANGELOG `1.0.0b5` (`async_get_sd_recordings`) and `1.0.0rc63`;
+   [CAMERAS.md](CAMERAS.md); `scripts/sd_event_probe.py`,
+   `scripts/sd_playback_validate.py`.
 7. **The quality levers** - closed 2026-09-04. The mid-session `sd` and `hd`
    commands are delivered and acked and do nothing measurable (35 sessions per
    arm against a control arm). The slow levers are out of scope (below).
@@ -133,10 +144,10 @@ for the owning account
 ## Out of scope for 1.0.0
 
 - **The `liveType=0` / TUTK P2P transport.** Every supported camera streams
-  over WebRTC, and every feature looked at so far, SD event listing included,
-  is reachable there. Using the vendor's native P2P stack would mean bundling
-  proprietary ARM binaries in a public package or reimplementing the protocol
-  from them, and `p2pId` is unset on every reference camera. Reopen only on
+  over WebRTC, and every feature looked at so far, SD event listing and
+  playback included, is reachable there. Using the vendor's native P2P stack
+  would mean bundling proprietary ARM binaries in a public package or
+  reimplementing the protocol from them, and `p2pId` is unset on every reference camera. Reopen only on
   evidence that a feature is unreachable on the WebRTC path.
 
 - **The slow quality levers: Auto, adaptive bitrate, the encoder ramp, TMMBR /

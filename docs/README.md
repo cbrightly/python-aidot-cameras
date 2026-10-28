@@ -27,6 +27,6 @@ git history, and the CHANGELOG still names them where it cites them.
 
 | File | Why it is kept |
 | --- | --- |
-| [APP-PARITY-STATUS.md](APP-PARITY-STATUS.md) | Where the library stood against the official app on 2026-08-23, and what it deliberately does not copy. |
+| [APP-PARITY-STATUS.md](APP-PARITY-STATUS.md) | Where the library stood against the official app on 2026-08-23 (on-device playback updated 2026-10-27), and what it deliberately does not copy. |
 | [lan-control-plan.md](lan-control-plan.md) | The plan the LAN control client was built from (July 2026). |
 | [PLAN-bridge-container.md](PLAN-bridge-container.md) | A standalone bridge container, considered in September 2026 and not built. |

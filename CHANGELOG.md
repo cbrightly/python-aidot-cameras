@@ -6,6 +6,19 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **SD playback that falls back from SDES to DTLS** (a camera flagged SDES that
+  answers only DTLS) now opens with the playback peer id rebuilt for DTLS and
+  keeps `rtsp_push_url`, so the DTLS open refuses what it cannot serve. It used
+  to open with a live peer id, which gets audio alone from an H265-recording
+  camera, and return that without an error.
+- **The DTLS recorder's H265 assembly** no longer blames a lost packet on the
+  access unit already emitted at its marker: the next unit, whose head was
+  lost, is the one dropped. A truncated aggregation packet now drops its unit
+  rather than passing on a cut-off NAL.
+- **A playback whose opening overflows the media hold** now logs a warning
+  that the clip has a gap, not only a debug status line.
+
 ## [1.0.0rc63]
 
 Soak: resets the clock once deployed. SESSION_MODE sequence numbers change on every SDES

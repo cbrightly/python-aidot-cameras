@@ -68,7 +68,7 @@ def test_the_flush_is_paced_and_reported():
     assert lines == ["bridge: released 40 held packet(s) to the serve"]
 
 
-def test_the_hold_is_bounded():
+def test_the_hold_is_bounded(caplog):
     sent = []
     hold = _MediaHold(limit=3)
     for i in range(5):
@@ -77,6 +77,11 @@ def test_the_hold_is_bounded():
     hold.release()
     assert hold.flush() == 3
     assert _MEDIA_HOLD_MAX >= 1000
+    # The hole it leaves is not a debug line only.
+    assert any(
+        r.levelname == "WARNING" and "2 packet(s)" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 def test_every_loopback_send_in_the_bridge_goes_through_the_hold():

@@ -274,16 +274,6 @@ class _CameraSdPlaybackMixin:
             record=record,
             sd_channel=sd_channel,
         )
-        peer_id = self.generate_webrtc_peer_id(
-            live_type=PLAY_CMD_SDCARD,
-            # Field 4, a literal 0 in the app - not the StreamID, which is
-            # field 5 (``stream``).
-            stream_id=0,
-            sdes=bool(self.is_sdes_camera),
-            device_id=self.device_id,
-            client_class=PLAYBACK_CLIENT_CLASS,
-            stream=PLAYBACK_STREAM,
-        )
         return await self.async_open_webrtc_stream(
             on_frame,
             timeout=timeout,
@@ -291,9 +281,28 @@ class _CameraSdPlaybackMixin:
             max_seconds=max_seconds,
             status_callback=status_callback,
             rtsp_push_url=rtsp_push_url,
-            reuse_peer_id=peer_id,
+            reuse_peer_id=playback_peer_id(self, sdes=bool(self.is_sdes_camera)),
             _sd_playback=start,
         )
+
+
+def playback_peer_id(camera: Any, *, sdes: bool) -> str:
+    """The peer id a playback open announces, for the SDES or DTLS transport.
+
+    The SDES-to-DTLS fallback builds a fresh one with ``sdes=False``: the
+    SDES id's transport digit is wrong for DTLS, and a live id (class 2,
+    PRE_LINK) would get audio alone from an H265-recording camera.
+    """
+    return camera.generate_webrtc_peer_id(
+        live_type=PLAY_CMD_SDCARD,
+        # Field 4, a literal 0 in the app - not the StreamID, which is
+        # field 5 (``stream``).
+        stream_id=0,
+        sdes=sdes,
+        device_id=camera.device_id,
+        client_class=PLAYBACK_CLIENT_CLASS,
+        stream=PLAYBACK_STREAM,
+    )
 
 
 # --- DTLS (A000088): the recording's H265 is taken raw ----------------------
@@ -459,13 +468,21 @@ class H265AccessUnits:
         self, seq: int, ts: int, marker: bool, payload: bytes
     ) -> "list[tuple[bytes, int, bool]]":
         out = []
-        gap = self._last_seq is not None and (seq - self._last_seq) & 0xFFFF != 1
+        missing = 0
+        if self._last_seq is not None:
+            missing = (seq - self._last_seq - 1) & 0xFFFF
+        gap = missing != 0
         if self._ts is not None and ts != self._ts:
-            # What went missing before this packet was the end of the unit
-            # in hand (or whole units between): that unit is the damaged one.
-            if gap:
+            # A unit in hand that never saw its marker lost at least its last
+            # packet; one already emitted at its marker lost nothing. Whatever
+            # else went missing is the head of this new unit (its VPS/SPS, or
+            # the first slice of a keyframe), so it is not handed on either.
+            pending = bool(self._nals) or self._fu is not None
+            if gap and pending:
                 self._broken = True
             out += self._emit()
+            if missing > (1 if pending else 0):
+                self._broken = True
         elif gap:
             self._broken = True
             self._fu = None
@@ -478,6 +495,9 @@ class H265AccessUnits:
                 i = 2
                 while i + 2 <= len(payload):
                     n = struct.unpack_from("!H", payload, i)[0]
+                    if n == 0 or i + 2 + n > len(payload):
+                        self._broken = True  # truncated or corrupt
+                        break
                     self._nals.append(bytes(payload[i + 2 : i + 2 + n]))
                     i += 2 + n
             elif t == 49 and len(payload) >= 3:  # fragmentation unit

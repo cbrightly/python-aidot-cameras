@@ -68,7 +68,9 @@ release still catches them.
 | `aidot_cameras.device_client.device_session_authenticated` | whether a device client's LAN session is logged in; a module-level function, so the row above does not cover it |
 | `CameraDeviceClient.has_live_session` | whether a stream session is up right now, answered without sending anything |
 | `lan_address`, `lan_login_failures`, `lan_login_over_ceiling` on every device client (`LanRetryMixin`) | the LAN login state, read-only: the address in use, consecutive failures, and whether the retry ceiling has been reached |
-| the session objects returned by `async_open_webrtc_stream` | `stop()`, `async_start_talk`, `async_stop_talk`, `talk_supported`, `is_alive`; statistics as `get_stats()` on a `WebRTCSession` and `media_stats()` on an `SdesSession`; `playback_reply()` on the `SdesSession` `async_open_sd_playback` returns |
+| the session objects returned by `async_open_webrtc_stream` | `stop()`, `async_start_talk`, `async_stop_talk`, `talk_supported`, `is_alive`; statistics as `get_stats()` on a `WebRTCSession` and `media_stats()` on an `SdesSession` |
+| the session `async_open_sd_playback` returns (an `SdesSession`, or a `WebRTCSession` on a DTLS camera) | everything in the row above, plus `playback_reply()` (the camera's answer to PLAY_START, its payload read with `decode_playcontrol_reply`) and `async_sd_pause()`, `async_sd_resume()`, `async_sd_seek(offset_s)` (each a `PlaycontrolReply`). All four answer `None` on a live session or when the camera does not answer in time |
+| `aidot_cameras.camera.sd_playback` | `decode_playcontrol_reply` and the `PlaycontrolReply` it returns (`command`, `result_channel`, `clip_seconds`, the clip's start time); the `PLAY_*` command numbers |
 | `aidot_cameras.camera.models` | `CameraDeviceInformation`, `CameraStatusData` |
 | `aidot_cameras.camera.lan_control` | LAN-direct control helpers |
 | `aidot_cameras.camera.go2rtc` | the go2rtc bridge helpers |
@@ -79,9 +81,10 @@ release still catches them.
 | the `aidot-go2rtc` command (also `python -m aidot_cameras`) | its arguments (`<dev_id> <output_url>`, `--list`, `-v`) and the meaning of the output URL schemes it accepts. Its log output is not part of the promise |
 | the `AIDOT_*` environment variables in the README's tables | per-install tuning seams. The variables in `docs/ENVIRONMENT.md` are not part of this promise: each may go once the behaviour it tunes has settled, and the CHANGELOG says so when one does |
 
-`lan_control`, `go2rtc` and `device_session_authenticated` are imported by the
-reference consumer (the Home Assistant integration), which is why they are
-listed: they were commitments in practice before this document named them.
+`lan_control`, `go2rtc`, `sd_playback.decode_playcontrol_reply` and
+`device_session_authenticated` are imported by the reference consumer (the Home
+Assistant integration), which is why they are listed: they were commitments in
+practice before this document named them.
 `CameraLanClient` appears in the README as a user-facing concept and is covered
 by the `lan_control` row.
 
@@ -112,10 +115,10 @@ interchangeable beyond that.
   function or attribute. Much of the interesting behaviour lives in
   `_open_sdes_stream_impl`, `_bridge_fn` and friends; none of it is stable.
 - `aidot_cameras._vendor.*`. A vendored aiortc 1.14.0, differing from upstream
-  by three import rewrites and one fix to closing a peer connection mid-ICE -
-  the exact delta and the re-vendoring procedure
-  are in `aidot_cameras/_vendor/aiortc/VENDOR.md`, and upstream's BSD licence
-  ships beside it. It tracks
+  by import rewrites, a fix to closing a peer connection mid-ICE, and the RTP
+  router hook SD playback takes H265 from - the exact delta and the
+  re-vendoring procedure are in `aidot_cameras/_vendor/aiortc/VENDOR.md`, and
+  upstream's BSD licence ships beside it. It tracks
   upstream on our schedule and is not part of the contract.
 - The internal protocol helpers in `camera.protocol` other than those named
   above, including the AVIO request and response machinery.

@@ -1109,6 +1109,10 @@ def _session_mode_echoed(frame: bytes) -> "Optional[int]":
 
 #: How many packets a playback open holds for its serve (see _new_media_hold).
 #: The serve is up within a second; ~70 packets/s on an A001064 recording.
+#: The hold is released once the serve binds or 4.5 s after it is launched
+#: (the bind wait and its fallback), so the cap is several times what one
+#: open can hold; a drop past it is logged as a warning, since the served
+#: clip then has a hole after its opening.
 _MEDIA_HOLD_MAX = 4000
 
 
@@ -1149,6 +1153,14 @@ class _MediaHold:
         first keyframe alone is ~130 packets and one burst of all of them can
         overrun the serve's socket. Returns how many were sent."""
         held, self._held = self._held or [], None
+        if self.dropped:
+            _LOGGER.warning(
+                "SD playback: %d packet(s) over the %d-packet hold were"
+                " dropped before the serve listened; the clip has a gap"
+                " after its opening",
+                self.dropped,
+                self._limit,
+            )
         sent = 0
         for i, (sock, pkt, port) in enumerate(held):
             try:
