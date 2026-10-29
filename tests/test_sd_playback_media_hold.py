@@ -143,3 +143,63 @@ def calls_to_serve_cmd():
     return calls_to(
         module_tree("aidot_cameras.camera.sdes_open"), "_build_sdes_serve_cmd"
     )
+
+
+def _rtp(seq, ssrc=0x1257, pt=8):
+    return (
+        bytes([0x80, pt])
+        + seq.to_bytes(2, "big")
+        + bytes(4)
+        + ssrc.to_bytes(4, "big")
+        + b"x"
+    )
+
+
+def test_a_packet_that_arrives_twice_is_forwarded_once():
+    # The reference box, 2026-10-28: every audio packet came twice (two
+    # routes to the camera), and the copied G.711 ran twice as long as the
+    # picture.
+    sent, lines = [], []
+    hold = _MediaHold()
+    hold.release()
+    for seq in (1, 1, 2, 3, 2, 3, 4):
+        hold.send(_Sock(sent), _rtp(seq), 5000, log=lines.append)
+    assert [int.from_bytes(p[2:4], "big") for p, _ in sent] == [1, 2, 3, 4]
+    assert hold.duplicates == 3
+    assert lines.count("bridge: dropping RTP packets that arrive twice") == 1
+
+
+def test_only_the_same_stream_and_port_count_as_a_repeat():
+    sent = []
+    hold = _MediaHold()
+    hold.release()
+    hold.send(_Sock(sent), _rtp(7), 5000)
+    hold.send(_Sock(sent), _rtp(7, ssrc=0x1259, pt=97), 5000)  # other SSRC
+    hold.send(_Sock(sent), _rtp(7), 5002)  # other port
+    rtcp = bytes([0x80, 200]) + bytes(10)
+    hold.send(_Sock(sent), rtcp, 5000)
+    hold.send(_Sock(sent), rtcp, 5000)  # RTCP is never deduplicated
+    assert len(sent) == 5 and hold.duplicates == 0
+
+
+def test_a_repeat_while_held_is_dropped_too():
+    sent = []
+    hold = _MediaHold()
+    for seq in (10, 10, 11):
+        hold.send(_Sock(sent), _rtp(seq), 5000)
+    hold.release()
+    hold.flush()
+    assert len(sent) == 2 and hold.duplicates == 1
+
+
+def test_the_window_forgets_old_numbers_so_a_wrapped_sequence_plays():
+    from aidot_cameras.camera.sdes_open import _DUPLICATE_WINDOW
+
+    sent = []
+    hold = _MediaHold()
+    hold.release()
+    n = 65536 + 10  # past a full wrap of the 16-bit sequence number
+    for i in range(n):
+        hold.send(_Sock(sent), _rtp(i & 0xFFFF), 5000)
+    assert len(sent) == n and hold.duplicates == 0
+    assert _DUPLICATE_WINDOW < 65536 // 4

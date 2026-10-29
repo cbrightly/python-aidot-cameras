@@ -724,8 +724,12 @@ frame matches the camera's own first frame in the same session (including the
 ~2 s the camera sends from before the record's listed time). If the hold
 fills before the serve listens (4000 packets, far beyond the few seconds it
 normally spans), the overflow is dropped and a warning says the clip has a
-gap. The recordings themselves have short holes in both tracks near their
-start (0.4-0.5 s, at the same offsets on every play).
+gap. The bridge also forwards each RTP packet of a playback once (by SSRC and
+sequence number): a host that reaches the camera by two routes received every
+audio packet twice and video packets up to six times (reference box,
+2026-10-28), and the copied G.711 then ran twice as long as the picture
+(unreleased). The recordings themselves have short holes in both tracks near
+their start (0.4-0.5 s, at the same offsets on every play).
 
 **An SDES `.ts` carries the G.711 audio as an unlabelled data stream**, not an
 audio track, so a player sees video only. A caller converting the file must

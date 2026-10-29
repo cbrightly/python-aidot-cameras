@@ -7,6 +7,13 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 ## [Unreleased]
 
 ### Fixed
+- **SD playback no longer writes a packet twice.** On a host that reaches the
+  camera by two routes every RTP packet can arrive more than once (the
+  reference box, 2026-10-28: each audio packet twice, video packets up to six
+  times). ffmpeg discards a repeated video packet, but an SDES recording's
+  G.711 is copied as data, so every repeat was written and the sound ran twice
+  as long as the picture. A playback session now forwards each packet of a
+  stream once; live sessions are unchanged.
 - **SD playback that falls back from SDES to DTLS** (a camera flagged SDES that
   answers only DTLS) now opens with the playback peer id rebuilt for DTLS and
   keeps `rtsp_push_url`, so the DTLS open refuses what it cannot serve. It used
