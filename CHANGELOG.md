@@ -6,6 +6,12 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc65]
+
+Soak: does not reset the clock. The changes are on the SD playback path; the
+offer filter now keeps two extmap lines a live offer never carries, and a live
+serve's ffmpeg command is unchanged.
+
 ### Added
 - **`playback_ended`** on an SDES playback session: True once the camera has
   marked the end of the recording, so a caller can finish at once instead of
