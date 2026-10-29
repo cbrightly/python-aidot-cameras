@@ -305,6 +305,175 @@ def playback_peer_id(camera: Any, *, sdes: bool) -> str:
     )
 
 
+# --- The recording's own clock (SDES) ---------------------------------------
+#
+# The camera stamps a recording's RTP as if it had been recorded at its live
+# frame rate and sends it at that pace: an A001064 night recording made at
+# 5 fps (200 ms a frame) went out at 20 fps (50 ms a frame), its 60 s in 15 s,
+# and its sound - sent in real time - stopped when the video ran out
+# (2026-10-29). The vendor app plays it at the right speed because every
+# packet also carries the frame's time in the recording, in an RTP header
+# extension the camera adds once the offer names transport-cc and
+# rtp-stream-id (OfferUtils.processRtp keeps exactly those two extmap lines;
+# the answer then says ``supportRtpExt: 1``). The 11-byte value is a 2-byte
+# playback channel, a flag byte (0xf0) and the time in Unix milliseconds, all
+# big-endian; all ones marks the end of the recording, on the packets the
+# camera sends after its last frame.
+
+#: The two header extensions the vendor app's offer keeps, with the ids this
+#: library offers them under.
+EXT_TRANSPORT_CC = (
+    "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
+)
+EXT_FRAME_TIME = "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id"
+EXT_TRANSPORT_CC_ID = 3
+EXT_FRAME_TIME_ID = 4
+#: The frame-time value the camera sends once the recording has run out.
+FRAME_TIME_END = 0xFFFFFFFFFFFFFFFF
+
+_AUDIO_CLOCKS = {0: 8000, 8: 8000}
+
+
+def offer_with_frame_times(sdp: str) -> str:
+    """``sdp`` asking for the per-frame recording time: both extmap lines in
+    every audio and video section, after its mid, and transport-cc feedback
+    on each video payload type."""
+    extmaps = [
+        f"a=extmap:{EXT_TRANSPORT_CC_ID} {EXT_TRANSPORT_CC}",
+        f"a=extmap:{EXT_FRAME_TIME_ID} {EXT_FRAME_TIME}",
+    ]
+    out = []
+    kind, pts = "", []
+    for line in sdp.split("\r\n"):
+        if line.startswith("m="):
+            kind = line[2:].split(" ", 1)[0]
+            pts = line.split()[3:]
+        out.append(line)
+        if line.startswith("a=mid:") and kind in ("audio", "video"):
+            out.extend(extmaps)
+            if kind == "video":
+                out.extend(f"a=rtcp-fb:{pt} transport-cc" for pt in pts)
+    return "\r\n".join(out)
+
+
+def rtp_extension(pkt: bytes, ext_id: int) -> "Optional[bytes]":
+    """The value of header extension ``ext_id`` in RTP packet ``pkt`` (RFC
+    8285, one- or two-byte form), or None. The header is in the clear under
+    SRTP, so this reads a packet still encrypted."""
+    if len(pkt) < 12 or not pkt[0] & 0x10:
+        return None
+    off = 12 + 4 * (pkt[0] & 0x0F)
+    if len(pkt) < off + 4:
+        return None
+    profile = int.from_bytes(pkt[off : off + 2], "big")
+    end = off + 4 + 4 * int.from_bytes(pkt[off + 2 : off + 4], "big")
+    if end > len(pkt):
+        return None
+    i = off + 4
+    while i < end:
+        if profile == 0xBEDE:
+            b = pkt[i]
+            if b == 0:
+                i += 1
+                continue
+            eid, n, i = b >> 4, (b & 0x0F) + 1, i + 1
+        elif profile >> 4 == 0x100 and i + 1 < end:
+            if pkt[i] == 0:
+                i += 1
+                continue
+            eid, n, i = pkt[i], pkt[i + 1], i + 2
+        else:
+            return None
+        if eid == ext_id:
+            return bytes(pkt[i : i + n])
+        i += n
+    return None
+
+
+def frame_time_ms(value: "Optional[bytes]") -> "Optional[int]":
+    """The recording time (Unix ms) in a frame-time extension value;
+    ``FRAME_TIME_END`` at the end of the recording; None if absent."""
+    if value is None or len(value) != 11:
+        return None
+    return int.from_bytes(value[3:11], "big")
+
+
+class PlaybackClock:
+    """Pairs each stream's RTP timestamps with the recording's own time.
+
+    Fed every packet the playback forwards; keeps one (rtp timestamp, ms)
+    pair per change of recording time, per payload type. ``ended`` turns
+    True on the first end-of-recording mark. ``timing()`` is what
+    ``retime_playback_ts`` needs.
+    """
+
+    def __init__(self) -> None:
+        self._pairs: "dict[int, list[tuple[int, int]]]" = {}
+        self.ended = False
+
+    def observe(self, pkt: bytes) -> bool:
+        """Note ``pkt``; True if it is an end-of-recording packet (forward
+        nothing of those: the recording is over)."""
+        ms = frame_time_ms(rtp_extension(pkt, EXT_FRAME_TIME_ID))
+        if ms is None:
+            return False
+        if ms == FRAME_TIME_END:
+            self.ended = True
+            return True
+        pairs = self._pairs.setdefault(pkt[1] & 0x7F, [])
+        if not pairs or pairs[-1][1] != ms:
+            pairs.append((int.from_bytes(pkt[4:8], "big"), ms))
+        return False
+
+    def timing(self) -> "dict[str, tuple[float, float]]":
+        """Per stream kind (``"video"``, ``"audio"``): (scale, start_s) - each
+        second of RTP time is ``scale`` seconds of recording, and the stream
+        starts ``start_s`` after the earliest stream does. Empty when no
+        frame times arrived."""
+        # One stream per kind: the payload type with the most frame times
+        # (a stray second video type would otherwise decide by dict order).
+        best: "dict[str, int]" = {}
+        for pt, pairs in self._pairs.items():
+            kind = "audio" if pt in _AUDIO_CLOCKS else "video"
+            if len(pairs) > len(self._pairs.get(best.get(kind, -1), ())):
+                best[kind] = pt
+        firsts = [self._pairs[pt][0][1] for pt in best.values()]
+        if not firsts:
+            return {}
+        origin = min(firsts)
+        out = {}
+        for kind, pt in best.items():
+            pairs = self._pairs[pt]
+            clock = _AUDIO_CLOCKS.get(pt, 90000)
+            (r0, m0), (r1, m1) = pairs[0], pairs[-1]
+            rtp_s = ((r1 - r0) & 0xFFFFFFFF) / clock
+            scale = (m1 - m0) / 1000 / rtp_s if rtp_s > 0 else 1.0
+            out[kind] = (scale, (m0 - origin) / 1000)
+        return out
+
+
+def retime_argv(
+    binary: str, src: str, dst: str, timing: "dict[str, tuple[float, float]]"
+) -> "list[str]":
+    """ffmpeg command that copies ``src`` to ``dst`` with each stream moved
+    onto the recording's clock (``PlaybackClock.timing``). An SDES capture's
+    G.711 rides a data stream, which takes the audio timing."""
+
+    def setts(scale: float, start_s: float) -> str:
+        def at(ts: str) -> str:
+            return f"({ts}-START{ts})*{scale:.6f}+{start_s:.6f}/TB"
+
+        return f"setts=pts={at('PTS')}:dts={at('DTS')}"
+
+    argv = [binary, "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+    argv += ["-i", src, "-map", "0", "-c", "copy"]
+    if "video" in timing:
+        argv += ["-bsf:v", setts(*timing["video"])]
+    if "audio" in timing:
+        argv += ["-bsf:a", setts(*timing["audio"]), "-bsf:d", setts(*timing["audio"])]
+    return [*argv, "-f", "mpegts", dst]
+
+
 # --- DTLS (A000088): the recording's H265 is taken raw ----------------------
 #
 # aiortc has no H265, and the camera sends a recording it holds as H265 on a

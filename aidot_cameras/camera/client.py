@@ -1041,9 +1041,13 @@ def _build_sdes_serve_cmd(
         # instead. Moving `-t` to the input side does not help - both placements
         # fail. Only a bounded run gives this up, and a bounded run is a
         # snapshot or the `-f null` drain, never the live stream.
+        # Nor for SD playback (``keep_probe_packets``): a recording arrives
+        # faster than it plays, and its timing is put right afterwards from
+        # the camera's per-frame recording time (sd_playback.PlaybackClock),
+        # which needs the camera's own RTP timestamps in the file.
         *(
             ["-use_wallclock_as_timestamps", "1"]
-            if _SERVE_ARRIVAL_TS and not max_seconds
+            if _SERVE_ARRIVAL_TS and not max_seconds and not keep_probe_packets
             else []
         ),
         # ``nobuffer`` drops what ffmpeg reads while probing the input (up to
