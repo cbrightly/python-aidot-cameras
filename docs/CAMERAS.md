@@ -731,6 +731,21 @@ audio packet twice and video packets up to six times (reference box,
 (unreleased). The recordings themselves have short holes in both tracks near
 their start (0.4-0.5 s, at the same offsets on every play).
 
+**A recording made at a lower frame rate is sent faster than it plays.** The
+camera stamps and paces a recording at its live frame rate (20 fps on the
+A001064), whatever it was recorded at: a night recording at 5 fps went out
+four times too fast, its 60 s in 15 s, and the sound - sent in real time -
+stopped with the last frame, about 15 s in (2026-10-29). Once the offer names
+transport-cc and rtp-stream-id, as the vendor app's does, every packet carries
+an RTP header extension (id 4 here): a 2-byte playback channel, a flag byte
+(0xf0), and the frame's time in the recording in Unix milliseconds; all ones
+marks the end of the recording. The library reads it off each packet (it is in
+the clear under SRTP) and moves the written `.ts` onto that clock when the
+session stops; `playback_ended` reports the end mark (unreleased). The sound
+after the first quarter of such a clip is never sent; the vendor app gets it,
+so the camera paces its sessions some other way, probably on transport-cc
+feedback, which this library does not send.
+
 **An SDES `.ts` carries the G.711 audio as an unlabelled data stream**, not an
 audio track, so a player sees video only. A caller converting the file must
 rebuild the A-law from that stream by timestamp, with silence in its holes:

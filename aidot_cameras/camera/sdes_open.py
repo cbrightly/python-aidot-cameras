@@ -36,6 +36,7 @@ from .constants import (
 )
 from .models import VideoFrame  # noqa: F401 - forward-ref annotation
 from .sdes import SdesSession
+from .sd_playback import EXT_FRAME_TIME, EXT_TRANSPORT_CC
 from .rtsp_publish import (
     redact_url,
     LoopbackRtpPublisher,
@@ -1146,6 +1147,11 @@ class _MediaHold:
         self.dropped = 0
         self.duplicates = 0
         self._seen: "dict" = {}
+        # The recording's own clock, from each packet's frame-time extension
+        # (sd_playback.PlaybackClock); its end mark ends the recording.
+        from .sd_playback import PlaybackClock
+
+        self.clock = PlaybackClock()
 
     def _repeat(self, pkt: bytes, port: int) -> bool:
         """Is ``pkt`` an RTP packet this hold has already passed on?"""
@@ -1172,6 +1178,16 @@ class _MediaHold:
         return self._released and self._held is not None
 
     def send(self, sock, pkt: bytes, port: int, *, pace=None, log=None) -> None:
+        was_ended = self.clock.ended
+        if self.clock.observe(pkt):
+            # After its last frame the camera marks packets as the end of the
+            # recording; there is nothing more of it to serve.
+            if not was_ended and log is not None:
+                try:
+                    log("bridge: the camera marked the end of the recording")
+                except Exception:
+                    pass
+            return
         if self._repeat(pkt, port):
             self.duplicates += 1
             if self.duplicates == 1 and log is not None:
@@ -2100,6 +2116,11 @@ def turn_install_permissions(
     return _perm_ok
 
 
+#: The extmap lines the vendor app's offer filter keeps (OfferUtils.processRtp):
+#: the two a playback offer adds (sd_playback.offer_with_frame_times).
+_KEPT_EXTMAPS = (EXT_TRANSPORT_CC, EXT_FRAME_TIME)
+
+
 def compress_sdp_req(device_id, _sdp: str) -> str:
     """g.b() equivalent - selective SDP filter for wPayload."""
     _out: list = []
@@ -2127,6 +2148,14 @@ def compress_sdp_req(device_id, _sdp: str) -> str:
             continue
         if any(_d in _ln for _d in ("sendrecv", "recvonly", "sendonly")):
             _k(_ln)
+            continue
+        if _ln.startswith("a=extmap"):
+            # OfferUtils.processRtp keeps these two, once each across the
+            # SDP; firmware that reads wPayload sees no others. A live offer
+            # names neither, so this changes nothing for it.
+            for _uri in _KEPT_EXTMAPS:
+                if _uri in _ln and _seen.get(_uri) is None:
+                    _k(_ln, _uri)
             continue
         for _ak in (
             "ice-ufrag",
@@ -6699,6 +6728,13 @@ async def _sdes_open_build_offer(self, ps: _SdesOpenState) -> None:
         )
         if ps._status:
             ps._status(f"SDES: offer pinned to video pt={_pin_video_pt}")
+    if ps.sd_playback is not None:
+        # The per-frame recording time the camera adds once the offer names
+        # transport-cc and rtp-stream-id, as the vendor app's does: its RTP
+        # clock runs at the live frame rate even for a slower recording.
+        from .sd_playback import offer_with_frame_times
+
+        ps.sdes_offer_sdp = offer_with_frame_times(ps.sdes_offer_sdp)
 
     _relay_str = (
         f"  relay-audio={ps._relay_addrs[ps._audio_sock][0]}:{ps._relay_addrs[ps._audio_sock][1]}"
@@ -9854,4 +9890,6 @@ class _SdesOpenMixin:
             # holding the started stream back for it.
             playback_waiter=_sd_start_waiter,
             playback=ps.sd_playback,
+            playback_clock=_media_hold.clock if _media_hold is not None else None,
+            playback_output=output_path if ps.sd_playback is not None else None,
         )

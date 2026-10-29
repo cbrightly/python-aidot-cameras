@@ -63,6 +63,8 @@ class SdesSession(_PlaybackControls, AvioRequestMixin):
         abort_chan=None,
         playback_waiter=None,
         playback=None,
+        playback_clock=None,
+        playback_output=None,
     ) -> None:
         # Which camera this session belongs to, for logging only.  Optional so
         # an existing caller that does not pass it still works; the logs then
@@ -135,6 +137,11 @@ class SdesSession(_PlaybackControls, AvioRequestMixin):
         # channel), for pause, resume and seek; None for live.
         self._sd_playback = playback
         self._sd_seek_count = 0
+        # SD playback: the recording's own clock as the bridge saw it
+        # (sd_playback.PlaybackClock) and the .ts it was written to, which
+        # stop() moves onto that clock.
+        self._playback_clock = playback_clock
+        self._playback_output = playback_output
         # Shared talk state (dict) for outbound two-way audio, or None when the
         # session was not opened talk-capable (offer stayed recvonly).  Populated
         # by the bridge (camera audio addr) and by async_start_talk (provider).
@@ -254,6 +261,13 @@ class SdesSession(_PlaybackControls, AvioRequestMixin):
         """time.monotonic() of the camera's last STUN answer, 0.0 if none yet."""
         return self._ice_progress[0]
 
+    @property
+    def playback_ended(self) -> bool:
+        """True once the camera has marked the end of the recording this
+        session plays (False for live, and before the end)."""
+        clock = self._playback_clock
+        return bool(clock is not None and clock.ended)
+
     def media_stats(self) -> dict:
         """Snapshot of media actually forwarded to ffmpeg by the bridge.
 
@@ -372,6 +386,62 @@ class SdesSession(_PlaybackControls, AvioRequestMixin):
         # others are waiting on.
         await asyncio.shield(task)
 
+    async def _retime_playback(self) -> None:
+        """Move a played recording's .ts onto the recording's own clock.
+
+        The camera's RTP clock runs at the live frame rate even for a
+        recording made slower (sd_playback.PlaybackClock), so the file ffmpeg
+        wrote plays fast; the frame-time extension says by how much. Left as
+        written when there is nothing to correct (no frame times, a live
+        session, an output that is not a .ts) or when the copy fails.
+        """
+        clock, path = self._playback_clock, self._playback_output
+        if clock is None or not path or not str(path).endswith(".ts"):
+            return
+        timing = clock.timing()
+        if not timing or all(
+            abs(s - 1.0) < 0.02 and o < 0.05 for s, o in timing.values()
+        ):
+            return
+        import os
+        import subprocess
+
+        from .sd_playback import retime_argv
+
+        tmp = f"{path}.retime.ts"
+        argv = retime_argv("ffmpeg", path, tmp, timing)
+
+        def _run() -> bool:
+            try:
+                done = subprocess.run(argv, capture_output=True, timeout=120)
+            except Exception:
+                return False
+            if done.returncode != 0 or not os.path.exists(tmp):
+                return False
+            os.replace(tmp, path)
+            return True
+
+        try:
+            ok = await asyncio.get_running_loop().run_in_executor(None, _run)
+        except Exception:
+            ok = False
+        if not ok:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            _LOGGER.warning(
+                "camera %s: the played recording could not be put on its own"
+                " clock and plays at the camera's send rate",
+                self._device_id,
+            )
+            return
+        _LOGGER.info(
+            "camera %s: played recording put on its own clock (%s)",
+            self._device_id,
+            ", ".join(f"{k} x{s:.2f} from +{o:.1f}s" for k, (s, o) in timing.items()),
+        )
+
     async def _stop_once(self) -> None:
         if self._talk_state is not None:
             # Ask the bridge to close the camera speaker, then give it a brief
@@ -454,6 +524,7 @@ class SdesSession(_PlaybackControls, AvioRequestMixin):
             except Exception:
                 _LOGGER.debug("swallowed exception in %s", "_stop_once", exc_info=True)
         self._log_ffmpeg_stderr(stderr_bytes or self._drained_stderr_tail())
+        await self._retime_playback()
         import os
 
         try:
@@ -465,7 +536,9 @@ class SdesSession(_PlaybackControls, AvioRequestMixin):
                 try:
                     _sock.close()
                 except Exception:
-                    _LOGGER.debug("swallowed exception in %s", "_stop_once", exc_info=True)
+                    _LOGGER.debug(
+                        "swallowed exception in %s", "_stop_once", exc_info=True
+                    )
         self._outgoing_q.put_nowait(None)
         try:
             await asyncio.wait_for(self._mqtt_fut, timeout=_STOP_MQTT_WAIT_S)

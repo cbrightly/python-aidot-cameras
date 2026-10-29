@@ -6,6 +6,32 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Added
+- **`playback_ended`** on an SDES playback session: True once the camera has
+  marked the end of the recording, so a caller can finish at once instead of
+  waiting for the media to go quiet.
+
+### Fixed
+- **SD playback of a recording made at a lower frame rate plays at the right
+  speed.** The camera stamps and sends a recording at its live frame rate: an
+  A001064 night recording made at 5 fps went out at 20 fps, its 60 s in 15 s,
+  and the file played four times too fast. A playback offer now names the two
+  RTP header extensions the vendor app's does (transport-cc and
+  rtp-stream-id), the camera then marks every packet with the frame's time in
+  the recording, and the `.ts` a playback writes is moved onto that clock when
+  the session stops. Measured on an A001064 night clip: 60.0 s of video at
+  200 ms a frame, its burned-in clock advancing 40 s over 40 s of file. The
+  offer filter keeps those two extmap lines, as the app's does; live offers
+  carry none, so live sessions are unchanged.
+
+### Known limitations
+- Such a recording's **sound** stops when the camera has sent the last frame,
+  about a quarter of the way through a 5 fps clip: the camera sends audio in
+  real time and the video four times faster, and ends both together. The
+  vendor app plays these with continuous sound, so the camera paces its
+  sessions somehow; transport-cc feedback, which this library does not send,
+  is the remaining candidate.
+
 ## [1.0.0rc64]
 
 Soak: does not reset the clock. Every change is on the SD playback path, which
