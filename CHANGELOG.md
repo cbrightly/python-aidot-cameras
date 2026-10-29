@@ -6,6 +6,11 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc64]
+
+Soak: does not reset the clock. Every change is on the SD playback path, which
+rc63 added; live sessions are unchanged.
+
 ### Fixed
 - **SD playback no longer writes a packet twice.** On a host that reaches the
   camera by two routes every RTP packet can arrive more than once (the
