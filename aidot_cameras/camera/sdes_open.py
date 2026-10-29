@@ -8,6 +8,7 @@ breaks the client<->sdes_open cycle).  CameraMixin inherits this mixin, so
 """
 
 import asyncio
+import collections
 import functools
 import hashlib as _hashlib_mod
 import logging
@@ -1116,6 +1117,11 @@ def _session_mode_echoed(frame: bytes) -> "Optional[int]":
 _MEDIA_HOLD_MAX = 4000
 
 
+#: How many recent sequence numbers per stream a playback remembers, to drop
+#: a packet that arrives twice. A few seconds of video at 2560x1440.
+_DUPLICATE_WINDOW = 2048
+
+
 class _MediaHold:
     """Packets for the serve, held in order until it is listening.
 
@@ -1123,6 +1129,14 @@ class _MediaHold:
     loopback port; ``release`` by the open once the serve is bound. The first
     ``send`` (or ``flush``) after the release hands over everything held -
     still on the bridge thread, so nothing can overtake it.
+
+    It also drops an RTP packet already forwarded (same port, SSRC and
+    sequence number). On a host that reaches the camera by two routes every
+    packet can arrive twice: measured on the reference box 2026-10-28, each
+    playback audio packet came twice and video packets up to six times. ffmpeg
+    discards a repeated video packet, but the G.711 is copied as data, so
+    every repeat was written too and the clip's sound ran twice as long as its
+    picture.
     """
 
     def __init__(self, limit: int = 0) -> None:
@@ -1130,6 +1144,26 @@ class _MediaHold:
         self._released = False
         self._limit = limit or _MEDIA_HOLD_MAX
         self.dropped = 0
+        self.duplicates = 0
+        self._seen: "dict" = {}
+
+    def _repeat(self, pkt: bytes, port: int) -> bool:
+        """Is ``pkt`` an RTP packet this hold has already passed on?"""
+        if len(pkt) < 12 or pkt[0] >> 6 != 2 or 192 <= pkt[1] <= 223:
+            return False  # not RTP, or RTCP (payload types 192-223)
+        ssrc = int.from_bytes(pkt[8:12], "big")
+        seq = int.from_bytes(pkt[2:4], "big")
+        seen = self._seen.get((port, ssrc))
+        if seen is None:
+            seen = self._seen[(port, ssrc)] = (set(), collections.deque())
+        recent, order = seen
+        if seq in recent:
+            return True
+        recent.add(seq)
+        order.append(seq)
+        if len(order) > _DUPLICATE_WINDOW:
+            recent.discard(order.popleft())
+        return False
 
     def release(self) -> None:
         self._released = True
@@ -1138,6 +1172,14 @@ class _MediaHold:
         return self._released and self._held is not None
 
     def send(self, sock, pkt: bytes, port: int, *, pace=None, log=None) -> None:
+        if self._repeat(pkt, port):
+            self.duplicates += 1
+            if self.duplicates == 1 and log is not None:
+                try:
+                    log("bridge: dropping RTP packets that arrive twice")
+                except Exception:
+                    pass
+            return
         if self._held is not None:
             if not self._released:
                 if len(self._held) < self._limit:
