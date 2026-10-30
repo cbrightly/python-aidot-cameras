@@ -6,7 +6,23 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Known limitations
+- The night-recording sound limit (rc65) was narrowed down on an A001064:
+  sending transport-cc feedback as the app's WebRTC stack does (123 SRTCP
+  reports in a playback), a REMB cap and identifying as the iOS client all
+  left it unchanged; pausing whenever the video ran 3 s ahead of the clock
+  stretched the delivery to real time but raised the sound only from 15 s to
+  35 s of a 60 s clip, since a pause stops the sound too. None of these
+  ships; what paces the app's sessions is still unknown.
+
 ### Fixed
+- **A DTLS card recording that loses a packet no longer loses seconds of
+  picture.** A frame with a sequence gap in it was dropped, and every frame
+  after it up to the next keyframe then referred to a frame that was not
+  there: one lost packet cost an A000088 playback 122 undecodable frames
+  (2026-10-29). The damaged frame is now handed to the decoder with what
+  arrived, which conceals it, as a WebRTC player does;
+  `H265AccessUnits(keep_damaged=False)` keeps the old behaviour.
 - **A DTLS recording's output file is opened off the event loop.** The
   MPEG-TS recorder opened it in its constructor, on the caller's loop; Home
   Assistant reported "Detected blocking call to open" on every card-recording

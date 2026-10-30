@@ -603,31 +603,47 @@ class H265AccessUnits:
     ``feed`` takes one packet's sequence number, RTP timestamp, marker bit and
     payload, and returns the access units it completed as
     ``(bytes, rtp_timestamp, is_keyframe)`` - the shape the DTLS recorder's
-    video queue takes. A unit with a sequence gap in it is dropped rather than
-    handed on damaged. ``parameter_sets`` (from the answer's fmtp) go in front
-    of a keyframe that does not carry its own VPS.
+    video queue takes. A unit with a sequence gap in it is handed on with
+    what arrived (``damaged`` counts them): every later frame up to the next
+    keyframe refers to it, so dropping it made all of those undecodable - an
+    A000088 playback lost 122 frames to one lost packet (2026-10-29), where
+    the decoder conceals a damaged frame and carries on. ``keep_damaged=False``
+    drops them instead (``dropped``). ``parameter_sets`` (from the answer's
+    fmtp) go in front of a keyframe that does not carry its own VPS.
     """
 
-    def __init__(self, parameter_sets: "Optional[list[bytes]]" = None) -> None:
+    def __init__(
+        self,
+        parameter_sets: "Optional[list[bytes]]" = None,
+        *,
+        keep_damaged: bool = True,
+    ) -> None:
         self.parameter_sets = list(parameter_sets or [])
+        self.keep_damaged = keep_damaged
         self._ts: "Optional[int]" = None
         self._nals: "list[bytes]" = []
         self._fu: "Optional[bytearray]" = None
         self._last_seq: "Optional[int]" = None
         self._broken = False
         self.dropped = 0
+        self.damaged = 0
 
     def _emit(self) -> "list[tuple[bytes, int, bool]]":
         out = []
         if self._fu is not None:
             self._broken = True  # a fragment never finished
-        if self._nals and not self._broken and self._ts is not None:
+            if self.keep_damaged and len(self._fu) > 2:
+                self._nals.append(bytes(self._fu))  # what arrived of it
+        keep = not self._broken or self.keep_damaged
+        if self._nals and keep and self._ts is not None:
             types = [(n[0] >> 1) & 0x3F for n in self._nals if n]
             kf = any(16 <= t <= 21 for t in types)
             nals = self._nals
             if kf and 32 not in types and self.parameter_sets:
                 nals = self.parameter_sets + nals
             out.append((b"".join(_NAL_SC + n for n in nals), self._ts, kf))
+            if self._broken:
+                self.damaged += 1
         elif self._nals or self._broken:
             self.dropped += 1
         self._nals, self._fu, self._broken = [], None, False
@@ -665,7 +681,7 @@ class H265AccessUnits:
                 while i + 2 <= len(payload):
                     n = struct.unpack_from("!H", payload, i)[0]
                     if n == 0 or i + 2 + n > len(payload):
-                        self._broken = True  # truncated or corrupt
+                        self._broken = True  # truncated or corrupt: the rest is lost
                         break
                     self._nals.append(bytes(payload[i + 2 : i + 2 + n]))
                     i += 2 + n

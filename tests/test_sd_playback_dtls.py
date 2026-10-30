@@ -164,9 +164,9 @@ def test_access_units_survive_rtp_and_back():
     assert [ts for _, ts, _ in got] == [90000 + i * 6000 for i in range(len(aus))]
 
 
-def test_a_unit_with_a_lost_packet_is_dropped_not_damaged():
+def test_in_drop_mode_a_unit_with_a_lost_packet_is_dropped():
     aus = _hevc_access_units(4)
-    units = H265AccessUnits()
+    units = H265AccessUnits(keep_damaged=False)
     got, seq = [], 7
     for i, au in enumerate(aus):
         pkts = _packetize(au, i * 6000, seq, mtu=200)
@@ -356,7 +356,7 @@ def test_a_recording_held_as_h264_is_muxed_as_h264():
 
 def test_a_lost_last_packet_drops_its_own_unit_not_the_next():
     aus = _hevc_access_units(5)
-    units = H265AccessUnits()
+    units = H265AccessUnits(keep_damaged=False)
     got, seq = [], 50
     for i, au in enumerate(aus):
         pkts = _packetize(au, i * 6000, seq, mtu=200)
@@ -419,7 +419,7 @@ def test_the_sd_mode_echo_has_one_parser():
 
 def test_a_lost_head_drops_the_new_unit_not_the_one_already_emitted():
     aus = _hevc_access_units(5)
-    units = H265AccessUnits()
+    units = H265AccessUnits(keep_damaged=False)
     got, seq = [], 300
     for i, au in enumerate(aus):
         pkts = _packetize(au, i * 6000, seq, mtu=200)
@@ -434,7 +434,7 @@ def test_a_lost_head_drops_the_new_unit_not_the_one_already_emitted():
 
 def test_a_gap_wider_than_the_lost_marker_drops_both_units():
     aus = _hevc_access_units(5)
-    units = H265AccessUnits()
+    units = H265AccessUnits(keep_damaged=False)
     got, seq = [], 900
     for i, au in enumerate(aus):
         pkts = _packetize(au, i * 6000, seq, mtu=200)
@@ -448,9 +448,29 @@ def test_a_gap_wider_than_the_lost_marker_drops_both_units():
 
 
 def test_a_truncated_aggregation_packet_breaks_its_unit():
-    units = H265AccessUnits()
+    units = H265AccessUnits(keep_damaged=False)
     vps = bytes([32 << 1, 1, 0x0C])
     ap = bytes([48 << 1, 1]) + struct.pack("!H", 3) + vps + struct.pack("!H", 1200)
     ap += bytes([19 << 1, 1]) + b"\x00" * 298
     assert units.feed(1, 0, True, ap) == []
     assert units.dropped == 1
+
+
+def test_by_default_a_damaged_unit_is_handed_on_and_counted():
+    # One lost packet used to cost every frame up to the next keyframe
+    # (A000088, 2026-10-29: 122 undecodable frames); handed on, the decoder
+    # conceals the one damaged frame.
+    aus = _hevc_access_units(5)
+    units = H265AccessUnits()
+    got, seq = [], 600
+    for i, au in enumerate(aus):
+        pkts = _packetize(au, i * 6000, seq, mtu=200)
+        seq += len(pkts)
+        for j, p in enumerate(pkts):
+            if i == 0 and j == 3:
+                continue  # one packet inside the first (keyframe) unit
+            got += units.feed(*p)
+    assert [ts for _, ts, _ in got] == [i * 6000 for i in range(len(aus))]
+    assert units.damaged == 1 and units.dropped == 0
+    assert got[0][2] is True  # still marked a keyframe
+    assert got[1:] and [_nals(d) for d, _, _ in got[1:]] == [_nals(a) for a in aus[1:]]

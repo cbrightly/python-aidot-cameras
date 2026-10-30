@@ -321,6 +321,7 @@ def _install_sd_h265_tap(pc, h265, status) -> int:
                 return
             units = h265["units"]
             lost_before = units.dropped
+            damaged_before = units.damaged
             for data, ts, kf in units.feed(
                 packet.sequence_number,
                 packet.timestamp,
@@ -335,6 +336,11 @@ def _install_sd_h265_tap(pc, h265, status) -> int:
                         status("SD playback: the recorder fell behind - H265 dropped")
             if units.dropped and not lost_before:
                 status("SD playback: an H265 frame with a lost packet was dropped")
+            if units.damaged and not damaged_before:
+                status(
+                    "SD playback: an H265 frame with a lost packet was passed on"
+                    " damaged (the decoder conceals it)"
+                )
 
         return _tap
 

@@ -741,10 +741,13 @@ an RTP header extension (id 4 here): a 2-byte playback channel, a flag byte
 (0xf0), and the frame's time in the recording in Unix milliseconds; all ones
 marks the end of the recording. The library reads it off each packet (it is in
 the clear under SRTP) and moves the written `.ts` onto that clock when the
-session stops; `playback_ended` reports the end mark (unreleased). The sound
+session stops; `playback_ended` reports the end mark (1.0.0rc65). The sound
 after the first quarter of such a clip is never sent; the vendor app gets it,
-so the camera paces its sessions some other way, probably on transport-cc
-feedback, which this library does not send.
+so the camera paces the app's sessions some other way. Not by transport-cc
+feedback (sent as the app's stack does, 123 reports in one playback: no
+change), a REMB cap, or the iOS client class; pausing whenever the video ran
+3 s ahead stretched delivery to real time but raised the sound only to 35 s
+of 60, because a pause stops the sound too (2026-10-30).
 
 **An SDES `.ts` carries the G.711 audio as an unlabelled data stream**, not an
 audio track, so a player sees video only. A caller converting the file must
