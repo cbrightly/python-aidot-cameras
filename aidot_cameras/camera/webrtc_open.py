@@ -3155,14 +3155,24 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
             track,
         )
 
-    ps.recorder = self._attach_file_recorder(
-        ps.pc,
-        ps.output_path,
-        ps.on_frame,
-        # SD playback: H264 or H265, whichever the recording is; the first
-        # keyframe names it.
-        video_codec=None if ps._sd_playback is not None else "h264",
-    )
+    # Opened off the event loop: a caller such as Home Assistant flags (and
+    # may be stalled by) a blocking open() on it. The recorder takes the open
+    # file, so an unwritable path still fails before the session connects.
+    _rec_file = await _open_ts_output(ps.output_path)
+    try:
+        ps.recorder = self._attach_file_recorder(
+            ps.pc,
+            ps.output_path,
+            ps.on_frame,
+            # SD playback: H264 or H265, whichever the recording is; the first
+            # keyframe names it.
+            video_codec=None if ps._sd_playback is not None else "h264",
+            file=_rec_file,
+        )
+    finally:
+        # A recorder that took the file closes it; nobody else will.
+        if _rec_file is not None and getattr(ps, "recorder", None) is None:
+            _rec_file.close()
     if ps._sd_playback is not None and ps.recorder is not None:
         from .sd_playback import H265AccessUnits
 
@@ -4693,8 +4703,26 @@ async def _dtls_open_ice_candidates_and_connect(
     return None
 
 
+async def _open_ts_output(path):
+    """``path`` opened for the TS recorder in an executor, or None: not a .ts
+    output (the recorder is not ours), or the open failed - the recorder then
+    tries itself and reports the error as it always has."""
+    from .recording import is_ts_path
+
+    if not path or not is_ts_path(path):
+        return None
+    try:
+        return await asyncio.get_running_loop().run_in_executor(
+            None, functools.partial(open, path, "wb")
+        )
+    except OSError:
+        return None
+
+
 class _WebRTCOpenMixin:
-    def _attach_file_recorder(self, pc, output_path, on_frame, video_codec="h264"):
+    def _attach_file_recorder(
+        self, pc, output_path, on_frame, video_codec="h264", file=None
+    ):
         """The recorder for a DTLS ``output_path``, wired to ``pc``'s tracks.
 
         MPEG-TS paths copy the camera's own streams (``TsCopyRecorder``): the
@@ -4716,6 +4744,7 @@ class _WebRTCOpenMixin:
                     output_path,
                     device_id=getattr(self, "device_id", None),
                     video_codec=video_codec,
+                    file=file,
                 )
             except OSError as exc:
                 _LOGGER.warning(

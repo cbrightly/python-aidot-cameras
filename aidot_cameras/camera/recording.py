@@ -55,6 +55,7 @@ class TsCopyRecorder:
         path: str,
         device_id: Optional[str] = None,
         video_codec: Optional[str] = "h264",
+        file=None,
     ) -> None:
         self._path = path
         # None: the first keyframe names it (SD playback, H264 or H265).
@@ -67,10 +68,12 @@ class TsCopyRecorder:
         self._thread: Optional[threading.Thread] = None
         self._state: dict = {}
         self._stopped = False
-        # Opened here, before the session connects, so an unwritable path fails
-        # while there is nothing to clean up. Held open until the mux thread is
-        # done with it - no single block encloses that, so no context manager.
-        self._file = open(self._path, "wb")  # noqa: SIM115
+        # Opened before the session connects, so an unwritable path fails
+        # while there is nothing to clean up: by the caller in an executor
+        # (``file``; an open() on an event loop blocks it), or here. Held open
+        # until the mux thread is done with it - no single block encloses
+        # that, so no context manager.
+        self._file = file if file is not None else open(self._path, "wb")  # noqa: SIM115
 
     async def start(self) -> None:
         if self._thread is not None or self._stopped:
