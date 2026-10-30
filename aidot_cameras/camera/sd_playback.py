@@ -597,6 +597,59 @@ def answer_h265_parameter_sets(sdp: str, pt: Optional[int]) -> "list[bytes]":
     return out
 
 
+class SeqReorder:
+    """Puts one RTP stream back in sequence order, waiting a little for gaps.
+
+    A packet the camera resends after a NACK arrives after the ones that
+    followed it; the access-unit assembler takes packets in order, so they
+    are held here until the gap fills or ``max_wait_s`` passes, then handed
+    on in order (a gap given up on reaches the assembler as a gap, and its
+    unit is handed on damaged). ``push`` returns what is ready; ``flush``
+    returns the rest at the end.
+    """
+
+    #: Most packets held; past this the oldest gap is given up at once.
+    MAX_HELD = 1500
+
+    def __init__(self, max_wait_s: float = 0.3) -> None:
+        self.max_wait_s = max_wait_s
+        self._next: "Optional[int]" = None
+        self._held: "dict[int, tuple[float, Any]]" = {}
+        self.late = 0  # arrived after its gap was given up
+
+    def push(self, seq: int, item: Any, now: float) -> "list":
+        if self._next is None:
+            self._next = seq
+        if (seq - self._next) & 0x8000:  # before the next expected one
+            self.late += 1
+            return []
+        self._held.setdefault(seq, (now, item))
+        return self._release(now)
+
+    def _release(self, now: float) -> "list":
+        out = []
+        while True:
+            while self._next in self._held:
+                out.append(self._held.pop(self._next)[1])
+                self._next = (self._next + 1) & 0xFFFF
+            if not self._held:
+                return out
+            oldest = min(t for t, _ in self._held.values())
+            if now - oldest < self.max_wait_s and len(self._held) < self.MAX_HELD:
+                return out
+            # Give up on the gap: carry on from the earliest packet held.
+            self._next = min(self._held, key=lambda s: (s - self._next) & 0xFFFF)
+
+    def flush(self) -> "list":
+        out = []
+        while self._held:
+            if self._next not in self._held:
+                self._next = min(self._held, key=lambda s: (s - self._next) & 0xFFFF)
+            out.append(self._held.pop(self._next)[1])
+            self._next = (self._next + 1) & 0xFFFF
+        return out
+
+
 class H265AccessUnits:
     """RTP payloads (RFC 7798) in, Annex B access units out.
 

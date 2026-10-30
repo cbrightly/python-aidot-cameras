@@ -489,3 +489,89 @@ def test_a_unit_sent_twice_is_handed_on_once():
             got += units.feed(*p)
     assert [ts for _, ts, _ in got] == [0, 6000, 12000]
     assert units.repeats == 1
+
+
+def test_a_resent_packet_is_put_back_in_place():
+    from aidot_cameras.camera.sd_playback import SeqReorder
+
+    r = SeqReorder(max_wait_s=0.3)
+    assert r.push(10, "a", 0.0) == ["a"]
+    assert r.push(12, "c", 0.01) == []  # 11 missing: hold 12
+    assert r.push(13, "d", 0.02) == []
+    assert r.push(11, "b", 0.1) == ["b", "c", "d"]  # the resend fills it
+
+
+def test_a_gap_that_never_fills_is_given_up_in_time():
+    from aidot_cameras.camera.sd_playback import SeqReorder
+
+    r = SeqReorder(max_wait_s=0.3)
+    r.push(65534, "a", 0.0)
+    assert r.push(1, "d", 0.01) == []  # 65535 and 0 missing, across the wrap
+    assert r.push(2, "e", 0.35) == ["d", "e"]  # past the wait: carry on
+    assert r.push(0, "late", 0.4) == [] and r.late == 1
+    r.push(5, "h", 0.5)
+    assert r.flush() == ["h"]
+
+
+def test_the_tap_asks_for_a_lost_packet_and_puts_the_resend_in_place():
+    # The A000088 resends what a NACK names (2026-10-30: three plays, no
+    # frame damaged or dropped, 0 decode errors, against 147 error lines
+    # from one dropped frame before). aiortc does not NACK this stream, as it
+    # does not route it; the tap asks, and holds packets until the resend.
+    import asyncio
+
+    from aidot_cameras.camera.webrtc_open import _install_sd_h265_tap
+
+    sent = []
+
+    class _Rx:
+        def __init__(self, router):
+            self.transport = type("T", (), {"_rtp_router": router})()
+
+        async def _send_rtcp_nack(self, ssrc, lost):
+            sent.append((ssrc, list(lost)))
+
+    class _PcNack:
+        def __init__(self, router):
+            self._t = [type("Tr", (), {"receiver": _Rx(router), "kind": "video"})()]
+
+        def getTransceivers(self):
+            return self._t
+
+    def _p(seq, ts, marker, payload):
+        p = _pkt(98, seq, ts, marker, payload)
+        p.ssrc = 0x1234
+        return p
+
+    rec = type("Rec", (), {"vq": queue.Queue(), "on_stop": []})()
+    state = {"pt": 98, "units": H265AccessUnits(), "recorder": rec, "dropped": 0}
+    router = _Router()
+
+    # One IDR in three fragments, and the next unit.
+    idr = bytes([19 << 1, 1]) + bytes(range(60))
+    fu_ind = bytes([(idr[0] & 0x81) | (49 << 1), idr[1]])
+    body = idr[2:]
+    frags = [
+        fu_ind + bytes([19 | 0x80]) + body[:20],
+        fu_ind + bytes([19]) + body[20:40],
+        fu_ind + bytes([19 | 0x40]) + body[40:],
+    ]
+    trail = bytes([1 << 1, 1, 0xBB])
+
+    async def main():
+        assert _install_sd_h265_tap(_PcNack(router), state, lambda m: None) == 1
+        router.raw_tap(_p(100, 3000, False, frags[0]))
+        router.raw_tap(_p(102, 3000, True, frags[2]))  # 101 lost
+        router.raw_tap(_p(103, 9000, True, trail))
+        await asyncio.sleep(0)
+        assert sent == [(0x1234, [101])]
+        assert rec.vq.empty()  # held for the resend
+        router.raw_tap(_p(101, 3000, False, frags[1]))  # the resend
+        await asyncio.sleep(0)
+
+    asyncio.run(main())
+    first = rec.vq.get_nowait()
+    assert first == (b"\x00\x00\x00\x01" + idr, 3000, True, "hevc")
+    assert state["units"].damaged == 0 and state["units"].dropped == 0
+    assert rec.vq.get_nowait()[1] == 9000
+    assert rec.on_stop  # the tap flushes what it holds when the recording stops

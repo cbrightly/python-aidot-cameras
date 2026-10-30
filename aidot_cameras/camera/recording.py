@@ -68,6 +68,9 @@ class TsCopyRecorder:
         self._thread: Optional[threading.Thread] = None
         self._state: dict = {}
         self._stopped = False
+        # Called first thing in stop(), for whoever still holds packets for
+        # this recording (the SD playback tap's reorder buffer).
+        self.on_stop: "list" = []
         # Opened before the session connects, so an unwritable path fails
         # while there is nothing to clean up: by the caller in an executor
         # (``file``; an open() on an event loop blocks it), or here. Held open
@@ -96,6 +99,11 @@ class TsCopyRecorder:
         if self._stopped:
             return
         self._stopped = True
+        for _cb in self.on_stop:
+            try:
+                _cb()
+            except Exception:
+                _LOGGER.debug("recording stop callback failed", exc_info=True)
         if self._thread is None:
             self._close()
             return
