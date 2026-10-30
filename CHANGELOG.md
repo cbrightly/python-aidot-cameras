@@ -7,6 +7,15 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 ## [Unreleased]
 
 ### Fixed
+- **A DTLS card recording asks for what it lost.** aiortc only sends NACKs
+  for streams it routes, and a recording's H265 is taken raw before routing,
+  so a lost packet was never resent and its frame, with every frame after it
+  up to the next keyframe, came out damaged: one lost packet cost an A000088
+  playback 147 error lines (2026-10-30). The tap now NACKs gaps through the
+  session's video receiver and holds packets up to 300 ms so a resend goes
+  back in place before the frame is assembled; what it still holds is written
+  when the recording stops. Three plays of the same recording: every frame
+  whole, 0 decode errors.
 - **A DTLS card recording no longer ends on a repeated frame.** The A000088
   sends a recording's last frame twice, under a new timestamp, and a decoder
   reported the picture order count twice ("Duplicate POC"). The H265

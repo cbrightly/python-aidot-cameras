@@ -735,7 +735,12 @@ video (the camera's per-frame recording times say the same: 4002 ms to the
 next frame), while its sound runs from the start; a player holds that first
 picture until the video resumes. It is in the recording, not lost on the way
 (2026-10-30). An A000088 sends a recording's last frame twice under a new
-timestamp; the H265 assembler skips the copy (unreleased).
+timestamp; the H265 assembler skips the copy (unreleased). Its recording's
+H265 is taken raw before aiortc routes it, so aiortc never asks for a lost
+packet again; the tap sends the NACK itself and holds packets up to 300 ms so
+the resend goes back in place. The A000088 resends what is named: three plays
+with it had every frame whole, against 147 decode-error lines from one lost
+packet before (unreleased).
 
 **A recording made at a lower frame rate is sent faster than it plays.** The
 camera stamps and paces a recording at its live frame rate (20 fps on the

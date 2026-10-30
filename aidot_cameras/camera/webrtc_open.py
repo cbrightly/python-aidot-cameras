@@ -295,7 +295,8 @@ def _install_sd_h265_tap(pc, h265, status) -> int:
     PCMU by number, but its answer's audio was PCMA alone, so nothing else
     claims it. Returns the routers tapped.
     """
-    from .sd_playback import starts_h265_stream
+    from .._vendor.aiortc.rtcrtpreceiver import NackGenerator
+    from .sd_playback import SeqReorder, starts_h265_stream
 
     if h265 is None:
         return 0
@@ -308,17 +309,21 @@ def _install_sd_h265_tap(pc, h265, status) -> int:
             routers.append(router)
 
     def _make(router):
-        def _tap(packet) -> None:
-            pt = h265["pt"]
-            if pt is None:
-                if packet.payload_type in router.payload_type_table or not (
-                    starts_h265_stream(packet.payload)
-                ):
-                    return
-                h265["pt"] = pt = packet.payload_type
-                status(f"SD playback: taking pt={pt} as the recording's H265")
-            if packet.payload_type != pt:
-                return
+        # A video receiver on this transport sends the NACKs: aiortc only
+        # asks for resends on streams it routes, and this one it does not.
+        rx = None
+        for t in pc.getTransceivers():
+            r = t.receiver
+            if getattr(getattr(r, "transport", None), "_rtp_router", None) is router:
+                if rx is None or getattr(t, "kind", None) == "video":
+                    rx = r
+        reorder = SeqReorder()
+        nack_gen = NackGenerator()
+        # The loop holds tasks weakly: a NACK not referenced here can be
+        # collected before it is sent.
+        nack_tasks: "set" = set()
+
+        def _feed(packet) -> None:
             units = h265["units"]
             lost_before = units.dropped
             damaged_before = units.damaged
@@ -341,6 +346,43 @@ def _install_sd_h265_tap(pc, h265, status) -> int:
                     "SD playback: an H265 frame with a lost packet was passed on"
                     " damaged (the decoder conceals it)"
                 )
+
+        def _flush() -> None:
+            for held in reorder.flush():
+                _feed(held)
+
+        on_stop = getattr(h265["recorder"], "on_stop", None)
+        if on_stop is not None:
+            on_stop.append(_flush)
+
+        def _tap(packet) -> None:
+            pt = h265["pt"]
+            if pt is None:
+                if packet.payload_type in router.payload_type_table or not (
+                    starts_h265_stream(packet.payload)
+                ):
+                    return
+                h265["pt"] = pt = packet.payload_type
+                status(f"SD playback: taking pt={pt} as the recording's H265")
+            if packet.payload_type != pt:
+                return
+            # Ask for what never arrived; the resend is put back in place
+            # by the reorder buffer before the assembler sees it.
+            if nack_gen.add(packet) and rx is not None and nack_gen.missing:
+                h265["nacks"] = h265.get("nacks", 0) + 1
+                if h265["nacks"] == 1:
+                    status("SD playback: asking the camera to resend lost H265 (NACK)")
+                try:
+                    task = asyncio.get_running_loop().create_task(
+                        rx._send_rtcp_nack(packet.ssrc, sorted(nack_gen.missing))
+                    )
+                except RuntimeError:
+                    pass  # no loop: nothing to send on
+                else:
+                    nack_tasks.add(task)
+                    task.add_done_callback(nack_tasks.discard)
+            for ready in reorder.push(packet.sequence_number, packet, time.monotonic()):
+                _feed(ready)
 
         return _tap
 
