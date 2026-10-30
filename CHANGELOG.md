@@ -6,6 +6,14 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **A DTLS recording's output file is opened off the event loop.** The
+  MPEG-TS recorder opened it in its constructor, on the caller's loop; Home
+  Assistant reported "Detected blocking call to open" on every card-recording
+  fetch from an A000088. The open phase now opens it in an executor and hands
+  it to the recorder, so an unwritable path still fails before the session
+  connects.
+
 ## [1.0.0rc65]
 
 Soak: does not reset the clock. The changes are on the SD playback path; the

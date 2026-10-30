@@ -122,3 +122,37 @@ def test_tapping_a_receiver_twice_for_different_queues_is_flagged(caplog):
     with caplog.at_level("WARNING"):
         CameraMixin._install_encoded_tap(rcv, second, True, serve=True)
     assert any("already tapped" in r.getMessage() for r in caplog.records)
+
+
+def test_the_recording_file_is_opened_off_the_event_loop(tmp_path, monkeypatch):
+    # Home Assistant flagged "Detected blocking call to open ... .part.ts"
+    # on every DTLS card-recording fetch (2026-10-29): the recorder opened its
+    # file in its constructor, on the loop. The open phase now opens it in an
+    # executor and hands it over.
+    import asyncio
+    import threading
+
+    from aidot_cameras.camera import webrtc_open
+    from aidot_cameras.camera.recording import TsCopyRecorder
+
+    loop_thread, opened_on = [], []
+    real_open = open
+
+    def _spy(*a, **k):
+        opened_on.append(threading.current_thread())
+        return real_open(*a, **k)
+
+    async def main():
+        loop_thread.append(threading.current_thread())
+        monkeypatch.setattr("builtins.open", _spy)
+        fh = await webrtc_open._open_ts_output(str(tmp_path / "clip.part.ts"))
+        monkeypatch.setattr("builtins.open", real_open)
+        assert await webrtc_open._open_ts_output(str(tmp_path / "clip.mp4")) is None
+        assert await webrtc_open._open_ts_output(None) is None
+        return fh
+
+    fh = asyncio.run(main())
+    assert fh is not None and opened_on and opened_on[0] is not loop_thread[0]
+    rec = TsCopyRecorder(str(tmp_path / "clip.part.ts"), file=fh)
+    assert rec._file is fh
+    fh.close()
