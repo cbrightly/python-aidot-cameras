@@ -6,6 +6,10 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc66]
+
+Soak: does not reset the clock. Both fixes are on the DTLS SD playback path.
+
 ### Known limitations
 - The night-recording sound limit (rc65) was narrowed down on an A001064:
   sending transport-cc feedback as the app's WebRTC stack does (123 SRTCP
