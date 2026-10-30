@@ -6,6 +6,12 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **A DTLS card recording no longer ends on a repeated frame.** The A000088
+  sends a recording's last frame twice, under a new timestamp, and a decoder
+  reported the picture order count twice ("Duplicate POC"). The H265
+  assembler now skips a unit identical to the one before it.
+
 ## [1.0.0rc66]
 
 Soak: does not reset the clock. Both fixes are on the DTLS SD playback path.

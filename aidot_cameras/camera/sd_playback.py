@@ -627,6 +627,12 @@ class H265AccessUnits:
         self._broken = False
         self.dropped = 0
         self.damaged = 0
+        # The camera sends a recording's last frame twice, under a new
+        # timestamp (A000088, 2026-10-30): a decoder then sees the same picture
+        # order count twice. A unit identical to the one before is not handed
+        # on (``repeats`` counts them).
+        self.repeats = 0
+        self._last_unit: "Optional[bytes]" = None
 
     def _emit(self) -> "list[tuple[bytes, int, bool]]":
         out = []
@@ -641,9 +647,14 @@ class H265AccessUnits:
             nals = self._nals
             if kf and 32 not in types and self.parameter_sets:
                 nals = self.parameter_sets + nals
-            out.append((b"".join(_NAL_SC + n for n in nals), self._ts, kf))
-            if self._broken:
-                self.damaged += 1
+            unit = b"".join(_NAL_SC + n for n in nals)
+            if unit == self._last_unit:
+                self.repeats += 1
+            else:
+                out.append((unit, self._ts, kf))
+                self._last_unit = unit
+                if self._broken:
+                    self.damaged += 1
         elif self._nals or self._broken:
             self.dropped += 1
         self._nals, self._fu, self._broken = [], None, False

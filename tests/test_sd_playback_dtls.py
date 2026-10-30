@@ -474,3 +474,18 @@ def test_by_default_a_damaged_unit_is_handed_on_and_counted():
     assert units.damaged == 1 and units.dropped == 0
     assert got[0][2] is True  # still marked a keyframe
     assert got[1:] and [_nals(d) for d, _, _ in got[1:]] == [_nals(a) for a in aus[1:]]
+
+
+def test_a_unit_sent_twice_is_handed_on_once():
+    # The A000088 sent a recording's last frame twice under a new timestamp
+    # (2026-10-30); the decoder then reported a duplicate picture order count.
+    aus = _hevc_access_units(3)
+    units = H265AccessUnits()
+    got, seq = [], 10
+    for i, au in enumerate([*aus, aus[-1]]):
+        pkts = _packetize(au, i * 6000, seq)
+        seq += len(pkts)
+        for p in pkts:
+            got += units.feed(*p)
+    assert [ts for _, ts, _ in got] == [0, 6000, 12000]
+    assert units.repeats == 1

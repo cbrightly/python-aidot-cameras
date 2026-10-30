@@ -728,8 +728,14 @@ gap. The bridge also forwards each RTP packet of a playback once (by SSRC and
 sequence number): a host that reaches the camera by two routes received every
 audio packet twice and video packets up to six times (reference box,
 2026-10-28), and the copied G.711 then ran twice as long as the picture
-(unreleased). The recordings themselves have short holes in both tracks near
-their start (0.4-0.5 s, at the same offsets on every play).
+(rc64). The recordings themselves have short holes in both tracks near
+their start (0.4-0.5 s, at the same offsets on every play). A night recording
+on the A001064 starts with a single keyframe about 4 s before the rest of its
+video (the camera's per-frame recording times say the same: 4002 ms to the
+next frame), while its sound runs from the start; a player holds that first
+picture until the video resumes. It is in the recording, not lost on the way
+(2026-10-30). An A000088 sends a recording's last frame twice under a new
+timestamp; the H265 assembler skips the copy (unreleased).
 
 **A recording made at a lower frame rate is sent faster than it plays.** The
 camera stamps and paces a recording at its live frame rate (20 fps on the
