@@ -6,6 +6,10 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc67]
+
+Soak: does not reset the clock. Both fixes are on the DTLS SD playback path.
+
 ### Fixed
 - **A DTLS card recording asks for what it lost.** aiortc only sends NACKs
   for streams it routes, and a recording's H265 is taken raw before routing,
