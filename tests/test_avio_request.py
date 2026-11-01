@@ -218,3 +218,84 @@ async def test_dispatching_a_frame_nobody_asked_for_is_harmless():
     session = _dtls_session(SimpleNamespace(send=lambda data: None))
     assert session.dispatch_avio_frame(_reply()) is False
     assert session.dispatch_avio_frame(b"junk") is False
+
+
+async def test_a_request_answered_in_several_replies_returns_them_all():
+    """The SD listing sends its pages back to back with no further request.
+
+    The second reply follows the first immediately; a waiter registered only
+    after the first reply came back would miss it.
+    """
+    session = None
+
+    def _send_and_answer(data):
+        for body in (b"\x00\x01", b"\x00\x02", b"\x00\x03"):
+            session.dispatch_avio_frame(_reply(payload=body))
+
+    session = _dtls_session(SimpleNamespace(send=_send_and_answer))
+
+    got = await session.async_avio_request_all(
+        SETSTREAMCTRL,
+        response_cmd=SETSTREAMCTRL_RESP,
+        timeout=2.0,
+        more_timeout=0.05,
+    )
+    assert [r.payload for r in got] == [b"\x00\x01", b"\x00\x02", b"\x00\x03"]
+    # Nothing left registered: a reply that turns up later belongs to nobody.
+    assert session.dispatch_avio_frame(_reply()) is False
+
+
+async def test_collecting_replies_stops_when_the_caller_has_enough():
+    session = None
+
+    def _send_and_answer(data):
+        for body in (b"\x00\x01", b"\x00\x02", b"\x00\x03"):
+            session.dispatch_avio_frame(_reply(payload=body))
+
+    session = _dtls_session(SimpleNamespace(send=_send_and_answer))
+
+    got = await session.async_avio_request_all(
+        SETSTREAMCTRL,
+        response_cmd=SETSTREAMCTRL_RESP,
+        timeout=2.0,
+        done=lambda replies: len(replies) == 2,
+    )
+    assert [r.payload for r in got] == [b"\x00\x01", b"\x00\x02"]
+    assert session.dispatch_avio_frame(_reply()) is False
+
+
+async def test_collecting_replies_to_a_command_that_could_not_be_sent():
+    session = _dtls_session(None)  # DataChannel not open
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    got = await session.async_avio_request_all(
+        SETSTREAMCTRL, response_cmd=SETSTREAMCTRL_RESP, timeout=30.0
+    )
+    assert got == []
+    assert loop.time() - started < 1.0
+    assert session.dispatch_avio_frame(_reply()) is False
+
+
+async def test_collecting_replies_gives_up_once_its_budget_is_spent():
+    """Each reply restarts the gap timer; the budget bounds the whole wait."""
+    session = _dtls_session(SimpleNamespace(send=lambda data: None))
+
+    async def _trickle():
+        for _ in range(20):
+            await asyncio.sleep(0.03)
+            session.dispatch_avio_frame(_reply())
+
+    feeder = asyncio.create_task(_trickle())
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    got = await session.async_avio_request_all(
+        SETSTREAMCTRL,
+        response_cmd=SETSTREAMCTRL_RESP,
+        timeout=1.0,
+        more_timeout=1.0,
+        budget=0.2,
+    )
+    feeder.cancel()
+    assert 1 <= len(got) < 20
+    assert loop.time() - started < 0.5

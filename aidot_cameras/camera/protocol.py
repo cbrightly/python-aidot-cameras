@@ -3847,6 +3847,68 @@ class AvioRequestMixin:
             return None
         return await waiter.result(timeout)
 
+    async def async_avio_request_all(
+        self,
+        cmd: int,
+        payload: bytes = b"",
+        *,
+        response_cmd: int,
+        timeout: float = AVIO_RESPONSE_TIMEOUT_S,
+        more_timeout: float = AVIO_RESPONSE_TIMEOUT_S,
+        max_replies: int = 64,
+        budget: "Optional[float]" = None,
+        done=None,
+    ) -> "list[AvioResponse]":
+        """Send ``cmd`` once and return every ``response_cmd`` reply it draws.
+
+        For a command the camera answers in several packets with no further
+        request: the SD listing sends a 7-day window as one 255-record page
+        after another, all unprompted. ``async_avio_request`` keeps the first
+        and the rest arrive with nobody waiting, so a caller saw the oldest
+        255 recordings and never today's.
+
+        Every waiter is registered before the send, for the same reason as the
+        single request: the pages follow each other faster than a waiter
+        registered after the first reply could catch the second. Collection
+        stops at the first wait that times out (``timeout`` for the first
+        reply, ``more_timeout`` after it), at ``max_replies``, once ``budget``
+        seconds have passed since the send, or as soon as ``done(replies)`` is
+        true. An empty list means nothing came back.
+
+        Replies are matched on ``response_cmd`` alone, so two of these for the
+        same command at once on one session can take each other's replies.
+        """
+        router = self._avio_responses
+        waiters = [router.expect(response_cmd) for _ in range(max(1, max_replies))]
+        replies: "list[AvioResponse]" = []
+        try:
+            try:
+                sent = self._avio_cmd(cmd, payload)
+            except Exception:
+                sent = False
+            if not sent:
+                return replies
+            loop = asyncio.get_running_loop()
+            give_up = None if budget is None else loop.time() + budget
+            for waiter in waiters:
+                wait = more_timeout if replies else timeout
+                if give_up is not None:
+                    wait = min(wait, give_up - loop.time())
+                    if wait <= 0:
+                        break
+                resp = await waiter.result(wait)
+                if resp is None:
+                    break
+                replies.append(resp)
+                if done is not None and done(replies):
+                    break
+        finally:
+            # The ones never reached are still registered; a stray later reply
+            # must go to nobody rather than to a question long since answered.
+            for waiter in waiters:
+                waiter.cancel()
+        return replies
+
 
 _SDP_SECRET_ATTRS = ("a=ice-pwd:", "a=psk:")
 

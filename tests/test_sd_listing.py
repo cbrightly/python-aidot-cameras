@@ -243,3 +243,124 @@ async def test_a_session_that_raises_does_not_reach_the_caller():
 
     out = await _Camera(_Angry({})).async_get_sd_recordings()
     assert out is not None and out.records == []
+
+
+class _PagedSession(_Session):
+    """A session that answers the list with every page, like a real camera."""
+
+    def __init__(self, pages, answers=None):
+        super().__init__(answers or {})
+        self._pages = pages
+
+    async def async_avio_request_all(
+        self, cmd, payload, *, response_cmd, max_replies, done, **_timeouts
+    ):
+        self.asked.append((cmd, payload, response_cmd))
+        got = []
+        for body in self._pages[:max_replies]:
+            got.append(_Reply(response_cmd, body))
+            if done(got):
+                break
+        return got
+
+
+@pytest.mark.asyncio
+async def test_every_page_of_a_long_listing_is_read():
+    """Measured 2026-11-01: four pages for one PTZ week, and only the first was read.
+
+    The first page holds the OLDEST records, so stopping there hid every
+    recording newer than the first 255.
+    """
+    session = _PagedSession(
+        [
+            _page([_record(day=5)], total=3, index=0, end_flag=0),
+            _page([_record(day=6)], total=3, index=1, end_flag=0),
+            _page([_record(day=7)], total=3, index=2, end_flag=1),
+        ]
+    )
+    out = await _Camera(session).async_get_sd_recordings()
+    assert [r.day for r in out.records] == [5, 6, 7]
+    assert out.complete is True
+
+
+@pytest.mark.asyncio
+async def test_pages_that_arrive_out_of_order_are_put_back_in_order():
+    session = _PagedSession(
+        [
+            _page([_record(day=6)], total=2, index=1, end_flag=1),
+            _page([_record(day=5)], total=2, index=0, end_flag=0),
+        ]
+    )
+    out = await _Camera(session).async_get_sd_recordings()
+    assert [r.day for r in out.records] == [5, 6]
+    assert out.complete is True
+
+
+@pytest.mark.asyncio
+async def test_a_page_sent_twice_is_counted_once():
+    session = _PagedSession(
+        [
+            _page([_record(day=5)], total=2, index=0, end_flag=0),
+            _page([_record(day=5)], total=2, index=0, end_flag=0),
+            _page([_record(day=6)], total=2, index=1, end_flag=1),
+        ]
+    )
+    out = await _Camera(session).async_get_sd_recordings()
+    assert [r.day for r in out.records] == [5, 6]
+    assert out.complete is True
+
+
+@pytest.mark.asyncio
+async def test_a_missing_page_before_the_end_is_reported_incomplete():
+    session = _PagedSession(
+        [
+            _page([_record(day=5)], total=3, index=0, end_flag=0),
+            _page([_record(day=7)], total=3, index=2, end_flag=1),
+        ]
+    )
+    out = await _Camera(session).async_get_sd_recordings()
+    assert [r.day for r in out.records] == [5, 7]
+    assert out.complete is False
+
+
+@pytest.mark.asyncio
+async def test_pages_that_stop_before_the_end_are_reported_incomplete():
+    session = _PagedSession(
+        [
+            _page([_record(day=5)], total=3, index=0, end_flag=0),
+            _page([_record(day=6)], total=3, index=1, end_flag=0),
+        ]
+    )
+    out = await _Camera(session).async_get_sd_recordings()
+    assert [r.day for r in out.records] == [5, 6]
+    assert out.complete is False
+    assert out.answered is True
+
+
+@pytest.mark.asyncio
+async def test_a_late_page_of_another_listing_is_not_mixed_in():
+    """Every page of one reply declares the same page count; a stray does not."""
+    session = _PagedSession(
+        [
+            _page([_record(day=5)], total=2, index=0, end_flag=0),
+            _page([_record(day=1)], total=4, index=1, end_flag=0),
+            _page([_record(day=6)], total=2, index=1, end_flag=1),
+        ]
+    )
+    out = await _Camera(session).async_get_sd_recordings()
+    assert [r.day for r in out.records] == [5, 6]
+    assert out.complete is True
+
+
+@pytest.mark.asyncio
+async def test_an_end_page_first_with_no_page_count_does_not_end_the_listing():
+    """With no declared count, the pages before the end-flag page are still owed."""
+    session = _PagedSession(
+        [
+            _page([_record(day=6)], total=0, index=1, end_flag=1),
+            _page([_record(day=5)], total=0, index=0, end_flag=0),
+        ]
+    )
+    out = await _Camera(session).async_get_sd_recordings()
+    assert [r.day for r in out.records] == [5, 6]
+    assert out.complete is True
