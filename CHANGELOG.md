@@ -6,6 +6,20 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **The on-device listing reads every page, so today's recordings show.** The
+  camera answers a listing in pages of 255 records, oldest first, and sends
+  them all from one request; only the first was read. A PTZ's 7-day window is
+  four pages (824 records, 2026-11-01), so a caller saw six days ending on
+  2026-10-26 and nothing newer. All pages are now collected, put in order and
+  de-duplicated, and `complete` is False when the end flag never arrived or a
+  page before it is missing. Live: the same window now returns 824 records in
+  8 s, the newest of them made 18 minutes before the listing.
+
+### Added
+- `async_avio_request_all()` on both session types: send one AVIO command and
+  collect every reply it draws, with all waiters registered before the send.
+
 ## [1.0.0rc67]
 
 Soak: does not reset the clock. Both fixes are on the DTLS SD playback path.

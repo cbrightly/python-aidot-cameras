@@ -14,7 +14,7 @@ list rather than as a traceback.
 
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from .sd_events import (
     HASLISTEVENT_REQ_CMD,
@@ -33,6 +33,94 @@ _LOGGER = logging.getLogger(__name__)
 #: Long enough for a camera that answers slowly, short enough that two silent
 #: requests cannot hold a session for more than a viewer would tolerate.
 _SD_LIST_TIMEOUT_S = 8.0
+
+#: The pages of one listing follow each other back to back; measured on a PTZ,
+#: four pages of a 7-day window arrived together. A gap this long after a page
+#: means no more are coming.
+_SD_MORE_PAGES_TIMEOUT_S = 3.0
+
+#: 255 records a page, so 64 pages is over 16,000 recordings - far more than a
+#: card holds in the 7 days a caller asks about.
+_SD_MAX_PAGES = 64
+
+#: However the pages trickle in, a listing gives up collecting them after this
+#: long and reports what it has as incomplete. Without it each page would
+#: restart the gap timer and a slow camera could hold the session for minutes.
+_SD_LIST_PAGES_BUDGET_S = 30.0
+
+
+class _ListPages:
+    """The pages of one listing reply, each decoded once, as it arrives."""
+
+    def __init__(self) -> None:
+        self.pages: dict = {}
+        self.undecodable = 0
+        self._total: Optional[int] = None
+        self._seen = 0
+
+    def take(self, replies: List[Any]) -> None:
+        """Decode whatever in ``replies`` has not been decoded yet."""
+        for reply in replies[self._seen :]:
+            self._add(reply)
+        self._seen = len(replies)
+
+    def done(self, replies: List[Any]) -> bool:
+        """The ``done`` hook: stop collecting once the reply is whole."""
+        self.take(replies)
+        return self.covered()
+
+    def _add(self, reply: Any) -> None:
+        page = decode_list_event_response(
+            bytes(reply.payload or b""), command=LISTEVENT_RESP_CMD
+        )
+        if page is None:
+            # The decode is measured from a handful of live replies and a
+            # reply with a different shape is entirely possible. It is an
+            # empty list with a logged reason, never an exception - but not
+            # a COMPLETE empty list: something came back and could not be
+            # read, so there may well be recordings behind it.
+            self.undecodable += 1
+            _LOGGER.debug(
+                "SD list reply did not decode (%d bytes)",
+                len(bytes(reply.payload or b"")),
+            )
+            return
+        if self._total is None:
+            self._total = page.total
+        elif page.total != self._total:
+            # Every page of one reply declares the same page count. One that
+            # does not is a late page of some earlier listing; mixing it in
+            # would file another window's records under this one.
+            _LOGGER.debug(
+                "SD list page declares %d pages, this reply %d: not ours",
+                page.total,
+                self._total,
+            )
+            return
+        # A page the camera sent twice is one page.
+        self.pages.setdefault(page.page_index, page)
+
+    def covered(self) -> bool:
+        """The end flag has arrived and no page before it is missing.
+
+        ``total`` is the page count the camera declared. A camera that declares
+        none (0) is held to the pages up to its end-flag page instead.
+        """
+        ends = [i for i, p in self.pages.items() if p.end_flag == 1]
+        if not ends:
+            return False
+        want = range(self._total) if self._total else range(max(ends) + 1)
+        return set(self.pages) >= set(want)
+
+    @property
+    def records(self) -> list:
+        return [e for i in sorted(self.pages) for e in self.pages[i].events]
+
+    @property
+    def complete(self) -> bool:
+        if self.undecodable:
+            return False
+        return not self.pages or self.covered()
 
 
 def _session_is_live(session: Any) -> bool:
@@ -88,6 +176,48 @@ class _CameraSdMixin:
             )
             return None
 
+    async def _sd_ask_pages(
+        self, session: Any, cmd: int, payload: bytes, response_cmd: int, timeout: float
+    ) -> "tuple[_ListPages, bool]":
+        """Every reply page to one request, and whether any reply came back.
+
+        A session without ``async_avio_request_all`` (an older or a stand-in
+        session) is asked the single-reply way, which is the first page only.
+
+        Not safe to run two at once on one session: replies carry no id this
+        layer can match on SDES, so concurrent listings could take each other's
+        pages. Callers serialise listings per camera.
+        """
+        pages = _ListPages()
+        ask_all = getattr(session, "async_avio_request_all", None)
+        if ask_all is None:
+            reply = await self._sd_ask(session, cmd, payload, response_cmd, timeout)
+            replies = [] if reply is None else [reply]
+        else:
+            try:
+                replies = list(
+                    await ask_all(
+                        cmd,
+                        payload,
+                        response_cmd=response_cmd,
+                        timeout=timeout,
+                        more_timeout=_SD_MORE_PAGES_TIMEOUT_S,
+                        max_replies=_SD_MAX_PAGES,
+                        budget=_SD_LIST_PAGES_BUDGET_S,
+                        done=pages.done,
+                    )
+                )
+            except Exception as exc:
+                _LOGGER.debug(
+                    "SD request %#x failed for %s: %s",
+                    cmd,
+                    getattr(self, "device_id", "?"),
+                    exc,
+                )
+                replies = []
+        pages.take(replies)
+        return pages, bool(replies)
+
     async def async_get_sd_recordings(
         self,
         *,
@@ -115,11 +245,13 @@ class _CameraSdMixin:
         card-bearing A000088 that returns an EMPTY page while 0 returns the
         records - measured 2026-08-11, same session, same window.
 
-        One request each for the list and the occupancy map. The reply is paged
-        and there is no known continuation request: the vendor's handler matches
-        a reply to the sequence number of the single request it sent. So a reply
-        whose end flag is not set comes back with ``complete=False`` rather than
-        with a second request this code would have to invent.
+        One request each for the list and the occupancy map. The list reply is
+        paged, 255 records a page, oldest first, and the camera sends every page
+        unprompted: there is no continuation request and none is needed. All of
+        them are collected (measured 2026-11-01: a PTZ's 7-day window was four
+        pages, 824 records, and reading only the first stopped six days short
+        of today). ``complete=False`` when the end flag never arrived or a page
+        before it is missing.
         """
         session = (
             session if session is not None else getattr(self, "_stream_session", None)
@@ -134,34 +266,14 @@ class _CameraSdMixin:
         end_ts = time.time()
         start_ts = end_ts - days * 86400
 
-        records = []
-        complete = True
-        list_reply = await self._sd_ask(
+        pages, list_answered = await self._sd_ask_pages(
             session,
             LISTEVENT_REQ_CMD,
             listevent_payload(start_ts, end_ts, channel=channel),
             LISTEVENT_RESP_CMD,
             timeout,
         )
-        if list_reply is not None:
-            page = decode_list_event_response(
-                bytes(list_reply.payload or b""), command=LISTEVENT_RESP_CMD
-            )
-            if page is None:
-                # The decode is measured from a handful of live replies and a
-                # reply with a different shape is entirely possible. It is an
-                # empty list with a logged reason, never an exception - but not
-                # a COMPLETE empty list: something came back and could not be
-                # read, so there may well be recordings behind it.
-                complete = False
-                _LOGGER.debug(
-                    "SD list reply for %s did not decode (%d bytes)",
-                    getattr(self, "device_id", "?"),
-                    len(bytes(list_reply.payload or b"")),
-                )
-            else:
-                records = page.events
-                complete = page.end_flag == 1
+        records, complete = pages.records, pages.complete
 
         hours = None
         map_reply = await self._sd_ask(
@@ -181,7 +293,7 @@ class _CameraSdMixin:
             hours=hours,
             # Either reply is enough to prove the camera is listening. Both
             # silent is the case that must never read as an empty card.
-            answered=list_reply is not None or map_reply is not None,
+            answered=list_answered or map_reply is not None,
             complete=complete,
             start_ts=start_ts,
             end_ts=end_ts,
