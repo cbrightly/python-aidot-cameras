@@ -6,6 +6,11 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc68]
+
+Soak: does not reset the clock. The change is to the on-device recording
+listing only.
+
 ### Fixed
 - **The on-device listing reads every page, so today's recordings show.** The
   camera answers a listing in pages of 255 records, oldest first, and sends
