@@ -6,6 +6,11 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc69]
+
+Soak: does not reset the clock. The change is to the on-device recording
+listing only.
+
 ### Fixed
 - **An A000088's card listing is no longer a page of nothing.** Asked for a
   window of five days or more, the M3 Pro answers with thousands of records it
