@@ -280,23 +280,111 @@ def _sctp_sack_chunk(cum_tsn: int, a_rwnd: int = 131072) -> bytes:
     return _st_sk.pack("!BBH", 3, 0, 4 + len(body)) + body
 
 
-def _sctp_advance_cum_tsn(cum: "Optional[int]", tsn: int) -> int:
-    """The cumulative TSN ack after receiving ``tsn``.
+#: How long, and for how many chunks behind it, a gap in the camera's DATA is
+#: waited on before the missing chunk is taken as lost. The camera resends what
+#: we have not acknowledged, so a gap normally fills within a round trip; the
+#: bound is for a camera that never does, whose control channel must not then
+#: stop delivering everything after the gap.
+_SCTP_GAP_WAIT_S = 4.0
+_SCTP_GAP_HOLD_CAP = 64
 
-    ``cum`` None means this is the first DATA chunk of the association, which
-    defines the base -- the association's initial TSN comes from the handshake,
-    but a camera that starts numbering elsewhere must not wedge us at a
-    cumulative ack it will never reach.
+#: A TSN further ahead than this is not a chunk past a gap but a stray, and is
+#: dropped rather than held: held, it would never become contiguous and would
+#: keep every later gap's wait looking already expired.
+_SCTP_MAX_AHEAD = 4096
 
-    Only an exactly-next TSN advances the ack. A gap leaves it where it is (the
-    camera retransmits), and so does a duplicate. Arithmetic is modulo 2**32
-    because TSNs wrap.
+#: In the sequence ``_sctp_take_in_order`` returns, a gap given up on: any
+#: half-built message from before it must be discarded before what follows is
+#: reassembled, or the two would be joined around the hole.
+_SCTP_GAP = object()
+
+
+def _sctp_data_chunks(pkt: bytes):
+    """Every DATA chunk in an SCTP packet: (tsn, flags, stream id, ppid, payload).
+
+    Walks all the chunks after the 12-byte common header, not just the first:
+    a camera may bundle DATA behind a SACK, or two DATA chunks together, and a
+    DATA chunk left unread is a TSN never delivered. A chunk's own length
+    bounds its payload (RFC 4960 s3.3.1); chunks are padded to four bytes. A
+    chunk that runs past the end of the packet is not yielded: delivered short
+    and acknowledged, it would never be resent.
     """
+    import struct as _st_dc
+
+    pos = 12
+    while pos + 4 <= len(pkt):
+        ctype, flags, clen = _st_dc.unpack_from("!BBH", pkt, pos)
+        if clen < 4:
+            return
+        if ctype == 0x00 and clen >= 16 and pos + clen <= len(pkt):
+            tsn, sid, _ssn, ppid = _st_dc.unpack_from("!IHHI", pkt, pos + 4)
+            yield tsn, flags, sid, ppid, pkt[pos + 16 : pos + clen]
+        pos += (clen + 3) & ~3
+
+
+def _sctp_take_in_order(state: dict, tsn: int, chunk: Any, now: float) -> list:
+    """The DATA chunks deliverable now, in TSN order, advancing the cumulative ack.
+
+    SCTP delivers a stream's chunks in TSN order (RFC 4960 s6.6), and a
+    fragmented message is only whole when its fragments are consecutive TSNs.
+    We handed every chunk to reassembly in ARRIVAL order. With a fragment lost
+    on the way - which a TURN relay does - the begin and end fragments of a
+    ~2.8 KB SD listing page were joined around the hole into a page that did
+    not decode, the resent middle and end then arrived with no begin and were
+    dropped, and the listing was told the camera had not answered.
+
+    ``state`` is the association's receive state: ``peer_cum_tsn`` (the last
+    TSN delivered and acknowledged) and the chunks held past a gap
+    (``rx_ooo``, each with when it arrived). Only an exactly-next TSN advances the ack. A chunk at or
+    behind it is a resend of one already delivered, and is dropped. One past a
+    gap is held, unacknowledged, so the camera resends what is missing; if the
+    gap has not filled ``_SCTP_GAP_WAIT_S`` after the oldest held chunk
+    arrived, or ``_SCTP_GAP_HOLD_CAP`` chunks are waiting, the missing chunk is
+    taken as lost and delivery resumes behind a ``_SCTP_GAP`` marker, at which
+    the caller discards every half-built message so nothing is joined across
+    the hole. The wait is longer than SCTP's initial resend timer (3 s): the
+    SACK carries no gap blocks, so the camera resends only when that timer
+    fires. A TSN more than ``_SCTP_MAX_AHEAD`` ahead is a stray and dropped.
+    Held chunks are looked at when the next DATA chunk arrives; the camera
+    sends one every few seconds.
+
+    The first chunk seen once the association is up starts the count. Not the
+    Initial TSN from the handshake: the camera can send DATA while the data
+    channel is still opening, which is not taken there, and counting from the
+    Initial TSN would hold the first real reply behind a gap of our own making.
+    TSN arithmetic is modulo 2**32.
+    """
+    mask = 0xFFFFFFFF
+    tsn &= mask
+    held = state.setdefault("rx_ooo", {})
+    cum = state.get("peer_cum_tsn")
     if cum is None:
-        return tsn & 0xFFFFFFFF
-    if ((tsn - cum) & 0xFFFFFFFF) == 1:
-        return tsn & 0xFFFFFFFF
-    return cum
+        cum = (tsn - 1) & mask
+        state["peer_cum_tsn"] = cum
+    ahead = (tsn - cum) & mask
+    if ahead == 0 or ahead > _SCTP_MAX_AHEAD:
+        return []
+    out = []
+    if ahead == 1:
+        out.append(chunk)
+        cum = tsn
+    else:
+        held.setdefault(tsn, (chunk, now))
+        oldest = min(t for _c, t in held.values())
+        if now - oldest < _SCTP_GAP_WAIT_S and len(held) < _SCTP_GAP_HOLD_CAP:
+            return []
+        # Give the gap up: resume at the oldest chunk held, behind a marker
+        # that tells the caller to drop any half-built message first.
+        cum = (min(held, key=lambda t: (t - cum) & mask) - 1) & mask
+        out.append(_SCTP_GAP)
+    while True:
+        nxt = (cum + 1) & mask
+        if nxt not in held:
+            break
+        out.append(held.pop(nxt)[0])
+        cum = nxt
+    state["peer_cum_tsn"] = cum
+    return out
 
 
 def _sctp_abort_chunk() -> bytes:
@@ -5179,9 +5267,11 @@ def make_sdes_bridge(
                                         )
                                     except Exception as _sce8:
                                         _status(f"SDES DC: enc LIVING err: {_sce8}")
-                                elif _pd_ct8 == 0x00 and _sct == "DONE":
-                                    # SCTP DATA from camera.  ACKNOWLEDGE IT
-                                    # FIRST: SCTP puts acknowledgement on the
+                                elif _sct == "DONE" and (
+                                    _sc_chunks := list(_sctp_data_chunks(_pd_plain))
+                                ):
+                                    # SCTP DATA from camera.  ACKNOWLEDGE IT:
+                                    # SCTP puts acknowledgement on the
                                     # receiver, and sending nothing let the
                                     # camera's retransmission timer run out and
                                     # ABORT the association at ~61.4 s, which is
@@ -5189,135 +5279,128 @@ def make_sdes_bridge(
                                     # stopped PTZ/talkback/SD answering a minute
                                     # into every session.  Ack before dispatch so
                                     # a handler that raises cannot cost us the ack.
-                                    if len(_pd_plain) >= 20:
-                                        _sc_tsn = int.from_bytes(
-                                            _pd_plain[16:20], "big"
+                                    #
+                                    # Every DATA chunk in the packet, wherever it
+                                    # sits (see _sctp_data_chunks), each taken in
+                                    # TSN order (see _sctp_take_in_order); only
+                                    # what that releases is reassembled, so a
+                                    # ~2.8 KB SD listing page that lost a
+                                    # fragment on the way waits for the resend
+                                    # instead of being joined around the hole.
+                                    _sc_first = _sctp.get("peer_cum_tsn") is None
+                                    if _pd_ct8 == 0x03 and len(_pd_plain) >= 20:
+                                        # A SACK with DATA bundled behind it:
+                                        # keep the trace the else branch gives
+                                        # a bare one.
+                                        _trace(
+                                            "SDES DC: SACK cum_tsn="
+                                            f"{int.from_bytes(_pd_plain[16:20], 'big'):#010x}"
+                                            f" state={_sct}"
                                         )
-                                        _sc_first_sack = (
-                                            _sctp.get("peer_cum_tsn") is None
-                                        )
-                                        _sctp["peer_cum_tsn"] = _sctp_advance_cum_tsn(
-                                            _sctp.get("peer_cum_tsn"), _sc_tsn
-                                        )
-                                        if _sc_first_sack:
-                                            # One line per session: the build tag for the
-                                            # SACK fix, and the thing to look for if the
-                                            # 61.4 s ABORT ever comes back.
-                                            _status(
-                                                f"SDES DC: SACK enabled"
-                                                f" - acking camera DATA from"
-                                                f" TSN={_sc_tsn:#010x}"
-                                            )
-                                        try:
-                                            _br_send_to_cam(
-                                                _bs,
-                                                _enc_c8_sctp(
-                                                    _sctp_pkt(
-                                                        _sctp["peer_tag"],
-                                                        _sctp_sack_chunk(
-                                                            _sctp["peer_cum_tsn"]
-                                                        ),
-                                                    )
-                                                ),
-                                                _bsrc,
-                                                _br_cam_peer,
-                                            )
-                                        except Exception as _sackerr:
-                                            _status(
-                                                f"SDES DC: SACK send failed: {_sackerr}"
-                                            )
-                                    # Reassemble before parsing.  A DATA chunk
-                                    # carries B/E flags (RFC 4960 s3.3.1) and a
-                                    # large reply - the ~2.8 KB SD listing page -
-                                    # arrives as several ~1.2 KB fragments.  Taking
-                                    # each one for a whole AVIO frame got the first
-                                    # rejected (declared length overruns the
-                                    # fragment) and the rest read as junk commands,
-                                    # so the reply was reported as "the camera did
-                                    # not answer".  Use the chunk's own length
-                                    # rather than the rest of the packet: the
-                                    # declared length is what bounds this chunk.
-                                    _sc_flags = (
-                                        _pd_plain[13] if len(_pd_plain) > 13 else 0x03
-                                    )
-                                    _sc_clen = (
-                                        int.from_bytes(_pd_plain[14:16], "big")
-                                        if len(_pd_plain) >= 16
-                                        else 0
-                                    )
-                                    _sc_sid = (
-                                        int.from_bytes(_pd_plain[20:22], "big")
-                                        if len(_pd_plain) >= 22
-                                        else 0
-                                    )
-                                    _sc_frag = (
-                                        _pd_plain[28 : 28 + (_sc_clen - 16)]
-                                        if _sc_clen >= 16 and len(_pd_plain) > 28
-                                        else (
-                                            _pd_plain[28:]
-                                            if len(_pd_plain) > 28
-                                            else b""
-                                        )
-                                    )
-                                    _sc_ppid = (
-                                        int.from_bytes(_pd_plain[24:28], "big")
-                                        if len(_pd_plain) >= 28
-                                        else 0
-                                    )
-                                    _sc_pay = _sctp_reassemble(
+                                    _sc_ready = []
+                                    for (
+                                        _sc_tsn,
                                         _sc_flags,
                                         _sc_sid,
+                                        _sc_ppid,
                                         _sc_frag,
-                                        _sctp.setdefault("rx_frag", {}),
-                                    )
-                                    # A mid-message fragment: nothing to parse yet.
-                                    # Its TSN is acknowledged above, so the camera
-                                    # will not retransmit it.  Guarded rather than
-                                    # `continue`d - the nearest enclosing loop is the
-                                    # per-socket one, and skipping it would drop the
-                                    # rest of this socket's turn.
-                                    if _sc_pay is not None:
-                                        _sc_cmd = (
-                                            int.from_bytes(_sc_pay[4:8], "little")
-                                            if len(_sc_pay) >= 8
-                                            else 0
+                                    ) in _sc_chunks:
+                                        _sc_ready += _sctp_take_in_order(
+                                            _sctp,
+                                            _sc_tsn,
+                                            (_sc_flags, _sc_sid, _sc_frag, _sc_ppid),
+                                            _time_br.monotonic(),
                                         )
-                                        # This is where the camera's answers
-                                        # come back on SDES.  They were parsed
-                                        # and logged here long before anything
-                                        # could receive them; hand them to
-                                        # whoever asked.
-                                        if _sc_cmd == 5377:
-                                            # SESSION_MODE_RESP: the camera's
-                                            # answer to the LIVING trigger.
-                                            # Counted whether or not anything
-                                            # was waiting for it, because the
-                                            # question the stall report asks is
-                                            # "did the trigger arrive", and the
-                                            # trigger is fire-and-forget.
-                                            _bridge_fn._br_session_mode_resp = (
-                                                getattr(
-                                                    _bridge_fn,
-                                                    "_br_session_mode_resp",
-                                                    0,
+                                    if _sc_first:
+                                        # One line per session: the build tag for the
+                                        # SACK fix, and the thing to look for if the
+                                        # 61.4 s ABORT ever comes back.
+                                        _status(
+                                            f"SDES DC: SACK enabled"
+                                            f" - acking camera DATA from"
+                                            f" TSN={(_sctp['peer_cum_tsn'] + 1) & 0xFFFFFFFF:#010x}"
+                                        )
+                                    try:
+                                        _br_send_to_cam(
+                                            _bs,
+                                            _enc_c8_sctp(
+                                                _sctp_pkt(
+                                                    _sctp["peer_tag"],
+                                                    _sctp_sack_chunk(
+                                                        _sctp["peer_cum_tsn"]
+                                                    ),
                                                 )
-                                                + 1
-                                            )
-                                            # Which mode it says the session
-                                            # is in: a playback open waits for
-                                            # SD here, not for any reply.
-                                            _bridge_fn._br_session_mode_echo = (
-                                                _session_mode_echoed(_sc_pay)
-                                            )
-                                        _sc_answered = _dispatch_sctp_avio(
-                                            _avio_responses, _sc_pay
+                                            ),
+                                            _bsrc,
+                                            _br_cam_peer,
                                         )
-                                        _trace(
-                                            f"SDES DC: enc DATA ppid={_sc_ppid}"
-                                            f" cmd={_sc_cmd} {len(_sc_pay)}B"
-                                            f"{' (answered a request)' if _sc_answered else ''}"
-                                            f" {_sc_pay[:32].hex()}"
+                                    except Exception as _sackerr:
+                                        _status(
+                                            f"SDES DC: SACK send failed: {_sackerr}"
                                         )
+                                    for _sc_item in _sc_ready:
+                                        if _sc_item is _SCTP_GAP:
+                                            # A lost chunk given up on: whatever
+                                            # was half built before it is not
+                                            # the start of what comes after.
+                                            _sctp.setdefault("rx_frag", {}).clear()
+                                            _sc_pay = None
+                                        else:
+                                            _sc_flags, _sc_sid, _sc_frag, _sc_ppid = (
+                                                _sc_item
+                                            )
+                                            _sc_pay = _sctp_reassemble(
+                                                _sc_flags,
+                                                _sc_sid,
+                                                _sc_frag,
+                                                _sctp.setdefault("rx_frag", {}),
+                                            )
+                                        # None for a mid-message fragment (nothing
+                                        # to parse yet; it was delivered in order,
+                                        # so its TSN is acknowledged above) and
+                                        # for a gap marker.
+                                        if _sc_pay is not None:
+                                            _sc_cmd = (
+                                                int.from_bytes(_sc_pay[4:8], "little")
+                                                if len(_sc_pay) >= 8
+                                                else 0
+                                            )
+                                            # This is where the camera's answers
+                                            # come back on SDES.  They were parsed
+                                            # and logged here long before anything
+                                            # could receive them; hand them to
+                                            # whoever asked.
+                                            if _sc_cmd == 5377:
+                                                # SESSION_MODE_RESP: the camera's
+                                                # answer to the LIVING trigger.
+                                                # Counted whether or not anything
+                                                # was waiting for it, because the
+                                                # question the stall report asks is
+                                                # "did the trigger arrive", and the
+                                                # trigger is fire-and-forget.
+                                                _bridge_fn._br_session_mode_resp = (
+                                                    getattr(
+                                                        _bridge_fn,
+                                                        "_br_session_mode_resp",
+                                                        0,
+                                                    )
+                                                    + 1
+                                                )
+                                                # Which mode it says the session
+                                                # is in: a playback open waits for
+                                                # SD here, not for any reply.
+                                                _bridge_fn._br_session_mode_echo = (
+                                                    _session_mode_echoed(_sc_pay)
+                                                )
+                                            _sc_answered = _dispatch_sctp_avio(
+                                                _avio_responses, _sc_pay
+                                            )
+                                            _trace(
+                                                f"SDES DC: enc DATA ppid={_sc_ppid}"
+                                                f" cmd={_sc_cmd} {len(_sc_pay)}B"
+                                                f"{' (answered a request)' if _sc_answered else ''}"
+                                                f" {_sc_pay[:32].hex()}"
+                                            )
                                 else:
                                     # Log SACK (0x03) with cumulative TSN ack for diagnostics
                                     if _pd_ct8 == 0x03 and len(_pd_plain) >= 20:
