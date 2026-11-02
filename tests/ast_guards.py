@@ -170,7 +170,7 @@ def sctp_data_branch() -> ast.AST:
         n
         for n in ast.walk(sdes_bridge())
         if isinstance(n, ast.If)
-        and ast.unparse(n.test) == "_pd_ct8 == 0 and _sct == 'DONE'"
+        and ast.unparse(n.test).startswith("_sct == 'DONE' and (_sc_chunks := ")
     ]
     assert len(found) == 1, "the inbound SCTP DATA branch has moved or gone"
     return found[0]

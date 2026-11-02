@@ -19,8 +19,8 @@ this channel.
 """
 
 from aidot_cameras.camera.sdes_open import (
-    _sctp_advance_cum_tsn,
     _sctp_sack_chunk,
+    _sctp_take_in_order,
 )
 
 
@@ -45,33 +45,40 @@ class TestSackWireFormat:
         assert int.from_bytes(b[4:8], "big") == 5
 
 
+def _ack_after(cum, tsn):
+    """The cumulative ack after ``tsn`` arrives on an association at ``cum``."""
+    state = {} if cum is None else {"peer_cum_tsn": cum}
+    _sctp_take_in_order(state, tsn, object(), 0.0)
+    return state["peer_cum_tsn"]
+
+
 class TestCumulativeTsn:
     def test_the_first_chunk_defines_the_base(self):
         """A camera that starts numbering somewhere unexpected must not wedge
         us at an ack it will never reach."""
-        assert _sctp_advance_cum_tsn(None, 5000) == 5000
+        assert _ack_after(None, 5000) == 5000
 
     def test_the_next_tsn_in_sequence_advances_the_ack(self):
-        assert _sctp_advance_cum_tsn(5000, 5001) == 5001
+        assert _ack_after(5000, 5001) == 5001
 
     def test_a_gap_does_not_advance_the_ack(self):
         """We report no gap blocks, so the ack must stay put and let the camera
         retransmit what we are missing."""
-        assert _sctp_advance_cum_tsn(5000, 5002) == 5000
+        assert _ack_after(5000, 5002) == 5000
 
     def test_a_duplicate_does_not_move_the_ack_backwards(self):
-        assert _sctp_advance_cum_tsn(5000, 5000) == 5000
-        assert _sctp_advance_cum_tsn(5000, 4999) == 5000
+        assert _ack_after(5000, 5000) == 5000
+        assert _ack_after(5000, 4999) == 5000
 
     def test_it_wraps_at_2_to_the_32(self):
-        assert _sctp_advance_cum_tsn(0xFFFFFFFF, 0) == 0
-        assert _sctp_advance_cum_tsn(0xFFFFFFFE, 0xFFFFFFFF) == 0xFFFFFFFF
+        assert _ack_after(0xFFFFFFFF, 0) == 0
+        assert _ack_after(0xFFFFFFFE, 0xFFFFFFFF) == 0xFFFFFFFF
 
     def test_a_long_in_order_run_tracks_every_chunk(self):
-        cum = None
+        state = {}
         for tsn in range(1000, 1100):
-            cum = _sctp_advance_cum_tsn(cum, tsn)
-        assert cum == 1099
+            _sctp_take_in_order(state, tsn, object(), 0.0)
+        assert state["peer_cum_tsn"] == 1099
 
 
 class TestItIsActuallyWiredIn:
@@ -87,7 +94,7 @@ class TestItIsActuallyWiredIn:
         branch = sctp_data_branch()
         sack = calls_to(branch, "_sctp_sack_chunk")
         assert sack, "inbound DATA is not acknowledged"
-        assert calls_to(branch, "_sctp_advance_cum_tsn")
+        assert calls_to(branch, "_sctp_take_in_order")
         sends = calls_to(branch, "_br_send_to_cam")
         assert sends, "the SACK is built but never sent"
         assert min(s.lineno for s in sends) < min(
