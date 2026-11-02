@@ -6,6 +6,12 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc70]
+
+Soak: resets the clock. The change is to every SDES session's control channel
+(PTZ, talkback, SD listing and playback commands, keepalive acknowledgements),
+once the reference installation runs it.
+
 ### Fixed
 - **An SDES camera's replies survive a doubled or lost packet.** The control
   channel handed the camera's SCTP DATA to reassembly in arrival order. A Home
