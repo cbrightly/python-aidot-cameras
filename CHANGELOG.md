@@ -6,6 +6,24 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **An A000088's card listing is no longer a page of nothing.** Asked for a
+  window of five days or more, the M3 Pro answers with thousands of records it
+  never filled in - all-zero dates and stray heap bytes, 7,800 slots for a card
+  holding one recording - while four days or less comes back right (measured
+  2026-11-02, windows of 1 to 6 days). A listing is now asked in windows of at
+  most three days, newest first, and stops at the first window that does not
+  come back whole. A record whose date cannot exist, or falls outside the
+  window it was asked for, is dropped and makes the listing incomplete. Live:
+  the M3 now lists its one recording, complete, where before it listed nothing
+  usable.
+- **A listing waits long enough for a slow page.** A PTZ took 6.3 s to start
+  answering for a window three to six days back, and a 3 s wait between pages
+  cut a 7-day reply off after two of its pages. Without a caller's own
+  timeout, the first page now gets 15 s and each next one 10 s, with 60 s for
+  all the windows of a listing. Live, twice: the chunked listing and a single
+  7-day request on the same session returned the same records, all of them.
+
 ## [1.0.0rc68]
 
 Soak: does not reset the clock. The change is to the on-device recording

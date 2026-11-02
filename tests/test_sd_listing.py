@@ -6,14 +6,26 @@ empty folder for two opposite reasons.
 """
 
 import struct
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from aidot_cameras.camera.sd_events import (
     HASLISTEVENT_RESP_CMD,
     LISTEVENT_RESP_CMD,
+    _stimeday,
 )
+from aidot_cameras.camera import sd_listing
 from aidot_cameras.camera.sd_listing import _CameraSdMixin
+
+#: The records below are dated 2026-08-11, and a listing drops a record from
+#: outside the window it asked for, so every listing here runs on that day.
+_NOW = datetime(2026, 8, 12, tzinfo=UTC).timestamp()
+
+
+@pytest.fixture(autouse=True)
+def _listing_clock(monkeypatch):
+    monkeypatch.setattr(sd_listing.time, "time", lambda: _NOW)
 
 
 class _Reply:
@@ -114,7 +126,8 @@ async def test_the_records_come_back_decoded():
             ),
         }
     )
-    out = await _Camera(session).async_get_sd_recordings()
+    # One window: this fake answers every window with the same page.
+    out = await _Camera(session).async_get_sd_recordings(days=1)
     assert [r.isoformat() for r in out.records] == [
         "2026-08-11T20:41:42Z",
         "2026-08-11T20:55:42Z",
@@ -273,13 +286,13 @@ async def test_every_page_of_a_long_listing_is_read():
     """
     session = _PagedSession(
         [
-            _page([_record(day=5)], total=3, index=0, end_flag=0),
-            _page([_record(day=6)], total=3, index=1, end_flag=0),
-            _page([_record(day=7)], total=3, index=2, end_flag=1),
+            _page([_record(day=9)], total=3, index=0, end_flag=0),
+            _page([_record(day=10)], total=3, index=1, end_flag=0),
+            _page([_record(day=11)], total=3, index=2, end_flag=1),
         ]
     )
-    out = await _Camera(session).async_get_sd_recordings()
-    assert [r.day for r in out.records] == [5, 6, 7]
+    out = await _Camera(session).async_get_sd_recordings(days=3)
+    assert [r.day for r in out.records] == [9, 10, 11]
     assert out.complete is True
 
 
@@ -287,12 +300,12 @@ async def test_every_page_of_a_long_listing_is_read():
 async def test_pages_that_arrive_out_of_order_are_put_back_in_order():
     session = _PagedSession(
         [
-            _page([_record(day=6)], total=2, index=1, end_flag=1),
-            _page([_record(day=5)], total=2, index=0, end_flag=0),
+            _page([_record(day=10)], total=2, index=1, end_flag=1),
+            _page([_record(day=9)], total=2, index=0, end_flag=0),
         ]
     )
-    out = await _Camera(session).async_get_sd_recordings()
-    assert [r.day for r in out.records] == [5, 6]
+    out = await _Camera(session).async_get_sd_recordings(days=3)
+    assert [r.day for r in out.records] == [9, 10]
     assert out.complete is True
 
 
@@ -300,13 +313,13 @@ async def test_pages_that_arrive_out_of_order_are_put_back_in_order():
 async def test_a_page_sent_twice_is_counted_once():
     session = _PagedSession(
         [
-            _page([_record(day=5)], total=2, index=0, end_flag=0),
-            _page([_record(day=5)], total=2, index=0, end_flag=0),
-            _page([_record(day=6)], total=2, index=1, end_flag=1),
+            _page([_record(day=9)], total=2, index=0, end_flag=0),
+            _page([_record(day=9)], total=2, index=0, end_flag=0),
+            _page([_record(day=10)], total=2, index=1, end_flag=1),
         ]
     )
-    out = await _Camera(session).async_get_sd_recordings()
-    assert [r.day for r in out.records] == [5, 6]
+    out = await _Camera(session).async_get_sd_recordings(days=3)
+    assert [r.day for r in out.records] == [9, 10]
     assert out.complete is True
 
 
@@ -314,12 +327,12 @@ async def test_a_page_sent_twice_is_counted_once():
 async def test_a_missing_page_before_the_end_is_reported_incomplete():
     session = _PagedSession(
         [
-            _page([_record(day=5)], total=3, index=0, end_flag=0),
-            _page([_record(day=7)], total=3, index=2, end_flag=1),
+            _page([_record(day=9)], total=3, index=0, end_flag=0),
+            _page([_record(day=11)], total=3, index=2, end_flag=1),
         ]
     )
-    out = await _Camera(session).async_get_sd_recordings()
-    assert [r.day for r in out.records] == [5, 7]
+    out = await _Camera(session).async_get_sd_recordings(days=3)
+    assert [r.day for r in out.records] == [9, 11]
     assert out.complete is False
 
 
@@ -327,12 +340,12 @@ async def test_a_missing_page_before_the_end_is_reported_incomplete():
 async def test_pages_that_stop_before_the_end_are_reported_incomplete():
     session = _PagedSession(
         [
-            _page([_record(day=5)], total=3, index=0, end_flag=0),
-            _page([_record(day=6)], total=3, index=1, end_flag=0),
+            _page([_record(day=9)], total=3, index=0, end_flag=0),
+            _page([_record(day=10)], total=3, index=1, end_flag=0),
         ]
     )
-    out = await _Camera(session).async_get_sd_recordings()
-    assert [r.day for r in out.records] == [5, 6]
+    out = await _Camera(session).async_get_sd_recordings(days=3)
+    assert [r.day for r in out.records] == [9, 10]
     assert out.complete is False
     assert out.answered is True
 
@@ -342,13 +355,13 @@ async def test_a_late_page_of_another_listing_is_not_mixed_in():
     """Every page of one reply declares the same page count; a stray does not."""
     session = _PagedSession(
         [
-            _page([_record(day=5)], total=2, index=0, end_flag=0),
+            _page([_record(day=9)], total=2, index=0, end_flag=0),
             _page([_record(day=1)], total=4, index=1, end_flag=0),
-            _page([_record(day=6)], total=2, index=1, end_flag=1),
+            _page([_record(day=10)], total=2, index=1, end_flag=1),
         ]
     )
-    out = await _Camera(session).async_get_sd_recordings()
-    assert [r.day for r in out.records] == [5, 6]
+    out = await _Camera(session).async_get_sd_recordings(days=3)
+    assert [r.day for r in out.records] == [9, 10]
     assert out.complete is True
 
 
@@ -357,10 +370,252 @@ async def test_an_end_page_first_with_no_page_count_does_not_end_the_listing():
     """With no declared count, the pages before the end-flag page are still owed."""
     session = _PagedSession(
         [
-            _page([_record(day=6)], total=0, index=1, end_flag=1),
-            _page([_record(day=5)], total=0, index=0, end_flag=0),
+            _page([_record(day=10)], total=0, index=1, end_flag=1),
+            _page([_record(day=9)], total=0, index=0, end_flag=0),
         ]
     )
-    out = await _Camera(session).async_get_sd_recordings()
-    assert [r.day for r in out.records] == [5, 6]
+    out = await _Camera(session).async_get_sd_recordings(days=3)
+    assert [r.day for r in out.records] == [9, 10]
     assert out.complete is True
+
+
+class _WindowSession(_Session):
+    """A session that answers each listing window from a function of it."""
+
+    def __init__(self, answer_for):
+        super().__init__({})
+        self._answer_for = answer_for
+        self.windows = []
+
+    async def async_avio_request(self, cmd, payload, *, response_cmd, timeout=8.0):
+        if response_cmd != LISTEVENT_RESP_CMD:
+            return None
+        start = datetime(*_stimeday(payload, 4), tzinfo=UTC)
+        end = datetime(*_stimeday(payload, 12), tzinfo=UTC)
+        self.windows.append((start, end))
+        body = self._answer_for(start, end)
+        return None if body is None else _Reply(LISTEVENT_RESP_CMD, body)
+
+
+@pytest.mark.asyncio
+async def test_a_week_is_asked_in_windows_the_camera_answers_correctly():
+    """An A000088 fills in nothing for a window of five days or more (2026-11-02)."""
+    session = _WindowSession(lambda start, end: _page([]))
+    await _Camera(session).async_get_sd_recordings(days=7)
+    assert len(session.windows) == 3
+    assert all(end - start <= timedelta(days=3) for start, end in session.windows)
+    # Newest first, contiguous, and the whole week between them.
+    assert session.windows[0][1] > session.windows[-1][1]
+    for (start, _), (_, end) in zip(session.windows, session.windows[1:]):
+        assert end == start
+    assert session.windows[0][1] - session.windows[-1][0] >= timedelta(
+        days=7
+    ) - timedelta(seconds=2)
+
+
+@pytest.mark.asyncio
+async def test_records_from_every_window_come_back_oldest_first_and_once():
+    def answer(start, end):
+        # Each window holds one record of its own, plus one on its lower edge
+        # that the window below also reports.
+        mid = start + (end - start) / 2
+        return _page(
+            [
+                _record(
+                    year=start.year,
+                    mon=start.month,
+                    day=start.day,
+                    hour=start.hour,
+                    mi=start.minute,
+                    sec=start.second,
+                ),
+                _record(
+                    year=mid.year,
+                    mon=mid.month,
+                    day=mid.day,
+                    hour=mid.hour,
+                    mi=mid.minute,
+                    sec=mid.second,
+                ),
+            ]
+            + (
+                [
+                    _record(
+                        year=end.year,
+                        mon=end.month,
+                        day=end.day,
+                        hour=end.hour,
+                        mi=end.minute,
+                        sec=end.second,
+                    )
+                ]
+                if end < session.windows[0][1]
+                else []
+            )
+        )
+
+    session = _WindowSession(answer)
+    out = await _Camera(session).async_get_sd_recordings(days=7)
+    stamps = [r.isoformat() for r in out.records]
+    assert stamps == sorted(stamps)
+    assert len(stamps) == len(set(stamps))
+    assert len(stamps) == 3 * 2
+    assert out.complete is True
+
+
+@pytest.mark.asyncio
+async def test_records_the_camera_never_filled_in_are_dropped():
+    blank = b"\x00" * 12
+    session = _WindowSession(lambda start, end: _page([blank, _record(), blank]))
+    out = await _Camera(session).async_get_sd_recordings(days=1)
+    assert [r.isoformat() for r in out.records] == ["2026-08-11T20:41:42Z"]
+    # There were more slots than records: this is not the whole card.
+    assert out.complete is False
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_goes_unanswered_part_way_keeps_the_newer_records():
+    calls = []
+
+    def answer(start, end):
+        calls.append(start)
+        return _page([_record()]) if len(calls) == 1 else None
+
+    session = _WindowSession(answer)
+    out = await _Camera(session).async_get_sd_recordings(days=7)
+    # It stops there: a reply still on its way for the window given up on
+    # would otherwise be read as the next window's.
+    assert len(session.windows) == 2
+    assert [r.isoformat() for r in out.records] == ["2026-08-11T20:41:42Z"]
+    assert out.answered is True
+    assert out.complete is False
+
+
+@pytest.mark.asyncio
+async def test_a_camera_that_answers_no_window_is_asked_once():
+    session = _WindowSession(lambda start, end: None)
+    out = await _Camera(session).async_get_sd_recordings(days=7)
+    assert len(session.windows) == 1
+    assert out.answered is False
+
+
+class _PagedWindowSession(_Session):
+    """Every page of each window's reply through the multi-reply request."""
+
+    def __init__(self, pages_for):
+        super().__init__({})
+        self._pages_for = pages_for
+        self.windows = []
+        self.timeouts = []
+
+    async def async_avio_request_all(
+        self, cmd, payload, *, response_cmd, timeout, max_replies, done, **_rest
+    ):
+        start = datetime(*_stimeday(payload, 4), tzinfo=UTC)
+        end = datetime(*_stimeday(payload, 12), tzinfo=UTC)
+        self.windows.append((start, end))
+        self.timeouts.append(timeout)
+        got = []
+        for body in self._pages_for(start, end)[:max_replies]:
+            got.append(_Reply(response_cmd, body))
+            if done(got):
+                break
+        return got
+
+    async def async_avio_request(self, cmd, payload, *, response_cmd, timeout=8.0):
+        # The occupancy map; this camera does not draw one.
+        self.timeouts.append(("map", timeout))
+
+
+def _at(when):
+    return _record(
+        year=when.year,
+        mon=when.month,
+        day=when.day,
+        hour=when.hour,
+        mi=when.minute,
+        sec=when.second,
+    )
+
+
+@pytest.mark.asyncio
+async def test_each_window_reads_all_of_its_pages():
+    def pages_for(start, end):
+        mid = start + (end - start) / 2
+        return [
+            _page([_at(start + timedelta(hours=1))], total=2, index=0, end_flag=0),
+            _page([_at(mid)], total=2, index=1, end_flag=1),
+        ]
+
+    session = _PagedWindowSession(pages_for)
+    out = await _Camera(session).async_get_sd_recordings(days=7)
+    assert len(session.windows) == 3
+    assert len(out.records) == 6
+    stamps = [r.isoformat() for r in out.records]
+    assert stamps == sorted(stamps)
+    assert out.complete is True
+
+
+@pytest.mark.asyncio
+async def test_a_window_cut_short_ends_the_listing():
+    """Its missing pages may still arrive, and must not answer the next window."""
+
+    def pages_for(start, end):
+        return [_page([_at(start + timedelta(hours=1))], total=2, index=0, end_flag=0)]
+
+    session = _PagedWindowSession(pages_for)
+    out = await _Camera(session).async_get_sd_recordings(days=7)
+    assert len(session.windows) == 1
+    assert len(out.records) == 1
+    assert out.complete is False
+
+
+@pytest.mark.asyncio
+async def test_a_record_of_stray_bytes_is_dropped():
+    """Measured on an A000088: slots that decode to month 160 or year 1680."""
+    junk = struct.pack("<HBBBBBBBBBB", 1680, 160, 6, 2, 6, 160, 6, 0, 0, 0, 0)
+    session = _WindowSession(lambda start, end: _page([junk, _record()]))
+    out = await _Camera(session).async_get_sd_recordings(days=1)
+    assert [r.isoformat() for r in out.records] == ["2026-08-11T20:41:42Z"]
+    assert out.complete is False
+
+
+@pytest.mark.asyncio
+async def test_a_record_from_outside_the_window_is_dropped():
+    session = _WindowSession(lambda start, end: _page([_record(mon=1), _record()]))
+    out = await _Camera(session).async_get_sd_recordings(days=1)
+    assert [r.isoformat() for r in out.records] == ["2026-08-11T20:41:42Z"]
+    assert out.complete is False
+
+
+@pytest.mark.asyncio
+async def test_two_identical_records_in_one_window_are_both_kept():
+    session = _WindowSession(lambda start, end: _page([_record(), _record()]))
+    out = await _Camera(session).async_get_sd_recordings(days=1)
+    assert len(out.records) == 2
+
+
+@pytest.mark.asyncio
+async def test_without_a_timeout_a_list_page_gets_the_longer_wait():
+    session = _PagedWindowSession(lambda start, end: [_page([])])
+    await _Camera(session).async_get_sd_recordings(days=1)
+    assert session.timeouts == [
+        sd_listing._SD_LIST_FIRST_PAGE_TIMEOUT_S,
+        ("map", sd_listing._SD_LIST_TIMEOUT_S),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_callers_timeout_is_used_as_given():
+    session = _PagedWindowSession(lambda start, end: [_page([])])
+    await _Camera(session).async_get_sd_recordings(days=1, timeout=3.0)
+    assert session.timeouts == [3.0, ("map", 3.0)]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_window_is_still_asked():
+    """Never 'complete' for a listing that was not sent."""
+    session = _PagedWindowSession(lambda start, end: [_page([])])
+    out = await _Camera(session).async_get_sd_recordings(days=0)
+    assert len(session.windows) == 1
+    assert out.answered is True
