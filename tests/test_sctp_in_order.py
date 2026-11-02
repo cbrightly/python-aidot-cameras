@@ -84,6 +84,15 @@ class TestOrder:
         assert _sctp_take_in_order(state, 100, "w", 0.1) == ["w", "x"]
         assert state["peer_cum_tsn"] == 101
 
+    def test_every_packet_arriving_twice_gives_each_message_once(self):
+        """Measured 2026-11-02 on a host reaching the camera by two routes:
+        every control packet arrived twice, 1-3 ms apart. In arrival order a
+        repeated middle fragment was appended into the page."""
+        state = _started(99)
+        frags = [(100, B, b"ab"), (101, 0, b"cd"), (102, E, b"ef"), (103, B | E, b"z")]
+        got = _packets(state, [[f] for f in frags for _ in (0, 1)])
+        assert got == [b"abcdef", b"z"]
+
     def test_a_resend_of_a_delivered_chunk_is_dropped(self):
         state = _started(99)
         assert _sctp_take_in_order(state, 100, "w", 0.0) == ["w"]

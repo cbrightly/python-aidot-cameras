@@ -7,19 +7,18 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 ## [Unreleased]
 
 ### Fixed
-- **An SDES camera's replies are reassembled in order, so a lost fragment no
-  longer loses the reply.** The control channel handed the camera's SCTP DATA
-  to reassembly in arrival order. A ~2.8 KB SD listing page comes as three
-  fragments, and over a TURN relay one can be lost and resent: the first and
-  last were joined around the hole into a page that did not decode, and the
-  resent ones then arrived with no start and were dropped, so the listing
-  reported that the camera had not answered. A Home Assistant install reaching
-  a PTZ only through the relay showed its card list cut off part way
-  (2026-11-02). DATA is now delivered in TSN order: a chunk past a gap is held,
+- **An SDES camera's replies survive a doubled or lost packet.** The control
+  channel handed the camera's SCTP DATA to reassembly in arrival order. A Home
+  Assistant install that reaches a PTZ by two routes received every control
+  packet twice (2026-11-02, its own log): a duplicated fragment was appended
+  into an SD listing page, which then decoded with a record outside its
+  window, and a duplicated page landed in the next window's listing and made
+  it reject its own - so the card list came back cut off part way. A lost and
+  resent fragment did the same kind of damage. DATA is now delivered in TSN
+  order: a chunk already delivered is dropped, a chunk past a gap is held,
   unacknowledged, until the camera resends what is missing (given up after
-  4 s, with any half-built message dropped), a resend of a chunk already
-  delivered is ignored, and every DATA chunk in a packet is read, not just the
-  first.
+  4 s, with any half-built message dropped), and every DATA chunk in a packet
+  is read, not just the first.
 
 ## [1.0.0rc69]
 
