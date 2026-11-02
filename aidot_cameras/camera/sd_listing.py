@@ -14,6 +14,7 @@ list rather than as a traceback.
 
 import logging
 import time
+from datetime import datetime, UTC
 from typing import Any, List, Optional
 
 from .sd_events import (
@@ -34,19 +35,31 @@ _LOGGER = logging.getLogger(__name__)
 #: requests cannot hold a session for more than a viewer would tolerate.
 _SD_LIST_TIMEOUT_S = 8.0
 
-#: The pages of one listing follow each other back to back; measured on a PTZ,
-#: four pages of a 7-day window arrived together. A gap this long after a page
-#: means no more are coming.
-_SD_MORE_PAGES_TIMEOUT_S = 3.0
+#: How long a listing waits for its first page, and then for each next one.
+#: The pages of one burst arrive together, but a burst can be slow to start:
+#: a PTZ took 6.3 s to answer for a window three to six days back, and a wait
+#: of 3 s between pages cut a 7-day reply off after two of its pages
+#: (measured 2026-11-02). The occupancy map keeps the caller's timeout.
+_SD_LIST_FIRST_PAGE_TIMEOUT_S = 15.0
+_SD_MORE_PAGES_TIMEOUT_S = 10.0
 
 #: 255 records a page, so 64 pages is over 16,000 recordings - far more than a
 #: card holds in the 7 days a caller asks about.
 _SD_MAX_PAGES = 64
 
+#: The widest window one listing request asks for. An A000088 answers a
+#: window of five days or more with page after page of records it never
+#: filled in - all-zero dates and stray heap bytes, 7,800 slots for a card
+#: holding one recording - and answers four days or less correctly (measured
+#: 2026-11-02, windows of 1 to 6 days). Three days keeps a margin under that.
+_SD_LIST_CHUNK_S = 3 * 86400.0
+
 #: However the pages trickle in, a listing gives up collecting them after this
-#: long and reports what it has as incomplete. Without it each page would
-#: restart the gap timer and a slow camera could hold the session for minutes.
-_SD_LIST_PAGES_BUDGET_S = 30.0
+#: long, across all its windows, and reports what it has as incomplete. The
+#: occupancy map is asked after it, with its own timeout.
+#: Without it each page would restart the gap timer and a slow camera could
+#: hold the session for minutes.
+_SD_LIST_BUDGET_S = 60.0
 
 
 class _ListPages:
@@ -123,6 +136,29 @@ class _ListPages:
         return not self.pages or self.covered()
 
 
+def _plausible(record: Any, lo: float, hi: float) -> bool:
+    """Is this a record the camera filled in, for the window it was asked for?
+
+    An A000088 pads a reply with slots it never wrote: all-zero dates, and
+    stray heap bytes that decode to month 160. A date that cannot exist, or one
+    outside the window (a second's slack either side for the camera's
+    rounding), is not a recording.
+    """
+    try:
+        when = datetime(
+            record.year,
+            record.month,
+            record.day,
+            record.hour,
+            record.minute,
+            record.second,
+            tzinfo=UTC,
+        ).timestamp()
+    except (ValueError, OverflowError):
+        return False
+    return lo - 1 <= when <= hi + 1
+
+
 def _session_is_live(session: Any) -> bool:
     """Is this session object one that could still carry a request?
 
@@ -177,7 +213,13 @@ class _CameraSdMixin:
             return None
 
     async def _sd_ask_pages(
-        self, session: Any, cmd: int, payload: bytes, response_cmd: int, timeout: float
+        self,
+        session: Any,
+        cmd: int,
+        payload: bytes,
+        response_cmd: int,
+        timeout: float,
+        budget: float = _SD_LIST_BUDGET_S,
     ) -> "tuple[_ListPages, bool]":
         """Every reply page to one request, and whether any reply came back.
 
@@ -203,7 +245,7 @@ class _CameraSdMixin:
                         timeout=timeout,
                         more_timeout=_SD_MORE_PAGES_TIMEOUT_S,
                         max_replies=_SD_MAX_PAGES,
-                        budget=_SD_LIST_PAGES_BUDGET_S,
+                        budget=budget,
                         done=pages.done,
                     )
                 )
@@ -218,13 +260,86 @@ class _CameraSdMixin:
         pages.take(replies)
         return pages, bool(replies)
 
+    async def _sd_list_chunks(
+        self,
+        session: Any,
+        start_ts: float,
+        end_ts: float,
+        channel: int,
+        first_page_timeout: float,
+    ) -> "tuple[list, bool, bool]":
+        """List ``start_ts``..``end_ts`` in chunks no wider than the camera handles.
+
+        Returns (records oldest first, complete, answered). Chunks are asked
+        newest first and the listing stops at the first chunk that did not come
+        back whole: a camera that goes quiet part way still gives the
+        recordings a user most wants, a dead channel costs one timeout rather
+        than one per chunk, and a page still on its way for a chunk given up on
+        cannot be read as the next chunk's answer - replies carry nothing this
+        layer can match a request on.
+        """
+        chunks = []
+        hi = end_ts
+        while hi > start_ts:
+            lo = max(start_ts, hi - _SD_LIST_CHUNK_S)
+            chunks.append((lo, hi))
+            hi = lo
+        if not chunks:
+            # An empty or inverted window is still asked, once: answering
+            # "complete" for a listing never sent would read as an empty card.
+            chunks.append((start_ts, end_ts))
+        by_chunk = []
+        complete = True
+        answered = False
+        give_up = time.monotonic() + _SD_LIST_BUDGET_S
+        for lo, hi in chunks:
+            left = give_up - time.monotonic()
+            if left <= 0:
+                complete = False
+                break
+            pages, chunk_answered = await self._sd_ask_pages(
+                session,
+                LISTEVENT_REQ_CMD,
+                listevent_payload(lo, hi, channel=channel),
+                LISTEVENT_RESP_CMD,
+                min(first_page_timeout, left),
+                budget=left,
+            )
+            if not chunk_answered:
+                complete = False
+                break
+            answered = True
+            records = pages.records
+            kept = [r for r in records if _plausible(r, lo, hi)]
+            by_chunk.append(kept)
+            if len(kept) != len(records):
+                complete = False
+                _LOGGER.debug(
+                    "SD list for %s: %d of %d records unfilled or outside the window",
+                    getattr(self, "device_id", "?"),
+                    len(records) - len(kept),
+                    len(records),
+                )
+            if not pages.complete:
+                complete = False
+                break
+        out: list = []
+        # Newest chunk was asked first; hand them back oldest first. Two
+        # neighbouring chunks share an edge second, so a record on it can come
+        # back in both - and only there is a repeat not a record of its own.
+        previous: set = set()
+        for records in reversed(by_chunk):
+            out.extend(r for r in records if r not in previous)
+            previous = set(records)
+        return out, complete, answered
+
     async def async_get_sd_recordings(
         self,
         *,
         session: Any = None,
         days: int = 7,
         channel: int = 0,
-        timeout: float = _SD_LIST_TIMEOUT_S,
+        timeout: Optional[float] = None,
     ) -> Optional[SdRecordingList]:
         """What the card holds over the last ``days``, or None if we could not ask.
 
@@ -245,13 +360,17 @@ class _CameraSdMixin:
         card-bearing A000088 that returns an EMPTY page while 0 returns the
         records - measured 2026-08-11, same session, same window.
 
-        One request each for the list and the occupancy map. The list reply is
-        paged, 255 records a page, oldest first, and the camera sends every page
+        The list is asked in windows of at most three days, newest first: an
+        A000088 answers a window of five days or more with records it never
+        filled in. One request for the occupancy map. Each list reply is paged,
+        255 records a page, oldest first, and the camera sends every page
         unprompted: there is no continuation request and none is needed. All of
         them are collected (measured 2026-11-01: a PTZ's 7-day window was four
         pages, 824 records, and reading only the first stopped six days short
-        of today). ``complete=False`` when the end flag never arrived or a page
-        before it is missing.
+        of today). A record whose date cannot exist or falls outside the window
+        it was asked for is one the camera did not fill in, and is dropped. The
+        listing stops at the first window that did not come back whole, and
+        ``complete=False`` then, and when a record was dropped.
         """
         session = (
             session if session is not None else getattr(self, "_stream_session", None)
@@ -266,14 +385,16 @@ class _CameraSdMixin:
         end_ts = time.time()
         start_ts = end_ts - days * 86400
 
-        pages, list_answered = await self._sd_ask_pages(
+        # A caller's own timeout is used as given. Without one, a list page
+        # gets the longer wait a slow card scan needs and the map the usual one.
+        map_timeout = _SD_LIST_TIMEOUT_S if timeout is None else timeout
+        records, complete, list_answered = await self._sd_list_chunks(
             session,
-            LISTEVENT_REQ_CMD,
-            listevent_payload(start_ts, end_ts, channel=channel),
-            LISTEVENT_RESP_CMD,
-            timeout,
+            start_ts,
+            end_ts,
+            channel,
+            _SD_LIST_FIRST_PAGE_TIMEOUT_S if timeout is None else timeout,
         )
-        records, complete = pages.records, pages.complete
 
         hours = None
         map_reply = await self._sd_ask(
@@ -281,7 +402,7 @@ class _CameraSdMixin:
             HASLISTEVENT_REQ_CMD,
             haslistevent_payload(start_ts, end_ts, channel=channel),
             HASLISTEVENT_RESP_CMD,
-            timeout,
+            map_timeout,
         )
         if map_reply is not None:
             hours = decode_hour_map(
