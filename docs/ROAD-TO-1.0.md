@@ -90,6 +90,18 @@ hash, and the library installed is `1.0.0rc70`, whose wheel on PyPI matches
 its tag file for file. 2026-11-02 had that install, a restart and a debug
 listing, so it is provocation; 2026-11-03 is the first ordinary day.
 
+**2026-11-04 counts.** For half an hour from 09:13 that morning the bedroom
+A000088 misbehaved on its own: its sessions died within seconds, then opens
+stopped connecting and were refused as busy, and at 09:46 every one of its
+Home Assistant entities went unavailable for ten minutes - the camera off the
+cloud. No other camera was affected, and that camera had shown nothing of the
+kind the day before. The watcher reported the refusals as a streaming finding,
+which it does for any refusal; the reading is a camera fault, not the
+library, so the day counts. What the library did make worse - reopening every
+15 s and retrying straight into the busy refusal - is fixed on a branch and
+held until the soak ends, because it changes the serve loop and that would
+reset the clock.
+
 **What counts as soak.** Ordinary use with nobody driving the box. Ordinary
 use includes one fixed viewing schedule, set before the first counting day so
 that it cannot be tuned to the result: every camera is viewed for 60 s through
