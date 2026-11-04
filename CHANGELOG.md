@@ -17,17 +17,31 @@ loop's retry pacing, and a change to the serve loop resets the soak clock.
   connecting ("ICE connection not established"), and every retry 15 s after
   one was refused as busy (-50002), because the camera still held the session
   it had accepted for the offer that never connected. Then it went offline.
-  Pounding an A000088 like that is what can wedge its DTLS stack. Now the
-  backoff resets only when a session lasts 30 s and delivers video; a session
-  that ends sooner, or never delivers video, escalates it, and the loop waits
-  that delay (30 s, doubling, up to 300 s) after the session is stopped. After
-  an ICE failure the next open waits as long as after a busy refusal
-  (`AIDOT_BUSY_RETRY_S`, 45 s by default).
+  Pounding an A000088 like that is what can wedge its DTLS stack. Now a
+  session that ends on its own within 30 s of its open succeeding, or without
+  ever delivering video, is a short session, counted apart from failed opens:
+  after one the loop waits before reopening, exactly 30 s after the first and
+  then jittered between 30 s and a ceiling that doubles per consecutive short
+  session, up to 300 s. A session that lasts 30 s and delivered video clears
+  the count, whatever its last serve cycle did. The wait does not hold the
+  camera's concurrent-stream slot (`AIDOT_MAX_CONCURRENT_STREAMS`), so it
+  does not keep another camera from serving. Failed opens are paced, and
+  reach the slow probe, exactly as before: an open that succeeds still
+  resets that count. The threshold is `AIDOT_DTLS_SHORT_SESSION_S`.
+- **After an open whose ICE never connected, the next open waits as long as
+  after a busy refusal** (`AIDOT_BUSY_RETRY_S`, 45 s by default). That
+  includes a shifted answer that did not connect, which used to be retried in
+  the 3 s not-ready burst, and the wait is a floor: the offline pause ending
+  early because the camera came back online no longer cuts it short.
 
 ### Added
 - `AidotIceNotEstablished`, a subclass of `AidotNegotiationFailed`, raised
   when ICE does not connect in time; code that catches
   `AidotNegotiationFailed` still catches it.
+- `AidotCameraNotReady.holds_session`, True when the camera declined on a
+  shifted answer whose ICE never connected and still holds that session.
+- `AIDOT_DTLS_SHORT_SESSION_S` (default 30): how long a served DTLS session
+  must last, with video, not to count as short.
 
 ## [1.0.0rc70]
 

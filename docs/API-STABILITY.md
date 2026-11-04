@@ -39,7 +39,7 @@ purpose.
 | `HTTPError`, `InvalidHost`, `InvalidURL` | `AidotError` | upstream's HTTP-level errors |
 | `AidotOSError` | `Exception` | upstream's OS-level error; not an `AidotError` (upstream's choice) |
 | `AidotCameraBusy` | `AidotError` | the camera refused the stream with a terminal code; do not retry |
-| `AidotCameraNotReady` | `AidotError` | the camera answered but its media pipeline is not up yet; retry soon |
+| `AidotCameraNotReady` | `AidotError` | the camera answered but its media pipeline is not up yet; retry soon, unless `holds_session` is True (a shifted answer whose ICE never connected): then retry no sooner than after a busy refusal |
 | `AidotCameraNoMedia` | `AidotError` | the camera answered and sent no media; abandon to the retry |
 | `AidotCameraWrongCodec` | `AidotCameraNoMedia` | a camera pinned to one codec sent the other |
 | `AidotStreamOpenError` | `AidotError`, `RuntimeError` | base of the open-path errors below |

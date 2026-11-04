@@ -44,7 +44,15 @@ class AidotCameraNotReady(AidotError):
     data channel.  Distinct from AidotCameraBusy (terminal) and from hard
     failures: the camera is awake and answering, its media pipeline just isn't
     up.  The DTLS serve loop fast-retries this in a bounded burst instead of
-    waiting the full 15s inter-attempt gate."""
+    waiting the full 15s inter-attempt gate.
+
+    ``holds_session`` is True when the camera answered with a shifted answer
+    and ICE then never connected: like ``AidotIceNotEstablished``, the camera
+    has accepted the offer and still holds that session, so a retry should
+    wait as long as after a busy refusal rather than burst."""
+
+    #: Set on the instance when the camera still holds the unconnected session.
+    holds_session: bool = False
 
 
 class AidotCameraNoMedia(AidotError):

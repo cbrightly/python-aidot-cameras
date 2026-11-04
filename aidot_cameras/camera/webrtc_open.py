@@ -4711,11 +4711,17 @@ async def _dtls_open_ice_candidates_and_connect(
         if ps._answer_inserted:
             # Before the answer sections were matched by content, a shifted
             # answer on the live path stubbed every section and raised this
-            # same error, which the caller retries in a fast bounded burst.
-            # Keep that: a shifted answer that did not connect inside the
-            # cap is the camera declining, not a transport fault, and the
-            # generic 15s-gated retry is the wrong response to it.
-            raise AidotCameraNotReady(self.device_id)
+            # same error. Keep the error: a shifted answer that did not
+            # connect inside the cap is the camera declining, not a transport
+            # fault. But not the fast burst the caller gives a NotReady: ICE
+            # did not connect, so the camera still holds the session it
+            # accepted for this offer, as after AidotIceNotEstablished below,
+            # and a 3 s retry walks into its busy refusal (-50002) - what
+            # every retry did on 2026-11-04. holds_session tells the serve
+            # loop to wait as long as after a busy refusal instead.
+            _not_ready = AidotCameraNotReady(self.device_id)
+            _not_ready.holds_session = True
+            raise _not_ready
         raise AidotIceNotEstablished(
             f"async_open_webrtc_stream: ICE connection not established "
             f"(connState={ps.pc.connectionState}"

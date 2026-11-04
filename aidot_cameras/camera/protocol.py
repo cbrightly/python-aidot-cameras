@@ -804,8 +804,8 @@ class ReconnectPacer:
         )
 
     def reset(self) -> None:
-        """Clear the failure count - e.g. once a session has lasted (the DTLS serve
-        loop, via _session_end_pacing)."""
+        """Clear the failure count - e.g. after a successful open in a loop that has
+        no end-of-session escalation (the DTLS serve loop, gated by its own spacing)."""
         self._attempt = 0
 
 
