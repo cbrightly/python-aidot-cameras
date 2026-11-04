@@ -17,8 +17,12 @@ Pinned here:
   again;
 * open failures are paced exactly as before: a successful open resets them,
   and short sessions never push a camera into the slow probe;
-* while it waits the loop holds no concurrent-stream slot, does not claim
-  to be serving, and releases the camera if nobody is watching;
+* while it waits the loop keeps its concurrent-stream slot (as a failed-open
+  wait does), does not claim to be serving, renews no battery keep-alive, and
+  afterwards releases the camera if nobody has watched for the idle window,
+  the waits themselves not counted;
+* a video-less session is paced once, as a short session, and does not also
+  escalate the open-failure pacer;
 * an open whose ICE never connected, on a plain or a shifted answer, is one
   failure with one policy: the pacer, the slow probe, the offline pause and a
   floor of AIDOT_BUSY_RETRY_S that an offline pause ending early cannot cut.
@@ -180,10 +184,18 @@ def test_a_plain_answer_that_never_connects_is_not_a_not_ready():
 class _Sess:
     """A session the fake serve cycle keeps for ``life`` fake seconds."""
 
-    def __init__(self, life: float, *, video: bool = True, idle: bool = False):
+    def __init__(
+        self,
+        life: float,
+        *,
+        video: bool = True,
+        idle: bool = False,
+        watched: bool = False,
+    ):
         self.life = life
         self.video = video
         self.idle = idle
+        self.watched = watched
         self._pc = types.SimpleNamespace(connectionState="connected")
         self.stopped = 0
 
@@ -193,10 +205,10 @@ class _Sess:
 
 class _Relay:
     def __init__(self):
-        self.paused: list[bool] = []
+        self.paused = False
 
     def set_paused(self, paused: bool) -> None:
-        self.paused.append(paused)
+        self.paused = paused
 
     def close(self) -> None:
         pass
@@ -215,6 +227,7 @@ class _Run:
         on_sleep=None,
         viewer=True,
         relay=None,
+        renew=False,
     ):
         self.cam = cam
         self.script = list(script)
@@ -222,14 +235,26 @@ class _Run:
         self.opens: list[float] = []
         self.ends: list[float] = []
         self.sleeps: list[tuple[float, float, bool]] = []  # (at, delay, waiting)
-        self.slot_free_in_wait: list[bool] = []
+        self.slot_held_in_wait: list[bool] = []
         self.slot_held_in_serve: list[bool] = []
         self.ready_in_wait: list[bool] = []
-        self.leases: list[tuple[object, object]] = []
+        self.relay_in_wait: list[tuple[float, bool]] = []  # (since end, paused)
+        self.renewals: list[tuple[float, bool]] = []  # (at, waiting)
         self.dormant: list[str] = []
         self.slots = slots
+        self.relay = relay
         self._waiting = False
         self._on_sleep = on_sleep
+        self._renew_task = None
+        if renew:
+            monkeypatch.setattr(
+                type(cam), "is_battery_camera", property(lambda _s: True)
+            )
+
+            async def _keep_alive():
+                run.renewals.append((run.now, run._waiting))
+
+            cam._async_set_keep_alive = _keep_alive
 
         cam._streaming_active = True
         cam._keepalive_rtsp_url = _URL
@@ -238,13 +263,26 @@ class _Run:
         run = self
 
         async def _sleep(delay, *a, **k):
+            if run._renew_task is not None and asyncio.current_task() is (
+                run._renew_task
+            ):
+                # The renew loop runs alongside on the same clock: it sleeps
+                # until the loop has moved the clock on by ``delay``.
+                target = run.now + delay
+                for _ in range(100000):
+                    if run.now >= target:
+                        return
+                    await _real_sleep(0)
+                raise asyncio.CancelledError
             run.sleeps.append((run.now, delay, run._waiting))
-            if len(run.sleeps) > 500:
+            if len(run.sleeps) > 5000:
                 raise asyncio.CancelledError
             if run._waiting:
                 run.ready_in_wait.append(cam._serve_ready.is_set())
                 if run.slots is not None:
-                    run.slot_free_in_wait.append(not run.slots.locked())
+                    run.slot_held_in_wait.append(run.slots.locked())
+                if run.relay is not None:
+                    run.relay_in_wait.append((run.now - run.ends[-1], run.relay.paused))
             if run._on_sleep is not None:
                 run._on_sleep(run)
             run.now += max(0.0, float(delay))
@@ -288,11 +326,16 @@ class _Run:
 
         async def _serve(self_, ps):
             sess = ps.session
-            run.leases.append((asyncio.current_task(), cc._DTLS_STREAM_SLOT.get()))
             if run.slots is not None:
                 run.slot_held_in_serve.append(run.slots.locked())
             cam._serve_ready.set()  # what a bound serve does
-            run.now += sess.life
+            if sess.watched:
+                ps._last_known_viewer = run.now - ps._waited_s
+            # In steps, so the renew loop running alongside sees the time pass.
+            for _ in range(int(sess.life)):
+                run.now += 1.0
+                await _real_sleep(0)
+            run.now += sess.life - int(sess.life)
             ps._session_had_video = sess.video
             ps.idle_release = sess.idle
             await sess.stop()
@@ -314,7 +357,19 @@ class _Run:
         monkeypatch.setattr(cc, "_dtls_serve_loop_serve_cycle", _serve)
 
     def run(self, entry: str = "_dtls_serve_loop_inner") -> "_Run":
-        asyncio.run(getattr(self.cam, entry)())
+        async def _go():
+            if self.cam.is_battery_camera:
+                self._renew_task = asyncio.ensure_future(
+                    self.cam._keepalive_renew_loop()
+                )
+            try:
+                await getattr(self.cam, entry)()
+            finally:
+                if self._renew_task is not None:
+                    self._renew_task.cancel()
+                    await asyncio.gather(self._renew_task, return_exceptions=True)
+
+        asyncio.run(_go())
         return self
 
     def gaps(self) -> list[float]:
@@ -421,83 +476,32 @@ def test_a_camera_down_past_the_cap_starts_its_short_count_again(
     assert run.gaps()[-1] == wait
 
 
-def test_the_wait_does_not_hold_the_stream_slot(monkeypatch, cam):
+def test_the_wait_keeps_the_stream_slot(monkeypatch, cam):
+    """As a failed-open wait always has: letting go of the slot to wait and
+    queueing for it again could park a camera in the queue indefinitely."""
     slots = asyncio.Semaphore(1)
     monkeypatch.setattr(cc, "_get_stream_slots", lambda: slots)
     run = _Run(monkeypatch, cam, [_Sess(5.0), _Sess(5.0), _Sess(5.0)], slots=slots)
     run.run(entry="_dtls_serve_loop")
     assert run.slot_held_in_serve == [True, True, True]
-    assert run.slot_free_in_wait and all(run.slot_free_in_wait)
-    # Taken back before each open and released once at the end - never twice,
-    # which would silently raise the cap.
+    assert run.slot_held_in_wait and all(run.slot_held_in_wait)
     assert not slots.locked() and slots._value == 1
 
 
-def test_the_wait_takes_the_slot_back_before_reopening(monkeypatch, cam):
-    """Another camera that took the slot during the wait is waited for."""
-    slots = asyncio.Semaphore(1)
-    monkeypatch.setattr(cc, "_get_stream_slots", lambda: slots)
-    other: dict = {}
-
-    def _other_camera_takes_the_slot(run):
-        if run._waiting and "task" not in other:
-
-            async def _hold():
-                await slots.acquire()
-                other["got"] = len(run.opens)
-                # Longer than the rest of the wait, which ticks once a chunk.
-                for _ in range(50):
-                    await _real_sleep(0)
-                other["freed"] = len(run.opens)
-                slots.release()
-
-            other["task"] = asyncio.ensure_future(_hold())
-
-    run = _Run(
-        monkeypatch,
-        cam,
-        [_Sess(5.0), _Sess(5.0)],
-        slots=slots,
-        on_sleep=_other_camera_takes_the_slot,
-    )
-    run.run(entry="_dtls_serve_loop")
-    # It got the slot during the wait and freed it before the second open.
-    assert other["got"] == 1 and other["freed"] == 1
-    assert len(run.opens) == 3
-    assert run.slot_held_in_serve == [True, True]
-    assert slots._value == 1
-
-
-def test_overlapping_serves_each_keep_their_own_slot(monkeypatch, cam):
-    """start_keepalive can start a serve while the old one is still winding
-    down: each serve's loop sees its own lease, so neither lets go of (or
-    clears) the other's, and the cap is whole again when both are done."""
-    slots = asyncio.Semaphore(2)
-    monkeypatch.setattr(cc, "_get_stream_slots", lambda: slots)
-    run = _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(6)], slots=slots)
-
-    async def _both():
-        await asyncio.gather(cam._dtls_serve_loop(), cam._dtls_serve_loop())
-
-    asyncio.run(_both())
-    by_task: dict = {}
-    for task, lease in run.leases:
-        by_task.setdefault(task, set()).add(id(lease))
-    assert len(by_task) == 2
-    assert all(len(ids) == 1 for ids in by_task.values())
-    first, second = (ids for ids in by_task.values())
-    assert first != second and None not in run.leases[0]
-    assert slots._value == 2
-    assert cc._DTLS_STREAM_SLOT.get() is None
-
-
 def test_the_wait_does_not_claim_to_be_serving(monkeypatch, cam):
-    """serve_ready is down for the whole wait, and the relay is paused for it
-    and resumed before the next open."""
+    """serve_ready is down for the whole wait. The relay closes pulls for
+    all but the last 30 s of it, then holds them for the reopen, and is
+    serving normally again when the next open starts. Waits: 30, 60, 120 s."""
     relay = _Relay()
-    run = _Run(monkeypatch, cam, [_Sess(5.0), _Sess(5.0)], relay=relay).run()
+    script = [_Sess(5.0), _Sess(5.0), _Sess(5.0)]
+    run = _Run(monkeypatch, cam, script, relay=relay).run()
     assert run.ready_in_wait and not any(run.ready_in_wait)
-    assert relay.paused == [True, False, True, False]
+    assert run.gaps() == [30.0, 60.0, 120.0]
+    paused = {round(t) for t, p in run.relay_in_wait if p}
+    held = {round(t) for t, p in run.relay_in_wait if not p}
+    assert paused and max(paused) < 90.0
+    assert {90, 95, 100, 105, 110, 115} <= held
+    assert relay.paused is False
 
 
 def test_a_paused_relay_closes_a_pull_at_once():
@@ -522,14 +526,27 @@ def test_a_paused_relay_closes_a_pull_at_once():
 
 def test_nobody_watching_after_the_wait_releases_the_camera(monkeypatch, cam):
     """Sessions that die in seconds never reach the serve cycle's idle
-    release; after the wait the loop asks itself. Idle window 60 s: after the
-    first wait (35 s since the serve began) it still reopens; after the second
-    (100 s) it releases instead of opening a third time."""
+    release; after each wait the loop asks itself, counting only the time
+    sessions ran. Idle window 60 s, 5 s sessions: the thirteenth session takes
+    it past 60 s, and the loop releases instead of opening a fourteenth."""
     cam._stream_idle_opt = 60.0
     monkeypatch.setenv("AIDOT_STREAM_STARTUP_GRACE_S", "0")
-    run = _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(5)], viewer=False).run()
+    script = [_Sess(5.0) for _ in range(20)]
+    run = _Run(monkeypatch, cam, script, viewer=False).run()
     assert run.dormant == ["idle release"]
-    assert len(run.opens) == 2
+    assert len(run.opens) == 13
+
+
+def test_the_wait_never_counts_towards_the_idle_window(monkeypatch, cam):
+    """A viewer was watching each session; during a wait go2rtc can report
+    none (the relay closed its pulls). Waits of 30 to 300 s, idle window
+    60 s: still not released."""
+    cam._stream_idle_opt = 60.0
+    monkeypatch.setenv("AIDOT_STREAM_STARTUP_GRACE_S", "0")
+    script = [_Sess(5.0, watched=True) for _ in range(6)]
+    run = _Run(monkeypatch, cam, script, viewer=False).run()
+    assert not run.dormant
+    assert len(run.opens) == 7
 
 
 @pytest.mark.parametrize("idle, viewer", [(60.0, True), (0.0, False)])
@@ -537,9 +554,22 @@ def test_a_watched_or_never_released_camera_keeps_reopening(
     monkeypatch, cam, idle, viewer
 ):
     cam._stream_idle_opt = idle
-    run = _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(5)], viewer=viewer).run()
+    script = [_Sess(5.0) for _ in range(15)]
+    run = _Run(monkeypatch, cam, script, viewer=viewer).run()
     assert not run.dormant
-    assert len(run.opens) == 6
+    assert len(run.opens) == 16
+
+
+def test_no_battery_keep_alive_is_renewed_during_the_wait(monkeypatch, cam):
+    """The renew loop keeps a battery camera awake while a session runs; in
+    the wait there is no session, and waking it is what the wait stops. It
+    renews again once a session is back."""
+    script = [_Sess(25.0) for _ in range(4)]
+    run = _Run(monkeypatch, cam, script, renew=True).run()
+    assert run.gaps() == [30.0, 60.0, 120.0, 240.0]
+    assert [at for at, waiting in run.renewals if waiting] == []
+    during = [at for at, waiting in run.renewals if not waiting]
+    assert any(at > run.ends[2] for at in during)
 
 
 def test_the_wait_floor_survives_an_offline_pause_that_ends_early(monkeypatch, cam):
@@ -678,3 +708,35 @@ def test_a_session_of_several_cycles_is_paced_once_after_it_ends(
     assert len(run.mux_targets) == 2
     assert len([m for m in msgs if "before reopening" in m]) == 1, msgs
     assert run.opens == 1  # still waiting when the run timed out
+
+
+def test_a_video_less_session_does_not_also_escalate_the_open_pacer(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """Paced once, as a short session. The open that fails after it retries
+    on the pacer's 15 s base, as after any successful open, not 30 s: the
+    video-less session no longer counts as an open failure too."""
+    run = _real_cycle_run(monkeypatch, make_camera_device_client, False)
+    # A short-session wait of a few ms of real time instead of 30 s.
+    monkeypatch.setattr(cc, "_SHORT_SESSION_BASE_S", 0.01)
+    monkeypatch.setattr(cc, "_SHORT_SESSION_CAP_S", 0.02)
+    from tests.keepalive_driver import FakeDtlsSession
+
+    outcomes = [FakeDtlsSession(), AidotNegotiationFailed("bad answer")]
+
+    async def _open(**kwargs):
+        run.opens += 1
+        if not outcomes:
+            raise asyncio.CancelledError
+        out = outcomes.pop(0)
+        if isinstance(out, BaseException):
+            raise out
+        return out
+
+    run.client.async_open_webrtc_stream = _open
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("delivered no video" in m for m in msgs), msgs
+    retries = [m for m in msgs if "open failed for" in m]
+    assert retries and "(retry 15s)" in retries[0], retries
