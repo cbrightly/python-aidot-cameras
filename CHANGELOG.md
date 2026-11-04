@@ -21,22 +21,20 @@ loop's retry pacing, and a change to the serve loop resets the soak clock.
   session that ends on its own within 30 s of its open succeeding, or without
   ever delivering video, is a short session, paced on its own backoff apart
   from failed opens: the loop waits 30 s after the first, then jittered
-  between 30 and 60 s. That takes the 2026-11-04 cadence from a reopen every
-  15 s to one every 30-60 s plus the session's own life, without starving a
-  viewer: capped at 60 s, a pull the serve relay holds (up to 90 s) is still
-  waiting when the reopen lands. A session that lasts 30 s and delivered
-  video resets that backoff, whatever its last serve cycle did, and so does
-  a camera that was down over 300 s (failed opens, an offline pause; the
-  loop's own waits do not count). A session that never delivers video is
-  paced only this way; it no longer also escalates the failed-open backoff.
-  While it waits the loop keeps the camera's concurrent-stream slot
-  (`AIDOT_MAX_CONCURRENT_STREAMS`), as a failed-open wait always has, does
-  not report the serve ready, and renews no battery keep-alive. After the
-  wait, a camera nobody has watched for the idle window is released rather
-  than reopened, by the serve cycle's own release rule, so sessions that die
-  before their idle window cannot keep a camera awake with no viewer. Failed
-  opens are paced, and reach the slow probe, exactly as before: an open that
-  succeeds still resets that count. The threshold is
+  between 30 and 45 s. That takes the 2026-11-04 cadence from a reopen every
+  15 s to one every 30-45 s plus the session's own life, without starving a
+  viewer: 45 s of wait, a 16-25 s cold open and about 8 s to serve-ready stay
+  inside the 90 s the serve relay holds a pull. A session that lasts 30 s and
+  delivered video resets that backoff, whatever its last serve cycle did. A
+  session that never delivers video is paced only this way; it no longer
+  also escalates the failed-open backoff. While it waits the loop keeps the
+  camera's concurrent-stream slot (`AIDOT_MAX_CONCURRENT_STREAMS`), as a
+  failed-open wait always has, and does not report the serve ready. Idle
+  release is unchanged, the serve cycle's alone: a camera nobody watches
+  whose sessions keep dying fast is reopened every 30-45 s plus its session
+  time until its keepalive is stopped - bounded, and mains-only in practice.
+  Failed opens are paced, and reach the slow probe, exactly as before: an
+  open that succeeds still resets that count. The threshold is
   `AIDOT_DTLS_SHORT_SESSION_S`.
 - **After an open whose ICE never connected, the next open waits as long as
   after a busy refusal** (`AIDOT_BUSY_RETRY_S`, 45 s by default), and is
