@@ -9,18 +9,20 @@ accepted for the offer that never connected. Then it went offline.
 
 Pinned here:
 
-* a session that ends short (or never delivers video) is counted on its own,
-  apart from the open-failure pacer, and the loop waits 30 s after the first,
-  then up to a doubling ceiling, before reopening - never less than 30 s;
-* a session that lasted and delivered video clears that count, however its
-  last serve cycle ended, and so does a camera that took over 300 s to open
-  again;
+* a session that ends short (or never delivers video) is paced on its own
+  pacer, apart from the open-failure pacer: the loop waits 30 s after the
+  first, then jittered in [30, 60] s - never less than 30 s, never more than
+  60 s, so a pull the serve relay holds (90 s) is still there for the reopen;
+* a session that lasted and delivered video resets that pacer, however its
+  last serve cycle ended, and so does a camera down over 300 s;
 * open failures are paced exactly as before: a successful open resets them,
   and short sessions never push a camera into the slow probe;
 * while it waits the loop keeps its concurrent-stream slot (as a failed-open
   wait does), does not claim to be serving, renews no battery keep-alive, and
-  afterwards releases the camera if nobody has watched for the idle window,
-  the waits themselves not counted;
+  lets a cancellation through; afterwards it releases the camera if nobody
+  has watched for the idle window, by the serve cycle's own rule, and never
+  releases a camera that is being watched;
+* the loop runs on one clock, the event loop's;
 * a video-less session is paced once, as a short session, and does not also
   escalate the open-failure pacer;
 * an open whose ICE never connected, on a plain or a shifted answer, is one
@@ -29,8 +31,9 @@ Pinned here:
 
 The loop tests drive the REAL ``_dtls_serve_loop_inner`` (and
 ``_dtls_serve_loop``) on a fake clock. Only the client module's ``asyncio`` and
-``time`` are rebound, to proxies of the real modules with ``sleep``,
-``get_running_loop().time()`` and ``monotonic`` on the fake clock; the global
+``time`` are rebound, to proxies of the real modules with ``sleep`` and
+``get_running_loop().time()`` (and, unless frozen, ``monotonic``) on the fake
+clock; the global
 ``asyncio.sleep`` is never touched. The serve cycle is replaced by a fake that
 lives a session's scripted length; the open attempt, session preparation and
 session-end pacing are the production code.
@@ -41,7 +44,6 @@ Repo convention: no pytest-asyncio; drive coroutines with asyncio.run().
 from __future__ import annotations
 
 import asyncio
-import socket
 import time as _real_time
 import types
 
@@ -50,7 +52,8 @@ import pytest
 from aidot_cameras import settings
 from aidot_cameras.camera import client as cc
 from aidot_cameras.camera import protocol
-from aidot_cameras.camera.client import _session_end_pacing, _short_session_delay
+from aidot_cameras.camera.client import _session_end_pacing
+from aidot_cameras.camera.protocol import ReconnectPacer
 from aidot_cameras.exceptions import (
     AidotCameraNotReady,
     AidotIceNotEstablished,
@@ -68,40 +71,43 @@ _BUSY = settings.read("AIDOT_BUSY_RETRY_S")
 # --------------------------------------------------------------------------- #
 
 
-def _pace(n, lived, *, video=True, down=0.0, r=1.0):
+def _pacer(r=1.0):
+    return ReconnectPacer(30.0, 60.0, rand=lambda: r)
+
+
+def _pace(pacer, lived, *, video=True, down=0.0):
     return _session_end_pacing(
-        n, lived, had_video=video, threshold_s=30.0, down_s=down, rand=lambda: r
+        pacer, lived, had_video=video, threshold_s=30.0, down_s=down
     )
 
 
-def test_the_first_short_session_waits_exactly_30s_at_either_end_of_the_jitter():
-    for r in (0.0, 1.0):
-        assert _short_session_delay(1, rand=lambda r=r: r) == 30.0
+@pytest.mark.parametrize("r, waits", [(0.0, [30.0] * 6), (1.0, [30.0] + [60.0] * 5)])
+def test_the_short_session_wait_is_30_then_at_most_60(r, waits):
+    """Exactly 30 s after the first at either end of the jitter; after that
+    within [30, 60] s, never outside it."""
+    p = _pacer(r)
+    assert [_pace(p, 5.0) for _ in range(6)] == waits
 
 
-def test_jitter_never_lands_below_the_30s_floor():
-    low = [_short_session_delay(n, rand=lambda: 0.0) for n in range(1, 9)]
-    assert low == [30.0] * 8
+def test_a_session_that_lasted_with_video_resets_the_pacer():
+    p = _pacer()
+    _pace(p, 5.0)
+    _pace(p, 5.0)
+    assert _pace(p, 120.0) == 0.0
+    assert p.attempt == 0
+    assert _pace(p, 5.0) == 30.0
 
 
-def test_the_ceiling_doubles_per_short_session_up_to_300s():
-    high = [_short_session_delay(n, rand=lambda: 1.0) for n in range(1, 8)]
-    assert high == [30.0, 60.0, 120.0, 240.0, 300.0, 300.0, 300.0]
+def test_a_video_less_session_is_short_however_long_it_ran():
+    assert _pace(_pacer(), 600.0, video=False) == 30.0
 
 
-def test_a_session_that_lasted_with_video_clears_the_count():
-    assert _pace(4, 120.0) == (0, 0.0)
-
-
-def test_a_short_or_video_less_session_adds_one_and_waits():
-    assert _pace(0, 5.0) == (1, 30.0)
-    assert _pace(1, 5.0) == (2, 60.0)
-    assert _pace(0, 600.0, video=False) == (1, 30.0)
-
-
-def test_downtime_past_the_cap_starts_the_count_again():
-    assert _pace(4, 5.0, down=301.0) == (1, 30.0)
-    assert _pace(4, 5.0, down=300.0) == (5, 300.0)
+def test_downtime_past_300s_starts_the_pacer_again():
+    p = _pacer()
+    _pace(p, 5.0)
+    _pace(p, 5.0)
+    assert _pace(p, 5.0, down=300.0) == 60.0
+    assert _pace(p, 5.0, down=301.0) == 30.0
 
 
 def test_the_shifted_answer_failure_is_both_kinds():
@@ -203,17 +209,6 @@ class _Sess:
         self.stopped += 1
 
 
-class _Relay:
-    def __init__(self):
-        self.paused = False
-
-    def set_paused(self, paused: bool) -> None:
-        self.paused = paused
-
-    def close(self) -> None:
-        pass
-
-
 class _Run:
     """One run of the serve loop against a script of open outcomes."""
 
@@ -226,8 +221,8 @@ class _Run:
         slots=None,
         on_sleep=None,
         viewer=True,
-        relay=None,
         renew=False,
+        frozen_monotonic=False,
     ):
         self.cam = cam
         self.script = list(script)
@@ -238,11 +233,9 @@ class _Run:
         self.slot_held_in_wait: list[bool] = []
         self.slot_held_in_serve: list[bool] = []
         self.ready_in_wait: list[bool] = []
-        self.relay_in_wait: list[tuple[float, bool]] = []  # (since end, paused)
         self.renewals: list[tuple[float, bool]] = []  # (at, waiting)
         self.dormant: list[str] = []
         self.slots = slots
-        self.relay = relay
         self._waiting = False
         self._on_sleep = on_sleep
         self._renew_task = None
@@ -258,7 +251,7 @@ class _Run:
 
         cam._streaming_active = True
         cam._keepalive_rtsp_url = _URL
-        cam._serve_relay = relay
+        cam._serve_relay = None
 
         run = self
 
@@ -281,8 +274,6 @@ class _Run:
                 run.ready_in_wait.append(cam._serve_ready.is_set())
                 if run.slots is not None:
                     run.slot_held_in_wait.append(run.slots.locked())
-                if run.relay is not None:
-                    run.relay_in_wait.append((run.now - run.ends[-1], run.relay.paused))
             if run._on_sleep is not None:
                 run._on_sleep(run)
             run.now += max(0.0, float(delay))
@@ -305,7 +296,8 @@ class _Run:
                 if not k.startswith("_")
             }
         )
-        fake_time.monotonic = lambda: run.now
+        # Frozen: the loop must not lean on time.monotonic for its own waits.
+        fake_time.monotonic = (lambda: 0.0) if frozen_monotonic else (lambda: run.now)
         # Scoped to the client module: the real asyncio and time are untouched.
         monkeypatch.setattr(cc, "asyncio", fake_asyncio)
         monkeypatch.setattr(cc, "time", fake_time)
@@ -330,7 +322,7 @@ class _Run:
                 run.slot_held_in_serve.append(run.slots.locked())
             cam._serve_ready.set()  # what a bound serve does
             if sess.watched:
-                ps._last_known_viewer = run.now - ps._waited_s
+                ps._last_known_viewer = run.now
             # In steps, so the renew loop running alongside sees the time pass.
             for _ in range(int(sess.life)):
                 run.now += 1.0
@@ -351,7 +343,7 @@ class _Run:
 
         cam.async_open_webrtc_stream = _open
         cam._install_av_taps = lambda pc, vq, aq: True
-        cam._maybe_start_serve_relay = lambda url: relay
+        cam._maybe_start_serve_relay = lambda url: None
         cam._go_dormant = _go_dormant
         cam._viewer_present = _viewer_present
         monkeypatch.setattr(cc, "_dtls_serve_loop_serve_cycle", _serve)
@@ -396,9 +388,13 @@ def _opened_after(run: _Run) -> list[float]:
     return [round(b - a, 6) for a, b in zip(run.opens, run.opens[1:])]
 
 
-def test_sessions_that_keep_dying_fast_wait_longer_each_time(monkeypatch, cam):
-    run = _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(7)]).run()
-    assert run.gaps() == [30.0, 60.0, 120.0, 240.0, 300.0, 300.0, 300.0]
+def test_sessions_that_keep_dying_fast_wait_30_then_never_more_than_60(
+    monkeypatch, cam
+):
+    """At the top of the jitter: 30 s, then 60 s for as long as it goes on.
+    A pull the relay holds for 90 s is still waiting when the reopen lands."""
+    run = _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(8)]).run()
+    assert run.gaps() == [30.0] + [60.0] * 7
 
 
 def test_the_first_wait_is_30s_even_at_the_bottom_of_the_jitter(monkeypatch, cam):
@@ -411,7 +407,7 @@ def test_the_first_wait_is_30s_even_at_the_bottom_of_the_jitter(monkeypatch, cam
 def test_a_session_that_lasted_reopens_at_once_and_clears_the_count(monkeypatch, cam):
     script = [_Sess(5.0), _Sess(5.0), _Sess(120.0), _Sess(5.0)]
     run = _Run(monkeypatch, cam, script).run()
-    # The count started again: the short session after it waits 30 s, not 120.
+    # The pacer started again: the short session after it waits 30 s, not 60.
     assert run.gaps() == [30.0, 60.0, 0.0, 30.0]
 
 
@@ -460,19 +456,19 @@ def test_short_sessions_never_push_a_camera_into_the_slow_probe(monkeypatch, cam
     assert run.open_sleeps()[-1] == 15.0
 
 
-@pytest.mark.parametrize("fails, wait", [(1, 300.0), (5, 30.0)])
-def test_a_camera_down_past_the_cap_starts_its_short_count_again(
+@pytest.mark.parametrize("fails, wait", [(1, 60.0), (5, 30.0)])
+def test_a_camera_down_over_300s_starts_its_short_pacer_again(
     monkeypatch, cam, fails, wait
 ):
     """Four short sessions, then failed opens, then a short session. One
-    failed open (15 s) leaves the run going: it waits 300 s. Five (15 + 30 +
+    failed open (15 s) leaves the run going: it waits 60 s. Five (15 + 30 +
     60 + 120 s, then the 600 s slow probe) is a camera that was down: the
-    count starts again and it waits 30 s."""
+    pacer starts again and it waits 30 s. The loop's own waits never count."""
     script = [_Sess(5.0) for _ in range(4)]
     script += [AidotNegotiationFailed("down") for _ in range(fails)]
     script += [_Sess(5.0)]
     run = _Run(monkeypatch, cam, script).run()
-    assert run.gaps()[:4] == [30.0, 60.0, 120.0, 240.0]
+    assert run.gaps()[:4] == [30.0, 60.0, 60.0, 60.0]
     assert run.gaps()[-1] == wait
 
 
@@ -489,73 +485,39 @@ def test_the_wait_keeps_the_stream_slot(monkeypatch, cam):
 
 
 def test_the_wait_does_not_claim_to_be_serving(monkeypatch, cam):
-    """serve_ready is down for the whole wait. The relay closes pulls for
-    all but the last 30 s of it, then holds them for the reopen, and is
-    serving normally again when the next open starts. Waits: 30, 60, 120 s."""
-    relay = _Relay()
-    script = [_Sess(5.0), _Sess(5.0), _Sess(5.0)]
-    run = _Run(monkeypatch, cam, script, relay=relay).run()
+    """serve_ready is down for the whole wait; the next serve sets it."""
+    run = _Run(monkeypatch, cam, [_Sess(5.0), _Sess(5.0), _Sess(5.0)]).run()
+    assert run.gaps() == [30.0, 60.0, 60.0]
     assert run.ready_in_wait and not any(run.ready_in_wait)
-    assert run.gaps() == [30.0, 60.0, 120.0]
-    paused = {round(t) for t, p in run.relay_in_wait if p}
-    held = {round(t) for t, p in run.relay_in_wait if not p}
-    assert paused and max(paused) < 90.0
-    assert {90, 95, 100, 105, 110, 115} <= held
-    assert relay.paused is False
-
-
-def test_a_paused_relay_closes_a_pull_at_once():
-    relay = protocol._ServeRelay(0, dial_timeout=5.0)
-    relay.start()
-    try:
-        relay.set_paused(True)
-        with socket.create_connection(("127.0.0.1", relay.port), timeout=2) as c:
-            c.settimeout(2.0)
-            t0 = _real_time.monotonic()
-            assert c.recv(1) == b""
-            assert _real_time.monotonic() - t0 < 1.5
-        relay.set_paused(False)
-        with socket.create_connection(("127.0.0.1", relay.port), timeout=2) as c:
-            # Unpaused with no backend: held, waiting for one.
-            c.settimeout(0.5)
-            with pytest.raises(TimeoutError):
-                c.recv(1)
-    finally:
-        relay.close()
 
 
 def test_nobody_watching_after_the_wait_releases_the_camera(monkeypatch, cam):
     """Sessions that die in seconds never reach the serve cycle's idle
-    release; after each wait the loop asks itself, counting only the time
-    sessions ran. Idle window 60 s, 5 s sessions: the thirteenth session takes
-    it past 60 s, and the loop releases instead of opening a fourteenth."""
+    release; after each wait the loop asks itself, by the same rule. Idle
+    window 60 s: after the first wait (35 s since the serve began) it still
+    reopens; after the second (100 s) it releases instead."""
     cam._stream_idle_opt = 60.0
     monkeypatch.setenv("AIDOT_STREAM_STARTUP_GRACE_S", "0")
-    script = [_Sess(5.0) for _ in range(20)]
-    run = _Run(monkeypatch, cam, script, viewer=False).run()
+    run = _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(5)], viewer=False).run()
     assert run.dormant == ["idle release"]
-    assert len(run.opens) == 13
+    assert len(run.opens) == 2
 
 
-def test_the_wait_never_counts_towards_the_idle_window(monkeypatch, cam):
-    """A viewer was watching each session; during a wait go2rtc can report
-    none (the relay closed its pulls). Waits of 30 to 300 s, idle window
-    60 s: still not released."""
+def test_a_watched_camera_whose_sessions_keep_dying_is_never_released(monkeypatch, cam):
+    """Fifteen sessions dying in 5 s, waits of 30-60 s, an idle window of
+    60 s: with a viewer watching it keeps reopening. The relay holds pulls
+    through the wait, so the viewer still shows when the loop asks."""
     cam._stream_idle_opt = 60.0
-    monkeypatch.setenv("AIDOT_STREAM_STARTUP_GRACE_S", "0")
-    script = [_Sess(5.0, watched=True) for _ in range(6)]
-    run = _Run(monkeypatch, cam, script, viewer=False).run()
-    assert not run.dormant
-    assert len(run.opens) == 7
-
-
-@pytest.mark.parametrize("idle, viewer", [(60.0, True), (0.0, False)])
-def test_a_watched_or_never_released_camera_keeps_reopening(
-    monkeypatch, cam, idle, viewer
-):
-    cam._stream_idle_opt = idle
     script = [_Sess(5.0) for _ in range(15)]
-    run = _Run(monkeypatch, cam, script, viewer=viewer).run()
+    run = _Run(monkeypatch, cam, script, viewer=True).run()
+    assert not run.dormant
+    assert len(run.opens) == 16
+
+
+def test_a_never_released_camera_is_not_asked(monkeypatch, cam):
+    cam._stream_idle_opt = 0.0
+    script = [_Sess(5.0) for _ in range(15)]
+    run = _Run(monkeypatch, cam, script, viewer=False).run()
     assert not run.dormant
     assert len(run.opens) == 16
 
@@ -566,26 +528,56 @@ def test_no_battery_keep_alive_is_renewed_during_the_wait(monkeypatch, cam):
     renews again once a session is back."""
     script = [_Sess(25.0) for _ in range(4)]
     run = _Run(monkeypatch, cam, script, renew=True).run()
-    assert run.gaps() == [30.0, 60.0, 120.0, 240.0]
+    assert run.gaps() == [30.0, 60.0, 60.0, 60.0]
     assert [at for at, waiting in run.renewals if waiting] == []
     during = [at for at, waiting in run.renewals if not waiting]
     assert any(at > run.ends[2] for at in during)
 
 
-def test_the_wait_floor_survives_an_offline_pause_that_ends_early(monkeypatch, cam):
-    """Cloud-offline at session end, back online 5 s into the pause: the
-    pause returns, and the loop still waits out the rest of the 30 s."""
-    monkeypatch.setattr(cc, "_OFFLINE_RECHECK_S", 5.0)
+def test_the_wait_is_a_plain_wait_even_when_the_cloud_says_offline(monkeypatch, cam):
+    """Offline handling belongs to the open path: the session-end wait is
+    its 30 s, not the offline pause's 600 s."""
     cam.status.online = False
     cam._cloud_online_explicit = True
-
-    def _back_online(run):
-        if run._waiting:
-            cam.status.online = True
-
-    run = _Run(monkeypatch, cam, [_Sess(5.0), _Sess(5.0)], on_sleep=_back_online)
-    run.run()
+    run = _Run(monkeypatch, cam, [_Sess(5.0), _Sess(5.0)]).run()
     assert run.gaps() == [30.0, 60.0]
+
+
+def test_a_cancellation_in_the_wait_propagates(monkeypatch, cam):
+    """Cancelled while it waits, the loop does not swallow it - and the
+    battery renewals are not left paused."""
+
+    def _cancel_in_the_wait(run):
+        if run._waiting:
+            raise asyncio.CancelledError
+
+    run = _Run(monkeypatch, cam, [_Sess(5.0), _Sess(5.0)], on_sleep=_cancel_in_the_wait)
+    with pytest.raises(asyncio.CancelledError):
+        run.run()
+    assert len(run.opens) == 1
+    assert cam._keepalive_renew_paused is False
+
+
+def test_a_cancellation_in_the_viewer_check_propagates(monkeypatch, cam):
+    cam._stream_idle_opt = 60.0
+
+    def _viewer(_now):
+        raise asyncio.CancelledError
+
+    run = _Run(monkeypatch, cam, [_Sess(5.0), _Sess(5.0)], viewer=_viewer)
+    with pytest.raises(asyncio.CancelledError):
+        run.run()
+    assert len(run.opens) == 1
+
+
+def test_the_loop_runs_on_the_event_loop_clock(monkeypatch, cam):
+    """time.monotonic frozen: the short-session waits and the ICE floor are
+    still exact, measured on the event loop's clock alone."""
+    ice = AidotIceNotEstablished("ICE connection not established")
+    script = [_Sess(5.0), _Sess(5.0), ice, _Sess(5.0)]
+    run = _Run(monkeypatch, cam, script, frozen_monotonic=True).run()
+    assert run.gaps()[:2] == [30.0, 60.0]
+    assert _opened_after(run)[2] == _BUSY
 
 
 _ICE = AidotIceNotEstablished("ICE connection not established")

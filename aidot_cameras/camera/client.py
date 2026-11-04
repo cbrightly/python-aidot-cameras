@@ -71,7 +71,6 @@ from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixi
     _mqtt_timestamp,
     is_resent_video_frame,
     ReconnectPacer,
-    next_backoff,
     _build_stun_binding_success_response,
     _terminal_webrtc_ack,
     _install_highport_nomination_patch,
@@ -305,65 +304,48 @@ def _retry_policy(
 # any session-end pacing runs, so a camera nobody is watching is never paced
 # here however briefly its last session ran.
 #
-# The wait after the n-th consecutive short session: 30 s after the first,
-# the ceiling doubling per session up to 300 s. Kept apart from the open-failure
-# pacer (its own counter on the loop state), so short sessions neither inherit
-# open failures from before a session nor push a camera into the slow probe.
-_SHORT_SESSION_BASE_S, _SHORT_SESSION_CAP_S = 30.0, 300.0
-# The last part of a short-session wait in which the serve relay holds a pull
-# (up to its 90 s dial timeout) instead of closing it: a pull then is still
-# waiting when the reopen, a cold open of 16-25 s, brings the serve back.
-_RELAY_REARM_S = 30.0
-
-
-def _short_session_delay(
-    short_sessions: int, *, rand: "Optional[Callable[[], float]]" = None
-) -> float:
-    """Seconds to wait before reopening after ``short_sessions`` (>= 1)
-    consecutive short sessions.
-
-    next_backoff with a 30 s base: the first wait is exactly 30 s, each later
-    one is jittered between 30 s and a ceiling that doubles per session (60,
-    120, 240) up to 300 s. The jitter only ever lands above the 30 s floor."""
-    return next_backoff(
-        short_sessions - 1,
-        base=_SHORT_SESSION_BASE_S,
-        cap=_SHORT_SESSION_CAP_S,
-        rand=rand,
-    )
+# The wait after a short session: 30 s after the first, then jittered in
+# [30, 60] s, never more than 60 s. On a separate ReconnectPacer on the loop
+# state, kept apart from the open-failure pacer, so short sessions neither
+# inherit open failures from before a session nor push a camera into the slow
+# probe. Capped at 60 s, not the open pacer's 300 s, for the viewer: the serve
+# relay holds a pull for up to 90 s, so a pull that arrives during the wait is
+# still waiting when the reopen (a cold open of 16-25 s) brings the serve back.
+# The 2026-11-04 cadence goes from a reopen every 15 s to one every 30-60 s
+# plus the session's own life - the protection wanted, without starving a
+# viewer.
+_SHORT_SESSION_BASE_S, _SHORT_SESSION_CAP_S = 30.0, 60.0
+# A camera down longer than this between short sessions (failed opens, an
+# offline pause) starts its short-session backoff again.
+_SHORT_SESSION_DOWN_RESET_S = 300.0
 
 
 def _session_end_pacing(
-    short_sessions: int,
+    pacer: "ReconnectPacer",
     lived_s: float,
     *,
     had_video: bool,
     threshold_s: float,
     down_s: float = 0.0,
-    rand: "Optional[Callable[[], float]]" = None,
-) -> "tuple[int, float]":
-    """Pace the next open after a DTLS session that lived ``lived_s``.
+) -> float:
+    """Seconds to wait before reopening after a DTLS session that lived
+    ``lived_s``, on the loop's short-session ``pacer``.
 
-    Returns ``(short_sessions, wait_s)``: the loop's new count of consecutive
-    short sessions and how long to wait before reopening. A session that
-    lasted ``threshold_s`` and delivered video (in any of its serve cycles,
-    whatever its last one did) clears the count and the loop reopens on its
-    open gate (0). Any other session adds one and waits
-    ``_short_session_delay``.
+    A session that lasted ``threshold_s`` and delivered video (in any of its
+    serve cycles, whatever its last one did) resets the pacer and the loop
+    reopens on its open gate (0). Any other session is a failure of the pacer:
+    30 s the first time, then up to 60 s.
 
     ``down_s`` is how long the camera took to open again once the loop was
-    free to reopen it (failed opens, an offline pause). Past the 300 s cap
-    the run of short sessions before it is history: the count starts again,
-    so a camera back after hours down waits 30 s after its first short
-    session, not the 300 s it had reached before. Below the cap the count
-    carries on, so a short session, a failed open or two, and another short
-    session still escalate. Pure: the open-failure pacer is not touched."""
-    if down_s > _SHORT_SESSION_CAP_S:
-        short_sessions = 0
+    free to reopen it (failed opens, an offline pause - never a wait of the
+    loop's own). Past _SHORT_SESSION_DOWN_RESET_S the run of short sessions
+    before it is history and the pacer starts again."""
+    if down_s > _SHORT_SESSION_DOWN_RESET_S:
+        pacer.reset()
     if had_video and lived_s >= threshold_s:
-        return (0, 0.0)
-    short_sessions += 1
-    return (short_sessions, _short_session_delay(short_sessions, rand=rand))
+        pacer.reset()
+        return 0.0
+    return pacer.fail_delay()
 
 
 def _open_gate_delay(last_open_at: float, now: float, open_gate: float) -> float:
@@ -1435,14 +1417,12 @@ class _DtlsServeLoopState:
     # prepare_session, serve_cycle; read by the loop at session end
     _session_had_video: "Any" = dataclasses.field(init=False)
     _session_opened_at: "Any" = dataclasses.field(init=False)  # prepare_session
-    _short_sessions: "Any" = dataclasses.field(init=False)  # the loop
+    _short_pacer: "Any" = dataclasses.field(init=False)  # the loop
     # the loop: when the loop was last free to reopen after a session
     _reopen_free_at: "Any" = dataclasses.field(init=False)
     # the loop, serve_cycle: across sessions, for the check after a wait
     _last_known_viewer: "Any" = dataclasses.field(init=False)
-    # the loop: seconds spent in session-end waits (the wait-free clock)
-    _waited_s: "Any" = dataclasses.field(init=False)
-    # prepare_session, serve_cycle: last pipe progress, wait-free clock
+    # prepare_session, serve_cycle: the pipe's last progress (loop clock)
     _last_progress_at: "Any" = dataclasses.field(init=False)
     loop: "Any" = dataclasses.field(init=False)  # the loop
     vq: "Any" = dataclasses.field(init=False)  # open_attempt
@@ -1559,7 +1539,7 @@ async def _failed_open_retry(self, ps: _DtlsServeLoopState, exc: BaseException) 
     split out so an AidotShiftedAnswerNotConnected - also an
     AidotCameraNotReady, whose clause would burst it - takes exactly this path.
     """
-    _failed_at = time.monotonic()
+    _failed_at = ps.loop.time()
     _delay = ps._pacer.fail_delay()
     _floor = 0.0
     if isinstance(exc, AidotIceNotEstablished):
@@ -1610,23 +1590,25 @@ async def _failed_open_retry(self, ps: _DtlsServeLoopState, exc: BaseException) 
     )
     try:
         await self._backoff_or_offline_pause(_delay)
-        await _wait_out_floor(self, _floor, _failed_at)
+        await _wait_until(self, ps, _failed_at + _floor)
     except asyncio.CancelledError:
         return True
     return False
 
 
-async def _wait_out_floor(dev: Any, floor: float, since: float) -> None:
-    """Sleep whatever is left of ``floor`` seconds counted from ``since``.
+async def _wait_until(dev: Any, ps: "_DtlsServeLoopState", until: float) -> None:
+    """Sleep until ``until`` on the loop's clock (``ps.loop.time()``).
 
-    For a wait that must not end early: ``_backoff_or_offline_pause`` returns
-    the moment a cloud-offline camera is reported back online, which is right
-    for an ordinary failed open but would cut short the wait for a session the
-    camera still holds. Chunked (``_slow_probe_sleep``), so it ends as soon as
-    streaming stops; a no-op once ``floor`` has passed."""
-    _rest = floor - (time.monotonic() - since)
-    if _rest > 0:
-        await dev._slow_probe_sleep(_rest)
+    In chunks of AIDOT_DTLS_SLOW_PROBE_CHUNK_S, so it ends as soon as
+    streaming stops; a no-op once ``until`` has passed. Used for the ICE-failure
+    floor (``_backoff_or_offline_pause`` returns the moment a cloud-offline
+    camera is reported back online, which would cut short the wait for a
+    session the camera still holds) and for the short-session wait."""
+    while getattr(dev, "_streaming_active", False):
+        _rest = until - ps.loop.time()
+        if _rest <= 0:
+            return
+        await asyncio.sleep(min(_SLOW_PROBE_SLEEP_CHUNK_S, _rest))
 
 
 def _serve_idle_release_due(
@@ -1645,9 +1627,9 @@ def _serve_idle_release_due(
 
     The one rule for both places the serve loop asks: each tick of a serve
     cycle, and after a short-session wait (_no_viewer_after_wait). ``watching``
-    is _viewer_present's answer. A viewer keeps it ("None"). No viewer releases
-    once the idle window (the start-up grace until one has been seen) has
-    passed since ``last_viewer`` ("no viewer"). Unknown keeps the old pipe
+    is _viewer_present's answer. The window and the start-up grace are
+    _idle_release_due's. A viewer keeps it. No viewer releases once the window
+    has passed since ``last_viewer`` ("no viewer"). Unknown keeps the old pipe
     staleness heuristic - released once nothing has flowed for the window
     ("stale") - and on a battery camera also releases past
     AIDOT_BATTERY_UNKNOWN_VIEWER_RELEASE_S since the last known viewer
@@ -1655,20 +1637,20 @@ def _serve_idle_release_due(
     fires and the camera would stream until restart. Pure."""
     if watching:
         return None
-    _window = idle_secs if viewer_seen else max(idle_secs, grace_s)
+    _rule = {"viewer_seen": viewer_seen, "startup_grace_s": grace_s}
     if watching is False:
-        return "no viewer" if now - last_viewer > _window else None
-    if now - progress_at > _window:
+        _due = _idle_release_due(False, last_viewer, now, idle_secs, **_rule)
+        return "no viewer" if _due else None
+    if _idle_release_due(False, progress_at, now, idle_secs, **_rule):
         return "stale"
-    if battery and _idle_release_due(
+    if _idle_release_due(
         None,
         last_viewer,
         now,
         idle_secs,
-        battery=True,
+        battery=battery,
         unknown_cap_s=unknown_cap_s,
-        viewer_seen=viewer_seen,
-        startup_grace_s=grace_s,
+        **_rule,
     ):
         return "battery unknown"
     return None
@@ -1680,19 +1662,14 @@ async def _no_viewer_after_wait(
     """After a short-session wait: has the idle release come due?
 
     Returns ``(why, seen_at)`` - why it should release (None to reopen), and
-    the wait-free time of a viewer watching now, else None.
-
-    _serve_idle_release_due, on the loop's wait-free clock (now minus every
-    session-end wait so far, ``ps._waited_s``): the wait itself never counts
-    towards the idle window. While it waits the serve is down and the relay
-    closes pulls, so a viewer trying to watch can drop off go2rtc for that
-    long; counting it would release a camera someone is trying to watch. So
-    only the time sessions actually ran since the last viewer (or since the
-    pipe last flowed, when the answer is unknown) counts. A serve that never
-    releases (idle window 0, the stdout producer) never does here either."""
+    the time of a viewer watching now, else None. _serve_idle_release_due on
+    the loop's clock, from the last viewer known in any session of this serve.
+    The serve relay holds a pull through the wait (it is at most 60 s), so a
+    viewer that is watching still shows. A serve that never releases (idle
+    window 0, the stdout producer) never does here either."""
     if ps.idle_secs <= 0:
         return (None, None)
-    _now = ps.loop.time() - ps._waited_s
+    _now = ps.loop.time()
     _watching = await self._viewer_present(_sdes_serve_port(ps.serve_url) or 0)
     _why = _serve_idle_release_due(
         _watching,
@@ -1722,7 +1699,7 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
     # not its start, so a slow open cannot carry a dying session past the
     # short-session threshold.
     ps._session_opened_at = ps.loop.time()
-    ps._last_progress_at = ps._session_opened_at - ps._waited_s  # serve_cycle
+    ps._last_progress_at = ps._session_opened_at  # moved on by serve_cycle
     self._stream_session = ps.session
     ps.pc = ps.session._pc
     # PC-dead test for the serve loop.  closed/failed are terminal at
@@ -2051,8 +2028,7 @@ async def _dtls_serve_loop_serve_cycle(
                     if _watching:
                         _last_viewer_dtls = _now
                         ps._viewer_seen_dtls = True
-                        # On the loop's wait-free clock (see _waited_s).
-                        ps._last_known_viewer = _now - ps._waited_s
+                        ps._last_known_viewer = _now
                     _why = _serve_idle_release_due(
                         _watching,
                         _now,
@@ -2083,9 +2059,9 @@ async def _dtls_serve_loop_serve_cycle(
                     if ps.idle_release:
                         break
             # Tear down this ffmpeg+mux cycle before the next.
-            # The pipe's last progress, on the wait-free clock, for the idle
-            # check after a short-session wait (_no_viewer_after_wait).
-            ps._last_progress_at = progress[0] - ps._waited_s
+            # The pipe's last progress, for the idle check after a
+            # short-session wait (_no_viewer_after_wait).
+            ps._last_progress_at = progress[0]
             ps.stop_flag.set()
             try:
                 if ps.wfile is not None:
@@ -7135,16 +7111,15 @@ class CameraMixin(
         # serve loop resets on any successful open (it has the _open_gate spacing
         # below) rather than escalating on no-media - hence reset() not
         # session_end_delay(). Sessions that connect and then end short are
-        # paced separately, by ps._short_sessions (_session_end_pacing).
+        # paced separately, on their own pacer (_session_end_pacing).
         ps._pacer = ReconnectPacer(_MIN_DELAY, _MAX_DELAY)
-        ps._short_sessions = 0  # consecutive short sessions (_session_end_pacing)
+        ps._short_pacer = ReconnectPacer(_SHORT_SESSION_BASE_S, _SHORT_SESSION_CAP_S)
         ps._reopen_free_at = 0.0  # 0 = no session has ended yet
         ps._last_open_at = 0.0  # monotonic of the previous open attempt (0 = none yet)
         ps._not_ready_burst = 0  # consecutive DC-only (encoder-cold) declines
         ps.loop = asyncio.get_running_loop()
         # As the SDES loop does: the serve's start counts as the last known
         # viewer, and the serve cycle moves it on whenever one is seen.
-        ps._waited_s = 0.0
         ps._last_known_viewer = ps.loop.time()
         while self._streaming_active:
             # Thread-safe queues: taps run on the loop, the A/V mux in a thread.
@@ -7180,15 +7155,16 @@ class CameraMixin(
             # open by how long it lasted and whether it delivered video.
             _now = ps.loop.time()
             _lived = _now - ps._session_opened_at
-            ps._short_sessions, _wait = _session_end_pacing(
-                ps._short_sessions,
+            _wait = _session_end_pacing(
+                ps._short_pacer,
                 _lived,
                 had_video=ps._session_had_video,
                 threshold_s=settings.read("AIDOT_DTLS_SHORT_SESSION_S"),
                 # How long the camera was down: from when the loop was free to
                 # reopen it (after any wait of its own) to the start of the
                 # open that worked - failed opens and offline pauses, never a
-                # wait. Past the cap, the old run of short sessions is history.
+                # wait. Long enough, and the old run of short sessions is
+                # history.
                 down_s=(
                     ps._last_open_at - ps._reopen_free_at if ps._reopen_free_at else 0.0
                 ),
@@ -7202,64 +7178,42 @@ class CameraMixin(
                 self.device_id,
                 _lived,
                 _wait,
-                ps._short_sessions,
+                ps._short_pacer.attempt,
             )
             # The wait keeps the concurrent-stream slot, as a failed-open wait
             # always has. Letting go of it and queueing for it again (tried in
             # review, 2026-11-04) could park a camera in the queue indefinitely
             # while it still counted as streaming, counted the queue time as
-            # downtime, and needed per-task plumbing to hand the slot over;
-            # a capped host waiting up to 300 s is the lesser cost.
+            # downtime, and needed per-task plumbing to hand the slot over.
             #
             # Not serving while it waits, and say so: a consumer that asks now
             # (stream_source, async_wait_serve_ready) must not be told the
-            # serve is ready. The relay closes a pull at once for most of the
-            # wait rather than holding it 90 s for a backend minutes away, but
-            # not for its last _RELAY_REARM_S: a pull then is held, and the
-            # reopen (a cold open takes 16-25 s) lands inside its 90 s.
+            # serve is ready; the next open clears it again anyway and the
+            # next serve sets it. The serve relay keeps holding a pull: the
+            # wait is at most 60 s, so the reopen lands inside its 90 s.
             self._serve_ready.clear()
-            _relay = getattr(self, "_serve_relay", None)
-            if _relay is not None:
-                _relay.set_paused(True)
             # Battery keep-alive renewals would wake the camera for nothing
             # while no session exists; the next open sends its own.
             self._keepalive_renew_paused = True
-            _waited_from = time.monotonic()
             try:
-                if _cloud_reports_offline(self):
-                    # Offline-aware: holds while the cloud says the camera is
-                    # gone, but returns as soon as it is back; the floor below
-                    # still waits out the rest of _wait.
-                    await self._backoff_or_offline_pause(_wait)
-                # Chunked, so it ends as soon as streaming stops.
-                await _wait_out_floor(
-                    self, max(0.0, _wait - _RELAY_REARM_S), _waited_from
-                )
-                if _relay is not None:
-                    _relay.set_paused(False)
-                await _wait_out_floor(self, _wait, _waited_from)
-            except asyncio.CancelledError:
-                return None
+                # A plain chunked wait that stops when streaming does. Not the
+                # offline-aware pause: offline handling belongs to the open
+                # path, which has it, and this wait is short. A cancellation
+                # propagates, as from the rest of the loop's own awaits.
+                await _wait_until(self, ps, _now + _wait)
             finally:
                 self._keepalive_renew_paused = False
-                if _relay is not None:
-                    _relay.set_paused(False)
-                # Off the clock the idle check reads (_no_viewer_after_wait).
-                ps._waited_s += time.monotonic() - _waited_from
             ps._reopen_free_at = ps.loop.time()
             # A session that dies before its idle window can never reach the
             # serve cycle's idle release, so a camera whose sessions keep
             # ending short would be reopened - a battery one woken - for as
             # long as they do, with nobody watching. Ask now, by the same rule
-            # (_serve_idle_release_due), with the waits taken out.
+            # (_serve_idle_release_due).
             if not self._streaming_active:
                 continue
-            try:
-                _why, _seen_at = await _no_viewer_after_wait(
-                    self, ps, ps._last_known_viewer, ps._last_progress_at
-                )
-            except asyncio.CancelledError:
-                return None
+            _why, _seen_at = await _no_viewer_after_wait(
+                self, ps, ps._last_known_viewer, ps._last_progress_at
+            )
             if _seen_at is not None:
                 ps._last_known_viewer = _seen_at
             if _why:
