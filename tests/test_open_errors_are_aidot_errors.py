@@ -25,6 +25,7 @@ OPEN_ERRORS = [
     exc.AidotNoWebrtcAnswer,
     exc.AidotNegotiationFailed,
     exc.AidotIceNotEstablished,
+    exc.AidotShiftedAnswerNotConnected,
     exc.AidotFfmpegMissing,
     exc.AidotSdPlaybackUnavailable,
 ]
@@ -66,6 +67,7 @@ def test_the_unknown_region_error_is_a_value_error():
         "AidotNoWebrtcAnswer",
         "AidotNegotiationFailed",
         "AidotIceNotEstablished",
+        "AidotShiftedAnswerNotConnected",
         "AidotFfmpegMissing",
         "AidotSdPlaybackUnavailable",
         "AidotUnknownRegion",

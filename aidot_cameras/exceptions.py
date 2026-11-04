@@ -46,13 +46,9 @@ class AidotCameraNotReady(AidotError):
     up.  The DTLS serve loop fast-retries this in a bounded burst instead of
     waiting the full 15s inter-attempt gate.
 
-    ``holds_session`` is True when the camera answered with a shifted answer
-    and ICE then never connected: like ``AidotIceNotEstablished``, the camera
-    has accepted the offer and still holds that session, so a retry should
-    wait as long as after a busy refusal rather than burst."""
-
-    #: Set on the instance when the camera still holds the unconnected session.
-    holds_session: bool = False
+    A shifted answer whose ICE never connected raises
+    ``AidotShiftedAnswerNotConnected``, which is also one of these; it is an
+    ``AidotIceNotEstablished`` first, and should be retried like one."""
 
 
 class AidotCameraNoMedia(AidotError):
@@ -163,6 +159,16 @@ class AidotIceNotEstablished(AidotNegotiationFailed):
     a session for it that never connected: asked again before that session
     lapses, it refuses as busy (-50002). A caller that retries should wait as
     long as it would after a busy refusal.
+    """
+
+
+class AidotShiftedAnswerNotConnected(AidotIceNotEstablished, AidotCameraNotReady):
+    """ICE did not connect after the camera answered with shifted sections.
+
+    The camera still holds the session it accepted, as for any
+    ``AidotIceNotEstablished``, and a retry should wait as long. It is also an
+    ``AidotCameraNotReady``, which is what this case raised before it had its
+    own class, so code that catches that keeps catching it.
     """
 
 

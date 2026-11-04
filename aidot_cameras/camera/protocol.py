@@ -1444,6 +1444,7 @@ class _ServeRelay:
         self._conns: "set[socket.socket]" = set()
         self._lock = threading.Lock()
         self._closed = threading.Event()
+        self._paused = threading.Event()
 
     @property
     def port(self) -> int:
@@ -1472,6 +1473,17 @@ class _ServeRelay:
         running yet; connected pulls wait for the next backend)."""
         with self._lock:
             self._backend_port = port
+
+    def set_paused(self, paused: bool) -> None:
+        """While paused there is no serve and none is coming soon (the DTLS serve
+        loop waiting out a short session, up to 300 s): a pull is closed at once,
+        and one already waiting for a backend gives up, instead of being held for
+        up to ``dial_timeout`` (90 s) with nothing behind it. The port stays bound,
+        so the next cold start still gets the relay's connect-and-wait."""
+        if paused:
+            self._paused.set()
+        else:
+            self._paused.clear()
 
     def close(self) -> None:
         """Tear down the listener, the accept thread, and any live connections."""
@@ -1508,7 +1520,7 @@ class _ServeRelay:
             self._conns.add(cli)
         be: "Optional[socket.socket]" = None
         try:
-            be = self._dial_backend()
+            be = None if self._paused.is_set() else self._dial_backend()
             if be is not None:
                 self._splice(cli, be)
         finally:
@@ -1524,7 +1536,11 @@ class _ServeRelay:
     def _dial_backend(self) -> "Optional[socket.socket]":
         """Block until the backend is set + connectable (or timeout / close)."""
         deadline = time.monotonic() + self._dial_timeout
-        while not self._closed.is_set() and time.monotonic() < deadline:
+        while (
+            not self._closed.is_set()
+            and not self._paused.is_set()
+            and time.monotonic() < deadline
+        ):
             with self._lock:
                 port = self._backend_port
             if port:

@@ -13,12 +13,15 @@ Pinned here:
   apart from the open-failure pacer, and the loop waits 30 s after the first,
   then up to a doubling ceiling, before reopening - never less than 30 s;
 * a session that lasted and delivered video clears that count, however its
-  last serve cycle ended;
+  last serve cycle ended, and so does a camera that took over 300 s to open
+  again;
 * open failures are paced exactly as before: a successful open resets them,
   and short sessions never push a camera into the slow probe;
-* the wait does not hold the concurrent-stream slot;
-* after an ICE failure, on a plain or a shifted answer, the next open waits at
-  least AIDOT_BUSY_RETRY_S, even when the offline pause ends early.
+* while it waits the loop holds no concurrent-stream slot, does not claim
+  to be serving, and releases the camera if nobody is watching;
+* an open whose ICE never connected, on a plain or a shifted answer, is one
+  failure with one policy: the pacer, the slow probe, the offline pause and a
+  floor of AIDOT_BUSY_RETRY_S that an offline pause ending early cannot cut.
 
 The loop tests drive the REAL ``_dtls_serve_loop_inner`` (and
 ``_dtls_serve_loop``) on a fake clock. Only the client module's ``asyncio`` and
@@ -33,10 +36,8 @@ Repo convention: no pytest-asyncio; drive coroutines with asyncio.run().
 
 from __future__ import annotations
 
-import ast
 import asyncio
-import inspect
-import textwrap
+import socket
 import time as _real_time
 import types
 
@@ -45,15 +46,12 @@ import pytest
 from aidot_cameras import settings
 from aidot_cameras.camera import client as cc
 from aidot_cameras.camera import protocol
-from aidot_cameras.camera.client import (
-    CameraMixin,
-    _session_end_pacing,
-    _short_session_delay,
-)
+from aidot_cameras.camera.client import _session_end_pacing, _short_session_delay
 from aidot_cameras.exceptions import (
     AidotCameraNotReady,
     AidotIceNotEstablished,
     AidotNegotiationFailed,
+    AidotShiftedAnswerNotConnected,
 )
 
 _real_sleep = asyncio.sleep
@@ -64,6 +62,12 @@ _BUSY = settings.read("AIDOT_BUSY_RETRY_S")
 # --------------------------------------------------------------------------- #
 # The pure pacing                                                              #
 # --------------------------------------------------------------------------- #
+
+
+def _pace(n, lived, *, video=True, down=0.0, r=1.0):
+    return _session_end_pacing(
+        n, lived, had_video=video, threshold_s=30.0, down_s=down, rand=lambda: r
+    )
 
 
 def test_the_first_short_session_waits_exactly_30s_at_either_end_of_the_jitter():
@@ -82,29 +86,90 @@ def test_the_ceiling_doubles_per_short_session_up_to_300s():
 
 
 def test_a_session_that_lasted_with_video_clears_the_count():
-    assert _session_end_pacing(4, 120.0, had_video=True) == (0, 0.0)
+    assert _pace(4, 120.0) == (0, 0.0)
 
 
 def test_a_short_or_video_less_session_adds_one_and_waits():
-    one = lambda: 1.0  # noqa: E731
-    assert _session_end_pacing(0, 5.0, had_video=True, rand=one) == (1, 30.0)
-    assert _session_end_pacing(1, 5.0, had_video=True, rand=one) == (2, 60.0)
-    assert _session_end_pacing(0, 600.0, had_video=False, rand=one) == (1, 30.0)
+    assert _pace(0, 5.0) == (1, 30.0)
+    assert _pace(1, 5.0) == (2, 60.0)
+    assert _pace(0, 600.0, video=False) == (1, 30.0)
 
 
-def test_the_threshold_is_a_knob(monkeypatch):
-    assert settings.read("AIDOT_DTLS_SHORT_SESSION_S") == 30.0
-    monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "90")
-    assert settings.read("AIDOT_DTLS_SHORT_SESSION_S") == 90.0
+def test_downtime_past_the_cap_starts_the_count_again():
+    assert _pace(4, 5.0, down=301.0) == (1, 30.0)
+    assert _pace(4, 5.0, down=300.0) == (5, 300.0)
 
 
-def test_the_ice_failure_is_still_a_negotiation_failure():
-    """Callers that catch AidotNegotiationFailed keep catching it."""
-    assert issubclass(AidotIceNotEstablished, AidotNegotiationFailed)
+def test_the_shifted_answer_failure_is_both_kinds():
+    """Callers that caught AidotCameraNotReady (what this case raised) or
+    AidotNegotiationFailed keep catching it."""
+    exc = AidotShiftedAnswerNotConnected("x")
+    assert isinstance(exc, AidotIceNotEstablished)
+    assert isinstance(exc, AidotNegotiationFailed)
+    assert isinstance(exc, AidotCameraNotReady)
 
 
-def test_a_plain_not_ready_does_not_hold_a_session():
-    assert AidotCameraNotReady("cam").holds_session is False
+# --------------------------------------------------------------------------- #
+# The ICE wait raises one type per outcome                                     #
+# --------------------------------------------------------------------------- #
+
+
+class _NeverConnects:
+    connectionState = "connecting"
+    iceConnectionState = "checking"
+    iceGatheringState = "complete"
+
+    def on(self, _event):
+        return lambda fn: fn
+
+    def getTransceivers(self):
+        return []
+
+
+def _ice_wait(shifted: bool) -> BaseException:
+    from aidot_cameras.camera import webrtc_open
+
+    async def _abort():
+        return None
+
+    ps = types.SimpleNamespace(
+        pc=_NeverConnects(),
+        _status=lambda *a, **k: None,
+        _trace=lambda *a, **k: None,
+        timeout=0.3,
+        _ice_wait_timeout_s=0.3,
+        _answer_inserted=shifted,
+        ice_q=asyncio.Queue(),
+        candidate_from_sdp=None,
+        outgoing_q=asyncio.Queue(),
+        user_id="u",
+        camera_reconnect_ev=asyncio.Event(),
+        _rr_ice_payloads=[],
+        _rr_webrtc_resp_topic=None,
+        _rr_webrtc_resp_payload=None,
+        _abort_open=_abort,
+        recorder=None,
+    )
+    cam = types.SimpleNamespace(device_id="cam")
+
+    async def _go():
+        ps.second_answer_fut = asyncio.get_running_loop().create_future()
+        await webrtc_open._dtls_open_ice_candidates_and_connect(cam, ps)
+
+    with pytest.raises(AidotIceNotEstablished) as info:
+        asyncio.run(_go())
+    return info.value
+
+
+def test_a_shifted_answer_that_never_connects_raises_the_shifted_failure():
+    exc = _ice_wait(shifted=True)
+    assert isinstance(exc, AidotShiftedAnswerNotConnected)
+    assert isinstance(exc, AidotCameraNotReady)
+
+
+def test_a_plain_answer_that_never_connects_is_not_a_not_ready():
+    exc = _ice_wait(shifted=False)
+    assert not isinstance(exc, AidotCameraNotReady)
 
 
 # --------------------------------------------------------------------------- #
@@ -126,16 +191,31 @@ class _Sess:
         self.stopped += 1
 
 
-def _held_not_ready() -> AidotCameraNotReady:
-    exc = AidotCameraNotReady("cam")
-    exc.holds_session = True
-    return exc
+class _Relay:
+    def __init__(self):
+        self.paused: list[bool] = []
+
+    def set_paused(self, paused: bool) -> None:
+        self.paused.append(paused)
+
+    def close(self) -> None:
+        pass
 
 
 class _Run:
     """One run of the serve loop against a script of open outcomes."""
 
-    def __init__(self, monkeypatch, cam, script, *, slots=None, on_sleep=None):
+    def __init__(
+        self,
+        monkeypatch,
+        cam,
+        script,
+        *,
+        slots=None,
+        on_sleep=None,
+        viewer=True,
+        relay=None,
+    ):
         self.cam = cam
         self.script = list(script)
         self.now = 1000.0
@@ -144,6 +224,8 @@ class _Run:
         self.sleeps: list[tuple[float, float, bool]] = []  # (at, delay, waiting)
         self.slot_free_in_wait: list[bool] = []
         self.slot_held_in_serve: list[bool] = []
+        self.ready_in_wait: list[bool] = []
+        self.leases: list[tuple[object, object]] = []
         self.dormant: list[str] = []
         self.slots = slots
         self._waiting = False
@@ -151,7 +233,7 @@ class _Run:
 
         cam._streaming_active = True
         cam._keepalive_rtsp_url = _URL
-        cam._serve_relay = None
+        cam._serve_relay = relay
 
         run = self
 
@@ -159,8 +241,10 @@ class _Run:
             run.sleeps.append((run.now, delay, run._waiting))
             if len(run.sleeps) > 500:
                 raise asyncio.CancelledError
-            if run._waiting and run.slots is not None:
-                run.slot_free_in_wait.append(not run.slots.locked())
+            if run._waiting:
+                run.ready_in_wait.append(cam._serve_ready.is_set())
+                if run.slots is not None:
+                    run.slot_free_in_wait.append(not run.slots.locked())
             if run._on_sleep is not None:
                 run._on_sleep(run)
             run.now += max(0.0, float(delay))
@@ -204,24 +288,29 @@ class _Run:
 
         async def _serve(self_, ps):
             sess = ps.session
+            run.leases.append((asyncio.current_task(), cc._DTLS_STREAM_SLOT.get()))
             if run.slots is not None:
                 run.slot_held_in_serve.append(run.slots.locked())
+            cam._serve_ready.set()  # what a bound serve does
             run.now += sess.life
             ps._session_had_video = sess.video
             ps.idle_release = sess.idle
             await sess.stop()
             run.ends.append(run.now)
             run._waiting = True
-            return
 
         async def _go_dormant(*, release_url, why):
             run.dormant.append(why)
             cam._streaming_active = False
 
+        async def _viewer_present(port):
+            return viewer(run.now) if callable(viewer) else viewer
+
         cam.async_open_webrtc_stream = _open
         cam._install_av_taps = lambda pc, vq, aq: True
-        cam._maybe_start_serve_relay = lambda url: None
+        cam._maybe_start_serve_relay = lambda url: relay
         cam._go_dormant = _go_dormant
+        cam._viewer_present = _viewer_present
         monkeypatch.setattr(cc, "_dtls_serve_loop_serve_cycle", _serve)
 
     def run(self, entry: str = "_dtls_serve_loop_inner") -> "_Run":
@@ -230,11 +319,12 @@ class _Run:
 
     def gaps(self) -> list[float]:
         """Seconds from each session's end to the next open."""
-        return [
-            round(self.opens[i + 1] - end, 6)
-            for i, end in enumerate(self.ends)
-            if i + 1 < len(self.opens)
-        ]
+        out = []
+        for end in self.ends:
+            nxt = [t for t in self.opens if t >= end]
+            if nxt:
+                out.append(round(nxt[0] - end, 6))
+        return out
 
     def open_sleeps(self) -> list[float]:
         """The delays slept outside a session-end wait (failed-open retries)."""
@@ -248,7 +338,7 @@ def cam(make_camera_device_client):
 
 def _opened_after(run: _Run) -> list[float]:
     """Each open's time since the one before it."""
-    return [b - a for a, b in zip(run.opens, run.opens[1:])]
+    return [round(b - a, 6) for a, b in zip(run.opens, run.opens[1:])]
 
 
 def test_sessions_that_keep_dying_fast_wait_longer_each_time(monkeypatch, cam):
@@ -273,6 +363,18 @@ def test_a_session_that_lasted_reopens_at_once_and_clears_the_count(monkeypatch,
 def test_a_video_less_session_is_short_however_long_it_ran(monkeypatch, cam):
     run = _Run(monkeypatch, cam, [_Sess(600.0, video=False), _Sess(5.0)]).run()
     assert run.gaps() == [30.0, 60.0]
+
+
+@pytest.mark.parametrize("threshold, gaps", [(None, [0.0, 30.0]), ("90", [30.0, 60.0])])
+def test_the_threshold_knob_is_read_at_each_session_end(
+    monkeypatch, cam, threshold, gaps
+):
+    """A 60 s session with video lasted at the default 30 s threshold, and is
+    short at 90 s - set after import, so the loop must read it at use."""
+    if threshold is not None:
+        monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", threshold)
+    run = _Run(monkeypatch, cam, [_Sess(60.0), _Sess(5.0)]).run()
+    assert run.gaps() == gaps
 
 
 def test_an_idle_release_is_never_paced(monkeypatch, cam, caplog):
@@ -303,6 +405,22 @@ def test_short_sessions_never_push_a_camera_into_the_slow_probe(monkeypatch, cam
     assert run.open_sleeps()[-1] == 15.0
 
 
+@pytest.mark.parametrize("fails, wait", [(1, 300.0), (5, 30.0)])
+def test_a_camera_down_past_the_cap_starts_its_short_count_again(
+    monkeypatch, cam, fails, wait
+):
+    """Four short sessions, then failed opens, then a short session. One
+    failed open (15 s) leaves the run going: it waits 300 s. Five (15 + 30 +
+    60 + 120 s, then the 600 s slow probe) is a camera that was down: the
+    count starts again and it waits 30 s."""
+    script = [_Sess(5.0) for _ in range(4)]
+    script += [AidotNegotiationFailed("down") for _ in range(fails)]
+    script += [_Sess(5.0)]
+    run = _Run(monkeypatch, cam, script).run()
+    assert run.gaps()[:4] == [30.0, 60.0, 120.0, 240.0]
+    assert run.gaps()[-1] == wait
+
+
 def test_the_wait_does_not_hold_the_stream_slot(monkeypatch, cam):
     slots = asyncio.Semaphore(1)
     monkeypatch.setattr(cc, "_get_stream_slots", lambda: slots)
@@ -313,7 +431,6 @@ def test_the_wait_does_not_hold_the_stream_slot(monkeypatch, cam):
     # Taken back before each open and released once at the end - never twice,
     # which would silently raise the cap.
     assert not slots.locked() and slots._value == 1
-    assert cam._dtls_stream_slot is None
 
 
 def test_the_wait_takes_the_slot_back_before_reopening(monkeypatch, cam):
@@ -351,6 +468,80 @@ def test_the_wait_takes_the_slot_back_before_reopening(monkeypatch, cam):
     assert slots._value == 1
 
 
+def test_overlapping_serves_each_keep_their_own_slot(monkeypatch, cam):
+    """start_keepalive can start a serve while the old one is still winding
+    down: each serve's loop sees its own lease, so neither lets go of (or
+    clears) the other's, and the cap is whole again when both are done."""
+    slots = asyncio.Semaphore(2)
+    monkeypatch.setattr(cc, "_get_stream_slots", lambda: slots)
+    run = _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(6)], slots=slots)
+
+    async def _both():
+        await asyncio.gather(cam._dtls_serve_loop(), cam._dtls_serve_loop())
+
+    asyncio.run(_both())
+    by_task: dict = {}
+    for task, lease in run.leases:
+        by_task.setdefault(task, set()).add(id(lease))
+    assert len(by_task) == 2
+    assert all(len(ids) == 1 for ids in by_task.values())
+    first, second = (ids for ids in by_task.values())
+    assert first != second and None not in run.leases[0]
+    assert slots._value == 2
+    assert cc._DTLS_STREAM_SLOT.get() is None
+
+
+def test_the_wait_does_not_claim_to_be_serving(monkeypatch, cam):
+    """serve_ready is down for the whole wait, and the relay is paused for it
+    and resumed before the next open."""
+    relay = _Relay()
+    run = _Run(monkeypatch, cam, [_Sess(5.0), _Sess(5.0)], relay=relay).run()
+    assert run.ready_in_wait and not any(run.ready_in_wait)
+    assert relay.paused == [True, False, True, False]
+
+
+def test_a_paused_relay_closes_a_pull_at_once():
+    relay = protocol._ServeRelay(0, dial_timeout=5.0)
+    relay.start()
+    try:
+        relay.set_paused(True)
+        with socket.create_connection(("127.0.0.1", relay.port), timeout=2) as c:
+            c.settimeout(2.0)
+            t0 = _real_time.monotonic()
+            assert c.recv(1) == b""
+            assert _real_time.monotonic() - t0 < 1.5
+        relay.set_paused(False)
+        with socket.create_connection(("127.0.0.1", relay.port), timeout=2) as c:
+            # Unpaused with no backend: held, waiting for one.
+            c.settimeout(0.5)
+            with pytest.raises(TimeoutError):
+                c.recv(1)
+    finally:
+        relay.close()
+
+
+def test_nobody_watching_after_the_wait_releases_the_camera(monkeypatch, cam):
+    """Sessions that die in seconds never reach the serve cycle's idle
+    release; after the wait the loop asks itself. Idle window 60 s: after the
+    first wait (35 s since the serve began) it still reopens; after the second
+    (100 s) it releases instead of opening a third time."""
+    cam._stream_idle_opt = 60.0
+    monkeypatch.setenv("AIDOT_STREAM_STARTUP_GRACE_S", "0")
+    run = _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(5)], viewer=False).run()
+    assert run.dormant == ["idle release"]
+    assert len(run.opens) == 2
+
+
+@pytest.mark.parametrize("idle, viewer", [(60.0, True), (0.0, False)])
+def test_a_watched_or_never_released_camera_keeps_reopening(
+    monkeypatch, cam, idle, viewer
+):
+    cam._stream_idle_opt = idle
+    run = _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(5)], viewer=viewer).run()
+    assert not run.dormant
+    assert len(run.opens) == 6
+
+
 def test_the_wait_floor_survives_an_offline_pause_that_ends_early(monkeypatch, cam):
     """Cloud-offline at session end, back online 5 s into the pause: the
     pause returns, and the loop still waits out the rest of the 30 s."""
@@ -367,10 +558,19 @@ def test_the_wait_floor_survives_an_offline_pause_that_ends_early(monkeypatch, c
     assert run.gaps() == [30.0, 60.0]
 
 
-def test_an_ice_failure_waits_out_the_busy_interval(monkeypatch, cam):
-    ice = AidotIceNotEstablished("ICE connection not established")
-    run = _Run(monkeypatch, cam, [ice, ice]).run()
-    assert _opened_after(run)[0] >= _BUSY
+_ICE = AidotIceNotEstablished("ICE connection not established")
+_SHIFTED = AidotShiftedAnswerNotConnected("ICE connection not established")
+
+
+@pytest.mark.parametrize("exc", [_ICE, _SHIFTED], ids=["plain", "shifted"])
+def test_an_ice_failure_has_the_busy_floor_and_escalates_to_the_slow_probe(
+    monkeypatch, cam, exc
+):
+    """At least AIDOT_BUSY_RETRY_S each time, then the pacer's own backoff,
+    then the slow probe after five failures - a shifted answer exactly as a
+    plain one, not the flat retry or 3 s burst of a NotReady."""
+    run = _Run(monkeypatch, cam, [exc] * 6).run()
+    assert _opened_after(run) == [_BUSY, _BUSY, 60.0, 120.0, 600.0, 600.0]
 
 
 def test_another_negotiation_failure_keeps_the_ordinary_backoff(monkeypatch, cam):
@@ -379,7 +579,8 @@ def test_another_negotiation_failure_keeps_the_ordinary_backoff(monkeypatch, cam
     assert _opened_after(run)[0] == 15.0 < _BUSY
 
 
-def test_the_ice_floor_survives_an_offline_pause_that_ends_early(monkeypatch, cam):
+@pytest.mark.parametrize("exc", [_ICE, _SHIFTED], ids=["plain", "shifted"])
+def test_the_ice_floor_survives_an_offline_pause_that_ends_early(monkeypatch, cam, exc):
     """The offline pause would hold for AIDOT_OFFLINE_PROBE_S, but returns
     the moment the camera is back online; the busy floor still holds."""
     monkeypatch.setattr(cc, "_OFFLINE_RECHECK_S", 5.0)
@@ -389,18 +590,14 @@ def test_the_ice_floor_survives_an_offline_pause_that_ends_early(monkeypatch, ca
     def _back_online(run):
         cam.status.online = True
 
-    ice = AidotIceNotEstablished("ICE connection not established")
-    run = _Run(monkeypatch, cam, [ice, ice], on_sleep=_back_online).run()
+    run = _Run(monkeypatch, cam, [exc, exc], on_sleep=_back_online).run()
     assert _opened_after(run)[0] == _BUSY
 
 
-def test_a_shifted_answer_that_did_not_connect_waits_out_the_busy_interval(
-    monkeypatch, cam, caplog
-):
-    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
-        run = _Run(monkeypatch, cam, [_held_not_ready(), _held_not_ready()]).run()
-    assert _opened_after(run)[0] >= _BUSY
-    assert not [r for r in caplog.records if "[burst]" in r.getMessage()]
+def test_shifted_failures_do_not_use_up_the_not_ready_burst(monkeypatch, cam):
+    nr = AidotCameraNotReady("cam")
+    run = _Run(monkeypatch, cam, [_SHIFTED] * 5 + [nr, nr]).run()
+    assert _opened_after(run)[-1] == 3.0
 
 
 def test_a_genuine_not_ready_still_bursts(monkeypatch, cam):
@@ -409,40 +606,14 @@ def test_a_genuine_not_ready_still_bursts(monkeypatch, cam):
     assert _opened_after(run)[0] == 3.0
 
 
-def test_the_shifted_answer_ice_timeout_is_marked_as_holding_the_session():
-    """webrtc_open raises the NotReady for a shifted answer that did not
-    connect with holds_session set; the loop keys its floor on that."""
-    from aidot_cameras.camera import webrtc_open
-
-    src = inspect.getsource(webrtc_open._dtls_open_ice_candidates_and_connect)
-    tree = ast.parse(textwrap.dedent(src))
-    marks = [
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Assign)
-        and any(
-            isinstance(t, ast.Attribute) and t.attr == "holds_session"
-            for t in n.targets
-        )
-    ]
-    assert marks and all(
-        isinstance(m.value, ast.Constant) and m.value.value is True for m in marks
-    )
-
-
 # --------------------------------------------------------------------------- #
-# A session whose last serve cycle had no video, through the real serve cycle  #
+# Through the real serve cycle                                                 #
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("first_cycle_video", [True, False])
-def test_a_lasting_session_is_judged_on_all_its_cycles(
-    monkeypatch, make_camera_device_client, caplog, first_cycle_video
-):
-    """Its first serve cycle delivers video and its second gives up on none:
-    the session delivered video and lasted, so it is not short. A session
-    with no video in either cycle is. The futile-video count still counts
-    the video-less cycle either way."""
+def _real_cycle_run(monkeypatch, make_camera_device_client, first_cycle_video):
+    """One session of two serve cycles: the first delivers video if
+    ``first_cycle_video``, the second gives up on none."""
     from tests.keepalive_driver import DtlsServeRun, FakeDtlsSession
 
     # The driver patches cc.asyncio.sleep; rebinding cc.asyncio first keeps
@@ -453,7 +624,6 @@ def test_a_lasting_session_is_judged_on_all_its_cycles(
     monkeypatch.setattr(cc, "asyncio", proxy)
     monkeypatch.setenv("AIDOT_DIRECT_PUBLISH", "1")
     monkeypatch.setenv("AIDOT_DTLS_VIDEO_GRACE_S", "0.15")
-    monkeypatch.setattr(cc, "_DTLS_SHORT_SESSION_S", 0.2)
     cam = make_camera_device_client("A000088")
     cam._stream_idle_opt = 0.0
     run = DtlsServeRun(
@@ -469,6 +639,19 @@ def test_a_lasting_session_is_judged_on_all_its_cycles(
         "_video_has_started",
         lambda canary: first_cycle_video and len(run.mux_targets) <= 1,
     )
+    return run
+
+
+@pytest.mark.parametrize("first_cycle_video", [True, False])
+def test_a_lasting_session_is_judged_on_all_its_cycles(
+    monkeypatch, make_camera_device_client, caplog, first_cycle_video
+):
+    """Its first serve cycle delivers video and its second gives up on none:
+    the session delivered video and lasted, so it is not short. A session
+    with no video in either cycle is. The futile-video count still counts
+    the video-less cycle either way."""
+    monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "0.2")
+    run = _real_cycle_run(monkeypatch, make_camera_device_client, first_cycle_video)
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         run.run()
     msgs = [r.getMessage() for r in caplog.records]
@@ -482,17 +665,16 @@ def test_a_lasting_session_is_judged_on_all_its_cycles(
         assert paced, msgs
 
 
-def test_sessions_are_paced_once_at_session_end_not_per_serve_cycle():
-    """Pacing inside the serve cycle would sleep per ffmpeg restart, holding a
-    live session; it belongs in the loop, after the session is stopped."""
-
-    def _calls_in(fn):
-        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
-        return {
-            n.func.id
-            for n in ast.walk(tree)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-        }
-
-    assert "_session_end_pacing" in _calls_in(CameraMixin._dtls_serve_loop_inner)
-    assert "_session_end_pacing" not in _calls_in(cc._dtls_serve_loop_serve_cycle)
+def test_a_session_of_several_cycles_is_paced_once_after_it_ends(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """Two serve cycles (an ffmpeg/publish restart between them) in one short
+    session: one wait, after the session, not one per cycle."""
+    monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "100")
+    run = _real_cycle_run(monkeypatch, make_camera_device_client, True)
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert len(run.mux_targets) == 2
+    assert len([m for m in msgs if "before reopening" in m]) == 1, msgs
+    assert run.opens == 1  # still waiting when the run timed out

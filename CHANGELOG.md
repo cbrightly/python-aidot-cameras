@@ -23,23 +23,33 @@ loop's retry pacing, and a change to the serve loop resets the soak clock.
   after one the loop waits before reopening, exactly 30 s after the first and
   then jittered between 30 s and a ceiling that doubles per consecutive short
   session, up to 300 s. A session that lasts 30 s and delivered video clears
-  the count, whatever its last serve cycle did. The wait does not hold the
-  camera's concurrent-stream slot (`AIDOT_MAX_CONCURRENT_STREAMS`), so it
-  does not keep another camera from serving. Failed opens are paced, and
-  reach the slow probe, exactly as before: an open that succeeds still
-  resets that count. The threshold is `AIDOT_DTLS_SHORT_SESSION_S`.
+  the count, whatever its last serve cycle did, and so does a camera that
+  took over 300 s to open again (it was down; the old run is history). The
+  wait does not hold the camera's concurrent-stream slot
+  (`AIDOT_MAX_CONCURRENT_STREAMS`), so it does not keep another camera from
+  serving; it does not report the serve ready, and a pull through the serve
+  relay is closed at once instead of being held for 90 s; and after it, a
+  camera nobody has watched for the idle window is released rather than
+  reopened, so sessions that die before their idle window cannot keep a
+  camera awake with no viewer. Failed opens are paced, and reach the slow
+  probe, exactly as before: an open that succeeds still resets that count.
+  The threshold is `AIDOT_DTLS_SHORT_SESSION_S`.
 - **After an open whose ICE never connected, the next open waits as long as
-  after a busy refusal** (`AIDOT_BUSY_RETRY_S`, 45 s by default). That
-  includes a shifted answer that did not connect, which used to be retried in
-  the 3 s not-ready burst, and the wait is a floor: the offline pause ending
-  early because the camera came back online no longer cuts it short.
+  after a busy refusal** (`AIDOT_BUSY_RETRY_S`, 45 s by default), and is
+  otherwise paced like any failed open (backoff, slow probe, offline pause).
+  That includes a shifted answer that did not connect, which used to be
+  retried in the 3 s not-ready burst; it now raises
+  `AidotShiftedAnswerNotConnected`. The wait is a floor: the offline pause
+  ending early because the camera came back online no longer cuts it short.
 
 ### Added
 - `AidotIceNotEstablished`, a subclass of `AidotNegotiationFailed`, raised
   when ICE does not connect in time; code that catches
   `AidotNegotiationFailed` still catches it.
-- `AidotCameraNotReady.holds_session`, True when the camera declined on a
-  shifted answer whose ICE never connected and still holds that session.
+- `AidotShiftedAnswerNotConnected`, a subclass of both `AidotIceNotEstablished`
+  and `AidotCameraNotReady`, raised when ICE does not connect after a shifted
+  answer (a plain `AidotCameraNotReady` before); code that catches either
+  still catches it.
 - `AIDOT_DTLS_SHORT_SESSION_S` (default 30): how long a served DTLS session
   must last, with video, not to count as short.
 
