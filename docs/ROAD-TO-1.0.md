@@ -35,10 +35,10 @@ playback's camera to resend what it lost and skips a repeated last frame, and
 `rc68` reads every page of a card listing instead of the first 255 records,
 and `rc69` lists in windows an A000088 fills in and waits for a slow page;
 none of them resets the clock. `rc70` delivers an SDES camera's control-channel
-data in order, which changes every SDES session: it resets the clock once the
-reference installation runs it. The
-Home Assistant integration `2.37.18` requires `>=1.0.0rc62`; the integration
-release that plays card recordings, 2.38.0b1, requires `>=1.0.0rc66`.
+data in order, which changes every SDES session, so it resets the clock; the
+count now runs on it (see below). The Home Assistant integration `2.37.18`
+requires `>=1.0.0rc62`; the integration release that plays card recordings
+began with 2.38.0b1 (`>=1.0.0rc66`), and 2.38.0b4 requires `>=1.0.0rc70`.
 
 ## Open
 
@@ -75,9 +75,20 @@ not on the reference host.
 (by then on Home Assistant 2026.10.4) was given `rc63` and the unreleased
 card-playback integration branch for a live test, which is provocation and
 puts a clock-resetting release on the box; about two minutes later the host
-shut itself down and has been off the network since. Day zero is re-dated
+shut itself down and was off the network for some days. Day zero is re-dated
 once the box is back and runs released `rc63` (or later) with a released
 integration, checked by hash as above.
+
+**Day zero is 2026-11-03; the target is 2026-11-17.** Once the box was back on
+the network it was given the card-playback releases as they shipped
+(integration 2.38.0b1 to 2.38.0b3 on library `rc66` to `rc69`), with live
+tests between them, so every day up to and including 2026-11-02 is
+provocation. Since 2026-11-02 it runs `1.0.0rc70` and integration 2.38.0b4
+(Home Assistant 2026.10.4 on HA OS): the
+integration's 34 installed files match the public `v2.38.0b4` release by
+hash, and the library installed is `1.0.0rc70`, whose wheel on PyPI matches
+its tag file for file. 2026-11-02 had that install, a restart and a debug
+listing, so it is provocation; 2026-11-03 is the first ordinary day.
 
 **What counts as soak.** Ordinary use with nobody driving the box. Ordinary
 use includes one fixed viewing schedule, set before the first counting day so
@@ -100,6 +111,18 @@ soak has to run on the program that ships.
 **What does not reset it.** A new opt-in feature; logging, log levels and
 observability lines; packaging and dependency floors; the light and LAN-login
 control path; diagnostics and repairs that do not touch media.
+
+**What is tallied, not counted.** A battery A001513 that answers but never
+delivers first media (`SDES first media never arrived`, `nominated=none` or no
+binding success, abandoned after 75 s) is a known class, shipped on purpose
+when the item that investigated it closed on 2026-08-11: one of its modes was
+found and fixed, the others look camera-side, a stalled session is bounded and
+retried, and the effect is a slow first frame rather than a dead camera. The
+soak watcher therefore tallies these stalls per camera each day instead of
+treating each as a reset. It is not a free pass. The class reopens, and the
+stall then counts against the soak, on a stall that does not clear on retry,
+or on any of these shapes repeating on a mains camera; the watcher raises a
+stall on the mains PTZ, the A000088s or any camera it does not list at once.
 
 Each release's CHANGELOG entry is where its classification goes, with the
 reason. When a release resets the clock, the new day zero is the first
