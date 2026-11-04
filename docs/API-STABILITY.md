@@ -39,7 +39,7 @@ purpose.
 | `HTTPError`, `InvalidHost`, `InvalidURL` | `AidotError` | upstream's HTTP-level errors |
 | `AidotOSError` | `Exception` | upstream's OS-level error; not an `AidotError` (upstream's choice) |
 | `AidotCameraBusy` | `AidotError` | the camera refused the stream with a terminal code; do not retry |
-| `AidotCameraNotReady` | `AidotError` | the camera answered but its media pipeline is not up yet; retry soon (but see `AidotShiftedAnswerNotConnected`) |
+| `AidotCameraNotReady` | `AidotError` | the camera answered but its media pipeline is not up yet; retry soon |
 | `AidotCameraNoMedia` | `AidotError` | the camera answered and sent no media; abandon to the retry |
 | `AidotCameraWrongCodec` | `AidotCameraNoMedia` | a camera pinned to one codec sent the other |
 | `AidotStreamOpenError` | `AidotError`, `RuntimeError` | base of the open-path errors below |
@@ -49,7 +49,6 @@ purpose.
 | `AidotNoWebrtcAnswer` | `AidotStreamOpenError` | no `webrtcResp` within the open timeout |
 | `AidotNegotiationFailed` | `AidotStreamOpenError` | the camera's SDP could not be applied, or ICE did not connect |
 | `AidotIceNotEstablished` | `AidotNegotiationFailed` | ICE did not connect; the camera still holds the session it accepted, so retry no sooner than after a busy refusal |
-| `AidotShiftedAnswerNotConnected` | `AidotIceNotEstablished`, `AidotCameraNotReady` | ICE did not connect after a shifted answer (which used to raise a plain `AidotCameraNotReady`); retry as for `AidotIceNotEstablished`, not soon |
 | `AidotFfmpegMissing` | `AidotStreamOpenError` | ffmpeg is needed and not installed |
 | `AidotSdPlaybackUnavailable` | `AidotStreamOpenError` | an SD recording was asked for where it cannot play: a DTLS camera without a `.ts` output_path, an answer with no data channel, or a camera this client streams live |
 | `AidotUnknownRegion` | `AidotError`, `ValueError` | the account region is not a known one (see `AIDOT_EXTRA_REGIONS`) |

@@ -39,19 +39,16 @@ loop's retry pacing, and a change to the serve loop resets the soak clock.
 - **After an open whose ICE never connected, the next open waits as long as
   after a busy refusal** (`AIDOT_BUSY_RETRY_S`, 45 s by default), and is
   otherwise paced like any failed open (backoff, slow probe, offline pause).
-  That includes a shifted answer that did not connect, which used to be
-  retried in the 3 s not-ready burst; it now raises
-  `AidotShiftedAnswerNotConnected`. The wait is a floor: the offline pause
-  ending early because the camera came back online no longer cuts it short.
+  The wait is a floor: neither the slow probe nor the offline pause, whether
+  it ends early because the camera came back online or falls through to a
+  probe open, cuts it short. Measured only after plain ICE failures: a
+  shifted answer that did not connect keeps its 3 s not-ready burst, since it
+  still connects about 1 in 7 on a quick retry.
 
 ### Added
 - `AidotIceNotEstablished`, a subclass of `AidotNegotiationFailed`, raised
   when ICE does not connect in time; code that catches
   `AidotNegotiationFailed` still catches it.
-- `AidotShiftedAnswerNotConnected`, a subclass of both `AidotIceNotEstablished`
-  and `AidotCameraNotReady`, raised when ICE does not connect after a shifted
-  answer (a plain `AidotCameraNotReady` before); code that catches either
-  still catches it.
 - `AIDOT_DTLS_SHORT_SESSION_S` (default 30): how long a served DTLS session
   must last, with video, not to count as short.
 

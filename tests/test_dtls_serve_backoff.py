@@ -24,9 +24,11 @@ Pinned here:
   the serve cycle's alone;
 * a video-less session is paced once, as a short session, and does not also
   escalate the open-failure pacer;
-* an open whose ICE never connected, on a plain or a shifted answer, is one
-  failure with one policy: the pacer, the slow probe, the offline pause and a
-  floor of AIDOT_BUSY_RETRY_S that an offline pause ending early cannot cut.
+* an open whose ICE never connected is paced like any failed open (backoff,
+  slow probe, offline pause) with a floor of AIDOT_BUSY_RETRY_S that no early
+  return cuts; a shifted answer that did not connect keeps main's 3 s burst;
+* a session's life is measured to when it stopped serving, not past its
+  teardown.
 
 The loop tests drive the REAL ``_dtls_serve_loop_inner`` (and
 ``_dtls_serve_loop``) on a fake clock. Only the client module's ``asyncio`` and
@@ -56,7 +58,6 @@ from aidot_cameras.exceptions import (
     AidotCameraNotReady,
     AidotIceNotEstablished,
     AidotNegotiationFailed,
-    AidotShiftedAnswerNotConnected,
 )
 
 _real_sleep = asyncio.sleep
@@ -98,13 +99,9 @@ def test_a_video_less_session_is_short_however_long_it_ran():
     assert _pace(_pacer(), 600.0, video=False) == 30.0
 
 
-def test_the_shifted_answer_failure_is_both_kinds():
-    """Callers that caught AidotCameraNotReady (what this case raised) or
-    AidotNegotiationFailed keep catching it."""
-    exc = AidotShiftedAnswerNotConnected("x")
-    assert isinstance(exc, AidotIceNotEstablished)
-    assert isinstance(exc, AidotNegotiationFailed)
-    assert isinstance(exc, AidotCameraNotReady)
+def test_the_ice_failure_is_still_a_negotiation_failure():
+    """Callers that catch AidotNegotiationFailed keep catching it."""
+    assert issubclass(AidotIceNotEstablished, AidotNegotiationFailed)
 
 
 # --------------------------------------------------------------------------- #
@@ -154,20 +151,22 @@ def _ice_wait(shifted: bool) -> BaseException:
         ps.second_answer_fut = asyncio.get_running_loop().create_future()
         await webrtc_open._dtls_open_ice_candidates_and_connect(cam, ps)
 
-    with pytest.raises(AidotIceNotEstablished) as info:
+    with pytest.raises((AidotIceNotEstablished, AidotCameraNotReady)) as info:
         asyncio.run(_go())
     return info.value
 
 
-def test_a_shifted_answer_that_never_connects_raises_the_shifted_failure():
-    exc = _ice_wait(shifted=True)
-    assert isinstance(exc, AidotShiftedAnswerNotConnected)
-    assert isinstance(exc, AidotCameraNotReady)
-
-
-def test_a_plain_answer_that_never_connects_is_not_a_not_ready():
+def test_a_plain_answer_that_never_connects_is_an_ice_failure():
     exc = _ice_wait(shifted=False)
-    assert not isinstance(exc, AidotCameraNotReady)
+    assert isinstance(exc, AidotIceNotEstablished)
+
+
+def test_a_shifted_answer_that_never_connects_is_still_a_not_ready():
+    """As on main: a shifted answer still connects about 1 in 7 on a quick
+    retry, so it keeps the 3 s burst rather than the busy floor."""
+    exc = _ice_wait(shifted=True)
+    assert isinstance(exc, AidotCameraNotReady)
+    assert not isinstance(exc, AidotIceNotEstablished)
 
 
 # --------------------------------------------------------------------------- #
@@ -310,6 +309,7 @@ class _Run:
                 run.now += 1.0
                 await _real_sleep(0)
             run.now += sess.life - int(sess.life)
+            ps._session_ended_at = run.now  # what the real cycle records
             ps._session_had_video = sess.video
             ps.idle_release = sess.idle
             await sess.stop()
@@ -512,18 +512,25 @@ def test_a_cancellation_in_the_wait_ends_the_loop_quietly(monkeypatch, cam):
 
 
 _ICE = AidotIceNotEstablished("ICE connection not established")
-_SHIFTED = AidotShiftedAnswerNotConnected("ICE connection not established")
 
 
-@pytest.mark.parametrize("exc", [_ICE, _SHIFTED], ids=["plain", "shifted"])
 def test_an_ice_failure_has_the_busy_floor_and_escalates_to_the_slow_probe(
-    monkeypatch, cam, exc
+    monkeypatch, cam
 ):
     """At least AIDOT_BUSY_RETRY_S each time, then the pacer's own backoff,
-    then the slow probe after five failures - a shifted answer exactly as a
-    plain one, not the flat retry or 3 s burst of a NotReady."""
-    run = _Run(monkeypatch, cam, [exc] * 6).run()
+    then the slow probe after five failures."""
+    run = _Run(monkeypatch, cam, [_ICE] * 6).run()
     assert _opened_after(run) == [_BUSY, _BUSY, 60.0, 120.0, 600.0, 600.0]
+
+
+def test_the_busy_floor_holds_in_a_short_slow_probe_too(monkeypatch, cam):
+    """At the bottom of the jitter every failed open waits 15 s; with the
+    slow-probe interval set to 20 s, an ICE failure still waits 45 s."""
+    monkeypatch.setattr(cc, "_SLOW_PROBE_INTERVAL_S", 20.0)
+    run = _Run(monkeypatch, cam, [_ICE] * 8)
+    monkeypatch.setattr(protocol, "random", types.SimpleNamespace(random=lambda: 0.0))
+    run.run()
+    assert _opened_after(run) == [_BUSY] * 8
 
 
 def test_another_negotiation_failure_keeps_the_ordinary_backoff(monkeypatch, cam):
@@ -532,8 +539,7 @@ def test_another_negotiation_failure_keeps_the_ordinary_backoff(monkeypatch, cam
     assert _opened_after(run)[0] == 15.0 < _BUSY
 
 
-@pytest.mark.parametrize("exc", [_ICE, _SHIFTED], ids=["plain", "shifted"])
-def test_the_ice_floor_survives_an_offline_pause_that_ends_early(monkeypatch, cam, exc):
+def test_the_ice_floor_survives_an_offline_pause_that_ends_early(monkeypatch, cam):
     """The offline pause would hold for AIDOT_OFFLINE_PROBE_S, but returns
     the moment the camera is back online; the busy floor still holds."""
     monkeypatch.setattr(cc, "_OFFLINE_RECHECK_S", 5.0)
@@ -543,17 +549,24 @@ def test_the_ice_floor_survives_an_offline_pause_that_ends_early(monkeypatch, ca
     def _back_online(run):
         cam.status.online = True
 
-    run = _Run(monkeypatch, cam, [exc, exc], on_sleep=_back_online).run()
+    run = _Run(monkeypatch, cam, [_ICE, _ICE], on_sleep=_back_online).run()
     assert _opened_after(run)[0] == _BUSY
 
 
-def test_shifted_failures_do_not_use_up_the_not_ready_burst(monkeypatch, cam):
-    nr = AidotCameraNotReady("cam")
-    run = _Run(monkeypatch, cam, [_SHIFTED] * 5 + [nr, nr]).run()
-    assert _opened_after(run)[-1] == 3.0
+def test_the_ice_floor_survives_an_offline_probe_interval_shorter_than_it(
+    monkeypatch, cam
+):
+    """Still offline when a 10 s AIDOT_OFFLINE_PROBE_S elapses: the pause
+    falls through to a probe open, but not before the 45 s floor."""
+    monkeypatch.setattr(cc, "_OFFLINE_PROBE_S", 10.0)
+    cam.status.online = False
+    cam._cloud_online_explicit = True
+    run = _Run(monkeypatch, cam, [_ICE, _ICE]).run()
+    assert _opened_after(run)[0] == _BUSY
 
 
-def test_a_genuine_not_ready_still_bursts(monkeypatch, cam):
+def test_a_not_ready_still_bursts(monkeypatch, cam):
+    """Including a shifted answer that did not connect, as on main."""
     nr = AidotCameraNotReady("cam")
     run = _Run(monkeypatch, cam, [nr, nr]).run()
     assert _opened_after(run)[0] == 3.0
@@ -663,3 +676,68 @@ def test_a_video_less_session_does_not_also_escalate_the_open_pacer(
     assert any("delivered no video" in m for m in msgs), msgs
     retries = [m for m in msgs if "open failed for" in m]
     assert retries and "(retry 15s)" in retries[0], retries
+
+
+class _SlowStopSession:
+    """A session whose PC dies after ``die_after`` s and whose stop takes
+    ``stop_takes`` s - the teardown that must not count as its life."""
+
+    def __init__(self, die_after: float, stop_takes: float):
+        from tests.keepalive_driver import FakePc
+
+        self._pc = FakePc()
+        self.die_after = die_after
+        self.stop_takes = stop_takes
+
+    async def get_stats(self) -> dict:
+        return {}
+
+    async def stop(self) -> None:
+        await _real_sleep(self.stop_takes)
+
+
+def test_a_session_is_measured_to_its_end_not_past_its_teardown(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """Threshold 0.35 s (real time here): the PC dies at 0.2 s, and the
+    session's stop then takes 0.4 s. Measured past the teardown it would be
+    0.6 s and count as lasting; measured to its end it is short and paced."""
+    from tests.keepalive_driver import DtlsServeRun
+
+    proxy = types.SimpleNamespace(
+        **{k: getattr(asyncio, k) for k in dir(asyncio) if not k.startswith("_")}
+    )
+    monkeypatch.setattr(cc, "asyncio", proxy)
+    monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "0.35")
+    cam = make_camera_device_client("A000088")
+    cam._stream_idle_opt = 0.0
+    sess = _SlowStopSession(die_after=0.2, stop_takes=0.4)
+    run = DtlsServeRun(monkeypatch, cam, [sess], timeout=1.5)
+    _open = cam.async_open_webrtc_stream
+
+    async def _open_and_die_later(**kwargs):
+        out = await _open(**kwargs)
+        asyncio.get_running_loop().call_later(
+            out.die_after, setattr, out._pc, "connectionState", "closed"
+        )
+        return out
+
+    cam.async_open_webrtc_stream = _open_and_die_later
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    paced = [
+        r.getMessage() for r in caplog.records if "before reopening" in r.getMessage()
+    ]
+    assert paced, [r.getMessage() for r in caplog.records]
+    assert "ended after 0s" in paced[0]
+
+
+def test_the_short_session_line_is_throttled(monkeypatch, cam, caplog):
+    """INFO for the first short session and every
+    AIDOT_DTLS_SLOW_PROBE_LOG_EVERY-th (6) after it; DEBUG for the rest."""
+    with caplog.at_level("DEBUG", logger="aidot_cameras.camera.client"):
+        _Run(monkeypatch, cam, [_Sess(5.0) for _ in range(8)]).run()
+    lines = [r for r in caplog.records if "before reopening" in r.getMessage()]
+    assert len(lines) == 8
+    info = [i + 1 for i, r in enumerate(lines) if r.levelname == "INFO"]
+    assert info == [1, 7]

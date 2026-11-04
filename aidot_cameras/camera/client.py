@@ -311,9 +311,12 @@ def _retry_policy(
 # probe. Capped at 45 s, not the open pacer's 300 s, for the viewer: the serve
 # relay holds a pull for up to 90 s, and 45 s of wait + a 16-25 s cold open +
 # about 8 s to serve-ready is at most about 78 s, so a pull that arrives
-# during the wait is still waiting when the serve comes back. The 2026-11-04
-# cadence goes from a reopen every 15 s to one every 30-45 s plus the
-# session's own life - the protection wanted, without starving a viewer.
+# during the wait is still waiting when the serve comes back - when the reopen
+# succeeds: an ICE failure on the reopen adds its own floor
+# (AIDOT_BUSY_RETRY_S) and the pull times out, and the viewer's player retries.
+# The 2026-11-04 cadence goes from a reopen every 15 s to one every 30-45 s
+# plus the session's own life - the protection wanted, without starving a
+# viewer.
 _SHORT_SESSION_BASE_S, _SHORT_SESSION_CAP_S = 30.0, 45.0
 
 
@@ -1407,6 +1410,8 @@ class _DtlsServeLoopState:
     _session_had_video: "Any" = dataclasses.field(init=False)
     # prepare_session; read by session_end
     _session_opened_at: "Any" = dataclasses.field(init=False)
+    # prepare_session, serve_cycle; read by session_end
+    _session_ended_at: "Any" = dataclasses.field(init=False)
     _short_pacer: "Any" = dataclasses.field(init=False)  # the loop
     loop: "Any" = dataclasses.field(init=False)  # the loop
     vq: "Any" = dataclasses.field(init=False)  # open_attempt
@@ -1478,13 +1483,6 @@ async def _dtls_serve_loop_open_attempt(
         except asyncio.CancelledError:
             return _PhaseReturn(None)
         return _LoopContinue()
-    except AidotIceNotEstablished as exc:
-        # Before the AidotCameraNotReady clause: a shifted answer that never
-        # connected (AidotShiftedAnswerNotConnected) is both, and it is the
-        # ICE failure that decides the retry - the camera holds the session.
-        if await _failed_open_retry(self, ps, exc):
-            return _PhaseReturn(None)
-        return _LoopContinue()
     except AidotCameraNotReady:
         # Camera answered cleanly but declined media (DC-only answer):
         # its encoder is still cold and warming up.  Fast-retry in a
@@ -1508,73 +1506,64 @@ async def _dtls_serve_loop_open_attempt(
             return _PhaseReturn(None)
         return _LoopContinue()
     except Exception as exc:
-        if await _failed_open_retry(self, ps, exc):
+        _delay = ps._pacer.fail_delay()
+        _floor = 0.0
+        if isinstance(exc, AidotIceNotEstablished):
+            # The camera accepted the offer and still holds the session that
+            # never connected; asked again before it lapses it refuses as
+            # busy, which is what every retry did on 2026-11-04 (an A000088,
+            # twelve times in twenty minutes). Wait as long as after a busy
+            # refusal: the cause is the same, a session the camera holds.
+            # A floor (min_s below), which the offline pause's early return on
+            # the camera coming back online does not cut short.
+            _floor = settings.read("AIDOT_BUSY_RETRY_S")
+        _attempt = ps._pacer.attempt
+        _cloud_offline = _cloud_reports_offline(self)
+        # Slow-probe throttle: an idle-but-cloud-online camera never
+        # sets _cloud_offline (the cloud keeps reporting it reachable),
+        # so without this it would retry forever at the pacer's cap.
+        # Keyed purely on the pacer's consecutive-failure count, not
+        # the offline flag - a genuinely offline camera already gets a
+        # comparable slow cadence (with early-resume) from
+        # _backoff_or_offline_pause below, so this only engages the
+        # part of the space that pause doesn't already cover.
+        if _in_slow_probe(_attempt, _SLOW_PROBE_THRESHOLD) and not _cloud_offline:
+            # The busy floor holds here too, whatever the probe interval is
+            # set to.
+            _delay = max(
+                _probe_interval(
+                    _attempt, _SLOW_PROBE_THRESHOLD, _delay, _SLOW_PROBE_INTERVAL_S
+                ),
+                _floor,
+            )
+            if _should_log_slow_probe(
+                _attempt, _SLOW_PROBE_THRESHOLD, _SLOW_PROBE_LOG_EVERY
+            ):
+                _LOGGER.info(
+                    "DTLS serve: %s still failing to open after %d"
+                    " attempts - slow-probing every %.0fs (last error: %s)",
+                    self.device_id,
+                    _attempt,
+                    _delay,
+                    exc,
+                )
+            try:
+                await self._slow_probe_sleep(_delay)
+            except asyncio.CancelledError:
+                return _PhaseReturn(None)
+            return _LoopContinue()
+        self._open_fail_logger()(
+            "DTLS serve: open failed for %s (retry %.0fs): %s",
+            self.device_id,
+            max(_delay, _floor),
+            exc,
+        )
+        try:
+            await self._backoff_or_offline_pause(_delay, min_s=_floor)
+        except asyncio.CancelledError:
             return _PhaseReturn(None)
         return _LoopContinue()
     return None
-
-
-async def _failed_open_retry(self, ps: _DtlsServeLoopState, exc: BaseException) -> bool:
-    """Wait out a failed DTLS serve open: the pacer's backoff, the slow probe
-    or the offline pause, with the busy floor after an ICE failure. True when
-    the wait was cancelled (the loop returns), else False (it retries).
-
-    Part of ``_dtls_serve_loop_open_attempt`` (its generic failed-open branch),
-    split out so an AidotShiftedAnswerNotConnected - also an
-    AidotCameraNotReady, whose clause would burst it - takes exactly this path.
-    """
-    _delay = ps._pacer.fail_delay()
-    _floor = 0.0
-    if isinstance(exc, AidotIceNotEstablished):
-        # The camera accepted the offer and still holds the session that
-        # never connected; asked again before it lapses it refuses as
-        # busy, which is what every retry did on 2026-11-04 (an A000088,
-        # twelve times in twenty minutes). Wait as long as after a busy
-        # refusal: the cause is the same, a session the camera holds.
-        # A floor (min_s below), which the offline pause's early return on
-        # the camera coming back online does not cut short.
-        _floor = settings.read("AIDOT_BUSY_RETRY_S")
-    _attempt = ps._pacer.attempt
-    _cloud_offline = _cloud_reports_offline(self)
-    # Slow-probe throttle: an idle-but-cloud-online camera never
-    # sets _cloud_offline (the cloud keeps reporting it reachable),
-    # so without this it would retry forever at the pacer's cap.
-    # Keyed purely on the pacer's consecutive-failure count, not
-    # the offline flag - a genuinely offline camera already gets a
-    # comparable slow cadence (with early-resume) from
-    # _backoff_or_offline_pause below, so this only engages the
-    # part of the space that pause doesn't already cover.
-    if _in_slow_probe(_attempt, _SLOW_PROBE_THRESHOLD) and not _cloud_offline:
-        _delay = _probe_interval(
-            _attempt, _SLOW_PROBE_THRESHOLD, _delay, _SLOW_PROBE_INTERVAL_S
-        )
-        if _should_log_slow_probe(
-            _attempt, _SLOW_PROBE_THRESHOLD, _SLOW_PROBE_LOG_EVERY
-        ):
-            _LOGGER.info(
-                "DTLS serve: %s still failing to open after %d"
-                " attempts - slow-probing every %.0fs (last error: %s)",
-                self.device_id,
-                _attempt,
-                _delay,
-                exc,
-            )
-        try:
-            await self._slow_probe_sleep(_delay)
-        except asyncio.CancelledError:
-            return True
-        return False
-    self._open_fail_logger()(
-        "DTLS serve: open failed for %s (retry %.0fs): %s",
-        self.device_id,
-        max(_delay, _floor),
-        exc,
-    )
-    try:
-        await self._backoff_or_offline_pause(_delay, min_s=_floor)
-    except asyncio.CancelledError:
-        return True
-    return False
 
 
 async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> None:
@@ -1591,6 +1580,7 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
     # not its start, so a slow open cannot carry a dying session past the
     # short-session threshold.
     ps._session_opened_at = ps.loop.time()
+    ps._session_ended_at = ps._session_opened_at  # serve_cycle moves it on
     self._stream_session = ps.session
     ps.pc = ps.session._pc
     # PC-dead test for the serve loop.  closed/failed are terminal at
@@ -1961,6 +1951,12 @@ async def _dtls_serve_loop_serve_cycle(
                     # which is why never-release fleets still worked.)
                     if ps.idle_release:
                         break
+            # When this cycle stopped serving - the session's end, if it was
+            # the last - taken before the teardown below (a mux join of up to
+            # 2 s, a publish backoff of up to 10 s, then the session's stop),
+            # which would otherwise carry a session that died at 25 s past
+            # the 30 s short-session threshold (_dtls_serve_loop_session_end).
+            ps._session_ended_at = ps.loop.time()
             # Tear down this ffmpeg+mux cycle before the next.
             ps.stop_flag.set()
             try:
@@ -2085,7 +2081,9 @@ async def _dtls_serve_loop_session_end(
     time until its keepalive is stopped - bounded, and in practice mains-only,
     since a battery camera's sessions do not die that way.
     """
-    _lived = ps.loop.time() - ps._session_opened_at
+    # From the open's success to when the session stopped serving, not to
+    # now: the teardown since then is not the session's life.
+    _lived = ps._session_ended_at - ps._session_opened_at
     _wait = _session_end_pacing(
         ps._short_pacer,
         _lived,
@@ -2094,13 +2092,22 @@ async def _dtls_serve_loop_session_end(
     )
     if not (_wait and self._streaming_active):
         return None
-    _LOGGER.info(
+    # The first short session, then every AIDOT_DTLS_SLOW_PROBE_LOG_EVERY-th,
+    # at INFO; the rest at DEBUG, so a camera doing this for hours does not
+    # drip a line a minute.
+    _n = ps._short_pacer.attempt
+    _log = (
+        _LOGGER.info
+        if _should_log_slow_probe(_n, 1, _SLOW_PROBE_LOG_EVERY)
+        else _LOGGER.debug
+    )
+    _log(
         "DTLS serve: session for %s ended after %.0fs - waiting"
         " %.0fs before reopening (%d short in a row)",
         self.device_id,
         _lived,
         _wait,
-        ps._short_pacer.attempt,
+        _n,
     )
     # The wait keeps the concurrent-stream slot, as a failed-open wait always
     # has. Letting go of it and queueing for it again (tried in review,
@@ -3039,14 +3046,17 @@ class CameraMixin(
                     "keepalive[%s]: device back online - resuming opens",
                     self.device_id,
                 )
-                _rest = min_s - (time.monotonic() - _t0)
-                if _rest > 0:
-                    await asyncio.sleep(_rest)
-                return
-        _LOGGER.debug(
-            "keepalive[%s]: offline probe interval elapsed - probing one open",
-            self.device_id,
-        )
+                break
+        else:
+            _LOGGER.debug(
+                "keepalive[%s]: offline probe interval elapsed - probing one open",
+                self.device_id,
+            )
+        # Both ways out - back online, or the probe interval elapsed (which
+        # AIDOT_OFFLINE_PROBE_S may set shorter than min_s) - honour min_s.
+        _rest = min_s - (time.monotonic() - _t0)
+        if _rest > 0:
+            await asyncio.sleep(_rest)
 
     async def _slow_probe_sleep(self, interval: float) -> None:
         """Sleep `interval` seconds for the DTLS serve loop's slow-probe wait,

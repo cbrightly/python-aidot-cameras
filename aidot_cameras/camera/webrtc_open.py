@@ -31,7 +31,6 @@ from ..exceptions import (
     AidotNoWebrtcAnswer,
     AidotPlaintextMqttRefused,
     AidotSdPlaybackUnavailable,
-    AidotShiftedAnswerNotConnected,
 )
 from .constants import _LIVE_PLAY_NOT_READY, fallback_turn_uris, stun_server_uris
 from .sdes_open import _answer_sdp_can_nominate
@@ -4711,19 +4710,12 @@ async def _dtls_open_ice_candidates_and_connect(
         await ps._abort_open()
         if ps._answer_inserted:
             # Before the answer sections were matched by content, a shifted
-            # answer on the live path stubbed every section and raised
-            # AidotCameraNotReady, which the serve loop retried in a 3 s
-            # burst. But ICE did not connect, so the camera still holds the
-            # session it accepted for this offer, as below, and a 3 s retry
-            # walks into its busy refusal (-50002) - what every retry did on
-            # 2026-11-04. Same failure, same retry policy: an
-            # AidotIceNotEstablished, still an AidotCameraNotReady for
-            # callers that catch that.
-            raise AidotShiftedAnswerNotConnected(
-                f"async_open_webrtc_stream: ICE connection not established"
-                f" on a shifted answer (connState={ps.pc.connectionState}"
-                f"  iceState={ps.pc.iceConnectionState}) within {_ice_timeout}s"
-            )
+            # answer on the live path stubbed every section and raised this
+            # same error, which the caller retries in a fast bounded burst.
+            # Keep that: a shifted answer that did not connect inside the
+            # cap is the camera declining, not a transport fault, and the
+            # generic 15s-gated retry is the wrong response to it.
+            raise AidotCameraNotReady(self.device_id)
         raise AidotIceNotEstablished(
             f"async_open_webrtc_stream: ICE connection not established "
             f"(connState={ps.pc.connectionState}"
