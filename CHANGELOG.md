@@ -6,6 +6,29 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+Held until the 1.0.0 soak ends (target 2026-11-17): it changes the DTLS serve
+loop's retry pacing, and a change to the serve loop resets the soak clock.
+
+### Changed
+- **A DTLS camera whose sessions keep failing fast is backed off, not
+  hammered.** On 2026-11-04 an A000088's sessions died within seconds of
+  opening for half an hour. A connected open reset the serve loop's backoff,
+  so it was reopened on the bare 15 s gate every time; then opens stopped
+  connecting ("ICE connection not established"), and every retry 15 s after
+  one was refused as busy (-50002), because the camera still held the session
+  it had accepted for the offer that never connected. Then it went offline.
+  Pounding an A000088 like that is what can wedge its DTLS stack. Now the
+  backoff resets only when a session lasts 30 s and delivers video; a session
+  that ends sooner, or never delivers video, escalates it, and the loop waits
+  that delay (30 s, doubling, up to 300 s) after the session is stopped. After
+  an ICE failure the next open waits as long as after a busy refusal
+  (`AIDOT_BUSY_RETRY_S`, 45 s by default).
+
+### Added
+- `AidotIceNotEstablished`, a subclass of `AidotNegotiationFailed`, raised
+  when ICE does not connect in time; code that catches
+  `AidotNegotiationFailed` still catches it.
+
 ## [1.0.0rc70]
 
 Soak: resets the clock. The change is to every SDES session's control channel

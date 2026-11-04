@@ -19,6 +19,7 @@ from ..exceptions import (
     AidotCameraNoMedia,
     AidotCameraNotReady,
     AidotCameraWrongCodec,
+    AidotIceNotEstablished,
 )
 from ..const import APP_ID as _AIDOT_APP_ID
 from ..const import (
@@ -170,9 +171,9 @@ _OFFLINE_PROBE_S = settings.read("AIDOT_OFFLINE_PROBE_S")
 # NOT the cloud-offline flag, which this case never sets), the loop widens its
 # retry interval to AIDOT_DTLS_SLOW_PROBE_INTERVAL_S and downgrades the
 # per-attempt WARNING to a periodic INFO summary (_should_log_slow_probe).
-# Resets the instant an open succeeds, via the same ReconnectPacer.reset() the
-# loop already calls on success (attempt -> 0, so _in_slow_probe is false again
-# with no separate state to clear).
+# Resets when a session lasts and delivers video, via the same
+# ReconnectPacer.reset() (_session_end_pacing; attempt -> 0, so _in_slow_probe
+# is false again with no separate state to clear).
 _SLOW_PROBE_THRESHOLD = settings.read("AIDOT_DTLS_SLOW_PROBE_THRESHOLD")
 _SLOW_PROBE_INTERVAL_S = settings.read("AIDOT_DTLS_SLOW_PROBE_INTERVAL_S")
 _SLOW_PROBE_LOG_EVERY = settings.read("AIDOT_DTLS_SLOW_PROBE_LOG_EVERY")
@@ -289,6 +290,33 @@ def _retry_policy(
     return (base_gate, False)
 
 
+#: A DTLS session that ends sooner than this after its open started is a short
+#: session: it escalates the loop's pacer and the loop waits the escalated delay
+#: before reopening, instead of reopening on the bare open gate. A session that
+#: lasts longer resets the pacer. A healthy idle-out runs for minutes, so it is
+#: never short.
+_DTLS_SHORT_SESSION_S = 30.0
+
+
+def _session_end_pacing(
+    pacer: "ReconnectPacer", lived_s: float, *, had_video: bool
+) -> float:
+    """Seconds to wait before reopening after a DTLS session that lived ``lived_s``.
+
+    A session that lasted the threshold and delivered video resets the pacer
+    and the loop reopens on its open gate (0). Any other escalates the pacer
+    and returns its delay. A video-less session counts as failed however long
+    it ran: the camera answers that way on every open (measured 2026-08-17),
+    and reopening on the gate cannot change it. Shorter ones: on 2026-11-04 an A000088's sessions died within seconds for half an
+    hour and, because a connected open reset the pacer, it was reopened on the
+    bare 15 s gate every time - hammering an A000088 like that is what wedges
+    its DTLS stack (see _MIN_DELAY in the loop)."""
+    if had_video and lived_s >= _DTLS_SHORT_SESSION_S:
+        pacer.reset()
+        return 0.0
+    return pacer.session_end_delay(healthy=False)
+
+
 def _open_gate_delay(last_open_at: float, now: float, open_gate: float) -> float:
     """Seconds to wait before the next open to honour the inter-attempt gate.
 
@@ -296,9 +324,10 @@ def _open_gate_delay(last_open_at: float, now: float, open_gate: float) -> float
     PREVIOUS open's start (`last_open_at`).  Returns 0 when there is no prior
     open (`last_open_at` is the 0.0 sentinel - monotonic time is never 0) or the
     gate has already elapsed (e.g. after a long healthy session that just died,
-    so it reopens immediately), else the remaining gate time.  This is the sole
-    reconnect-spacing mechanism: a fast death still gets spaced a full gate from
-    its open-start (anti-hammer), so no separate post-death delay is needed."""
+    so it reopens immediately), else the remaining gate time.  It is the floor:
+    a fast death is spaced at least a full gate from its open-start
+    (anti-hammer) even before the session-end pacing (_session_end_pacing) adds
+    its own wait for a session that died short."""
     if not last_open_at:
         return 0.0
     remaining = open_gate - (now - last_open_at)
@@ -1354,6 +1383,9 @@ class _DtlsServeLoopState:
     _last_open_at: "Any" = dataclasses.field(init=False)  # the loop, open_attempt
     # the loop, open_attempt, prepare_session
     _not_ready_burst: "Any" = dataclasses.field(init=False)
+    # prepare_session, serve_cycle; read by the loop at session end
+    _session_had_video: "Any" = dataclasses.field(init=False)
+    _session_opened_at: "Any" = dataclasses.field(init=False)  # prepare_session
     loop: "Any" = dataclasses.field(init=False)  # the loop
     vq: "Any" = dataclasses.field(init=False)  # open_attempt
     aq: "Any" = dataclasses.field(init=False)  # open_attempt
@@ -1389,9 +1421,9 @@ async def _dtls_serve_loop_open_attempt(
     self._serve_ready.clear()  # fresh (cold) session: not ready until bound
     # Hard inter-attempt gate (APK parity): never start an open within
     # _open_gate seconds of the previous one, regardless of the backoff.
-    # This is the SOLE reconnect-spacing mechanism (no separate post-death
-    # sleep) - after a healthy session it has long elapsed, so a clean
-    # death reopens immediately; a fast death still owes the full gate.
+    # After a session that lasted it has long elapsed, so a clean death
+    # reopens immediately; a fast death owes at least the full gate, and the
+    # loop has already waited the session-end pacing (_session_end_pacing).
     _gate_wait = _open_gate_delay(ps._last_open_at, ps.loop.time(), ps._open_gate)
     if _gate_wait:
         try:
@@ -1447,6 +1479,13 @@ async def _dtls_serve_loop_open_attempt(
         return _LoopContinue()
     except Exception as exc:
         _delay = ps._pacer.fail_delay()
+        if isinstance(exc, AidotIceNotEstablished):
+            # The camera accepted the offer and still holds the session that
+            # never connected; asked again before it lapses it refuses as
+            # busy, which is what every retry did on 2026-11-04 (an A000088,
+            # twelve times in twenty minutes). Wait as long as after a busy
+            # refusal: the cause is the same, a session the camera holds.
+            _delay = max(_delay, settings.read("AIDOT_BUSY_RETRY_S"))
         _attempt = ps._pacer.attempt
         _cloud_offline = (not self.status.online) and getattr(
             self, "_cloud_online_explicit", False
@@ -1500,8 +1539,15 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
     through ``ps`` (a ``_DtlsServeLoopState``) and returns a sentinel for a
     ``continue``, ``break`` or ``return`` of the loop, else None.
     """
-    ps._pacer.reset()
+    # The pacer is NOT reset here: a connected open says nothing about whether
+    # the session will last. It is reset when the session ends having lasted
+    # (_session_end_pacing), so sessions that keep dying fast back off.
     ps._not_ready_burst = 0  # clean open: reset the encoder-cold burst
+    ps._session_had_video = False
+    # When the session began, for _session_end_pacing: from the open's success,
+    # not its start, so a slow open cannot carry a dying session past the
+    # short-session threshold.
+    ps._session_opened_at = ps.loop.time()
     self._stream_session = ps.session
     ps.pc = ps.session._pc
     # PC-dead test for the serve loop.  closed/failed are terminal at
@@ -1901,17 +1947,13 @@ async def _dtls_serve_loop_serve_cycle(
                 # A session that delivered video clears the futile run:
                 # the count is about CONSECUTIVE video-less sessions.
                 self._futile_video_runs = 0
+                ps._session_had_video = True
             if _no_video:
-                # Do not let a video-less session look like a clean open.
-                # It reached "connected", so the pacer was reset when it
-                # opened; escalate here instead, or the loop re-opens on
-                # the bare 15s gate for as long as the camera keeps
-                # answering this way (it answered the same way on every
-                # open measured 2026-08-17).  The returned delay is not
-                # slept on here - the loop's own inter-attempt gate does
-                # the spacing; what matters is the escalated attempt
-                # count it leaves behind.
-                ps._pacer.session_end_delay(healthy=False)
+                # A session that ends on a video-less cycle is paced as
+                # failed when it ends (_session_end_pacing), whatever an
+                # earlier cycle delivered; here it also counts towards the
+                # futile-video limit.
+                ps._session_had_video = False
                 _limit = _futile_video_limit()
                 if _limit and self._futile_video_runs >= _limit:
                     _LOGGER.warning(
@@ -6913,10 +6955,10 @@ class CameraMixin(
         # attempts so no code path (reset bug, fast PC-death) can pound the camera.
         _MIN_DELAY, _MAX_DELAY = 15.0, 300.0
         ps._open_gate = settings.read("AIDOT_DTLS_RETRY_GATE_S")
-        # Jittered-backoff pacer for failed opens. Unlike the SDES/JPEG loops this
-        # serve loop resets on any successful open (it has the _open_gate spacing
-        # below) rather than escalating on no-media - hence reset() not
-        # session_end_delay().
+        # Jittered-backoff pacer for failed opens and for sessions that end fast.
+        # It escalates on a failed open and on a session shorter than
+        # _DTLS_SHORT_SESSION_S, and resets when a session lasts
+        # (_session_end_pacing); the _open_gate spacing applies on top.
         ps._pacer = ReconnectPacer(_MIN_DELAY, _MAX_DELAY)
         ps._last_open_at = 0.0  # monotonic of the previous open attempt (0 = none yet)
         ps._not_ready_burst = 0  # consecutive DC-only (encoder-cold) declines
@@ -6931,9 +6973,9 @@ class CameraMixin(
             if isinstance(_o, _LoopContinue):
                 continue
 
-            # Resetting the pacer's attempt count also clears slow-probe state:
-            # it derives purely from _pacer.attempt, so _in_slow_probe reads
-            # false again on the very next failure sequence.
+            # A session that lasts resets the pacer's attempt count when it ends
+            # (_session_end_pacing), which also clears slow-probe state: that
+            # derives purely from _pacer.attempt.
             await _dtls_serve_loop_prepare_session(self, ps)
             _o = await _dtls_serve_loop_serve_cycle(self, ps)
             if isinstance(_o, _PhaseReturn):
@@ -6950,12 +6992,36 @@ class CameraMixin(
                     self.device_id,
                 )
                 return None
+            # The session has ended and been stopped. Pace the next open by
+            # how long it lasted.
+            # Short sessions feed the same attempt count the slow probe reads,
+            # so a camera whose sessions keep dying and whose opens then fail
+            # reaches the slow probe sooner. That is intended.
+            _lived = ps.loop.time() - ps._session_opened_at
+            _wait = _session_end_pacing(
+                ps._pacer, _lived, had_video=ps._session_had_video
+            )
+            if _wait and self._streaming_active:
+                _LOGGER.info(
+                    "DTLS serve: session for %s ended after %.0fs - waiting"
+                    " %.0fs before reopening (attempt %d)",
+                    self.device_id,
+                    _lived,
+                    _wait,
+                    ps._pacer.attempt,
+                )
+                try:
+                    # Offline-aware when the cloud says the camera is gone,
+                    # else in chunks that stop as soon as streaming does.
+                    if not self.status.online and getattr(
+                        self, "_cloud_online_explicit", False
+                    ):
+                        await self._backoff_or_offline_pause(_wait)
+                    else:
+                        await self._slow_probe_sleep(_wait)
+                except asyncio.CancelledError:
+                    return None
         return None
-        # No separate post-death delay: loop back to the top open-gate, which
-        # spaces attempts from the previous open-start.  After a healthy
-        # session the gate has elapsed (immediate reopen); a fast death still
-        # owes the full gate there.  (Was a hardcoded 15s sleep that ignored
-        # AIDOT_DTLS_RETRY_GATE_S and added dead latency after healthy drops.)
 
     async def _spawn_dtls_serve_ffmpeg(self, serve_url: Optional[str], stdin_fd: int):
         """Launch ffmpeg to serve the mux thread's MPEG-TS (read from ``stdin_fd``).

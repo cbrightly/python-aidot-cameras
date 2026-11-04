@@ -148,6 +148,16 @@ class AidotNegotiationFailed(AidotStreamOpenError):
     or ICE did not connect within the timeout."""
 
 
+class AidotIceNotEstablished(AidotNegotiationFailed):
+    """ICE did not connect within the timeout.
+
+    Its own class because the camera has by then accepted the offer and holds
+    a session for it that never connected: asked again before that session
+    lapses, it refuses as busy (-50002). A caller that retries should wait as
+    long as it would after a busy refusal.
+    """
+
+
 class AidotFfmpegMissing(AidotStreamOpenError):
     """ffmpeg is needed for this stream and is not installed."""
 
