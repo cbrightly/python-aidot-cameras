@@ -124,6 +124,16 @@ stall then counts against the soak, on a stall that does not clear on retry,
 or on any of these shapes repeating on a mains camera; the watcher raises a
 stall on the mains PTZ, the A000088s or any camera it does not list at once.
 
+**What is measured, not counted.** Whether each scheduled view got video is
+tracked as its own figure. A stall that clears on retry is tallied and not
+counted, but the stream it delays can come up after the 60 s view is over:
+on 2026-11-03 the kitchen A001513's 20:05 view stalled, cleared on its first
+retry and still produced no video in the view. The soak watcher records every
+view as `ok` (at least 50 s of video), `short` (the first frame came late) or
+`missed` (no video), and reports the share that got video each day and since
+day zero. It does not reset the clock; it is the number to read when deciding
+whether a camera's late opens are a slow first frame or a view nobody saw.
+
 Each release's CHANGELOG entry is where its classification goes, with the
 reason. When a release resets the clock, the new day zero is the first
 ordinary day the reference installation runs it.
