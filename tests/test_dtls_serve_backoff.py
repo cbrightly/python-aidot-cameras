@@ -53,6 +53,7 @@ from aidot_cameras import settings
 from aidot_cameras.camera import client as cc
 from aidot_cameras.camera import protocol
 from aidot_cameras.camera.client import _session_end_pacing
+from aidot_cameras.camera.client import _video_has_started as _real_video_has_started
 from aidot_cameras.camera.protocol import ReconnectPacer
 from aidot_cameras.exceptions import (
     AidotCameraNotReady,
@@ -600,12 +601,47 @@ def _real_cycle_run(monkeypatch, make_camera_device_client, first_cycle_video):
         timeout=1.5,
         publish_for=0.3,
     )
+    # A canary is there to read (the driver's default is none); whether it
+    # shows video is up to the test.
+    monkeypatch.setattr(cc, "_live_video_canary", lambda pc, stored: {"keyframes": 0})
     monkeypatch.setattr(
         cc,
         "_video_has_started",
         lambda canary: first_cycle_video and len(run.mux_targets) <= 1,
     )
     return run
+
+
+@pytest.mark.parametrize(
+    "canary, paced",
+    [(None, False), ({"frames": 40, "keyframes": 0}, True)],
+    ids=["no canary", "canary without keyframes"],
+)
+def test_a_session_with_no_canary_is_not_short_for_want_of_one(
+    monkeypatch, make_camera_device_client, caplog, canary, paced
+):
+    """The presence watchdog gives up after 0.15 s either way (threshold
+    0.1 s, so the session lasted). With no canary to read, whether it had
+    video is unknown and it is not counted short; a canary that shows frames
+    and no keyframe is a session without usable video, and it is."""
+    from tests.keepalive_driver import DtlsServeRun, FakeDtlsSession
+
+    proxy = types.SimpleNamespace(
+        **{k: getattr(asyncio, k) for k in dir(asyncio) if not k.startswith("_")}
+    )
+    monkeypatch.setattr(cc, "asyncio", proxy)
+    monkeypatch.setenv("AIDOT_DTLS_VIDEO_GRACE_S", "0.15")
+    monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "0.1")
+    cam = make_camera_device_client("A000088")
+    cam._stream_idle_opt = 0.0
+    run = DtlsServeRun(monkeypatch, cam, [FakeDtlsSession()], timeout=1.5)
+    monkeypatch.setattr(cc, "_live_video_canary", lambda pc, stored: canary)
+    monkeypatch.setattr(cc, "_video_has_started", _real_video_has_started)
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("delivered no video" in m for m in msgs), msgs
+    assert bool([m for m in msgs if "before reopening" in m]) is paced, msgs
 
 
 @pytest.mark.parametrize("first_cycle_video", [True, False])
@@ -741,3 +777,82 @@ def test_the_short_session_line_is_throttled(monkeypatch, cam, caplog):
     assert len(lines) == 8
     info = [i + 1 for i, r in enumerate(lines) if r.levelname == "INFO"]
     assert info == [1, 7]
+
+
+def test_a_disconnect_is_measured_from_when_it_began(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """The PC goes disconnected at 0.2 s and stays so; the debounce
+    (AIDOT_ICE_DISCONNECT_S, 0.4 s here) gives up on it at 0.6 s. With a
+    0.45 s threshold the session is short: it died at 0.2 s, not at 0.6 s."""
+    from tests.keepalive_driver import DtlsServeRun
+
+    proxy = types.SimpleNamespace(
+        **{k: getattr(asyncio, k) for k in dir(asyncio) if not k.startswith("_")}
+    )
+    monkeypatch.setattr(cc, "asyncio", proxy)
+    monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "0.45")
+    monkeypatch.setenv("AIDOT_ICE_DISCONNECT_S", "0.4")
+    cam = make_camera_device_client("A000088")
+    cam._stream_idle_opt = 0.0
+    sess = _SlowStopSession(die_after=0.2, stop_takes=0.0)
+    run = DtlsServeRun(monkeypatch, cam, [sess], timeout=1.5)
+    _open = cam.async_open_webrtc_stream
+
+    async def _open_and_drop_later(**kwargs):
+        out = await _open(**kwargs)
+        asyncio.get_running_loop().call_later(
+            out.die_after, setattr, out._pc, "connectionState", "disconnected"
+        )
+        return out
+
+    cam.async_open_webrtc_stream = _open_and_drop_later
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    paced = [
+        r.getMessage() for r in caplog.records if "before reopening" in r.getMessage()
+    ]
+    assert paced, [r.getMessage() for r in caplog.records]
+
+
+def test_the_busy_floor_stops_when_streaming_does(monkeypatch, cam):
+    """The 45 s floor is chunked: a stop 5 s into it ends the wait there."""
+
+    def _stop_in_the_floor(run):
+        if run.sleeps and run.sleeps[-1][1] <= 5.0 and len(run.opens) == 1:
+            cam._streaming_active = False
+
+    run = _Run(monkeypatch, cam, [_ICE, _ICE], on_sleep=_stop_in_the_floor).run()
+    assert len(run.opens) == 1
+    assert sum(d for _at, d, _w in run.sleeps) <= 5.0
+
+
+@pytest.mark.parametrize(
+    "offline, says", [(False, "(retry 45s)"), (True, "(retry after the offline pause)")]
+)
+def test_the_failed_open_line_names_the_wait_that_runs(
+    monkeypatch, cam, caplog, offline, says
+):
+    if offline:
+        monkeypatch.setattr(cc, "_OFFLINE_RECHECK_S", 5.0)
+        cam.status.online = False
+        cam._cloud_online_explicit = True
+
+        def _back_online(run):
+            cam.status.online = True
+
+    else:
+        _back_online = None
+    with caplog.at_level("DEBUG", logger="aidot_cameras.camera.client"):
+        _Run(monkeypatch, cam, [_ICE], on_sleep=_back_online).run()
+    lines = [
+        r.getMessage() for r in caplog.records if "open failed for" in r.getMessage()
+    ]
+    assert lines and says in lines[0], lines
+
+
+def test_every_nth_counts_from_the_first():
+    from aidot_cameras.camera.client import _every_nth
+
+    assert [n for n in range(1, 15) if _every_nth(n, 6)] == [1, 7, 13]
+    assert all(_every_nth(n, 1) for n in range(1, 5))

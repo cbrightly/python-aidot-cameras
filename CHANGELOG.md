@@ -21,13 +21,16 @@ loop's retry pacing, and a change to the serve loop resets the soak clock.
   session that ends on its own within 30 s of its open succeeding, or without
   ever delivering video, is a short session, paced on its own backoff apart
   from failed opens: the loop waits 30 s after the first, then jittered
-  between 30 and 45 s. That takes the 2026-11-04 cadence from a reopen every
-  15 s to one every 30-45 s plus the session's own life, without starving a
-  viewer: 45 s of wait, a 16-25 s cold open and about 8 s to serve-ready stay
-  inside the 90 s the serve relay holds a pull. A session that lasts 30 s and
-  delivered video resets that backoff, whatever its last serve cycle did. A
-  session that never delivers video is paced only this way; it no longer
-  also escalates the failed-open backoff. While it waits the loop keeps the
+  between 30 and 45 s, so the 2026-11-04 cadence goes from a reopen every
+  15 s to one every 30-45 s plus the session's own life; 45 s is the most a
+  viewer's pull held by the serve relay can absorb (the arithmetic is by
+  `_SHORT_SESSION_CAP_S` in camera/client.py). A session's life runs from its
+  open succeeding to when it stopped serving (when its connection went bad,
+  not when the disconnect debounce gave up), so a teardown cannot carry it
+  past 30 s. A session that lasts 30 s and delivered video resets that
+  backoff, whatever its last serve cycle did; one with no video canary to
+  read counts as having delivered. A session that never delivers video is
+  paced only this way; it no longer also escalates the failed-open backoff. While it waits the loop keeps the
   camera's concurrent-stream slot (`AIDOT_MAX_CONCURRENT_STREAMS`), as a
   failed-open wait always has, and does not report the serve ready. Idle
   release is unchanged, the serve cycle's alone: a camera nobody watches
@@ -43,7 +46,9 @@ loop's retry pacing, and a change to the serve loop resets the soak clock.
   it ends early because the camera came back online or falls through to a
   probe open, cuts it short. Measured only after plain ICE failures: a
   shifted answer that did not connect keeps its 3 s not-ready burst, since it
-  still connects about 1 in 7 on a quick retry.
+  still connects about 1 in 7 on a quick retry. Only the serve loop's own
+  retries get the floor; the other open paths (a live view, SD playback)
+  retry as before.
 
 ### Added
 - `AidotIceNotEstablished`, a subclass of `AidotNegotiationFailed`, raised
