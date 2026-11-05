@@ -1596,21 +1596,6 @@ async def _dtls_serve_loop_open_attempt(
     return None
 
 
-def _cycle_dead(ps: "_DtlsServeLoopState") -> bool:
-    """Can this serve cycle no longer serve? The PC is dead (which also stamps
-    when it went bad), the mux or publish thread has exited, or ffmpeg has.
-
-    The one test for both the serve-ready wait and the serving loop, so a
-    cycle is never marked ready that the loop would end at once, and a dead
-    mux ends the cycle in every mode - on the ffmpeg path too, which would
-    otherwise sit with ffmpeg serving nothing."""
-    return (
-        ps._pc_dead()
-        or not ps.mux_thread.is_alive()
-        or (ps.proc is not None and ps.proc.returncode is not None)
-    )
-
-
 async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> None:
     """Prepare a freshly opened DTLS session for its serve cycle.
 
@@ -1811,7 +1796,6 @@ async def _dtls_serve_loop_serve_cycle(
                     _relay.set_backend(_ff_port)
                 ps.wfile = os.fdopen(wfd, "wb", buffering=0)
             progress = [ps.loop.time()]
-            _progress0 = progress[0]  # moved on by the mux for each frame
             ps.stop_flag = _threading.Event()
             _publish_result: dict = {}
             if _publishing:
@@ -1839,7 +1823,7 @@ async def _dtls_serve_loop_serve_cycle(
                     await asyncio.sleep(0.2)
                     # Also stamps when the PC went bad, so a session that
                     # dies in here is not measured as lasting until a poll.
-                    _dead = _cycle_dead(ps)
+                    _dead = ps._pc_dead()
                     if _dead or progress[0] > _p0:
                         break
                 # ffmpeg binds its -listen socket at startup, so by the time
@@ -1849,8 +1833,8 @@ async def _dtls_serve_loop_serve_cycle(
                 # the port - `-listen 1` would consume our probe as its one
                 # client and tear down before go2rtc connects.)
                 if not _dead:
-                    # A dead PC, mux or ffmpeg is not "serving": the cycle
-                    # below ends on its first check instead.
+                    # A dead session is not "serving": the cycle below ends
+                    # on its first check instead.
                     await asyncio.sleep(0.3)
                     self._serve_ready.set()
                     self._cold_phase("serving (dtls)")
@@ -1902,11 +1886,12 @@ async def _dtls_serve_loop_serve_cycle(
                 ps.proc is None or ps.proc.returncode is None
             ):
                 await asyncio.sleep(0.5)
-                if _cycle_dead(ps):
-                    # The PC died, or the publish/mux thread or ffmpeg ended
-                    # (go2rtc gone, stream missing, connection dropped): end
-                    # this cycle; the next one restarts it after a short
-                    # backoff, if the PC is still up.
+                if ps._pc_dead():
+                    break
+                if _publishing and not ps.mux_thread.is_alive():
+                    # The publish ended (go2rtc gone, stream missing,
+                    # connection dropped): end this cycle; the next one
+                    # republishes after a short backoff.
                     break
                 _now = ps.loop.time()
                 if _health_dtls.due(_now):
@@ -2029,20 +2014,6 @@ async def _dtls_serve_loop_serve_cycle(
             # threshold. The session's end is worked out from it once, in
             # _dtls_serve_loop_session_end.
             ps._session_ended_at = ps.loop.time()
-            # Serve-ready stays up across a warm reconnect only: the PC still
-            # alive, this cycle muxed at least one frame, and the cycle did
-            # not end the session (no-video, idle release). Anything else -
-            # a dead PC, a cycle that served nothing (its ffmpeg or publish
-            # failing at once, so the next one runs the readiness wait
-            # again), the end of the session - is not serving, from here,
-            # through the teardown.
-            if (
-                ps._pc_dead()
-                or progress[0] <= _progress0
-                or _no_video
-                or ps.idle_release
-            ):
-                self._serve_ready.clear()
             # Tear down this ffmpeg+mux cycle before the next.
             ps.stop_flag.set()
             try:
@@ -2115,9 +2086,6 @@ async def _dtls_serve_loop_serve_cycle(
                 break
     except asyncio.CancelledError:
         ps.cancelled = True
-        # A cancellation skips the end-of-cycle rule above, and it is not a
-        # warm reconnect: nothing serves until a new serve starts.
-        self._serve_ready.clear()
     finally:
         if ps.stop_flag is not None:
             ps.stop_flag.set()
@@ -2182,10 +2150,6 @@ async def _dtls_serve_loop_session_end(
     if ps._pc_bad_box[0] is not None:
         _end = min(_end, ps._pc_bad_box[0])
     _lived = _end - ps._session_opened_at
-    # The session is over: nothing serves until the next one does, whether
-    # it waits first or not (a last cycle judged warm, then the PC dying or
-    # the serve stopping, would otherwise leave it up until the next open).
-    self._serve_ready.clear()
     _wait = _session_end_pacing(
         ps._short_pacer,
         _lived,
@@ -2214,12 +2178,14 @@ async def _dtls_serve_loop_session_end(
     # 2026-11-04) could park a camera in the queue indefinitely while it still
     # counted as streaming.
     #
-    # Serve-ready is already down (above), so a consumer that asks during the
-    # wait is not told the serve is ready. The serve relay keeps holding a
+    # Not serving while it waits, and say so: a consumer that asks now
+    # (stream_source, async_wait_serve_ready) must not be told the serve is
+    # ready; the next serve sets it again. The serve relay keeps holding a
     # pull, and the wait is short enough for the reopen to land inside its
     # 90 s (see _SHORT_SESSION_CAP_S). Battery keep-alive renewals carry on:
     # letting the camera's ~25 s low-power timer run out would turn the reopen
     # into a slow cold wake.
+    self._serve_ready.clear()
     try:
         # Chunked, so it ends as soon as streaming stops. Not the offline-aware
         # pause: offline handling belongs to the open path, which has it.
