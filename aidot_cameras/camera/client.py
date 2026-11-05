@@ -589,6 +589,20 @@ def _video_presence_verdict(
     return "give-up" if (now - connected_at) > grace else "waiting"
 
 
+def _video_seen_now(dev: Any, pc: Any) -> bool:
+    """Has the serve's video canary seen usable video yet (a keyframe)?
+
+    Reads the canary that is actually being fed (_live_video_canary) and,
+    when it has, keeps that one on ``dev`` so the canary log line describes
+    the live session. Used by the serve cycle's in-loop check and by its
+    re-read at the end of the cycle."""
+    _canary = _live_video_canary(pc, getattr(dev, "_serve_video_canary", None))
+    if _video_has_started(_canary):
+        dev._serve_video_canary = _canary
+        return True
+    return False
+
+
 def _video_has_started(canary: Optional[dict]) -> bool:
     """Has this session delivered video a consumer can actually use?
 
@@ -1893,15 +1907,8 @@ async def _dtls_serve_loop_serve_cycle(
                     except Exception:  # a report must never end a session
                         _health_dtls.skip(_now)
                         _LOGGER.debug("health line failed", exc_info=True)
-                if _first_video_at is None:
-                    _canary_v = _live_video_canary(
-                        ps.pc, getattr(self, "_serve_video_canary", None)
-                    )
-                    if _video_has_started(_canary_v):
-                        _first_video_at = _now
-                        # Keep the one that is actually filling, so the
-                        # canary log line describes the live session.
-                        self._serve_video_canary = _canary_v
+                if _first_video_at is None and _video_seen_now(self, ps.pc):
+                    _first_video_at = _now
                 if (
                     _video_presence_verdict(
                         _first_video_at, _connected_at, _now, _vid_grace
@@ -1992,13 +1999,12 @@ async def _dtls_serve_loop_serve_cycle(
             # would otherwise be recorded as video-less (then a long session
             # with video is paced as short). Not after a no-video verdict,
             # which stands.
-            if _first_video_at is None and not _no_video:
-                _canary_v = _live_video_canary(
-                    ps.pc, getattr(self, "_serve_video_canary", None)
-                )
-                if _video_has_started(_canary_v):
-                    _first_video_at = ps.loop.time()
-                    self._serve_video_canary = _canary_v
+            if (
+                _first_video_at is None
+                and not _no_video
+                and _video_seen_now(self, ps.pc)
+            ):
+                _first_video_at = ps.loop.time()
             # When this cycle stopped serving, taken before the teardown
             # below (a mux join of up to 2 s, a publish backoff of up to
             # 10 s, then the session's stop), which would otherwise carry a
@@ -2006,6 +2012,10 @@ async def _dtls_serve_loop_serve_cycle(
             # threshold. The session's end is worked out from it once, in
             # _dtls_serve_loop_session_end.
             ps._session_ended_at = ps.loop.time()
+            # Not serving from here: a consumer that asks during the teardown
+            # (stream_source, async_wait_serve_ready) must not be told the
+            # serve is ready. The next cycle's serve-ready wait sets it again.
+            self._serve_ready.clear()
             # Tear down this ffmpeg+mux cycle before the next.
             ps.stop_flag.set()
             try:

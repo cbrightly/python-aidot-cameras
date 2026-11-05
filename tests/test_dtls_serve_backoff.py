@@ -97,7 +97,7 @@ def test_a_session_that_lasted_with_video_resets_the_pacer():
     assert _pace(p, 5.0) == 30.0
 
 
-def test_a_video_less_session_is_short_however_long_it_ran():
+def test_a_video_less_session_is_short_however_long_it_ran_pure():
     assert _pace(_pacer(), 600.0, video=False) == 30.0
 
 
@@ -1079,3 +1079,33 @@ def test_a_cycle_whose_publish_dies_at_once_still_records_its_video(
     assert run.mux_targets and set(run.mux_targets) == {"publish"}
     assert not _paced(caplog), [r.getMessage() for r in caplog.records]
     assert run.opens == 2
+
+
+def test_serve_ready_is_down_once_a_cycle_stops_serving(
+    monkeypatch, make_camera_device_client
+):
+    """The cycle serves (serve-ready set), the PC closes at 0.3 s, and during
+    the teardown that follows serve-ready is already down."""
+    run, cam = _canary_run(
+        monkeypatch, make_camera_device_client, {"frames": 30, "keyframes": 1}
+    )
+    cam._serve_ready = _CountingEvent()
+    ready_in_teardown: list = []
+
+    def _terminate(proc):
+        ready_in_teardown.append(cam._serve_ready.is_set())
+
+    monkeypatch.setattr(cc, "_terminate_proc", _terminate)
+    _open = cam.async_open_webrtc_stream
+
+    async def _open_and_close_later(**kwargs):
+        out = await _open(**kwargs)
+        asyncio.get_running_loop().call_later(
+            0.3, setattr, out._pc, "connectionState", "closed"
+        )
+        return out
+
+    cam.async_open_webrtc_stream = _open_and_close_later
+    run.run()
+    assert cam._serve_ready.sets >= 1
+    assert ready_in_teardown and ready_in_teardown[0] is False
