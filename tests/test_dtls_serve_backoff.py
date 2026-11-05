@@ -1094,38 +1094,126 @@ def _close_pc_after(cam, delay):
     cam.async_open_webrtc_stream = _open_and_close_later
 
 
+def _scripted_publish(monkeypatch, cam, script):
+    """Replace the publish thread: cycle ``i`` (from 0) muxes frames for
+    ``script[i]`` s (0: exits at once, muxing nothing; the last entry repeats)
+    and records serve-ready as the cycle starts."""
+    ready_at_start: list = []
+
+    def _publish(vq, aq, url, progress, stop, **kw):
+        n = len(ready_at_start)
+        ready_at_start.append(cam._serve_ready.is_set())
+        span = script[min(n, len(script) - 1)]
+        end = _real_time.monotonic() + span
+        while not stop.is_set() and _real_time.monotonic() < end:
+            progress[0] = _real_time.monotonic()
+            stop.wait(0.002)
+
+    monkeypatch.setattr(cc, "dtls_rtp_publish_run", _publish)
+    return ready_at_start
+
+
 def test_a_warm_reconnect_reports_ready_at_once_and_logs_cold_start_once(
     monkeypatch, make_camera_device_client, caplog
 ):
-    """Direct publish ending every 0.15 s stands in for go2rtc reconnecting:
-    several serve cycles on one live PC. Serve-ready is set once, by the
-    first cycle, and is already up when each later cycle starts; the
-    cold-start "serving" line is logged once for the session."""
+    """A publish that ends every 0.15 s after muxing stands in for go2rtc
+    reconnecting: several serve cycles on one live PC. Serve-ready is set
+    once, by the first cycle, and is already up when each later cycle
+    starts; the cold-start "serving" line is logged once for the session."""
     monkeypatch.setenv("AIDOT_DIRECT_PUBLISH", "1")
     run, cam = _canary_run(
         monkeypatch,
         make_camera_device_client,
         {"frames": 30, "keyframes": 1},
         url="rtsp://127.0.0.1:8554/cam",
-        publish_for=0.15,
     )
     cam._serve_ready = _CountingEvent()
     cam._cold_open_t0 = _real_time.monotonic()
-    ready_at_cycle_start: list = []
-
-    async def _pli(pc):
-        ready_at_cycle_start.append(cam._serve_ready.is_set())
-
-    cam._send_video_pli = _pli
+    ready_at_start = _scripted_publish(monkeypatch, cam, [0.15])
     _close_pc_after(cam, 0.6)
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         run.run()
-    assert len(run.mux_targets) >= 2
-    assert ready_at_cycle_start[0] is False
-    assert all(ready_at_cycle_start[1 : len(run.mux_targets)])
+    assert len(ready_at_start) >= 2
+    assert ready_at_start[0] is False
+    assert all(ready_at_start[1:])
     assert cam._serve_ready.sets == 1
     serving = [r for r in caplog.records if "serving (dtls)" in r.getMessage()]
     assert len(serving) == 1
+
+
+def test_a_cycle_that_serves_nothing_is_not_warm(
+    monkeypatch, make_camera_device_client
+):
+    """Cycle 1 serves; cycle 2's publish fails at once, muxing nothing; cycle
+    3 serves again. Cycle 3 starts not ready and runs the readiness wait,
+    setting serve-ready only once its frames flow."""
+    monkeypatch.setenv("AIDOT_DIRECT_PUBLISH", "1")
+    run, cam = _canary_run(
+        monkeypatch,
+        make_camera_device_client,
+        {"frames": 30, "keyframes": 1},
+        url="rtsp://127.0.0.1:8554/cam",
+    )
+    cam._serve_ready = _CountingEvent()
+    ready_at_start = _scripted_publish(monkeypatch, cam, [0.15, 0.0, 0.15])
+    _close_pc_after(cam, 0.6)
+    run.run()
+    assert len(ready_at_start) >= 3
+    assert ready_at_start[:3] == [False, True, False]
+    assert cam._serve_ready.sets >= 2
+
+
+def test_serve_ready_is_down_once_the_pc_dies(monkeypatch, make_camera_device_client):
+    """A session serving video whose PC then closes: serve-ready is down
+    during the teardown and stays down afterwards."""
+    run, cam = _canary_run(
+        monkeypatch, make_camera_device_client, {"frames": 30, "keyframes": 1}
+    )
+    cam._serve_ready = _CountingEvent()
+    ready_in_teardown: list = []
+    monkeypatch.setattr(
+        cc,
+        "_terminate_proc",
+        lambda proc: ready_in_teardown.append(cam._serve_ready.is_set()),
+    )
+    _close_pc_after(cam, 0.3)
+    run.run()
+    assert cam._serve_ready.sets >= 1
+    assert ready_in_teardown and ready_in_teardown[0] is False
+    assert not cam._serve_ready.is_set()
+
+
+def test_serve_ready_is_down_after_a_futile_video_abandon(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """Frames flow (serve-ready set) but no keyframe ever comes; with a
+    futile-video limit of 1 the serve is abandoned, and not left ready."""
+    monkeypatch.setenv("AIDOT_DTLS_VIDEO_GRACE_S", "0.15")
+    monkeypatch.setenv("AIDOT_DTLS_FUTILE_VIDEO_LIMIT", "1")
+    run, cam = _canary_run(
+        monkeypatch, make_camera_device_client, {"frames": 30, "keyframes": 0}
+    )
+    cam._serve_ready = _CountingEvent()
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    assert run.dormant and run.dormant[0]["why"] == "video abandon"
+    assert cam._serve_ready.sets >= 1
+    assert not cam._serve_ready.is_set()
+
+
+def test_a_dead_mux_ends_the_cycle_on_the_ffmpeg_path(
+    monkeypatch, make_camera_device_client
+):
+    """No direct publish: the mux thread exits at once. The cycle ends on it
+    and the next one starts, instead of sitting with nothing serving."""
+    run, cam = _canary_run(
+        monkeypatch, make_camera_device_client, {"frames": 30, "keyframes": 1}
+    )
+    muxes: list = []
+    monkeypatch.setattr(cc, "_dtls_av_mux_run", lambda *a, **k: muxes.append(1))
+    _close_pc_after(cam, 0.5)
+    run.run()
+    assert len(muxes) >= 2
 
 
 def test_a_cancelled_serve_stops_reporting_ready(

@@ -55,10 +55,15 @@ loop's retry pacing, and a change to the serve loop resets the soak clock.
   answered, which also leaves a session held on the camera; releasing it on
   the camera side in `_abort_open` would be the general fix (a follow-up).
 
-- **A DTLS serve is reported ready only while it can serve.** A cancelled
-  serve no longer leaves serve-ready set, and a serve cycle whose PC, mux or
-  ffmpeg is already dead is never marked ready. A warm go2rtc reconnect
-  within a live session still reports ready at once.
+- **A DTLS serve is reported ready only while it can serve.** Serve-ready
+  stays up between serve cycles only across a warm go2rtc reconnect (the PC
+  still alive and the cycle having muxed a frame), which still reports ready
+  at once. It goes down as soon as a cycle ends any other way - the PC
+  dying, no video, an idle release, a futile-video abandon, a cycle that
+  served nothing - and at the end of every session and on cancellation, and
+  a cycle whose PC, mux or ffmpeg is dead is never marked ready. A mux
+  thread that dies now ends its cycle on the ffmpeg path too, not only when
+  publishing.
 
 ### Added
 - `AidotIceNotEstablished`, a subclass of `AidotNegotiationFailed`, raised
