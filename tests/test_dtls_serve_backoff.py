@@ -1079,3 +1079,39 @@ def test_a_cycle_whose_publish_dies_at_once_still_records_its_video(
     assert run.mux_targets and set(run.mux_targets) == {"publish"}
     assert not _paced(caplog), [r.getMessage() for r in caplog.records]
     assert run.opens == 2
+
+
+def test_a_keyframe_landing_during_the_stats_await_counts(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """A 1 ms video grace, so the first serving tick is the grace tick, and
+    that tick is also the health line's first (it always is). Video starts
+    on another receiver while its getStats() is awaited: the first-video
+    check must read the canary as it is after the await, not the zero-frame
+    one from before it, and must not give the session up."""
+    monkeypatch.setenv("AIDOT_DTLS_VIDEO_GRACE_S", "0.001")
+    state = {"canary": {"frames": 0, "keyframes": 0}}
+    run, cam = _canary_run(monkeypatch, make_camera_device_client, None)
+    monkeypatch.setattr(cc, "_live_video_canary", lambda pc, stored: state["canary"])
+    sess = run.sessions[0]
+
+    async def _get_stats():
+        await _real_sleep(0)
+        state["canary"] = {"frames": 5, "keyframes": 1}  # another receiver
+        return {}
+
+    sess.get_stats = _get_stats
+    _open = cam.async_open_webrtc_stream
+
+    async def _open_and_close_later(**kwargs):
+        out = await _open(**kwargs)
+        asyncio.get_running_loop().call_later(
+            0.3, setattr, out._pc, "connectionState", "closed"
+        )
+        return out
+
+    cam.async_open_webrtc_stream = _open_and_close_later
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any("delivered no video" in m for m in msgs), msgs
