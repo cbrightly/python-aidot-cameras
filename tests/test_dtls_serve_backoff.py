@@ -1081,31 +1081,78 @@ def test_a_cycle_whose_publish_dies_at_once_still_records_its_video(
     assert run.opens == 2
 
 
-def test_serve_ready_is_down_once_a_cycle_stops_serving(
-    monkeypatch, make_camera_device_client
-):
-    """The cycle serves (serve-ready set), the PC closes at 0.3 s, and during
-    the teardown that follows serve-ready is already down."""
-    run, cam = _canary_run(
-        monkeypatch, make_camera_device_client, {"frames": 30, "keyframes": 1}
-    )
-    cam._serve_ready = _CountingEvent()
-    ready_in_teardown: list = []
-
-    def _terminate(proc):
-        ready_in_teardown.append(cam._serve_ready.is_set())
-
-    monkeypatch.setattr(cc, "_terminate_proc", _terminate)
+def _close_pc_after(cam, delay):
     _open = cam.async_open_webrtc_stream
 
     async def _open_and_close_later(**kwargs):
         out = await _open(**kwargs)
         asyncio.get_running_loop().call_later(
-            0.3, setattr, out._pc, "connectionState", "closed"
+            delay, setattr, out._pc, "connectionState", "closed"
         )
         return out
 
     cam.async_open_webrtc_stream = _open_and_close_later
+
+
+def test_a_warm_reconnect_reports_ready_at_once_and_logs_cold_start_once(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """Direct publish ending every 0.15 s stands in for go2rtc reconnecting:
+    several serve cycles on one live PC. Serve-ready is set once, by the
+    first cycle, and is already up when each later cycle starts; the
+    cold-start "serving" line is logged once for the session."""
+    monkeypatch.setenv("AIDOT_DIRECT_PUBLISH", "1")
+    run, cam = _canary_run(
+        monkeypatch,
+        make_camera_device_client,
+        {"frames": 30, "keyframes": 1},
+        url="rtsp://127.0.0.1:8554/cam",
+        publish_for=0.15,
+    )
+    cam._serve_ready = _CountingEvent()
+    cam._cold_open_t0 = _real_time.monotonic()
+    ready_at_cycle_start: list = []
+
+    async def _pli(pc):
+        ready_at_cycle_start.append(cam._serve_ready.is_set())
+
+    cam._send_video_pli = _pli
+    _close_pc_after(cam, 0.6)
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    assert len(run.mux_targets) >= 2
+    assert ready_at_cycle_start[0] is False
+    assert all(ready_at_cycle_start[1 : len(run.mux_targets)])
+    assert cam._serve_ready.sets == 1
+    serving = [r for r in caplog.records if "serving (dtls)" in r.getMessage()]
+    assert len(serving) == 1
+
+
+def test_a_cancelled_serve_stops_reporting_ready(
+    monkeypatch, make_camera_device_client
+):
+    """Cancelled while it serves: not a warm reconnect, so serve-ready is
+    cleared rather than left up for a serve that no longer exists."""
+    run, cam = _canary_run(
+        monkeypatch, make_camera_device_client, {"frames": 30, "keyframes": 1}
+    )
+    cam._serve_ready = _CountingEvent()
+    run.timeout = 0.4
     run.run()
     assert cam._serve_ready.sets >= 1
-    assert ready_in_teardown and ready_in_teardown[0] is False
+    assert not cam._serve_ready.is_set()
+
+
+def test_a_dead_mux_in_the_serve_ready_wait_is_never_called_serving(
+    monkeypatch, make_camera_device_client
+):
+    """The mux thread exits at once and no frame ever arrives: the wait stops
+    on the dead thread and serve-ready is never set for that cycle."""
+    run, cam = _canary_run(
+        monkeypatch, make_camera_device_client, {"frames": 30, "keyframes": 1}
+    )
+    cam._serve_ready = _CountingEvent()
+    monkeypatch.setattr(cc, "_dtls_av_mux_run", lambda *a, **k: None)
+    _close_pc_after(cam, 0.3)
+    run.run()
+    assert cam._serve_ready.sets == 0

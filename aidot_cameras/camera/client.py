@@ -589,14 +589,19 @@ def _video_presence_verdict(
     return "give-up" if (now - connected_at) > grace else "waiting"
 
 
+def _current_video_canary(dev: Any, pc: Any) -> Optional[dict]:
+    """The serve's video canary as it stands: the one stored on ``dev`` or
+    the one actually being fed on ``pc`` (_live_video_canary)."""
+    return _live_video_canary(pc, getattr(dev, "_serve_video_canary", None))
+
+
 def _video_seen_now(dev: Any, pc: Any) -> bool:
     """Has the serve's video canary seen usable video yet (a keyframe)?
 
-    Reads the canary that is actually being fed (_live_video_canary) and,
-    when it has, keeps that one on ``dev`` so the canary log line describes
-    the live session. Used by the serve cycle's in-loop check and by its
-    re-read at the end of the cycle."""
-    _canary = _live_video_canary(pc, getattr(dev, "_serve_video_canary", None))
+    Reads _current_video_canary and, when it has, keeps that one on ``dev``
+    so the canary log line describes the live session. Used by the serve
+    cycle's in-loop check and by its re-read at the end of the cycle."""
+    _canary = _current_video_canary(dev, pc)
     if _video_has_started(_canary):
         dev._serve_video_canary = _canary
         return True
@@ -1655,7 +1660,7 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
     # found no decoder queue to hang it on), "no keyframe seen" means "cannot
     # tell", which must not make every session short: None, read as video
     # unless a cycle's presence watchdog declares no video (False).
-    _canary = _live_video_canary(ps.pc, getattr(self, "_serve_video_canary", None))
+    _canary = _current_video_canary(self, ps.pc)
     ps._session_had_video = False if _canary is not None else None
 
     # The release window. HA's stream worker waits 10, 20, 30 ... s
@@ -1818,7 +1823,11 @@ async def _dtls_serve_loop_serve_cycle(
                     await asyncio.sleep(0.2)
                     # Also stamps when the PC went bad, so a session that
                     # dies in here is not measured as lasting until a poll.
-                    _dead = ps._pc_dead()
+                    _dead = (
+                        ps._pc_dead()
+                        or not ps.mux_thread.is_alive()
+                        or (ps.proc is not None and ps.proc.returncode is not None)
+                    )
                     if _dead or progress[0] > _p0:
                         break
                 # ffmpeg binds its -listen socket at startup, so by the time
@@ -1828,8 +1837,8 @@ async def _dtls_serve_loop_serve_cycle(
                 # the port - `-listen 1` would consume our probe as its one
                 # client and tear down before go2rtc connects.)
                 if not _dead:
-                    # A dead session is not "serving": the cycle below ends
-                    # on its first check instead.
+                    # A dead PC, mux or ffmpeg is not "serving": the cycle
+                    # below ends on its first check instead.
                     await asyncio.sleep(0.3)
                     self._serve_ready.set()
                     self._cold_phase("serving (dtls)")
@@ -1896,10 +1905,7 @@ async def _dtls_serve_loop_serve_cycle(
                             _now,
                             _dtls_snapshot(
                                 await _get_stats() if _get_stats else {},
-                                _live_video_canary(
-                                    ps.pc,
-                                    getattr(self, "_serve_video_canary", None),
-                                ),
+                                _current_video_canary(self, ps.pc),
                                 progress[0],
                                 _watching_dtls,
                             ),
@@ -2012,10 +2018,6 @@ async def _dtls_serve_loop_serve_cycle(
             # threshold. The session's end is worked out from it once, in
             # _dtls_serve_loop_session_end.
             ps._session_ended_at = ps.loop.time()
-            # Not serving from here: a consumer that asks during the teardown
-            # (stream_source, async_wait_serve_ready) must not be told the
-            # serve is ready. The next cycle's serve-ready wait sets it again.
-            self._serve_ready.clear()
             # Tear down this ffmpeg+mux cycle before the next.
             ps.stop_flag.set()
             try:
@@ -2088,6 +2090,10 @@ async def _dtls_serve_loop_serve_cycle(
                 break
     except asyncio.CancelledError:
         ps.cancelled = True
+        # A cancelled serve is not a warm reconnect: nothing will serve until
+        # a new one is started, so stop reporting ready. (Between cycles of a
+        # live session it stays set; the session's end clears it.)
+        self._serve_ready.clear()
     finally:
         if ps.stop_flag is not None:
             ps.stop_flag.set()
