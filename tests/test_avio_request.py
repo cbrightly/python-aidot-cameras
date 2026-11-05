@@ -299,3 +299,25 @@ async def test_collecting_replies_gives_up_once_its_budget_is_spent():
     feeder.cancel()
     assert 1 <= len(got) < 20
     assert loop.time() - started < 0.5
+
+
+@pytest.mark.parametrize("transport", ["dtls", "sdes"])
+async def test_a_cancelled_request_stops_listening(transport):
+    """Cancelled while it waits (entity teardown, config-entry unload): the
+    cancellation goes through, and the request's registration is withdrawn
+    at once rather than left in the router until the next reply for that
+    command sweeps it out."""
+    if transport == "dtls":
+        session = _dtls_session(SimpleNamespace(send=lambda data: None))
+    else:
+        session = _sdes_session(lambda cmd, payload: None)
+
+    task = await _ask(session, response_cmd=SETSTREAMCTRL_RESP, timeout=5.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Withdrawn at once, not left in the router until the next reply for the
+    # command happens to sweep it out.
+    assert SETSTREAMCTRL_RESP not in session._avio_responses._waiting
+    assert session.dispatch_avio_frame(_reply()) is False
