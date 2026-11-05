@@ -1986,6 +1986,19 @@ async def _dtls_serve_loop_serve_cycle(
                     # which is why never-release fleets still worked.)
                     if ps.idle_release:
                         break
+            # Read the canary once more however the cycle ended: a break on a
+            # dead PC or an exited publish thread, or ffmpeg exiting, comes
+            # before the in-loop check, and a cycle that delivered video
+            # would otherwise be recorded as video-less (then a long session
+            # with video is paced as short). Not after a no-video verdict,
+            # which stands.
+            if _first_video_at is None and not _no_video:
+                _canary_v = _live_video_canary(
+                    ps.pc, getattr(self, "_serve_video_canary", None)
+                )
+                if _video_has_started(_canary_v):
+                    _first_video_at = ps.loop.time()
+                    self._serve_video_canary = _canary_v
             # When this cycle stopped serving, taken before the teardown
             # below (a mux join of up to 2 s, a publish backoff of up to
             # 10 s, then the session's stop), which would otherwise carry a

@@ -1046,3 +1046,36 @@ def test_the_tap_install_gives_up_on_a_dead_pc(monkeypatch, make_camera_device_c
     cam._install_av_taps = _no_taps
     run.run()
     assert tries["n"] == 1
+
+
+def test_a_cycle_whose_publish_dies_at_once_still_records_its_video(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """Direct publish whose thread exits at once, so every cycle breaks on it
+    before the in-loop canary check, while the canary shows keyframes. The PC
+    closes at 0.4 s against a 0.2 s threshold: the session delivered video
+    and lasted, and is not paced as short."""
+    monkeypatch.setenv("AIDOT_DIRECT_PUBLISH", "1")
+    monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "0.2")
+    run, cam = _canary_run(
+        monkeypatch,
+        make_camera_device_client,
+        {"frames": 30, "keyframes": 1},
+        url="rtsp://127.0.0.1:8554/cam",
+        publish_for=0.001,
+    )
+    _open = cam.async_open_webrtc_stream
+
+    async def _open_and_close_later(**kwargs):
+        out = await _open(**kwargs)
+        asyncio.get_running_loop().call_later(
+            0.4, setattr, out._pc, "connectionState", "closed"
+        )
+        return out
+
+    cam.async_open_webrtc_stream = _open_and_close_later
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    assert run.mux_targets and set(run.mux_targets) == {"publish"}
+    assert not _paced(caplog), [r.getMessage() for r in caplog.records]
+    assert run.opens == 2
