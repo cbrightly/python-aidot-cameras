@@ -309,23 +309,17 @@ def _retry_policy(
 # state, kept apart from the open-failure pacer, so short sessions neither
 # inherit open failures from before a session nor push a camera into the slow
 # probe. Capped at 45 s, not the open pacer's 300 s, for the viewer: the serve
-# relay holds a pull for up to 90 s, and 45 s of wait + a 16-25 s cold open +
-# about 8 s to serve-ready is at most about 78 s, so a pull that arrives
-# during the wait is still waiting when the serve comes back - when the reopen
-# succeeds: an ICE failure on the reopen adds its own floor
-# (AIDOT_BUSY_RETRY_S) and the pull times out, and the viewer's player retries.
-# The 2026-11-04 cadence goes from a reopen every 15 s to one every 30-45 s
-# plus the session's own life - the protection wanted, without starving a
-# viewer.
+# relay holds a pull for up to 90 s. In the typical case a pull that arrives
+# during the wait is still held when the serve comes back: at most 45 s of
+# wait, then a 16-25 s cold open and about 8 s to serve-ready. The worst case
+# can exceed 90 s - a slow open (up to AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S), up to
+# 12 s to install the taps, a slow serve-ready, or an ICE failure on the
+# reopen with its own AIDOT_BUSY_RETRY_S floor - and then the pull times out
+# and the viewer's player retries. The 2026-11-04 cadence goes from a reopen
+# every 15 s to one every 30-45 s plus the session's own life.
 _SHORT_SESSION_BASE_S, _SHORT_SESSION_CAP_S = 30.0, 45.0
 #: Short sessions in a row between INFO lines (the rest log at DEBUG).
 _SHORT_SESSION_LOG_EVERY = 6
-
-
-def _every_nth(n: int, k: int) -> bool:
-    """True for the 1st, (k+1)-th, (2k+1)-th ... of a run counted from 1;
-    every one when ``k`` <= 1."""
-    return k <= 1 or (n - 1) % k == 0
 
 
 def _session_end_pacing(
@@ -359,7 +353,8 @@ def _open_gate_delay(last_open_at: float, now: float, open_gate: float) -> float
     a fast death is spaced at least a full gate from its open-start
     (anti-hammer).  A session that ended short has, before the loop gets here,
     already waited at least 30 s from its end (_dtls_serve_loop_session_end),
-    so for it the gate has always elapsed."""
+    so at the default gate (15 s, under that 30 s) it has elapsed; a gate set
+    longer than 30 s still owes its remainder."""
     if not last_open_at:
         return 0.0
     remaining = open_gate - (now - last_open_at)
@@ -1589,7 +1584,6 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
     """
     ps._pacer.reset()
     ps._not_ready_burst = 0  # clean open: reset the encoder-cold burst
-    ps._session_had_video = False
     # When the session began, for _session_end_pacing: from the open's success,
     # not its start, so a slow open cannot carry a dying session past the
     # short-session threshold.
@@ -1604,39 +1598,42 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
     # (matching the app, which reconnects on ICE FAILED/CLOSED/DISCONNECTED
     # - f0.java:2495).  Previously a stuck "disconnected" was only caught
     # ~120 s later by the idle-progress timer.
-    _disc_since = [None]
     _DISC_DEBOUNCE = settings.read("AIDOT_ICE_DISCONNECT_S")
+    # When the PC went bad (disconnected, closed or failed), None while it is
+    # up. The debounce runs from it, and it is the session's end when the
+    # debounce declares the PC dead, AIDOT_ICE_DISCONNECT_S after the fact.
+    ps._pc_bad_since = None
 
-    def _pc_dead(
-        pc=ps.pc, _disc_since=_disc_since, _DISC_DEBOUNCE=_DISC_DEBOUNCE
-    ) -> bool:
+    def _pc_dead(pc=ps.pc, _DISC_DEBOUNCE=_DISC_DEBOUNCE) -> bool:
         _st = getattr(pc, "connectionState", "closed")
+        _t = ps.loop.time()
         if _st in ("closed", "failed"):
             if ps._pc_bad_since is None:
-                ps._pc_bad_since = ps.loop.time()
+                ps._pc_bad_since = _t
             return True
         if _st == "disconnected":
-            _t = ps.loop.time()
-            if _disc_since[0] is None:
-                _disc_since[0] = _t
+            if ps._pc_bad_since is None:
                 ps._pc_bad_since = _t
-            elif _t - _disc_since[0] >= _DISC_DEBOUNCE:
+            elif _t - ps._pc_bad_since >= _DISC_DEBOUNCE:
                 return True
         else:
-            _disc_since[0] = None  # connected/connecting -> reset debounce
-            ps._pc_bad_since = None
+            ps._pc_bad_since = None  # connected/connecting -> reset debounce
         return False
 
     ps._pc_dead = _pc_dead
-    # When the PC last went bad (disconnected, closed or failed), None while
-    # it is up: the session's end when the debounce above declares it dead,
-    # AIDOT_ICE_DISCONNECT_S after the fact.
-    ps._pc_bad_since = None
 
     for _ in range(40):  # ~12s for the receiver/track(s) to exist
         if self._install_av_taps(ps.pc, ps.vq, ps.aq):
             break
         await asyncio.sleep(0.3)
+    # Whether this session delivered video, for the short-session pacing,
+    # decided once per session now the taps are in. With a video canary to
+    # read: False until a cycle sees a keyframe (True). Without one (the tap
+    # found no decoder queue to hang it on), "no keyframe seen" means "cannot
+    # tell", which must not make every session short: None, read as video
+    # unless a cycle's presence watchdog declares no video (False).
+    _canary = _live_video_canary(ps.pc, getattr(self, "_serve_video_canary", None))
+    ps._session_had_video = False if _canary is not None else None
 
     # The release window. HA's stream worker waits 10, 20, 30 ... s
     # between retries (+10 s each, stream/__init__.py _run_worker), and
@@ -1835,9 +1832,6 @@ async def _dtls_serve_loop_serve_cycle(
             _connected_at = ps.loop.time()
             _first_video_at = None
             _no_video = False
-            # Whether this cycle had a video canary to read at all (see the
-            # teardown): without one, "no video seen" means "cannot tell".
-            _canary_seen = False
             # One INFO line per AIDOT_HEALTH_LINE_S (camera/health.py):
             # aiortc's inbound packet and loss counts, the serve
             # canary's frames and keyframes, and this loop's viewer
@@ -1887,8 +1881,6 @@ async def _dtls_serve_loop_serve_cycle(
                     _canary_v = _live_video_canary(
                         ps.pc, getattr(self, "_serve_video_canary", None)
                     )
-                    if _canary_v is not None:
-                        _canary_seen = True
                     if _video_has_started(_canary_v):
                         _first_video_at = _now
                         # Keep the one that is actually filling, so the
@@ -2018,12 +2010,10 @@ async def _dtls_serve_loop_serve_cycle(
                 # the count is about CONSECUTIVE video-less sessions.
                 self._futile_video_runs = 0
                 ps._session_had_video = True
-            elif not _canary_seen:
-                # No canary for this cycle (the tap found no decoder queue to
-                # hang one on): whether it delivered video is unknown, and
-                # unknown must not make every session short - so it counts as
-                # having delivered, for the short-session pacing only.
-                ps._session_had_video = True
+            elif _no_video and ps._session_had_video is None:
+                # No canary to read, and the watchdog said no video: that is
+                # a verdict, not a presumption (see prepare_session).
+                ps._session_had_video = False
             if _no_video:
                 # A session that never delivers video is paced at its end as
                 # a short session (_session_end_pacing) - the camera answered
@@ -2124,7 +2114,8 @@ async def _dtls_serve_loop_session_end(
     _wait = _session_end_pacing(
         ps._short_pacer,
         _lived,
-        had_video=ps._session_had_video,
+        # None: no canary and no no-video verdict (see prepare_session).
+        had_video=ps._session_had_video is not False,
         threshold_s=settings.read("AIDOT_DTLS_SHORT_SESSION_S"),
     )
     if not (_wait and self._streaming_active):
@@ -2133,7 +2124,12 @@ async def _dtls_serve_loop_session_end(
     # at INFO; the rest at DEBUG, so a camera doing this for hours does not
     # drip a line a minute.
     _n = ps._short_pacer.attempt
-    _log = _LOGGER.info if _every_nth(_n, _SHORT_SESSION_LOG_EVERY) else _LOGGER.debug
+    # (The slow-probe throttle with a threshold of 1: the 1st, then every Nth.)
+    _log = (
+        _LOGGER.info
+        if _should_log_slow_probe(_n, 1, _SHORT_SESSION_LOG_EVERY)
+        else _LOGGER.debug
+    )
     _log(
         "DTLS serve: session for %s ended after %.0fs - waiting"
         " %.0fs before reopening (%d short in a row)",
@@ -3058,11 +3054,14 @@ class CameraMixin(
         sooner retry as busy (2026-11-04).
         """
         if not _cloud_reports_offline(self):
-            if min_s > delay:
-                # Chunked and stop-aware, the floor can be long.
-                await self._slow_probe_sleep(min_s)
-            else:
+            if min_s <= 0:
+                # Exactly as before for every caller without a floor (the SDES
+                # and JPEG loops among them, whose retry timing is pinned).
                 await asyncio.sleep(delay)
+            else:
+                # A floor can be long: chunked and stop-aware (CameraMixin's,
+                # so a caller that is not one - a test stub - gets it too).
+                await CameraMixin._slow_probe_sleep(self, max(delay, min_s))
             return
         _LOGGER.info(
             "keepalive[%s]: device is cloud-offline - pausing open retries "
@@ -3093,7 +3092,7 @@ class CameraMixin(
         # AIDOT_OFFLINE_PROBE_S may set shorter than min_s) - honour min_s.
         _rest = min_s - (time.monotonic() - _t0)
         if _rest > 0:
-            await self._slow_probe_sleep(_rest)
+            await CameraMixin._slow_probe_sleep(self, _rest)
 
     async def _slow_probe_sleep(self, interval: float) -> None:
         """Sleep `interval` seconds for the DTLS serve loop's slow-probe wait,

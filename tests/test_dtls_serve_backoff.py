@@ -430,14 +430,14 @@ def test_open_failures_before_a_session_do_not_survive_it(monkeypatch, cam):
     fails = [AidotNegotiationFailed("bad answer") for _ in range(4)]
     run = _Run(monkeypatch, cam, [*fails, _Sess(5.0), AidotNegotiationFailed("x")])
     run.run()
-    assert run.open_sleeps()[:4] == [15.0, 30.0, 60.0, 120.0]
-    assert run.open_sleeps()[-1] == 15.0
+    assert _opened_after(run)[:4] == [15.0, 30.0, 60.0, 120.0]
+    assert _opened_after(run)[-1] == 15.0
 
 
 def test_short_sessions_never_push_a_camera_into_the_slow_probe(monkeypatch, cam):
     script = [_Sess(5.0) for _ in range(8)] + [AidotNegotiationFailed("x")]
     run = _Run(monkeypatch, cam, script).run()
-    assert run.open_sleeps()[-1] == 15.0
+    assert _opened_after(run)[-1] == 15.0
 
 
 def test_the_wait_keeps_the_stream_slot(monkeypatch, cam):
@@ -612,36 +612,100 @@ def _real_cycle_run(monkeypatch, make_camera_device_client, first_cycle_video):
     return run
 
 
-@pytest.mark.parametrize(
-    "canary, paced",
-    [(None, False), ({"frames": 40, "keyframes": 0}, True)],
-    ids=["no canary", "canary without keyframes"],
-)
-def test_a_session_with_no_canary_is_not_short_for_want_of_one(
-    monkeypatch, make_camera_device_client, caplog, canary, paced
-):
-    """The presence watchdog gives up after 0.15 s either way (threshold
-    0.1 s, so the session lasted). With no canary to read, whether it had
-    video is unknown and it is not counted short; a canary that shows frames
-    and no keyframe is a session without usable video, and it is."""
+def _canary_run(monkeypatch, make_camera_device_client, canary, **kw):
+    """A real-serve-cycle run whose session has ``canary`` (None: none)."""
     from tests.keepalive_driver import DtlsServeRun, FakeDtlsSession
 
     proxy = types.SimpleNamespace(
         **{k: getattr(asyncio, k) for k in dir(asyncio) if not k.startswith("_")}
     )
     monkeypatch.setattr(cc, "asyncio", proxy)
-    monkeypatch.setenv("AIDOT_DTLS_VIDEO_GRACE_S", "0.15")
-    monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "0.1")
     cam = make_camera_device_client("A000088")
     cam._stream_idle_opt = 0.0
-    run = DtlsServeRun(monkeypatch, cam, [FakeDtlsSession()], timeout=1.5)
+    run = DtlsServeRun(monkeypatch, cam, [FakeDtlsSession()], timeout=1.5, **kw)
     monkeypatch.setattr(cc, "_live_video_canary", lambda pc, stored: canary)
     monkeypatch.setattr(cc, "_video_has_started", _real_video_has_started)
+    return run, cam
+
+
+def _paced(caplog) -> bool:
+    return any("before reopening" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "canary",
+    [None, {"frames": 40, "keyframes": 0}],
+    ids=["no canary", "canary without keyframes"],
+)
+def test_a_no_video_verdict_makes_a_session_short_canary_or_not(
+    monkeypatch, make_camera_device_client, caplog, canary
+):
+    """The presence watchdog gives up after 0.15 s (threshold 0.1 s, so the
+    session lasted). Its no-video verdict is final: with a canary showing no
+    keyframe, and with no canary at all, the session is short."""
+    monkeypatch.setenv("AIDOT_DTLS_VIDEO_GRACE_S", "0.15")
+    monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "0.1")
+    run, _cam = _canary_run(monkeypatch, make_camera_device_client, canary)
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         run.run()
     msgs = [r.getMessage() for r in caplog.records]
     assert any("delivered no video" in m for m in msgs), msgs
-    assert bool([m for m in msgs if "before reopening" in m]) is paced, msgs
+    assert _paced(caplog), msgs
+
+
+def test_a_session_with_no_canary_and_no_verdict_is_not_short(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """No canary to read and the watchdog off (grace 0), so nothing says the
+    session had no video: it lasted 0.3 s against a 0.1 s threshold, and is
+    not short for want of a canary."""
+    monkeypatch.setenv("AIDOT_DTLS_VIDEO_GRACE_S", "0")
+    monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "0.1")
+    run, cam = _canary_run(monkeypatch, make_camera_device_client, None)
+    _open = cam.async_open_webrtc_stream
+
+    async def _open_and_close_later(**kwargs):
+        out = await _open(**kwargs)
+        asyncio.get_running_loop().call_later(
+            0.3, setattr, out._pc, "connectionState", "closed"
+        )
+        return out
+
+    cam.async_open_webrtc_stream = _open_and_close_later
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    assert not _paced(caplog), [r.getMessage() for r in caplog.records]
+    assert run.opens == 2
+
+
+def test_a_cycle_that_ends_before_polling_does_not_flip_the_verdict(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """Cycle 1 sees a keyframe; the PC closes as cycle 2 starts, so cycle 2
+    ends before it ever reads the canary. The session delivered video and
+    lasted (0.3 s against 0.2 s): it is not short."""
+    monkeypatch.setenv("AIDOT_DIRECT_PUBLISH", "1")
+    monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "0.2")
+    run, cam = _canary_run(
+        monkeypatch,
+        make_camera_device_client,
+        {"frames": 30, "keyframes": 1},
+        url="rtsp://127.0.0.1:8554/cam",
+        publish_for=0.3,
+    )
+    plis = {"n": 0}
+
+    async def _pli(pc):
+        plis["n"] += 1
+        if plis["n"] == 2:  # the start of cycle 2
+            pc.connectionState = "closed"
+
+    cam._send_video_pli = _pli
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    assert len(run.mux_targets) == 2
+    assert not _paced(caplog), [r.getMessage() for r in caplog.records]
+    assert run.opens == 2
 
 
 @pytest.mark.parametrize("first_cycle_video", [True, False])
@@ -849,10 +913,3 @@ def test_the_failed_open_line_names_the_wait_that_runs(
         r.getMessage() for r in caplog.records if "open failed for" in r.getMessage()
     ]
     assert lines and says in lines[0], lines
-
-
-def test_every_nth_counts_from_the_first():
-    from aidot_cameras.camera.client import _every_nth
-
-    assert [n for n in range(1, 15) if _every_nth(n, 6)] == [1, 7, 13]
-    assert all(_every_nth(n, 1) for n in range(1, 5))
