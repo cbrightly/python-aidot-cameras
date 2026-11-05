@@ -1423,7 +1423,7 @@ class _DtlsServeLoopState:
     session: "Any" = dataclasses.field(init=False)  # open_attempt
     pc: "Any" = dataclasses.field(init=False)  # prepare_session
     _pc_dead: "Any" = dataclasses.field(init=False)  # prepare_session
-    _pc_bad_since: "Any" = dataclasses.field(init=False)  # prepare_session
+    _pc_bad_box: "Any" = dataclasses.field(init=False)  # prepare_session
     idle_secs: "Any" = dataclasses.field(init=False)  # prepare_session
     proc: "Any" = dataclasses.field(init=False)  # prepare_session, serve_cycle
     wfile: "Any" = dataclasses.field(init=False)  # prepare_session, serve_cycle
@@ -1484,7 +1484,8 @@ async def _dtls_serve_loop_open_attempt(
             busy_retry,
         )
         try:
-            await asyncio.sleep(busy_retry)
+            # Chunked, so a stop ends it at once.
+            await self._slow_probe_sleep(busy_retry)
         except asyncio.CancelledError:
             return _PhaseReturn(None)
         return _LoopContinue()
@@ -1602,22 +1603,27 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
     # When the PC went bad (disconnected, closed or failed), None while it is
     # up. The debounce runs from it, and it is the session's end when the
     # debounce declares the PC dead, AIDOT_ICE_DISCONNECT_S after the fact.
-    ps._pc_bad_since = None
+    # A one-slot holder the check closes over (not ``ps``, which holds the
+    # check: no reference cycle); the serve cycle reads it through ``ps``.
+    _bad_since: "list[Optional[float]]" = [None]
+    ps._pc_bad_box = _bad_since
 
-    def _pc_dead(pc=ps.pc, _DISC_DEBOUNCE=_DISC_DEBOUNCE) -> bool:
+    def _pc_dead(
+        pc=ps.pc, _bad_since=_bad_since, _clock=ps.loop, _DISC_DEBOUNCE=_DISC_DEBOUNCE
+    ) -> bool:
         _st = getattr(pc, "connectionState", "closed")
-        _t = ps.loop.time()
+        _t = _clock.time()
         if _st in ("closed", "failed"):
-            if ps._pc_bad_since is None:
-                ps._pc_bad_since = _t
+            if _bad_since[0] is None:
+                _bad_since[0] = _t
             return True
         if _st == "disconnected":
-            if ps._pc_bad_since is None:
-                ps._pc_bad_since = _t
-            elif _t - ps._pc_bad_since >= _DISC_DEBOUNCE:
+            if _bad_since[0] is None:
+                _bad_since[0] = _t
+            elif _t - _bad_since[0] >= _DISC_DEBOUNCE:
                 return True
         else:
-            ps._pc_bad_since = None  # connected/connecting -> reset debounce
+            _bad_since[0] = None  # connected/connecting -> reset debounce
         return False
 
     ps._pc_dead = _pc_dead
@@ -1626,6 +1632,7 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
         if self._install_av_taps(ps.pc, ps.vq, ps.aq):
             break
         await asyncio.sleep(0.3)
+        ps._pc_dead()  # only to stamp when the PC went bad, if it does
     # Whether this session delivered video, for the short-session pacing,
     # decided once per session now the taps are in. With a video canary to
     # read: False until a cycle sees a keyframe (True). Without one (the tap
@@ -1792,6 +1799,9 @@ async def _dtls_serve_loop_serve_cycle(
                 _p0 = progress[0]
                 for _ in range(40):  # up to ~8s for the first muxed frames
                     await asyncio.sleep(0.2)
+                    # Stamps when the PC went bad, so a session that dies
+                    # in here is not measured as lasting until the poll.
+                    ps._pc_dead()
                     if progress[0] > _p0:
                         break
                 # ffmpeg binds its -listen socket at startup, so by the time
@@ -1978,8 +1988,8 @@ async def _dtls_serve_loop_serve_cycle(
             # and from when the PC went bad, not from when the disconnect
             # debounce gave up on it.
             ps._session_ended_at = ps.loop.time()
-            if ps._pc_bad_since is not None:
-                ps._session_ended_at = min(ps._session_ended_at, ps._pc_bad_since)
+            if ps._pc_bad_box[0] is not None:
+                ps._session_ended_at = min(ps._session_ended_at, ps._pc_bad_box[0])
             # Tear down this ffmpeg+mux cycle before the next.
             ps.stop_flag.set()
             try:
@@ -2050,6 +2060,13 @@ async def _dtls_serve_loop_serve_cycle(
                 break
             if ps.idle_release:
                 break
+        else:
+            # The loop's own condition ended it, not a break: when that was
+            # the PC going bad between cycles (during a teardown or a publish
+            # backoff), the session ended when it went bad, which is later
+            # than the last cycle's end.
+            if ps._pc_bad_box[0] is not None:
+                ps._session_ended_at = ps._pc_bad_box[0]
     except asyncio.CancelledError:
         ps.cancelled = True
     finally:
@@ -2104,9 +2121,10 @@ async def _dtls_serve_loop_session_end(
     watched cameras whenever the idle window was shorter than the wait (the
     integration's 15 s battery window) or the viewer state was unknown (the
     pipe cannot move during a wait). The trade-off: a camera nobody watches
-    whose sessions keep dying fast is reopened every 30-45 s plus its session
-    time until its keepalive is stopped - bounded, and in practice mains-only,
-    since a battery camera's sessions do not die that way.
+    whose sessions keep dying fast is reopened, each time after a 30-45 s wait
+    plus its session time, for as long as its keepalive runs. Nothing here
+    bounds that: the caller stops the keepalive (its viewer policy, or the
+    entity being unloaded).
     """
     # From the open's success to when the session stopped serving, not to
     # now: the teardown since then is not the session's life.
@@ -2124,12 +2142,12 @@ async def _dtls_serve_loop_session_end(
     # at INFO; the rest at DEBUG, so a camera doing this for hours does not
     # drip a line a minute.
     _n = ps._short_pacer.attempt
-    # (The slow-probe throttle with a threshold of 1: the 1st, then every Nth.)
-    _log = (
-        _LOGGER.info
-        if _should_log_slow_probe(_n, 1, _SHORT_SESSION_LOG_EVERY)
-        else _LOGGER.debug
+    _info = (
+        _SHORT_SESSION_LOG_EVERY <= 1
+        or _n == 1
+        or (_n - 1) % _SHORT_SESSION_LOG_EVERY == 0
     )
+    _log = _LOGGER.info if _info else _LOGGER.debug
     _log(
         "DTLS serve: session for %s ended after %.0fs - waiting"
         " %.0fs before reopening (%d short in a row)",
@@ -3034,7 +3052,9 @@ class CameraMixin(
         """Sleep a reconnect backoff, extended while the device is cloud-offline.
 
         Normal case (device online, or the cloud never reported an online
-        flag): plain ``asyncio.sleep(delay)`` - behavior unchanged.
+        flag): plain ``asyncio.sleep(delay)`` when there is no ``min_s``, as
+        before; with one, a chunked ``_slow_probe_sleep(max(delay, min_s))``
+        that ends as soon as streaming stops.
 
         When an open just failed AND the cloud has explicitly reported the
         device offline (``update_status_from_device`` saw ``online: false``),
@@ -3047,8 +3067,9 @@ class CameraMixin(
         (observed live: two unpowered A000088s cycling 30 s open attempts
         pushed a healthy camera's cold open past two minutes).
 
-        ``min_s`` is a floor no path returns before, except a stop: the early
-        return when the camera comes back online waits out the rest of it.
+        ``min_s`` is a floor no path returns before, except a stop. Offline,
+        both ways out of the pause - the camera back online, or the probe
+        interval elapsed - wait out the rest of it (chunked, stop-aware).
         The DTLS serve loop passes AIDOT_BUSY_RETRY_S after an ICE failure,
         when the camera still holds the session it accepted and refuses a
         sooner retry as busy (2026-11-04).
@@ -3059,9 +3080,8 @@ class CameraMixin(
                 # and JPEG loops among them, whose retry timing is pinned).
                 await asyncio.sleep(delay)
             else:
-                # A floor can be long: chunked and stop-aware (CameraMixin's,
-                # so a caller that is not one - a test stub - gets it too).
-                await CameraMixin._slow_probe_sleep(self, max(delay, min_s))
+                # A floor can be long: chunked and stop-aware.
+                await self._slow_probe_sleep(max(delay, min_s))
             return
         _LOGGER.info(
             "keepalive[%s]: device is cloud-offline - pausing open retries "
@@ -3092,7 +3112,7 @@ class CameraMixin(
         # AIDOT_OFFLINE_PROBE_S may set shorter than min_s) - honour min_s.
         _rest = min_s - (time.monotonic() - _t0)
         if _rest > 0:
-            await CameraMixin._slow_probe_sleep(self, _rest)
+            await self._slow_probe_sleep(_rest)
 
     async def _slow_probe_sleep(self, interval: float) -> None:
         """Sleep `interval` seconds for the DTLS serve loop's slow-probe wait,

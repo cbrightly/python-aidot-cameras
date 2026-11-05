@@ -56,6 +56,7 @@ from aidot_cameras.camera.client import _session_end_pacing
 from aidot_cameras.camera.client import _video_has_started as _real_video_has_started
 from aidot_cameras.camera.protocol import ReconnectPacer
 from aidot_cameras.exceptions import (
+    AidotCameraBusy,
     AidotCameraNotReady,
     AidotIceNotEstablished,
     AidotNegotiationFailed,
@@ -913,3 +914,83 @@ def test_the_failed_open_line_names_the_wait_that_runs(
         r.getMessage() for r in caplog.records if "open failed for" in r.getMessage()
     ]
     assert lines and says in lines[0], lines
+
+
+def test_the_pc_going_bad_between_cycles_ends_the_session_then(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """The publish ends at about 0.2 s (end of cycle 1); the teardown then
+    takes 0.3 s, at the end of which the PC closes and the loop's own check
+    stops it. The session ended when the PC went bad (about 0.5 s), not when
+    its last cycle stopped serving: against a 0.35 s threshold it lasted."""
+    from tests.keepalive_driver import FakeDtlsSession
+
+    monkeypatch.setenv("AIDOT_DIRECT_PUBLISH", "1")
+    monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "0.35")
+    sess = FakeDtlsSession()
+    run, cam = _canary_run(
+        monkeypatch,
+        make_camera_device_client,
+        {"frames": 30, "keyframes": 1},
+        url="rtsp://127.0.0.1:8554/cam",
+        publish_for=0.2,
+    )
+    run.sessions = [sess]
+    calls = {"n": 0}
+
+    def _slow_terminate(proc):
+        calls["n"] += 1
+        if calls["n"] == 1:  # the first cycle's teardown
+            _real_time.sleep(0.3)
+            sess._pc.connectionState = "closed"
+
+    monkeypatch.setattr(cc, "_terminate_proc", _slow_terminate)
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    assert len(run.mux_targets) == 1
+    assert not _paced(caplog), [r.getMessage() for r in caplog.records]
+    assert run.opens == 2
+
+
+def test_a_pc_that_drops_during_the_serve_ready_wait_is_stamped_then(
+    monkeypatch, make_camera_device_client, caplog
+):
+    """No frames, so the serve-ready wait runs its full 40 polls (0.8 s at
+    this scale). The PC drops at 0.1 s; the disconnect debounce is 0.3 s.
+    Stamped in the wait, the session ended at 0.1 s and is short against a
+    0.5 s threshold; stamped only after the wait it would have lasted."""
+    monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "0.5")
+    monkeypatch.setenv("AIDOT_ICE_DISCONNECT_S", "0.3")
+    run, cam = _canary_run(
+        monkeypatch,
+        make_camera_device_client,
+        {"frames": 30, "keyframes": 1},
+        scale=0.1,
+        frames=False,
+    )
+    run.timeout = 3.0
+    _open = cam.async_open_webrtc_stream
+
+    async def _open_and_drop_later(**kwargs):
+        out = await _open(**kwargs)
+        asyncio.get_running_loop().call_later(
+            0.1, setattr, out._pc, "connectionState", "disconnected"
+        )
+        return out
+
+    cam.async_open_webrtc_stream = _open_and_drop_later
+    with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
+        run.run()
+    assert _paced(caplog), [r.getMessage() for r in caplog.records]
+
+
+def test_the_busy_wait_stops_when_streaming_does(monkeypatch, cam):
+    busy = AidotCameraBusy(-50002)
+
+    def _stop_in_the_wait(run):
+        if len(run.opens) == 1:
+            cam._streaming_active = False
+
+    run = _Run(monkeypatch, cam, [busy, busy], on_sleep=_stop_in_the_wait).run()
+    assert len(run.opens) == 1
+    assert sum(d for _at, d, _w in run.sleeps) <= 5.0
