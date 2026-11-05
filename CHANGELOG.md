@@ -51,7 +51,9 @@ loop's retry pacing, and a change to the serve loop resets the soak clock.
   shifted answer that did not connect keeps its 3 s not-ready burst, since it
   still connects about 1 in 7 on a quick retry. Only the serve loop's own
   retries get the floor; the other open paths (a live view, SD playback)
-  retry as before.
+  retry as before. Nor does a setRemoteDescription failure after the camera
+  answered, which also leaves a session held on the camera; releasing it on
+  the camera side in `_abort_open` would be the general fix (a follow-up).
 
 ### Added
 - `AidotIceNotEstablished`, a subclass of `AidotNegotiationFailed`, raised

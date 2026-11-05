@@ -1423,7 +1423,8 @@ class _DtlsServeLoopState:
     session: "Any" = dataclasses.field(init=False)  # open_attempt
     pc: "Any" = dataclasses.field(init=False)  # prepare_session
     _pc_dead: "Any" = dataclasses.field(init=False)  # prepare_session
-    _pc_bad_box: "Any" = dataclasses.field(init=False)  # prepare_session
+    # prepare_session; read by serve_cycle's check and session_end
+    _pc_bad_box: "Any" = dataclasses.field(init=False)
     idle_secs: "Any" = dataclasses.field(init=False)  # prepare_session
     proc: "Any" = dataclasses.field(init=False)  # prepare_session, serve_cycle
     wfile: "Any" = dataclasses.field(init=False)  # prepare_session, serve_cycle
@@ -1632,7 +1633,8 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
         if self._install_av_taps(ps.pc, ps.vq, ps.aq):
             break
         await asyncio.sleep(0.3)
-        ps._pc_dead()  # only to stamp when the PC went bad, if it does
+        if ps._pc_dead():  # also stamps when the PC went bad
+            break  # no session to tap; the serve cycle ends at once
     # Whether this session delivered video, for the short-session pacing,
     # decided once per session now the taps are in. With a video canary to
     # read: False until a cycle sees a keyframe (True). Without one (the tap
@@ -1797,12 +1799,13 @@ async def _dtls_serve_loop_serve_cycle(
             # hand HA a working URL (no 40s connection-refused retry gap).
             if not self._serve_ready.is_set():
                 _p0 = progress[0]
+                _dead = False
                 for _ in range(40):  # up to ~8s for the first muxed frames
                     await asyncio.sleep(0.2)
-                    # Stamps when the PC went bad, so a session that dies
-                    # in here is not measured as lasting until the poll.
-                    ps._pc_dead()
-                    if progress[0] > _p0:
+                    # Also stamps when the PC went bad, so a session that
+                    # dies in here is not measured as lasting until a poll.
+                    _dead = ps._pc_dead()
+                    if _dead or progress[0] > _p0:
                         break
                 # ffmpeg binds its -listen socket at startup, so by the time
                 # the mux has written a frame (progress moved above) the
@@ -1810,9 +1813,12 @@ async def _dtls_serve_loop_serve_cycle(
                 # 2.0s blind wait was pure cold-start latency.  (Don't probe
                 # the port - `-listen 1` would consume our probe as its one
                 # client and tear down before go2rtc connects.)
-                await asyncio.sleep(0.3)
-                self._serve_ready.set()
-                self._cold_phase("serving (dtls)")
+                if not _dead:
+                    # A dead session is not "serving": the cycle below ends
+                    # on its first check instead.
+                    await asyncio.sleep(0.3)
+                    self._serve_ready.set()
+                    self._cold_phase("serving (dtls)")
             # Periodic keyframe request shortens the camera's GOP so HA's
             # HLS segmenter (which cuts on keyframes) produces short
             # segments -> far less player buffering (the ~20s HLS lag is
@@ -1980,16 +1986,13 @@ async def _dtls_serve_loop_serve_cycle(
                     # which is why never-release fleets still worked.)
                     if ps.idle_release:
                         break
-            # When this cycle stopped serving - the session's end, if it was
-            # the last - taken before the teardown below (a mux join of up to
-            # 2 s, a publish backoff of up to 10 s, then the session's stop),
-            # which would otherwise carry a session that died at 25 s past
-            # the 30 s short-session threshold (_dtls_serve_loop_session_end);
-            # and from when the PC went bad, not from when the disconnect
-            # debounce gave up on it.
+            # When this cycle stopped serving, taken before the teardown
+            # below (a mux join of up to 2 s, a publish backoff of up to
+            # 10 s, then the session's stop), which would otherwise carry a
+            # session that died at 25 s past the 30 s short-session
+            # threshold. The session's end is worked out from it once, in
+            # _dtls_serve_loop_session_end.
             ps._session_ended_at = ps.loop.time()
-            if ps._pc_bad_box[0] is not None:
-                ps._session_ended_at = min(ps._session_ended_at, ps._pc_bad_box[0])
             # Tear down this ffmpeg+mux cycle before the next.
             ps.stop_flag.set()
             try:
@@ -2060,13 +2063,6 @@ async def _dtls_serve_loop_serve_cycle(
                 break
             if ps.idle_release:
                 break
-        else:
-            # The loop's own condition ended it, not a break: when that was
-            # the PC going bad between cycles (during a teardown or a publish
-            # backoff), the session ended when it went bad, which is later
-            # than the last cycle's end.
-            if ps._pc_bad_box[0] is not None:
-                ps._session_ended_at = ps._pc_bad_box[0]
     except asyncio.CancelledError:
         ps.cancelled = True
     finally:
@@ -2126,9 +2122,13 @@ async def _dtls_serve_loop_session_end(
     bounds that: the caller stops the keepalive (its viewer policy, or the
     entity being unloaded).
     """
-    # From the open's success to when the session stopped serving, not to
-    # now: the teardown since then is not the session's life.
-    _lived = ps._session_ended_at - ps._session_opened_at
+    # The session's end, one rule: the earlier of when its last serve cycle
+    # stopped serving and when its PC went bad (not when the disconnect
+    # debounce gave up on it). Not now: the teardown since is not its life.
+    _end = ps._session_ended_at
+    if ps._pc_bad_box[0] is not None:
+        _end = min(_end, ps._pc_bad_box[0])
+    _lived = _end - ps._session_opened_at
     _wait = _session_end_pacing(
         ps._short_pacer,
         _lived,
@@ -2142,11 +2142,7 @@ async def _dtls_serve_loop_session_end(
     # at INFO; the rest at DEBUG, so a camera doing this for hours does not
     # drip a line a minute.
     _n = ps._short_pacer.attempt
-    _info = (
-        _SHORT_SESSION_LOG_EVERY <= 1
-        or _n == 1
-        or (_n - 1) % _SHORT_SESSION_LOG_EVERY == 0
-    )
+    _info = _n == 1 or (_n - 1) % _SHORT_SESSION_LOG_EVERY == 0
     _log = _LOGGER.info if _info else _LOGGER.debug
     _log(
         "DTLS serve: session for %s ended after %.0fs - waiting"

@@ -916,13 +916,13 @@ def test_the_failed_open_line_names_the_wait_that_runs(
     assert lines and says in lines[0], lines
 
 
-def test_the_pc_going_bad_between_cycles_ends_the_session_then(
+def test_a_pc_dying_in_the_teardown_does_not_lengthen_the_session(
     monkeypatch, make_camera_device_client, caplog
 ):
-    """The publish ends at about 0.2 s (end of cycle 1); the teardown then
-    takes 0.3 s, at the end of which the PC closes and the loop's own check
-    stops it. The session ended when the PC went bad (about 0.5 s), not when
-    its last cycle stopped serving: against a 0.35 s threshold it lasted."""
+    """Serving stops at about 0.2 s (cycle 1's publish ends); the teardown
+    then takes 0.3 s, at the end of which the PC closes and is stamped. The
+    session's end is the earlier of the two, the serving stop: against a
+    0.35 s threshold it is short, not carried to 0.5 s by the late stamp."""
     from tests.keepalive_driver import FakeDtlsSession
 
     monkeypatch.setenv("AIDOT_DIRECT_PUBLISH", "1")
@@ -948,8 +948,7 @@ def test_the_pc_going_bad_between_cycles_ends_the_session_then(
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         run.run()
     assert len(run.mux_targets) == 1
-    assert not _paced(caplog), [r.getMessage() for r in caplog.records]
-    assert run.opens == 2
+    assert _paced(caplog), [r.getMessage() for r in caplog.records]
 
 
 def test_a_pc_that_drops_during_the_serve_ready_wait_is_stamped_then(
@@ -994,3 +993,56 @@ def test_the_busy_wait_stops_when_streaming_does(monkeypatch, cam):
     run = _Run(monkeypatch, cam, [busy, busy], on_sleep=_stop_in_the_wait).run()
     assert len(run.opens) == 1
     assert sum(d for _at, d, _w in run.sleeps) <= 5.0
+
+
+class _CountingEvent(asyncio.Event):
+    def __init__(self):
+        super().__init__()
+        self.sets = 0
+
+    def set(self):
+        self.sets += 1
+        super().set()
+
+
+def test_a_session_dead_in_the_serve_ready_wait_is_never_called_serving(
+    monkeypatch, make_camera_device_client
+):
+    """No frames, so the serve-ready wait polls; the PC closes at 0.1 s. The
+    wait stops there and serve-ready is never set for the dead session."""
+    run, cam = _canary_run(
+        monkeypatch,
+        make_camera_device_client,
+        {"frames": 30, "keyframes": 1},
+        scale=0.1,
+        frames=False,
+    )
+    cam._serve_ready = _CountingEvent()
+    _open = cam.async_open_webrtc_stream
+
+    async def _open_and_close_later(**kwargs):
+        out = await _open(**kwargs)
+        asyncio.get_running_loop().call_later(
+            0.1, setattr, out._pc, "connectionState", "closed"
+        )
+        return out
+
+    cam.async_open_webrtc_stream = _open_and_close_later
+    run.run()
+    assert cam._serve_ready.sets == 0
+
+
+def test_the_tap_install_gives_up_on_a_dead_pc(monkeypatch, make_camera_device_client):
+    """The taps never land and the PC is closed: the install loop stops on its
+    first check instead of trying 40 times (about 12 s)."""
+    run, cam = _canary_run(monkeypatch, make_camera_device_client, None)
+    tries = {"n": 0}
+
+    def _no_taps(pc, vq, aq):
+        tries["n"] += 1
+        pc.connectionState = "closed"
+        return False
+
+    cam._install_av_taps = _no_taps
+    run.run()
+    assert tries["n"] == 1
