@@ -67,8 +67,10 @@ def _camera_media():
 
 
 def test_a_mid_stream_join_through_the_real_publisher_is_in_step(
-    go2rtc, monkeypatch, tmp_path
-):  # noqa: F811
+    go2rtc,  # noqa: F811 - the imported fixture, requested by name
+    monkeypatch,
+    tmp_path,
+):
     monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
     router = TsRouter(0)
     router.start()

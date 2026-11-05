@@ -159,8 +159,11 @@ async def test_cancelling_the_caller_is_not_swallowed():
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    # ...and it still stopped listening on the way out.
-    assert router.dispatch(_frame(SETSTREAMCTRL_RESP, b"\xaa")) is False
+    # ...and it still stopped listening on the way out: withdrawn at once,
+    # not left registered until the next reply for the command sweeps it out.
+    # (A later reply would find nobody either way - cancelling the wait also
+    # cancels the future - so only the registrations can show it.)
+    assert SETSTREAMCTRL_RESP not in router._waiting
 
 
 async def test_an_unanswered_wait_can_be_asked_again():

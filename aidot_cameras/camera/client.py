@@ -595,15 +595,13 @@ def _current_video_canary(dev: Any, pc: Any) -> Optional[dict]:
     return _live_video_canary(pc, getattr(dev, "_serve_video_canary", None))
 
 
-def _video_seen_now(dev: Any, pc: Any) -> bool:
-    """Has the serve's video canary seen usable video yet (a keyframe)?
-
-    Reads _current_video_canary and, when it has, keeps that one on ``dev``
-    so the canary log line describes the live session. Used by the serve
-    cycle's in-loop check and by its re-read at the end of the cycle."""
-    _canary = _current_video_canary(dev, pc)
-    if _video_has_started(_canary):
-        dev._serve_video_canary = _canary
+def _note_video_started(dev: Any, canary: Optional[dict]) -> bool:
+    """Has ``canary`` seen usable video yet (a keyframe)? If so, also store it
+    on ``dev`` as the serve's canary, so the canary log line describes the
+    live session. Used by the serve cycle's in-loop check and by its re-read
+    at the end of the cycle, with the canary from _current_video_canary."""
+    if _video_has_started(canary):
+        dev._serve_video_canary = canary
         return True
     return False
 
@@ -1894,14 +1892,22 @@ async def _dtls_serve_loop_serve_cycle(
                     # republishes after a short backoff.
                     break
                 _now = ps.loop.time()
-                if _health_dtls.due(_now):
+                _health_due = _health_dtls.due(_now)
+                # Resolved once per tick, for the health line and the
+                # first-video check alike, and only when one of them needs it.
+                _canary_now = (
+                    _current_video_canary(self, ps.pc)
+                    if _health_due or _first_video_at is None
+                    else None
+                )
+                if _health_due:
                     try:
                         _get_stats = getattr(ps.session, "get_stats", None)
                         _health_dtls.tick(
                             _now,
                             _dtls_snapshot(
                                 await _get_stats() if _get_stats else {},
-                                _current_video_canary(self, ps.pc),
+                                _canary_now,
                                 progress[0],
                                 _watching_dtls,
                             ),
@@ -1909,7 +1915,7 @@ async def _dtls_serve_loop_serve_cycle(
                     except Exception:  # a report must never end a session
                         _health_dtls.skip(_now)
                         _LOGGER.debug("health line failed", exc_info=True)
-                if _first_video_at is None and _video_seen_now(self, ps.pc):
+                if _first_video_at is None and _note_video_started(self, _canary_now):
                     _first_video_at = _now
                 if (
                     _video_presence_verdict(
@@ -2004,7 +2010,7 @@ async def _dtls_serve_loop_serve_cycle(
             if (
                 _first_video_at is None
                 and not _no_video
-                and _video_seen_now(self, ps.pc)
+                and _note_video_started(self, _current_video_canary(self, ps.pc))
             ):
                 _first_video_at = ps.loop.time()
             # When this cycle stopped serving, taken before the teardown
