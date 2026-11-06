@@ -684,11 +684,23 @@ def _make_talk_audio_track(pcm_provider: Callable[[], "Optional[bytes]"]):
         def __init__(self) -> None:
             super().__init__()
             self._timestamp = 0
+            self._next = None
 
         async def recv(self):
-            # Pace to real time: one 20 ms frame per 20 ms.
-            if self._timestamp:
-                await asyncio.sleep(_SAMPLES / _RATE)
+            # Pace to real time on an absolute schedule, as the SDES pump does:
+            # a relative sleep adds the frame-building and scheduling time to
+            # every 20 ms and drifts.  Late frames go out at once and the
+            # schedule resets, so a stall is never followed by a burst.
+            now = time.monotonic()
+            if self._next is None:
+                self._next = now
+            else:
+                self._next += _SAMPLES / _RATE
+                delay = self._next - now
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                else:
+                    self._next = now
             try:
                 pcm = pcm_provider()
             except Exception:
@@ -3737,6 +3749,14 @@ SPEAKER_ACK_TIMEOUT_S = 2.0
 #: here to read as a refusal.
 _SPEAKER_ACKS_SEEN = (b"\x00\x64", b"\x00\xc8")
 
+#: The official app reads payload[1] == 0x64 on an 851 as "talk failed, the
+#: camera's mic is occupied" (KVSWebRTCChannel.processRespData, case 0x353,
+#: publishing serviceOfStartSpeakFail; NewLivePresenter then toasts and stops).
+#: That contradicts the measurements above, where 0x0064 came back from
+#: speakers that opened on three models, so it is logged, not enforced, until a
+#: live session shows which reading is right.
+_SPEAKER_ACK_MIC_OCCUPIED = 0x64
+
 
 async def _speaker_opened(session, cmd: int, resp_cmd: int, timeout: float) -> bool:
     """Send SPEAKERSTART and decide whether the camera opened its speaker.
@@ -3777,7 +3797,15 @@ async def _speaker_ack_accepted(waiter, timeout: float) -> bool:
     if reply is None:
         _LOGGER.debug("SPEAKERSTART: no ack within %.1fs - treating as opened", timeout)
         return True
-    if reply.payload not in _SPEAKER_ACKS_SEEN:
+    if len(reply.payload) > 1 and reply.payload[1] == _SPEAKER_ACK_MIC_OCCUPIED:
+        _LOGGER.warning(
+            "SPEAKERSTART acked with %s, which the official app reads as mic "
+            "occupied (another talk session still holds it). Treating the "
+            "speaker as open, because this payload has also been measured on "
+            "speakers that opened; if no audio plays, this is the likely cause",
+            reply.payload.hex(),
+        )
+    elif reply.payload not in _SPEAKER_ACKS_SEEN:
         _LOGGER.info(
             "SPEAKERSTART acked with an unrecorded payload %s - treating the "
             "speaker as open. Please report this: the payloads seen so far all "

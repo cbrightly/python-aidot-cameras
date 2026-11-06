@@ -114,6 +114,72 @@ def test_talk_track_frame_format():
     assert bytes(f2.planes[0])[:4] == b"\x34\x12\x34\x12"
 
 
+def _paced_track(monkeypatch, work_s):
+    """A talk track on a fake monotonic clock, recording each sleep it asks for.
+
+    Every recv also costs ``work_s`` of clock time, standing in for the time the
+    caller spends encoding and sending a frame between pulls.
+    """
+    from aidot_cameras.camera import protocol
+
+    clock = {"now": 1000.0}
+    sleeps = []
+
+    async def _sleep(d):
+        sleeps.append(round(d, 6))
+        clock["now"] += d
+
+    monkeypatch.setattr(protocol.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(protocol.asyncio, "sleep", _sleep)
+    track = _make_talk_audio_track(lambda: None)
+
+    async def pull():
+        f = await track.recv()
+        clock["now"] += work_s
+        return f
+
+    return track, clock, sleeps, pull
+
+
+def test_talk_track_paces_on_an_absolute_schedule(monkeypatch):
+    """A relative sleep(0.02) adds the per-frame work to every frame and drifts.
+
+    With 5 ms of work per frame, the old track sent a frame every 25 ms - 50
+    frames took 1.25 s of clock for 1.0 s of audio. On the absolute schedule
+    the sleep absorbs the work and 50 frames span exactly 49 x 20 ms.
+    """
+    track, clock, sleeps, pull = _paced_track(monkeypatch, work_s=0.005)
+    if track is None:
+        return
+    start = clock["now"]
+
+    async def run():
+        for _ in range(50):
+            await pull()
+
+    asyncio.run(run())
+    assert sleeps == [0.015] * 49
+    assert abs((clock["now"] - 0.005) - start - 49 * 0.02) < 1e-9
+
+
+def test_talk_track_resets_after_a_stall_instead_of_bursting(monkeypatch):
+    """The SDES pump's rule: a late frame goes out at once and the schedule
+    restarts from now, so a stall is not followed by a catch-up burst."""
+    track, clock, sleeps, pull = _paced_track(monkeypatch, work_s=0.0)
+    if track is None:
+        return
+
+    async def run():
+        await pull()
+        await pull()
+        clock["now"] += 0.2  # ten frames' worth of stall
+        await pull()  # late: no sleep, schedule reset
+        await pull()  # back on a 20 ms cadence from the reset
+
+    asyncio.run(run())
+    assert sleeps == [0.02, 0.02]
+
+
 if __name__ == "__main__":
     fns = [
         v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)

@@ -6,6 +6,24 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **DTLS talk audio holds 20 ms per frame instead of drifting.** The DTLS talk
+  track slept a relative 20 ms between frames, so the time spent building each
+  frame and waking up was added to every one and the stream ran slow. It now
+  paces against an absolute schedule on the monotonic clock, as the SDES pump
+  does: each frame is due 20 ms after the last one was due, and a frame that is
+  already late goes out at once and resets the schedule, so a stall is never
+  followed by a burst.
+- **A SPEAKERSTART ack the official app reads as "mic occupied" is logged as a
+  warning.** The app treats an 851 with payload[1] == 0x64 as "talk failed, the
+  camera's mic is occupied", toasts an error and stops talk. Every 0x0064 we
+  have recorded came from a speaker that opened (M3 Pro, PTZ and an L2), and
+  it is the only ack seen from the first two, so enforcing the app's reading
+  would disable talk on them outright. `async_start_talk` still reports
+  success; the warning names "mic occupied (another talk session still holds
+  it)" so a live session can settle whether 0x64 lines up with talk that
+  plays nothing.
+
 ## [1.0.0rc71]
 
 Soak: resets the clock. The changes are to the DTLS serve loop's retry pacing
