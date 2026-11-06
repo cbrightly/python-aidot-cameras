@@ -6,6 +6,32 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **`AIDOT_INCLUDE_SHARED_HOUSES=false` means off.** The knob was read as
+  "anything but `0` enables", so `false`, `no` and `off` all turned it on and
+  listed the devices of every house shared to the account. It now parses like
+  the other default-off switches: `1`, `true`, `yes` or `on` enables it, and
+  anything else, blank included, leaves it off.
+- **A 630009 refreshes the token and a 21025 logs in again.** The app's HTTP
+  retry refreshes the access token on 21026 and 630009 and sends the user back
+  to login on 21025. The camera HTTP calls knew 21026, 21027 and 21041 only,
+  so a 630009 or a 21025 was not seen as an auth error unless its desc said
+  "login again". 630009 now takes the refresh path and 21025 the full
+  re-login, as 21027 does. 21041 stays on the re-login path; it is upstream's
+  code, not the app's, and the comments now say so. The scheduled refresh at
+  90% of the token's lifetime is unchanged.
+- **A lower-case model id is a camera everywhere.** The account listing and
+  the CLI upper-cased the model id before looking for `IPC`; the TCP:10000
+  login gate did not, so a camera listed as `lk.ipc...` would have been
+  sent the light protocol's login. All three now ask one helper,
+  `const.is_camera_model`.
+- **`setDevAttrReq` carries `parentId` as the app's does.** The app's MQTT
+  attribute write sends `parentId` (the record's `directId`, else its
+  `parentId`) and publishes on the `directId` topic when there is one. The
+  payload now carries `parentId` when the device record has either field, and
+  the topic moves to `iot/v1/c/{directId}/...` only for a non-empty `directId`.
+  A record with neither sends exactly what it did before.
+
 ## [1.0.0rc71]
 
 Soak: resets the clock. The changes are to the DTLS serve loop's retry pacing

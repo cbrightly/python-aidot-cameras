@@ -85,7 +85,7 @@ from .cloud_auth import (  # noqa: F401  (re-exported for callers and tests)
     _read_token_file,
     _write_token_file,
 )
-from .const import CONF_DEVICE_LIST, CONF_ID, CONF_MODEL_ID, CONF_NAME
+from .const import CONF_DEVICE_LIST, CONF_ID, CONF_MODEL_ID, CONF_NAME, is_camera_model
 
 _LOGGER = logging.getLogger("aidot.go2rtc")
 
@@ -112,7 +112,7 @@ def _env_bool(name: str) -> bool | None:
     systemd unit or a compose file - into a silent loss of audio.
 
     Not every knob is safe to route through this.  A handful still compare against
-    a bare ``"0"`` (``AIDOT_SERVE_RELAY``, ``AIDOT_INCLUDE_SHARED_HOUSES``), where
+    a bare ``"0"`` (``AIDOT_SERVE_RELAY``, ``AIDOT_SDES_STALL_NUDGE``), where
     a word spelling reads as true whatever it says; passing one of those through
     here would hand the library an override it disagrees with.  Check the
     resolver before adding a knob to ``cmd_stream``."""
@@ -124,11 +124,7 @@ def _env_bool(name: str) -> bool | None:
 async def _cameras(client: AidotClient) -> list[dict]:
     """Return the raw device dicts for every camera on the account."""
     data = await client.async_get_all_device()
-    return [
-        d
-        for d in data[CONF_DEVICE_LIST]
-        if "IPC" in (d.get(CONF_MODEL_ID) or "").upper()
-    ]
+    return [d for d in data[CONF_DEVICE_LIST] if is_camera_model(d.get(CONF_MODEL_ID))]
 
 
 def _stream_slug(name: Optional[str], dev_id: str) -> str:

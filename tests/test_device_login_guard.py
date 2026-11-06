@@ -69,6 +69,43 @@ def test_unknown_model_logs_in(_record_base_login):
     assert _record_base_login == ["192.0.2.50"]
 
 
+def test_lower_case_camera_model_is_excluded(_record_base_login):
+    # This gate used to match "IPC" case-sensitively while the account listing
+    # upper-cased first, so a lower-case model id was a camera to one and not the
+    # other.
+    cam = _client("lk.ipc.a001513")
+    asyncio.run(cam.async_login())
+    assert _record_base_login == []
+
+
+@pytest.mark.parametrize(
+    "model, expected",
+    [
+        ("LK.IPC.A001513", True),
+        ("lk.ipc.a000088", True),
+        ("Lk.Ipc.A001064", True),
+        ("lk.WIFI-RGBWLight-D0006", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_every_camera_test_gives_the_same_answer(model, expected):
+    from aidot_cameras import __main__ as cli
+    from aidot_cameras.client import _is_camera, _is_camera_device
+    from aidot_cameras.const import CONF_DEVICE_LIST, is_camera_model
+
+    assert is_camera_model(model) is expected
+    assert _is_camera_device({"modelId": model}) is expected
+    assert _is_camera(SimpleNamespace(info=SimpleNamespace(model_id=model))) is expected
+
+    class _Client:
+        async def async_get_all_device(self):
+            return {CONF_DEVICE_LIST: [{"id": "d1", "modelId": model}]}
+
+    got = asyncio.run(cli._cameras(_Client()))
+    assert (got != []) is expected
+
+
 # NOTE: the pre-inversion fork also carried a 30-second re-login throttle inside
 # update_ip_address, and a test for it lived here.  update_ip_address is now
 # upstream's (aidot.device_client) and we do not override it: upstream suppresses
