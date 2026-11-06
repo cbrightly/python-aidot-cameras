@@ -1195,9 +1195,9 @@ def test_loopback_publish_builds_the_aac_track_off_the_constructing_thread(
     calls = []
     real_make = rp.make_aac_track
 
-    def _make(device_id="?"):
+    def _make(device_id="?", stream_settings=None):
         calls.append(threading.current_thread())
-        return real_make(device_id)
+        return real_make(device_id, stream_settings)
 
     monkeypatch.setattr(rp, "make_aac_track", _make)
     a_port, v_port = _free_udp_ports(2)
@@ -1491,8 +1491,8 @@ def test_dtls_publish_feeds_queued_audio_before_the_idle_fill(go2rtc, monkeypatc
     monkeypatch.setenv("AIDOT_PUBLISH_AAC", "1")
     made = []
 
-    def _make(device_id="?"):
-        made.append(real_make(device_id))
+    def _make(device_id="?", stream_settings=None):
+        made.append(real_make(device_id, stream_settings))
         return made[-1]
 
     real_make = rp.make_aac_track

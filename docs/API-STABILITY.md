@@ -23,6 +23,7 @@ Everything in `aidot_cameras.__all__`, importable as
 | `Discover`, `CameraDiscover` | the LAN discovery sweep. `Discover` is an alias of `CameraDiscover` |
 | `SdesSession`, `WebRTCSession` | the two session types `async_open_webrtc_stream` returns (see below) |
 | `configure_stream_limits` | fleet-wide concurrency limits |
+| `StreamSettings` | per-client stream settings: the `stream_settings` keyword of `CameraClient`, and the read-only `stream_settings` attribute of the client and of each `CameraDeviceClient` it creates. A field that is set wins over its `AIDOT_*` variable for that client's cameras; see `docs/ENVIRONMENT.md` |
 | `AidotError` and the other exception types in `__all__` | see `aidot_cameras.exceptions` below |
 
 ### Exceptions
@@ -80,7 +81,7 @@ release still catches them.
 | `aidot_cameras.camera.constants` | published protocol constants (`TALK_PCM_*`) |
 | `aidot_cameras.camera.hwaccel.probe_decoder` | decoder capability probe |
 | the `aidot-go2rtc` command (also `python -m aidot_cameras`) | its arguments (`<dev_id> <output_url>`, `--list`, `-v`) and the meaning of the output URL schemes it accepts. Its log output is not part of the promise |
-| the `AIDOT_*` environment variables in the README's tables | per-install tuning seams. The variables in `docs/ENVIRONMENT.md` are not part of this promise: each may go once the behaviour it tunes has settled, and the CHANGELOG says so when one does |
+| the `AIDOT_*` environment variables in the README's tables | per-install tuning seams. The four `StreamSettings` covers are read after a client's own setting and before the default. The variables in `docs/ENVIRONMENT.md` are not part of this promise: each may go once the behaviour it tunes has settled, and the CHANGELOG says so when one does |
 
 `lan_control`, `go2rtc`, `sd_playback.decode_playcontrol_reply` and
 `device_session_authenticated` are imported by the reference consumer (the Home

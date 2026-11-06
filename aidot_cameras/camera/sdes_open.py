@@ -902,11 +902,18 @@ _DIRECT_PUBLISH_VIDEO_PT = 96
 
 
 def _should_direct_publish(
-    rtsp_push_url, output_path, max_seconds, plain_rtp: bool, video_pt=None
+    rtsp_push_url,
+    output_path,
+    max_seconds,
+    plain_rtp: bool,
+    video_pt=None,
+    *,
+    stream_settings=None,
 ) -> bool:
     """Whether the SDES serve publishes in-process instead of running ffmpeg.
 
-    Only a live RTSP push qualifies, and only with ``AIDOT_DIRECT_PUBLISH`` on:
+    Only a live RTSP push qualifies, and only with direct publish on (the
+    camera's ``stream_settings``, else ``AIDOT_DIRECT_PUBLISH``):
     recordings and snapshots (``output_path`` / ``max_seconds``) and the
     ``-f null`` decode drain keep ffmpeg. See docs/DESIGN-direct-publish.md.
 
@@ -926,7 +933,7 @@ def _should_direct_publish(
         return False
     return (
         plain_rtp
-        and direct_publish_enabled()
+        and direct_publish_enabled(stream_settings)
         and is_publishable_url(rtsp_push_url)
         and not output_path
         and not max_seconds
@@ -1349,7 +1356,7 @@ def _new_media_hold(sd_playback) -> "Optional[_MediaHold]":
     return _MediaHold()
 
 
-def _pinned_video_pt(sd_playback) -> "Optional[int]":
+def _pinned_video_pt(sd_playback, stream_settings=None) -> "Optional[int]":
     """The video payload type this open pins, or None for SD playback.
 
     A playback open offers both codecs (the camera only adds the H265
@@ -1358,7 +1365,7 @@ def _pinned_video_pt(sd_playback) -> "Optional[int]":
     payload type - must see none. Read from the global pin, the open rejected
     the recording it asked for as the wrong codec (A001064, 2026-10-27).
     """
-    return None if sd_playback is not None else _resolve_sdes_video_pt()
+    return None if sd_playback is not None else _resolve_sdes_video_pt(stream_settings)
 
 
 def _sd_playback_unservable(sd_playback, answer_sdp: str) -> bool:
@@ -2799,7 +2806,7 @@ def _should_count_media(decrypted: bool, plain_rtp: bool) -> bool:
     return bool(decrypted or not plain_rtp)
 
 
-def _resolve_sdes_video_pt() -> Optional[int]:
+def _resolve_sdes_video_pt(stream_settings=None) -> Optional[int]:
     """Pin the OFFER to one video codec: H.264 (96) unless told otherwise.
 
     The offer sent in webrtcReq advertises BOTH 96 (H264) and 97 (H265) and
@@ -2819,7 +2826,8 @@ def _resolve_sdes_video_pt() -> Optional[int]:
     An earlier version of this pinned the answer builder instead and changed
     nothing at all, while the arms still came out looking like it had worked.
 
-    ``AIDOT_SDES_VIDEO_PT``: unset or empty pins 96; ``97`` pins H.265 - **do
+    ``AIDOT_SDES_VIDEO_PT`` (or the camera's ``stream_settings``, which wins):
+    unset or empty pins 96; ``97`` pins H.265 - **do
     not**: an H265-only offer returned NO VIDEO (audio only, no video stream in
     the recording) in 3 of 3 interleaved rounds against 3 of 3 successes for 96
     in the same run; ``none``/``off``/``0`` leaves the camera its choice (the
@@ -2827,7 +2835,8 @@ def _resolve_sdes_video_pt() -> Optional[int]:
     default.  A payload type the offer does not advertise would leave the
     camera nothing to send, so it is never pinned to.
     """
-    raw = (settings.read("AIDOT_SDES_VIDEO_PT") or "").strip().lower()
+    raw = settings.read("AIDOT_SDES_VIDEO_PT", overrides=stream_settings)
+    raw = (raw or "").strip().lower()
     if raw in ("none", "off", "0"):
         return None
     if raw.isdigit() and int(raw) in _SDES_ANSWER_VIDEO_PTS:
@@ -6804,7 +6813,7 @@ async def _sdes_open_build_offer(self, ps: _SdesOpenState) -> None:
     # SD playback offers both codecs: the camera only creates the H265
     # transceiver recorded H265 is sent to when the offer names two
     # (u8VideoCodecCnt >= 2 in its codec decision).
-    _pin_video_pt = _pinned_video_pt(ps.sd_playback)
+    _pin_video_pt = _pinned_video_pt(ps.sd_playback, settings.stream_settings_of(self))
     if _pin_video_pt is not None:
         ps.sdes_offer_sdp = narrow_sdp_payload_types(
             ps.sdes_offer_sdp, keep_video=_pin_video_pt
@@ -9304,7 +9313,11 @@ class _SdesOpenMixin:
                 (ps.answer_fut.result() or {}).get("sdp", "") or ""
             )
             if _answer_pt is not None and _should_direct_publish(
-                ps.rtsp_push_url, output_path, max_seconds, ps._use_plain_rtp
+                ps.rtsp_push_url,
+                output_path,
+                max_seconds,
+                ps._use_plain_rtp,
+                stream_settings=settings.stream_settings_of(self),
             ):
                 _answer_apt = _answer_pt
                 _LOGGER.info(
@@ -9327,7 +9340,7 @@ class _SdesOpenMixin:
                     _answer_apt,
                 )
         _vpt = _first_video_pt[0]
-        _pinned = _pinned_video_pt(ps.sd_playback)
+        _pinned = _pinned_video_pt(ps.sd_playback, settings.stream_settings_of(self))
         _mismatches = getattr(self, "_pinned_codec_mismatches", 0)
         if _should_retry_pinned_codec(
             _vpt,
@@ -9398,7 +9411,9 @@ class _SdesOpenMixin:
                     "_open_sdes_stream_impl",
                     exc_info=True,
                 )
-            _pin_pt = _pinned_video_pt(ps.sd_playback)
+            _pin_pt = _pinned_video_pt(
+                ps.sd_playback, settings.stream_settings_of(self)
+            )
             if _pin_pt is not None:
                 _LOGGER.info(
                     "camera %s: the observed payload type is not one this SDP "
@@ -9420,7 +9435,9 @@ class _SdesOpenMixin:
         # matters here: this camera answers H.265 and sends H.264, so trusting
         # the answer built an hevc-only SDP and killed the serve at startup.
         _keep_v = _serve_video_pt(
-            _vpt, _answer_video_pt[0], _pinned_video_pt(ps.sd_playback)
+            _vpt,
+            _answer_video_pt[0],
+            _pinned_video_pt(ps.sd_playback, settings.stream_settings_of(self)),
         )
         _keep_a = int(_apt) if _apt in _SDP_AUDIO_PTS else None
         if _serve_audio and _keep_a is None:
@@ -9517,11 +9534,22 @@ class _SdesOpenMixin:
         # polls, terminates, reaps or relaunches `proc` is unchanged. Only a
         # live push qualifies - recordings, snapshots and the decode drain keep
         # ffmpeg. See docs/DESIGN-direct-publish.md.
+        _settings = settings.stream_settings_of(self)
         _direct_publish = _should_direct_publish(
-            ps.rtsp_push_url, output_path, max_seconds, ps._use_plain_rtp, _keep_v
+            ps.rtsp_push_url,
+            output_path,
+            max_seconds,
+            ps._use_plain_rtp,
+            _keep_v,
+            stream_settings=_settings,
         )
         if not _direct_publish and _should_direct_publish(
-            ps.rtsp_push_url, output_path, max_seconds, True, _keep_v
+            ps.rtsp_push_url,
+            output_path,
+            max_seconds,
+            True,
+            _keep_v,
+            stream_settings=_settings,
         ):
             _LOGGER.info(
                 "camera %s: direct publish is on but this model's media reaches"
@@ -9529,7 +9557,11 @@ class _SdesOpenMixin:
                 getattr(self, "device_id", "?"),
             )
         elif not _direct_publish and _should_direct_publish(
-            ps.rtsp_push_url, output_path, max_seconds, ps._use_plain_rtp
+            ps.rtsp_push_url,
+            output_path,
+            max_seconds,
+            ps._use_plain_rtp,
+            stream_settings=_settings,
         ):
             _LOGGER.info(
                 "camera %s: this session negotiated video pt=%s, which the"
@@ -9570,6 +9602,7 @@ class _SdesOpenMixin:
                     ts_session=(
                         None if ps.sd_playback is not None else self._hls_ts_session()
                     ),
+                    stream_settings=_settings,
                 )
             _p = subprocess.Popen(
                 cmd,

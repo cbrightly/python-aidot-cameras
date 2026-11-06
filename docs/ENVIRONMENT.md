@@ -11,6 +11,28 @@ was measured. None is part of the public API (see
 [API-STABILITY.md](API-STABILITY.md)): each may be removed in a later release
 once the behaviour it tunes has settled, and the CHANGELOG will say so.
 
+## Settings given to the client
+
+Four of the README's streaming variables can be given per account client
+instead: `StreamSettings` (exported from the package root), passed as
+`CameraClient(..., stream_settings=...)` and handed to every camera that client
+creates.
+
+| Field | Variable |
+| --- | --- |
+| `direct_publish` (bool) | `AIDOT_DIRECT_PUBLISH` |
+| `publish_aac` (bool) | `AIDOT_PUBLISH_AAC` |
+| `hls_direct_ts` (bool) | `AIDOT_HLS_DIRECT_TS` |
+| `sdes_video_pt` (`96`, `97` or `"none"`) | `AIDOT_SDES_VIDEO_PT` |
+
+One precedence rule, wherever a camera reads one of them (`settings.read` with
+the camera's settings as `overrides`): a field that is set, then the variable
+if it is set, then the default. A field left `None` has no opinion, so a client
+given nothing, or an empty `StreamSettings()`, reads exactly as before. The
+variables stay supported; they are process-wide, so two clients that need
+different values must use the fields. A value the field does not accept raises
+when the `StreamSettings` is built, not at use.
+
 ## Streaming knobs
 
 | Variable | Effect | Default |

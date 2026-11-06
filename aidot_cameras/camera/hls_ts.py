@@ -1,11 +1,12 @@
 """In-sync HLS: a library-muxed MPEG-TS per camera for Home Assistant's stream worker.
 
-Unless ``AIDOT_HLS_DIRECT_TS`` is turned off, Home Assistant's HLS view and
-recordings of a DTLS camera read the camera's MPEG-TS from a loopback ``TsRouter`` instead of
-go2rtc's RTSP. go2rtc re-bases each track for each consumer, so a recording or
-view that joins a running stream had its sound 0.1-0.75 s late, differently
-every time (measured 2026-10-03); this TS carries one clock, so any joiner is in
-step. WebRTC is unchanged.
+Unless ``AIDOT_HLS_DIRECT_TS`` or the client's ``StreamSettings`` turns it off,
+Home Assistant's HLS view and recordings of a DTLS camera read the camera's
+MPEG-TS from a loopback ``TsRouter`` instead of go2rtc's RTSP. go2rtc re-bases
+each track for each consumer, so a recording or view that joins a running
+stream had its sound 0.1-0.75 s late, differently every time (measured
+2026-10-03); this TS carries one clock, so any joiner is in step. WebRTC is
+unchanged.
 
 It is fed by the direct publisher (so ``AIDOT_DIRECT_PUBLISH`` must be on) and
 carries the publisher's AAC track (so ``AIDOT_PUBLISH_AAC`` must be on). DTLS
@@ -52,14 +53,19 @@ _router: Optional[TsRouter] = None
 _tees: Dict[str, TsTee] = {}
 
 
-def enabled() -> bool:
+def enabled(stream_settings=None) -> bool:
     """The option, and both things it is built on, are on.
 
     All three are on unless turned off (since 1.0.0rc44): the in-sync stream
     is what makes a recording's sound and picture agree whenever it joins.
+    ``stream_settings`` is the camera's (see ``settings.read``).
     """
-    on = settings.read(ENV_HLS_DIRECT_TS)
-    return on and direct_publish_enabled() and publish_aac_enabled()
+    on = settings.read(ENV_HLS_DIRECT_TS, overrides=stream_settings)
+    return (
+        on
+        and direct_publish_enabled(stream_settings)
+        and publish_aac_enabled(stream_settings)
+    )
 
 
 def _path(name: str) -> str:

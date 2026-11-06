@@ -170,10 +170,27 @@ def read_knob(knob: Knob, env: Optional[Mapping[str, str]] = None) -> Any:
     raise ValueError(f"unknown knob kind {kind!r} for {knob.name}")
 
 
-def read(name: str, env: Optional[Mapping[str, str]] = None) -> Any:
+def read(
+    name: str,
+    env: Optional[Mapping[str, str]] = None,
+    overrides: "Optional[StreamSettings]" = None,
+) -> Any:
     """The value of the registered knob ``name``. Unknown names raise
-    ``KeyError``: an unregistered read is a programming error, not a default."""
-    return read_knob(KNOBS[name], env)
+    ``KeyError``: an unregistered read is a programming error, not a default.
+
+    ``overrides`` is the camera's :class:`StreamSettings`, for the knobs it
+    carries. The one precedence rule: a value set there, then the environment
+    variable if it is set, then the default. ``None`` is today's read."""
+    knob = KNOBS[name]
+    if overrides is not None:
+        if not isinstance(overrides, StreamSettings):
+            raise TypeError(
+                f"overrides must be StreamSettings, not {type(overrides).__name__}"
+            )
+        value = overrides.get(name)
+        if value is not None:
+            return value
+    return read_knob(knob, env)
 
 
 def read_or_none(name: str, env: Optional[Mapping[str, str]] = None) -> Any:
@@ -412,3 +429,76 @@ KNOBS: "dict[str, Knob]" = _registry(
         "list",
     ),
 )
+
+
+#: The knobs an account client can be given explicitly, by field. Each must be
+#: a registered knob; the env var stays the fallback when a field is unset.
+_STREAM_FIELDS: "dict[str, str]" = {
+    "direct_publish": "AIDOT_DIRECT_PUBLISH",
+    "publish_aac": "AIDOT_PUBLISH_AAC",
+    "hls_direct_ts": "AIDOT_HLS_DIRECT_TS",
+    "sdes_video_pt": "AIDOT_SDES_VIDEO_PT",
+}
+for _field, _name in _STREAM_FIELDS.items():
+    if _name not in KNOBS:  # pragma: no cover - caught by the import itself
+        raise ValueError(f"StreamSettings.{_field}: {_name} is not a registered knob")
+_VIDEO_PT_VALUES = {"96": "96", "97": "97", "none": "none", "off": "none", "0": "none"}
+
+
+@dataclass(frozen=True)
+class StreamSettings:
+    """Stream settings for one account client and every camera it creates.
+
+    Pass one as ``CameraClient(..., stream_settings=...)``. Each field is one
+    ``AIDOT_*`` variable; ``None`` (the default) has no opinion, so the
+    variable is read as before, and an empty ``StreamSettings()`` behaves
+    exactly like none at all. A field that is set wins over the variable for
+    this client's cameras only: two clients in one process do not see each
+    other's settings.
+
+    ``sdes_video_pt`` takes ``96`` (pin H.264), ``97`` (pin H.265) or
+    ``"none"`` (leave the camera its choice), as an int or a string.
+    """
+
+    direct_publish: Optional[bool] = None  # AIDOT_DIRECT_PUBLISH
+    publish_aac: Optional[bool] = None  # AIDOT_PUBLISH_AAC
+    hls_direct_ts: Optional[bool] = None  # AIDOT_HLS_DIRECT_TS
+    sdes_video_pt: "Optional[int | str]" = None  # AIDOT_SDES_VIDEO_PT
+
+    def __post_init__(self) -> None:
+        for field in ("direct_publish", "publish_aac", "hls_direct_ts"):
+            value = getattr(self, field)
+            if value is not None and not isinstance(value, bool):
+                raise TypeError(f"StreamSettings.{field} must be a bool or None")
+        pt = self.sdes_video_pt
+        if pt is not None:
+            norm = _VIDEO_PT_VALUES.get(str(pt).strip().lower())
+            if norm is None or isinstance(pt, bool):
+                raise ValueError(
+                    f"StreamSettings.sdes_video_pt must be 96, 97 or 'none', not {pt!r}"
+                )
+            object.__setattr__(self, "sdes_video_pt", norm)
+
+    def get(self, name: str) -> Any:
+        """The value set for the knob ``name``, or None when it is not set."""
+        for field, knob in _STREAM_FIELDS.items():
+            if knob == name:
+                return getattr(self, field)
+        return None
+
+    def as_env(self) -> "dict[str, Any]":
+        """The fields that are set, by variable name (for a diagnostic)."""
+        return {
+            knob: getattr(self, field)
+            for field, knob in _STREAM_FIELDS.items()
+            if getattr(self, field) is not None
+        }
+
+
+def stream_settings_of(obj: Any) -> "Optional[StreamSettings]":
+    """``obj.stream_settings`` when it is a :class:`StreamSettings`, else None.
+
+    How a camera's read sites find their client's settings: an object without
+    them (a test double, a client built before this existed) reads as before."""
+    value = getattr(obj, "stream_settings", None)
+    return value if isinstance(value, StreamSettings) else None
