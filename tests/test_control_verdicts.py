@@ -306,3 +306,32 @@ async def test_every_observed_speaker_ack_is_an_acceptance(payload, camera):
     assert await _start_talk(session, _reply(SPEAKERSTART_RESP, payload)) is True, (
         camera
     )
+
+
+@pytest.mark.parametrize(
+    "payload,warned",
+    [
+        (b"\x00\x64", True),
+        (b"\x01\x64\x00\x00", True),
+        (b"\x00\xc8", False),
+        (b"\x64", False),
+    ],
+)
+async def test_the_app_mic_occupied_ack_is_logged_not_enforced(payload, warned, caplog):
+    """The official app reads 851 payload[1] == 0x64 as "mic occupied" and stops.
+
+    Our own measurements contradict that - 0x0064 is the only ack an M3 Pro and
+    the PTZ have ever sent, on speakers that opened - so the start still
+    succeeds. What changes is that the app's reading is surfaced as a warning,
+    so a live session can line it up against talk that plays nothing.
+    """
+    session = _session()
+    with caplog.at_level("WARNING", logger="aidot_cameras.camera.protocol"):
+        assert await _start_talk(session, _reply(SPEAKERSTART_RESP, payload)) is True
+    hits = [
+        r
+        for r in caplog.records
+        if r.levelname == "WARNING"
+        and "mic occupied (another talk session still holds it)" in r.getMessage()
+    ]
+    assert bool(hits) is warned
