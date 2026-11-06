@@ -629,6 +629,21 @@ def _canary_run(monkeypatch, make_camera_device_client, canary, **kw):
     return run, cam
 
 
+def _close_pc_after(cam, delay: float, state: str = "closed") -> None:
+    """Open as before, then set the PC's connectionState to ``state`` ``delay``
+    real seconds later (these runs are on real time, sleeps scaled)."""
+    _open = cam.async_open_webrtc_stream
+
+    async def _open_then_change_later(**kwargs):
+        out = await _open(**kwargs)
+        asyncio.get_running_loop().call_later(
+            delay, setattr, out._pc, "connectionState", state
+        )
+        return out
+
+    cam.async_open_webrtc_stream = _open_then_change_later
+
+
 def _paced(caplog) -> bool:
     return any("before reopening" in r.getMessage() for r in caplog.records)
 
@@ -654,25 +669,18 @@ def test_a_no_video_verdict_makes_a_session_short_canary_or_not(
     assert _paced(caplog), msgs
 
 
+@pytest.mark.parametrize("grace", ["0", "10"], ids=["watchdog off", "before it rules"])
 def test_a_session_with_no_canary_and_no_verdict_is_not_short(
-    monkeypatch, make_camera_device_client, caplog
+    monkeypatch, make_camera_device_client, caplog, grace
 ):
-    """No canary to read and the watchdog off (grace 0), so nothing says the
+    """No canary to read, and the watchdog either off (grace 0) or not yet
+    ruling (a 10 s grace the session ends well inside), so nothing says the
     session had no video: it lasted 0.3 s against a 0.1 s threshold, and is
-    not short for want of a canary."""
-    monkeypatch.setenv("AIDOT_DTLS_VIDEO_GRACE_S", "0")
+    not short for want of a canary. Unknown means do not back off."""
+    monkeypatch.setenv("AIDOT_DTLS_VIDEO_GRACE_S", grace)
     monkeypatch.setenv("AIDOT_DTLS_SHORT_SESSION_S", "0.1")
     run, cam = _canary_run(monkeypatch, make_camera_device_client, None)
-    _open = cam.async_open_webrtc_stream
-
-    async def _open_and_close_later(**kwargs):
-        out = await _open(**kwargs)
-        asyncio.get_running_loop().call_later(
-            0.3, setattr, out._pc, "connectionState", "closed"
-        )
-        return out
-
-    cam.async_open_webrtc_stream = _open_and_close_later
+    _close_pc_after(cam, 0.3)
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         run.run()
     assert not _paced(caplog), [r.getMessage() for r in caplog.records]
@@ -814,16 +822,7 @@ def test_a_session_is_measured_to_its_end_not_past_its_teardown(
     cam._stream_idle_opt = 0.0
     sess = _SlowStopSession(die_after=0.2, stop_takes=0.4)
     run = DtlsServeRun(monkeypatch, cam, [sess], timeout=1.5)
-    _open = cam.async_open_webrtc_stream
-
-    async def _open_and_die_later(**kwargs):
-        out = await _open(**kwargs)
-        asyncio.get_running_loop().call_later(
-            out.die_after, setattr, out._pc, "connectionState", "closed"
-        )
-        return out
-
-    cam.async_open_webrtc_stream = _open_and_die_later
+    _close_pc_after(cam, sess.die_after)
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         run.run()
     paced = [
@@ -862,16 +861,7 @@ def test_a_disconnect_is_measured_from_when_it_began(
     cam._stream_idle_opt = 0.0
     sess = _SlowStopSession(die_after=0.2, stop_takes=0.0)
     run = DtlsServeRun(monkeypatch, cam, [sess], timeout=1.5)
-    _open = cam.async_open_webrtc_stream
-
-    async def _open_and_drop_later(**kwargs):
-        out = await _open(**kwargs)
-        asyncio.get_running_loop().call_later(
-            out.die_after, setattr, out._pc, "connectionState", "disconnected"
-        )
-        return out
-
-    cam.async_open_webrtc_stream = _open_and_drop_later
+    _close_pc_after(cam, sess.die_after, "disconnected")
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         run.run()
     paced = [
@@ -968,16 +958,7 @@ def test_a_pc_that_drops_during_the_serve_ready_wait_is_stamped_then(
         frames=False,
     )
     run.timeout = 3.0
-    _open = cam.async_open_webrtc_stream
-
-    async def _open_and_drop_later(**kwargs):
-        out = await _open(**kwargs)
-        asyncio.get_running_loop().call_later(
-            0.1, setattr, out._pc, "connectionState", "disconnected"
-        )
-        return out
-
-    cam.async_open_webrtc_stream = _open_and_drop_later
+    _close_pc_after(cam, 0.1, "disconnected")
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         run.run()
     assert _paced(caplog), [r.getMessage() for r in caplog.records]
@@ -1018,16 +999,7 @@ def test_a_session_dead_in_the_serve_ready_wait_is_never_called_serving(
         frames=False,
     )
     cam._serve_ready = _CountingEvent()
-    _open = cam.async_open_webrtc_stream
-
-    async def _open_and_close_later(**kwargs):
-        out = await _open(**kwargs)
-        asyncio.get_running_loop().call_later(
-            0.1, setattr, out._pc, "connectionState", "closed"
-        )
-        return out
-
-    cam.async_open_webrtc_stream = _open_and_close_later
+    _close_pc_after(cam, 0.1)
     run.run()
     assert cam._serve_ready.sets == 0
 
@@ -1064,16 +1036,7 @@ def test_a_cycle_whose_publish_dies_at_once_still_records_its_video(
         url="rtsp://127.0.0.1:8554/cam",
         publish_for=0.001,
     )
-    _open = cam.async_open_webrtc_stream
-
-    async def _open_and_close_later(**kwargs):
-        out = await _open(**kwargs)
-        asyncio.get_running_loop().call_later(
-            0.4, setattr, out._pc, "connectionState", "closed"
-        )
-        return out
-
-    cam.async_open_webrtc_stream = _open_and_close_later
+    _close_pc_after(cam, 0.4)
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         run.run()
     assert run.mux_targets and set(run.mux_targets) == {"publish"}
@@ -1102,19 +1065,12 @@ def test_a_keyframe_landing_during_the_stats_await_counts(
         state["stats_calls"] += 1
         await _real_sleep(0)
         state["canary"] = {"frames": 5, "keyframes": 1}  # another receiver
+        # End the session on the loop's next check, however slow the runner:
+        # no real-time timer racing the scaled sleeps.
+        sess._pc.connectionState = "closed"
         return {}
 
     sess.get_stats = _get_stats
-    _open = cam.async_open_webrtc_stream
-
-    async def _open_and_close_later(**kwargs):
-        out = await _open(**kwargs)
-        asyncio.get_running_loop().call_later(
-            0.3, setattr, out._pc, "connectionState", "closed"
-        )
-        return out
-
-    cam.async_open_webrtc_stream = _open_and_close_later
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         run.run()
     msgs = [r.getMessage() for r in caplog.records]

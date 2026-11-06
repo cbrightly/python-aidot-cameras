@@ -333,7 +333,9 @@ def _session_end_pacing(
     ``lived_s``, on the loop's short-session ``pacer``.
 
     A session that lasted ``threshold_s`` and delivered video (in any of its
-    serve cycles, whatever its last one did) resets the pacer and the loop
+    serve cycles, whatever its last one did; with no video canary to read,
+    unless the presence watchdog declared it video-less, which includes one
+    that ended before the watchdog ruled) resets the pacer and the loop
     reopens on its open gate (0). Any other session is a failure of the pacer:
     30 s the first time, then up to 45 s."""
     if had_video and lived_s >= threshold_s:
@@ -1657,7 +1659,10 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
     # read: False until a cycle sees a keyframe (True). Without one (the tap
     # found no decoder queue to hang it on), "no keyframe seen" means "cannot
     # tell", which must not make every session short: None, read as video
-    # unless a cycle's presence watchdog declares no video (False).
+    # unless a cycle's presence watchdog declares no video (False). So such a
+    # session that ends before the watchdog rules - inside its grace, at any
+    # AIDOT_DTLS_VIDEO_GRACE_S, or with the watchdog off - counts as having
+    # had video and is not paced as short: unknown means do not back off.
     _canary = _current_video_canary(self, ps.pc)
     ps._session_had_video = False if _canary is not None else None
 
