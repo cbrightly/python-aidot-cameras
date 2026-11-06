@@ -1528,6 +1528,54 @@ _PRE_LAUNCH_ANSWER_WAIT_S = 8.0
 # Kept tight so a camera that genuinely sends no audio barely delays the picture.
 _AUDIO_PT_GRACE_S = 1.0
 
+# The audio grace when the camera's answer names an audio payload type, so audio
+# is coming and only its first packet is late.  Measured 2026-11-06 on an
+# A001513 reachable only through the relay: its first audio RTP arrived 1.14 s
+# after its first video, 136 ms past _AUDIO_PT_GRACE_S, and the session served
+# video only for its whole life.  A camera whose answer names no audio still
+# gets the tight grace above.
+_AUDIO_PT_ANSWERED_GRACE_S = 3.0
+
+
+def _audio_pt_grace_s(answer_names_audio: bool) -> float:
+    """Seconds to wait for the first audio packet once video is known."""
+    return _AUDIO_PT_ANSWERED_GRACE_S if answer_names_audio else _AUDIO_PT_GRACE_S
+
+
+def _answer_names_audio_pt(answer_fut: Any) -> bool:
+    """Whether the camera's settled answer names an audio payload type we serve."""
+    try:
+        if (
+            answer_fut is None
+            or not answer_fut.done()
+            or answer_fut.cancelled()
+            or answer_fut.exception() is not None
+        ):
+            return False
+        sdp = (answer_fut.result() or {}).get("sdp", "") or ""
+        if audio_pt_from_answer_sdp(sdp) is None:
+            return False
+        # A rejected (port 0) or non-sending audio section names a payload type
+        # but promises no packets; it keeps the tight grace.
+        section = None
+        for raw in sdp.splitlines():
+            line = raw.strip()
+            if line.startswith("m="):
+                if section is not None:
+                    break
+                if line.startswith("m=audio"):
+                    parts = line.split()
+                    if len(parts) < 2 or parts[1] == "0":
+                        return False
+                    section = []
+                continue
+            if section is not None:
+                section.append(line)
+        return not any(line in ("a=inactive", "a=recvonly") for line in (section or []))
+    except Exception:
+        return False
+
+
 # Extra seconds to wait for the FIRST media packet when the stale-offer backstop
 # ended the wait and nothing has been observed yet.
 #
@@ -2633,7 +2681,9 @@ def audio_pt_from_answer_sdp(sdp_text: str) -> Optional[int]:
     if :func:`answer_pt_kinds` agrees it is audio: on this fleet payload type 0
     is sometimes H265 VIDEO (see there), so a bare "0" proves nothing.
 
-    Used by the direct publish, which - unlike the ffmpeg serve - does not need
+    The ffmpeg serve uses it only to decide how long to wait for the first
+    audio packet (see _answer_names_audio_pt). The direct publish attaches the
+    track from it, because - unlike the ffmpeg serve - it does not need
     to SEE an audio packet before it starts: go2rtc takes an announced audio
     track whose first packet arrives later. Measured 2026-09-19 on an A001513:
     the answer said ``m=audio 9 RTP/SAVPF 8``, video started, the 1 s audio
@@ -9308,8 +9358,16 @@ class _SdesOpenMixin:
                     _answer_apt,
                 )
         if _serve_audio and _first_audio_pt[0] is None and _answer_apt is None:
-            _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
+            # The ffmpeg serve still needs a packet in hand, but a camera whose
+            # answer names an audio payload type is sending audio, so give its
+            # first packet longer to arrive than one that may send none.
+            _answer_names_audio = _answer_names_audio_pt(ps.answer_fut)
+            _apt_deadline = time.monotonic() + _audio_pt_grace_s(_answer_names_audio)
             while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:
+                # A refusal during the wait is the later checks' to report; stop
+                # waiting for audio from a camera that has said no.
+                if ps.terminal_error_fut is not None and ps.terminal_error_fut.done():
+                    break
                 await asyncio.sleep(0.1)
         _vpt = _first_video_pt[0]
         _pinned = _pinned_video_pt(ps.sd_playback)

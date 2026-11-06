@@ -8,8 +8,9 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [1.0.0rc71]
 
-Soak: resets the clock. The change is to the DTLS serve loop's retry pacing
-on every A000088, once the reference installation runs it.
+Soak: resets the clock. The changes are to the DTLS serve loop's retry pacing
+on every A000088 and to when an SDES serve launches, once the reference
+installation runs it.
 
 ### Changed
 - **A DTLS camera whose sessions keep failing fast is backed off, not
@@ -63,6 +64,15 @@ on every A000088, once the reference installation runs it.
   `AidotNegotiationFailed` still catches it.
 - `AIDOT_DTLS_SHORT_SESSION_S` (default 30): how long a served DTLS session
   must last, with video, not to count as short.
+
+### Fixed
+- **An SDES camera whose audio trails its video keeps its sound.** Once its
+  first video packet arrived the serve waited 1 s for the first audio packet,
+  and launched without audio if none had come. An A001513 reachable only
+  through the relay sent its first audio 1.14 s after its video, so it served
+  the whole session silent. When the camera's answer names an audio payload
+  type the wait is now up to 3 s; it still ends at the first audio packet, and
+  a camera whose answer names no audio keeps the 1 s wait.
 
 ## [1.0.0rc70]
 
