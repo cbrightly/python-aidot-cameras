@@ -68,15 +68,16 @@ _SR_INDEX = {
 _OFF = ("0", "false", "no", "off")
 
 
-def publish_aac_enabled() -> bool:
-    """Whether the direct publish adds the AAC track (on unless turned off).
+def publish_aac_enabled(stream_settings=None) -> bool:
+    """Whether the direct publish adds the AAC track (on unless turned off by
+    the camera's ``stream_settings`` or ``AIDOT_PUBLISH_AAC``).
 
     On by default since 1.0.0rc44: it is what gives an AAC-only consumer
     (Home Assistant's HLS player, ``camera.record``) sound at all.
     """
     from .. import settings
 
-    return settings.read(ENV_PUBLISH_AAC)
+    return settings.read(ENV_PUBLISH_AAC, overrides=stream_settings)
 
 
 def audio_specific_config(
@@ -429,10 +430,10 @@ class AacTrack:
 _ENCODER_WARNED = False
 
 
-def make_aac_track(device_id: str = "?") -> Optional[AacTrack]:
+def make_aac_track(device_id: str = "?", stream_settings=None) -> Optional[AacTrack]:
     """An ``AacTrack`` for one publish, or None (disabled, or cannot encode)."""
     global _ENCODER_WARNED
-    if not publish_aac_enabled():
+    if not publish_aac_enabled(stream_settings):
         return None
     try:
         return AacTrack(device_id=device_id)

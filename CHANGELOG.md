@@ -57,7 +57,24 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   `playback_ended` is True once it arrives, on both session types. On SDES
   the frame-time end still counts; either signal ends the play.
 
+### Added
+- **`StreamSettings`: stream settings per account client, not per process.**
+  `CameraClient(..., stream_settings=StreamSettings(...))` takes
+  `direct_publish`, `publish_aac`, `hls_direct_ts` and `sdes_video_pt`, the
+  per-client form of `AIDOT_DIRECT_PUBLISH`, `AIDOT_PUBLISH_AAC`,
+  `AIDOT_HLS_DIRECT_TS` and `AIDOT_SDES_VIDEO_PT`, and hands them to every
+  camera the client creates (`CameraDeviceClient.stream_settings`). Exported
+  from the package root. Values are checked when it is built.
+
 ### Changed
+- **One precedence rule for those four knobs, on every path a camera reads
+  them:** the client's setting, then the environment variable if it is set,
+  then the default. The read sites that had no camera in hand (the direct
+  publish, AAC and in-sync HLS switches, the SDES codec pin, the AAC track
+  the publishers build) now take the camera's settings as an argument, so the
+  publisher threads see the same value the open decided on. A client given
+  nothing reads exactly as before, and the variables stay supported (see
+  docs/ENVIRONMENT.md).
 - **Docs: citations into the official app now point at the current APK.** The
   old `f0.java` references came from an older build; comments now cite
   `KVSWebRTCChannel.smali` and its inner classes by line. Several claims were

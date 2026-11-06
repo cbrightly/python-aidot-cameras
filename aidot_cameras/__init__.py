@@ -13,6 +13,7 @@ import time as _time
 from .client import AidotClient, CameraClient
 from .device_client import CameraDeviceClient, DeviceInformation, DeviceStatusData
 from .camera.client import configure_stream_limits
+from .settings import StreamSettings
 
 # Promised by docs/API-STABILITY.md and previously not reachable from the
 # package root. Verified to pull no optional dependency: importing these does
@@ -199,6 +200,7 @@ __all__ = [
     "InvalidURL",
     "RtspPublishError",
     "SdesSession",
+    "StreamSettings",
     "WebRTCSession",
     "configure_stream_limits",
 ]

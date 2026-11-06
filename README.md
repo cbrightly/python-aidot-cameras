@@ -393,6 +393,12 @@ and the CLI; they take priority over a stored credentials file.
 | `AIDOT_HLS_DIRECT_TS` | Give each eligible camera a library-muxed MPEG-TS on a loopback listener (`CameraMixin.hls_ts_url()`) with video and AAC on one clock, for Home Assistant's HLS view and recordings to read instead of go2rtc's RTSP (through go2rtc a reader joining a running stream had its sound 0.1-0.75 s late). Needs `AIDOT_DIRECT_PUBLISH` and `AIDOT_PUBLISH_AAC`. Eligible: DTLS cameras, and a mains SDES camera whose media the bridge decrypts (A001064) with its offer pinned to H.264; never a battery camera (its packet loss can keep the TS empty past Home Assistant's open timeout), and never a pulled session. When a camera's SPS changes, readers are disconnected to rebuild their decoder. Each URL carries a per-listener secret as `?auth=<secret>` (a request without it gets 404); for your own tools the listener URL (`http://127.0.0.1:<port>/{name}.ts?auth=<secret>`, `{name}` being `aidot_` plus the first 12 characters of the device id) is written, owner-readable, to `hls-ts-url` in `AIDOT_SPROP_DIR` while it runs. A reader counts as a viewer. `0` turns it off. | `1` (on) |
 | `AIDOT_LOGIN_RETRY_LIMIT` | Consecutive failed LAN logins after which a device is left alone: discovery and the retry loop stop kicking it, and a login something else still asks for (Home Assistant's five-minute light poll) is made quietly, until the device's address changes or a login succeeds. One warning marks the moment. A login the device accepts and closes within `AIDOT_LAN_STABLE_SESSION_S` counts as a failure. Applies to every device; in practice, lights on another subnet. | `6` |
 
+`AIDOT_DIRECT_PUBLISH`, `AIDOT_PUBLISH_AAC`, `AIDOT_HLS_DIRECT_TS` and
+`AIDOT_SDES_VIDEO_PT` can also be given to one account client, as
+`CameraClient(..., stream_settings=StreamSettings(...))`. A value set there wins
+for that client's cameras; one left unset is read from the variable, then the
+default. Two clients in one process keep their own.
+
 ### Security hardening
 
 Defaults keep current behaviour (the firmware's signaling carries no verifiable

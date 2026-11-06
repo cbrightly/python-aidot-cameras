@@ -52,6 +52,7 @@ from .lan_retry import (
     _await_connect_with_deadline,
     _next_login_retry_delay,
 )
+from .settings import StreamSettings
 
 from .const import (
     CONF_HARDWARE_VERSION,
@@ -239,6 +240,7 @@ class CameraDeviceClient(CameraMixin, LanRetryMixin, _UpstreamDeviceClient):
         raw_device: Optional[dict] = None,
         login_info: Optional[dict] = None,
         client: Any = None,
+        stream_settings: Optional[StreamSettings] = None,
     ) -> None:
         """Build the upstream client, then initialize camera state.
 
@@ -255,6 +257,9 @@ class CameraDeviceClient(CameraMixin, LanRetryMixin, _UpstreamDeviceClient):
 
         The typed `device` is still built and kept as `_device_model`, because
         the camera layer and the dispatch seam read `.id` / `.aesKey` off it.
+
+        `stream_settings` is the account client's `StreamSettings`; every
+        camera-side read of those knobs goes through it (see `settings.read`).
         """
         # Real cameras report `aesKey: [None]` - a truthy list holding None.
         # Normalize OUR typed copy to None; upstream reads the raw dict, whose
@@ -279,6 +284,7 @@ class CameraDeviceClient(CameraMixin, LanRetryMixin, _UpstreamDeviceClient):
         # self._user_info with the raw dict the camera layer expects.
         self._device_model = device
         self._user_info_model = user_info
+        self.stream_settings = stream_settings
 
         raw_dev = _raw_device
         # `user_info` is normally the raw account dict itself; only fall back

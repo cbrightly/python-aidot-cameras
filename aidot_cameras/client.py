@@ -78,6 +78,7 @@ from .device_client import CameraDeviceClient, LightDeviceClient
 # plus the active_color_mode tracker (see aidot_cameras/device_client.py).
 from .device_client import DeviceStatusData as _CarriedStatusData
 from .discover import CameraDiscover
+from .settings import StreamSettings
 from .exceptions import AidotAuthFailed
 
 _LOGGER = logging.getLogger(__name__)
@@ -261,7 +262,15 @@ class CameraClient(_UpstreamAidotClient):
         username: str | None = None,
         password: str | None = None,
         token: dict | None = None,
+        stream_settings: Optional[StreamSettings] = None,
     ) -> None:
+        # Given to every camera this client creates, so two clients in one
+        # process never share these knobs (see settings.StreamSettings).
+        if stream_settings is not None and not isinstance(
+            stream_settings, StreamSettings
+        ):
+            raise TypeError("stream_settings must be a StreamSettings")
+        self.stream_settings: Optional[StreamSettings] = stream_settings
         # These must exist BEFORE super().__init__: upstream's constructor ends
         # with self.setup_discover(), and our override reads self.login_info.
         self._login_info: dict[str, Any] = {}
@@ -835,6 +844,7 @@ class CameraClient(_UpstreamAidotClient):
                 raw_device=device,
                 login_info=self.login_info,
                 client=self,
+                stream_settings=self.stream_settings,
             )
             # Let the camera HTTP calls force a token refresh on 21026
             # ("Please login again") and retry.

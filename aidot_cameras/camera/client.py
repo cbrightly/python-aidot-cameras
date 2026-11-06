@@ -1757,7 +1757,9 @@ async def _dtls_serve_loop_serve_cycle(
             # thread - no ffmpeg, no listen port for go2rtc to dial.
             # Checked before the direct TS serve, which would otherwise
             # try to BIND the rtsp:// URL's port (go2rtc's own).
-            _publishing = direct_publish_enabled() and is_publishable_url(ps.serve_url)
+            _publishing = direct_publish_enabled(
+                settings.stream_settings_of(self)
+            ) and is_publishable_url(ps.serve_url)
             if _publishing:
                 pass
             elif _is_http_serve_url(ps.serve_url):
@@ -2699,6 +2701,10 @@ class CameraMixin(
 
     # Optional LAN control client; when attached, attribute writes go local-first.
     _lan_client = None
+
+    #: The account client's ``settings.StreamSettings``, or None (environment
+    #: and defaults only). Read through ``settings.stream_settings_of``.
+    stream_settings = None
 
     # MQTT credential state, defaulted at class level so the credential path is
     # safe on any client whose __init__ did not run to completion.
@@ -6097,9 +6103,10 @@ class CameraMixin(
     def hls_ts_url(self) -> Optional[str]:
         """The camera's in-sync MPEG-TS URL for Home Assistant's HLS, or None.
 
-        Set when ``AIDOT_HLS_DIRECT_TS`` (with direct publish and the AAC track)
-        is on, for cameras whose session is sure to feed it (``_hls_ts_eligible``;
-        never a battery camera).
+        Set when in-sync HLS (with direct publish and the AAC track) is on -
+        ``stream_settings``, else ``AIDOT_HLS_DIRECT_TS`` - for cameras whose
+        session is sure to feed it (``_hls_ts_eligible``; never a battery
+        camera).
         Unlike go2rtc's RTSP, a consumer joining this
         stream at any moment gets sound and picture in step. The URL exists
         before the camera's session does and stays the same while the listener
@@ -6110,7 +6117,10 @@ class CameraMixin(
         """
         from . import hls_ts
 
-        if not hls_ts.enabled() or not self._hls_ts_eligible():
+        if (
+            not hls_ts.enabled(settings.stream_settings_of(self))
+            or not self._hls_ts_eligible()
+        ):
             return None
         # Only a camera that publishes to go2rtc feeds the TS: one pulled from
         # its local serve (go2rtc unreachable) never runs the direct publisher,
@@ -6137,7 +6147,8 @@ class CameraMixin(
         video at all. A DTLS camera always direct-publishes when the option is
         on. An SDES camera does only on a model whose media the bridge decrypts
         (``_PLAIN_RTP_MODELS``) and with its offer pinned to H.264
-        (``AIDOT_SDES_VIDEO_PT=96``): an H.265 session keeps the ffmpeg serve.
+        (``sdes_video_pt`` / ``AIDOT_SDES_VIDEO_PT`` 96): an H.265 session
+        keeps the ffmpeg serve.
 
         A battery camera never gets it. Its link loses 15-25% of packets, and
         the TS starts a reader only on a complete keyframe (SPS and IDR in one
@@ -6155,7 +6166,8 @@ class CameraMixin(
             return False
         from .sdes_open import _DIRECT_PUBLISH_VIDEO_PT, _resolve_sdes_video_pt
 
-        return _resolve_sdes_video_pt() == _DIRECT_PUBLISH_VIDEO_PT
+        pinned = _resolve_sdes_video_pt(settings.stream_settings_of(self))
+        return pinned == _DIRECT_PUBLISH_VIDEO_PT
 
     def _hls_ts_expected(self) -> bool:
         """Was this camera handed an in-sync TS URL that a session must feed?
@@ -6166,7 +6178,10 @@ class CameraMixin(
         """
         from . import hls_ts
 
-        return hls_ts.enabled() and self._hls_ts_eligible()
+        return (
+            hls_ts.enabled(settings.stream_settings_of(self))
+            and self._hls_ts_eligible()
+        )
 
     def _hls_ts_session(self):
         """A fresh in-sync TS session for one serve cycle, or None.
@@ -6176,7 +6191,10 @@ class CameraMixin(
         """
         from . import hls_ts
 
-        if not hls_ts.enabled() or not self._hls_ts_eligible():
+        if (
+            not hls_ts.enabled(settings.stream_settings_of(self))
+            or not self._hls_ts_eligible()
+        ):
             return None
         device_id = str(getattr(self, "device_id", "?"))
         try:
@@ -6194,6 +6212,7 @@ class CameraMixin(
         kwargs = {
             "device_id": str(getattr(self, "device_id", "?")),
             "result": result,
+            "stream_settings": settings.stream_settings_of(self),
         }
         session = self._hls_ts_session()
         if session is not None:
@@ -6225,7 +6244,10 @@ class CameraMixin(
         # cheap, so asked before the throttle.
         from . import hls_ts
 
-        if hls_ts.enabled() and hls_ts.consumers(self._go2rtc_stream_name()) > 0:
+        if (
+            hls_ts.enabled(settings.stream_settings_of(self))
+            and hls_ts.consumers(self._go2rtc_stream_name()) > 0
+        ):
             self._viewer_cache = (time.monotonic(), True)
             return True
 

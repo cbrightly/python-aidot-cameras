@@ -115,15 +115,16 @@ EXIT_FAILED = 1
 _OFF = ("0", "false", "no", "off")
 
 
-def direct_publish_enabled() -> bool:
-    """On unless ``AIDOT_DIRECT_PUBLISH`` turns it off.
+def direct_publish_enabled(stream_settings=None) -> bool:
+    """On unless the camera's ``stream_settings`` or ``AIDOT_DIRECT_PUBLISH``
+    turns it off (``settings.read`` decides which wins).
 
     The default since 1.0.0rc44: validated on every model since rc28, the soak
     since 2026-10-04 ran it, and the AAC track and the in-sync HLS stream are
     built on it. An ``rtsp://`` push still needs a server that accepts an
     ANNOUNCE (go2rtc); anything else keeps the ffmpeg serve regardless.
     """
-    return settings.read(ENV_DIRECT_PUBLISH)
+    return settings.read(ENV_DIRECT_PUBLISH, overrides=stream_settings)
 
 
 def is_publishable_url(url: Optional[str]) -> bool:
@@ -997,8 +998,11 @@ class LoopbackRtpPublisher:
         include_audio: bool = True,
         publisher_factory=RtspPublisher,
         ts_session=None,
+        stream_settings=None,
     ):
         self.args = ["<direct-publish>", redact_url(url)]
+        # The camera's StreamSettings, for the AAC switch (see make_aac_track).
+        self._stream_settings = stream_settings
         self.pid = os.getpid()
         self.stdout = None
         self.stdin = None
@@ -1213,7 +1217,7 @@ class LoopbackRtpPublisher:
         """Build the AAC track and announce it (worker thread, before connect)."""
         if self._pcma_idx is None:
             return
-        aac = make_aac_track(self.device_id)
+        aac = make_aac_track(self.device_id, self._stream_settings)
         if aac is None:
             return
         track = PublishTrack(
@@ -1642,12 +1646,14 @@ def dtls_rtp_publish_run(
     publisher_factory=RtspPublisher,
     result: Optional[dict] = None,
     ts_session=None,
+    stream_settings=None,
 ) -> None:
     """Publish the DTLS tap's queues to ``url``. Thread target.
 
     ``ts_session`` (a ``ts_tee.TsSession``), when given, also receives every
     published video frame and AAC frame with its media time, for the MPEG-TS
     that Home Assistant's HLS reads in step whenever it joins.
+    ``stream_settings`` is the camera's, for the AAC switch.
 
     Same contract as ``_dtls_av_mux_run``: consumes ``vq`` items
     ``(annexb_bytes, ts90k, is_keyframe)`` and ``aq`` items
@@ -1661,7 +1667,7 @@ def dtls_rtp_publish_run(
     audio = PublishTrack("audio", 8, 8000, "PCMA", 1)
     # AAC after A-law: Home Assistant's HLS keeps only AAC/MP3 and asks for it by
     # name; everything reading the first audio track keeps A-law. See aac_track.
-    aac = make_aac_track(device_id)
+    aac = make_aac_track(device_id, stream_settings)
     aac_t = (
         PublishTrack("audio", 97, AAC_CLOCK_RATE, "MPEG4-GENERIC", 2) if aac else None
     )

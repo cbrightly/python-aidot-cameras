@@ -241,7 +241,9 @@ class TestNoPinOnPlayback:
     def test_playback_pins_nothing(self, monkeypatch):
         from aidot_cameras.camera import sdes_open
 
-        monkeypatch.setattr(sdes_open, "_resolve_sdes_video_pt", lambda: 96)
+        monkeypatch.setattr(
+            sdes_open, "_resolve_sdes_video_pt", lambda stream_settings=None: 96
+        )
         assert sdes_open._pinned_video_pt(_start()) is None
         assert sdes_open._pinned_video_pt(None) == 96
 
