@@ -66,13 +66,14 @@ installation runs it.
   must last, with video, not to count as short.
 
 ### Fixed
-- **An SDES camera whose audio trails its video keeps its sound.** Once its
-  first video packet arrived the serve waited 1 s for the first audio packet,
-  and launched without audio if none had come. An A001513 reachable only
-  through the relay sent its first audio 1.14 s after its video, so it served
-  the whole session silent. When the camera's answer names an audio payload
-  type the wait is now up to 3 s; it still ends at the first audio packet, and
-  a camera whose answer names no audio keeps the 1 s wait.
+- **An SDES camera whose audio trails its video keeps its sound.** The ffmpeg
+  serve (recordings, snapshots, H.265 sessions, and any serve with direct
+  publish off) mapped audio only once an audio packet had arrived, waiting 1 s
+  after the first video packet for one and launching video-only otherwise. An
+  A001513 reachable only through the relay sent its first audio 1.14 s after
+  its video, so it served the whole session silent. It still waits the 1 s for
+  the type it sees on the wire, but now falls back to the type the camera's
+  answer named, as the direct publish already did.
 
 ## [1.0.0rc70]
 
