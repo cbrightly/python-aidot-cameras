@@ -4,8 +4,8 @@ a fresh one every attempt.
 A fresh peerid registers a NEW camera-side session, and the camera releases old
 ones only slowly (~3-4 min measured), so minting one per retry on a failing loop
 stacks up sessions faster than they drain - which is how a battery A001513 gets
-wedged into a wake-then-sleep loop that serves nothing. The official app reuses a
-peerid and resends within one session. This locks:
+wedged into a wake-then-sleep loop that serves nothing. (The official app sends
+one offer per attempt; its offer-resend timer is dead code.) This locks:
   - the impl accepts reuse_peer_id and uses it verbatim when given;
   - it still mints a fresh one when not given (unchanged for every other caller);
   - the SDES keepalive loop holds one across retries and rotates it after a

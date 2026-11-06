@@ -141,8 +141,12 @@ HASLISTEVENT_RESP_CMD = 0x4B6
 HASLISTEVENT_REQ_CMD = 0x4B5
 LISTEVENT_REQ_CMD = 0x318
 
-#: The event selector the vendor's app sends, read off
-#: KVSWebRTCChannel.getSDRecordList: `const/16 v1, 0x12`.
+#: The event selector the vendor's app sends in its event mode. Its
+#: KVSWebRTCChannel.getSDRecordList2 (KVSWebRTCChannel.smali:13184) puts
+#: byte 20 = 1 when its eventType is 0 (:13206) and 0x12 otherwise (:13211);
+#: SDEventsFragment sets eventType 0 when the SdcardRecord_Type prop is "1"
+#: (SDEventsFragment.smali:2893-2910). So 0x12 is only the app's event-mode
+#: branch, not what it always sends.
 #:
 #: It is NOT the default here, because on a camera with a card it returns
 #: nothing. Measured 2026-08-11: the same session, the same window, 0x12

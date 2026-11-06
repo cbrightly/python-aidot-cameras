@@ -13,22 +13,39 @@ Read the code before acting on any parity claim, including this one.
 
 | Gap | Claim in the June trace | Actual state |
 | --- | --- | --- |
-| **A** reconnect backoff | ours 5 s, app 15 s fixed + 15 s gate | **deliberate divergence**, A/B'd |
-| **B** offer resend | app resends 2-3x per attempt, we send once | **implemented** |
+| **A** reconnect backoff | ours 5 s, app 15 s fixed + 15 s gate | **deliberate divergence**, A/B'd (app is actually one automatic rebuild at 15 s, see below) |
+| **B** offer resend | app resends 2-3x per attempt, we send once | **claim wrong**: the current app sends once; our resend is our own divergence |
 | **D** terminal ack handling | we retry `-50002`/`-50015`, app treats them as terminal | **implemented** |
 
 ### A - reconnect backoff: intentionally 5 s, not a gap
 
 `_streaming_loop` uses `_MIN_DELAY = 5.0` with exponential escalation to 300 s.
-The comment at that line records the reasoning: the app's fixed 15 s (f0.java
-`I1=15000`) was tried, measured, and produced no benefit while slowing recovery.
+The comment at that line records the reasoning: a fixed 15 s, as the app's 15 s
+gate suggested, was tried, measured, and produced no benefit while slowing
+recovery.
+
+What the current app actually does is narrower than "reconnect every 15 s". On
+ICE FAILED, CLOSED or DISCONNECTED it calls `onError` and `release(false)`
+(`KVSWebRTCChannel$8.smali:1017-1086`), and `NewLivePresenter$32.onError` shows a
+manual retry panel. Its only automatic rebuild is a single one gated at 15 s
+since the last attempt: `autoRetryConnectTimeOutMs = 15000`
+(`KVSWebRTCChannel.smali:862-864`), read in `anylizeAutoReconnectLogic`
+(`KVSWebRTCChannel.smali:3284`). Every automatic reconnect we do is therefore our
+own choice, not parity.
 Home Assistant users notice a slow reconnect; they do not notice a fast one.
 
 Do not "fix" this to 15 s without new evidence that beats the A/B already done.
 The SDES keepalive uses 10 s and the DTLS serve loop already uses 15 s, so the
 three loops differ on purpose rather than by accident.
 
-### B - offer resend: implemented
+### B - offer resend: ours, not the app's
+
+The June trace was wrong about the app. In the current APK the resend timer is
+dead code: `mSendOfferTimer` (`KVSWebRTCChannel.smali:175`) is only ever
+cancelled and set to null (`:1892`/`:1900`, `:11887`/`:11897`) and is never
+assigned a `Timer`, so the app sends one offer per attempt. The resends below
+are a deliberate divergence of ours, kept because they recover answers the
+camera would otherwise never send.
 
 `webrtc_open.py` resends the offer within a single attempt. `_init_reconnect_resends`
 gates a resend (bounded at 2) after a camera reconnect, and the echo-reversal
@@ -49,7 +66,9 @@ fresh peerid into a camera that just refused one.
 - **Teardown is dispose-only.** The app sends no `livePlay:0`, no stop command,
   no MQTT unsubscribe; the camera releases on heartbeat loss. An earlier claim
   that we were "missing a camera stop" was retracted after tracing the app.
-- **Heartbeat** is command 5156 every 10 s, matching f0.java.
+- **Heartbeat** is command 5156 every 10 s, matching the app: a 10 s `Timer`
+  (`KVSWebRTCChannel$9.smali:456-459`) calling `sendHeartbeat`
+  (`KVSWebRTCChannel.smali:14988`).
 - **Reconnect model** is a full re-offer, not an ICE restart - `restartIce` does
   not appear in the app at all.
 - **ICE handling has nothing to copy.** The app passes inbound candidates to

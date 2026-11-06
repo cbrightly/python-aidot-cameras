@@ -356,8 +356,9 @@ class _CameraSdMixin:
           * ``answered=True`` - the camera replied. Only now does an empty
             ``records`` mean the card holds nothing in this window.
 
-        Asks with event selector 0. The vendor's app sends 0x12 and on a
-        card-bearing A000088 that returns an EMPTY page while 0 returns the
+        Asks with event selector 0. The vendor's app sends 0x12 in its event
+        mode (1 otherwise; see sd_events.SD_EVENT_APP), and on a card-bearing
+        A000088 that returns an EMPTY page while 0 returns the
         records - measured 2026-08-11, same session, same window.
 
         The list is asked in windows of at most three days, newest first: an

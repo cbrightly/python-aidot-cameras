@@ -47,6 +47,18 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   payload now carries `parentId` when the device record has either field, and
   the topic moves to `iot/v1/c/{directId}/...` only for a non-empty `directId`.
   A record with neither sends exactly what it did before.
+### Changed
+- **Docs: citations into the official app now point at the current APK.** The
+  old `f0.java` references came from an older build; comments now cite
+  `KVSWebRTCChannel.smali` and its inner classes by line. Several claims were
+  wrong for the current app and are corrected: it does not resend `webrtcReq`
+  (the resend timer is dead code - so the 0.12.16 entry saying the SDES peerid
+  reuse was "mirroring the official app, which resends within one session" is
+  wrong; our resend is our own choice); it does not reconnect on ICE
+  failure/close/disconnect but shows a manual retry, with one automatic rebuild
+  gated at 15 s; it numbers PTZ from the control counter, and the camera does
+  check seq for SESSION_MODE; the app's 0x12 SD-list selector is only its
+  event-mode branch (it sends 1 otherwise). No behaviour change.
 
 ## [1.0.0rc71]
 

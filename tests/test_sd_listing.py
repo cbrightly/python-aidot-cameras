@@ -140,7 +140,7 @@ async def test_the_request_asks_with_the_selector_that_answers():
     session = _Session({})
     await _Camera(session).async_get_sd_recordings()
     listevent = [a for a in session.asked if a[2] == LISTEVENT_RESP_CMD][0]
-    # Byte 20 is the event selector. 0x12 is the app's and returns nothing.
+    # Byte 20 is the event selector. 0x12 (the app's event-mode one) returns nothing.
     assert listevent[1][20] == 0
     assert len(listevent[1]) == 24
 
