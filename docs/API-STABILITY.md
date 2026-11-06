@@ -48,6 +48,7 @@ purpose.
 | `AidotLivePlayRefused` | `AidotStreamOpenError` | the camera answered `livePlay=0` |
 | `AidotNoWebrtcAnswer` | `AidotStreamOpenError` | no `webrtcResp` within the open timeout |
 | `AidotNegotiationFailed` | `AidotStreamOpenError` | the camera's SDP could not be applied, or ICE did not connect |
+| `AidotIceNotEstablished` | `AidotNegotiationFailed` | ICE did not connect; the camera still holds the session it accepted, so retry no sooner than after a busy refusal |
 | `AidotFfmpegMissing` | `AidotStreamOpenError` | ffmpeg is needed and not installed |
 | `AidotSdPlaybackUnavailable` | `AidotStreamOpenError` | an SD recording was asked for where it cannot play: a DTLS camera without a `.ts` output_path, an answer with no data channel, or a camera this client streams live |
 | `AidotUnknownRegion` | `AidotError`, `ValueError` | the account region is not a known one (see `AIDOT_EXTRA_REGIONS`) |

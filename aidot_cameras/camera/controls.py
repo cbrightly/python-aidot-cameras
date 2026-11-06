@@ -12,6 +12,7 @@ import struct
 from typing import Optional
 
 from .constants import _PTZ_DIR_CODES, _STREAM_QUALITY, SETSTREAMCTRL_CMD
+from .models import _cloud_reports_offline
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -385,7 +386,7 @@ class _CameraControlsMixin:
         is "The device Needs a minute to reboot"), during which a viewer sees a
         session that connects and delivers nothing.
         """
-        if (not self.status.online) and getattr(self, "_cloud_online_explicit", False):
+        if _cloud_reports_offline(self):
             _LOGGER.warning(
                 "reboot refused for %s: the cloud reports it offline", self.device_id
             )

@@ -353,3 +353,14 @@ class VideoFrame:
     @property
     def is_audio(self) -> bool:
         return self.frame_type == _FRAME_TYPE_AUDIO
+
+
+def _cloud_reports_offline(dev: Any) -> bool:
+    """True only when the cloud has explicitly reported ``dev`` offline.
+
+    ``DeviceStatusData.online`` defaults to False, which must not read as
+    "offline": only once ``update_status_from_device`` has seen an ``online``
+    flag (``_cloud_online_explicit``) does a False mean the cloud says the
+    camera is gone. The serve loops' offline pause, the open-failure log level
+    and the reboot guard all ask this same question."""
+    return (not dev.status.online) and getattr(dev, "_cloud_online_explicit", False)

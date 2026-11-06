@@ -352,6 +352,7 @@ KNOBS: "dict[str, Knob]" = _registry(
     Knob("AIDOT_ICE_DISCONNECT_S", 8.0, "float"),
     Knob("AIDOT_DTLS_RETRY_GATE_S", 15.0, "float"),
     Knob("AIDOT_BUSY_RETRY_S", 45.0, "float"),
+    Knob("AIDOT_DTLS_SHORT_SESSION_S", 30.0, "float", minimum=0.0),
     Knob("AIDOT_BUSY_BACKOFF_S", 20.0, "float"),
     Knob("AIDOT_OFFLINE_RECHECK_S", 30.0, "float"),
     Knob("AIDOT_OFFLINE_PROBE_S", 600.0, "float"),

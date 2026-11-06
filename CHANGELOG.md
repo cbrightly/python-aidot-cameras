@@ -6,6 +6,62 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+Held until the 1.0.0 soak ends (target 2026-11-17): it changes the DTLS serve
+loop's retry pacing, and a change to the serve loop resets the soak clock.
+
+### Changed
+- **A DTLS camera whose sessions keep failing fast is backed off, not
+  hammered.** On 2026-11-04 an A000088's sessions died within seconds of
+  opening for half an hour. A connected open reset the serve loop's backoff,
+  so it was reopened on the bare 15 s gate every time; then opens stopped
+  connecting ("ICE connection not established"), and every retry 15 s after
+  one was refused as busy (-50002), because the camera still held the session
+  it had accepted for the offer that never connected. Then it went offline.
+  Pounding an A000088 like that is what can wedge its DTLS stack. Now a
+  session that ends on its own within 30 s of its open succeeding, or without
+  ever delivering video, is a short session, paced on its own backoff apart
+  from failed opens: the loop waits 30 s after the first, then jittered
+  between 30 and 45 s, so the 2026-11-04 cadence goes from a reopen every 15 s
+  to one every 30-45 s plus the session's own life; capped at 45 s so that,
+  typically, a viewer's pull held by the serve relay is still waiting when the
+  reopen lands (the arithmetic, and when it does not hold, is by
+  `_SHORT_SESSION_CAP_S` in camera/client.py). A session's life runs from its
+  open succeeding to when it stopped serving (when its connection went bad,
+  not when the disconnect debounce gave up), so a teardown cannot carry it
+  past 30 s. A session that lasts 30 s and delivered video resets that
+  backoff, whatever its last serve cycle did; one with no video canary to read
+  counts as having delivered unless the presence watchdog declared it
+  video-less. A session that never delivers video is paced only this way; it
+  no longer also escalates the failed-open backoff. While it waits the loop
+  keeps the camera's concurrent-stream slot (`AIDOT_MAX_CONCURRENT_STREAMS`),
+  as a failed-open wait always has, and does not report the serve ready. Idle
+  release is unchanged, the serve cycle's alone: a camera nobody watches whose
+  sessions keep dying fast is reopened, each time after a 30-45 s wait plus
+  its session time, for as long as its keepalive runs: the library does not
+  bound it, the caller stops it (its viewer policy, or the entity being
+  unloaded). Failed opens are paced, and reach the slow probe, exactly as
+  before: an open that succeeds still resets that count. The threshold is
+  `AIDOT_DTLS_SHORT_SESSION_S`.
+- **After an open whose ICE never connected, the next open waits as long as
+  after a busy refusal** (`AIDOT_BUSY_RETRY_S`, 45 s by default), and is
+  otherwise paced like any failed open (backoff, slow probe, offline pause).
+  The wait is a floor: neither the slow probe nor the offline pause, whether
+  it ends early because the camera came back online or falls through to a
+  probe open, cuts it short. Measured only after plain ICE failures: a
+  shifted answer that did not connect keeps its 3 s not-ready burst, since it
+  still connects about 1 in 7 on a quick retry. Only the serve loop's own
+  retries get the floor; the other open paths (a live view, SD playback)
+  retry as before. Nor does a setRemoteDescription failure after the camera
+  answered, which also leaves a session held on the camera; releasing it on
+  the camera side in `_abort_open` would be the general fix (a follow-up).
+
+### Added
+- `AidotIceNotEstablished`, a subclass of `AidotNegotiationFailed`, raised
+  when ICE does not connect in time; code that catches
+  `AidotNegotiationFailed` still catches it.
+- `AIDOT_DTLS_SHORT_SESSION_S` (default 30): how long a served DTLS session
+  must last, with video, not to count as short.
+
 ## [1.0.0rc70]
 
 Soak: resets the clock. The change is to every SDES session's control channel

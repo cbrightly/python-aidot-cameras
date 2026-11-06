@@ -24,6 +24,7 @@ if TYPE_CHECKING:  # import cost stays out of the runtime path
 from ..exceptions import (
     AidotCameraBusy,
     AidotCameraNotReady,
+    AidotIceNotEstablished,
     AidotLivePlayRefused,
     AidotMqttUnavailable,
     AidotNegotiationFailed,
@@ -4715,7 +4716,7 @@ async def _dtls_open_ice_candidates_and_connect(
             # cap is the camera declining, not a transport fault, and the
             # generic 15s-gated retry is the wrong response to it.
             raise AidotCameraNotReady(self.device_id)
-        raise AidotNegotiationFailed(
+        raise AidotIceNotEstablished(
             f"async_open_webrtc_stream: ICE connection not established "
             f"(connState={ps.pc.connectionState}"
             f"  iceState={ps.pc.iceConnectionState}) within {_ice_timeout}s"
