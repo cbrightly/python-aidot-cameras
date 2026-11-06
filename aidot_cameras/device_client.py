@@ -67,6 +67,7 @@ from .const import (
     CONF_PROPERTIES,
     CONF_SERVICE_MODULES,
     Identity,
+    is_camera_model,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -306,8 +307,7 @@ class CameraDeviceClient(CameraMixin, LanRetryMixin, _UpstreamDeviceClient):
         never succeed.  This is the single chokepoint for both the discovery and
         the reconnect-chain login paths.
         """
-        model = getattr(getattr(self, "info", None), "model_id", "") or ""
-        if "IPC" in model:
+        if is_camera_model(getattr(getattr(self, "info", None), "model_id", "")):
             return
         # LanRetryMixin is next in the MRO; it forwards to upstream and clears
         # the consecutive-failure count on a login that got through.

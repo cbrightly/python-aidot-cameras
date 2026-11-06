@@ -17,7 +17,7 @@ camera layer and the CLI depend on and upstream does not provide:
 * ``async_ensure_mqtt_credential()``, which fetches the MQTT password cameras
   need (never persisted - it rotates on every account login);
 * ``async_ensure_token()``, the refresh hook camera HTTP calls invoke on a
-  21026 "Please login again";
+  21026 "Please login again" (or 630009), or a full login on a void session;
 * ``async_get_all_device()`` returning cameras (upstream filters them out);
 * discovery and persistent-MQTT teardown.
 """
@@ -70,6 +70,7 @@ from .const import (
     LOGIN_INFO_PERSISTENT_MQTT_KEY,
     LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
     RUNTIME_ONLY_LOGIN_INFO_KEYS,
+    is_camera_model,
 )
 from .device_client import CameraDeviceClient, LightDeviceClient
 
@@ -111,14 +112,9 @@ def _spawn_bg(coro):
     return _t
 
 
-def _model_is_camera(model_id: "Optional[str]") -> bool:
-    """True for an AiDot IPC (camera) model id, e.g. ``LK.IPC.A001513``."""
-    return "IPC" in (model_id or "").upper()
-
-
 def _is_camera_device(device: dict[str, Any]) -> bool:
     """Camera test against a raw cloud device dict (before any client exists)."""
-    return _model_is_camera(device.get(CONF_MODEL_ID))
+    return is_camera_model(device.get(CONF_MODEL_ID))
 
 
 def _is_camera(device_client: "DeviceClient") -> bool:
@@ -128,7 +124,7 @@ def _is_camera(device_client: "DeviceClient") -> bool:
     pushing a discovered IP would trigger light-protocol logins on TCP:10000
     (which can hang - the camera accepts but never answers).
     """
-    return _model_is_camera(
+    return is_camera_model(
         getattr(getattr(device_client, "info", None), "model_id", "")
     )
 
@@ -495,7 +491,8 @@ class CameraClient(_UpstreamAidotClient):
         in-flight refresh instead of each starting their own re-login.
 
         ``force_login`` skips the refresh token and re-logs in outright, for the
-        codes that mean the session itself is void (21027/21041). Such a caller
+        codes that mean the session itself is void (21025/21027, and upstream's
+        21041; see ``_AUTH_LOGIN_CODES`` in camera.client). Such a caller
         does NOT join an in-flight refresh-only attempt: that attempt can only
         deliver the token its own session already invalidated.
         """

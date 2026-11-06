@@ -124,6 +124,13 @@ from .health import HealthReporter, dtls_snapshot as _dtls_snapshot
 
 _LOGGER = logging.getLogger(__name__)
 
+#: Response codes that mean the access token expired; the refresh token fixes
+#: them (LDSAutoRetryHttpRequest.smali: 21026, 630009 -> refresh).
+_AUTH_REFRESH_CODES = (21026, 630009, "21026", "630009")
+#: Codes that mean the session is void and need a full login. 21025 and 21027
+#: are the app's; 21041 is upstream's (aidot.client voids the token on it).
+_AUTH_LOGIN_CODES = (21025, 21027, 21041, "21025", "21027", "21041")
+
 #: Guards every client's ``_live_dseq``; see ``_next_dseq``.
 _DSEQ_LOCK = threading.Lock()
 
@@ -3217,7 +3224,7 @@ class CameraMixin(
         if not isinstance(data, dict):
             return False
         code = data.get("code")
-        if code in (21026, 21027, 21041, "21026", "21027", "21041"):
+        if code in _AUTH_REFRESH_CODES or code in _AUTH_LOGIN_CODES:
             return True
         return "login again" in str(data.get("desc", "")).lower()
 
@@ -3225,18 +3232,21 @@ class CameraMixin(
     def _auth_error_needs_full_login(data: Any) -> bool:
         """True if the SESSION is void, not merely the access token.
 
-        21026 is an expired access token and the refresh token fixes it. 21027
-        and 21041 mean the session is finished and the refresh token with it, so
-        a `/users/refreshToken` round trip is spent for nothing - and if the
-        endpoint hands back a token the server then refuses, the retry-once
-        call sites never reach the full re-login that would actually recover.
+        21026 and 630009 are an expired access token and the refresh token
+        fixes it. 21025 and 21027 mean the session is finished and the refresh
+        token with it (the app's LDSAutoRetryHttpRequest refreshes on the first
+        pair and sends the user back to login on 21025); 21041 is upstream's
+        addition, not the app's, and is kept because upstream voids the token on
+        it. A `/users/refreshToken` round trip on those is spent for nothing -
+        and if the endpoint hands back a token the server then refuses, the
+        retry-once call sites never reach the full re-login that would recover.
 
         The desc-only "login again" match is deliberately NOT fatal: it carries
         no code, so it cannot claim which of the two this is.
         """
         if not isinstance(data, dict):
             return False
-        return data.get("code") in (21027, 21041, "21027", "21041")
+        return data.get("code") in _AUTH_LOGIN_CODES
 
     async def _async_refresh_auth_token(self, data: Any = None) -> bool:
         """Refresh the access token via the AidotClient callback (in place).
@@ -4141,6 +4151,9 @@ class CameraMixin(
           Payload: {"id": deviceId, "method": "setDevAttrReq",
                     "service": "device", "seq": "<generated>",
                     "payload": {"attr": {key: value}}}
+        The H5 DeviceControl MQTT builder (assets/build.zip, main chunk) sends
+        ``{devId, parentId: directId || parentId, userId, password, attr}`` on
+        ``iot/v1/c/{directId || id}/device/setDevAttrReq``; we follow it.
 
         LDSBaseMqttServiceImpl auto-injects seq in the official app;
         we add it ourselves.  onlyPubAck=false means camera sends
@@ -4172,7 +4185,16 @@ class CameraMixin(
         seq = f"ap{_random.randint(1000000, 9999999)}"
         # Web app JS (app-beautified.js:26551) includes userId + password in payload;
         # b6.java does not - camera accepts both, but web format is more complete.
+        # directId/parentId are top-level fields of the cloud device record.
+        # Only a non-empty directId moves the topic; without one it stays on
+        # the device id, the shape every model is proven on.
+        raw = getattr(self, "_raw_device", None)
+        raw = raw if isinstance(raw, dict) else {}
+        direct_id = str(raw.get("directId") or "")
+        parent_id = direct_id or str(raw.get("parentId") or "")
         inner: dict = {"devId": device_id, "attr": {attr: value}}
+        if parent_id:
+            inner["parentId"] = parent_id
         if user_id:
             inner["userId"] = str(user_id)
         if cam_pwd:
@@ -4192,7 +4214,7 @@ class CameraMixin(
                 "payload": inner,
             }
         )
-        pub_topic = f"iot/v1/c/{device_id}/device/setDevAttrReq"
+        pub_topic = f"iot/v1/c/{direct_id or device_id}/device/setDevAttrReq"
         _LOGGER.info("setDevAttrReq: %s=%s -> %s  seq=%s", attr, value, device_id, seq)
         ok = await self._mqtt_device_cmd(
             pub_topic, payload, timeout=timeout, ack_keyword="setDevAttr", seq=seq

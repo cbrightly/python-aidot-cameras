@@ -12,6 +12,8 @@ import asyncio
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aidot_cameras.client import CameraClient, _include_shared_houses
@@ -74,6 +76,19 @@ def test_include_shared_houses_override(monkeypatch):
     assert _include_shared_houses() is True
     monkeypatch.setenv("AIDOT_INCLUDE_SHARED_HOUSES", "0")
     assert _include_shared_houses() is False
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "False", "no", "off", " OFF ", ""])
+def test_include_shared_houses_falsy_words_are_off(monkeypatch, raw):
+    """It was a bool_zero knob, where only "0" was off and "false" turned it on."""
+    monkeypatch.setenv("AIDOT_INCLUDE_SHARED_HOUSES", raw)
+    assert _include_shared_houses() is False
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "YES", "on"])
+def test_include_shared_houses_truthy_words_are_on(monkeypatch, raw):
+    monkeypatch.setenv("AIDOT_INCLUDE_SHARED_HOUSES", raw)
+    assert _include_shared_houses() is True
 
 
 def test_shared_house_skipped_when_unset(monkeypatch):

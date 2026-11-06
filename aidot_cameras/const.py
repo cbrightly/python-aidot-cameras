@@ -78,6 +78,15 @@ LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY = "_persistent_mqtt_lock"
 # start fetches a fresh one - a single extra HTTP call.
 LOGIN_INFO_MQTT_PASSWORD_KEYS = ("mqttPassword", "mqttPwd")
 
+
+def is_camera_model(model_id: "str | None") -> bool:
+    """True for an AiDot IPC (camera) model id, e.g. ``LK.IPC.A001513``.
+
+    The one camera test: the account listing, the CLI and the TCP:10000 login
+    gate all ask it, so they cannot disagree on a lower-case model id."""
+    return "IPC" in (model_id or "").upper()
+
+
 RUNTIME_ONLY_LOGIN_INFO_KEYS = frozenset(
     {
         LOGIN_INFO_PERSISTENT_MQTT_KEY,

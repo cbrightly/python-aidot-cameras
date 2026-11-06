@@ -1,7 +1,8 @@
-"""21027/21041 mean the session is void - go straight to a full login.
+"""21025/21027/21041 mean the session is void - go straight to a full login.
 
-The three auth codes do not mean the same thing. 21026 is an expired access
-token, which the refresh token can fix. 21027 and 21041 mean the session itself
+The auth codes do not mean the same thing. 21026 and 630009 are an expired
+access token, which the refresh token can fix. 21025 and 21027 (the app's) and
+21041 (upstream's) mean the session itself
 is finished, and the refresh token with it - so spending a round trip on
 ``/users/refreshToken`` before logging in is at best waste.
 
@@ -58,6 +59,24 @@ def test_21027_and_21041_need_a_full_login():
         ), code
 
 
+def test_630009_is_an_auth_error_recoverable_by_the_refresh_token():
+    """LDSAutoRetryHttpRequest refreshes on 630009 exactly as on 21026."""
+    for code in (630009, "630009"):
+        assert CameraDeviceClient._is_auth_error({"code": code}) is True, code
+        assert (
+            CameraDeviceClient._auth_error_needs_full_login({"code": code}) is False
+        ), code
+
+
+def test_21025_is_an_auth_error_that_needs_a_full_login():
+    """The app sends the user back to the login page on 21025."""
+    for code in (21025, "21025"):
+        assert CameraDeviceClient._is_auth_error({"code": code}) is True, code
+        assert (
+            CameraDeviceClient._auth_error_needs_full_login({"code": code}) is True
+        ), code
+
+
 def test_a_non_auth_body_needs_nothing():
     assert CameraDeviceClient._auth_error_needs_full_login({"code": 200}) is False
     assert CameraDeviceClient._auth_error_needs_full_login(None) is False
@@ -99,6 +118,20 @@ def test_a_21026_body_does_not_force_a_login():
     dc.set_token_refresh_cb(_cb)
     assert asyncio.run(dc._async_refresh_auth_token({"code": 21026})) is True
     assert asked == [False]
+
+
+def test_a_630009_body_refreshes_and_a_21025_body_logs_in():
+    dc = _make_dc()
+    asked = []
+
+    async def _cb(force_login=False):
+        asked.append(force_login)
+        return True
+
+    dc.set_token_refresh_cb(_cb)
+    assert asyncio.run(dc._async_refresh_auth_token({"code": 630009})) is True
+    assert asyncio.run(dc._async_refresh_auth_token({"code": 21025})) is True
+    assert asked == [False, True]
 
 
 def test_a_callback_that_takes_no_argument_still_works():

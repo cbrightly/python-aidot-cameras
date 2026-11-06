@@ -256,8 +256,8 @@ KNOBS: "dict[str, Knob]" = _registry(
     Knob(
         "AIDOT_INCLUDE_SHARED_HOUSES",
         False,
-        "bool_zero",
-        note="any value but 0 enables",
+        "bool_off",
+        note="1/true/yes/on enables; was bool_zero, where false meant on",
     ),
     # --- camera streaming / tuning (README) ---------------------------------
     Knob("AIDOT_VIDEO_DECODER", None, "str", note="a decoder name or hwaccel:<method>"),
