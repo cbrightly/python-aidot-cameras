@@ -8918,6 +8918,12 @@ class _SdesOpenMixin:
             )
 
         _sd_start_waiter = None
+        # Before PLAY_START can go out, so a short clip's end is not missed.
+        _sd_end_waiter = None
+        if ps.sd_playback is not None:
+            from .sd_playback import play_end_waiter
+
+            _sd_end_waiter = play_end_waiter(_avio_responses)
         _sd_start_failed = False
         _sd_unservable = False
         try:
@@ -9987,6 +9993,7 @@ class _SdesOpenMixin:
             # the session hands it out on request rather than the open
             # holding the started stream back for it.
             playback_waiter=_sd_start_waiter,
+            playback_end_waiter=_sd_end_waiter,
             playback=ps.sd_playback,
             playback_clock=_media_hold.clock if _media_hold is not None else None,
             playback_output=output_path if ps.sd_playback is not None else None,

@@ -160,6 +160,13 @@ def answers(command: int):
     return _match
 
 
+def play_end_waiter(router: Any) -> Any:
+    """Listen for the camera's PLAY_END for a session's life: a 0x31b reply
+    nobody asked for, sent when the recording has run out. Register it before
+    PLAY_START goes out."""
+    return router.expect(RECORD_PLAYCONTROL_RESP_CMD, answers(PLAY_END))
+
+
 def session_mode_of(payload: Optional[bytes]) -> Optional[int]:
     """The mode a SESSION_MODE_RESP (5377) payload reports, or None.
 
@@ -767,16 +774,28 @@ class H265AccessUnits:
 
 
 class _PlaybackControls:
-    """Pause, resume, seek and the PLAY_START reply, on either session type.
+    """Pause, resume, seek, the PLAY_START reply and the end of play, on
+    either session type.
 
     The session sets ``_sd_playback`` (the SdPlaybackStart it was opened with,
-    or None for live), ``_playback_waiter`` and ``_sd_seek_count``, and has
-    ``async_avio_request``.
+    or None for live), ``_playback_waiter``, ``_playback_end_waiter`` and
+    ``_sd_seek_count``, and has ``async_avio_request``.
     """
 
     _sd_playback: Any = None
     _playback_waiter: Any = None
+    #: The camera's 0x31b reply carrying PLAY_END, unasked: the app's
+    #: KVSWebRTCChannel (sswitch_e) takes it as the end of the recording and
+    #: calls reciveStreamEnd. None for live.
+    _playback_end_waiter: Any = None
     _sd_seek_count = 0
+
+    @property
+    def playback_ended(self) -> bool:
+        """True once the camera has marked the end of the recording this
+        session plays (False for live, and before the end)."""
+        waiter = self._playback_end_waiter
+        return bool(waiter is not None and waiter.answered)
 
     async def playback_reply(self, timeout: float = 10.0):
         """The camera's RECORD_PLAYCONTROL reply to the open's PLAY_START.

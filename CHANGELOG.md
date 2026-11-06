@@ -6,6 +6,17 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+### Fixed
+- **An SD playback ends on the camera's PLAY_END, on DTLS as well as SDES.**
+  The app ends a play when the camera sends a RECORD_PLAYCONTROL reply
+  (0x31b) carrying command 7 (PLAY_END), unasked. The library ignored it and
+  marked the end only from the all-ones frame time on SDES media, so a DTLS
+  session never reported an end: a night clip the camera sends about four
+  times faster than real time could only be ended by a caller's own timers.
+  Both opens now listen for PLAY_END from before PLAY_START goes out, and
+  `playback_ended` is True once it arrives, on both session types. On SDES
+  the frame-time end still counts; either signal ends the play.
+
 ## [1.0.0rc71]
 
 Soak: resets the clock. The changes are to the DTLS serve loop's retry pacing

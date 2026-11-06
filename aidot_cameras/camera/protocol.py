@@ -3230,6 +3230,12 @@ class _AvioWaiter:
         """Withdraw the question - used when the command could not be sent."""
         self._router._forget(self)
 
+    @property
+    def answered(self) -> bool:
+        """True once the camera's reply has arrived; never blocks."""
+        f = self._future
+        return f.done() and not f.cancelled() and f.exception() is None
+
     async def result(
         self, timeout: float, *, keep: bool = False
     ) -> "Optional[AvioResponse]":

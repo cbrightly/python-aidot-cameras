@@ -47,6 +47,7 @@ class WebRTCSession(_PlaybackControls, AvioRequestMixin):
         talk_holder: Any = None,
         responses: Any = None,
         playback_waiter: Any = None,
+        playback_end_waiter: Any = None,
         playback: Any = None,
         next_seq: "Optional[Callable[[], int]]" = None,
     ) -> None:
@@ -71,6 +72,7 @@ class WebRTCSession(_PlaybackControls, AvioRequestMixin):
         )
         # SD playback (see sd_playback._PlaybackControls); None for live.
         self._playback_waiter = playback_waiter
+        self._playback_end_waiter = playback_end_waiter
         self._sd_playback = playback
         self._sd_seek_count = 0
         # The client's dseq counter (``_next_dseq``), as the app's sendCtrl

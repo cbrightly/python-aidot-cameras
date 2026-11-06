@@ -62,6 +62,7 @@ class SdesSession(_PlaybackControls, AvioRequestMixin):
         responses=None,
         abort_chan=None,
         playback_waiter=None,
+        playback_end_waiter=None,
         playback=None,
         playback_clock=None,
         playback_output=None,
@@ -133,6 +134,7 @@ class SdesSession(_PlaybackControls, AvioRequestMixin):
         # The pending RECORD_PLAYCONTROL reply when this session was opened to
         # play an SD recording; None for live.  Read with playback_reply().
         self._playback_waiter = playback_waiter
+        self._playback_end_waiter = playback_end_waiter
         # The SdPlaybackStart this session was opened with (its record and
         # channel), for pause, resume and seek; None for live.
         self._sd_playback = playback
@@ -265,8 +267,9 @@ class SdesSession(_PlaybackControls, AvioRequestMixin):
     def playback_ended(self) -> bool:
         """True once the camera has marked the end of the recording this
         session plays (False for live, and before the end)."""
+        # Either signal: the all-ones frame time on the media, or PLAY_END.
         clock = self._playback_clock
-        return bool(clock is not None and clock.ended)
+        return bool(clock is not None and clock.ended) or super().playback_ended
 
     def media_stats(self) -> dict:
         """Snapshot of media actually forwarded to ffmpeg by the bridge.
