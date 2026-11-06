@@ -6,6 +6,91 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+## [1.0.0rc71]
+
+Soak: resets the clock. The changes are to the DTLS serve loop's retry pacing on
+every A000088, to when an SDES serve launches, to SD playback's end and to
+talk pacing, once the reference installation runs it.
+
+### Added
+- **`StreamSettings`: stream settings per account client, not per process.**
+  `CameraClient(..., stream_settings=StreamSettings(...))` takes
+  `direct_publish`, `publish_aac`, `hls_direct_ts` and `sdes_video_pt`, the
+  per-client form of `AIDOT_DIRECT_PUBLISH`, `AIDOT_PUBLISH_AAC`,
+  `AIDOT_HLS_DIRECT_TS` and `AIDOT_SDES_VIDEO_PT`, and hands them to every
+  camera the client creates (`CameraDeviceClient.stream_settings`). Exported
+  from the package root. Values are checked when it is built.
+- `AidotIceNotEstablished`, a subclass of `AidotNegotiationFailed`, raised
+  when ICE does not connect in time; code that catches
+  `AidotNegotiationFailed` still catches it.
+- `AIDOT_DTLS_SHORT_SESSION_S` (default 30): how long a served DTLS session
+  must last, with video, not to count as short.
+
+### Changed
+- **One precedence rule for those four knobs, on every path a camera reads
+  them:** the client's setting, then the environment variable if it is set,
+  then the default. The read sites that had no camera in hand (the direct
+  publish, AAC and in-sync HLS switches, the SDES codec pin, the AAC track
+  the publishers build) now take the camera's settings as an argument, so the
+  publisher threads see the same value the open decided on. A client given
+  nothing reads exactly as before, and the variables stay supported (see
+  docs/ENVIRONMENT.md).
+- **Docs: citations into the official app now point at the current APK.** The
+  old `f0.java` references came from an older build; comments now cite
+  `KVSWebRTCChannel.smali` and its inner classes by line. Several claims were
+  wrong for the current app and are corrected: it does not resend `webrtcReq`
+  (the resend timer is dead code - so the 0.12.16 entry saying the SDES peerid
+  reuse was "mirroring the official app, which resends within one session" is
+  wrong; our resend is our own choice); it does not reconnect on ICE
+  failure/close/disconnect but shows a manual retry, with one automatic rebuild
+  gated at 15 s; it numbers PTZ from the control counter, and the camera does
+  check seq for SESSION_MODE; the app's 0x12 SD-list selector is only its
+  event-mode branch (it sends 1 otherwise). No behaviour change.
+- **A DTLS camera whose sessions keep failing fast is backed off, not
+  hammered.** On 2026-11-04 an A000088's sessions died within seconds of
+  opening for half an hour. A connected open reset the serve loop's backoff,
+  so it was reopened on the bare 15 s gate every time; then opens stopped
+  connecting ("ICE connection not established"), and every retry 15 s after
+  one was refused as busy (-50002), because the camera still held the session
+  it had accepted for the offer that never connected. Then it went offline.
+  Pounding an A000088 like that is what can wedge its DTLS stack. Now a
+  session that ends on its own within 30 s of its open succeeding, or without
+  ever delivering video, is a short session, paced on its own backoff apart
+  from failed opens: the loop waits 30 s after the first, then jittered
+  between 30 and 45 s, so the 2026-11-04 cadence goes from a reopen every 15 s
+  to one every 30-45 s plus the session's own life; capped at 45 s so that,
+  typically, a viewer's pull held by the serve relay is still waiting when the
+  reopen lands (the arithmetic, and when it does not hold, is by
+  `_SHORT_SESSION_CAP_S` in camera/client.py). A session's life runs from its
+  open succeeding to when it stopped serving (when its connection went bad,
+  not when the disconnect debounce gave up), so a teardown cannot carry it
+  past 30 s. A session that lasts 30 s and delivered video resets that
+  backoff, whatever its last serve cycle did; one with no video canary to read
+  counts as having delivered unless the presence watchdog declared it
+  video-less. A session that never delivers video is paced only this way; it
+  no longer also escalates the failed-open backoff. While it waits the loop
+  keeps the camera's concurrent-stream slot (`AIDOT_MAX_CONCURRENT_STREAMS`),
+  as a failed-open wait always has, and does not report the serve ready. Idle
+  release is unchanged, the serve cycle's alone: a camera nobody watches whose
+  sessions keep dying fast is reopened, each time after a 30-45 s wait plus
+  its session time, for as long as its keepalive runs: the library does not
+  bound it, the caller stops it (its viewer policy, or the entity being
+  unloaded). Failed opens are paced, and reach the slow probe, exactly as
+  before: an open that succeeds still resets that count. The threshold is
+  `AIDOT_DTLS_SHORT_SESSION_S`.
+- **After an open whose ICE never connected, the next open waits as long as
+  after a busy refusal** (`AIDOT_BUSY_RETRY_S`, 45 s by default), and is
+  otherwise paced like any failed open (backoff, slow probe, offline pause).
+  The wait is a floor: neither the slow probe nor the offline pause, whether
+  it ends early because the camera came back online or falls through to a
+  probe open, cuts it short. Measured only after plain ICE failures: a
+  shifted answer that did not connect keeps its 3 s not-ready burst, since it
+  still connects about 1 in 7 on a quick retry. Only the serve loop's own
+  retries get the floor; the other open paths (a live view, SD playback)
+  retry as before. Nor does a setRemoteDescription failure after the camera
+  answered, which also leaves a session held on the camera; releasing it on
+  the camera side in `_abort_open` would be the general fix (a follow-up).
+
 ### Fixed
 - **DTLS talk audio holds 20 ms per frame instead of drifting.** The DTLS talk
   track slept a relative 20 ms between frames, so the time spent building each
@@ -56,97 +141,6 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   Both opens now listen for PLAY_END from before PLAY_START goes out, and
   `playback_ended` is True once it arrives, on both session types. On SDES
   the frame-time end still counts; either signal ends the play.
-
-### Added
-- **`StreamSettings`: stream settings per account client, not per process.**
-  `CameraClient(..., stream_settings=StreamSettings(...))` takes
-  `direct_publish`, `publish_aac`, `hls_direct_ts` and `sdes_video_pt`, the
-  per-client form of `AIDOT_DIRECT_PUBLISH`, `AIDOT_PUBLISH_AAC`,
-  `AIDOT_HLS_DIRECT_TS` and `AIDOT_SDES_VIDEO_PT`, and hands them to every
-  camera the client creates (`CameraDeviceClient.stream_settings`). Exported
-  from the package root. Values are checked when it is built.
-
-### Changed
-- **One precedence rule for those four knobs, on every path a camera reads
-  them:** the client's setting, then the environment variable if it is set,
-  then the default. The read sites that had no camera in hand (the direct
-  publish, AAC and in-sync HLS switches, the SDES codec pin, the AAC track
-  the publishers build) now take the camera's settings as an argument, so the
-  publisher threads see the same value the open decided on. A client given
-  nothing reads exactly as before, and the variables stay supported (see
-  docs/ENVIRONMENT.md).
-- **Docs: citations into the official app now point at the current APK.** The
-  old `f0.java` references came from an older build; comments now cite
-  `KVSWebRTCChannel.smali` and its inner classes by line. Several claims were
-  wrong for the current app and are corrected: it does not resend `webrtcReq`
-  (the resend timer is dead code - so the 0.12.16 entry saying the SDES peerid
-  reuse was "mirroring the official app, which resends within one session" is
-  wrong; our resend is our own choice); it does not reconnect on ICE
-  failure/close/disconnect but shows a manual retry, with one automatic rebuild
-  gated at 15 s; it numbers PTZ from the control counter, and the camera does
-  check seq for SESSION_MODE; the app's 0x12 SD-list selector is only its
-  event-mode branch (it sends 1 otherwise). No behaviour change.
-
-## [1.0.0rc71]
-
-Soak: resets the clock. The changes are to the DTLS serve loop's retry pacing
-on every A000088 and to when an SDES serve launches, once the reference
-installation runs it.
-
-### Changed
-- **A DTLS camera whose sessions keep failing fast is backed off, not
-  hammered.** On 2026-11-04 an A000088's sessions died within seconds of
-  opening for half an hour. A connected open reset the serve loop's backoff,
-  so it was reopened on the bare 15 s gate every time; then opens stopped
-  connecting ("ICE connection not established"), and every retry 15 s after
-  one was refused as busy (-50002), because the camera still held the session
-  it had accepted for the offer that never connected. Then it went offline.
-  Pounding an A000088 like that is what can wedge its DTLS stack. Now a
-  session that ends on its own within 30 s of its open succeeding, or without
-  ever delivering video, is a short session, paced on its own backoff apart
-  from failed opens: the loop waits 30 s after the first, then jittered
-  between 30 and 45 s, so the 2026-11-04 cadence goes from a reopen every 15 s
-  to one every 30-45 s plus the session's own life; capped at 45 s so that,
-  typically, a viewer's pull held by the serve relay is still waiting when the
-  reopen lands (the arithmetic, and when it does not hold, is by
-  `_SHORT_SESSION_CAP_S` in camera/client.py). A session's life runs from its
-  open succeeding to when it stopped serving (when its connection went bad,
-  not when the disconnect debounce gave up), so a teardown cannot carry it
-  past 30 s. A session that lasts 30 s and delivered video resets that
-  backoff, whatever its last serve cycle did; one with no video canary to read
-  counts as having delivered unless the presence watchdog declared it
-  video-less. A session that never delivers video is paced only this way; it
-  no longer also escalates the failed-open backoff. While it waits the loop
-  keeps the camera's concurrent-stream slot (`AIDOT_MAX_CONCURRENT_STREAMS`),
-  as a failed-open wait always has, and does not report the serve ready. Idle
-  release is unchanged, the serve cycle's alone: a camera nobody watches whose
-  sessions keep dying fast is reopened, each time after a 30-45 s wait plus
-  its session time, for as long as its keepalive runs: the library does not
-  bound it, the caller stops it (its viewer policy, or the entity being
-  unloaded). Failed opens are paced, and reach the slow probe, exactly as
-  before: an open that succeeds still resets that count. The threshold is
-  `AIDOT_DTLS_SHORT_SESSION_S`.
-- **After an open whose ICE never connected, the next open waits as long as
-  after a busy refusal** (`AIDOT_BUSY_RETRY_S`, 45 s by default), and is
-  otherwise paced like any failed open (backoff, slow probe, offline pause).
-  The wait is a floor: neither the slow probe nor the offline pause, whether
-  it ends early because the camera came back online or falls through to a
-  probe open, cuts it short. Measured only after plain ICE failures: a
-  shifted answer that did not connect keeps its 3 s not-ready burst, since it
-  still connects about 1 in 7 on a quick retry. Only the serve loop's own
-  retries get the floor; the other open paths (a live view, SD playback)
-  retry as before. Nor does a setRemoteDescription failure after the camera
-  answered, which also leaves a session held on the camera; releasing it on
-  the camera side in `_abort_open` would be the general fix (a follow-up).
-
-### Added
-- `AidotIceNotEstablished`, a subclass of `AidotNegotiationFailed`, raised
-  when ICE does not connect in time; code that catches
-  `AidotNegotiationFailed` still catches it.
-- `AIDOT_DTLS_SHORT_SESSION_S` (default 30): how long a served DTLS session
-  must last, with video, not to count as short.
-
-### Fixed
 - **An SDES camera whose audio trails its video keeps its sound.** The ffmpeg
   serve (recordings, snapshots, H.265 sessions, and any serve with direct
   publish off) mapped audio only once an audio packet had arrived, waiting 1 s
