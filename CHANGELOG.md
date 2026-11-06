@@ -47,6 +47,16 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   payload now carries `parentId` when the device record has either field, and
   the topic moves to `iot/v1/c/{directId}/...` only for a non-empty `directId`.
   A record with neither sends exactly what it did before.
+- **An SD playback ends on the camera's PLAY_END, on DTLS as well as SDES.**
+  The app ends a play when the camera sends a RECORD_PLAYCONTROL reply
+  (0x31b) carrying command 7 (PLAY_END), unasked. The library ignored it and
+  marked the end only from the all-ones frame time on SDES media, so a DTLS
+  session never reported an end: a night clip the camera sends about four
+  times faster than real time could only be ended by a caller's own timers.
+  Both opens now listen for PLAY_END from before PLAY_START goes out, and
+  `playback_ended` is True once it arrives, on both session types. On SDES
+  the frame-time end still counts; either signal ends the play.
+
 ### Changed
 - **Docs: citations into the official app now point at the current APK.** The
   old `f0.java` references came from an older build; comments now cite
@@ -59,15 +69,6 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
   gated at 15 s; it numbers PTZ from the control counter, and the camera does
   check seq for SESSION_MODE; the app's 0x12 SD-list selector is only its
   event-mode branch (it sends 1 otherwise). No behaviour change.
-- **An SD playback ends on the camera's PLAY_END, on DTLS as well as SDES.**
-  The app ends a play when the camera sends a RECORD_PLAYCONTROL reply
-  (0x31b) carrying command 7 (PLAY_END), unasked. The library ignored it and
-  marked the end only from the all-ones frame time on SDES media, so a DTLS
-  session never reported an end: a night clip the camera sends about four
-  times faster than real time could only be ended by a caller's own timers.
-  Both opens now listen for PLAY_END from before PLAY_START goes out, and
-  `playback_ended` is True once it arrives, on both session types. On SDES
-  the frame-time end still counts; either signal ends the play.
 
 ## [1.0.0rc71]
 
