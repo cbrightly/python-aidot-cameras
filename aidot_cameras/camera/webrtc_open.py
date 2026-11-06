@@ -1068,7 +1068,7 @@ def dtls_on_dc_open(
 
         # Periodic keepalive loop:
         # - HEARTBEAT (5156) every 10 s: prevents camera's ~22 s
-        #   DTLS watchdog (f0.java:2991).
+        #   DTLS watchdog (the app's 10 s Timer, KVSWebRTCChannel$9.smali:456-459).
         # - AUDIOSTART (768) every 10 s: prevents camera's ~25 s
         #   audio watchdog.  Camera negotiates audio as sendrecv;
         #   aiortc's sender emits RTCP SR with packet_count=0, which
@@ -1833,8 +1833,8 @@ async def _dtls_open_credentials_and_mqtt_setup(self, ps: _DtlsOpenState) -> Non
     # A fresh peerid mints a NEW camera-side session, and the camera releases
     # old ones only slowly (~3-4 min measured), so minting one on every retry
     # of a failing loop stacks up sessions faster than they drain and can wedge
-    # a battery camera. The official app instead reuses one peerid and resends
-    # the same offer within a single session. ``reuse_peer_id`` lets a caller
+    # a battery camera. (The official app sends one offer per attempt; its
+    # offer-resend timer is dead code - see _resend_webrtcreq.) ``reuse_peer_id`` lets a caller
     # (the SDES keepalive loop) hold one peerid across retries; None keeps the
     # historical mint-per-attempt behaviour for every other caller.
     ps.peer_id = ps.reuse_peer_id or self.generate_webrtc_peer_id(
@@ -2009,13 +2009,13 @@ async def _dtls_open_ice_config_and_user_info(self, ps: _DtlsOpenState) -> None:
         webrtc_req_echo_fut=ps.webrtc_req_echo_fut,
     )
 
-    # MQTT transport for the stream signaling.  Default: a dedicated
-    # connect-per-stream session in an executor (stopped via outgoing_q
-    # sentinel on WebRTCSession.stop()).  AIDOT_PERSISTENT_MQTT (Phase 2):
-    # ride the SAME account-level persistent connection commands/attrs use
+    # MQTT transport for the stream signaling.  Default (AIDOT_PERSISTENT_MQTT
+    # on): ride the SAME account-level persistent connection commands/attrs use
     # (the stream's mqtt_cid IS the authorized mqttClientId, so it's the same
     # connection) - subscribe + register a handler + drain outgoing_q through
-    # it, and DON'T tear the connection down on stop (matching the app).
+    # it, and DON'T tear the connection down on stop (matching the app).  With
+    # it off: a dedicated connect-per-stream session in an executor (stopped
+    # via outgoing_q sentinel on WebRTCSession.stop()).
     # A prior open may have left a drain running (e.g. a reopen with no
     # async_stop_streaming between them); reap it before starting a new one
     # so we don't orphan its executor thread + handler on the shared conn.
@@ -2822,7 +2822,8 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
     #
     # Two-way audio (talk): when a talk_pcm_provider is supplied we attach a
     # real PCMA sender track from the start, mirroring the official app
-    # (f0.java:695 createAudioTrack + addTrack, enabled only during talk).
+    # (KVSWebRTCChannel.smali:6908 createAudioTrack, disabled at :6915, added
+    # to the PeerConnection at :2834, enabled only in startTalk at :9664).
     # The track emits silence until the provider returns PCM, so the camera
     # sees a genuine, continuously-present sender - the APK keeps the track
     # present the whole session, so track presence is NOT the ~24s-teardown
@@ -2970,8 +2971,9 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
 
     def _send_avio_heartbeat(_dc_ref) -> None:
         # CMD_AVIO_CTRL_HEARTHEAT_REQ = 5156 (AVIOCTRLDEFs.java:119).
-        # Official app sends this every 10 s (f0.java:2991 timer period
-        # 10000 ms) to prevent the camera's 22-second watchdog from
+        # Official app sends this every 10 s (KVSWebRTCChannel$9.smali:456-459,
+        # Timer period 10000 ms -> sendHeartbeat, KVSWebRTCChannel.smali:14988)
+        # to prevent the camera's 22-second watchdog from
         # tearing down the DTLS session.  Empty payload, header only.
         try:
             _seq = random.randint(0, 0x7FFFFFFF)
@@ -3013,8 +3015,9 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
     def _send_avio_speaker(_dc_ref, start: bool) -> None:
         # IOTYPE_USER_IPCAM_SPEAKERSTART = 848 / SPEAKERSTOP = 849
         # (AVIOCTRLDEFs.java:268-271).  The official app sends SPEAKERSTART
-        # when talk begins (f0.java:1500, startTalk m2()) to open the
-        # camera's speaker, and SPEAKERSTOP to close it.  Payload is
+        # when talk begins (KVSWebRTCChannel.smali:9684, in startTalk) to
+        # open the camera's speaker, and SPEAKERSTOP (:11939, stopTalk) to
+        # close it.  Payload is
         # SMsgAVIoctrlAVStream.parseContent(0) = 8 bytes, channel=0 LE.
         try:
             _cmd = 848 if start else 849
@@ -3100,8 +3103,8 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
 
     ps._kvs_dc = None
     if self._offer_should_include_datachannel:
-        # Match the official client's label exactly: f0.java:2923 uses
-        # "data-channel-of-" + this.h, where this.h is the peer_id we
+        # Match the official client's label exactly: KVSWebRTCChannel.smali:2882
+        # uses "data-channel-of-" + mClientId, where mClientId is the peer_id we
         # already generate (deviceId_random_count_0_streamID).  Camera
         # firmware likely pattern-matches this label.
         _dc_label = f"data-channel-of-{ps.peer_id}"
@@ -3445,9 +3448,14 @@ async def _dtls_open_offer_and_answer(self, ps: _DtlsOpenState) -> None:
         f"  payload={len(webrtc_req_payload)}B"
     )
 
-    # GAP B (APK parity): the official app re-publishes webrtcReq up to ~3x,
-    # ~15 s apart, when no webrtcResp arrives (f0.java reconnect / offer-resend),
-    # targeting the "camera never answered" loss.  Re-send the SAME offer with a
+    # Offer resend: our own deliberate divergence, NOT app parity (the "GAP B
+    # parity" label in the status line below is historical).  An older APK was
+    # read as re-publishing webrtcReq up to ~3x; in the current app the resend
+    # timer is dead code - mSendOfferTimer (KVSWebRTCChannel.smali:175) is only
+    # cancelled and nulled (:1892/:1900, :11887/:11897), never assigned a Timer -
+    # so the app sends one offer per attempt.  We re-publish up to 2 more times,
+    # ~15 s apart, when no webrtcResp arrives, targeting the "camera never
+    # answered" loss.  Re-send the SAME offer with a
     # fresh seq/tst (so the camera does not dedup it), gated on answer_fut /
     # camera_offer_fut so it is a no-op the instant the camera answers - it
     # therefore cannot disturb the connect path.  NB: the no-webrtcResp loss is

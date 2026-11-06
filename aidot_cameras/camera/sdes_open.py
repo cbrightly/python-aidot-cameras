@@ -3940,7 +3940,8 @@ def make_sdes_bridge(
                 # pinned at ~18 s regardless of motion (brief tap-past 18.3 s vs
                 # sustained 40 s motion 17.6 s), while raw-0xC8 heartbeats *were*
                 # firing.  The official app sends this via DataChannel.customSend
-                # (= SCTP) on a 10 s timer (f0.java Z2() -> CMD_AVIO_CTRL_HEARTHEAT_REQ).
+                # (= SCTP) on a 10 s timer (KVSWebRTCChannel$9.smali:456-459 ->
+                # sendHeartbeat, KVSWebRTCChannel.smali:14988, cmd 0x1424 at :15003).
                 #
                 # Gating on dcep_sock confines this to the encrypted-SCTP path
                 # (battery SDES cams), which is where the watchdog bites and where
@@ -4236,10 +4237,14 @@ def make_sdes_bridge(
                                 # same counter for livePlayReq already.
                                 # Filling the slot randomly was the only
                                 # field in the 28-byte header that differed
-                                # from the app's.  Parity, not a fix: PTZ
-                                # (AVIO 0x1001) pans through this very
-                                # builder with a random dSeq, so the camera
-                                # is not validating it.
+                                # from the app's.  The app numbers PTZ
+                                # (AVIO 0x1001) from the same counter
+                                # (ptzControl -> sendCtrl ->
+                                # generateLivePlayDSeq,
+                                # KVSWebRTCChannel.smali:14201, :11794;
+                                # starts at 100, :4113), and the camera does
+                                # check seq for SESSION_MODE (see
+                                # tests/test_session_mode_seq.py).
                                 _seq = self._next_dseq()
                                 _ts = int(_time_br.time() * 1000)
                                 _avio = (
@@ -5521,7 +5526,8 @@ def make_sdes_bridge(
                                 # AVIO control frames identified by cmd field - never
                                 # forward these to ffmpeg's audio port.  804 =
                                 # LdsTrackSwitchNotify (device->client track-id change,
-                                # f0.java:3224): the camera can send it unsolicited, and
+                                # processRespData case 0x324,
+                                # KVSWebRTCChannel.smali:11661): the camera can send it unsolicited, and
                                 # without it here an 804 frame is misrouted as PCMA noise.
                                 _avio_cmds = {
                                     5376,
@@ -7999,8 +8005,10 @@ async def _sdes_open_harvest_answer(self, ps: _SdesOpenState) -> None:
                 )
 
         # SCTP DataChannel for SDES cameras.
-        # Source analysis (f0.java g2()) confirmed SESSION_MODE_REQ (5376)
-        # must be sent via DataChannel.send(), NOT raw TUTK 0xC8 UDP.
+        # Source analysis confirmed SESSION_MODE_REQ (5376) must be sent via
+        # DataChannel.send(), NOT raw TUTK 0xC8 UDP: changeStream sends 0x1500
+        # through sendCtrl (KVSWebRTCChannel.smali:12377), which ends in
+        # DataChannel.send (:9418).
         # Camera uses plain SCTP over UDP (same ICE port), no DTLS.
         # We are the SCTP client (proactive INIT), camera is server.
         ps._dc_answer_has_app = "m=application" in ps._pre_launch_answer_sdp

@@ -655,7 +655,8 @@ def _compress_sdp_for_camera(sdp: str) -> str:
 def _make_talk_audio_track(pcm_provider: Callable[[], "Optional[bytes]"]):
     """Build an aiortc MediaStreamTrack that emits viewer->camera talk audio.
 
-    Mirrors the official app (f0.java:695): a real audio track is present on the
+    Mirrors the official app (KVSWebRTCChannel.smali:6908 createAudioTrack,
+    :2834 addTrack): a real audio track is present on the
     PeerConnection from the start, so the camera sees a genuine sender.  The
     track emits 20 ms (160-sample) frames of signed-16-bit PCM at 8 kHz mono;
     aiortc's RTCRtpSender encodes them to PCMA (PT=8) on the wire.

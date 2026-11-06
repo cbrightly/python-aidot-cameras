@@ -22,10 +22,11 @@ only, filling the control frames with a random number instead.
 ignored: `button.*_ptz_*` is AVIO 0x1001 sent through the identical frame
 builder with the same random dSeq, and it is class A on physical evidence --
 "the camera pans. Mean frame difference across a 5 s pan: 25.2 at speed 4,
-38.6 at speed 200, against a no-command control of 2.6." A camera that pans on
-a random dSeq is not validating it. Closing the gap removes the last known
-framing difference from the app; it is not expected to change any behaviour,
-and the PTZ pan must still work afterwards.
+38.6 at speed 200, against a no-command control of 2.6." That a camera pans on
+a random dSeq does NOT mean it ignores seq: the firmware does check it for
+SESSION_MODE (see test_session_mode_seq.py), and the current app numbers PTZ
+from the counter too. Closing the gap removes the last known framing difference
+from the app, and the PTZ pan must still work afterwards.
 """
 
 

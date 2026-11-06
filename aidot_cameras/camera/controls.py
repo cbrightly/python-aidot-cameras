@@ -455,7 +455,8 @@ class _CameraControlsMixin:
         speed:     0-255, default 4 (matches app default)
         preset:    preset slot for "goto" command
 
-        Source: a.java d1() / f0.java A2() -> avSendIOCtrl(4097, 8B payload)
+        Source: KVSWebRTCChannel.ptzControl (KVSWebRTCChannel.smali:14177) ->
+        sendCtrl(0x1001 = 4097, SMsgAVIoctrlPtzCmd.parseContent(...)) at :14201
         Payload: [direction_code, speed, preset, 0, 0, 0, 0, 0]
 
         Direction codes (AVIOCTRLDEFs.java):
@@ -533,7 +534,8 @@ class _CameraControlsMixin:
         other models are not covered by that measurement. Callers should not
         rely on it changing the bitrate.
 
-        Source: f0.java g3() -> X2(800, SetStreamCtrlReq.parseContent(0, quality)).
+        Source: KVSWebRTCChannel.setResolution (KVSWebRTCChannel.smali:15295) ->
+        sendCtrl(0x320 = 800, SetStreamCtrlReq.parseContent(0, quality)) at :15314.
         Payload <IB3x> = channel(0) + quality byte + 3 reserved.
         The app has three settings, not two: Auto, SD and HD, which
         `NewLivePresenter.setDefaultResolution` maps from the persistent

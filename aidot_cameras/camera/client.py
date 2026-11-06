@@ -1615,9 +1615,13 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
     # PC-dead test for the serve loop.  closed/failed are terminal at
     # once; a transient ICE "disconnected" is debounced - aiortc reports
     # it on a brief consent/path blip that often self-recovers, so we only
-    # treat a SUSTAINED disconnect as dead and force a fresh session
-    # (matching the app, which reconnects on ICE FAILED/CLOSED/DISCONNECTED
-    # - f0.java:2495).  Previously a stuck "disconnected" was only caught
+    # treat a SUSTAINED disconnect as dead and force a fresh session.  This
+    # is our own deliberate divergence: the app does NOT reconnect here - on
+    # ICE FAILED/CLOSED/DISCONNECTED it calls onError and release(false)
+    # (KVSWebRTCChannel$8.smali:1017-1086) and NewLivePresenter$32.onError
+    # shows a manual retry panel; its only automatic rebuild is a single one
+    # gated at 15 s (anylizeAutoReconnectLogic, KVSWebRTCChannel.smali:3284).
+    # Previously a stuck "disconnected" was only caught
     # ~120 s later by the idle-progress timer.
     _DISC_DEBOUNCE = settings.read("AIDOT_ICE_DISCONNECT_S")
     # When the PC went bad (disconnected, closed or failed), None while it is
@@ -6352,8 +6356,9 @@ class CameraMixin(
         # fresh one per attempt. A fresh peerid = a new camera-side session, and
         # the camera frees old ones only slowly, so mint-per-retry stacks up
         # sessions on a failing battery camera faster than they drain (measured:
-        # this is how the L2 wedged into a wake-then-sleep loop). Mirrors the
-        # official app, which resends within one session. Rotate to a fresh
+        # this is how the L2 wedged into a wake-then-sleep loop). Our own choice:
+        # the official app sends one offer per attempt (its offer-resend timer
+        # is dead code). Rotate to a fresh
         # peerid after a session that actually delivered media (so the next view
         # is a clean session) or after _PEERID_MAX_REUSE consecutive dead
         # attempts (so a poisoned peerid can't wedge us permanently).  The bound
@@ -6411,8 +6416,11 @@ class CameraMixin(
 
         _WATCHDOG = 30.0
         # Reconnect backoff starts at 5 s (exponential ->300 s).  This is an
-        # INTENTIONAL divergence from the app, which uses a fixed 15 s reconnect
-        # + a 15 s gate (f0.java I1=15000).  We favour faster HA recovery; an A/B
+        # INTENTIONAL divergence from the app, which makes a single automatic
+        # rebuild gated at 15 s since the last attempt (autoRetryConnectTimeOutMs
+        # = 15000, KVSWebRTCChannel.smali:862-864, read in
+        # anylizeAutoReconnectLogic at :3284) and otherwise leaves retry to the
+        # user.  We favour faster HA recovery; an A/B
         # of 15 s showed no measurable benefit and only slowed reconnects.  Raise
         # to 15 s here (+ the SDES/serve loops) if strict app parity is wanted.
         _MIN_DELAY = 5.0
@@ -7153,8 +7161,9 @@ class CameraMixin(
 
         ps = _DtlsServeLoopState()
         ps.serve_url = self._keepalive_rtsp_url
-        # APK parity: the official app gates re-connects to ~15 s (f0.java I1=15000)
-        # and never hammers.  We previously floored at 5 s and a partial-success ->
+        # The official app gates its one automatic rebuild at 15 s
+        # (autoRetryConnectTimeOutMs, KVSWebRTCChannel.smali:862-864) and never
+        # hammers; we borrow that 15 s as our floor.  We previously floored at 5 s and a partial-success ->
         # reset path could drop the effective spacing even lower, pounding a flaky
         # A000088 camera fast enough to wedge its DTLS stack (ICE completes but DTLS
         # never fires until a power-cycle).  Floor the backoff at the 15 s gate and,
