@@ -19,7 +19,7 @@ understood and its shape has settled:
 - the release that becomes 1.0.0 has run in ordinary use for two weeks without
   a streaming-breaking release replacing it.
 
-Where things stand: the library is at `1.0.0rc70` on PyPI. `1.0.0rc58` is
+Where things stand: the library is at `1.0.0rc71` on PyPI. `1.0.0rc58` is
 yanked: in it a successful DTLS open returned `None` instead of its session;
 `rc59` fixed that and `rc60` adds a test that holds every phase of both opens
 to exporting what later phases read. `rc62` fixes what the first day of
@@ -35,8 +35,10 @@ playback's camera to resend what it lost and skips a repeated last frame, and
 `rc68` reads every page of a card listing instead of the first 255 records,
 and `rc69` lists in windows an A000088 fills in and waits for a slow page;
 none of them resets the clock. `rc70` delivers an SDES camera's control-channel
-data in order, which changes every SDES session, so it resets the clock; the
-count now runs on it (see below). The Home Assistant integration `2.37.18`
+data in order, which changes every SDES session, so it reset the clock.
+`rc71` backs off a DTLS camera whose sessions keep failing fast, which changes
+the serve loop on every A000088, so it resets the clock again once the
+reference installation runs it (see below). The Home Assistant integration `2.37.18`
 requires `>=1.0.0rc62`; the integration release that plays card recordings
 began with 2.38.0b1 (`>=1.0.0rc66`), and 2.38.0b4 requires `>=1.0.0rc70`.
 

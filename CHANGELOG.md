@@ -6,8 +6,10 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
-Held until the 1.0.0 soak ends (target 2026-11-17): it changes the DTLS serve
-loop's retry pacing, and a change to the serve loop resets the soak clock.
+## [1.0.0rc71]
+
+Soak: resets the clock. The change is to the DTLS serve loop's retry pacing
+on every A000088, once the reference installation runs it.
 
 ### Changed
 - **A DTLS camera whose sessions keep failing fast is backed off, not
