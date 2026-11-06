@@ -83,16 +83,21 @@ shut itself down and was off the network for some days. Day zero is re-dated
 once the box is back and runs released `rc63` (or later) with a released
 integration, checked by hash as above.
 
-**Day zero is 2026-11-03; the target is 2026-11-17.** Once the box was back on
-the network it was given the card-playback releases as they shipped
-(integration 2.38.0b1 to 2.38.0b3 on library `rc66` to `rc69`), with live
-tests between them, so every day up to and including 2026-11-02 is
-provocation. Since 2026-11-02 it runs `1.0.0rc70` and integration 2.38.0b4
-(Home Assistant 2026.10.4 on HA OS): the
-integration's 34 installed files match the public `v2.38.0b4` release by
-hash, and the library installed is `1.0.0rc70`, whose wheel on PyPI matches
-its tag file for file. 2026-11-02 had that install, a restart and a debug
-listing, so it is provocation; 2026-11-03 is the first ordinary day.
+**Day zero is 2026-11-07; the target is 2026-11-21.** The count that began on
+2026-11-03 under `1.0.0rc70` and integration 2.38.0b4 was reset by `rc71`,
+which changes the DTLS serve loop on every A000088. On 2026-11-06 the box
+was given `1.0.0rc71` and integration 2.38.0b5 (Home Assistant 2026.10.4 on
+HA OS): the integration's 35 installed files match the public `v2.38.0b5`
+release by hash, and the library installed is `1.0.0rc71`, whose wheel on
+PyPI matches its tag file for file. 2026-11-06 had that install and a
+restart, so it is provocation; 2026-11-07 is the first ordinary day.
+
+The earlier count, kept for the record: day zero 2026-11-03 under `rc70`.
+Once the box was back on the network it was given the card-playback releases
+as they shipped (integration 2.38.0b1 to 2.38.0b3 on library `rc66` to
+`rc69`), with live tests between them, so every day up to and including
+2026-11-02 was provocation; 2026-11-03 was the first ordinary day of that
+count.
 
 **2026-11-04 counts.** For half an hour from 09:13 that morning the bedroom
 A000088 misbehaved on its own: its sessions died within seconds, then opens
