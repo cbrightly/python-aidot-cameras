@@ -1345,6 +1345,7 @@ class _DtlsOpenState:
     #: SD playback over DTLS: the PLAY_START reply waiter, and the H265 tap's
     #: state ({"pt", "units", "recorder", "dropped"}). None for live.
     _sd_start_waiter: "Any" = dataclasses.field(init=False, default=None)
+    _sd_end_waiter: "Any" = dataclasses.field(init=False, default=None)
     _sd_h265: "Any" = dataclasses.field(init=False, default=None)
     use_sdes: "Any" = dataclasses.field(init=False)  # head
     _fast_connect: "Any" = dataclasses.field(init=False)  # head
@@ -3041,12 +3042,14 @@ async def _dtls_open_peer_connection_setup(self, ps: _DtlsOpenState) -> None:
     ps._avio_responses = AvioResponseRouter()
     if ps._sd_playback is not None:
         from .sd_playback import PLAY_START, RECORD_PLAYCONTROL_RESP_CMD, answers
+        from .sd_playback import play_end_waiter
 
         # Registered now, before anything can answer: PLAY_START goes out
         # from the data channel's open, and its reply comes ~6 s later.
         ps._sd_start_waiter = ps._avio_responses.expect(
             RECORD_PLAYCONTROL_RESP_CMD, answers(PLAY_START)
         )
+        ps._sd_end_waiter = play_end_waiter(ps._avio_responses)
 
     # Camera-initiated DCEP path: KVS firmware on A000088 doesn't include
     # m=application in its answer SDP, suggesting the data channel may
@@ -4753,6 +4756,7 @@ async def _dtls_open_ice_candidates_and_connect(
             talk_holder=ps._talk_holder,
             responses=ps._avio_responses,
             playback_waiter=ps._sd_start_waiter,
+            playback_end_waiter=ps._sd_end_waiter,
             playback=ps._sd_playback,
             next_seq=self._next_dseq,
         )
