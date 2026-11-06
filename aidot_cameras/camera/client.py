@@ -1892,38 +1892,27 @@ async def _dtls_serve_loop_serve_cycle(
                     # republishes after a short backoff.
                     break
                 _now = ps.loop.time()
-                _health_due = _health_dtls.due(_now)
-                _stats = None
-                if _health_due:
+                if _health_dtls.due(_now):
                     try:
                         _get_stats = getattr(ps.session, "get_stats", None)
-                        _stats = await _get_stats() if _get_stats else {}
-                    except Exception:  # a report must never end a session
-                        _health_dtls.skip(_now)
-                        _LOGGER.debug("health line failed", exc_info=True)
-                        _health_due = False
-                # Resolved once per tick, for the health line and the
-                # first-video check alike, and only when one of them needs it
-                # - AFTER the stats await: video that starts during it (on
-                # another receiver, at the grace boundary) must count, not be
-                # read as the stale zero-frame canary from before it.
-                _canary_now = (
-                    _current_video_canary(self, ps.pc)
-                    if _health_due or _first_video_at is None
-                    else None
-                )
-                if _health_due:
-                    try:
                         _health_dtls.tick(
                             _now,
                             _dtls_snapshot(
-                                _stats, _canary_now, progress[0], _watching_dtls
+                                await _get_stats() if _get_stats else {},
+                                _current_video_canary(self, ps.pc),
+                                progress[0],
+                                _watching_dtls,
                             ),
                         )
                     except Exception:  # a report must never end a session
                         _health_dtls.skip(_now)
                         _LOGGER.debug("health line failed", exc_info=True)
-                if _first_video_at is None and _note_video_started(self, _canary_now):
+                # Its own read, after any await above: video that started
+                # during it (on another receiver, at the grace boundary) must
+                # count, not the stale zero-frame canary from before it.
+                if _first_video_at is None and _note_video_started(
+                    self, _current_video_canary(self, ps.pc)
+                ):
                     _first_video_at = _now
                 if (
                     _video_presence_verdict(

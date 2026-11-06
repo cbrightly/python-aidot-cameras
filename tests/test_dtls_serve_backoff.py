@@ -1090,12 +1090,16 @@ def test_a_keyframe_landing_during_the_stats_await_counts(
     check must read the canary as it is after the await, not the zero-frame
     one from before it, and must not give the session up."""
     monkeypatch.setenv("AIDOT_DTLS_VIDEO_GRACE_S", "0.001")
-    state = {"canary": {"frames": 0, "keyframes": 0}}
+    # Pinned: the health line on (its first tick always reports), whatever
+    # the environment says.
+    monkeypatch.setenv("AIDOT_HEALTH_LINE_S", "60")
+    state = {"canary": {"frames": 0, "keyframes": 0}, "stats_calls": 0}
     run, cam = _canary_run(monkeypatch, make_camera_device_client, None)
     monkeypatch.setattr(cc, "_live_video_canary", lambda pc, stored: state["canary"])
     sess = run.sessions[0]
 
     async def _get_stats():
+        state["stats_calls"] += 1
         await _real_sleep(0)
         state["canary"] = {"frames": 5, "keyframes": 1}  # another receiver
         return {}
@@ -1114,4 +1118,8 @@ def test_a_keyframe_landing_during_the_stats_await_counts(
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         run.run()
     msgs = [r.getMessage() for r in caplog.records]
+    # Not vacuous: the await happened, and the video landing in it counted.
+    assert state["stats_calls"] >= 1
+    assert cam._serve_video_canary == {"frames": 5, "keyframes": 1}
+    assert getattr(cam, "_futile_video_runs", 0) == 0
     assert not any("delivered no video" in m for m in msgs), msgs
