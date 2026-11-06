@@ -9283,24 +9283,30 @@ class _SdesOpenMixin:
         # Direct publish attaches audio from the NEGOTIATED payload type rather
         # than an observed one - see audio_pt_from_answer_sdp - so it neither
         # waits the audio grace nor goes video-only when the camera's first
-        # audio packet trails its first video. The ffmpeg serve keeps needing a
-        # packet in hand (a mapped stream with none stalls its mpegts mux).
+        # audio packet trails its first video. The ffmpeg serve still prefers
+        # the type it sees on the wire, so it waits the grace first; only when
+        # no audio packet came does it fall back to the answer's type rather
+        # than serving the whole session silent. Measured 2026-11-06: a relay-
+        # only A001513 sent its first audio 1.14 s after its video, and with
+        # ffmpeg 7.1 a mapped audio line whose packets start late is captured,
+        # and one whose packets never come does not hold up the video.
         _answer_apt = None
+        _answer_pt = None
         if (
             _serve_audio
             and _first_audio_pt[0] is None
-            and _should_direct_publish(
-                ps.rtsp_push_url, output_path, max_seconds, ps._use_plain_rtp
-            )
             and ps.answer_fut is not None
             and ps.answer_fut.done()
             and not ps.answer_fut.cancelled()
             and ps.answer_fut.exception() is None
         ):
-            _answer_apt = audio_pt_from_answer_sdp(
+            _answer_pt = audio_pt_from_answer_sdp(
                 (ps.answer_fut.result() or {}).get("sdp", "") or ""
             )
-            if _answer_apt is not None:
+            if _answer_pt is not None and _should_direct_publish(
+                ps.rtsp_push_url, output_path, max_seconds, ps._use_plain_rtp
+            ):
+                _answer_apt = _answer_pt
                 _LOGGER.info(
                     "camera %s: direct publish: attaching audio pt=%d from the"
                     " camera's answer (no audio packet seen yet)",
@@ -9311,6 +9317,15 @@ class _SdesOpenMixin:
             _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
             while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:
                 await asyncio.sleep(0.1)
+            if _first_audio_pt[0] is None and _answer_pt is not None:
+                _answer_apt = _answer_pt
+                _LOGGER.info(
+                    "camera %s: no audio packet within %.0fs of the video;"
+                    " mapping audio pt=%d from the camera's answer",
+                    getattr(self, "device_id", "?"),
+                    _AUDIO_PT_GRACE_S,
+                    _answer_apt,
+                )
         _vpt = _first_video_pt[0]
         _pinned = _pinned_video_pt(ps.sd_playback)
         _mismatches = getattr(self, "_pinned_codec_mismatches", 0)
@@ -9352,8 +9367,8 @@ class _SdesOpenMixin:
             )
         _apt = _first_audio_pt[0] if _first_audio_pt[0] is not None else _answer_apt
         # Which single payload type (if any) each line can be narrowed to. Audio
-        # is usable only when its type was actually observed; otherwise the "0 8"
-        # line cannot be narrowed.
+        # is usable when its type was observed or the camera's answer named it;
+        # otherwise the "0 8" line cannot be narrowed.
         # NOTE: the no-video case this was written for no longer reaches here -
         # an open with nothing observed is abandoned above, so _vpt is always
         # set by this point. What is left is an OBSERVED but unadvertised
@@ -9409,13 +9424,13 @@ class _SdesOpenMixin:
         )
         _keep_a = int(_apt) if _apt in _SDP_AUDIO_PTS else None
         if _serve_audio and _keep_a is None:
-            # No audio observed in the window, so the line cannot be narrowed and
-            # mapping audio would stall the mux (pull) or break the ANNOUNCE
-            # (push).  Serve video only rather than serving nothing, and say so.
+            # No audio observed and none named in the answer, so the "0 8" line
+            # cannot be narrowed: an un-narrowed line breaks the ANNOUNCE (push)
+            # and leaves ffmpeg guessing (pull). Serve video only, and say so.
             _LOGGER.warning(
-                "camera %s: no audio observed before the serve launched, so the "
-                "audio payload type is unknown; mapping it would stall the mpegts "
-                "mux and serve no video. Continuing without audio.",
+                "camera %s: no audio observed before the serve launched and the "
+                "answer names no audio type, so the audio payload type is "
+                "unknown. Continuing without audio.",
                 getattr(self, "device_id", "?"),
             )
             _serve_audio = False

@@ -46,23 +46,36 @@ def test_no_audio_section_or_unserved_codec_gives_none():
     assert audio_pt_from_answer_sdp(None) is None
 
 
-def test_the_open_uses_it_only_for_direct_publish_and_skips_the_grace():
-    """The negotiated audio PT is taken from the answer only on the direct
-    publish (never the ffmpeg serve, which needs a packet in hand), and the
-    audio grace wait runs only when no negotiated PT was taken."""
+def test_the_open_uses_it_at_once_only_for_direct_publish_and_skips_the_grace():
+    """Direct publish takes the negotiated audio PT straight away and skips the
+    audio grace; the ffmpeg serve waits the grace for a packet on the wire and
+    falls back to the answer's PT only if none came (2026-11-06: a relay-only
+    A001513's audio trailed its video by 1.14 s and the session served silent)."""
     from tests.ast_guards import calls_to, names_in, sdes_open_family
 
     family = sdes_open_family()
-    takes = [
+    assert any(
+        calls_to(n, "audio_pt_from_answer_sdp") for fn in family for n in ast.walk(fn)
+    ), "the open no longer reads the answer's audio PT"
+
+    def _assigns(node, name):
+        return any(
+            isinstance(s, ast.Assign)
+            and any(getattr(t, "id", None) == name for t in s.targets)
+            for s in ast.walk(node)
+        )
+
+    # Taken at once only under the direct-publish test.
+    at_once = [
         n
         for fn in family
         for n in ast.walk(fn)
         if isinstance(n, ast.If)
-        and calls_to(n, "audio_pt_from_answer_sdp")
-        and not calls_to(n.test, "audio_pt_from_answer_sdp")
+        and calls_to(n.test, "_should_direct_publish")
+        and _assigns(n, "_answer_apt")
     ]
-    assert takes, "the open no longer reads the answer's audio PT"
-    assert all(calls_to(t.test, "_should_direct_publish") for t in takes)
+    assert at_once, "direct publish no longer attaches the answer's audio PT"
+
     graces = [
         n
         for fn in family
@@ -75,6 +88,14 @@ def test_the_open_uses_it_only_for_direct_publish_and_skips_the_grace():
         )
     ]
     assert graces and all("_answer_apt" in names_in(g.test) for g in graces)
+    # ...and the grace ends in the fallback to the answer's PT, after the wait.
+    for g in graces:
+        kinds = [type(s).__name__ for s in g.body]
+        assert "While" in kinds, "the grace no longer waits for a packet"
+        after = g.body[kinds.index("While") + 1 :]
+        assert any(_assigns(s, "_answer_apt") for s in after), (
+            "the ffmpeg serve no longer falls back to the answer's audio PT"
+        )
 
 
 def test_key_restart_keeps_the_audio_narrowing():
