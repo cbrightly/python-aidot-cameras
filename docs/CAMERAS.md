@@ -7,8 +7,7 @@ upstream lights-only library.
 
 ## Supported cameras
 
-The transport is auto-selected per camera from its model id (`LK.IPC.*`):
-
+The transport is auto-selected per camera from its model id (`LK.IPC.*`).
 This is the one table for both projects; the two READMEs link here.
 
 | Model (`LK.IPC.*`) | Type | Transport | Power | Tested | Notes |
@@ -24,8 +23,7 @@ Model ids are matched by **substring**, so a firmware/hardware revision suffix
 same handling as the base model rather than falling through to the generic path.
 
 Battery models sleep between events and are woken on demand; mains-powered models
-also expose the LAN-direct control path. Any other `LK.IPC.*` model defaults to
-the SDES-SRTP path.
+also expose the LAN-direct control path.
 
 ### Battery detection (why it matters)
 
@@ -73,16 +71,11 @@ auto-selected per camera:
 - **DTLS-SRTP** - A000088 models (e.g. M3 Pro, A000088-1).
 - **SDES-SRTP** - other models (keys carried in the SDP).
 
-```python
-session = await device_client.async_open_webrtc_stream(on_frame=cb, timeout=30.0)
-# ... session.stop() when done
-```
-
+Opening a stream is shown in the README's quick start.
 `scripts/smoke_stream.py` exercises the full path against a real camera
 (`python scripts/smoke_stream.py --list`, then `--name "<name>" --hold 15`; it
 exits non-zero if no media arrives). It is in the git repo, not the wheel, so it
-needs a clone rather than a pip install. See
-its `--help`.
+needs a clone rather than a pip install. See its `--help`.
 
 ### Signaling handshake (MQTT)
 
@@ -149,11 +142,9 @@ opening a session until the device reports itself awake.
 
 None of this wakes a camera that nobody is watching. Snapshots for a dashboard
 card come from a cached cloud thumbnail, and the periodic attribute fetch skips
-battery cameras outright. Startup prewarm excludes them, and so does motion
-prewarm (Home Assistant integration 2.36.0 and later): a notification's tap
-opens the cloud clip, not a live session, so warming one nobody would watch
-bought nothing. Earlier integration releases did prewarm a battery camera on
-motion.
+battery cameras outright. The Home Assistant integration never pre-warms a
+battery camera, at startup or on motion; its "Pre-connect on motion" option
+applies to mains cameras only and is off by default.
 
 The **DTLS** path has the targeted equivalent (0.9.0): `dtls_fast_liveplay`
 (the `AIDOT_DTLS_FAST_LIVEPLAY` environment variable; there is no per-camera
@@ -171,7 +162,7 @@ the ~2 s `iceConfig` fetch on a re-open after the warm session lapses.
   inbound RTP packets received/lost and jitter. Audio counters are reliable; the
   *video* count is undercounted (this path bridges video outside aiortc's RTP
   receiver - trust decoded-frame rate for video health).
-- `CameraStatus.wifi_rssi` (0.9.0) - the camera's cloud-reported Wi-Fi RSSI (dBm),
+- `CameraStatusData.wifi_rssi` (0.9.0) - the camera's cloud-reported Wi-Fi RSSI (dBm),
   surfaced by HA as a diagnostic sensor; the fastest way to spot a marginal link.
 - `scripts/camera_diag.py` - maintained on-hardware probe: handshake time,
   time-to-first-frame, per-second fps timeline + gaps, nominated ICE path, RTP
@@ -225,11 +216,22 @@ backoff from 5 s to 300 s, with opens spaced at least `AIDOT_DTLS_RETRY_GATE_S`
 apart) the effective connect rate is high. The fix is unconditional (it self-gates to
 A000088 DTLS connections, so it is a strict no-op everywhere else).
 
-If a camera is already serving its maximum number of viewers it returns a
-terminal ack (`-50002` / `-50015`); the library raises `AidotCameraBusy` and
-stops retrying rather than burning the retry budget.
+Since 1.0.0rc71 a served DTLS session that ends on its own within
+`AIDOT_DTLS_SHORT_SESSION_S` (30 s) of opening, or never delivers video, is a
+short session and is paced on its own backoff (30 s, then 30-45 s), not
+reopened on the bare 15 s gate; and after an open whose ICE never connected
+(`AidotIceNotEstablished`) the next serve-loop open waits at least
+`AIDOT_BUSY_RETRY_S` (45 s), since the camera still holds the session it
+accepted and refuses a sooner retry as busy. Hammering an A000088 like that is
+what can wedge its DTLS stack.
 
-### The SDP handed to ffmpeg carries ONE codec (0.14.0)
+If a camera is already serving its maximum number of viewers it returns a
+terminal ack (`-50002` / `-50015`); the open raises `AidotCameraBusy` rather
+than retrying at once. The DTLS serve loop then retries after
+`AIDOT_BUSY_RETRY_S` (45 s) and the SDES keepalive after `AIDOT_BUSY_BACKOFF_S`
+(20 s), so the camera can release the sessions it holds.
+
+### The SDP handed to ffmpeg carries ONE codec
 
 The ffmpeg-input SDP advertises both video codecs (`m=video ... 96 97`) and both
 audio ones (`m=audio ... 0 8`), because which pair a camera uses varies per
@@ -253,11 +255,8 @@ number the same codec differently, and narrowing to a number our SDP does not
 contain would drop the video line entirely. An answer naming no codec we write
 leaves the SDP unchanged.
 
-Before 0.14.0 there was no fallback, so a session whose media started late served
-nothing at all - and the serve-restart path rebuilt the same un-narrowed SDP on
-every watchdog cycle, so it stayed broken until the process restarted. The
-`SDES: narrowed ffmpeg SDP to ...` status line is the signal that narrowing ran;
-its absence is the fault.
+The `SDES: narrowed ffmpeg SDP to ...` status line is the signal that narrowing
+ran; its absence is the fault.
 
 ### Direct publish: no ffmpeg in the live path (on by default since 1.0.0rc44)
 
@@ -473,25 +472,10 @@ happens on a fleet whose echo band is not empty.
 Battery models take neither wait; their cold open is dominated by the camera
 waking, and is unchanged.
 
-#### The older figures scattered through the tree predate this
-
-`25-70 s cold on SDES` and `15-21 s on DTLS` appear in roughly twenty comments
-across the library and the integration. They are pre-`rc8` and should not be
-read as current for a MAINS live open. Confirmed on the fleet 2026-09-07 over
-**11 real cold opens** (7 SDES, 4 DTLS, mains, taken from production logs rather
-than forced): the serve bound in **2.6-3.6 s, median 2.9 s**, with no meaningful
-split between transports.
-
-Two cautions before deleting any of them:
-
-- They do not all describe the same operation. Some size an **SD listing**,
-  which needs the session *and* an SCTP handshake on top, and that has not been
-  re-measured. Some describe a **battery** wake, which is dominated by the
-  camera and was never what `rc8` changed.
-- Several **size a timeout**. An over-sized upper bound on a wait that ends
-  early costs nothing, while an under-sized one reintroduces the failure it was
-  written for. Re-measure the specific path before retuning any of them; do not
-  propagate this number by search-and-replace.
+Older figures of 25-70 s cold on SDES and 15-21 s on DTLS predate this; over
+11 real cold opens on mains cameras (2026-09-07) the serve bound in 2.6-3.6 s,
+median 2.9 s, on both transports. An SD listing (which adds an SCTP handshake)
+and a battery wake have not been re-measured.
 
 ### Connection reliability (SDES / battery)
 
@@ -553,9 +537,6 @@ A-law (PCMA, PT=8) - the codec the camera negotiates.
   audibly on an A001513 (the camera ACKs `SPEAKERSTART` with `851`). Pure-streaming
   opens stay `recvonly` and are unaffected.
 
-A local developer script (`talk_test.py`, not shipped in the repo) plays a
-440 Hz tone for a few seconds (validated audibly).
-
 **Releasing the speaker on teardown:** when a session that used talk is stopped,
 the library sends `SPEAKERSTOP(849)` and gives the transport a brief flush window
 before closing it, so the camera actually frees its speaker/talk channel. Without
@@ -585,10 +566,9 @@ if device_client.has_live_session:  # sends nothing
     result = await device_client.async_get_sd_recordings(days=7)
 ```
 
-**Listing needs a WebRTC session** - historically 15-21 s on DTLS and 25-70 s
-cold on SDES (pre-`rc8`; the session itself is now ~3 s, but the listing's own
-SCTP handshake has not been re-measured), and
-it wakes the camera - where the cloud equivalent is one ~200 ms request. So the
+**Listing needs a WebRTC session**, which takes seconds and wakes the camera
+(about 3 s for a mains session, more for a battery wake; the listing's own SCTP
+handshake comes on top), where the cloud equivalent is one ~200 ms request. So the
 library never opens one for a listing: it asks the session it is handed, or
 answers `None`. Deciding when a listing is worth a session is policy, and policy
 belongs to the caller that knows what one costs.
@@ -610,23 +590,24 @@ opposite reasons:
 | `answered=False` | the requests went out and the camera said nothing. This is what a model that does not implement the commands looks like, and also what a channel that just died looks like. It is **not** a statement about the card. |
 | `answered=True` | the camera replied. Only now does an empty `records` mean the card holds nothing in that window. |
 
-`complete=False` means the reply's end flag never arrived or a page did not
-decode - there may be more on the card than came back. The reply is paged and
-there is no known continuation request, so this reports the truncation rather
-than inventing a second request.
+How a listing is taken (1.0.0rc68 to rc70):
 
-Measured 2026-08-13: one A001064 answered nothing to five asks over 84 s on a
-live session. **That reading was ours, not the camera's, and 1.0.0b34 fixes it.**
-The camera did reply; the reply is ~2.8 KB and arrives as several SCTP fragments,
-and the SDES receive path parsed each fragment as a whole AVIO frame - so the
-first was correctly refused as truncated and the rest decoded as junk command
-ids. `answered=False` was reporting a reply we had thrown away. The DTLS path
-reassembles in its SCTP stack, which is why only SDES cameras ever looked mute.
+- It is asked in windows of at most three days, newest first: an A000088 asked
+  for five days or more answers with thousands of records it never filled in.
+- Each window's reply is paged (255 records a page, oldest first) and the
+  camera sends every page unprompted; all of them are collected, ordered and
+  de-duplicated. A PTZ's 7-day window measured four pages, 824 records.
+- A record whose date cannot exist, or falls outside the window asked for, is
+  dropped. The listing stops at the first window that does not come back whole.
+- Without a caller's own `timeout`, the first page gets 15 s and each later one
+  10 s, with 60 s for all the windows of a listing.
 
-`answered=False` still means exactly what the table says, and it is still the
-honest answer for a model that genuinely does not implement the commands - but
-it is no longer evidence that any particular model is one of those. No model on
-the reference fleet currently is.
+`complete=False` means a window's end flag never arrived, a page before it is
+missing, or a record was dropped: there may be more on the card than came back.
+
+No model on the reference fleet answers `answered=False` to a healthy session;
+it remains the honest answer for a model that does not implement the commands,
+or a channel that has just died.
 
 ### Is there even a card?
 
@@ -648,7 +629,7 @@ await device_client.async_stop_streaming()  # one media slot per camera
 session = await device_client.async_open_sd_playback(
     result.records[-1], rtsp_push_url="rtsp://127.0.0.1:8554/playback"
 )
-reply = await session.playback_reply()  # AvioResponse or None
+reply = await session.playback_reply()  # AvioResponse or None; decode_playcontrol_reply reads it
 await session.async_sd_pause()
 await session.async_sd_resume()
 await session.async_sd_seek(40)  # seconds into the recording
@@ -689,10 +670,10 @@ in the vendored aiortc), assembled into access units and recorded as HEVC.
 The recorder's video codec is set by the recording's first keyframe, so an
 H264 recording (camera encoder setting 2) is recorded as H264 from aiortc's
 own track. There is no `on_frame` decode and no serve on this path. A camera
-flagged SDES that answers only DTLS falls back to this path still asking for
-the recording (unreleased; rc63 fell back with a live peer id and recorded
-audio alone). An access unit that lost a packet is dropped, not recorded
-damaged. On an
+flagged SDES that answers only DTLS falls back to this path, still asking for
+the recording (1.0.0rc64). A frame that lost a packet the camera did not resend
+is handed on with what arrived, for the decoder to conceal, rather than
+dropped (1.0.0rc66; `H265AccessUnits(keep_damaged=False)` drops it). On an
 A000088 the answer's extra video section names H265 on PT 0. Played on a
 carded A000088 on 2026-10-27, over a direct LAN path: 638 HEVC frames at
 2560x1440 with 0 decode errors, 41.9 s of audio with no gap over 21 ms, the
@@ -735,12 +716,10 @@ video (the camera's per-frame recording times say the same: 4002 ms to the
 next frame), while its sound runs from the start; a player holds that first
 picture until the video resumes. It is in the recording, not lost on the way
 (2026-10-30). An A000088 sends a recording's last frame twice under a new
-timestamp; the H265 assembler skips the copy (unreleased). Its recording's
-H265 is taken raw before aiortc routes it, so aiortc never asks for a lost
-packet again; the tap sends the NACK itself and holds packets up to 300 ms so
-the resend goes back in place. The A000088 resends what is named: three plays
-with it had every frame whole, against 147 decode-error lines from one lost
-packet before (unreleased).
+timestamp; the H265 assembler skips the copy. Its recording's H265 is taken raw
+before aiortc routes it, so aiortc never asks for a lost packet; the tap sends
+the NACK itself and holds packets up to 300 ms so the resend goes back in
+place. Three plays with it had every frame whole (both 1.0.0rc67).
 
 **A recording made at a lower frame rate is sent faster than it plays.** The
 camera stamps and paces a recording at its live frame rate (20 fps on the
@@ -752,13 +731,13 @@ an RTP header extension (id 4 here): a 2-byte playback channel, a flag byte
 (0xf0), and the frame's time in the recording in Unix milliseconds; all ones
 marks the end of the recording. The library reads it off each packet (it is in
 the clear under SRTP) and moves the written `.ts` onto that clock when the
-session stops; `playback_ended` reports the end mark (1.0.0rc65). The sound
-after the first quarter of such a clip is never sent; the vendor app gets it,
-so the camera paces the app's sessions some other way. Not by transport-cc
-feedback (sent as the app's stack does, 123 reports in one playback: no
-change), a REMB cap, or the iOS client class; pausing whenever the video ran
-3 s ahead stretched delivery to real time but raised the sound only to 35 s
-of 60, because a pause stops the sound too (2026-10-30).
+session stops; `playback_ended` reports the end mark (1.0.0rc65).
+
+**Known limitation:** the sound after about the first quarter of such a clip is
+never sent to this library. The AiDot app plays these with continuous sound,
+so the camera paces the app's sessions some other way; transport-cc feedback,
+a REMB cap and the iOS client class were each tried without effect (details in
+the CHANGELOG under 1.0.0rc65 and rc66).
 
 **An SDES `.ts` carries the G.711 audio as an unlabelled data stream**, not an
 audio track, so a player sees video only. A caller converting the file must
@@ -790,6 +769,16 @@ the bandwidth-heavy media therefore stays on the LAN.
   (MQTT + STUN/TURN). Only the *media* is LAN-direct; the *handshake* is not.
 - **Connect is per-attempt probabilistic** for DTLS cameras; rely on retries (the
   high-port nomination fix substantially raises the per-attempt rate).
+- **The A001064 (PTZ) streams at about 2.2 Mbps, about 24% above the AiDot
+  app** (measured from a capture of the app on the same camera: about 1796 Kbps
+  on HD, 866 Kbps on SD). The app's SD setting halves its rate; the same command
+  sent here, byte for byte, does not change ours. Streaming is correct either
+  way; the cost is bandwidth. An H.265 session costs about half an H.264 one
+  (766-774 against 1597-1685 Kbps over ten sessions), but the camera chooses the
+  codec: narrowing the offer to H.265 gets no video at all (see
+  `AIDOT_SDES_VIDEO_PT`), reordering the offer does not move the choice, and
+  browser support for HEVC over Media Source Extensions is far narrower than for
+  H.264.
 
 ## Choosing a video decoder
 
@@ -836,11 +825,8 @@ before anything is spawned, and if none survive, no sample is even encoded -
 that case answers in about three milliseconds. Only H.264 is measured, because
 only H.264 is ingested.
 
-## Advanced tuning environment variables
+## Environment variables
 
-Every `AIDOT_*` variable the library reads that is not in the
-[README's table](../README.md#camera-streaming--tuning) is documented in one
-place, [`ENVIRONMENT.md`](ENVIRONMENT.md): the streaming knobs, the deeper
-internals (idle release, PLI cadence, retry spacing, audio normalisation), the
-ffmpeg serve's input settings, and the endpoint overrides and test seams.
-The table that used to sit here moved there so the two could not drift apart.
+The public ones are in the
+[README](../README.md#environment-variables); every other `AIDOT_*` variable is
+in [`ENVIRONMENT.md`](ENVIRONMENT.md).
