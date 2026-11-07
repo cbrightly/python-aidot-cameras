@@ -378,7 +378,9 @@ def test_import_time_constants_come_from_the_registry():
     assert sdes_open._BATTERY_STALE_OFFER_GRACE_S == settings.default(
         "AIDOT_BATTERY_STALE_OFFER_GRACE_S"
     )
-    assert sdes_open._TRIGGER_GRACE_S == settings.default("AIDOT_SDES_TRIGGER_GRACE_S")
+    assert sdes_open._NO_MEDIA_GRACE_S == settings.default(
+        "AIDOT_SDES_NO_MEDIA_GRACE_S"
+    )
     assert lan_retry._LOGIN_RETRY_LIMIT == settings.default("AIDOT_LOGIN_RETRY_LIMIT")
     assert protocol.REMB_TARGET_BPS == settings.default("AIDOT_REMB_TARGET_BPS")
 

@@ -96,18 +96,3 @@ def test_the_open_uses_it_at_once_only_for_direct_publish_and_skips_the_grace():
         assert any(_assigns(s, "_answer_apt") for s in after), (
             "the ffmpeg serve no longer falls back to the answer's audio PT"
         )
-
-
-def test_key_restart_keeps_the_audio_narrowing():
-    """The SRTP key-change relaunch rebuilds the SDP; without the negotiated
-    PT the audio line is left unnarrowed and the publisher takes PCMU (first
-    listed) and drops every PCMA packet."""
-    from tests.ast_guards import calls_to, names_in, sdes_open_family
-
-    rebuilds = [
-        c for fn in sdes_open_family() for c in calls_to(fn, "_build_restart_sdp")
-    ]
-    assert rebuilds
-    for call in rebuilds:
-        audio = {k.arg: k.value for k in call.keywords}.get("first_audio_pt")
-        assert audio is not None and "_keep_a" in names_in(audio)

@@ -28,6 +28,7 @@ from ..exceptions import (
     AidotFfmpegMissing,
     AidotLivePlayRefused,
     AidotSdPlaybackUnavailable,
+    AidotStreamOpenError,
 )
 from .constants import (
     _LIVE_PLAY_NOT_READY,
@@ -928,10 +929,12 @@ def _should_direct_publish(
     recordings and snapshots (``output_path`` / ``max_seconds``) and the
     ``-f null`` decode drain keep ffmpeg. See docs/DESIGN-direct-publish.md.
 
-    And only when the bridge itself decrypts (``plain_rtp``): for any other
-    SDES model the loopback ports carry SRTP that the serve ffmpeg decrypts
-    from the SDP's ``a=crypto`` keys, and the publisher would forward it still
-    encrypted - a stream go2rtc accepts and nobody can decode.
+    And only when the bridge itself decrypts (``plain_rtp``): otherwise the
+    loopback ports would carry SRTP and the publisher would forward it still
+    encrypted - a stream go2rtc accepts and nobody can decode.  The SDES open
+    refuses any model outside ``_PLAIN_RTP_MODELS``, so the open always
+    passes True; the term stays so the precondition is stated where it is
+    relied on.
 
     And only for the codec the publisher is validated on. ``video_pt`` is what
     the serve SDP was narrowed to: 96 (H.264) is measured on seven cameras,
@@ -1134,36 +1137,47 @@ _FIRST_MEDIA_WAIT_S = 75.0
 _BATTERY_STALE_OFFER_GRACE_S = settings.read("AIDOT_BATTERY_STALE_OFFER_GRACE_S")
 
 
-# How long a nominated candidate has to produce ANY inbound STUN Binding Success
-# before its attempt is abandoned to the retry.  ROAD-TO-1.0 item 3 measured
-# that the trigger "arms within about a second of the answer or never" - there
-# is no slow-success state - so a nominated pair that has answered nothing for
-# this long will not start media in this attempt.  Seen on 2026-09-15 on an
-# A001513 whose answer carried only its own on-subnet host address
-# (_candidate_is_off_subnet cannot flag that): the attempt otherwise ran its
-# whole 75 s budget before the retry.  The address was the camera's real one
-# (ARP resolved it to the camera's own MAC; ICMP to it came and went), so the
-# likely shape is a battery camera dozing after it answered, as rc7 measured -
-# not a dead address.  Timed from nomination, not from the open, so a slow
-# battery wake is never clipped; and a learned relay peer or any Binding
-# Success keeps the wait alive, so the relay-observed-peer recovery is
-# preserved.
-#
-# Set AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S=0 to restore the previous behaviour.
-_UNREACHABLE_NOMINEE_GRACE_S = settings.read("AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S")
+# The other first-media timer: how long after the camera's answer the attempt
+# may go without media before it is abandoned to the retry (see
+# _no_media_abandon_due).  It replaced three rules that shared this 20 s and
+# differed only in which event they timed from - nomination, the answer, the
+# LIVING send - and which shape they could see.  Sized from 165 successful
+# first medias across 28 live-validation runs (2026-09-22 to 10-09), the
+# slowest 9.5 s after webrtcReq; 29 of 30 stalls in those runs were shapes this
+# ends.  Timed from the answer, so a slow battery wake is never clipped.
+# A malformed or non-finite value is the default (the rules live in
+# ``settings``); 0 restores the full-budget wait.
+_NO_MEDIA_GRACE_S = settings.read("AIDOT_SDES_NO_MEDIA_GRACE_S")
+
+# Knobs whose paths are gone (the webrtcReq-echo wait, and the three rules the
+# no-media timer replaced), still accepted and ignored: one warning per process
+# when any is set.
+_DEPRECATED_SDES_KNOBS = (
+    "AIDOT_SDES_ECHO_WAIT_S",
+    "AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S",
+    "AIDOT_SDES_ANSWER_PROBE_GRACE_S",
+    "AIDOT_SDES_TRIGGER_GRACE_S",
+)
+_deprecated_knobs_warned = False
 
 
-# The two companions of the unreachable-nominee grace, for the two first-media
-# shapes it cannot see (see _no_probe_abandon_due / _trigger_unacked_abandon_due).
-# Both are sized from the same measurement: 165 successful first medias across
-# 28 live-validation runs (2026-09-22 to 10-09), the slowest 9.5 s after
-# webrtcReq; 29 of 30 stalls in those runs were the two shapes these rules end.
-# Also the earlier finding that the trigger arms within about a second or never.
-# A malformed or non-finite value is the default: a bare float() here stopped
-# the library importing on an empty value, and `nan` made both rules fire at
-# once. The rules live in ``settings``.
-_ANSWER_PROBE_GRACE_S = settings.read("AIDOT_SDES_ANSWER_PROBE_GRACE_S")
-_TRIGGER_GRACE_S = settings.read("AIDOT_SDES_TRIGGER_GRACE_S")
+def _warn_deprecated_knobs(env: Optional[dict] = None) -> None:
+    """Log once per process that a deprecated, ignored knob is set."""
+    global _deprecated_knobs_warned
+    if _deprecated_knobs_warned:
+        return
+    _set = [n for n in _DEPRECATED_SDES_KNOBS if settings.is_set(n, env)]
+    if not _set:
+        return
+    _deprecated_knobs_warned = True
+    _LOGGER.warning(
+        "%s: deprecated and ignored. The SDES open no longer waits for a"
+        " webrtcReq echo, and abandons a first-media wait on one timer,"
+        " AIDOT_SDES_NO_MEDIA_GRACE_S (no media that long after the answer);"
+        " unset %s.",
+        ", ".join(_set),
+        "it" if len(_set) == 1 else "them",
+    )
 
 
 def _sd_session_mode(sd_playback) -> int:
@@ -1436,98 +1450,93 @@ def _stale_offer_abandon_due(
     return (now - first_seen_ts) >= grace_s
 
 
-def _no_answer_abandon_due(
-    *, nominated_since_s, grace_s: float, binding_success: int, prflx_learned: bool
-) -> bool:
-    """Whether a nominated candidate that never answered should be abandoned.
+def _no_media_abandon_due(*, answered_since_s, grace_s: float, media_pkts: int) -> bool:
+    """Whether a camera that answered and then sent no media should be abandoned.
 
-    The companion to :func:`_stale_offer_abandon_due`, whose own docstring notes
-    it leaves "a camera that never speaks at all ... unreachable" on the full
-    window.  This is that case, and it is narrower: we DID nominate -- the answer
-    arrived and carried a candidate -- but nothing came back.  Seen on
-    2026-09-15: an A001513 answered with only its own on-subnet host address,
-    nothing answered a connectivity check, and the attempt ran its whole 75 s
-    budget before the retry.  :func:`_candidate_is_off_subnet` cannot flag it
-    (the address is on our subnet), and the address was the camera's real one -
-    the likely shape is a battery camera dozing after it answered (rc7).
-    ROAD-TO-1.0 item 3 measured that the trigger arms within about a second of
-    the answer or never, so waiting out the window buys nothing.
+    The second of the two first-media timers, beside
+    :func:`_stale_offer_abandon_due`.  Timed from the camera's ANSWER, never from
+    the open, so a battery camera still waking is never clipped: until it has
+    answered there is nothing to time.  Sized from 165 successful first medias
+    across 28 live-validation runs (2026-09-22 to 10-09), the slowest 9.5 s
+    after webrtcReq, and the finding that the trigger arms within about a
+    second of the answer or never (ROAD-TO-1.0 item 3).
 
-    Fires only when ALL of these hold:
+    This used to be three rules on the same 20 s, each timed from its own
+    event (nomination, answer, LIVING) and each blind to the others' shapes.
+    Which shape the attempt was in is still worth knowing, and
+    :func:`_no_media_shape` names it for the stall report.
 
-      * ``nominated_since_s`` is not None -- we have nominated a candidate.  It
-        is the seconds since NOMINATION, not since the open, so a battery camera
-        still waking (nothing nominated yet) is never clipped; and
-      * that has lasted at least ``grace_s``; and
-      * ``binding_success`` is 0 -- nothing we nominated answered a connectivity
-        check; and
-      * ``prflx_learned`` is False -- no peer-reflexive candidate has been
-        learned from a relay-carried probe, so the relay-observed-peer recovery
-        is not in progress.
-
-    Any Binding Success, or a learned relay peer, keeps the wait alive.
-    ``grace_s`` <= 0 disables the check.
-
-    Pure, so the policy is testable without a camera.
-    """
-    if grace_s <= 0 or nominated_since_s is None:
-        return False
-    if nominated_since_s < grace_s:
-        return False
-    return binding_success == 0 and not prflx_learned
-
-
-def _no_probe_abandon_due(
-    *,
-    answered_since_s,
-    grace_s: float,
-    nominated: bool,
-    probes: int,
-    binding_success: int,
-) -> bool:
-    """Whether a camera that answered and then never probed should be abandoned.
-
-    The third shape, after the stale-offer and unreachable-nominee rules: the
-    answer arrived, so the camera is awake, but no STUN probe ever came and
-    nothing was nominated - so the nominee rule never starts.  Measured
-    2026-10-08 on an A001513: `nominated=none; probes=none` for the whole 75 s,
-    then the next attempt served in 5 s.  Timed from the ANSWER, never from
-    the open, so a battery camera still waking is never clipped.  Fires only
-    when nothing has been nominated, no probe was seen, and no connectivity
-    check was answered; ``grace_s`` <= 0 disables it.
-
-    ``binding_success`` is the backstop for nomination the caller cannot see:
-    an answer with ICE credentials and no candidates is nominated by the
-    bridge's periodic tick from trickled candidates, which records nothing, and
-    the relay-only cameras on that path send no probes.  Any Binding Success
-    means a check was answered, and the trigger rule owns the attempt from
-    there.
+    ``media_pkts`` counts any media, audio included: a camera that is sending
+    something is acting on the session, and the wait ends on its own once the
+    video follows.  ``grace_s`` <= 0 disables the check.
     """
     if grace_s <= 0 or answered_since_s is None:
         return False
     if answered_since_s < grace_s:
         return False
-    return not nominated and probes == 0 and binding_success == 0
+    return media_pkts == 0
 
 
-def _trigger_unacked_abandon_due(
-    *, trigger_sent_since_s, grace_s: float, trigger_acked: bool, media_pkts: int
-) -> bool:
-    """Whether a camera that never acted on LIVING should be abandoned.
+def _no_media_shape(
+    *,
+    nominated: bool,
+    probes: int,
+    binding_success: int,
+    prflx_learned: bool,
+    trigger_sent: bool,
+    trigger_acked: bool,
+) -> str:
+    """Which stall an attempt ended by :func:`_no_media_abandon_due` was in.
 
-    The fourth shape: the camera answered our connectivity checks (so it is
-    reachable), LIVING went out on the channel, and neither an ack nor a media
-    packet followed.  Measured 2026-10-08 on an A001513: `binding-success=2;
-    trigger=sent(unacked); inbound-media=0` for 75 s.  Timed from the LIVING
-    send.  The bridge's existing retrigger already re-sends LIVING every 2 s
-    until the camera's first probe; this rule only ends the attempt.
-    ``grace_s`` <= 0 disables it.
+    The names are the ones the stall report has always carried, so a log
+    reader keeps the distinction the three separate rules used to make:
+
+      * ``no-probe``: the camera answered and then never started ICE - nothing
+        nominated, no probe, no connectivity check answered (measured
+        2026-10-08 on an A001513: ``nominated=none; probes=none`` for 75 s).
+      * ``unreachable-nominee``: we nominated a candidate and nothing answered
+        it - no Binding Success and no peer learned through the relay (seen
+        2026-09-15 on an A001513 whose answer carried only an address it then
+        dozed behind).
+      * ``trigger-unacked``: the path is up and LIVING went out, and neither an
+        ack nor media followed (measured 2026-10-08: ``binding-success=2;
+        trigger=sent(unacked)``).
+      * ``no-media``: none of the above - the camera acted on everything and
+        still sent nothing.
     """
-    if grace_s <= 0 or trigger_sent_since_s is None:
-        return False
-    if trigger_sent_since_s < grace_s:
-        return False
-    return not trigger_acked and media_pkts == 0
+    if not nominated and probes == 0 and binding_success == 0:
+        return "no-probe"
+    if nominated and binding_success == 0 and not prflx_learned:
+        return "unreachable-nominee"
+    if trigger_sent and not trigger_acked:
+        return "trigger-unacked"
+    return "no-media"
+
+
+#: The INFO status line for each :func:`_no_media_shape`, formatted with the
+#: grace.  The first three are the lines the separate rules wrote.
+_NO_MEDIA_STATUS = {
+    "unreachable-nominee": (
+        "nothing answered the nominated candidate(s) in %.0fs"
+        " - no STUN binding success and no relay-learned peer,"
+        " so the address is not reachable; abandoning this"
+        " attempt to the retry"
+    ),
+    "no-probe": (
+        "the camera answered %.0fs ago and has sent no STUN probe"
+        " since - nothing to nominate, so no trigger can arm;"
+        " abandoning this attempt to the retry"
+    ),
+    "trigger-unacked": (
+        "LIVING went out %.0fs ago on a path the camera answered,"
+        " and neither an ack nor a media packet followed; abandoning"
+        " this attempt to the retry"
+    ),
+    "no-media": (
+        "the camera answered %.0fs ago and has sent no media since;"
+        " abandoning this attempt to the retry"
+    ),
+}
 
 
 # How long to wait for the camera's webrtcResp before parsing it for the ICE
@@ -1537,7 +1546,7 @@ def _trigger_unacked_abandon_due(
 # answer a single event-loop cycle and almost always read an empty string.
 # Everything downstream then behaved as if the camera had never answered.
 # Bounded so a camera that truly never answers still falls through to the
-# existing no-answer/DTLS-fallback path on its own schedule.
+# existing no-answer path on its own schedule.
 _PRE_LAUNCH_ANSWER_WAIT_S = 8.0
 
 # Extra time for the audio payload type once video is known.  Measured on an
@@ -1616,8 +1625,7 @@ def _should_retry_pinned_codec(
 def _abandoned_media_grace_s() -> float:
     """Seconds of grace after the backstop. Never negative, never raises.
 
-    Read per call and guarded, like `_sdes_liveplay_echo_timeout` and
-    `_sdes_echo_wait_timeout`. Parsed at import this was a ValueError on any
+    Read per call and guarded, like `_sdes_liveplay_echo_timeout`. Parsed at import this was a ValueError on any
     non-numeric value - `AIDOT_ABANDONED_MEDIA_GRACE_S=8s` would stop the whole
     module importing and take the integration down at setup rather than
     degrading. Reading it per call also makes the documented `=0` escape hatch
@@ -1798,13 +1806,13 @@ def _answer_ready_for_this_open(stamp, open_started_at) -> bool:
 def _stun_window_answer_exit_due(*, stun_seen: bool, answer_ready: bool) -> bool:
     """Whether the STUN responder window has nothing left to wait for.
 
-    Every branch of the window carries the delay, so this is not scoped to one.
-    Measured on two cold A001064 opens that took different branches:
+    Measured on two cold A001064 opens, when the window still had a 20 s
+    branch for a webrtcReq echo (since removed):
 
-      * echo received, webrtcResp sent (the 20 s window): answer at +0.72 s,
-        window ran to +5.05 s and left on 1.5 s of ICE silence.
-      * no echo (the 2.5 s window): answer at +0.22 s, window ran the full
-        2.5 s cap and left on the deadline.
+      * the 20 s window: answer at +0.72 s, window ran to +5.05 s and left on
+        1.5 s of ICE silence.
+      * the 2.5 s window: answer at +0.22 s, window ran the full 2.5 s cap and
+        left on the deadline.
 
     Both held the answer for the whole window.  Nothing else in the window is
     load-bearing by then either: an SRTP packet already breaks out of it, a
@@ -2730,10 +2738,10 @@ def answer_pt_kinds(sdp_text: str) -> dict:
 def rewrite_rtp_payload_type(pkt: bytes, pt: int) -> bytes:
     """Return ``pkt`` with its RTP payload type replaced, marker bit preserved.
 
-    Used only where the bridge itself decrypted the packet (``_use_plain_rtp``),
-    so what is being edited is plaintext on its way to our own loopback -- never
-    a packet ffmpeg will authenticate, where a changed byte would fail the SRTP
-    auth tag.  RTP byte 1 is ``M(1) | PT(7)`` (RFC 3550), so only the low seven
+    Used only where the bridge itself decrypted the packet, so what is being
+    edited is plaintext on its way to our own loopback -- never a packet
+    ffmpeg will authenticate, where a changed byte would fail the SRTP auth
+    tag.  RTP byte 1 is ``M(1) | PT(7)`` (RFC 3550), so only the low seven
     bits move.
 
     A packet too short to hold that byte is returned untouched rather than
@@ -2769,52 +2777,8 @@ def _should_capture_sprop(kind, decrypted: bool, sprop_done: bool) -> bool:
     not clear the file, and the first correct capture then differs from it and
     trips the ``.unstable`` marker, disabling injection for that camera for good.
     A bad frame is cheap; a bad file is not.
-
-    Returning False for a packet nobody decrypted is right even where ffmpeg
-    does its own decryption: what we hold is still ciphertext, so anything mined
-    from it would be noise either way.
     """
     return bool(kind == "video" and decrypted and not sprop_done)
-
-
-def _should_count_media(decrypted: bool, plain_rtp: bool) -> bool:
-    """Did this forward deliver media the consumer can actually use?
-
-    ``_media_progress`` and ``_media_counts`` are the only in-process evidence
-    that media flowed on the SDES path - nothing is decoded in this process, so
-    ``on_frame`` never fires and these counters are what every health check
-    reads: ``SdesSession.last_media_monotonic`` feeds ``SdesSession.is_stalled``,
-    the keepalive's ``_healthy`` is ``last_media_monotonic > 0.0``, and
-    ``_healthy`` is what resets the streak ``_should_abandon_keepalive`` counts.
-    Counting a packet the consumer throws away therefore does not just skew a
-    statistic: it makes a session report healthy forever while the viewer sees
-    black, because every one of those checks is satisfied by a counter that
-    keeps moving.
-
-    The question is not "did we decrypt it" but "is the forwarded packet
-    plaintext by the time ffmpeg reads it", and who owes the decryption depends
-    on the camera:
-
-    * ``plain_rtp`` (``_use_plain_rtp``, the ``_PLAIN_RTP_MODELS`` substring
-      allowlist): the ffmpeg SDP is ``RTP/AVP`` with no ``a=crypto``, so the
-      BRIDGE owes the decryption.  ``_fwd_pkt`` is rebound only when
-      ``unprotect`` succeeds, and two paths leave it as ciphertext - no SRTP
-      receive session (pylibsrtp is in the optional ``webrtc`` extra) and an
-      ``unprotect`` that raised.  ffmpeg discards those, so they are not
-      delivered media.  Non-TUTK packets on this path are SRTP by then: the
-      camera switches from TUTK SFrames to standard SRTP after LIVING, and the
-      SFrames are handled and ``continue``-d well before this point.
-    * Otherwise the SDP is ``RTP/SAVP`` with ``a=crypto`` and FFMPEG owes the
-      decryption.  Forwarding ciphertext is exactly right there, ``decrypted``
-      is always False, and the packet IS delivered media - so the ``plain_rtp``
-      term is load-bearing.  ``is_sdes_camera`` is a cloud property
-      (``enableSdes == '1'``), a different and wider set than the model
-      allowlist, so this path is reachable by any SDES camera not named in it.
-      Without the second term such a camera would report ``last_media`` 0.0
-      forever, trip ``is_stalled`` at the grace deadline while streaming fine,
-      and eventually have its keepalive abandoned.
-    """
-    return bool(decrypted or not plain_rtp)
 
 
 def _resolve_sdes_video_pt(stream_settings=None) -> Optional[int]:
@@ -2987,104 +2951,35 @@ def _ffmpeg_rx_sdp(
     ts: int,
     audio_port: int,
     video_port: int,
-    plain_rtp: bool,
-    srtp_key_audio: str,
-    srtp_key_video: str,
     conn_ip: str,
     session_name: str,
 ) -> str:
     """The SDP ffmpeg reads to receive the bridge's audio and video.
 
-    Four copies of this template lived in the open (the first launch, the
-    key-restart rebuild and both branches of the bridge's rewrite); they
-    differed only in what this takes as arguments. ``plain_rtp`` selects
-    RTP/AVP with no ``a=crypto`` for the models whose bridge decrypts and
-    forwards plain RTP; the rest is RTP/SAVP keyed with the SRTP keys.
+    Plain RTP/AVP with no ``a=crypto``: the bridge is the only decryptor (every
+    SDES model the open accepts is in ``_PLAIN_RTP_MODELS``) and forwards
+    plaintext RTP to the loopback ports named here.  An RTP/SAVP variant keyed
+    from our offer existed for any other SDES camera; no supported one used it,
+    and the open now refuses such a model up front instead.
     """
-    proto = "RTP/AVP" if plain_rtp else "RTP/SAVP"
-
-    def _crypto(key: str) -> str:
-        if plain_rtp:
-            return ""
-        return f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{key}\r\n"
-
     return (
         "v=0\r\n"
         f"o=- {ts} {ts} IN IP4 0.0.0.0\r\n"
         f"s={session_name}\r\n"
         "t=0 0\r\n"
-        f"m=audio {audio_port} {proto} 0 8\r\n"
+        f"m=audio {audio_port} RTP/AVP 0 8\r\n"
         f"c=IN IP4 {conn_ip}\r\n"
-        f"{_crypto(srtp_key_audio)}"
         "a=rtpmap:0 PCMU/8000\r\n"
         "a=rtpmap:8 PCMA/8000\r\n"
         "a=rtcp-mux\r\n"
-        f"m=video {video_port} {proto} 96 97\r\n"
+        f"m=video {video_port} RTP/AVP 96 97\r\n"
         f"c=IN IP4 {conn_ip}\r\n"
-        f"{_crypto(srtp_key_video)}"
         "a=rtpmap:96 H264/90000\r\n"
         "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
         "profile-level-id=42e01f\r\n"
         "a=rtpmap:97 H265/90000\r\n"
         "a=fmtp:97 level-id=93\r\n"
         "a=rtcp-mux\r\n"
-    )
-
-
-def _build_restart_sdp(
-    *,
-    ts: int,
-    lo_audio_port: int,
-    lo_video_port: int,
-    use_plain_rtp: bool,
-    srtp_key_audio: str,
-    srtp_key_video: str,
-    first_video_pt=None,
-    answer_video_pt=None,
-    first_audio_pt=None,
-) -> str:
-    """Build the SDP the SRTP key-restart hands to the relaunched ffmpeg.
-
-    The restart rebuilds the bridge SDP from scratch, and it has to match the
-    PRIMARY SDP on two counts or it undoes two shipped fixes at once.
-
-    Transport: for ``_use_plain_rtp`` models - which is every SDES camera this
-    library supports - the bridge decrypts and forwards PLAIN RTP, so the
-    primary SDP is RTP/AVP with no a=crypto.  Writing RTP/SAVP here makes
-    ffmpeg try to authenticate already-decrypted packets: every one fails its
-    HMAC check and a working stream drops to zero bytes mid-session.
-
-    Payload types: hard-coding "0 8" and "96 97" throws away the narrowing, and
-    ffmpeg binds the FIRST type on each line - so an H.265 camera silently
-    loses all video (and with it the PAT/PMT, hence the whole output), and a
-    PCMA camera loses its audio.  Both types are known by now, so the selection
-    lives here rather than at the call site: a caller free to pass a payload
-    type of its own is a caller free to reintroduce the hard-coding.
-
-    Pure: no I/O, no clock, no ``self``.  ``ts`` is passed in and the
-    sprop-parameter-sets injection and the on-disk rewrite stay with the
-    caller.
-    """
-    sdp = _ffmpeg_rx_sdp(
-        ts=ts,
-        audio_port=lo_audio_port,
-        video_port=lo_video_port,
-        plain_rtp=use_plain_rtp,
-        srtp_key_audio=srtp_key_audio,
-        srtp_key_video=srtp_key_video,
-        conn_ip="127.0.0.1",
-        session_name="aidot-sdes-rx",
-    )
-    return narrow_sdp_payload_types(
-        sdp,
-        # Same answer-SDP fallback as the pre-launch narrowing: this restart
-        # rebuilds the dual-codec template, so without it a session that never
-        # saw a video packet reproduces the unnarrowed SDP on every watchdog
-        # cycle.
-        keep_video=(
-            first_video_pt if first_video_pt in _SDP_VIDEO_PTS else answer_video_pt
-        ),
-        keep_audio=(first_audio_pt if first_audio_pt in (0, 8) else None),
     )
 
 
@@ -3097,7 +2992,7 @@ async def _sdes_await_answer_or_terminal(
     camera REFUSED this stream; the whole point of classifying it as terminal
     is that neither waiting nor retrying can help.  The SDES path used to watch
     only ``answer_fut``, so a refusal cost the full answer budget and then a
-    pointless DTLS-fallback offer on top.
+    pointless DTLS offer on top, back when there was a DTLS fallback.
 
     Raises ``AidotCameraBusy`` the moment the refusal lands, ``TimeoutError``
     if neither arrives in ``timeout`` (the caller's existing no-answer path).
@@ -3124,78 +3019,12 @@ async def _sdes_await_answer_or_terminal(
     # so USE-CANDIDATE is never sent, the camera stays in ICE "Checking" and the
     # view shows a black frame with no media - the 0.12.16 failure mode.
     #
-    # ``terminal_error_fut`` is deliberately NOT cancelled: it is checked again
-    # after the open returns (webrtc_open.py) to surface a refusal that landed
-    # during the fallback.
+    # ``terminal_error_fut`` is deliberately NOT cancelled: the first-media
+    # wait and the caller still read it.
     answer_fut.cancel()
     # Builtin TimeoutError (asyncio.TimeoutError is an alias since 3.11); this
-    # is what the caller's `except TimeoutError` no-answer path already catches,
-    # which is what triggers the DTLS fallback.
+    # is what the caller's `except TimeoutError` no-answer path catches.
     raise TimeoutError()
-
-
-# Seconds a role-reversal camera gets to echo our webrtcReq back.
-#
-# This was 2.0 s on the reading that A001064 "needs the resulting webrtcResp".
-# Measured over 18 hours of logs on 2026-09-03/04: of 61 SDES opens, the 17 that
-# took this wait timed out 17/17 at a mean of 2.086 s, and neither `camera
-# webrtcReq echo received` nor `webrtcResp sent (SDES` appears once in the whole
-# log.  The webrtcResp was never built, and all 17 streamed regardless - so the
-# 2.0 s was 45 percent of a 4.2 s cold connect, spent on nothing.
-#
-# Shortened rather than removed, exactly as the livePlayReq echo wait was
-# (5.0 -> 0.25 s, 169/169 timeouts): the evidence says the wait times out, not
-# that the branch is wrong, so a camera that does echo promptly still gets its
-# webrtcResp.  Raise AIDOT_SDES_ECHO_WAIT_S to put the old behaviour back
-# without a release.
-#
-# The measurement is one fleet.  An echo that lands between this value and the
-# old 2.0 s would now miss the wait, and _cam_echo_received is a branch
-# selector, not just a log line: it decides whether the webrtcResp is built,
-# whether the ICE window runs 20 s or 2.5 s, and whether the quickConn
-# reconnect retry is armed.  A late echo is therefore reported loudly at the
-# end of the STUN window rather than passing unnoticed, so an operator on a
-# fleet whose band is not empty gets a line naming the knob.
-_SDES_ECHO_WAIT_S = 0.25
-#: What the wait was before it was measured, and what a device that has actually
-#: produced an echo goes back to.
-_SDES_ECHO_WAIT_LEGACY_S = 2.0
-
-
-def _sdes_echo_wait_timeout(skip_liveplay: bool, echo_seen: bool = False) -> float:
-    """Seconds to block on the camera's webrtcReq echo. Never negative.
-
-    ``echo_seen`` is this device's own history: once an echo has been observed
-    from it - during the wait or, more usefully, after the wait had already
-    expired - every later open on that device waits the full
-    ``_SDES_ECHO_WAIT_LEGACY_S`` again.  That is what keeps the shortened wait
-    honest on a fleet the 17/17 measurement never saw: such a camera pays the
-    miss once, says so in the log, and is never shortened again.  An explicit
-    env value still wins over both.
-
-    The echo only ever arrives for role-reversal models (e.g. A001064), which
-    build a webrtcResp from it and run with ``skip_liveplay`` False (they are
-    hard-excluded from sdes_fast_liveplay).  For A001513-class cameras
-    (``skip_liveplay`` True, the default) the echo never arrives at all, so they
-    do not block on it.
-
-    Read per call and clamped, like its sibling
-    :func:`_sdes_liveplay_echo_timeout`: a malformed env value is ignored rather
-    than raising, because parsing it at import time makes one typo on an HA box
-    an ImportError that takes down every camera, and freezing it at import means
-    an operator changing it sees nothing until a full restart.
-    """
-    raw = settings.read("AIDOT_SDES_ECHO_WAIT_S")
-    if raw is not None:
-        try:
-            val = float(raw)
-        except (TypeError, ValueError):
-            val = None
-        if val is not None and val >= 0.0:
-            return 0.0 if skip_liveplay else val
-    if skip_liveplay:
-        return 0.0
-    return _SDES_ECHO_WAIT_LEGACY_S if echo_seen else _SDES_ECHO_WAIT_S
 
 
 # ffmpeg returns AVERROR(EPIPE) = -32 when its output consumer disappears, and a
@@ -3213,8 +3042,7 @@ def _classify_ffmpeg_exit(rc: int, teardown_requested: bool) -> int:
     """Log level for the bridge observe loop's "ffmpeg exited" line.
 
     Teardown here is SIGTERM-first with a SIGKILL fallback (SdesSession.stop(),
-    the cold-open _reap(), the key-restart proc replace, and the DTLS-fallback
-    abort).
+    and the cold-open _reap()).
 
     A teardown ends one of two ways and BOTH are expected:
 
@@ -3287,12 +3115,11 @@ def _bridge_should_break(rc, teardown_requested: bool) -> bool:
     rc is the held proc's poll() result (None while it is still running).
     Ending the loop is only correct when ffmpeg has actually exited AND no
     locally-initiated teardown is in flight for it: a non-None rc seen while
-    teardown_requested is True is the key-restart window (or any other
-    flagged local kill) - the OLD proc's exit, not a reason to stop.  That
-    window always resolves promptly one of two ways, so skipping the break
-    here cannot hang the bridge thread: either the key-restart repoints
-    _proc_holder[0] at the live new proc (next poll() is None again), or a
-    genuine teardown closes the loopback sockets, which makes the loop's
+    teardown_requested is True is a flagged local kill - the OLD proc's exit,
+    not a reason to stop.  That window always resolves promptly one of two
+    ways, so skipping the break here cannot hang the bridge thread: either a
+    restart repoints _proc_holder[0] at the live new proc (next poll() is None
+    again), or a genuine teardown closes the loopback sockets, which makes the loop's
     select() raise and exit via its own except-break.  Pure function so the
     policy is unit-testable without a live bridge thread.
     """
@@ -3542,10 +3369,11 @@ def _first_media_stall_report(
     users paste that file into public issue reports.
 
     ``probes`` is a sequence of ``(source_label, verdict)`` from
-    :func:`_probe_source_verdict`.  ``abandoned_by`` names the early-abandon
-    rule that ended the wait (``stale-offer``, ``unreachable-nominee``,
-    ``no-probe`` or ``trigger-unacked``), or None when none did.  Pure, so the
-    wording is testable.
+    :func:`_probe_source_verdict`.  ``abandoned_by`` says why the wait ended
+    early: ``stale-offer`` for the battery timer, or for the no-media timer
+    the shape :func:`_no_media_shape` named (``unreachable-nominee``,
+    ``no-probe``, ``trigger-unacked`` or ``no-media``); None when neither
+    timer fired.  Pure, so the wording is testable.
     """
     _cands = ", ".join(f"{_ip}:{_port}" for _ip, _port in (nominated or []))
     _probes = "; ".join(
@@ -3663,8 +3491,8 @@ def _ensure_srtp_rx_session(holder, key, build, *, on_built=None, on_error=None)
     library supports -- the bridge is the only decryptor: the ffmpeg SDP is
     RTP/AVP with no ``a=crypto``, so a receive session holding the wrong key
     means no media at all, not a degraded stream.  The camera can hand us a
-    different key partway through the open (the second webrtcResp on
-    echo-reversal cameras), so "built once" is not good enough; the session has
+    different key partway through the open (a later webrtcResp, or an answer
+    that lands after the bridge started), so "built once" is not good enough; the session has
     to follow the key it was built from.
 
     ``build(key)`` constructs the session; the caller keeps ``pylibsrtp`` out of
@@ -3744,7 +3572,6 @@ def make_sdes_bridge(
     _turn_send_indication,
     _ufrag_a,
     _ufrag_v,
-    _use_plain_rtp,
     _video_sock,
     _build_srtp_rx,
     _dcep_open_msg,
@@ -3779,7 +3606,7 @@ def make_sdes_bridge(
     so they are this factory's own locals (the keyword defaults); the rest
     arrive here by value, bound once in the open before the thread starts,
     except the three the open reassigns while the thread may be running -
-    the audio SRTP key (the key-restart path), the camera's audio key and
+    the audio SRTP key (the late-answer paths), the camera's audio key and
     the data-channel flag (the late-answer path) - which come as getters so
     the bridge keeps seeing the open's current value as the closure did.
     The returned function is the thread target; the open stores counters on
@@ -3833,10 +3660,10 @@ def make_sdes_bridge(
         _bridge_fn._br_binding_success_count = 0
         _bridge_fn._br_probe_verdicts = {}
         _bridge_fn._br_probe_overflow = 0
-        # Read by the first-media wait's trigger rule
-        # (_trigger_unacked_abandon_due): when LIVING first went out
-        # (monotonic), and TUTK-framed media, which leaves its branch before
-        # _br_media_pkts is counted.
+        # Read by the first-media wait's no-media timer (_no_media_abandon_due
+        # and _no_media_shape): whether LIVING went out (monotonic), and
+        # TUTK-framed media, which leaves its branch before _br_media_pkts is
+        # counted.
         _bridge_fn._br_trigger_sent_ts = None
         _bridge_fn._br_tutk_media = 0
         _last_trigger_ts = 0.0  # time of last AVIO LIVING send
@@ -3897,11 +3724,9 @@ def make_sdes_bridge(
                     break
                 # Stop the bridge when ffmpeg exits (normal end or crash) -
                 # but NOT on a stale exit seen during a flagged teardown
-                # window (key-restart proc replace, stop(), _reap(), the
-                # DTLS-fallback abort): _bridge_should_break() skips the
-                # break there, and the loop resolves it either via the
-                # key-restart's _proc_holder[0] repoint (next poll() None,
-                # below) or via a genuine teardown closing the loopback
+                # window (stop(), _reap()): _bridge_should_break() skips the
+                # break there, and the loop resolves it either via a
+                # _proc_holder[0] repoint (next poll() None, below) or via a genuine teardown closing the loopback
                 # sockets, which raises out of the select() above.
                 _br_proc = _proc_holder[0]
                 if _br_proc is not None:
@@ -4795,11 +4620,7 @@ def make_sdes_bridge(
                         #   - IV:   base64_decode(our_sdes_inline_key)[16:30] + \x00\x00
                         #   - Packet: [0xC8][0x00][len_hi][len_lo][ciphertext]
                         #     (4-byte header, NOT the 12-byte TUTK SFrame with ts/SSRC)
-                        if (
-                            _use_plain_rtp
-                            and not _tutk_trigger_sent
-                            and _bpkt[:2] == b"\x01\x01"
-                        ):
+                        if not _tutk_trigger_sent and _bpkt[:2] == b"\x01\x01":
                             _tutk_trigger_sent = True
                             _bridge_fn._tutk_trigger_sent = True
                             if getattr(_bridge_fn, "_br_trigger_sent_ts", None) is None:
@@ -5015,7 +4836,7 @@ def make_sdes_bridge(
                                     f" cam_key={_sdes_v_fp}"
                                     f" [{_bpkt[:24].hex()}]"
                                 )
-                        # TUTK SFrame detection (A001064 / _use_plain_rtp):
+                        # TUTK SFrame detection (A001064 / A001513):
                         # The camera sends TUTK-framed data instead of SRTP.
                         # Wire-capture analysis (2026-05-02) confirmed:
                         #   byte0=0xC8 -> TUTK audio SFrame
@@ -5028,11 +4849,7 @@ def make_sdes_bridge(
                         #   [8-11] SSRC (big-endian; confirmed matches actual pkt ssrc)
                         # Strip TUTK header and synthesize a standard RTP/2 packet
                         # so ffmpeg (configured with RTP/AVP, no SRTP) can decode.
-                        if (
-                            _use_plain_rtp
-                            and len(_bpkt) >= 12
-                            and _bpkt[0] in (0xC8, 0xC9)
-                        ):
+                        if len(_bpkt) >= 12 and _bpkt[0] in (0xC8, 0xC9):
                             _tk_type = _bpkt[0]
                             _tk_ts = int.from_bytes(_bpkt[4:8], "big")
                             _tk_ssrc = int.from_bytes(_bpkt[8:12], "big")
@@ -5617,7 +5434,7 @@ def make_sdes_bridge(
                                             "_bridge_fn",
                                             exc_info=True,
                                         )
-                            # Counted for the first-media trigger rule: this
+                            # Counted for the first-media no-media timer: this
                             # branch leaves before _br_media_pkts is counted,
                             # so without it a camera sending TUTK-framed
                             # media would read as sending nothing.
@@ -5660,36 +5477,14 @@ def make_sdes_bridge(
                                 getattr(_bridge_fn, "_br_media_pkts", 0) + 1
                             )
                         if 200 <= _pt_byte <= 204:
-                            # SRTCP from camera.  For _use_plain_rtp cameras
-                            # the ffmpeg SDP uses RTP/AVP (no crypto).  If we
-                            # forward encrypted SRTCP, ffmpeg reads the
-                            # encrypted NTP/RTP sender-info bytes as garbage
-                            # and uses them to rebase its internal clock,
-                            # producing wildly wrong DTS (~ Unix epoch us).
-                            # Drop encrypted SRTCP entirely; ffmpeg works fine
-                            # without RTCP SR - it uses only RTP timestamps.
-                            if _use_plain_rtp:
-                                continue
-                            # For SDES cameras (non-plain-rtp) ffmpeg uses
-                            # SAVP and handles SRTCP itself - forward as-is.
-                            try:
-                                _br_lo_send(_lo_a, _bpkt, _lo_audio_port)
-                            except Exception:
-                                _LOGGER.debug(
-                                    "camera %s: swallowed exception in %s",
-                                    getattr(self, "device_id", "?"),
-                                    "_bridge_fn",
-                                    exc_info=True,
-                                )
-                            try:
-                                _br_lo_send(_lo_v, _bpkt, _lo_video_port)
-                            except Exception:
-                                _LOGGER.debug(
-                                    "camera %s: swallowed exception in %s",
-                                    getattr(self, "device_id", "?"),
-                                    "_bridge_fn",
-                                    exc_info=True,
-                                )
+                            # SRTCP from camera.  The ffmpeg SDP is RTP/AVP
+                            # (no crypto).  If we forward encrypted SRTCP,
+                            # ffmpeg reads the encrypted NTP/RTP sender-info
+                            # bytes as garbage and uses them to rebase its
+                            # internal clock, producing wildly wrong DTS
+                            # (~ Unix epoch us).  Drop encrypted SRTCP
+                            # entirely; ffmpeg works fine without RTCP SR -
+                            # it uses only RTP timestamps.
                             continue
                         _pt = _pt_byte & 0x7F
                         # The ANSWER decides which payload type is which
@@ -5731,13 +5526,11 @@ def make_sdes_bridge(
                             # the same translation video_pt_from_answer_sdp
                             # already performs for the SDP side ("the
                             # camera's own numbering need not agree").
-                            # Gated on _use_plain_rtp because only there is
-                            # the bridge the decryptor and the packet
-                            # reaching ffmpeg plaintext; rewriting a byte
-                            # ffmpeg will itself authenticate breaks SRTP.
+                            # Safe because the bridge is the decryptor: the
+                            # packet reaches ffmpeg plaintext, so no SRTP
+                            # auth tag covers the rewritten byte.
                             if (
                                 _pt not in _SDP_VIDEO_PTS
-                                and _use_plain_rtp
                                 and _answer_video_pt[0] is not None
                             ):
                                 _pt_out = int(_answer_video_pt[0])
@@ -5891,8 +5684,7 @@ def make_sdes_bridge(
                             # os.environ.get costs ~250ns of it.  A flip
                             # now takes effect on the next stream open.
                             _bridge_fn._nack_on = _sdes_nack_enabled()
-                        # For TUTK cameras (_use_plain_rtp) the ffmpeg SDP uses
-                        # RTP/AVP (no crypto). After LIVING the camera switches
+                        # The ffmpeg SDP uses RTP/AVP (no crypto). After LIVING the camera switches
                         # from TUTK SFrames to standard SRTP, so we decrypt here
                         # before forwarding plain RTP to ffmpeg.
                         _fwd_pkt = _bpkt
@@ -5902,55 +5694,53 @@ def make_sdes_bridge(
                         # inert (ffmpeg discards it), but MINING it is not -
                         # see _should_capture_sprop.
                         _decrypted = False
-                        if _use_plain_rtp:
-                            # get_srtp_key_audio(), not get_cam_key_audio(): the
-                            # second-webrtcResp handler adopts the camera's
-                            # real key into get_srtp_key_audio() (this is a live
-                            # closure cell, so the rebind is visible here)
-                            # and leaves get_cam_key_audio() at the first answer's
-                            # value.  Preferring get_cam_key_audio() pinned the
-                            # bridge - the only decryptor on this path - to a
-                            # key the camera had stopped using.
-                            _rx_sess = _ensure_srtp_rx_session(
-                                _bridge_fn,
-                                get_srtp_key_audio(),
-                                _build_srtp_rx,
-                                on_built=_on_srtp_rx_built,
-                                on_error=_on_srtp_rx_error,
-                            )
-                            if _rx_sess is not None:
-                                try:
-                                    _fwd_pkt = _rx_sess.unprotect(_bpkt)
-                                    _decrypted = True
-                                except Exception as _srx_dec_e:
-                                    # Uncapped, unlike the log counter below
-                                    # which stops at 8 to keep the log
-                                    # readable. The stall report needs the
-                                    # real total: "8 failures" and "every
-                                    # packet failed" are different findings.
-                                    _bridge_fn._br_decrypt_fails = (
-                                        getattr(_bridge_fn, "_br_decrypt_fails", 0) + 1
+                        # get_srtp_key_audio(), not get_cam_key_audio(): a
+                        # later webrtcResp's key is adopted into
+                        # get_srtp_key_audio() (this is a live closure cell,
+                        # so the rebind is visible here) and leaves
+                        # get_cam_key_audio() at the first answer's value.  Preferring get_cam_key_audio() pinned the
+                        # bridge - the only decryptor on this path - to a
+                        # key the camera had stopped using.
+                        _rx_sess = _ensure_srtp_rx_session(
+                            _bridge_fn,
+                            get_srtp_key_audio(),
+                            _build_srtp_rx,
+                            on_built=_on_srtp_rx_built,
+                            on_error=_on_srtp_rx_error,
+                        )
+                        if _rx_sess is not None:
+                            try:
+                                _fwd_pkt = _rx_sess.unprotect(_bpkt)
+                                _decrypted = True
+                            except Exception as _srx_dec_e:
+                                # Uncapped, unlike the log counter below
+                                # which stops at 8 to keep the log
+                                # readable. The stall report needs the
+                                # real total: "8 failures" and "every
+                                # packet failed" are different findings.
+                                _bridge_fn._br_decrypt_fails = (
+                                    getattr(_bridge_fn, "_br_decrypt_fails", 0) + 1
+                                )
+                                _ec = getattr(_bridge_fn, "_decrypt_err_n", 0)
+                                if _ec < 8:
+                                    _bridge_fn._decrypt_err_n = _ec + 1
+                                    _seq_d = (
+                                        int.from_bytes(_bpkt[2:4], "big")
+                                        if len(_bpkt) >= 4
+                                        else -1
                                     )
-                                    _ec = getattr(_bridge_fn, "_decrypt_err_n", 0)
-                                    if _ec < 8:
-                                        _bridge_fn._decrypt_err_n = _ec + 1
-                                        _seq_d = (
-                                            int.from_bytes(_bpkt[2:4], "big")
-                                            if len(_bpkt) >= 4
-                                            else -1
-                                        )
-                                        _ssrc_d = (
-                                            int.from_bytes(_bpkt[8:12], "big")
-                                            if len(_bpkt) >= 12
-                                            else 0
-                                        )
-                                        _trace(
-                                            f"bridge: SRTP decrypt err:"
-                                            f" {_srx_dec_e}"
-                                            f" seq={_seq_d}"
-                                            f" ssrc=0x{_ssrc_d:08x}"
-                                            f" pt={_pt}"
-                                        )
+                                    _ssrc_d = (
+                                        int.from_bytes(_bpkt[8:12], "big")
+                                        if len(_bpkt) >= 12
+                                        else 0
+                                    )
+                                    _trace(
+                                        f"bridge: SRTP decrypt err:"
+                                        f" {_srx_dec_e}"
+                                        f" seq={_seq_d}"
+                                        f" ssrc=0x{_ssrc_d:08x}"
+                                        f" pt={_pt}"
+                                    )
                         # Capture this camera's SPS/PPS once so future streams
                         # can inject sprop-parameter-sets (out-of-band decoder
                         # init, robust to in-band SPS loss).  Parses only until
@@ -5995,11 +5785,7 @@ def make_sdes_bridge(
                         # or negative DTS values that the MPEG-TS muxer drops.
                         # Subtracting the first-seen timestamp per-stream gives
                         # ffmpeg a monotonically increasing sequence from 0.
-                        if (
-                            _use_plain_rtp
-                            and len(_fwd_pkt) >= 8
-                            and _fwd_pkt[0] == 0x80
-                        ):
+                        if len(_fwd_pkt) >= 8 and _fwd_pkt[0] == 0x80:
                             _rtp_raw_ts = _st_br.unpack_from("!I", _fwd_pkt, 4)[0]
                             _ts_base_attr = (
                                 "_rtp_ts_base_video"
@@ -6095,10 +5881,10 @@ def make_sdes_bridge(
                             # media flowed, so counting a discarded packet
                             # keeps is_stalled from ever tripping and the
                             # session reports healthy while the viewer sees
-                            # black.  See _should_count_media.
-                            if not _nk_late and _should_count_media(
-                                _decrypted, _use_plain_rtp
-                            ):
+                            # black.  The bridge is the only decryptor, so a
+                            # packet nothing decrypted (no SRTP session, or
+                            # unprotect raised) is ciphertext ffmpeg drops.
+                            if not _nk_late and _decrypted:
                                 _media_progress[0] = _time_br.monotonic()
                                 _media_counts[0] += 1
                                 _media_counts[1] += len(_fwd_pkt)
@@ -6236,14 +6022,12 @@ class _SdesOpenState:
     outgoing_q: "Any"
     answer_fut: "Any"
     camera_offer_fut: "Any"
-    webrtc_req_echo_fut: "Any"
     _status: "Any"
     liveplay_echo_ev: "Any"
     liveplay_resp_fut: "Any"
     numeric_uid_raw: "Optional[str]"
     second_answer_fut: "Any"
     ice_config: "Optional[dict[Any, Any]]"
-    camera_reconnect_ev: "Any"
     rtsp_push_url: "Optional[str]"
     talk: "bool"
     terminal_error_fut: "Any"
@@ -6281,32 +6065,11 @@ class _SdesOpenState:
     _skip_lp: "Any" = dataclasses.field(init=False)  # build_offer
     # write_ffmpeg_sdp_and_send_webrtcreq
     sdp_path: "Any" = dataclasses.field(init=False)
-    # write_ffmpeg_sdp_and_send_webrtcreq
-    _compress_sdp_req: "Any" = dataclasses.field(init=False)
-    _echo_fut: "Any" = dataclasses.field(init=False)  # answer_webrtcreq_echo
-    _cam_echo_received: "Any" = dataclasses.field(init=False)  # answer_webrtcreq_echo
-    # answer_webrtcreq_echo
-    _webrtc_resp_sdes_topic: "Any" = dataclasses.field(init=False)
-    _webrtc_resp_sdes: "Any" = dataclasses.field(init=False)  # answer_webrtcreq_echo
-    # answer_webrtcreq_echo
-    _sdes_webrtcresp_sent: "Any" = dataclasses.field(init=False)
-    _echo_wait_s: "Any" = dataclasses.field(init=False)  # answer_webrtcreq_echo
-    _echo_wait_t0: "Any" = dataclasses.field(init=False)  # answer_webrtcreq_echo
     _send_sdes_ice_cand: "Any" = dataclasses.field(init=False)  # announce_candidates
     _hp_host: "Any" = dataclasses.field(init=False)  # nat_hole_punch
-    _hp_port: "Any" = dataclasses.field(init=False)  # nat_hole_punch
-    _hp_stun: "Any" = dataclasses.field(init=False)  # nat_hole_punch
     _is_self_peer_ip: "Any" = dataclasses.field(init=False)  # nat_hole_punch
     _selfloop_drop_count: "Any" = dataclasses.field(init=False)  # nat_hole_punch
     _prefer_direct_stun: "Any" = dataclasses.field(init=False)  # nat_hole_punch
-    _STUN_MAGIC: "Any" = dataclasses.field(init=False)  # stun_responder_window
-    # stun_responder_window, reconnect_retry_window
-    _stun_count: "Any" = dataclasses.field(init=False)
-    # stun_responder_window, reconnect_retry_window
-    _srtp_detected: "Any" = dataclasses.field(init=False)
-    # stun_responder_window
-    _camera_side_pkt_count: "Any" = dataclasses.field(init=False)
-    _idle_limit: "Any" = dataclasses.field(init=False)  # stun_responder_window
     _pre_launch_answer_sdp: "str" = dataclasses.field(init=False)  # harvest_answer
     _our_tx_srtp_key_audio: "Any" = dataclasses.field(init=False)  # harvest_answer
     _sctp: "dict[Any, Any]" = dataclasses.field(init=False)  # harvest_answer
@@ -6363,6 +6126,7 @@ async def _sdes_open_head(self, ps: _SdesOpenState) -> None:
     # object, not the open, so a marker older than this belongs to a
     # previous open and must not fire this one's early exit.
     ps._open_started_at = time.monotonic()
+    _warn_deprecated_knobs()
     # Stop the MQTT signaling thread on ANY abnormal exit from this impl.
     # The explicit `outgoing_q.put_nowait(None)` calls further down cover the
     # paths that existed when they were written, but an exception raised
@@ -6410,8 +6174,20 @@ async def _sdes_open_head(self, ps: _SdesOpenState) -> None:
     # SRTP model, so ffmpeg tried to decrypt TUTK frames with the announced
     # fake key and the bridge never stripped the TUTK header - a session that
     # negotiates and delivers nothing decodable.
+    #
+    # Every SDES model this library supports is one of these, and the bridge is
+    # the only decryptor this path has.  An SDES camera outside the list (a
+    # cloud profile flags enableSdes, not the model) is refused here, before
+    # the offer is built, rather than opened into a session nothing decrypts.
     _model_id = getattr(getattr(self, "info", None), "model_id", None) or ""
     ps._use_plain_rtp = any(m in _model_id for m in self._PLAIN_RTP_MODELS)
+    if not ps._use_plain_rtp:
+        raise AidotStreamOpenError(
+            f"camera {ps.device_id}: SDES model {_model_id or '?'} is not one"
+            " whose media this library can decrypt (supported: "
+            + ", ".join(sorted(self._PLAIN_RTP_MODELS))
+            + "); add it to _PLAIN_RTP_MODELS once its framing is confirmed"
+        )
     # powerType/p2pCache - IpcServiceImpl.java:B() returns 2 for battery
     # models; 1 for wired.  Derived from is_battery_camera (see live_power_type)
     # so the wire value and the battery guards cannot drift apart.  All tested
@@ -6976,9 +6752,6 @@ async def _sdes_open_write_ffmpeg_sdp_and_send_webrtcreq(
         ts=ps.ts,
         audio_port=ps.audio_port,
         video_port=ps.video_port,
-        plain_rtp=False,
-        srtp_key_audio=ps.srtp_key_audio,
-        srtp_key_video=ps.srtp_key_video,
         conn_ip="0.0.0.0",
         session_name="aidot-sdes-rx",
     )
@@ -7012,10 +6785,7 @@ async def _sdes_open_write_ffmpeg_sdp_and_send_webrtcreq(
     _sdes_ice_server_list.extend(ps._sdes_turn_entries)
 
     # _psk_value_req was generated before the SDP offer (see above).
-    # Reused here in webrtcReq and webrtcResp for consistency.
-    ps._compress_sdp_req = functools.partial(compress_sdp_req, ps.device_id)
-
-    _compressed_sdp_req = ps._compress_sdp_req(ps.sdes_offer_sdp)
+    _compressed_sdp_req = compress_sdp_req(ps.device_id, ps.sdes_offer_sdp)
     _webrtc_req_sdes_payload = ipc_envelope(
         "webrtcReq",
         ps.device_id,
@@ -7059,203 +6829,6 @@ async def _sdes_open_write_ffmpeg_sdp_and_send_webrtcreq(
     ps.outgoing_q.put_nowait((ps.webrtc_req_topic, _webrtc_req_sdes_payload))
     self._cold_phase("webrtcReq (sdes)")
     ps._status(f"webrtcReq sent (SDES)  peerid={ps.peer_id}")
-
-
-async def _sdes_open_answer_webrtcreq_echo(self, ps: _SdesOpenState) -> None:
-    """Phase of the SDES open: answer_webrtcreq_echo.
-
-    Split out of ``_open_sdes_stream_impl``; reads and writes the open's
-    state through ``ps`` (a ``_SdesOpenState``).
-    """
-    import asyncio as _asyncio
-
-    ps._echo_fut = (
-        ps.webrtc_req_echo_fut
-        if ps.webrtc_req_echo_fut is not None
-        else ps.camera_offer_fut
-    )
-    ps._cam_echo_received = False
-    ps._webrtc_resp_sdes_topic = None
-    ps._webrtc_resp_sdes = None
-    ps._sdes_webrtcresp_sent = (
-        False  # True once we actually publish the SDES webrtcResp
-    )
-    # Only role-reversal models (A001064, _skip_lp False) echo our webrtcReq
-    # and need the webrtcResp built below; for A001513-class (_skip_lp True,
-    # default) the echo never arrives, so don't block ~2s on it.
-    ps._echo_wait_s = _sdes_echo_wait_timeout(
-        ps._skip_lp, echo_seen=bool(getattr(self, "_sdes_echo_seen", False))
-    )
-    ps._echo_wait_t0 = time.monotonic()
-    try:
-        await _asyncio.wait_for(
-            _asyncio.shield(ps._echo_fut),
-            timeout=ps._echo_wait_s,
-        )
-        ps._cam_echo_received = True
-        self._sdes_echo_seen = True
-        ps._status("camera webrtcReq echo received - building webrtcResp")
-        # Seed _sdes_turn_entries from the echo's IceServerList if the HTTP
-        # ice_config fetch returned nothing (empty list).  The echo carries
-        # our userId TURN credentials - extract them so the hole-punch and
-        # any future relay allocation use the correct server/port.
-        if not ps._sdes_turn_entries:
-            try:
-                _echo_payload = (
-                    ps._echo_fut.result()
-                    if (ps._echo_fut is not None and ps._echo_fut.done())
-                    else {}
-                )
-                for _e in _echo_payload.get("IceServerList") or []:
-                    _e_uris = _e.get("Uris") or []
-                    if any("turn:" in str(u) for u in _e_uris):
-                        ps._sdes_turn_entries.append(
-                            {
-                                "Uris": _e_uris,
-                                "Username": _e.get("Username") or "",
-                                "Password": str(_e.get("Password") or ""),
-                            }
-                        )
-            except Exception:
-                _LOGGER.debug(
-                    "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
-                    "_sdes_open_answer_webrtcreq_echo",
-                    exc_info=True,
-                )
-        # Allocate TURN relay if not already done before offer build.
-        # When ice_config provided TURN entries, pre-allocation already ran
-        # and _relay_addrs is populated - skip to avoid double-allocation.
-        # Connection mode lan skips it here too: lan means no relay, and an
-        # allocation here was trickled and put in the answer's c= anyway.
-        if not ps._relay_addrs and not ps._skip_turn_prealloc:
-            try:
-                _tgt_e = _turn_target(ps._sdes_turn_entries, ps.user_id)
-                if _tgt_e:
-                    for _alloc_sock_e in (ps._audio_sock, ps._video_sock):
-                        _alloc_res_e = await _run_off_loop(
-                            ps._turn_allocate_udp, _alloc_sock_e, *_tgt_e
-                        )
-                        if _alloc_res_e:
-                            ps._relay_addrs[_alloc_sock_e] = _turn_relay_record(
-                                _alloc_res_e, *_tgt_e
-                            )
-                            ps._status(
-                                f"TURN relay allocated (echo fallback): "
-                                f"{'audio' if _alloc_sock_e is ps._audio_sock else 'video'}"
-                                f" -> {_alloc_res_e[0]}:{_alloc_res_e[1]}"
-                            )
-            except Exception as _relay_early_exc:
-                _LOGGER.warning("TURN relay allocation error: %s", _relay_early_exc)
-        # Answer SDP c= and m= use the TURN relay address when available so
-        # the camera sends SRTP to our relay port.  The TURN server then
-        # wraps each SRTP packet in a Data Indication and delivers it to
-        # audio_sock / video_sock; the bridge thread strips the wrapper and
-        # forwards the inner SRTP to ffmpeg's loopback ports.
-        # For cameras on the same LAN or when relay allocation failed, fall
-        # back to the srflx (public) or local IP.
-        _audio_relay = ps._relay_addrs.get(ps._audio_sock)
-        _video_relay = ps._relay_addrs.get(ps._video_sock)
-        _ans_audio_ip = (
-            _audio_relay[0] if _audio_relay else (ps._public_ip or ps.local_ip)
-        )
-        _ans_audio_port = _audio_relay[1] if _audio_relay else ps.audio_port
-        _ans_video_ip = (
-            _video_relay[0] if _video_relay else (ps._public_ip or ps.local_ip)
-        )
-        _ans_video_port = _video_relay[1] if _video_relay else ps.video_port
-        _relay_answer_sdp = (
-            "v=0\r\n"
-            f"o=- {ps.ts} {ps.ts} IN IP4 {ps.local_ip}\r\n"
-            "s=-\r\n"
-            "t=0 0\r\n"
-            f"m=audio {_ans_audio_port} RTP/SAVPF 0 8\r\n"
-            f"c=IN IP4 {_ans_audio_ip}\r\n"
-            "a=sendonly\r\n"
-            "a=mid:0\r\n"
-            f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{ps.srtp_key_audio}\r\n"
-            "a=rtpmap:0 PCMU/8000\r\n"
-            "a=rtpmap:8 PCMA/8000\r\n"
-            "a=rtcp-mux\r\n"
-            f"a=ice-ufrag:{ps._ufrag_a}\r\n"
-            f"a=ice-pwd:{ps._pwd_a}\r\n"
-            + _sdes_offer_candidate_lines(
-                ps._conn_mode,
-                ps.local_ip,
-                ps.audio_port,
-                ps._public_ip,
-                ps._relay_addrs.get(ps._audio_sock),
-            )
-            + f"m=video {_ans_video_port} RTP/SAVPF 96 97\r\n"
-            f"c=IN IP4 {_ans_video_ip}\r\n"
-            "a=sendonly\r\n"
-            "a=mid:1\r\n"
-            f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{ps.srtp_key_video}\r\n"
-            "a=rtpmap:96 H264/90000\r\n"
-            "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;"
-            "profile-level-id=42e01f\r\n"
-            "a=rtpmap:97 H265/90000\r\n"
-            "a=fmtp:97 level-id=93\r\n"
-            "a=rtcp-mux\r\n"
-            f"a=ice-ufrag:{ps._ufrag_v}\r\n"
-            f"a=ice-pwd:{ps._pwd_v}\r\n"
-            + _sdes_offer_candidate_lines(
-                ps._conn_mode,
-                ps.local_ip,
-                ps.video_port,
-                ps._public_ip,
-                ps._relay_addrs.get(ps._video_sock),
-            )
-        )
-        _compressed_sdp_ans = ps._compress_sdp_req(_relay_answer_sdp)
-
-        ps._webrtc_resp_sdes_topic = f"iot/v1/s/{ps.user_id}/IPC/webrtcResp"
-        ps._webrtc_resp_sdes = ipc_envelope(
-            "webrtcResp",
-            ps.device_id,
-            ps.user_id,
-            ps.numeric_uid_raw,
-            seq=ps._seq(),
-            payload={
-                "peerid": ps.peer_id,
-                "devId": ps.device_id,
-                "answer": {"type": "answer", "sdp": _relay_answer_sdp},
-                "trackId": 0,
-                "dstAddr": ps.device_id,
-                "encOffer": 1,
-                "liveMqtt": 1,
-                # wPayload: newer firmware (e.g. LK.IPC.A001064) parses
-                # wPayload to extract ICE credentials and PSK.  Fields match
-                # reference app o.java (signaling/tyrus).
-                "wPayload": {
-                    "peerid": ps.peer_id,
-                    "sts": int(time.time() * 1000),
-                    "psk": ps._psk_value_req,
-                    "answer": {"type": "answer", "sdp": _compressed_sdp_ans},
-                },
-            },
-        )
-        # Send SDES webrtcResp: camera will send SRTP to our public IP/port
-        # (srflx), which routes through NAT directly to our socket.
-        ps.outgoing_q.put_nowait((ps._webrtc_resp_sdes_topic, ps._webrtc_resp_sdes))
-        ps._sdes_webrtcresp_sent = True
-        _ans_via = "relay" if (_audio_relay or _video_relay) else "srflx"
-        ps._status(
-            f"webrtcResp sent (SDES, {_ans_via} answer:"
-            f" audio={_ans_audio_ip}:{_ans_audio_port}"
-            f" video={_ans_video_ip}:{_ans_video_port})"
-        )
-    except TimeoutError:
-        # No echo - camera uses a different signalling variant; proceed.
-        # Logged rather than swallowed: `except TimeoutError: pass` is how
-        # 2.0 s of dead time here stayed invisible, and the elapsed line is
-        # what will show it if this wait ever starts being used.
-        _LOGGER.info(
-            "signaling-wait[%s] webrtcReq-echo elapsed=%dms (timeout=%.2fs)",
-            getattr(self, "device_id", "?"),
-            int((time.monotonic() - ps._echo_wait_t0) * 1000),
-            ps._echo_wait_s,
-        )
 
 
 async def _sdes_open_announce_candidates(self, ps: _SdesOpenState) -> None:
@@ -7376,7 +6949,7 @@ async def _sdes_open_nat_hole_punch(self, ps: _SdesOpenState) -> None:
     state through ``ps`` (a ``_SdesOpenState``).
     """
     ps._hp_host = None
-    ps._hp_port = 3478
+    _hp_port = 3478
     try:
         if ps._sdes_turn_entries:
             import re as _re_hp
@@ -7394,7 +6967,7 @@ async def _sdes_open_nat_hole_punch(self, ps: _SdesOpenState) -> None:
             _m_hp = _re_hp.search(r"turns?:([^:?]+)(?::(\d+))?", _hp_uri)
             if _m_hp:
                 ps._hp_host = _m_hp.group(1)
-                ps._hp_port = int(_m_hp.group(2) or 3478)
+                _hp_port = int(_m_hp.group(2) or 3478)
     except Exception:
         _LOGGER.debug(
             "camera %s: swallowed exception in %s",
@@ -7419,14 +6992,14 @@ async def _sdes_open_nat_hole_punch(self, ps: _SdesOpenState) -> None:
                 getattr(self, "device_id", "?"),
                 ps._hp_host,
             )
-    ps._hp_stun = b"\x00\x01\x00\x00\x21\x12\xa4\x42" + os.urandom(12)
+    _hp_stun = b"\x00\x01\x00\x00\x21\x12\xa4\x42" + os.urandom(12)
     _hp_port2 = 5349
     if not ps._hp_host:
         ps._status("NAT hole-punch: skipped (no TURN host)")
     else:
         for _hp_sock in (ps._audio_sock, ps._video_sock):
             try:
-                _hp_sock.sendto(ps._hp_stun, (ps._hp_host, ps._hp_port))
+                _hp_sock.sendto(_hp_stun, (ps._hp_host, _hp_port))
             except Exception:
                 _LOGGER.debug(
                     "camera %s: swallowed exception in %s",
@@ -7436,10 +7009,10 @@ async def _sdes_open_nat_hole_punch(self, ps: _SdesOpenState) -> None:
                 )
         # Punch to TURN allocation port (5349) as well so port-restricted NAT
         # allows traffic from either TURN port (3478 STUN or 5349 allocation).
-        if ps._hp_port != _hp_port2:
+        if _hp_port != _hp_port2:
             for _hp_sock in (ps._audio_sock, ps._video_sock):
                 try:
-                    _hp_sock.sendto(ps._hp_stun, (ps._hp_host, _hp_port2))
+                    _hp_sock.sendto(_hp_stun, (ps._hp_host, _hp_port2))
                 except Exception:
                     _LOGGER.debug(
                         "camera %s: swallowed exception in %s",
@@ -7449,8 +7022,8 @@ async def _sdes_open_nat_hole_punch(self, ps: _SdesOpenState) -> None:
                     )
         ps._status(
             f"NAT hole-punch: sent from audio={ps.audio_port}"
-            f" video={ps.video_port} -> {ps._hp_host}:{ps._hp_port}"
-            + (f" and :{_hp_port2}" if ps._hp_port != _hp_port2 else "")
+            f" video={ps.video_port} -> {ps._hp_host}:{_hp_port}"
+            + (f" and :{_hp_port2}" if _hp_port != _hp_port2 else "")
         )
 
     # The ports our own srflx candidates advertise - the only ports on the
@@ -7482,20 +7055,14 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
     import struct as _struct
 
     _selfloop_drop_count = ps._selfloop_drop_count
-    ps._STUN_MAGIC = b"\x21\x12\xa4\x42"
-    ps._stun_count = 0
+    _STUN_MAGIC = b"\x21\x12\xa4\x42"
+    _stun_count = 0
     _stun_seen = False
-    ps._srtp_detected = False
+    _srtp_detected = False
     _stun_window_pkt_count = 0
     _turn_only_pkt_count = 0
-    ps._camera_side_pkt_count = 0
-    if not ps._cam_echo_received:
-        _stun_max = 2.5
-    elif ps._sdes_webrtcresp_sent:
-        _stun_max = 20.0  # webrtcResp sent - camera may do ICE; give it time
-    else:
-        _stun_max = 5.0  # webrtcResp suppressed - no STUN expected; exit fast
-    ps._idle_limit = 1.5  # exit after ICE silence once first STUN seen
+    _stun_max = 2.5
+    _idle_limit = 1.5  # exit after ICE silence once first STUN seen
     _pre_stun_idle = 0.5  # exit early if no packet at all (non-ICE camera)
     _stun_deadline = time.monotonic() + _stun_max
     _last_pkt_t = time.monotonic()
@@ -7528,15 +7095,15 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
                 "STUN window: leaving early after %.2fs - answer ICE"
                 " credentials in hand and camera probing; nominating now"
                 " (%d binding request(s) answered)"
-                % (time.monotonic() - _stun_window_t0, ps._stun_count)
+                % (time.monotonic() - _stun_window_t0, _stun_count)
             )
             break
         # Idle-exit: threshold depends on whether we've seen any STUN yet
         idle = time.monotonic() - _last_pkt_t
         if _stun_seen:
-            if idle > ps._idle_limit:
+            if idle > _idle_limit:
                 break  # ICE done (silence after STUN) - ffmpeg will pick up SRTP
-        elif not ps._cam_echo_received and idle > _pre_stun_idle:
+        elif idle > _pre_stun_idle:
             break  # no STUN at all - non-ICE camera, skip window
         try:
             _rlist = await _select_readable([ps._audio_sock, ps._video_sock], 0.1)
@@ -7563,8 +7130,6 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
             # that the camera actually started ICE checks.
             if _src[0] == ps._hp_host:
                 _turn_only_pkt_count += 1
-            else:
-                ps._camera_side_pkt_count += 1
             # --- TURN Data Indication (type 0x0017): strip wrapper --------- #
             # Camera ICE probes routed via TURN arrive as Data Indications from
             # 3.230.182.123:5349 (the control channel, already NAT-mapped).
@@ -7572,11 +7137,7 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
             # we can respond correctly via a TURN Send Indication.
             _turn_peer_ip_sw: "Optional[str]" = None
             _turn_peer_port_sw: "Optional[int]" = None
-            if (
-                len(_pkt) >= 20
-                and _pkt[:2] == b"\x00\x17"
-                and _pkt[4:8] == ps._STUN_MAGIC
-            ):
+            if len(_pkt) >= 20 and _pkt[:2] == b"\x00\x17" and _pkt[4:8] == _STUN_MAGIC:
                 _sw_off = 20
                 _sw_inner = None
                 while _sw_off + 4 <= len(_pkt):
@@ -7587,7 +7148,7 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
                         _sw_xp = _struct.unpack_from("!H", _sw_av, 2)[0] ^ 0x2112
                         _sw_xb = bytes(
                             a ^ b
-                            for a, b in zip(_sw_av[4:8], ps._STUN_MAGIC, strict=False)
+                            for a, b in zip(_sw_av[4:8], _STUN_MAGIC, strict=False)
                         )
                         _turn_peer_ip_sw = ".".join(str(b) for b in _sw_xb)
                         _turn_peer_port_sw = _sw_xp
@@ -7595,12 +7156,8 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
                         _sw_inner = _sw_av
                 if _sw_inner:
                     _pkt = _sw_inner  # process inner payload
-                # TURN Data Indication with XOR-PEER-ADDRESS means the
-                # camera (or its relay) is actively talking to us.
-                if _turn_peer_ip_sw:
-                    ps._camera_side_pkt_count += 1
 
-            if len(_pkt) >= 20 and _pkt[4:8] == ps._STUN_MAGIC:
+            if len(_pkt) >= 20 and _pkt[4:8] == _STUN_MAGIC:
                 # STUN packet - only Binding Requests (0x0001) indicate that
                 # ICE is active.  Error/Success responses (e.g. hole-punch
                 # replies) must NOT set _stun_seen or they'd trigger the 1.5s
@@ -7630,7 +7187,7 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
                             mi_password=(
                                 ps._pwd_a if _sock is ps._audio_sock else ps._pwd_v
                             ),
-                            magic_cookie=ps._STUN_MAGIC,
+                            magic_cookie=_STUN_MAGIC,
                         )
                         if _turn_peer_ip_sw and ps._prefer_direct_stun.get(
                             _sock, False
@@ -7649,7 +7206,7 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
                             _si_pip = bytes(int(x) for x in _turn_peer_ip_sw.split("."))
                             _si_xip = bytes(
                                 a ^ b
-                                for a, b in zip(_si_pip, ps._STUN_MAGIC, strict=False)
+                                for a, b in zip(_si_pip, _STUN_MAGIC, strict=False)
                             )
                             _si_xport = (_turn_peer_port_sw ^ 0x2112) & 0xFFFF
                             _si_xpa = (
@@ -7662,7 +7219,7 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
                             _send_ind = (
                                 b"\x00\x16"
                                 + _struct.pack("!H", len(_si_body))
-                                + ps._STUN_MAGIC
+                                + _STUN_MAGIC
                                 + os.urandom(12)
                                 + _si_body
                             )
@@ -7690,7 +7247,7 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
                         else:
                             _sock.sendto(_resp, _src)
                             _stun_seen = True
-                        ps._stun_count += 1
+                        _stun_count += 1
                     except Exception:
                         _LOGGER.debug(
                             "camera %s: swallowed exception in %s",
@@ -7700,39 +7257,10 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
                         )
             else:
                 # Non-STUN packet = SRTP arriving - ICE is done, hand off to ffmpeg now
-                ps._srtp_detected = True
+                _srtp_detected = True
                 break  # inner per-socket loop
-        if ps._srtp_detected:
+        if _srtp_detected:
             break  # outer while loop
-    # An echo that missed the shortened wait but turned up anyway.  Recorded,
-    # not acted on: the webrtcResp this would have built has to be sent
-    # BEFORE the relay allocation and the ICE window, so building it now
-    # would be a reordering with no camera to measure it against.  What it
-    # does do is make the NEXT open on this device wait the full legacy
-    # window - so a fleet whose echo band is not empty pays the miss once
-    # and says so, instead of losing the branch silently forever.
-    if (
-        not ps._cam_echo_received
-        and ps._echo_fut is not None
-        and not getattr(self, "_sdes_echo_seen", False)
-    ):
-        try:
-            _late_echo = ps._echo_fut.done() and not ps._echo_fut.cancelled()
-        except Exception:
-            _late_echo = False
-        if _late_echo:
-            self._sdes_echo_seen = True
-            _LOGGER.warning(
-                "camera %s: the webrtcReq echo arrived %.2fs after a %.2fs"
-                " wait expired, so no webrtcResp was built for this open."
-                " Later opens on this camera will wait %.1fs again. Set"
-                " AIDOT_SDES_ECHO_WAIT_S=%.1f to make that permanent.",
-                getattr(self, "device_id", "?"),
-                time.monotonic() - ps._echo_wait_t0,
-                ps._echo_wait_s,
-                _SDES_ECHO_WAIT_LEGACY_S,
-                _SDES_ECHO_WAIT_LEGACY_S,
-            )
     for _rsock in (ps._audio_sock, ps._video_sock):
         try:
             _rsock.setblocking(True)
@@ -7743,9 +7271,9 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
                 "_sdes_open_stun_responder_window",
                 exc_info=True,
             )
-    if ps._stun_count:
-        ps._status(f"ICE: responded to {ps._stun_count} STUN binding request(s)")
-    elif not ps._srtp_detected:
+    if _stun_count:
+        ps._status(f"ICE: responded to {_stun_count} STUN binding request(s)")
+    elif not _srtp_detected:
         if _stun_window_pkt_count and _turn_only_pkt_count == _stun_window_pkt_count:
             ps._status(
                 "ICE: no camera probes seen in STUN window"
@@ -7756,142 +7284,23 @@ async def _sdes_open_stun_responder_window(self, ps: _SdesOpenState) -> None:
                 "ICE: 0 camera STUN binding requests in window"
                 f" (total packets={_stun_window_pkt_count})"
             )
-    if ps._srtp_detected:
+    if _srtp_detected:
         ps._status("SRTP detected - exiting STUN window, handing off to ffmpeg")
 
 
-async def _sdes_open_reconnect_retry_window(self, ps: _SdesOpenState) -> None:
-    """Phase of the SDES open: reconnect_retry_window.
-
-    Split out of ``_open_sdes_stream_impl``; reads and writes the open's
-    state through ``ps`` (a ``_SdesOpenState``).
-    """
-    _sdes_retries = 0
-    while (
-        ps._cam_echo_received
-        and ps._stun_count == 0
-        and not ps._srtp_detected
-        and ps.camera_reconnect_ev is not None
-        and _sdes_retries < 2
-    ):
-        await asyncio.sleep(0)  # flush queued callbacks (reconnect_ev.set())
-        if not ps.camera_reconnect_ev.is_set():
+def _sdes_key_from_sdp(sdp: str, media: str) -> str:
+    """The inline key from the first a=crypto line in the named m-section."""
+    in_sec = False
+    for ln in sdp.splitlines():
+        if ln.startswith(f"m={media}"):
+            in_sec = True
+        elif ln.startswith("m=") and in_sec:
             break
-        ps.camera_reconnect_ev.clear()
-        _sdes_retries += 1
-        ps._status(
-            f"camera reconnected during SDES ICE window (retry {_sdes_retries})"
-            " - re-sending webrtcResp + ICE candidates"
-        )
-        await asyncio.sleep(0.3)  # let camera re-subscribe before re-send
-        if ps._webrtc_resp_sdes is not None and ps._sdes_webrtcresp_sent:
-            # Only re-send webrtcResp if we sent it originally (isDTLS='0').
-            # For dtls_fallback_ok cameras the SDES session was intentionally
-            # suppressed - do not retroactively start one on reconnect.
-            ps.outgoing_q.put_nowait((ps._webrtc_resp_sdes_topic, ps._webrtc_resp_sdes))
-        for _ice_mid_r, _ice_port_r in (("0", ps.audio_port), ("1", ps.video_port)):
-            ps._send_sdes_ice_cand(
-                f"candidate:1 1 udp 2130706431 {ps.local_ip} {_ice_port_r} typ host",
-                _ice_mid_r,
-            )
-            if ps._public_ip:
-                ps._send_sdes_ice_cand(
-                    f"candidate:2 1 udp 1694498815 {ps._public_ip} {_ice_port_r}"
-                    f" typ srflx raddr {ps.local_ip} rport {_ice_port_r}",
-                    _ice_mid_r,
-                )
-            _relay_sock_r = ps._audio_sock if _ice_mid_r == "0" else ps._video_sock
-            if _relay_sock_r in ps._relay_addrs:
-                _ri_r = ps._relay_addrs[_relay_sock_r]
-                ps._send_sdes_ice_cand(
-                    f"candidate:3 1 udp 16777215 {_ri_r[0]} {_ri_r[1]}"
-                    f" typ relay raddr {ps.local_ip} rport {_ice_port_r}",
-                    _ice_mid_r,
-                )
-        # Refresh NAT mapping so router allows new inbound STUN from camera
-        for _hp_sock_r in (ps._audio_sock, ps._video_sock):
-            try:
-                _hp_sock_r.sendto(ps._hp_stun, (ps._hp_host, ps._hp_port))
-            except Exception:
-                _LOGGER.debug(
-                    "camera %s: swallowed exception in %s",
-                    getattr(self, "device_id", "?"),
-                    "_sdes_open_reconnect_retry_window",
-                    exc_info=True,
-                )
-        # Retry STUN window (8 s)
-        _stun_deadline = time.monotonic() + 8.0
-        _last_pkt_t = time.monotonic()
-        _stun_seen = False
-        while time.monotonic() < _stun_deadline:
-            # Same exit as the first window.  A camera that quickConns after
-            # signalling re-runs ICE here, and without this it sat the full
-            # 8 s on credentials it already had - the same delay the first
-            # window was fixed for, in the window the fix had not reached.
-            if _stun_window_answer_exit_due(
-                stun_seen=_stun_seen,
-                answer_ready=_answer_ready_for_this_open(
-                    getattr(self, "_camera_answer_ice_ready_ts", None),
-                    ps._open_started_at,
-                ),
-            ):
-                ps._status(
-                    "STUN window (retry %d): leaving early after %.2fs -"
-                    " answer ICE credentials in hand and camera probing"
-                    % (_sdes_retries, time.monotonic() - (_stun_deadline - 8.0))
-                )
-                break
-            if _stun_seen and time.monotonic() - _last_pkt_t > ps._idle_limit:
-                break
-            try:
-                _rlist_r = await _select_readable([ps._audio_sock, ps._video_sock], 0.1)
-            except Exception:
-                break
-            for _sk_r in _rlist_r:
-                _last_pkt_t = time.monotonic()
-                try:
-                    _pkt_r, _src_r = _sk_r.recvfrom(2048)
-                except OSError:
-                    continue
-                if len(_pkt_r) >= 20 and _pkt_r[4:8] == ps._STUN_MAGIC:
-                    if _pkt_r[:2] != b"\x00\x01":
-                        continue  # not a Binding Request; don't trigger idle-exit
-                    _tid_r = _pkt_r[8:20]
-                    try:
-                        _resp_r = _build_stun_binding_success_response(
-                            transaction_id=_tid_r,
-                            mapped_ip=_src_r[0],
-                            mapped_port=_src_r[1],
-                            mi_password=(
-                                ps._pwd_a if _sk_r is ps._audio_sock else ps._pwd_v
-                            ),
-                            magic_cookie=ps._STUN_MAGIC,
-                        )
-                        _sk_r.sendto(_resp_r, _src_r)
-                        _stun_seen = True
-                        ps._stun_count += 1
-                    except Exception:
-                        _LOGGER.debug(
-                            "camera %s: swallowed exception in %s",
-                            getattr(self, "device_id", "?"),
-                            "_sdes_open_reconnect_retry_window",
-                            exc_info=True,
-                        )
-                else:
-                    ps._srtp_detected = True
-                    break
-            if ps._srtp_detected:
-                break
-        if ps._stun_count:
-            ps._status(
-                f"ICE retry {_sdes_retries}:"
-                f" responded to {ps._stun_count} STUN binding request(s)"
-            )
-        if ps._srtp_detected:
-            ps._status(
-                f"SRTP detected in retry {_sdes_retries}"
-                " - exiting STUN window, handing off to ffmpeg"
-            )
+        elif in_sec and ln.startswith("a=crypto:"):
+            _m = re.search(r"inline:([A-Za-z0-9+/=]+)", ln)
+            if _m:
+                return _m.group(1)
+    return ""
 
 
 async def _sdes_open_harvest_answer(self, ps: _SdesOpenState) -> None:
@@ -7913,7 +7322,7 @@ async def _sdes_open_harvest_answer(self, ps: _SdesOpenState) -> None:
     # wait was cut to 0.25 s, and the window then sat on the answer for
     # seconds - see _stun_window_answer_exit_due.)
     # shield() so a timeout here cannot cancel the future the real answer
-    # await (and the DTLS-fallback path) still consume further down.
+    # await still consumes further down.
     # A TERMINAL refusal races the harvest.  A camera at its viewer cap acks
     # -50002/-50015 about a second after webrtcReq and then, by definition,
     # never answers - so without this the refusal sat unread for the whole
@@ -7989,22 +7398,6 @@ async def _sdes_open_harvest_answer(self, ps: _SdesOpenState) -> None:
             "_open_sdes_stream: camera webrtcResp answer SDP (len=%d)",
             len(ps._pre_launch_answer_sdp),
         )
-        import re as _re
-
-        def _sdes_key_from_sdp(sdp, media):
-            """Return the inline key from the first a=crypto line in the named m-section."""
-            in_sec = False
-            for ln in sdp.splitlines():
-                if ln.startswith(f"m={media}"):
-                    in_sec = True
-                elif ln.startswith("m=") and in_sec:
-                    break
-                elif in_sec and ln.startswith("a=crypto:"):
-                    _m = _re.search(r"inline:([A-Za-z0-9+/=]+)", ln)
-                    if _m:
-                        return _m.group(1)
-            return ""
-
         # Probe result: did camera echo back m=application?
         if ps._dc_probe_fp:
             _dc_ans_lines, _in_dc_sec = [], False
@@ -8362,7 +7755,6 @@ class _SdesOpenMixin:
         outgoing_q,
         answer_fut,
         camera_offer_fut,
-        webrtc_req_echo_fut=None,
         loop,
         timeout: float,
         output_path: Optional[str],
@@ -8377,17 +7769,14 @@ class _SdesOpenMixin:
         liveplay_echo_ev=None,
         liveplay_resp_fut=None,
         numeric_uid_raw: Optional[str] = None,
-        dtls_fallback_ok: bool = True,
         second_answer_fut=None,
         ice_config: "Optional[dict]" = None,
-        camera_reconnect_ev=None,
         sdes_answer_timeout: Optional[float] = None,
         rtsp_push_url: Optional[str] = None,
         talk: bool = False,
         ice_cands_seen=None,
         # So the SDES answer-wait can abandon at once when the camera says
-        # -50002/-50015 instead of waiting out its budget and then paying for a
-        # DTLS-fallback offer that cannot succeed.
+        # -50002/-50015 instead of waiting out its budget.
         terminal_error_fut=None,
         sd_playback=None,
     ) -> "SdesSession":
@@ -8399,20 +7788,17 @@ class _SdesOpenMixin:
             outgoing_q=outgoing_q,
             answer_fut=answer_fut,
             camera_offer_fut=camera_offer_fut,
-            webrtc_req_echo_fut=webrtc_req_echo_fut,
             _status=_status,
             liveplay_echo_ev=liveplay_echo_ev,
             liveplay_resp_fut=liveplay_resp_fut,
             numeric_uid_raw=numeric_uid_raw,
             second_answer_fut=second_answer_fut,
             ice_config=ice_config,
-            camera_reconnect_ev=camera_reconnect_ev,
             rtsp_push_url=rtsp_push_url,
             talk=talk,
             terminal_error_fut=terminal_error_fut,
             sd_playback=sd_playback,
         )
-        from .client import CameraMixin
         from .client import _build_sdes_serve_cmd
         from .client import _ffmpeg_path
         from .client import _resolve_serve_input_timeout_s
@@ -8467,33 +7853,17 @@ class _SdesOpenMixin:
         # after webrtcReq means the first seconds of SRTP data land in the
         # Python reservation sockets (or trigger ICMP port-unreachable after
         # they are closed), causing 0-frame output.
-        # ffmpeg_sdp uses only audio_port/video_port and srtp_key_* - all known
-        # from the allocation step above; the camera's webrtcResp is not needed.
-        # c=IN IP4 0.0.0.0 tells ffmpeg to bind locally (listen mode).
-        # Use RTP/SAVP (plain SRTP, RFC 3711) rather than RTP/SAVPF for the
-        # ffmpeg receiver SDP.  ffmpeg's SDP demuxer does not recognise the
-        # SAVPF feedback profile (RFC 4585) as a valid SRTP profile and fails
-        # with "Could not find codec parameters" when SAVPF is used.  The
-        # camera-facing offer SDP still uses RTP/SAVPF as required by the
-        # firmware; only this local file (read by ffmpeg) needs SAVP.
+        # ffmpeg_sdp uses only audio_port/video_port - known from the
+        # allocation step above; the camera's webrtcResp is not needed.
+        # c=IN IP4 0.0.0.0 tells ffmpeg to bind locally (listen mode).  It is
+        # plain RTP/AVP: the bridge decrypts, and the camera-facing offer alone
+        # carries RTP/SAVPF and the keys.
         # a=rtcp-mux in the template keeps ffmpeg from binding audio_port+1
         # for RTCP, a separate socket that is never needed here.
         await _sdes_open_write_ffmpeg_sdp_and_send_webrtcreq(self, ps)
 
-        # --- Acknowledge camera's webrtcReq echo with webrtcResp ------------- #
-        # LK.IPC.A001064 echoes our offer back as webrtcReq before doing ICE.
-        # It will not start streaming until it receives a webrtcResp from us.
-        # Check for the echo within 2 s so the webrtcResp is sent while our
-        # reservation sockets are still open (camera's ICE may arrive next).
-        #
-        # NOTE: webrtc_req_echo_fut (not camera_offer_fut) is the correct future
-        # here.  camera_offer_fut is only set for non-echo (role-reversal) messages
-        # where is_echo=False.  The broker echo carries our own srcAddr prefix so
-        # is_echo=True, which is exactly what webrtc_req_echo_fut signals.
-        await _sdes_open_answer_webrtcreq_echo(self, ps)
-
         # --- Announce our ICE candidates via MQTT (iceCandidateReq) ----------- #
-        # The iOS app always sends iceCandidateReq after webrtcReq/webrtcResp.
+        # The iOS app always sends iceCandidateReq after webrtcReq.
         # ICE-capable cameras (e.g. LK.IPC.A001064) wait for this trickle-ICE
         # message before initiating STUN connectivity checks, even when the same
         # candidates are already present in the SDP a=candidate lines.  Without
@@ -8503,10 +7873,9 @@ class _SdesOpenMixin:
         # messages is safe for all camera models.
         await _sdes_open_announce_candidates(self, ps)
 
-        # --- TURN relay allocation: fallback for cameras that skip the echo path #
-        # Early allocation was done inside the echo handler above.  This block
-        # handles cameras that did not produce an echo (non-echo-reversal path)
-        # so _relay_addrs is still empty at this point.
+        # --- TURN relay allocation: when the pre-offer allocation did not run -- #
+        # _relay_addrs is still empty here if ice_config carried no TURN entry
+        # before the offer was built.
         # Skipped in AIDOT_FAST_CONNECT (LAN-direct): no relay alloc, host/srflx
         # candidates only (the synchronous allocate would block the post-offer
         # candidate trickle on a cloud round-trip).
@@ -8521,24 +7890,12 @@ class _SdesOpenMixin:
         await _sdes_open_nat_hole_punch(self, ps)
 
         # --- ICE STUN responder (runs while reservation sockets are still open) #
-        # Two-phase window:
-        #   Normal (no echo-reversal): exit after 0.5 s idle, max 2.5 s total.
-        #   Echo-reversal, SDES confirmed (webrtcResp sent): up to 20 s for ICE.
-        #   Echo-reversal, dtls_fallback_ok (webrtcResp suppressed): 5 s max -
-        #     camera won't stream without webrtcResp so no STUN/SRTP will arrive;
-        #     exit quickly so the DTLS fallback starts sooner.
+        # Exit after 0.5 s with no packet, or 1.5 s of silence after the
+        # camera's first probe, max 2.5 s total.  The bridge thread takes the
+        # responder role over once the window closes.
         #   SRTP early exit: if a non-STUN packet arrives (SRTP), ICE is done -
         #     close sockets immediately so ffmpeg can bind.
         await _sdes_open_stun_responder_window(self, ps)
-
-        # --- Reconnect retry: camera may quickConn during synchronous STUN window #
-        # LK.IPC.A001064 performs an MQTT disconnect+reconnect (quickConn) after
-        # receiving WebRTC signaling.  The synchronous select() loop above blocks
-        # asyncio entirely, so camera_reconnect_ev.set() is queued but not
-        # processed until asyncio.sleep(0) runs.  After flushing the queue, check
-        # for the reconnect and re-send webrtcResp + ICE candidates so the camera
-        # can restart its ICE agent.  Allow up to 2 retries.
-        await _sdes_open_reconnect_retry_window(self, ps)
 
         # --- Harvest camera's webrtcResp answer --- #
         # The asyncio event loop was blocked by the synchronous STUN loop.  Any
@@ -8598,11 +7955,8 @@ class _SdesOpenMixin:
             ts=_ts_br,
             audio_port=_lo_audio_port,
             video_port=_lo_video_port,
-            plain_rtp=ps._use_plain_rtp,
-            srtp_key_audio=ps.srtp_key_audio,
-            srtp_key_video=ps.srtp_key_video,
             conn_ip="127.0.0.1",
-            session_name="aidot-tutk-rx" if ps._use_plain_rtp else "aidot-sdes-rx",
+            session_name="aidot-tutk-rx",
         )
         try:
             await asyncio.get_running_loop().run_in_executor(
@@ -8631,8 +7985,7 @@ class _SdesOpenMixin:
         # bridge thread can poll for exit without a NameError race.
         _proc_holder: list = [None]
         # Teardown holder: [0] flips True the moment ANY locally-initiated
-        # ffmpeg-kill path fires (_reap() above on a cancelled cold open, the
-        # key-restart proc replace, or the DTLS-fallback abort below - plus
+        # ffmpeg-kill path fires (_reap() above on a cancelled cold open, plus
         # SdesSession.stop() once the session is handed off, via the
         # teardown_requested= kwarg at construction).  The bridge observe loop
         # reads it via _classify_ffmpeg_exit() to demote an expected signal
@@ -8651,8 +8004,8 @@ class _SdesOpenMixin:
         )
         # Fallback for the above, filled from the camera's negotiated answer SDP
         # when the wait below expires without a single video packet. Kept in a
-        # list for the same reason as _first_video_pt: the serve-restart path
-        # reads it from a nested scope.
+        # list for the same reason as _first_video_pt: the bridge reads it from
+        # a nested scope.
         _answer_video_pt: list = [None]
         # PT -> "video"/"audio" from the camera's answer, read by the
         # bridge demux. Empty until the answer lands (the bridge starts
@@ -8674,7 +8027,7 @@ class _SdesOpenMixin:
         # see SdesSession.media_stats(), which the live-validation gate reads.
         _media_counts: list = [0, 0]
 
-        # SRTP receive side for _use_plain_rtp cameras.  Defined once per open
+        # SRTP receive side: the bridge is the only decryptor.  Defined once per open
         # rather than per packet; the bridge calls _ensure_srtp_rx_session with
         # these deep inside its receive loop.  pylibsrtp is imported here, not at
         # module scope, because it lives in the optional "webrtc" extra.
@@ -8765,7 +8118,6 @@ class _SdesOpenMixin:
             _turn_send_indication=ps._turn_send_indication,
             _ufrag_a=ps._ufrag_a,
             _ufrag_v=ps._ufrag_v,
-            _use_plain_rtp=ps._use_plain_rtp,
             _video_sock=ps._video_sock,
             _build_srtp_rx=_build_srtp_rx,
             _dcep_open_msg=ps._dcep_open_msg,
@@ -8809,47 +8161,6 @@ class _SdesOpenMixin:
             _trickle_task = loop.create_task(_consume_camera_trickle())
             _SDES_BACKGROUND_TASKS.add(_trickle_task)
             _trickle_task.add_done_callback(_SDES_BACKGROUND_TASKS.discard)
-
-        # --- DTLS fallback: echo-reversal camera did not do ICE or SRTP ----- #
-        # LK.IPC.A001064 echoes our webrtcReq offer and webrtcResp answer back
-        # over MQTT but then never initiates STUN connectivity checks or sends
-        # any SRTP packets.  The camera appears to require DTLS (peerid _2)
-        # despite reporting enableSdes='1' in its device properties.
-        # Detect this by checking: echo-reversal received (_cam_echo_received)
-        # AND no STUN in the ICE window AND no early SRTP.
-        # _cam_echo_received=True only for cameras that mirror our webrtcReq
-        # (e.g. A001064); non-echo SDES cameras (e.g. A001513) always have it
-        # False and are never affected by this block.
-        # NOTE: isDTLS='0' (dtls_fallback_ok=False) does NOT mean the camera
-        # cannot do DTLS - webrtc_internals_dump confirms LK.IPC.A001064 uses
-        # DTLS (UDP/TLS/RTP/SAVPF) when given a proper DTLS offer.  The
-        # property means SDES is available, not that DTLS is absent.
-        if (
-            ps._cam_echo_received
-            and ps._stun_count == 0
-            and ps._camera_side_pkt_count == 0
-            and not ps._srtp_detected
-            and dtls_fallback_ok
-        ):
-            ps._status(
-                "echo-reversal camera: no STUN or SRTP received in ICE window"
-                " - camera likely requires DTLS; falling back"
-            )
-            # Stop bridge thread by closing its sockets before we raise.
-            # The sockets and the SDP file are released by the exit stack as this raises.
-            ps.outgoing_q.put_nowait(None)  # stop MQTT thread
-            raise CameraMixin._SdesNoAnswerError()
-        elif (
-            ps._cam_echo_received
-            and ps._stun_count == 0
-            and ps._camera_side_pkt_count == 0
-            and not ps._srtp_detected
-            and not dtls_fallback_ok
-        ):
-            ps._status(
-                "echo-reversal camera: no STUN or SRTP received in ICE window"
-                " - DTLS fallback disabled by camera flags; continuing SDES path"
-            )
 
         if ps.rtsp_push_url and ps.rtsp_push_url.startswith("http"):
             # Cold-start relay: when the keepalive loop is holding the public
@@ -8922,14 +8233,8 @@ class _SdesOpenMixin:
         _stale_offer_abandoned = False
         # Which early-abandon rule broke out of the wait, for the stall report.
         _abandoned_by = None
-        # When we first nominated a candidate, for the unreachable-nominee
-        # abandon (_no_answer_abandon_due). Set now if the pre-launch answer
-        # already nominated at setup; otherwise stamped in the loop when a late
-        # answer nominates. Measured from nomination, not the open, so a battery
-        # camera still waking is never clipped.
-        _nominated_at = _media_wait_started if _early_nominated else None
-        # When the camera's answer was first readable, for the no-probe abandon
-        # (_no_probe_abandon_due). Timed from the answer, never the open.
+        # When the camera's answer was first readable, for the no-media abandon
+        # (_no_media_abandon_due). Timed from the answer, never the open.
         _answered_at = None
 
         def _report_first_media_stall(_waited_s, _cancelled=False):
@@ -9031,12 +8336,6 @@ class _SdesOpenMixin:
                         )
                     )
                     break
-                # Stamp nomination the first time it happens on a late answer;
-                # the pre-launch case is stamped at setup above.
-                if _nominated_at is None and (
-                    _bridge_uc_info["sent"] or ps._nominated_seen
-                ):
-                    _nominated_at = time.monotonic()
                 if (
                     _answered_at is None
                     and ps.answer_fut is not None
@@ -9044,93 +8343,53 @@ class _SdesOpenMixin:
                     and not ps.answer_fut.cancelled()
                 ):
                     _answered_at = time.monotonic()
-                if _no_answer_abandon_due(
-                    nominated_since_s=(
-                        time.monotonic() - _nominated_at
-                        if _nominated_at is not None
-                        else None
-                    ),
-                    grace_s=_UNREACHABLE_NOMINEE_GRACE_S,
-                    binding_success=int(
-                        getattr(_bridge_fn, "_br_binding_success_count", 0)
-                    ),
-                    prflx_learned=bool(_bridge_uc_info.get("prflx")),
-                ):
-                    # We nominated a candidate and, for the whole grace since,
-                    # nothing answered: no STUN Binding Success and no relay-
-                    # learned peer. The trigger arms within about a second of
-                    # the answer or never (ROAD-TO-1.0 item 3), so nothing
-                    # recovers this attempt; the retry's fresh offer is served
-                    # in seconds and re-wakes a camera that dozed. Stop paying
-                    # for the window.
-                    _stale_offer_abandoned = True
-                    _abandoned_by = "unreachable-nominee"
-                    ps._status(
-                        "nothing answered the nominated candidate(s) in %.0fs"
-                        " - no STUN binding success and no relay-learned peer,"
-                        " so the address is not reachable; abandoning this"
-                        " attempt to the retry" % _UNREACHABLE_NOMINEE_GRACE_S
-                    )
-                    break
-                # Every nomination record, not _nominated_at alone: the answer-
-                # peek path sets _early_nominated before _nominated_at is
-                # stamped, and an answer with credentials but no candidates is
-                # nominated by the bridge's tick from trickled candidates, which
-                # only _bridge_uc_info["cands"] shows.
-                _any_nominated = bool(
-                    _nominated_at is not None
-                    or _early_nominated
-                    or ps._nominated_seen
-                    or _bridge_uc_info["sent"]
-                    or _bridge_uc_info["prflx"]
-                    or (
-                        ps._cam_ice_ufrag
-                        and ps._cam_ice_pwd
-                        and _bridge_uc_info["cands"]
-                    )
-                )
-                if _no_probe_abandon_due(
+                if _no_media_abandon_due(
                     answered_since_s=(
                         time.monotonic() - _answered_at
                         if _answered_at is not None
                         else None
                     ),
-                    grace_s=_ANSWER_PROBE_GRACE_S,
-                    nominated=_any_nominated,
-                    probes=len(getattr(_bridge_fn, "_br_probe_verdicts", None) or {}),
-                    binding_success=int(
-                        getattr(_bridge_fn, "_br_binding_success_count", 0)
-                    ),
-                ):
-                    _stale_offer_abandoned = True
-                    _abandoned_by = "no-probe"
-                    ps._status(
-                        "the camera answered %.0fs ago and has sent no STUN probe"
-                        " since - nothing to nominate, so no trigger can arm;"
-                        " abandoning this attempt to the retry" % _ANSWER_PROBE_GRACE_S
-                    )
-                    break
-                # One stamp, written by the bridge from the same time module
-                # (_time_br is `time`), so the two monotonic clocks agree.
-                _trigger_ts = getattr(_bridge_fn, "_br_trigger_sent_ts", None)
-                if _trigger_unacked_abandon_due(
-                    trigger_sent_since_s=(
-                        time.monotonic() - _trigger_ts
-                        if _trigger_ts is not None
-                        else None
-                    ),
-                    grace_s=_TRIGGER_GRACE_S,
-                    trigger_acked=bool(getattr(_bridge_fn, "_br_session_mode_resp", 0)),
+                    grace_s=_NO_MEDIA_GRACE_S,
                     media_pkts=int(getattr(_bridge_fn, "_br_media_pkts", 0))
                     + int(getattr(_bridge_fn, "_br_tutk_media", 0)),
                 ):
+                    # The camera answered and, for the whole grace since, sent
+                    # nothing. Every first media measured arrived within 10 s
+                    # of the answer, so nothing recovers this attempt; the
+                    # retry's fresh offer is served in seconds. The shape is
+                    # kept for the stall report. Every nomination record counts,
+                    # not one: the answer-peek path sets _early_nominated, and
+                    # an answer with credentials but no candidates is nominated
+                    # by the bridge's tick from trickled candidates, which only
+                    # _bridge_uc_info["cands"] shows.
                     _stale_offer_abandoned = True
-                    _abandoned_by = "trigger-unacked"
-                    ps._status(
-                        "LIVING went out %.0fs ago on a path the camera answered,"
-                        " and neither an ack nor a media packet followed; abandoning"
-                        " this attempt to the retry" % _TRIGGER_GRACE_S
+                    _abandoned_by = _no_media_shape(
+                        nominated=bool(
+                            _early_nominated
+                            or ps._nominated_seen
+                            or _bridge_uc_info["sent"]
+                            or _bridge_uc_info["prflx"]
+                            or (
+                                ps._cam_ice_ufrag
+                                and ps._cam_ice_pwd
+                                and _bridge_uc_info["cands"]
+                            )
+                        ),
+                        probes=len(
+                            getattr(_bridge_fn, "_br_probe_verdicts", None) or {}
+                        ),
+                        binding_success=int(
+                            getattr(_bridge_fn, "_br_binding_success_count", 0)
+                        ),
+                        prflx_learned=bool(_bridge_uc_info.get("prflx")),
+                        trigger_sent=(
+                            getattr(_bridge_fn, "_br_trigger_sent_ts", None) is not None
+                        ),
+                        trigger_acked=bool(
+                            getattr(_bridge_fn, "_br_session_mode_resp", 0)
+                        ),
                     )
+                    ps._status(_NO_MEDIA_STATUS[_abandoned_by] % _NO_MEDIA_GRACE_S)
                     break
                 if ps.terminal_error_fut is not None and ps.terminal_error_fut.done():
                     _code, _desc = ps.terminal_error_fut.result()
@@ -9578,19 +8837,6 @@ class _SdesOpenMixin:
             ps.rtsp_push_url,
             output_path,
             max_seconds,
-            True,
-            _keep_v,
-            stream_settings=_settings,
-        ):
-            _LOGGER.info(
-                "camera %s: direct publish is on but this model's media reaches"
-                " the serve still SRTP-encrypted; keeping the ffmpeg serve",
-                getattr(self, "device_id", "?"),
-            )
-        elif not _direct_publish and _should_direct_publish(
-            ps.rtsp_push_url,
-            output_path,
-            max_seconds,
             ps._use_plain_rtp,
             stream_settings=_settings,
         ):
@@ -9738,27 +8984,24 @@ class _SdesOpenMixin:
 
         # --- Wait for SDP answer -------------------------------------------- #
         # Wait for the camera's SDP answer.  True SDES cameras (e.g.
-        # LK.IPC.A001513) send webrtcResp within a few seconds.  If no
-        # answer arrives the camera is not operating in SDES mode - most
-        # likely it has enableSdes='1' set incorrectly and actually requires
-        # DTLS.  In that case abort the ffmpeg process and raise
-        # _SdesNoAnswerError so the caller retries with the DTLS path.
+        # LK.IPC.A001513) send webrtcResp within a few seconds; it has usually
+        # long since landed by the time the first-media wait above is over.
         # Battery SDES cameras (A001513 etc.) take up to ~15s to wake from
         # deep sleep - they answer webrtcReq well after the bridge starts.
-        # Cameras with DTLS fallback keep 8s so the fallback fires quickly.
+        # There is no other transport to fall back to, as in the vendor app:
+        # without an answer the session carries on with ffmpeg.
         _sdes_answer_timeout = (
             sdes_answer_timeout
             if sdes_answer_timeout is not None
-            else min(timeout, 8.0 if dtls_fallback_ok else 20.0)
+            else min(timeout, 20.0)
         )
         try:
             # Race the answer against a TERMINAL refusal (-50002 max-streams /
             # -50015 SD-cap).  Without this the SDES path is blind to a camera
             # that explicitly said no: it waited out its whole answer budget and
-            # then handed a "no answer" to the DTLS fallback, which sent a second
-            # offer and only THEN surfaced AidotCameraBusy.  Measured ~48s to
-            # report a refusal that arrived in about one second - and two of the
-            # three validated models (A001513, A001064) take this path.
+            # only THEN surfaced AidotCameraBusy (measured ~48s, with a DTLS
+            # fallback offer in between, for a refusal that arrived in about one
+            # second).
             answer = await _sdes_await_answer_or_terminal(
                 ps.answer_fut,
                 ps.terminal_error_fut,
@@ -9809,17 +9052,7 @@ class _SdesOpenMixin:
                                     # learned only here has to land in it or this
                                     # camera keeps being decrypted with our offer
                                     # key -- which it never used.
-                                    #
-                                    # Only where the bridge is the decryptor.
-                                    # Adopting it on the other branch would make
-                                    # the second-answer comparison below see the
-                                    # key as already taken and skip the ffmpeg
-                                    # restart - but there it is ffmpeg that holds
-                                    # the key, and its SDP was written before this
-                                    # answer arrived, so the restart is the only
-                                    # thing that would deliver the new key.
-                                    if ps._use_plain_rtp:
-                                        ps.srtp_key_audio = ps._cam_key_audio
+                                    ps.srtp_key_audio = ps._cam_key_audio
                                     break
                     ps._status(
                         f"late ICE creds parsed - bridge will send USE-CANDIDATE"
@@ -9831,202 +9064,77 @@ class _SdesOpenMixin:
                             else ""
                         )
                     )
-            # For echo-reversal cameras (A001064) the first answer_fut was set by
-            # the broker echo of our own webrtcResp.  Wait briefly for the camera's
-            # real second webrtcResp, which may carry a different SRTP key.
-            if (
-                ps.second_answer_fut is not None
-                and ps._cam_echo_received
-                and not ps.second_answer_fut.done()
-            ):
-                try:
-                    _second_ans = await asyncio.wait_for(
-                        asyncio.shield(ps.second_answer_fut), timeout=5.0
-                    )
-                except TimeoutError:
-                    _second_ans = None
-            elif ps.second_answer_fut is not None and ps.second_answer_fut.done():
+            # A later webrtcResp from the camera, if one is already in hand, may
+            # carry a different SRTP key.  The bridge is the only decryptor and
+            # reads srtp_key_audio per packet (it rebuilds its receive session
+            # when the key changes), so adopting the key is all it takes; the
+            # serve reads plain RTP and needs no restart.
+            _second_ans = None
+            if ps.second_answer_fut is not None and ps.second_answer_fut.done():
                 try:
                     _second_ans = ps.second_answer_fut.result()
                 except Exception:
                     _second_ans = None
-            else:
-                _second_ans = None
-
-            if _second_ans:
-                _second_sdp = _second_ans.get("sdp", "")
-                if _second_sdp:
-                    ps._status("camera real webrtcResp - extracting SRTP keys")
-                    import re as _re2
-
-                    def _extract_key(sdp, media):
-                        _in_sec = False
-                        for _ln in sdp.splitlines():
-                            if _ln.startswith(f"m={media}"):
-                                _in_sec = True
-                            elif _ln.startswith("m=") and _in_sec:
-                                break
-                            elif _in_sec and _ln.startswith("a=crypto:"):
-                                _km = _re2.search(r"inline:([A-Za-z0-9+/=]+)", _ln)
-                                if _km:
-                                    return _km.group(1)
-                        return ""
-
-                    _real_key_audio = _extract_key(_second_sdp, "audio")
-                    _real_key_video = _extract_key(_second_sdp, "video")
-                    _keys_changed = False
-                    if _real_key_audio and _real_key_audio != ps.srtp_key_audio:
-                        ps._status(
-                            "camera audio SRTP key differs from offer - restarting ffmpeg"
-                        )
-                        ps.srtp_key_audio = _real_key_audio
-                        _keys_changed = True
-                    if _real_key_video and _real_key_video != ps.srtp_key_video:
-                        ps._status(
-                            "camera video SRTP key differs from offer - restarting ffmpeg"
-                        )
-                        ps.srtp_key_video = _real_key_video
-                        _keys_changed = True
-                    if _keys_changed:
-                        # Locally-initiated kill (the offered key was wrong;
-                        # restarting ffmpeg with the camera's real key) - flag it
-                        # so the bridge observe loop does not warn on the old
-                        # proc's signal death.  Reset once the NEW proc is live
-                        # (below) so a later, genuine crash of the restarted
-                        # ffmpeg is not silently swallowed as "expected teardown".
-                        _teardown_holder[0] = True
-                        await _stop_proc_off_loop(proc)
-                        _ts2 = int(time.time())
-                        # Transport and payload-type selection both live in
-                        # _build_restart_sdp, where they are unit-tested against
-                        # the SDP it actually emits.
-                        _new_sdp = _build_restart_sdp(
-                            ts=_ts2,
-                            lo_audio_port=_lo_audio_port,
-                            lo_video_port=_lo_video_port,
-                            use_plain_rtp=ps._use_plain_rtp,
-                            srtp_key_audio=ps.srtp_key_audio,
-                            srtp_key_video=ps.srtp_key_video,
-                            first_video_pt=_first_video_pt[0],
-                            answer_video_pt=_answer_video_pt[0],
-                            first_audio_pt=(
-                                _first_audio_pt[0]
-                                if _first_audio_pt[0] is not None
-                                else _keep_a
-                            ),
-                        )
-                        try:
-                            # Re-apply the cached sprop-parameter-sets here too:
-                            # this serve-restart rewrite is the SDP the keepalive
-                            # ffmpeg actually reads on every watchdog cycle, so
-                            # without this the out-of-band SPS is lost on restart
-                            # (the failure persisted live even for cached cameras).
-                            # Through the executor: Home Assistant patches
-                            # builtins.open and flags a write here exactly as
-                            # it flags the read six lines below.
-                            _sdp_text = _inject_sprop(_new_sdp, self.device_id)
-
-                            def _write_sdp_file() -> None:
-                                with open(ps.sdp_path, "w") as _f2:
-                                    _f2.write(_sdp_text)
-
-                            await asyncio.get_running_loop().run_in_executor(
-                                None, _write_sdp_file
-                            )
-                        except Exception as _sdp_exc2:
-                            _LOGGER.warning(
-                                "could not rewrite SDP for restart: %s", _sdp_exc2
-                            )
-                        proc = await _spawn_serve()
-                        # Point the shared holder at the live proc immediately.
-                        # The bridge thread polls _proc_holder[0]; if it still
-                        # sees the terminated old proc it logs "stream ended",
-                        # breaks, and closes the loopback sockets - starving the
-                        # restarted ffmpeg (0-frame stream).
-                        _proc_holder[0] = proc
-                        # New proc is live and owns the holder; clear the
-                        # teardown flag so this session's NEXT exit (the
-                        # restarted ffmpeg's) is classified fresh.
-                        _teardown_holder[0] = False
-                        ps._status("ffmpeg restarted with camera's SRTP keys")
+            _second_key = _sdes_key_from_sdp(
+                (_second_ans or {}).get("sdp", "") or "", "audio"
+            )
+            if _second_key and _second_key != ps.srtp_key_audio:
+                ps.srtp_key_audio = _second_key
+                ps._status(
+                    "camera's later webrtcResp carries a different SRTP key"
+                    " - the bridge decrypts with it from here"
+                )
         except TimeoutError:
-            if ps._cam_echo_received:
-                # We already sent webrtcResp in response to the camera's echo.
-                # The camera should now be streaming; keep ffmpeg running.
-                ps._status(
-                    f"no second webrtcResp in {_sdes_answer_timeout:.0f}s"
-                    " - camera acknowledged; continuing with ffmpeg"
-                )
-            elif dtls_fallback_ok:
-                # Camera likely requires DTLS despite enableSdes='1'.  Kill
-                # ffmpeg and signal the caller to retry with the DTLS path.
-                ps._status(
-                    f"no webrtcResp in {_sdes_answer_timeout:.0f}s"
-                    " - SDES handshake failed; aborting ffmpeg and falling back to DTLS"
-                )
-                # Locally-initiated abort (no answer; giving up on SDES for this
-                # attempt) - flag it so the bridge observe loop does not warn on
-                # the resulting signal death.  Nothing continues to use this
-                # proc/holder afterward, so no reset is needed here.
-                _teardown_holder[0] = True
-                await _stop_proc_off_loop(proc)
-                # The sockets and the SDP file are released by the exit stack as this raises.
-                ps.outgoing_q.put_nowait(None)  # signal MQTT thread to exit
-                raise CameraMixin._SdesNoAnswerError()
-            else:
-                # isDTLS='0': DTLS fallback is disabled by camera flags (NOT that
-                # the camera lacks DTLS - see the NOTE above), so there is nothing
-                # to fall back to.  Some SDES cameras (e.g. LK.IPC.A001064) start
-                # streaming SRTP directly to our ports without sending a
-                # webrtcResp SDP answer.  Keep ffmpeg running - it already
-                # has the SRTP key it needs from the offered SDP, and the
-                # camera's RTP should start arriving momentarily.
-                ps._status(
-                    f"no webrtcResp in {_sdes_answer_timeout:.0f}s"
-                    " - isDTLS=0: DTLS fallback not available;"
-                    " continuing with ffmpeg (camera may stream without SDP answer)"
-                )
-                # Battery cameras often answer after the 20s timeout (they take
-                # 15-25s to wake).  The answer arrives as a second webrtcResp
-                # (answer_fut was cancelled, so MQTT handler sets second_answer_fut).
-                # Spawn a background task to pick it up and inject ICE credentials
-                # into _bridge_uc_info so the bridge can send USE-CANDIDATE.
-                if ps.second_answer_fut is not None:
+            # No answer and nothing to fall back to.  Some SDES cameras (e.g.
+            # LK.IPC.A001064) start streaming SRTP directly to our ports without
+            # sending a webrtcResp SDP answer.  Keep ffmpeg running: the bridge
+            # already holds our offer key, and the camera's RTP should start
+            # arriving momentarily.
+            ps._status(
+                f"no webrtcResp in {_sdes_answer_timeout:.0f}s"
+                " - continuing with ffmpeg (camera may stream without SDP answer)"
+            )
+            # Battery cameras often answer after the 20s timeout (they take
+            # 15-25s to wake).  The answer arrives as a second webrtcResp
+            # (answer_fut was cancelled, so MQTT handler sets second_answer_fut).
+            # Spawn a background task to pick it up and inject ICE credentials
+            # into _bridge_uc_info so the bridge can send USE-CANDIDATE.
+            if ps.second_answer_fut is not None:
 
-                    async def _late_second_answer_task():
-                        try:
-                            _la = await asyncio.wait_for(
-                                asyncio.shield(ps.second_answer_fut), timeout=30.0
-                            )
-                            _la_sdp = (_la or {}).get("sdp", "") if _la else ""
-                            if (
+                async def _late_second_answer_task():
+                    try:
+                        _la = await asyncio.wait_for(
+                            asyncio.shield(ps.second_answer_fut), timeout=30.0
+                        )
+                        _la_sdp = (_la or {}).get("sdp", "") if _la else ""
+                        if (
+                            _la_sdp
+                            and not _bridge_uc_info["sent"]
+                            and not _bridge_uc_info["ufrag"]
+                        ):
+                            (_la_ufrag, _la_pwd, _la_cands, _) = _parse_answer_ice(
                                 _la_sdp
-                                and not _bridge_uc_info["sent"]
-                                and not _bridge_uc_info["ufrag"]
-                            ):
-                                (_la_ufrag, _la_pwd, _la_cands, _) = _parse_answer_ice(
-                                    _la_sdp
-                                )
-                                if _la_ufrag and _la_pwd and _la_cands:
-                                    _bridge_uc_info["ufrag"] = _la_ufrag
-                                    _bridge_uc_info["pwd"] = _la_pwd
-                                    _bridge_uc_info["cands"] = _la_cands
-                                    if "m=application" in _la_sdp:
-                                        ps._dc_answer_has_app = True
-                                    ps._status(
-                                        f"late second_answer_fut: ICE creds parsed"
-                                        f" ({len(_la_cands)} candidate(s))"
-                                        + (" [m=app]" if ps._dc_answer_has_app else "")
-                                    )
-                        except Exception:
-                            _LOGGER.debug(
-                                "camera %s: swallowed exception in %s",
-                                getattr(self, "device_id", "?"),
-                                "_late_second_answer_task",
-                                exc_info=True,
                             )
+                            if _la_ufrag and _la_pwd and _la_cands:
+                                _bridge_uc_info["ufrag"] = _la_ufrag
+                                _bridge_uc_info["pwd"] = _la_pwd
+                                _bridge_uc_info["cands"] = _la_cands
+                                if "m=application" in _la_sdp:
+                                    ps._dc_answer_has_app = True
+                                ps._status(
+                                    f"late second_answer_fut: ICE creds parsed"
+                                    f" ({len(_la_cands)} candidate(s))"
+                                    + (" [m=app]" if ps._dc_answer_has_app else "")
+                                )
+                    except Exception:
+                        _LOGGER.debug(
+                            "camera %s: swallowed exception in %s",
+                            getattr(self, "device_id", "?"),
+                            "_late_second_answer_task",
+                            exc_info=True,
+                        )
 
-                    _spawn_bg(_late_second_answer_task())
+                _spawn_bg(_late_second_answer_task())
 
         return SdesSession(
             proc=proc,

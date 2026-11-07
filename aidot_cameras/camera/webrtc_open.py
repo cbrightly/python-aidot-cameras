@@ -1370,7 +1370,6 @@ class _DtlsOpenState:
     numeric_user_id: "Any" = dataclasses.field(init=False)  # credentials_and_mqtt_setup
     _cam_local_ip: "Any" = dataclasses.field(init=False)  # credentials_and_mqtt_setup
     # credentials_and_mqtt_setup
-    _dtls_fallback_ok: "Any" = dataclasses.field(init=False)
     device_id: "Any" = dataclasses.field(init=False)  # credentials_and_mqtt_setup
     peer_id: "Any" = dataclasses.field(init=False)  # credentials_and_mqtt_setup
     loop: "Any" = dataclasses.field(init=False)  # credentials_and_mqtt_setup
@@ -1824,16 +1823,6 @@ async def _dtls_open_credentials_and_mqtt_setup(self, ps: _DtlsOpenState) -> Non
         ps._numeric_uid_raw,
         _cam_user_uuid,
     )
-
-    # Respect isDTLS='0': those cameras cannot do DTLS, so falling back
-    # after an SDES timeout would only hang the stream (~30 s with zero
-    # frames).  For cameras where isDTLS is absent or non-zero, allow DTLS
-    # fallback in case enableSdes='1' was incorrectly provisioned.
-    # LK.IPC.A001064 (enableSdes='1') echoes our MQTT messages but does
-    # not send STUN or SRTP - the echo-reversal DTLS fallback path at the
-    # end of _open_sdes_stream handles this without launching ffmpeg.
-    _cam_props = (self._raw_device or {}).get("properties") or {}
-    ps._dtls_fallback_ok = str(_cam_props.get("isDTLS", "1")) != "0"
 
     ps.device_id = self.device_id
     # A fresh peerid mints a NEW camera-side session, and the camera releases
@@ -2400,8 +2389,6 @@ async def _dtls_open_sdes_branch(self, ps: _DtlsOpenState) -> _PhaseReturn | Non
     Split out of ``_async_open_webrtc_stream_impl``; reads and writes the open's
     state through ``ps`` (a ``_DtlsOpenState``).
     """
-    from .client import CameraMixin
-
     if ps.use_sdes:
 
         def _raise_if_camera_refused():
@@ -2422,114 +2409,42 @@ async def _dtls_open_sdes_branch(self, ps: _DtlsOpenState) -> _PhaseReturn | Non
                 ps._status(f"camera refused the stream (code={_code}) - not retrying")
                 raise AidotCameraBusy(_code, _desc)
 
-        try:
-            _raise_if_camera_refused()
-            _sdes_session = await self._open_sdes_stream(
-                peer_id=ps.peer_id,
-                user_id=ps.user_id,
-                device_id=ps.device_id,
-                outgoing_q=ps.outgoing_q,
-                answer_fut=ps.answer_fut,
-                camera_offer_fut=ps.camera_offer_fut,
-                webrtc_req_echo_fut=ps.webrtc_req_echo_fut,
-                loop=ps.loop,
-                timeout=ps.timeout,
-                output_path=ps.output_path,
-                max_seconds=ps.max_seconds,
-                _status=ps._status,
-                _trace=ps._trace,
-                mqtt_fut=ps.mqtt_fut,
-                liveplay_echo_ev=ps.liveplay_echo_ev,
-                liveplay_resp_fut=ps.liveplay_resp_fut,
-                numeric_uid_raw=ps._numeric_uid_raw,
-                dtls_fallback_ok=ps._dtls_fallback_ok,
-                second_answer_fut=ps.second_answer_fut,
-                ice_config=(
-                    ps.ice_config_fut.result()
-                    if ps.ice_config_fut.done()
-                    else ps._http_ice_config
-                ),
-                camera_reconnect_ev=ps.camera_reconnect_ev,
-                sdes_answer_timeout=ps._sdes_answer_timeout,
-                rtsp_push_url=ps.rtsp_push_url,
-                talk=ps.talk,
-                ice_cands_seen=ps.ice_cands_seen,
-                terminal_error_fut=ps.terminal_error_fut,
-                sd_playback=ps._sd_playback,
-            )
-            # Success: the SdesSession now owns outgoing_q + mqtt_fut and
-            # reaps them on stop(); clear the backstop slot so a concurrent
-            # open on this camera cannot reap this live session's drain.
-            # (On _SdesNoAnswerError the await raises before this runs, so the
-            # DTLS-fallback path below keeps the slot for its own hand-off.)
-            self._release_stream_drain_to_session()
-            return _PhaseReturn(_sdes_session)
-        except AidotCameraBusy:
-            raise
-        except CameraMixin._SdesNoAnswerError:
-            # A terminal refusal that lands while we were waiting surfaces
-            # as a no-answer; check before spending a DTLS fallback on a
-            # camera that has already told us it has no free session.
-            _raise_if_camera_refused()
-            # Camera reported enableSdes='1' but did not respond to our SDES
-            # offer.  iOS telemetry shows models such as LK.IPC.A001064 can
-            # have an incorrectly set enableSdes property while actually
-            # requiring DTLS (peerid suffix _2).  The MQTT session was already
-            # told to close (None sentinel sent to outgoing_q inside
-            # _open_sdes_stream); wait for the thread to finish before opening
-            # a new MQTT connection with the same clientId.
-            ps._status(
-                "SDES handshake failed - camera may be DTLS despite"
-                " enableSdes='1'.  Retrying with DTLS (aiortc) ..."
-            )
-            try:
-                await asyncio.wait_for(ps.mqtt_fut, timeout=5.0)
-            except Exception:
-                pass  # MQTT thread exit errors don't affect the retry
-            # A playback keeps what it asked for across the fallback: its own
-            # peer id rebuilt for DTLS (the live default is class 2 and
-            # PRE_LINK, which an H265-recording camera sends audio alone),
-            # and rtsp_push_url, so the DTLS open refuses what it cannot
-            # serve instead of dropping it. A live open mints a fresh id.
-            _fallback_peer_id = None
-            _fallback_push_url = None
-            if ps._sd_playback is not None:
-                from .sd_playback import playback_peer_id
-
-                _fallback_peer_id = playback_peer_id(self, sdes=False)
-                _fallback_push_url = ps.rtsp_push_url
-            # Call the UNGATED impl, not the public async_open_webrtc_stream:
-            # we are already holding the global open-gate permit (acquired in
-            # async_open_webrtc_stream), and the gate's semaphore is not
-            # reentrant. Re-entering the public method here would try to
-            # acquire a second permit and deadlock whenever the gate is
-            # saturated (two SDES->DTLS fallbacks at once, or
-            # AIDOT_MAX_CONCURRENT_OPENS=1). The impl runs the same handshake
-            # under the permit we already hold.
-            return _PhaseReturn(
-                await self._async_open_webrtc_stream_impl(
-                    ps.on_frame,
-                    stream_id=ps.stream_id,
-                    timeout=ps.timeout,
-                    output_path=ps.output_path,
-                    max_seconds=ps.max_seconds,
-                    status_callback=ps.status_callback,
-                    force_sdes=False,
-                    rtsp_push_url=_fallback_push_url,
-                    reuse_peer_id=_fallback_peer_id,
-                    _skip_ice_config=True,
-                    _ice_config=(
-                        ps.ice_config_fut.result() if ps.ice_config_fut.done() else None
-                    ),
-                    # Carry the caller's ICE budget across the fallback, or it
-                    # silently reverts to `timeout` on this path.
-                    _ice_wait_timeout_s=ps._ice_wait_timeout_s,
-                    _abort_holder=ps._abort_holder,
-                    # Carried so the DTLS open refuses it rather than
-                    # handing a playback caller the live stream.
-                    _sd_playback=ps._sd_playback,
-                )
-            )
+        _raise_if_camera_refused()
+        _sdes_session = await self._open_sdes_stream(
+            peer_id=ps.peer_id,
+            user_id=ps.user_id,
+            device_id=ps.device_id,
+            outgoing_q=ps.outgoing_q,
+            answer_fut=ps.answer_fut,
+            camera_offer_fut=ps.camera_offer_fut,
+            loop=ps.loop,
+            timeout=ps.timeout,
+            output_path=ps.output_path,
+            max_seconds=ps.max_seconds,
+            _status=ps._status,
+            _trace=ps._trace,
+            mqtt_fut=ps.mqtt_fut,
+            liveplay_echo_ev=ps.liveplay_echo_ev,
+            liveplay_resp_fut=ps.liveplay_resp_fut,
+            numeric_uid_raw=ps._numeric_uid_raw,
+            second_answer_fut=ps.second_answer_fut,
+            ice_config=(
+                ps.ice_config_fut.result()
+                if ps.ice_config_fut.done()
+                else ps._http_ice_config
+            ),
+            sdes_answer_timeout=ps._sdes_answer_timeout,
+            rtsp_push_url=ps.rtsp_push_url,
+            talk=ps.talk,
+            ice_cands_seen=ps.ice_cands_seen,
+            terminal_error_fut=ps.terminal_error_fut,
+            sd_playback=ps._sd_playback,
+        )
+        # Success: the SdesSession now owns outgoing_q + mqtt_fut and
+        # reaps them on stop(); clear the backstop slot so a concurrent
+        # open on this camera cannot reap this live session's drain.
+        self._release_stream_drain_to_session()
+        return _PhaseReturn(_sdes_session)
     return None
 
 

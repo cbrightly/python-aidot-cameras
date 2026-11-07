@@ -358,10 +358,9 @@ def answer_inserted_a_section(
     over.
 
     The distinction is load-bearing: the cap comes from 63 opens on a mains
-    A000088 that connects in 9 s, and an SDES camera reaching this path through
-    the SDES->DTLS fallback can take 25-70 s to open cold. Cutting its deadline
-    to 15 s on a shape that was never measured would break exactly the streaming
-    this must not break.
+    A000088 that connects in 9 s, and a camera opened over DTLS cold can take
+    25-70 s. Cutting its deadline to 15 s on a shape that was never measured
+    would break exactly the streaming this must not break.
     """
     return shifted_sections > 0 and unclaimed_answer_mids > 0
 

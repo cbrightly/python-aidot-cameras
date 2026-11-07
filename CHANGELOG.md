@@ -36,10 +36,29 @@ function each, all on default paths.
 - **The SD listing collects its pages with one registration** instead of 64
   waiters registered up front, until the listing reports its end, as the app
   reads `listEventEndFlag`. Same pages, same limits.
+- **The SDES first-media wait has two early-abandon timers, not four.** The
+  battery stale-offer timer (`AIDOT_BATTERY_STALE_OFFER_GRACE_S`, from the
+  camera's first sighting) is unchanged. The unreachable-nominee, no-probe and
+  trigger-unacked rules all waited 20 s, each from its own event (nomination,
+  the answer, the LIVING send), and each fired only on its own shape; they are
+  one timer now, `AIDOT_SDES_NO_MEDIA_GRACE_S` (default 20, `0` disables): no
+  media 20 s after the camera's answer ends the attempt, whatever the shape.
+  The stall WARNING still says which shape it was (`abandoned:
+  unreachable-nominee`, `no-probe` or `trigger-unacked`, the same words as
+  before), and `abandoned: no-media` for an attempt where the camera acted on
+  everything and still sent nothing, which used to run the full 75 s. The
+  INFO status lines for the three old shapes are unchanged. Measured
+  2026-09-22 to 10-09, every one of 165 first medias arrived within 9.5 s of
+  `webrtcReq`.
 
 ### Deprecated
 - **`AIDOT_PERSISTENT_MQTT`** is accepted and ignored; set to
   `0`/`false`/`no`/`off` it logs one warning. See above.
+- `AIDOT_SDES_ECHO_WAIT_S`, `AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S`,
+  `AIDOT_SDES_ANSWER_PROBE_GRACE_S` and `AIDOT_SDES_TRIGGER_GRACE_S` are still
+  accepted and are ignored; one warning per process names any that are set.
+  The echo wait is gone, and the three graces are replaced by
+  `AIDOT_SDES_NO_MEDIA_GRACE_S`.
 
 ### Removed
 - Code nothing called: `protocol._mqtt_session`,
@@ -53,6 +72,34 @@ function each, all on default paths.
   `HAS_READ_DATA_SEAM`, `HAS_SHARED_DISCOVERY_MAP`,
   `broadcast_protocol_args`). `UPSTREAM_SHAPE` stays, because the integration's
   diagnostics report it.
+Soak: resets the clock. The SDES open loses paths that never ran in the field,
+and its first-media wait is abandoned on one rule after the answer instead of
+three; both supported SDES models (A001513, A001064) need a live check.
+- **The SDES `webrtcReq`-echo wait, the `webrtcResp` built from it, and the
+  quickConn retry that re-sent it.** The official app never publishes a
+  `webrtcResp` on SDES; it hands the session to its WebRTC stack. Across 18 h of
+  one deployment the 17 opens that took the wait timed out 17 of 17 and all
+  streamed. With it go the 20 s and 5 s branches of the ICE responder window
+  (it is always the 2.5 s one now), the second-answer wait and ffmpeg restart
+  that only an echo armed, and `AIDOT_SDES_ECHO_WAIT_S`. A001064 opens no
+  longer wait 0.25 s for it. A later camera `webrtcResp` that carries a new
+  SRTP key is still adopted; the bridge decrypts with it, and the serve, which
+  reads plain RTP, is no longer restarted for it.
+- **The SDES-to-DTLS fallback.** An SDES open that got no answer, or saw an
+  echo and then no ICE, raised an internal error and the open was retried over
+  DTLS for any camera not flagged `isDTLS=0`. The official app has no such
+  fallback, and the echo-gated half could not fire. An SDES open with no answer
+  now carries on with ffmpeg, as `isDTLS=0` cameras always did. A refusal
+  (`-50002`/`-50015`) is still raised as `AidotCameraBusy`.
+- **The RTP/SAVP serve, where ffmpeg decrypted SDES media from our offer's
+  keys.** Every supported SDES model is in `_PLAIN_RTP_MODELS`, where the bridge
+  decrypts and ffmpeg reads plain RTP. An SDES camera of any other model now
+  fails at the start of the open with `AidotStreamOpenError` naming the model,
+  before an offer is sent, instead of opening a session nothing could decrypt.
+  **This includes the A001108 and A001360 battery cameras:** they are
+  recognised and flagged SDES but have never been seen live, and they now
+  refuse every stream open with that named error until their framing is
+  confirmed and they are added to `_PLAIN_RTP_MODELS`.
 
 ## [1.0.0rc71]
 

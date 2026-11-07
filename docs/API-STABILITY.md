@@ -147,3 +147,9 @@ a minor release; fixes ship in a patch release.
 
 Deprecations get at least one minor release of overlap with a runtime warning
 before the old name is removed in the next major.
+
+Deprecated now:
+
+| Name | Since | What happens |
+| --- | --- | --- |
+| `AIDOT_SDES_ECHO_WAIT_S`, `AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S`, `AIDOT_SDES_ANSWER_PROBE_GRACE_S`, `AIDOT_SDES_TRIGGER_GRACE_S` | [Unreleased] | accepted and ignored, with one warning per process when any is set; the SDES open has no `webrtcReq`-echo wait, and the three first-media rules are one timer, `AIDOT_SDES_NO_MEDIA_GRACE_S` (docs/ENVIRONMENT.md) |

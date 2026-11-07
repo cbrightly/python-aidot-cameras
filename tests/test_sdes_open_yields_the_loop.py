@@ -163,7 +163,9 @@ def test_the_allocates_still_happen_off_the_loop():
         and c.args
         and name_of(c.args[0]) == "_turn_allocate_udp"
     ]
-    assert len(via_executor) == 3
+    # Pre-offer and post-offer; the third, in the webrtcReq-echo branch, went
+    # with that branch.
+    assert len(via_executor) == 2
 
 
 async def test_a_cancelled_caller_waits_out_the_blocking_call():

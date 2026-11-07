@@ -272,7 +272,8 @@ def test_the_line_is_one_line():
 # one that ran the whole wait; only an INFO status line said which rule fired,
 # and INFO is not what users paste. The line names it.
 @pytest.mark.parametrize(
-    "reason", ["stale-offer", "unreachable-nominee", "no-probe", "trigger-unacked"]
+    "reason",
+    ["stale-offer", "unreachable-nominee", "no-probe", "trigger-unacked", "no-media"],
 )
 def test_the_line_names_the_rule_that_abandoned_the_attempt(reason):
     plain = _report()
@@ -290,41 +291,54 @@ def test_a_wait_no_rule_abandoned_leaves_the_line_unchanged():
     assert "abandoned" not in _report()
 
 
-@pytest.mark.parametrize(
-    "rule, reason",
-    [
-        ("_stale_offer_abandon_due", "stale-offer"),
-        ("_no_answer_abandon_due", "unreachable-nominee"),
-        ("_no_probe_abandon_due", "no-probe"),
-        ("_trigger_unacked_abandon_due", "trigger-unacked"),
-    ],
-)
-def test_each_abandon_rule_records_its_reason_for_the_report(rule, reason):
-    """The open cannot be driven here; its AST must show each abandon branch
-    recording its reason before it breaks out, and the report taking it."""
-    family = sdes_open_family()
-    branches = [
+def _abandon_branches(rule):
+    return [
         n
-        for fn in family
+        for fn in sdes_open_family()
         for n in ast.walk(fn)
         if isinstance(n, ast.If) and calls_to(n.test, rule)
     ]
-    assert branches, f"no branch is gated on {rule}"
+
+
+def _records_before_break(branch, value_ok):
+    records = [
+        s
+        for s in ast.walk(branch)
+        if isinstance(s, ast.Assign)
+        and any(getattr(t, "id", None) == "_abandoned_by" for t in s.targets)
+        and value_ok(s.value)
+    ]
+    breaks = [s.lineno for s in ast.walk(branch) if isinstance(s, ast.Break)]
+    return records and (not breaks or records[0].lineno < min(breaks))
+
+
+def test_the_stale_offer_timer_records_its_reason_for_the_report():
+    """The open cannot be driven here; its AST must show the abandon branch
+    recording its reason before it breaks out."""
+    branches = _abandon_branches("_stale_offer_abandon_due")
+    assert branches, "no branch is gated on _stale_offer_abandon_due"
     for branch in branches:
-        records = [
-            s
-            for s in ast.walk(branch)
-            if isinstance(s, ast.Assign)
-            and any(getattr(t, "id", None) == "_abandoned_by" for t in s.targets)
-            and isinstance(s.value, ast.Constant)
-            and s.value.value == reason
-        ]
-        assert records, f"the {rule} branch must record {reason!r}"
-        breaks = [s.lineno for s in ast.walk(branch) if isinstance(s, ast.Break)]
-        assert not breaks or records[0].lineno < min(breaks)
+        assert _records_before_break(
+            branch,
+            lambda v: isinstance(v, ast.Constant) and v.value == "stale-offer",
+        )
+
+
+def test_the_no_media_timer_records_the_shape_for_the_report():
+    """The no-media timer records the shape _no_media_shape names, so the
+    WARNING keeps the distinction the three merged rules used to make."""
+    branches = _abandon_branches("_no_media_abandon_due")
+    assert branches, "no branch is gated on _no_media_abandon_due"
+    for branch in branches:
+        assert _records_before_break(
+            branch, lambda v: bool(calls_to(v, "_no_media_shape"))
+        )
+
+
+def test_the_report_is_handed_the_recorded_reason():
     reports = [
         c
-        for fn in family
+        for fn in sdes_open_family()
         for c in calls_to(fn, "report_first_media_stall")
         if any(
             k.arg == "abandoned_by" and getattr(k.value, "id", "") == "_abandoned_by"

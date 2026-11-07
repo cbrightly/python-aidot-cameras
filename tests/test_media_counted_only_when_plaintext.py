@@ -19,72 +19,26 @@ climb: ``is_stalled`` never trips, ``_healthy`` stays True, the streak keeps
 resetting, and the abandon ceiling can never fire.  A session reports healthy
 forever.
 
-The condition is NOT "did we decrypt it".  It is "is ``_fwd_pkt`` plaintext by
-the time ffmpeg reads it", and who owes the decryption depends on the camera:
-
-* ``_use_plain_rtp`` models (the ``_PLAIN_RTP_MODELS`` substring allowlist) get
-  an ffmpeg SDP of ``RTP/AVP`` with no ``a=crypto``, so the BRIDGE owes the
-  decryption and ciphertext is a non-delivery.
-* Every other SDES camera -- ``is_sdes_camera`` is a cloud property,
-  ``enableSdes == '1'``, a different set from the model allowlist -- gets
-  ``RTP/SAVP`` plus ``a=crypto`` and FFMPEG owes the decryption.  There the
-  bridge forwards ciphertext by design, ``_decrypted`` is always False, and
-  that forward is real delivered media.
-
-Gating on ``_decrypted`` alone would therefore zero the counters for the whole
-RTP/SAVP path: ``last_media_monotonic`` would stay 0.0, ``is_stalled`` would
-trip at the grace deadline on a stream that is working, and
-``_should_abandon_keepalive`` would eventually stop the keepalive for a healthy
-camera.  Hence the two-term predicate.
+The bridge is the only decryptor: every SDES model the open accepts is in
+``_PLAIN_RTP_MODELS``, and the ffmpeg SDP is ``RTP/AVP`` with no ``a=crypto``.
+So the gate is ``_decrypted`` alone.  (An ``RTP/SAVP`` branch, where ffmpeg
+owed the decryption and the bridge forwarded ciphertext as real media, needed a
+second term; that branch is gone and the open refuses any other SDES model.)
 """
 
 import ast
 
 import aidot_cameras.camera.sdes_open as sdes_open
-from aidot_cameras.camera.sdes_open import _should_count_media
-from tests.ast_guards import calls_to, enclosing, names_in, parents, sdes_bridge
+from tests.ast_guards import enclosing, names_in, parents, sdes_bridge
 
 
 # --------------------------------------------------------------------- #
-# Pure helper truth table
-# --------------------------------------------------------------------- #
-
-
-def test_decrypted_plain_rtp_packet_counts():
-    """The bridge unprotected it; ffmpeg gets plaintext on an RTP/AVP SDP."""
-    assert _should_count_media(True, True) is True
-
-
-def test_undecrypted_plain_rtp_packet_does_not_count():
-    """The bug: ciphertext to an RTP/AVP ffmpeg, discarded, counted anyway."""
-    assert _should_count_media(False, True) is False
-
-
-def test_savp_packet_counts_even_though_the_bridge_did_not_decrypt_it():
-    """ffmpeg owns the SRTP on this path -- forwarding ciphertext IS delivery.
-
-    This is the case a bare ``if _decrypted:`` would have broken.
-    """
-    assert _should_count_media(False, False) is True
-
-
-def test_savp_packet_counts_when_something_decrypted_it_anyway():
-    assert _should_count_media(True, False) is True
-
-
-def test_returns_a_bool_not_a_truthy_value():
-    for d in (True, False):
-        for p in (True, False):
-            assert isinstance(_should_count_media(d, p), bool)
-
-
-# --------------------------------------------------------------------- #
-# Source anchor: the production forward site must actually call it.
+# Source anchor: the production forward site must actually be gated.
 #
 # The bridge is one long closure inside _open_sdes_stream_impl and cannot be
 # invoked standalone, so the mirror below is only a mirror.  These checks are
-# what bind the helper to the real code -- without them the tests above would
-# still pass with the production gate deleted.
+# what bind it to the real code -- without them the mirror would still pass
+# with the production gate deleted.
 # --------------------------------------------------------------------- #
 
 
@@ -103,10 +57,9 @@ def _gates(node):
     return [p.test for p in enclosing(node, parents(sdes_bridge()), ast.If)]
 
 
-def test_the_srtp_forward_site_is_gated_on_the_helper():
-    """The SRTP forward's counters run only when _should_count_media says the
-    consumer can use what was forwarded - with BOTH terms: _decrypted alone
-    zeroes the counters for every RTP/SAVP camera, where ffmpeg owns SRTP."""
+def test_the_srtp_forward_site_is_gated_on_decryption():
+    """The SRTP forward's counters run only when the bridge decrypted what it
+    forwarded."""
     fwd = [
         n
         for n in ast.walk(sdes_bridge())
@@ -115,12 +68,10 @@ def test_the_srtp_forward_site_is_gated_on_the_helper():
         and "_fwd_pkt" in names_in(n.value)
     ]
     assert len(fwd) == 1, "expected one _fwd_pkt counter site"
-    calls = [c for t in _gates(fwd[0]) for c in calls_to(t, "_should_count_media")]
-    assert calls, (
+    assert any("_decrypted" in names_in(t) for t in _gates(fwd[0])), (
         "the bridge's SRTP forward counts every packet it forwards, including "
         "ciphertext ffmpeg discards - is_stalled never trips"
     )
-    assert {"_decrypted", "_use_plain_rtp"} <= names_in(calls[0])
 
 
 def test_only_the_two_known_counter_sites_exist():
@@ -142,13 +93,13 @@ def test_the_tutk_counter_site_is_deliberately_left_ungated():
         and "_pd_plain" in names_in(n.value)
     ]
     assert len(tutk) == 1, "the TUTK audio counter site moved"
-    assert not [
-        c for t in _gates(tutk[0]) for c in calls_to(t, "_should_count_media")
-    ], "the TUTK audio counter must keep counting"
+    assert not any("_decrypted" in names_in(t) for t in _gates(tutk[0])), (
+        "the TUTK audio counter must keep counting"
+    )
 
 
 # --------------------------------------------------------------------- #
-# Behavioural mirror: the consequence, driven through the real helper.
+# Behavioural mirror: the consequence of the gate.
 # --------------------------------------------------------------------- #
 
 
@@ -171,8 +122,8 @@ class _FakeSession:
         }
 
 
-def _forward(packets, plain_rtp, now=100.0):
-    """Mirror of the bridge's forward step, using the real predicate.
+def _forward(packets, now=100.0):
+    """Mirror of the bridge's forward step.
 
     ``packets`` is a list of ``(payload, decrypted)``.  Everything is forwarded
     -- the fix does not change loop control flow -- only the counting is gated.
@@ -182,7 +133,7 @@ def _forward(packets, plain_rtp, now=100.0):
     forwarded = []
     for payload, decrypted in packets:
         forwarded.append(payload)  # sendto()
-        if _should_count_media(decrypted, plain_rtp):
+        if decrypted:
             media_progress[0] = now
             media_counts[0] += 1
             media_counts[1] += len(payload)
@@ -195,7 +146,7 @@ def test_a_stream_that_never_decrypts_is_reported_stalled():
     Grace is 60 s and nothing decrypted, so ``last_media`` stays 0.0 and the
     keepalive's own health test (``last_media_monotonic > 0.0``) is False.
     """
-    _, session = _forward([(b"x" * 200, False)] * 500, plain_rtp=True)
+    _, session = _forward([(b"x" * 200, False)] * 500)
     assert session.last_media_monotonic == 0.0
     assert session.media_stats()["packets"] == 0
     assert (
@@ -211,12 +162,12 @@ def test_undecryptable_packets_are_still_forwarded():
     """Prefer the flag over a ``continue``.  Forwarding ciphertext ffmpeg
     discards is inert; changing loop control flow on the whole SDES fleet is
     not."""
-    forwarded, _ = _forward([(b"x" * 200, False)] * 3, plain_rtp=True)
+    forwarded, _ = _forward([(b"x" * 200, False)] * 3)
     assert len(forwarded) == 3
 
 
 def test_a_decrypting_stream_stays_healthy():
-    _, session = _forward([(b"x" * 200, True)] * 10, plain_rtp=True)
+    _, session = _forward([(b"x" * 200, True)] * 10)
     assert session.media_stats() == {
         "packets": 10,
         "bytes": 2000,
@@ -230,22 +181,9 @@ def test_a_decrypting_stream_stays_healthy():
     )
 
 
-def test_a_savp_stream_stays_healthy_without_the_bridge_decrypting():
-    """The regression the second term prevents: a working RTP/SAVP camera."""
-    _, session = _forward([(b"x" * 200, False)] * 10, plain_rtp=False)
-    assert session.media_stats()["packets"] == 10
-    assert session.last_media_monotonic == 100.0
-    assert (
-        sdes_open.SdesSession.is_stalled(
-            session.last_media_monotonic, started_at=0.0, now=101.0
-        )
-        is False
-    )
-
-
 def test_a_partly_decrypting_stream_counts_only_what_decrypted():
     """Intermittent decrypt failure: the counters track usable media only."""
     packets = [(b"x" * 100, i % 2 == 0) for i in range(10)]
-    _, session = _forward(packets, plain_rtp=True)
+    _, session = _forward(packets)
     assert session.media_stats()["packets"] == 5
     assert session.media_stats()["bytes"] == 500
