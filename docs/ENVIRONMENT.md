@@ -54,7 +54,7 @@ when the `StreamSettings` is built, not at use.
 | `AIDOT_DTLS_FAST_LIVEPLAY` | The DTLS (A000088) analogue: skip the `livePlayReq`-echo and `livePlayResp` waits (the dominant LAN cold-start cost) while keeping the full ICE/TURN/DTLS handshake, so remote/relay viewing is unaffected. **On by default**; set to `0`/`false`/`no`/`off` to disable. | enabled (on) |
 | `AIDOT_HLS_TS_PORT` | Port of the loopback listener for `AIDOT_HLS_DIRECT_TS`. One listener serves every camera, by path (`/aidot_<first 12 of the device id>.ts?auth=<secret>`). | `0` (any free port) |
 | `AIDOT_PUBLISH_GAP_WARN_S` | Seconds without a frame to publish before the direct publisher says so in the log. The line splits the gap into its causes - seconds idle waiting for a frame to arrive, seconds spent inside the publish, and how many frames were dropped over that gap (waiting for a keyframe, or a presentation time already served) - alongside the queue depth. Each session also records its largest gap. `0` disables the line. | `1.0` |
-| `AIDOT_SERVE_RELAY` | Hold the public stream port via an internal relay that proxies to ffmpeg, so the first (cold) view connects instead of failing while ffmpeg can't pre-bind the port. Set to `0` to serve ffmpeg directly. Not involved in a direct publish, which has no port to hold. | `1` (enabled) |
+| `AIDOT_SERVE_RELAY` | Hold the public stream port via an internal relay that proxies to ffmpeg, so the first (cold) view connects instead of failing while ffmpeg can't pre-bind the port. Set to `0` to serve ffmpeg directly. SDES serves only: a DTLS pull serve holds its own port for the whole stream, and a direct publish has no port to hold. | `1` (enabled) |
 | `AIDOT_DTLS_VIDEO_GRACE_S` | How long a connected DTLS session may go without a single video frame before it is torn down and re-opened. A session that receives audio and no video passes every other check the serve loop makes - the peer connection is healthy, ffmpeg respawns for each consumer - so without this it is held open indefinitely while the viewer sees "no video". `0` disables the check. For the short-session pacing (`AIDOT_DTLS_SHORT_SESSION_S`), a session with no video canary to read counts as having delivered video unless this check declares it video-less: one that ends before the check rules (sooner than this grace, or with the check off) is not counted short, since unknown means do not back off. | `30` |
 | `AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S` | How long one WebRTC open attempt for a served DTLS camera may take before it is abandoned and retried. Raised from 30 s because the library re-publishes its offer (`webrtcReq`) at 15 s and again at 30 s when the camera has not answered, so the attempt used to die at the instant its last resend went out; answers measured arriving at 30.7-99.5 s were discarded as a result. | `75` |
 | `AIDOT_DTLS_SERVE_ICE_WAIT_S` | Separate budget for the ICE half of that open, clamped to `AIDOT_DTLS_SERVE_OPEN_TIMEOUT_S`. The open is two sequential waits - signalling then ICE - so without its own budget the ICE wait inherits the timeout above and doubles the worst case while holding the global open gate. | `30` |
@@ -101,8 +101,10 @@ out of the box.
 
 ## The ffmpeg serve and the recordings
 
-The ffmpeg serve carries recordings, snapshots, `-` and `http://` serves, H.265
-sessions and any camera with `AIDOT_DIRECT_PUBLISH=0`.
+The ffmpeg serve carries SDES recordings, snapshots, `http://` serves, H.265
+sessions and any SDES camera with `AIDOT_DIRECT_PUBLISH=0`. A DTLS camera runs
+no ffmpeg: its `-` and `http://` serves are the PyAV mux's MPEG-TS as written,
+and its `rtsp://` push is always the direct publish.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |

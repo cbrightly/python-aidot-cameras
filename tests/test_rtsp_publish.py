@@ -1161,11 +1161,11 @@ def test_loopback_publish_adds_aac_after_pcma(go2rtc, monkeypatch):
         assert _wait(lambda: sum(1 for ch, _ in go2rtc.frames if ch == 4) >= 20)
         # The camera's timestamps are contiguous (160 samples/packet, no gaps),
         # so a working feed() never asks the pacer to fill silence. Video also
-        # flows here, so tick() runs on every pass (see `_video_forwarded`):
+        # flows here, so tick() runs on every pass (see `video_moved`):
         # if the AAC packets above came from tick()'s idle-fill instead of
         # feed() actually consuming the A-law, this would be in the thousands
         # by now.
-        assert proc._aac.pacer.silence_samples == 0
+        assert proc._sink.aac.pacer.silence_samples == 0
         tx.close()
     finally:
         proc.terminate()
@@ -1231,18 +1231,18 @@ def test_loopback_publish_fills_aac_silence_only_while_video_flows(go2rtc, monke
                 ("127.0.0.1", a_port),
             )
             time.sleep(0.02)
-        assert _wait(lambda: proc._aac.frames > 0)
+        assert _wait(lambda: proc._sink.aac.frames > 0)
         # The camera goes quiet - no audio, no video. Silence is generated to
         # keep the track alive BESIDE video, so none is generated now.
         time.sleep(1.2)
-        assert proc._aac.pacer.silence_samples == 0
+        assert proc._sink.aac.pacer.silence_samples == 0
         for i in range(40):  # video resumes, audio does not: fill beside it
             tx.sendto(
                 rp.build_rtp(96, True, 1 + i, 1800 * i, 0xAAAA, b"\x41pic"),
                 ("127.0.0.1", v_port),
             )
             time.sleep(0.02)
-        assert _wait(lambda: proc._aac.pacer.silence_samples > 0)
+        assert _wait(lambda: proc._sink.aac.pacer.silence_samples > 0)
         tx.close()
     finally:
         proc.terminate()
@@ -1481,7 +1481,8 @@ def test_dtls_publish_announces_and_sends_an_aac_track(go2rtc, monkeypatch, capl
     ]
     assert len(ended) == 1
     assert f"AAC {res['aac_frames']} frames" in ended[0]
-    assert f"{res['aac_silence_samples']} samples silence-filled" in ended[0]
+    # The same summary the SDES publisher ends its line with (PublishSink).
+    assert "0 silence-filled / 0 trimmed / 0 re-anchors" in ended[0]
 
 
 def test_dtls_publish_feeds_queued_audio_before_the_idle_fill(go2rtc, monkeypatch):
@@ -2002,9 +2003,9 @@ def test_loopback_publish_never_splits_a_frame_a_stray_packet_interrupts(
         now = time.monotonic()
         proc._send(pub, video_idx, (True, 1000, b"A1", now, ssrc))
         proc._send(pub, video_idx, (False, 7000, b"B1", now, ssrc))
-        proc._video_forwarded = False
+        proc._sink.video_moved = False
         proc._send(pub, video_idx, (False, 1000, b"Alate", now, ssrc))
-        assert proc._video_forwarded is False
+        assert proc._sink.video_moved is False
         proc._send(pub, video_idx, (True, 7000, b"B2", now, ssrc))
         assert _wait(lambda: len(go2rtc.frames) == 3)
         time.sleep(0.1)
@@ -2820,3 +2821,107 @@ def test_loopback_publisher_without_audio_builds_no_conditioner(go2rtc, monkeypa
     finally:
         proc.kill()
     assert proc.poll() == rp.EXIT_KILLED
+
+
+# -- PublishSink: what both publishers share ---------------------------------- #
+
+
+class _SinkPub:
+    def __init__(self, fail=False):
+        self.sent, self.fail = [], fail
+
+    def send_rtp(self, track, pkt):
+        if self.fail:
+            raise rp.RtspPublishError("send failed")
+        self.sent.append((track.channel, pkt))
+
+
+class _FakeAac:
+    ssrc = 0x1234
+
+    def __init__(self):
+        self.ticks, self.fed = [], []
+        self._ts = 0xFFFFFC00  # the AAC clock wraps on the second frame
+
+    def _out(self):
+        out = [(1, self._ts, b"\0\x10\0\x08" + b"au")]
+        self._ts = (self._ts + 1024) & 0xFFFFFFFF
+        return out
+
+    def feed(self, alaw, pcma_ts, now):
+        self.fed.append((alaw, pcma_ts, now))
+        return self._out()
+
+    def tick(self, now, video_media_s=None):
+        self.ticks.append(video_media_s)
+        return self._out()
+
+
+def _sink(**kw):
+    sess = _SpySession()
+    s = rp.PublishSink(
+        "cam",
+        ts_session=type("S", (), {"video": sess.video_, "aac": sess.aac_})(),
+        **kw,
+    )
+    aac = _FakeAac()
+    s.attach_aac(aac, rp.PublishTrack("audio", 97, 48000, "MPEG4-GENERIC", 2))
+    return s, aac, sess
+
+
+def test_publish_sink_video_clock_unwraps_the_published_timestamps():
+    s, _aac, _ = _sink()
+    assert s.video_published(0xFFFFF000) == 0
+    assert s.video_published(0x00000800) == 0x1800  # across the 32-bit wrap
+    assert s.video_published(0x00000800) == 0x1800  # same picture, no step
+
+
+def test_publish_sink_ticks_aac_only_after_video_moved():
+    s, aac, _ = _sink()
+    pub = _SinkPub()
+    s.tick_aac(pub)
+    assert aac.ticks == [], "no idle fill before any video"
+    s.video_published(1000)
+    s.video_published(1000 + 9000)
+    s.tick_aac(pub)
+    s.tick_aac(pub)
+    assert aac.ticks == [pytest.approx(0.1)], "one tick per video movement"
+    assert [ch for ch, _ in pub.sent] == [4]
+
+
+def test_publish_sink_feeds_the_tee_aac_on_its_own_clock():
+    s, aac, sess = _sink()
+    pub = _SinkPub()
+    s.feed_aac(pub, b"\xd5" * 160, 160, 1.0)
+    s.feed_aac(pub, b"\xd5" * 160, 320, 1.02)
+    assert aac.fed[0] == (b"\xd5" * 160, 160, 1.0)
+    # Raw frames minus the RFC 3640 AU header, counted from 0 across the wrap.
+    assert sess.aac == [(b"au", 0), (b"au", 1024)]
+    assert s.aac_seconds > 0
+
+
+def test_publish_sink_send_errors_raise_unless_quiet():
+    s, _aac, sess = _sink()
+    with pytest.raises(rp.RtspPublishError):
+        s.feed_aac(_SinkPub(fail=True), b"\xd5" * 160, 160, 1.0)
+    assert sess.aac == [], "a frame that did not go out is not teed"
+    s, _aac, sess = _sink(quiet_send_errors=True)
+    s.feed_aac(_SinkPub(fail=True), b"\xd5" * 160, 160, 1.0)  # left to pub.alive
+    assert len(sess.aac) == 1
+
+
+def test_publish_sink_without_aac_reports_zeros_and_no_summary():
+    s = rp.PublishSink("cam")
+    s.attach_aac(None, None)
+    s.video_published(0)
+    s.tick_aac(_SinkPub())
+    assert s.aac_stats() == dict.fromkeys(rp.AAC_STAT_KEYS, 0)
+    assert s.aac_summary() == ""
+
+
+def test_publish_sink_tee_never_costs_the_publish():
+    def _boom(*a):
+        raise RuntimeError("tee")
+
+    s = rp.PublishSink("cam", ts_session=type("S", (), {"video": _boom})())
+    s.tee_video(b"au", 0, True)  # swallowed

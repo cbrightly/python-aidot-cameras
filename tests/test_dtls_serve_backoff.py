@@ -259,7 +259,7 @@ class _Run:
 
         cam._streaming_active = True
         cam._keepalive_rtsp_url = _URL
-        cam._serve_relay = None
+        cam._ts_serve = None
 
         run = self
 
@@ -350,7 +350,7 @@ class _Run:
 
         cam.async_open_webrtc_stream = _open
         cam._install_av_taps = lambda pc, vq, aq: True
-        cam._maybe_start_serve_relay = lambda url: None
+        cam._start_ts_serve = lambda url, **kw: None
         cam._go_dormant = _go_dormant
         cam._viewer_present = _viewer_present
         monkeypatch.setattr(cc, "_dtls_serve_loop_serve_cycle", _serve)
@@ -1030,14 +1030,19 @@ def test_a_pc_dying_in_the_teardown_does_not_lengthen_the_session(
     )
     run.sessions = [sess]
     calls = {"n": 0}
+    import threading
 
-    def _slow_terminate(proc):
-        calls["n"] += 1
-        if calls["n"] == 1:  # the first cycle's teardown
-            _real_time.sleep(0.3)
-            sess._pc.connectionState = "closed"
+    real_join = threading.Thread.join
 
-    monkeypatch.setattr(cc, "_terminate_proc", _slow_terminate)
+    def _slow_join(self, timeout=None):
+        if self.name == "aidot-dtls-publish":
+            calls["n"] += 1
+            if calls["n"] == 1:  # the first cycle's teardown
+                _real_time.sleep(0.3)
+                sess._pc.connectionState = "closed"
+        return real_join(self, timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", _slow_join)
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         run.run()
     assert len(run.mux_targets) == 1

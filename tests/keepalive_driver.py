@@ -235,20 +235,34 @@ class FakeDtlsSession:
         self.stopped += 1
 
 
-class FakeDirectTsServer:
-    """Records the port the serve cycle binds instead of binding it."""
+class FakeTsServer:
+    """Records the port the serve loop binds instead of binding it."""
 
     instances: list = []
 
     def __init__(self, port: int) -> None:
         self.port = port
-        FakeDirectTsServer.instances.append(self)
+        self.closed = False
+        self.opened = 0
+        FakeTsServer.instances.append(self)
 
     def start(self) -> None:
         pass
 
+    def open(self):
+        self.opened += 1
+        return _FakeSink()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeSink:
     def write(self, data) -> int:
         return len(data)
+
+    def mark_keyframe(self) -> None:
+        pass
 
     def close(self) -> None:
         pass
@@ -283,9 +297,10 @@ class DtlsServeRun:
         self.dormant: list[dict] = []
         self.dormant_after: list[float] = []
         self.mux_targets: list[str] = []
+        self.mux_sinks: list = []
         self.started_at = _real_time.monotonic()
-        FakeDirectTsServer.instances = []
-        self.direct = FakeDirectTsServer.instances
+        FakeTsServer.instances = []
+        self.direct = FakeTsServer.instances
 
         client._streaming_active = True
         client._keepalive_rtsp_url = url
@@ -332,8 +347,9 @@ class DtlsServeRun:
         client._send_video_pli = _pli
         client._install_av_taps = lambda pc, vq, aq: True
 
-        def _mux(vq, aq, wfile, progress, stop):
+        def _mux(vq, aq, wfile, progress, stop, **kw):
             self.mux_targets.append("mux")
+            self.mux_sinks.append(wfile)
             while not stop.is_set():
                 if frames:
                     progress[0] = _real_time.monotonic()
@@ -349,7 +365,7 @@ class DtlsServeRun:
 
         monkeypatch.setattr(cc, "_dtls_av_mux_run", _mux)
         monkeypatch.setattr(cc, "dtls_rtp_publish_run", _publish)
-        monkeypatch.setattr(cc, "_DirectTsServer", FakeDirectTsServer)
+        monkeypatch.setattr(cc, "TsServer", FakeTsServer)
         monkeypatch.setattr(cc, "_live_video_canary", lambda pc, stored: None)
         monkeypatch.setattr(cc, "_video_has_started", lambda canary: video)
         self._threading = threading

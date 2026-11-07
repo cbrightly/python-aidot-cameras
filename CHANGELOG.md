@@ -74,6 +74,22 @@ function each, all on default paths.
   dormant camera; the count is kept on the camera, so one still failing goes
   dormant again after one more failed session, and a session that lasts with
   video starts the count again.
+- **The DTLS mux encodes its AAC with the publishers' encoder**
+  (`aac_track.AacEncoder`) instead of its own decode, resample and FIFO
+  chain. Same timestamps packet for packet, the same silence for lost audio,
+  and the same level normalizer before it; the AAC is now 64 kbit/s, as the
+  direct publish's is. A recording's last partial AAC frame is flushed as it
+  was.
+- **One publish sink for both direct publishers.** The DTLS and SDES
+  publishers each carried their own AAC feed and idle tick, video media clock,
+  HLS TS tee clock and AAC stats; both now hand what they publish to one
+  `PublishSink`. The SDES publisher still forwards the camera's packets as
+  they come rather than rebuilding frames, so a lost packet stays a glitch
+  and not a frozen frame. Two visible differences: the DTLS publish's AAC
+  line at the end of a session now reads like the SDES one (`AAC N frames /
+  N s / N silence-filled / N trimmed / N re-anchors, AAC start aligned +N
+  ms`), and a failure inside the in-sync HLS TS no longer ends a DTLS
+  publish (it never ended an SDES one).
 
 ### Deprecated
 - **`AIDOT_PERSISTENT_MQTT`** is accepted and ignored; set to
@@ -128,6 +144,41 @@ three; both supported SDES models (A001513, A001064) need a live check.
   recognised and flagged SDES but have never been seen live, and they now
   refuse every stream open with that named error until their framing is
   confirmed and they are added to `_PLAIN_RTP_MODELS`.
+Soak: resets the clock. The changes are to how every DTLS camera's media is
+served (pull, stdout and RTSP push), once the reference installation runs it.
+- **The DTLS serve runs no ffmpeg.** With the direct publish off, a DTLS
+  `rtsp://` push went through `ffmpeg -c:v copy -c:a pcm_alaw`: the camera's
+  A-law was encoded to AAC by the mux and transcoded back to A-law by ffmpeg.
+  The `-` (stdout) serve, and an `http://` serve whose port could not be
+  bound, also went through an ffmpeg `-c copy` hop. Now:
+  - `-` writes the mux's MPEG-TS to stdout as it is muxed, so
+    `aidot-go2rtc <dtls-id> -` behind a go2rtc `exec:` source needs no
+    ffmpeg. A failed write to stdout (its reader has gone) releases the
+    camera until the next view instead of starting another mux into it.
+  - a DTLS `rtsp://` push is always the direct publish: H.264 and the
+    camera's A-law, plus the AAC track unless `AIDOT_PUBLISH_AAC=0`.
+    `AIDOT_DIRECT_PUBLISH=0` (or `StreamSettings(direct_publish=False)`) no
+    longer changes it; it still applies to SDES pushes, and still turns off
+    the in-sync HLS TS, which the publish feeds.
+  - an `http://` serve whose port cannot be bound, or a serve URL that is
+    none of the three (`https://`, `rtsps://`), releases the camera with the
+    reason at ERROR instead of starting ffmpeg.
+- **`_DirectTsServer`**, and the serve relay in front of the DTLS pull serve.
+  A DTLS camera's `http://` serve (the default with only Home Assistant's
+  bundled go2rtc) is now its `TsChannel` on the advertised port
+  (`ts_fanout.TsServer`), bound from the start of the stream to its end, as
+  the relay held the port before. Unchanged: a pull that dials during the
+  camera's handshake connects and waits for its response until the first
+  mux is writing; a consumer starts at the next keyframe after the stream's
+  tables; and a consumer that read one serve cycle's stream is disconnected
+  when the next cycle's mux starts, so it reconnects to a stream it can
+  decode. Changed: a slow consumer no longer holds up the mux (each has its
+  own buffer, resynced at a keyframe past 4 MB), a consumer that joins while
+  another is reading no longer cuts the first one off, and a consumer still
+  waiting for its keyframe when a cycle ends keeps waiting rather than being
+  closed. The fallback that started a consumer on the container's
+  random-access flag when no keyframe signal came within 5 s is gone: the
+  mux always signals. `AIDOT_SERVE_RELAY` now applies to SDES serves only.
 
 ## [1.0.0rc71]
 

@@ -6,16 +6,20 @@ so a consumer that joins a running stream gets audio 0.1-0.75 s behind the
 picture, a different amount each time (measured 2026-10-03). The TS written here
 carries one clock for both tracks, so any joiner stays in step.
 
-Joining is the delicate part, learned on ``_DirectTsServer`` (protocol.py): a
+Joining is the delicate part, learned on the DTLS pull serve's first server: a
 consumer that starts mid-GOP references parameter sets it never received and
 gets no picture. So the last PAT and PMT are cached, and a new consumer is held
 until the writer signals a keyframe (``mark_keyframe``); it then receives the
 tables followed by media from that keyframe on.
 
-Unlike ``_DirectTsServer`` this serves several consumers at once, and none can
-hold up the writer or another consumer: each has its own bounded buffer and
-sender thread. A consumer that falls more than ``MAX_BUFFER`` behind is put back
-to "wait for the next keyframe" rather than slowing anything down.
+Several consumers are served at once, and none can hold up the writer or
+another consumer: each has its own bounded buffer and sender thread. A consumer
+that falls more than ``MAX_BUFFER`` behind is put back to "wait for the next
+keyframe" rather than slowing anything down.
+
+``TsServer`` serves one camera's channel on the port its consumer was told (a
+DTLS camera's ``http://`` pull serve); ``TsRouter`` serves every camera's
+in-sync HLS TS from one port, by path.
 """
 
 from __future__ import annotations
@@ -220,6 +224,13 @@ class TsChannel:
     def flush(self) -> None:
         return None
 
+    def new_stream(self) -> None:
+        """The writer starts a new MPEG-TS stream (a new muxer): forget the
+        old one's partial packet, tables and keyframe signal."""
+        self._tail = b""
+        self._pat = self._pmt = self._pmt_pid = None
+        self._kf_pending = False
+
     def disconnect_all(self) -> int:
         """Disconnect every consumer now; new ones are still accepted. Returns
         how many were connected."""
@@ -267,6 +278,140 @@ class TsChannel:
             except OSError:
                 pass
             self._drop(c)
+
+
+class TsServer:
+    """One camera's pull serve: its ``TsChannel`` on the port go2rtc dials.
+
+    It is bound when the camera starts streaming and held until it stops, so
+    a consumer that dials during the camera's handshake (an eager go2rtc pull,
+    16-25 s before the first frame) connects and waits instead of being
+    refused. Its HTTP response is held until a mux is writing (``open``),
+    and media then starts at the next keyframe, after the channel's tables.
+
+    Each mux (one per serve cycle) writes through its own ``open()`` sink.
+    Closing that sink disconnects the consumers that were sent its media - a
+    new mux starts a new stream, which they could not decode on from where
+    they were - and keeps the ones still waiting for a keyframe.
+    """
+
+    #: How long a consumer may wait for a mux before it is closed.
+    READY_TIMEOUT_S = 90.0
+
+    def __init__(self, port: int, *, host: str = "127.0.0.1") -> None:
+        self._port = port
+        self._host = host
+        self.channel = TsChannel("/")
+        self._listen: Optional[socket.socket] = None
+        self._live = threading.Event()
+        self._closed = threading.Event()
+        self._sink: Optional["_CycleSink"] = None
+
+    @property
+    def port(self) -> int:
+        return self._port
+
+    def start(self) -> None:
+        """Bind and begin accepting. Raises OSError when the port is taken."""
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((self._host, self._port))
+            s.listen(8)
+        except OSError:
+            _close(s)
+            raise
+        s.settimeout(0.5)
+        self._port = s.getsockname()[1]
+        self._listen = s
+        threading.Thread(
+            target=self._accept_loop, name="ts-serve-accept", daemon=True
+        ).start()
+
+    def open(self) -> "_CycleSink":
+        """The sink for one mux; consumers are answered from now on."""
+        if self._sink is not None:
+            self._sink.close()
+        self.channel.new_stream()
+        self._sink = _CycleSink(self)
+        self._live.set()
+        return self._sink
+
+    def _detach(self, sink: "_CycleSink") -> None:
+        if self._sink is sink:
+            self._sink = None
+            self._live.clear()
+            self.channel.disconnect_started()
+
+    def _accept_loop(self) -> None:
+        while not self._closed.is_set():
+            try:
+                cli, _ = self._listen.accept()  # type: ignore[union-attr]
+            except TimeoutError:
+                continue
+            except OSError:
+                if self._closed.is_set():
+                    return
+                _LOGGER.debug("ts-serve: accept failed", exc_info=True)
+                self._closed.wait(0.1)
+                continue
+            threading.Thread(
+                target=self._handshake, args=(cli,), name="ts-serve-hs", daemon=True
+            ).start()
+
+    def _handshake(self, cli: socket.socket) -> None:
+        try:
+            cli.settimeout(5.0)
+            cli.recv(4096)  # the request line and headers; any path is served
+            deadline = self.READY_TIMEOUT_S
+            while not self._live.wait(min(0.5, deadline)):
+                deadline -= 0.5
+                if self._closed.is_set() or deadline <= 0 or _peer_gone(cli):
+                    _close(cli)
+                    return
+            if self._closed.is_set():
+                _close(cli)
+                return
+            cli.sendall(_HTTP_OK)
+            cli.settimeout(None)
+        except OSError:
+            _close(cli)
+            return
+        self.channel.add_consumer(cli)
+
+    def close(self) -> None:
+        self._closed.set()
+        self._live.clear()
+        if self._listen is not None:
+            _close(self._listen)
+            self._listen = None
+        self.channel.close()
+
+
+class _CycleSink:
+    """One mux's view of a ``TsServer``: writes after ``close`` are refused, so
+    a mux that outlives its cycle cannot write into the next one's stream."""
+
+    def __init__(self, server: TsServer) -> None:
+        self._server = server
+        self.closed = False
+
+    def write(self, b) -> int:
+        if self.closed:
+            raise OSError("serve cycle ended")
+        return self._server.channel.write(b)
+
+    def flush(self) -> None:
+        return None
+
+    def mark_keyframe(self) -> None:
+        if not self.closed:
+            self._server.channel.mark_keyframe()
+
+    def close(self) -> None:
+        if not self.closed:
+            self.closed = True
+            self._server._detach(self)
 
 
 class TsRouter:

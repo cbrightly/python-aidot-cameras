@@ -276,7 +276,9 @@ ran; its absence is the fault.
 
 Direct publish (on unless `AIDOT_DIRECT_PUBLISH=0`) replaces the serve's ffmpeg
 with an RTSP publisher inside the library, for a live `rtsp://` push only (recordings, snapshots, `-`
-and `http://` serves are unchanged). Design, measurements and rollout:
+and `http://` serves are unchanged). A DTLS push is published this way whatever
+the switch says: its ffmpeg push transcoded the mux's AAC back to A-law, which
+the publish already carries as the camera's own. Design, measurements and rollout:
 [`DESIGN-direct-publish.md`](DESIGN-direct-publish.md).
 
 - **SDES.** The bridge still decrypts and forwards plain RTP to the two loopback
@@ -336,8 +338,8 @@ re-sent frames dropped, N filter resets, AAC N frames / N s / N
 silence-filled / N trimmed / N re-anchors, AAC start aligned +N ms` when it
 stops (the AAC suffix is omitted when the track is off or unavailable). The
 aligned figure is `aac_align_ms` in `publish_stats()` (signed ms); the DTLS
-path puts the same key in its result and ends its own `DTLS direct
-publish: AAC ...` line with the same `AAC start aligned +N ms`. On a
+path puts the same key in its result and logs the same AAC summary in its
+own `DTLS direct publish: AAC N frames / ...` line. On a
 healthy LAN
 `late` and `lost` are 0; the repair count is normally 0 or near it; a steered
 snap or a filter reset adds one. `re-sent frames dropped` counts the

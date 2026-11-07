@@ -15,19 +15,20 @@ import aidot_cameras.camera.client as cc
 from tests.keepalive_driver import dtls_view as _dtls_view
 
 
-def test_the_stream_slot_is_released_even_if_the_relay_fails_to_start(
+def test_the_stream_slot_is_released_even_if_the_serve_fails_to_start(
     make_camera_device_client,
 ):
     """Thread.start() raises RuntimeError under thread exhaustion. Starting the
-    relay outside the try that releases lost the permit for the life of the
-    process and the cap silently shrank."""
+    serve's listener (the relay, before it) outside the try that releases lost
+    the permit for the life of the process and the cap silently shrank."""
     slots = cc._get_stream_slots()
     cam = make_camera_device_client("A000088")
+    cam._keepalive_rtsp_url = "http://127.0.0.1:18559/cam.ts"
 
     def _no_threads(url):
         raise RuntimeError("can't start new thread")
 
-    cam._maybe_start_serve_relay = _no_threads
+    cam._start_ts_serve = _no_threads
     before = slots._value
     for _ in range(before + 1):
         with pytest.raises(RuntimeError):

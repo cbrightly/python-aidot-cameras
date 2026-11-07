@@ -213,10 +213,10 @@ async def cmd_stream(dev_id: str, output_url: str) -> int:
                 "stdout for a go2rtc exec: consumer."
             )
         elif output_url.startswith("rtsp") and not dc.is_sdes_camera:
-            # Why G.711 here: see the codec_args branch in camera/client.py.
+            # The direct publish: see _dtls_serve_mode in camera/client.py.
             _LOGGER.info(
-                "DTLS RTSP push: publishing video + G.711 audio to %s. Pass '-' "
-                "instead to keep the mux's 48 kHz AAC.",
+                "DTLS RTSP push: publishing video, G.711 audio and (unless "
+                "AIDOT_PUBLISH_AAC=0) AAC audio to %s.",
                 output_url,
             )
         elif not output_url.startswith("rtsp") and dc.is_sdes_camera:

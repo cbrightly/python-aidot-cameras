@@ -261,7 +261,7 @@ The live gate exercises the SDES path through ffmpeg (`serving (sdes ffmpeg
 bound)`) and scores DTLS cameras by counting frames. It never runs the direct
 publisher or the in-sync MPEG-TS listener (`AIDOT_HLS_DIRECT_TS`) -- grep a
 run's log for `in-sync HLS: serving camera TS` and you get nothing -- and it
-does not run the `http://` pull serve (`_DirectTsServer`, `serving TS
+does not run the `http://` pull serve (`ts_fanout.TsServer`, `serving TS
 directly`) either.
 
 Home Assistant **does** use the first two by default: since 1.0.0rc44 its DTLS
