@@ -208,13 +208,12 @@ def test_a_removed_knob_is_named_once_per_process(name, monkeypatch, caplog):
     import logging
 
     from aidot_cameras import settings
-    from aidot_cameras.camera import sdes_open
 
-    assert "deprecated" in settings.KNOBS[name].note
-    monkeypatch.setattr(sdes_open, "_deprecated_knobs_warned", False)
-    with caplog.at_level(logging.WARNING, logger=sdes_open._LOGGER.name):
-        sdes_open._warn_deprecated_knobs({name: "5"})
-        sdes_open._warn_deprecated_knobs({name: "5"})
+    assert settings.KNOBS[name].deprecated
+    monkeypatch.setattr(settings, "_deprecated_warned", set())
+    with caplog.at_level(logging.WARNING, logger=settings._LOGGER.name):
+        settings.warn_deprecated_once({name: "5"})
+        settings.warn_deprecated_once({name: "5"})
     lines = [r.getMessage() for r in caplog.records if "deprecated" in r.getMessage()]
     assert len(lines) == 1 and name in lines[0]
 
@@ -222,18 +221,18 @@ def test_a_removed_knob_is_named_once_per_process(name, monkeypatch, caplog):
 def test_nothing_is_logged_when_no_removed_knob_is_set(monkeypatch, caplog):
     import logging
 
-    from aidot_cameras.camera import sdes_open
+    from aidot_cameras import settings
 
-    monkeypatch.setattr(sdes_open, "_deprecated_knobs_warned", False)
-    with caplog.at_level(logging.WARNING, logger=sdes_open._LOGGER.name):
-        sdes_open._warn_deprecated_knobs({})
+    monkeypatch.setattr(settings, "_deprecated_warned", set())
+    with caplog.at_level(logging.WARNING, logger=settings._LOGGER.name):
+        settings.warn_deprecated_once({})
     assert not caplog.records
-    assert sdes_open._deprecated_knobs_warned is False
+    assert settings._deprecated_warned == set()
 
 
 def test_the_open_checks_for_removed_knobs():
     from tests.ast_guards import calls_to, sdes_open_family
 
     assert [
-        c for fn in sdes_open_family() for c in calls_to(fn, "_warn_deprecated_knobs")
+        c for fn in sdes_open_family() for c in calls_to(fn, "warn_deprecated_once")
     ]

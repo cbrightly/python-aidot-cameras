@@ -23,7 +23,7 @@ from ..exceptions import (
 )
 from ..const import APP_ID as _AIDOT_APP_ID
 from ..const import (
-    LOGIN_INFO_MQTT_CONFIG2_HOST_KEY,
+    LOGIN_INFO_MQTT_CREDENTIALS_KEY,
     LOGIN_INFO_MQTT_PASSWORD_KEYS,
     LOGIN_INFO_PERSISTENT_MQTT_KEY,
     LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
@@ -117,7 +117,7 @@ from .protocol import (  # noqa: F401 - re-exported for device_client / back-com
     _parse_alarm_event,
 )
 from .. import settings
-from ..mqtt_config2 import broker_url as _mqtt_config2_broker_url
+from ..mqtt_config2 import broker_url as _mqtt_broker_url
 from .health import HealthReporter, dtls_snapshot as _dtls_snapshot
 
 _LOGGER = logging.getLogger(__name__)
@@ -188,34 +188,9 @@ _OFFLINE_PROBE_S = settings.read("AIDOT_OFFLINE_PROBE_S")
 _DTLS_RETRY_BASE_S, _DTLS_RETRY_CAP_S = 15.0, 600.0
 #: Failures in a row between INFO lines once a pacer is quiet (the rest DEBUG).
 _PACER_LOG_EVERY = 6
-# The three slow-probe knobs, still accepted and ignored since the pacer above
-# replaced the slow probe: one warning per process when any is set.
-_DEPRECATED_DTLS_KNOBS = (
-    "AIDOT_DTLS_SLOW_PROBE_THRESHOLD",
-    "AIDOT_DTLS_SLOW_PROBE_INTERVAL_S",
-    "AIDOT_DTLS_SLOW_PROBE_LOG_EVERY",
-)
-_deprecated_knobs_warned = False
 # Sleep increment for the loops' long waits (_chunked_wait): never one blocking
 # asyncio.sleep(interval) call, so stop() is not delayed by up to 10 minutes.
 _WAIT_CHUNK_S = settings.read("AIDOT_DTLS_SLOW_PROBE_CHUNK_S")
-
-
-def _warn_deprecated_knobs(env: Optional[dict] = None) -> None:
-    """Log once per process that a deprecated, ignored knob is set."""
-    global _deprecated_knobs_warned
-    if _deprecated_knobs_warned:
-        return
-    _set = [n for n in _DEPRECATED_DTLS_KNOBS if settings.is_set(n, env)]
-    if not _set:
-        return
-    _deprecated_knobs_warned = True
-    _LOGGER.warning(
-        "%s: deprecated and ignored. The DTLS serve loop retries a failed open"
-        " on one backoff from 15 s up to 600 s; unset %s.",
-        ", ".join(_set),
-        "it" if len(_set) == 1 else "them",
-    )
 
 
 #: Quick retries for an encoder still cold (a DC-only answer), and how many.
@@ -275,6 +250,9 @@ _DTLS_SERVE_ICE_WAIT_S = settings.read("AIDOT_DTLS_SERVE_ICE_WAIT_S")
 # discarded task can be garbage-collected mid-flight. Discarded on completion.
 _BG_TASKS: set = set()
 
+# The status error of a persistent request that found no connection to use.
+_NO_PERSISTENT_MQTT = "no persistent MQTT connection"
+
 # Minimum gap between MQTT credential refetches after the broker refused one.
 # One rotation is normal (another login happened); a second refusal that fast
 # means refetching is not helping, so back off rather than loop.
@@ -286,26 +264,6 @@ _MQTT_CREDENTIAL_REFETCH_FLOOR = 30.0
 # video. Idle release is measured in minutes, so seconds of staleness here costs
 # nothing.
 _VIEWER_CHECK_INTERVAL_S = 10.0
-
-
-_PERSISTENT_MQTT_KNOB_WARNED = False
-
-
-def _warn_persistent_mqtt_knob() -> None:
-    """Say once per process that ``AIDOT_PERSISTENT_MQTT=0`` no longer does anything.
-
-    The per-operation MQTT path it selected is gone: it connected with the
-    account's one clientId and so evicted the persistent connection. The knob
-    is still accepted so a setting left in place does not break anything.
-    """
-    global _PERSISTENT_MQTT_KNOB_WARNED
-    if _PERSISTENT_MQTT_KNOB_WARNED or settings.read("AIDOT_PERSISTENT_MQTT"):
-        return
-    _PERSISTENT_MQTT_KNOB_WARNED = True
-    _LOGGER.warning(
-        "AIDOT_PERSISTENT_MQTT is deprecated and ignored: every MQTT "
-        "operation uses the one persistent connection. Remove the setting."
-    )
 
 
 def _spawn_bg(coro):
@@ -3022,6 +2980,16 @@ class CameraMixin(
             self._cloud_online_explicit = True
         return self.status
 
+    @property
+    def cloud_reports_offline(self) -> bool:
+        """True only when the cloud has explicitly reported this camera offline.
+
+        Not the same as ``not status.online``: that reads False before the
+        cloud has said anything, and only an explicit report means the camera
+        is gone. The serve loops' offline pause, the open-failure log level
+        and the reboot guard ask this same question."""
+        return _cloud_reports_offline(self)
+
     def _open_fail_logger(self):
         """Pick the log level for a stream-open failure in the serve/keepalive
         loops: WARNING for a genuine failure, but DEBUG when the cloud has
@@ -3386,11 +3354,6 @@ class CameraMixin(
             self._mqtt_url = _env_mqtt
             return self._mqtt_url
 
-        # AIDOT_MQTT_CONFIG2: the broker that endpoint named with the password.
-        # getServerUrlConfig is still called below for its "ip" (the srflx
-        # candidate), and is the URL whenever that endpoint did not supply one.
-        _cfg2_url = await self._async_mqtt_config2_url()
-
         import aiohttp
 
         async def _fetch():
@@ -3408,10 +3371,23 @@ class CameraMixin(
                 ) as resp:
                     return await resp.json(content_type=None)
 
-        try:
+        async def _server_url_config():
             body = await _fetch()
             if self._is_auth_error(body) and await self._async_refresh_auth_token(body):
                 body = await _fetch()  # retry once with the refreshed token
+            return body
+
+        # AIDOT_MQTT_CONFIG2: the broker that endpoint named with the password.
+        # getServerUrlConfig is still called, alongside, for its "ip" (the
+        # srflx candidate), and is the URL whenever that endpoint named none.
+        _cfg2_url, body = await asyncio.gather(
+            self._async_mqtt_config2_url(), _server_url_config(), return_exceptions=True
+        )
+        if isinstance(_cfg2_url, BaseException):
+            raise _cfg2_url
+        try:
+            if isinstance(body, BaseException):
+                raise body
 
             data = body.get("data") or {}
             _LOGGER.debug(
@@ -3434,35 +3410,10 @@ class CameraMixin(
                 )
                 mqtt_host = mqtt_fallback_url(self._region)
 
-            # The connection carries the account's MQTT password: refuse a
-            # non-TLS broker URL unless the operator opted in. Nothing is
-            # cached, so every caller sees None (and the open path raises
-            # AidotPlaintextMqttRefused from the scheme recorded here).
-            _plain = plaintext_mqtt_scheme(mqtt_host)
-            if _plain and not settings.read("AIDOT_ALLOW_PLAINTEXT_MQTT"):
-                # Every poll refetches (nothing is cached), so say it loudly
-                # once per change and quietly after that.
-                _level = (
-                    logging.DEBUG
-                    if self._mqtt_url_refused_scheme == _plain
-                    else logging.ERROR
-                )
-                self._mqtt_url_refused_scheme = _plain
-                _LOGGER.log(
-                    _level,
-                    "getServerUrlConfig named a non-TLS MQTT broker (%s://); "
-                    "refusing to send the MQTT password over it. Set "
-                    "AIDOT_ALLOW_PLAINTEXT_MQTT=1 to allow it.",
-                    _plain,
-                )
+            if not self._accept_mqtt_url(
+                mqtt_host, "mqttConfig2" if _cfg2_url else "getServerUrlConfig"
+            ):
                 return None
-            self._mqtt_url_refused_scheme = None
-
-            self._mqtt_url = (
-                mqtt_host
-                if mqtt_host.startswith(("wss://", "ws://"))
-                else f"wss://{mqtt_host}"
-            )
 
             # Capture mqttUser + mqttPassword from this same response if present.
             # iOS SDK binary strings confirm these fields cluster with mqttServerUrl.
@@ -3498,41 +3449,117 @@ class CameraMixin(
 
         except Exception as exc:
             _LOGGER.error("_async_get_mqtt_url failed: %r", exc)
-            if _cfg2_url and not plaintext_mqtt_scheme(_cfg2_url):
-                self._mqtt_url = _cfg2_url
-                return self._mqtt_url
+            if _cfg2_url:
+                return self._accept_mqtt_url(_cfg2_url, "mqttConfig2")
             return None
+
+    def _accept_mqtt_url(self, url: str, source: str) -> Optional[str]:
+        """Cache and return ``url`` as the broker URL, or None if it is refused.
+
+        The connection carries the account's MQTT password: a non-TLS broker
+        URL is refused unless the operator opted in. Nothing is cached then, so
+        every caller sees None (and the open path raises
+        AidotPlaintextMqttRefused from the scheme recorded here). A bare host
+        gets the one rule ``mqtt_config2.broker_url`` applies.
+        """
+        _plain = plaintext_mqtt_scheme(url)
+        if _plain and not settings.read("AIDOT_ALLOW_PLAINTEXT_MQTT"):
+            # Every poll refetches (nothing is cached), so say it loudly
+            # once per change and quietly after that.
+            _level = (
+                logging.DEBUG
+                if self._mqtt_url_refused_scheme == _plain
+                else logging.ERROR
+            )
+            self._mqtt_url_refused_scheme = _plain
+            _LOGGER.log(
+                _level,
+                "%s named a non-TLS MQTT broker (%s://); refusing to send the "
+                "MQTT password over it. Set AIDOT_ALLOW_PLAINTEXT_MQTT=1 to allow it.",
+                source,
+                _plain,
+            )
+            return None
+        self._mqtt_url_refused_scheme = None
+        self._mqtt_url = _mqtt_broker_url(url)
+        return self._mqtt_url
+
+    def _mqtt_credential_record(self) -> dict:
+        """The record of the fetch that issued the account's current MQTT
+        password (``LOGIN_INFO_MQTT_CREDENTIALS_KEY``), or {} when the password
+        is gone or came from elsewhere."""
+        rec = self._user_info.get(LOGIN_INFO_MQTT_CREDENTIALS_KEY)
+        pwd = self._shared_mqtt_password()
+        if isinstance(rec, dict) and pwd and rec.get("password") == pwd:
+            return rec
+        return {}
+
+    def _mqtt_client_id(self) -> Optional[str]:
+        """The clientId issued with the current password, else the account's
+        registered ``mqttClientId``, else None."""
+        return (
+            self._mqtt_credential_record().get("clientId")
+            or self._user_info.get("mqttClientId")
+            or None
+        )
 
     async def _async_mqtt_config2_url(self) -> Optional[str]:
         """The broker URL mqttConfig2 issued with the current password, or None.
 
         None unless AIDOT_MQTT_CONFIG2 is on and the account's password came
-        from that endpoint (the host is stored only alongside it).  Fetches the
-        credential first when there is none, since the host arrives with it.
+        from that endpoint (the host is recorded only alongside it). Fetches
+        the credential first when there is none, since the host arrives with it.
         """
         if not settings.read("AIDOT_MQTT_CONFIG2"):
             return None
         if self._shared_mqtt_password() is None:
             await self._async_refresh_mqtt_credential()
-        host = self._user_info.get(LOGIN_INFO_MQTT_CONFIG2_HOST_KEY)
-        if not (isinstance(host, str) and host and self._shared_mqtt_password()):
+        rec = self._mqtt_credential_record()
+        host = rec.get("host")
+        if rec.get("source") != "mqttConfig2" or not isinstance(host, str) or not host:
             return None
-        return _mqtt_config2_broker_url(host)
+        return _mqtt_broker_url(host)
 
     async def _mqtt_credentials(self) -> tuple:
         """``(mqttUser, mqttPassword, client id)`` for the account's broker.
 
         The user falls back to the account id and the password to empty when
-        the smarthome auth carries neither; the client id is the account's
-        registered ``mqttClientId``, else ``app-<user>``. Four MQTT sessions
+        the smarthome auth carries neither; the client id is
+        ``_mqtt_client_id()``, else ``app-<user>``. Four MQTT sessions
         (control commands, device actions, attribute reads and the shared
         persistent connection) built this the same way.
         """
         smarthome_auth = await self._async_get_smarthome_auth()
         mqtt_user = (smarthome_auth or {}).get("mqttUser") or str(self.user_id)
         mqtt_pwd = (smarthome_auth or {}).get("mqttPassword") or ""
-        client_id = self._user_info.get("mqttClientId") or f"app-{mqtt_user}"
+        client_id = self._mqtt_client_id() or f"app-{mqtt_user}"
         return mqtt_user, mqtt_pwd, client_id
+
+    async def _persistent_request(
+        self, publish_items: list, sub_topics: list, timeout: float
+    ) -> tuple:
+        """Publish ``publish_items`` and collect what arrives on ``sub_topics``
+        for ``timeout`` seconds, on the account's one persistent connection.
+
+        ``(messages, status)``, as ``_PersistentMqtt.request``. With no
+        connection to be had, ``([], {"error": _NO_PERSISTENT_MQTT})``: there
+        is no per-op fallback, because a second connect with the account's
+        clientId evicts the persistent one.
+        """
+        try:
+            pm = await self._get_persistent_mqtt()
+        except Exception:
+            _LOGGER.debug(
+                "camera %s: persistent MQTT unavailable",
+                getattr(self, "device_id", "?"),
+                exc_info=True,
+            )
+            pm = None
+        if pm is None:
+            return [], {"error": _NO_PERSISTENT_MQTT}
+        return await pm.request(
+            publish_items=publish_items, subscribe_topics=sub_topics, timeout=timeout
+        )
 
     async def _async_get_smarthome_auth(self) -> Optional[dict]:
         """Fetch MQTT credentials (mqttUser + mqttPassword) for the Arnoo broker.
@@ -3899,12 +3926,6 @@ class CameraMixin(
         import json as _json
 
         user_id = self.user_id
-
-        mqtt_url = await self._async_get_mqtt_url()
-        if not mqtt_url:
-            _LOGGER.error("_mqtt_device_cmd: no MQTT URL for %s", self.device_id)
-            return False
-
         device_id = self.device_id
         sub_topics = [
             f"iot/v1/c/{user_id}/#",
@@ -3946,8 +3967,6 @@ class CameraMixin(
             _wake_items.append((_wake_topic, _wake_payload))
         publish_items.append((pub_topic, payload_str))
 
-        pm = await self._get_persistent_mqtt()
-
         import time as _time
 
         _plan = _wake_plan(
@@ -3955,28 +3974,28 @@ class CameraMixin(
             now=_time.monotonic(),
             last_wake=getattr(self, "_last_wake_mono", None),
         )
-        if _plan.wake and _wake_items and pm is not None:
+        _connected = True
+        if _plan.wake and _wake_items:
             try:
-                await pm.request(
-                    publish_items=_wake_items, subscribe_topics=[], timeout=2.0
-                )
-                self._last_wake_mono = _time.monotonic()
+                _, _wst = await self._persistent_request(_wake_items, [], 2.0)
+                _connected = _wst.get("error") != _NO_PERSISTENT_MQTT
+                if _connected:
+                    self._last_wake_mono = _time.monotonic()
             except Exception:
                 # A failed wake must not stop the command: on a camera that is
                 # already up the command works without it.
                 _LOGGER.debug(
                     "camera %s: wake publish failed", device_id, exc_info=True
                 )
-            await asyncio.sleep(_plan.settle)
-        if pm is not None:
-            messages, _st = await pm.request(
-                publish_items=publish_items,
-                subscribe_topics=sub_topics,
-                timeout=timeout,
+            if _connected:
+                await asyncio.sleep(_plan.settle)
+        if _connected:
+            messages, _st = await self._persistent_request(
+                publish_items, sub_topics, timeout
             )
         else:
-            messages, _st = [], {"error": "no persistent MQTT connection"}
-        if _st and _st.get("error"):
+            messages, _st = [], {"error": _NO_PERSISTENT_MQTT}
+        if _st.get("error"):
             # No per-op fallback: it connected with the same clientId, which
             # evicts the persistent connection. The command is reported as not
             # sent rather than falsely as sent on an empty result.
@@ -3991,7 +4010,7 @@ class CameraMixin(
         # cannot: it returns False for a failed publish and for a camera that
         # rebooted before answering.
         if not expect_ack:
-            _published = not (_st and _st.get("error"))
+            _published = not _st.get("error")
             _LOGGER.info(
                 "_mqtt_device_cmd: published without waiting for an ack "
                 "(topic=%s published=%s)",
@@ -4202,11 +4221,6 @@ class CameraMixin(
 
         user_id = self.user_id
         device_id = self.device_id
-        mqtt_url = await self._async_get_mqtt_url()
-        if not mqtt_url:
-            _LOGGER.debug("async_query_device_action: no MQTT URL for %s", device_id)
-            return None
-
         _dev = self._camera_properties() or {}
         parent_id = (
             getattr(getattr(self, "info", None), "direct_id", None)
@@ -4240,20 +4254,15 @@ class CameraMixin(
         # on a duplicate client id: inside Home Assistant the query and the
         # integration's own connection knock each other off and the reply
         # never arrives.
-        messages = []
-        pm = await self._get_persistent_mqtt()
-        if pm is not None:
-            messages, _st = await pm.request(
-                publish_items=publish_items,
-                subscribe_topics=sub_topics,
-                timeout=timeout,
+        messages, _st = await self._persistent_request(
+            publish_items, sub_topics, timeout
+        )
+        if _st.get("error"):
+            _LOGGER.debug(
+                "async_query_device_action: MQTT failed for %s (%s)",
+                device_id,
+                _st.get("error"),
             )
-            if _st and _st.get("error"):
-                _LOGGER.debug(
-                    "async_query_device_action: MQTT failed for %s (%s)",
-                    device_id,
-                    _st.get("error"),
-                )
         # Several devAction messages can be in flight on a shared connection,
         # and some carry no `out` at all (a bare acknowledgement). Taking the
         # first match therefore loses data: a camera reporting six sound
@@ -4484,11 +4493,6 @@ class CameraMixin(
         user_id = self.user_id
         device_id = self.device_id
 
-        mqtt_url = await self._async_get_mqtt_url()
-        if not mqtt_url:
-            _LOGGER.error("async_get_camera_attributes: no MQTT URL for %s", device_id)
-            return None
-
         sub_topics = [
             f"iot/v1/c/{user_id}/#",
             f"iot/v1/cb/{user_id}/#",
@@ -4533,31 +4537,17 @@ class CameraMixin(
             )
             publish_items.append((_wake_topic, _wake_payload))
 
-        messages: list = []
-        try:
-            pm = await self._get_persistent_mqtt()
-        except Exception:
-            _LOGGER.debug(
-                "camera %s: persistent MQTT unavailable for attribute read",
-                getattr(self, "device_id", "?"),
-                exc_info=True,
-            )
-            pm = None
-        _st = None
-        if pm is not None:
-            messages, _st = await pm.request(
-                publish_items=publish_items,
-                subscribe_topics=sub_topics,
-                timeout=timeout,
-            )
-        if pm is None or (_st and _st.get("error")):
+        messages, _st = await self._persistent_request(
+            publish_items, sub_topics, timeout
+        )
+        if _st.get("error"):
             # Said as a transport failure, so "the broker would not have us"
             # and "the camera stayed quiet" do not both read as an empty push.
             _LOGGER.warning(
                 "async_get_camera_attributes: no MQTT session for %s (%s) - "
                 "this is a transport failure, not the camera staying quiet.",
                 device_id,
-                (_st or {}).get("error") or "no persistent connection",
+                _st["error"],
             )
 
         for topic, raw in messages:
@@ -6826,7 +6816,7 @@ class CameraMixin(
 
         It is the only MQTT transport, as the app's LDSBaseMqttServiceImpl is.
         ``AIDOT_PERSISTENT_MQTT`` used to switch it off and is now ignored."""
-        _warn_persistent_mqtt_knob()
+        settings.warn_deprecated_once()
         # _user_info is the shared account dict (same object across the account's
         # DeviceClients, and the same object as AidotClient.login_info) - the right
         # place to cache one connection per account.
@@ -7088,7 +7078,7 @@ class CameraMixin(
         ps._last_open_at = 0.0  # monotonic of the previous open attempt (0 = none yet)
         ps._not_ready_burst = 0  # not-ready answers in a row (encoder cold)
         ps.loop = asyncio.get_running_loop()
-        _warn_deprecated_knobs()
+        settings.warn_deprecated_once()
         while self._streaming_active:
             # Thread-safe queues: taps run on the loop, the A/V mux in a thread.
             _o = await _dtls_serve_loop_open_attempt(self, ps)

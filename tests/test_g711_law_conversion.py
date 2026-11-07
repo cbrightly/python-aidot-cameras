@@ -39,3 +39,49 @@ def test_conversion_keeps_the_level_within_one_step():
     for a in range(256):
         lin = alaw2linear(a)
         assert abs(ulaw2linear(ALAW_TO_ULAW[a]) - lin) <= abs(lin) / 8 + 8
+
+
+# --- agc decodes with g711.alaw2linear: bit-identical to the copy it had --- #
+
+
+def _old_agc_alaw_to_linear(a: int) -> int:
+    """The decoder agc.py carried before it used g711.alaw2linear, verbatim."""
+    a ^= 0x55
+    t = (a & 0x0F) << 4
+    seg = (a & 0x70) >> 4
+    if seg == 0:
+        t += 8
+    elif seg == 1:
+        t += 0x108
+    else:
+        t = (t + 0x108) << (seg - 1)
+    return t if (a & 0x80) else -t
+
+
+def _old_gain_table(gain_db):
+    from aidot_cameras.g711 import linear2alaw
+
+    k = 10 ** (gain_db / 20.0)
+    return bytes(
+        linear2alaw(max(-32768, min(32767, round(_old_agc_alaw_to_linear(a) * k))))
+        for a in range(256)
+    )
+
+
+def test_agc_decode_is_bit_identical_to_its_old_copy():
+    from aidot_cameras.camera import agc
+    from aidot_cameras.g711 import alaw2linear
+
+    old = tuple(_old_agc_alaw_to_linear(a) for a in range(256))
+    assert tuple(alaw2linear(a) for a in range(256)) == old
+    assert agc._ALAW_TO_LINEAR == old
+    assert agc._ALAW_SQUARES == tuple(float(v) * v for v in old)
+    assert agc._alaw_to_linear is alaw2linear
+
+
+def test_agc_gain_tables_are_bit_identical():
+    from aidot_cameras.camera import agc
+
+    assert agc.alaw_gain_table(0) is None
+    for gain_db in (-12.0, -8.0, -0.5, 0.5, 6.0, 30.0):
+        assert agc.alaw_gain_table(gain_db) == _old_gain_table(gain_db), gain_db

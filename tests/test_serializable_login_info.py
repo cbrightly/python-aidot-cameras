@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from aidot_cameras.client import AidotClient
 from aidot_cameras.const import (
-    LOGIN_INFO_MQTT_CONFIG2_HOST_KEY,
+    LOGIN_INFO_MQTT_CREDENTIALS_KEY,
     LOGIN_INFO_MQTT_PASSWORD_KEYS,
     LOGIN_INFO_PERSISTENT_MQTT_KEY,
     LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
@@ -96,5 +96,5 @@ def test_runtime_only_keys_constant_matches_the_key_names_written():
         LOGIN_INFO_PERSISTENT_MQTT_KEY,
         LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
         *LOGIN_INFO_MQTT_PASSWORD_KEYS,
-        LOGIN_INFO_MQTT_CONFIG2_HOST_KEY,
+        LOGIN_INFO_MQTT_CREDENTIALS_KEY,
     }

@@ -12,20 +12,27 @@ through one registration, and both transports send AVIO commands through one
 function each, all on default paths.
 
 ### Added
+- **`CameraDeviceInformation.firmware_version`**: the firmware version the
+  cloud reports (`firmwareVersion`, or `deviceInfo.firmwareVersion`), or None.
+- **`CameraDeviceClient.cloud_reports_offline`**: True only when the cloud has
+  explicitly reported the camera offline, the question the serve loops ask.
+- **`hwaccel.probe_encoder()` and `hwaccel.cached_encoder()`**: a hardware
+  H.264/H.265 encoder proven by a test encode on this host (`["-c:v", name]`),
+  or `[]` for software, cached on disk with the decoder verdicts.
+  `AIDOT_DISABLE_HWACCEL` answers software.
 - **`go2rtc.async_ensure_stream` and `go2rtc.async_remove_stream`: one locked
   write path to go2rtc.** `async_ensure_stream(client, name, source=None, *,
   recreate=False)` sends the optional DELETE (`recreate`, for a camera whose
-  H.264 parameter sets change between sessions), the PUT and, only if the PUT
-  is rejected, the stream-list check, all under the server's write lock so no
-  other write lands between them. It returns an `EnsureResult` (`outcome`:
-  `REGISTERED`, `UNCHANGED` for a rejected PUT on a stream go2rtc already
-  holds, or `FAILED`; a `reason`; `ok`). `source=None` defines the stream
+  H.264 parameter sets change between sessions) and the PUT under the
+  server's write lock, so no other write lands between them, then, only if
+  the PUT is rejected, the stream-list check. It returns an `EnsureResult`
+  (`outcome`: `REGISTERED`, `UNCHANGED` for a rejected PUT on a stream go2rtc
+  already holds, or `FAILED`; `ok`). `source=None` defines the stream
   with `PLACEHOLDER_SOURCE`, for a stream whose media is published into it.
   The Home Assistant integration now registers through it instead of its own
   copy, and `prefer_go2rtc` (the standalone `_register_with_go2rtc` path) and
   stream removal on stop go through the same calls. The request sequence
-  go2rtc sees is unchanged. The write lock may now be re-entered by the task
-  holding it.
+  go2rtc sees is unchanged.
 - **Experimental, off by default: MQTT credentials the way the app fetches
   them** (`AIDOT_MQTT_CONFIG2=1`). `GET /v25/commons/mqttConfig2` with
   `sessionType=App` and a per-install 21-character `sessionId`, generated once
@@ -39,6 +46,22 @@ function each, all on default paths.
   changes.
 
 ### Changed
+- **A missing broker URL reads as a missing connection.** A device command,
+  device-action query or attribute read no longer checks for the URL first;
+  all three go through one persistent-connection request, so with no URL an
+  attribute read logs the transport failure and returns the device list's
+  properties (it returned None), as it already did with no connection.
+- **`AIDOT_MQTT_CONFIG2`: the fallback broker URL takes the plaintext gate.**
+  When getServerUrlConfig fails and the mqttConfig2 host is used instead, a
+  non-TLS URL is now refused unless `AIDOT_ALLOW_PLAINTEXT_MQTT` is set, and
+  logged, as the main path always did. getServerUrlConfig and the credential
+  fetch now run concurrently. The clientId, host and password that endpoint
+  issues are kept together in one runtime-only record, so its clientId is no
+  longer persisted; `mqttClientId` in stored login_info is userConfig's.
+- **Deprecated knobs warn from one place, one line per knob.** Each of the
+  eight accepted-and-ignored variables now logs its own WARNING, once per
+  process, naming what replaced it. `AIDOT_PERSISTENT_MQTT` warns when it is
+  set to any value, not only when it is set off.
 - **One MQTT connection, and no fallback that evicts it.** Commands, attribute
   reads, device-action queries and stream-open signaling use only the
   account's persistent connection. The per-operation session they fell back to

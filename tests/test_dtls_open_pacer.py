@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 import aidot_cameras.camera.client as camera_client
+from aidot_cameras import settings
 from aidot_cameras.camera.client import CameraMixin
 from aidot_cameras.camera.protocol import ReconnectPacer
 
@@ -131,7 +132,7 @@ def test_the_early_end_is_checked_each_step(monkeypatch):
 
 @pytest.fixture
 def fresh_warning(monkeypatch):
-    monkeypatch.setattr(camera_client, "_deprecated_knobs_warned", False)
+    monkeypatch.setattr(settings, "_deprecated_warned", set())
 
 
 def test_a_deprecated_knob_that_is_set_warns_once(fresh_warning, caplog):
@@ -139,18 +140,26 @@ def test_a_deprecated_knob_that_is_set_warns_once(fresh_warning, caplog):
         "AIDOT_DTLS_SLOW_PROBE_THRESHOLD": "3",
         "AIDOT_DTLS_SLOW_PROBE_INTERVAL_S": "60",
     }
-    with caplog.at_level("WARNING", logger="aidot_cameras.camera.client"):
-        camera_client._warn_deprecated_knobs(env)
-        camera_client._warn_deprecated_knobs(env)
+    with caplog.at_level("WARNING", logger=settings._LOGGER.name):
+        settings.warn_deprecated_once(env)
+        settings.warn_deprecated_once(env)
     lines = [r.getMessage() for r in caplog.records if "deprecated" in r.getMessage()]
-    assert len(lines) == 1, lines
+    assert len(lines) == 2, lines
     assert "AIDOT_DTLS_SLOW_PROBE_THRESHOLD" in lines[0]
-    assert "AIDOT_DTLS_SLOW_PROBE_INTERVAL_S" in lines[0]
-    assert "AIDOT_DTLS_SLOW_PROBE_LOG_EVERY" not in lines[0]
+    assert "AIDOT_DTLS_SLOW_PROBE_INTERVAL_S" in lines[1]
+    assert all("15 s up to 600 s" in line for line in lines)
+    assert not any("AIDOT_DTLS_SLOW_PROBE_LOG_EVERY" in line for line in lines)
 
 
 def test_no_deprecated_knob_set_says_nothing(fresh_warning, caplog):
-    with caplog.at_level("WARNING", logger="aidot_cameras.camera.client"):
-        camera_client._warn_deprecated_knobs({})
+    with caplog.at_level("WARNING", logger=settings._LOGGER.name):
+        settings.warn_deprecated_once({})
     assert not caplog.records
-    assert camera_client._deprecated_knobs_warned is False
+    assert settings._deprecated_warned == set()
+
+
+def test_the_serve_loop_checks_for_deprecated_knobs():
+    from tests.ast_guards import calls_to, module_tree
+
+    tree = module_tree("aidot_cameras.camera.client")
+    assert calls_to(tree, "warn_deprecated_once")

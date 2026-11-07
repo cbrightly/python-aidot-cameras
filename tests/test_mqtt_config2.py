@@ -16,7 +16,7 @@ import pytest
 
 from aidot_cameras import mqtt_config2
 from aidot_cameras.client import AidotClient
-from aidot_cameras.const import LOGIN_INFO_MQTT_CONFIG2_HOST_KEY
+from aidot_cameras.const import LOGIN_INFO_MQTT_CREDENTIALS_KEY as _REC
 from aidot_cameras.device_client import CameraDeviceClient
 
 _TOKEN = "TOKEN-SECRET-123"
@@ -78,6 +78,9 @@ def _client(session, login_info=None) -> AidotClient:
     c.login_info = login_info or {"id": "u1", "accessToken": _TOKEN}
     c.session = session
     c._region = "us"
+    c._mqtt_config2_failure = None
+    c._mqtt_credential_source = None
+    c._mqtt_session_id = None
     return c
 
 
@@ -141,16 +144,20 @@ def test_reply_fields_land_in_login_info(on):
 
     li = c.login_info
     assert li["mqttPassword"] == "CFG2-PASSWORD"
-    assert li["mqttClientId"] == "cfg2-client-0001-u1"
-    assert li[LOGIN_INFO_MQTT_CONFIG2_HOST_KEY] == "us-mqtt.example.com:8443"
+    assert li[_REC] == {
+        "source": "mqttConfig2",
+        "password": "CFG2-PASSWORD",
+        "clientId": "cfg2-client-0001-u1",
+        "host": "us-mqtt.example.com:8443",
+    }
     # The app ignores the reply's userId (it overwrites it with its own); so do
     # we - the username stays the account id.
     assert li["id"] == "u1"
-    # Password and host are runtime-only; the clientId persists as today.
+    # The record is runtime-only with its password, so nothing mqttConfig2
+    # issued outlives it; the persisted mqttClientId is userConfig's alone.
     out = c.serializable_login_info()
-    assert "mqttPassword" not in out
-    assert LOGIN_INFO_MQTT_CONFIG2_HOST_KEY not in out
-    assert out["mqttClientId"] == "cfg2-client-0001-u1"
+    assert "mqttPassword" not in out and _REC not in out
+    assert "mqttClientId" not in out
 
 
 @pytest.mark.parametrize(
@@ -184,6 +191,8 @@ def test_parse_reply_rejects_incomplete(body):
 
 def test_broker_url():
     assert mqtt_config2.broker_url("h.example:8443") == "wss://h.example:8443/mqtt"
+    assert mqtt_config2.broker_url("h.example:8443/") == "wss://h.example:8443/mqtt"
+    assert mqtt_config2.broker_url("h.example/m") == "wss://h.example/m"
     assert mqtt_config2.broker_url("wss://h/mqtt") == "wss://h/mqtt"
 
 
@@ -211,26 +220,31 @@ def test_failure_falls_back_to_user_config(on, bad, caplog):
     li = c.login_info
     assert li["mqttPassword"] == "UC-PASSWORD"
     assert li["mqttClientId"] == "uc-client-u1"
-    assert LOGIN_INFO_MQTT_CONFIG2_HOST_KEY not in li
+    assert li[_REC]["source"] == "userConfig" and li[_REC]["host"] is None
     info = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
     assert any("MQTT credentials from userConfig" in m for m in info)
 
 
-def test_fallback_drops_a_leftover_config2_client_id(on):
-    # A config2 clientId persisted from an earlier run must not be paired with
-    # a userConfig password when userConfig names no clientId of its own.
+def test_fallback_drops_the_config2_client_id_and_host(on):
+    # The config2 clientId and host must not be paired with a userConfig
+    # password when userConfig names no clientId of its own.
     s = _Session({_CONFIG2_URL: _GOOD_REPLY})
-    c = _client(s)
+    c = _client(s, {"id": "u1", "accessToken": _TOKEN, "mqttClientId": "uc-old"})
     asyncio.run(c._async_fetch_user_config())
-    assert c.login_info["mqttClientId"] == "cfg2-client-0001-u1"
+    assert c.login_info[_REC]["clientId"] == "cfg2-client-0001-u1"
 
     s.replies[_CONFIG2_URL] = aiohttp.ClientError("down")
     s.replies[_USERCONFIG_URL] = {"code": 200, "data": {"mqttPassword": "UC"}}
     c.login_info.pop("mqttPassword")
     asyncio.run(c._async_fetch_user_config())
     assert c.login_info["mqttPassword"] == "UC"
-    assert "mqttClientId" not in c.login_info
-    assert LOGIN_INFO_MQTT_CONFIG2_HOST_KEY not in c.login_info
+    assert c.login_info[_REC] == {
+        "source": "userConfig",
+        "password": "UC",
+        "clientId": "",
+        "host": None,
+    }
+    assert c.login_info["mqttClientId"] == "uc-old"
 
 
 # --------------------------------------------------------------------------- #
@@ -320,8 +334,7 @@ def test_off_by_default_makes_no_config2_call(caplog):
     assert "params" not in s.calls[0][1]
     assert c.login_info["mqttPassword"] == "UC-PASSWORD"
     assert c.login_info["mqttClientId"] == "uc-client-u1"
-    assert "_mqttClientIdSource" not in c.login_info
-    assert getattr(c, "_mqtt_session_id", None) is None
+    assert c._mqtt_session_id is None
     assert not any(
         r.getMessage().startswith("MQTT credentials from") for r in caplog.records
     )
@@ -365,6 +378,15 @@ class _CamSession:
         return False
 
 
+def _cfg2_record(password, host, client_id="cfg2-cid"):
+    return {
+        "source": "mqttConfig2",
+        "password": password,
+        "clientId": client_id,
+        "host": host,
+    }
+
+
 def _camera(login_info):
     c = CameraDeviceClient.__new__(CameraDeviceClient)
     c._user_info = login_info
@@ -396,11 +418,13 @@ def test_camera_uses_the_config2_host_and_keeps_the_ip(on, monkeypatch):
         "id": "u1",
         "accessToken": "AT",
         "mqttPassword": "CFG2-PASSWORD",
-        LOGIN_INFO_MQTT_CONFIG2_HOST_KEY: "cfg2.example:8443",
+        "mqttClientId": "uc-cid",
+        _REC: _cfg2_record("CFG2-PASSWORD", "cfg2.example:8443"),
     }
     cam = _camera(li)
     url = asyncio.run(cam._async_get_mqtt_url())
     assert url == "wss://cfg2.example:8443/mqtt"
+    assert cam._mqtt_client_id() == "cfg2-cid"
     assert any("getServerUrlConfig" in u for u in sess.urls)
     # The srflx source the SDES path reads.
     assert cam._smarthome_auth["raw"]["ip"] == "203.0.113.7"
@@ -408,9 +432,22 @@ def test_camera_uses_the_config2_host_and_keeps_the_ip(on, monkeypatch):
 
 def test_camera_ignores_a_host_without_its_password(on, monkeypatch):
     _patch_session(monkeypatch, _SRV)
-    li = {"id": "u1", "accessToken": "AT", LOGIN_INFO_MQTT_CONFIG2_HOST_KEY: "stale"}
-    url = asyncio.run(_camera(li)._async_get_mqtt_url())
-    assert url == "wss://srv.example:8443/mqtt"
+    # A refusal popped the password; and a record whose password is not the
+    # account's current one is just as stale.
+    for li in (
+        {"id": "u1", "accessToken": "AT", _REC: _cfg2_record("OLD", "stale")},
+        {
+            "id": "u1",
+            "accessToken": "AT",
+            "mqttPassword": "NEW",
+            "mqttClientId": "uc-cid",
+            _REC: _cfg2_record("OLD", "stale"),
+        },
+    ):
+        cam = _camera(li)
+        url = asyncio.run(cam._async_get_mqtt_url())
+        assert url == "wss://srv.example:8443/mqtt"
+        assert cam._mqtt_client_id() == li.get("mqttClientId")
 
 
 def test_camera_off_ignores_the_host(monkeypatch):
@@ -419,7 +456,7 @@ def test_camera_off_ignores_the_host(monkeypatch):
         "id": "u1",
         "accessToken": "AT",
         "mqttPassword": "P",
-        LOGIN_INFO_MQTT_CONFIG2_HOST_KEY: "cfg2.example:8443",
+        _REC: _cfg2_record("P", "cfg2.example:8443"),
     }
     url = asyncio.run(_camera(li)._async_get_mqtt_url())
     assert url == "wss://srv.example:8443/mqtt"
@@ -491,3 +528,117 @@ def test_user_config_client_id_log_is_masked(caplog):
     text = "\n".join(r.getMessage() for r in caplog.records)
     assert "mqttClientId stored" in text
     assert "uc-client-u1" not in text
+
+
+# --------------------------------------------------------------------------- #
+# The fallback URL takes the same plaintext gate as the main path
+# --------------------------------------------------------------------------- #
+
+
+class _FailingCamSession(_CamSession):
+    def get(self, url, **kw):
+        self.urls.append(url)
+        raise aiohttp.ClientError("getServerUrlConfig down")
+
+
+def _cfg2_camera(host):
+    li = {
+        "id": "u1",
+        "accessToken": "AT",
+        "mqttPassword": "P",
+        _REC: _cfg2_record("P", host),
+    }
+    cam = _camera(li)
+    cam._leedarson_headers = lambda: {}
+    return cam
+
+
+def test_fallback_uses_the_config2_url_when_server_url_config_fails(on, monkeypatch):
+    monkeypatch.setattr(
+        aiohttp, "ClientSession", lambda *a, **k: _FailingCamSession(None)
+    )
+    cam = _cfg2_camera("cfg2.example:8443")
+    assert asyncio.run(cam._async_get_mqtt_url()) == "wss://cfg2.example:8443/mqtt"
+    assert cam._mqtt_url == "wss://cfg2.example:8443/mqtt"
+
+
+def test_a_plaintext_config2_fallback_is_refused_and_logged(on, monkeypatch, caplog):
+    monkeypatch.delenv("AIDOT_ALLOW_PLAINTEXT_MQTT", raising=False)
+    monkeypatch.setattr(
+        aiohttp, "ClientSession", lambda *a, **k: _FailingCamSession(None)
+    )
+    cam = _cfg2_camera("ws://cfg2.example/mqtt")
+    with caplog.at_level(logging.ERROR):
+        assert asyncio.run(cam._async_get_mqtt_url()) is None
+    assert cam._mqtt_url is None and cam._mqtt_url_refused_scheme == "ws"
+    assert any(
+        "mqttConfig2 named a non-TLS MQTT broker" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_a_plaintext_config2_fallback_takes_the_opt_in(on, monkeypatch):
+    monkeypatch.setenv("AIDOT_ALLOW_PLAINTEXT_MQTT", "1")
+    monkeypatch.setattr(
+        aiohttp, "ClientSession", lambda *a, **k: _FailingCamSession(None)
+    )
+    cam = _cfg2_camera("ws://cfg2.example/mqtt")
+    assert asyncio.run(cam._async_get_mqtt_url()) == "ws://cfg2.example/mqtt"
+    assert cam._mqtt_url_refused_scheme is None
+
+
+def test_the_two_fetches_run_concurrently(on, monkeypatch):
+    # The credential fetch mqttConfig2 needs and getServerUrlConfig are
+    # independent, so neither waits for the other.
+    order = []
+    sess = _patch_session(monkeypatch, _SRV)
+    real_get = sess.get
+
+    def get(url, **kw):
+        order.append("server")
+        return real_get(url, **kw)
+
+    sess.get = get
+    li = {"id": "u1", "accessToken": "AT"}
+    cam = _camera(li)
+
+    async def refresh():
+        order.append("cred-start")
+        await asyncio.sleep(0.01)
+        li["mqttPassword"] = "P"
+        li[_REC] = _cfg2_record("P", "cfg2.example:8443")
+        order.append("cred-end")
+
+    cam._mqtt_credential_refresh_cb = refresh
+    url = asyncio.run(cam._async_get_mqtt_url())
+    assert url == "wss://cfg2.example:8443/mqtt"
+    assert order == ["cred-start", "server", "cred-end"]
+
+
+def test_mask_identifier_lives_with_the_redaction():
+    from aidot_cameras._log_redaction import mask_identifier
+
+    assert mask_identifier(None) == "<none>"
+    assert mask_identifier("abcdefgh") == "<8 chars>"
+    assert mask_identifier("cfg2-client-0001-u1") == "...1-u1 (19 chars)"
+    assert not hasattr(mqtt_config2, "mask")
+
+
+def test_the_private_write_leaves_the_old_file_on_failure(tmp_path):
+    from aidot_cameras._private_file import write_private_file
+
+    path = tmp_path / "f"
+    write_private_file(
+        str(path), lambda fh: fh.write("one"), prefix=".t-", encoding="ascii"
+    )
+    assert path.read_text() == "one"
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+    def boom(fh):
+        fh.write("partial")
+        raise TypeError("not serializable")
+
+    with pytest.raises(TypeError):
+        write_private_file(str(path), boom, prefix=".t-", encoding="ascii")
+    assert path.read_text() == "one"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["f"]

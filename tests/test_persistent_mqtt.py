@@ -15,6 +15,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import aidot_cameras.camera.client as cc
+from aidot_cameras import settings
 from aidot_cameras.camera.protocol import _PersistentMqtt
 
 
@@ -26,24 +27,26 @@ def _warnings(caplog):
     ]
 
 
-def test_turning_the_knob_off_warns_once_and_changes_nothing(monkeypatch, caplog):
-    monkeypatch.setattr(cc, "_PERSISTENT_MQTT_KNOB_WARNED", False)
-    monkeypatch.setenv("AIDOT_PERSISTENT_MQTT", "0")
+def test_setting_the_knob_warns_once_and_changes_nothing(monkeypatch, caplog):
+    monkeypatch.setattr(settings, "_deprecated_warned", set())
     with caplog.at_level(logging.WARNING):
-        cc._warn_persistent_mqtt_knob()
-        cc._warn_persistent_mqtt_knob()
+        settings.warn_deprecated_once({"AIDOT_PERSISTENT_MQTT": "0"})
+        settings.warn_deprecated_once({"AIDOT_PERSISTENT_MQTT": "0"})
     assert len(_warnings(caplog)) == 1
 
 
-def test_the_knob_left_on_or_unset_says_nothing(monkeypatch, caplog):
-    monkeypatch.setattr(cc, "_PERSISTENT_MQTT_KNOB_WARNED", False)
+def test_the_knob_unset_says_nothing(monkeypatch, caplog):
+    monkeypatch.setattr(settings, "_deprecated_warned", set())
     with caplog.at_level(logging.WARNING):
-        monkeypatch.delenv("AIDOT_PERSISTENT_MQTT", raising=False)
-        cc._warn_persistent_mqtt_knob()
-        for val in ("1", "true", "on", "anything"):
-            monkeypatch.setenv("AIDOT_PERSISTENT_MQTT", val)
-            cc._warn_persistent_mqtt_knob()
+        settings.warn_deprecated_once({})
     assert _warnings(caplog) == []
+
+
+def test_the_persistent_connection_checks_for_the_knob():
+    import inspect
+
+    src = inspect.getsource(cc.CameraMixin._get_persistent_mqtt)
+    assert "settings.warn_deprecated_once()" in src
 
 
 def test_there_is_no_switch_left_to_read():
@@ -76,3 +79,59 @@ def test_subscriptions_tracked_for_replay():
     pm = _PersistentMqtt("wss://h:8443/mqtt", "u", "p", "cid")
     pm._subscribe_sync(["a/#", "b/#", "a/#"])  # no client yet -> just tracked
     assert pm._subs == {"a/#", "b/#"}
+
+
+def test_a_request_without_a_connection_reports_it():
+    import asyncio
+    import types
+
+    async def no_pm():
+        return None
+
+    async def boom():
+        raise RuntimeError("cannot build")
+
+    for get_pm in (no_pm, boom):
+        obj = types.SimpleNamespace(_get_persistent_mqtt=get_pm, device_id="d")
+        req = cc.CameraMixin._persistent_request.__get__(obj)
+        assert asyncio.run(req([("t", "p")], ["s/#"], 1.0)) == (
+            [],
+            {"error": cc._NO_PERSISTENT_MQTT},
+        )
+
+
+def test_a_request_rides_the_persistent_connection():
+    import asyncio
+    import types
+
+    seen = {}
+
+    class _Pm:
+        async def request(self, publish_items, subscribe_topics, timeout):
+            seen.update(pub=publish_items, sub=subscribe_topics, timeout=timeout)
+            return [("t", "{}")], {"error": None}
+
+    async def get_pm():
+        return _Pm()
+
+    obj = types.SimpleNamespace(_get_persistent_mqtt=get_pm, device_id="d")
+    req = cc.CameraMixin._persistent_request.__get__(obj)
+    assert asyncio.run(req([("t", "p")], ["s/#"], 1.5)) == (
+        [("t", "{}")],
+        {"error": None},
+    )
+    assert seen == {"pub": [("t", "p")], "sub": ["s/#"], "timeout": 1.5}
+
+
+def test_the_request_sites_share_the_helper_and_drop_the_url_guard():
+    import inspect
+
+    for fn in (
+        cc.CameraMixin._mqtt_device_cmd,
+        cc.CameraMixin.async_query_device_action,
+        cc.CameraMixin.async_get_camera_attributes,
+    ):
+        src = inspect.getsource(fn)
+        assert "self._persistent_request(" in src, fn.__name__
+        assert "pm.request(" not in src, fn.__name__
+        assert "_async_get_mqtt_url()" not in src, fn.__name__

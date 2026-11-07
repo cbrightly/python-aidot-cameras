@@ -67,6 +67,16 @@ _SDP_INLINE = re.compile(r"(inline:)[A-Za-z0-9+/=]+")
 _SDP_ATTR = re.compile(r"^(\s*a=(?:ice-pwd|psk):)[^\r\n]+", re.MULTILINE)
 
 
+def mask_identifier(value: object) -> str:
+    """A log-safe stand-in for an identifier: its length and last 4 characters."""
+    s = str(value or "")
+    if not s:
+        return "<none>"
+    if len(s) <= 8:
+        return f"<{len(s)} chars>"
+    return f"...{s[-4:]} ({len(s)} chars)"
+
+
 def redact_secrets(text: str) -> str:
     """``text`` with the value of every known secret key replaced."""
     return _SECRET_FIELD.sub(lambda m: m.group("key") + REDACTED, text)

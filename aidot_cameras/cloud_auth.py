@@ -18,11 +18,11 @@ import asyncio
 import json
 import logging
 import os
-import tempfile
 
 import aiohttp
 
 from . import settings
+from ._private_file import write_private_file
 from .client import AidotClient
 
 _LOGGER = logging.getLogger("aidot.cloud_auth")
@@ -58,23 +58,12 @@ def _read_token_file(path: str) -> dict:
 def _write_token_file(path: str, data: dict) -> None:
     """Atomic, 0600-secure write of login_info to ``path``.
 
-    Serialize into a temp file in the same directory (mkstemp creates it 0600,
-    closing the world-readable window os.chmod-after-write leaves) and only then
-    os.replace it over ``path`` - so a serialization failure never truncates the
-    previously-valid token. On any error the temp file is removed and re-raised.
+    Serialized straight into the temp file, so a serialization failure never
+    truncates the previously-valid token (see ``write_private_file``).
     """
-    directory = os.path.dirname(path) or "."
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".token-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    write_private_file(
+        path, lambda fh: json.dump(data, fh), prefix=".token-", encoding="utf-8"
+    )
 
 
 def _install_token_cache(client: AidotClient, path: str) -> None:

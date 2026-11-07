@@ -235,6 +235,16 @@ class CameraStatusData(DeviceStatusData):
         )
 
 
+def _firmware_version(device: dict) -> Optional[str]:
+    """``firmwareVersion`` from the device record, at the top level or under
+    ``deviceInfo``; None when neither carries a non-empty string."""
+    for src in (device, device.get("deviceInfo")):
+        value = src.get("firmwareVersion") if isinstance(src, dict) else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 class CameraDeviceInformation(DeviceInformation):
     """Core device info plus camera fields parsed from the device dict."""
 
@@ -262,6 +272,9 @@ class CameraDeviceInformation(DeviceInformation):
     # works (`Dimming` is real on the A000088 and verified by read-back there,
     # though the profile omits it) should keep using that evidence instead.
     declared_properties: frozenset
+    # The firmware version the cloud reports for the device (the app's
+    # "Firmware Version"), or None when the record carries none.
+    firmware_version: Optional[str]
 
     @staticmethod
     def _collect_declared_properties(device: dict) -> frozenset:
@@ -310,6 +323,7 @@ class CameraDeviceInformation(DeviceInformation):
         self.device_password = device.get("password") or ""
         self.ptz_directions = []
         self.declared_properties = self._collect_declared_properties(device)
+        self.firmware_version = _firmware_version(device)
         if CONF_PRODUCT in device and CONF_SERVICE_MODULES in device[CONF_PRODUCT]:
             for service in device[CONF_PRODUCT][CONF_SERVICE_MODULES]:
                 for prop in service.get(CONF_PROPERTIES) or []:

@@ -67,7 +67,7 @@ from .const import (
     CONF_USERNAME,
     DEFAULT_COUNTRY_NAME,
     DEFAULT_REGION,
-    LOGIN_INFO_MQTT_CONFIG2_HOST_KEY,
+    LOGIN_INFO_MQTT_CREDENTIALS_KEY,
     LOGIN_INFO_PERSISTENT_MQTT_KEY,
     LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
     RUNTIME_ONLY_LOGIN_INFO_KEYS,
@@ -80,6 +80,7 @@ from .device_client import CameraDeviceClient, LightDeviceClient
 from .device_client import DeviceStatusData as _CarriedStatusData
 from .discover import CameraDiscover
 from . import mqtt_config2
+from ._log_redaction import mask_identifier
 from . import settings
 from .settings import StreamSettings
 from .exceptions import AidotAuthFailed
@@ -94,17 +95,32 @@ _CLOUD_APP_ID = "68"
 # The typo'd "mqqtPwd" is the vendor's, not ours - see the read below.
 _MQTT_PASSWORD_RESPONSE_KEYS = ("mqttPassword", "mqqtPwd", "mqttPwd")
 
-# Marks a stored mqttClientId as issued by /v25/commons/mqttConfig2.  The
-# clientId is persisted and the password is not, so when that endpoint stops
-# supplying both (the setting turned off, or the call failing) a userConfig
-# password must not be paired with the leftover clientId.
-_CLIENT_ID_SOURCE_KEY = "_mqttClientIdSource"
-_CLIENT_ID_FROM_CONFIG2 = "mqttConfig2"
-
 # The mqttConfig2 sessionId, kept in login_info so it persists wherever
 # login_info does (a Home Assistant config entry).  A token file's sibling
 # file takes precedence when AIDOT_TOKEN_FILE is set.
 _MQTT_SESSION_ID_KEY = "mqttSessionId"
+
+
+def _store_mqtt_credentials(
+    login_info: dict,
+    source: str,
+    password: str,
+    client_id: str = "",
+    host: Optional[str] = None,
+) -> None:
+    """Make ``password`` the account's MQTT password, with the record of the
+    fetch that issued it (see ``LOGIN_INFO_MQTT_CREDENTIALS_KEY``).
+
+    The clientId goes in the record only: the persisted ``mqttClientId`` is
+    userConfig's, so nothing mqttConfig2 issued outlives its password."""
+    login_info["mqttPassword"] = password
+    login_info[LOGIN_INFO_MQTT_CREDENTIALS_KEY] = {
+        "source": source,
+        "password": password,
+        "clientId": client_id,
+        "host": host,
+    }
+
 
 # Strong refs to fire-and-forget tasks: asyncio only keeps weak refs, so a
 # discarded task can be garbage-collected mid-flight (see camera/client.py).
@@ -297,6 +313,12 @@ class CameraClient(_UpstreamAidotClient):
         # Same single-flight idiom for the MQTT credential fetch - see
         # async_ensure_mqtt_credential().
         self._user_config_inflight: "Optional[asyncio.Future]" = None
+        # AIDOT_MQTT_CONFIG2: why that endpoint last failed (None after a
+        # success), which endpoint last supplied the credentials (logged once
+        # per change), and this install's sessionId once read or made.
+        self._mqtt_config2_failure: Optional[str] = None
+        self._mqtt_credential_source: Optional[str] = None
+        self._mqtt_session_id: Optional[str] = None
         # Upstream keeps the session inside CloudApi only; the camera-side
         # /commons/userConfig fetch needs it directly.
         self.session = session
@@ -650,8 +672,6 @@ class CameraClient(_UpstreamAidotClient):
         if settings.read("AIDOT_MQTT_CONFIG2"):
             if await self._async_fetch_mqtt_config2(region, headers):
                 return
-        # A password from here does not pair with a host mqttConfig2 named.
-        login_info.pop(LOGIN_INFO_MQTT_CONFIG2_HOST_KEY, None)
         try:
             async with self.session.get(
                 url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
@@ -684,11 +704,25 @@ class CameraClient(_UpstreamAidotClient):
                 or mqtt_block.get("password")
                 or ""
             )
+            client_id = data.get("mqttClientId") or mqtt_block.get("clientId") or ""
+            if client_id:
+                login_info["mqttClientId"] = client_id
+                _LOGGER.info(
+                    "_async_fetch_user_config: mqttClientId stored: %s",
+                    mask_identifier(client_id),
+                )
             if pwd:
-                login_info["mqttPassword"] = pwd
+                # Replaces an mqttConfig2 record whole, so neither its
+                # clientId nor its host is paired with this password.
+                _store_mqtt_credentials(login_info, "userConfig", pwd, client_id)
                 _LOGGER.info(
                     "_async_fetch_user_config: mqttPassword stored (len=%d)", len(pwd)
                 )
+                if settings.read("AIDOT_MQTT_CONFIG2"):
+                    _why = self._mqtt_config2_failure
+                    self._note_mqtt_credential_source(
+                        "userConfig", f"mqttConfig2 failed: {_why}" if _why else ""
+                    )
             else:
                 # Do NOT log `body`: the userConfig response often still carries
                 # the live mqttPassword under an unexpected key, which is exactly
@@ -698,28 +732,12 @@ class CameraClient(_UpstreamAidotClient):
                     "keys=%s",
                     list(data.keys()),
                 )
-            client_id = data.get("mqttClientId") or mqtt_block.get("clientId") or ""
-            if client_id:
-                login_info["mqttClientId"] = client_id
-                login_info.pop(_CLIENT_ID_SOURCE_KEY, None)
-                _LOGGER.info(
-                    "_async_fetch_user_config: mqttClientId stored: %s",
-                    mqtt_config2.mask(client_id),
-                )
-            elif login_info.get(_CLIENT_ID_SOURCE_KEY) == _CLIENT_ID_FROM_CONFIG2:
-                login_info.pop("mqttClientId", None)
-                login_info.pop(_CLIENT_ID_SOURCE_KEY, None)
-            if pwd and settings.read("AIDOT_MQTT_CONFIG2"):
-                _why = getattr(self, "_mqtt_config2_failure", None)
-                self._note_mqtt_credential_source(
-                    "userConfig", f"mqttConfig2 failed: {_why}" if _why else ""
-                )
         except Exception as exc:
             _LOGGER.warning("_async_fetch_user_config failed: %s", exc)
 
     def _note_mqtt_credential_source(self, source: str, detail: str = "") -> None:
         """Say at INFO which endpoint supplied the MQTT credentials, once per change."""
-        if getattr(self, "_mqtt_credential_source", None) == source:
+        if self._mqtt_credential_source == source:
             return
         self._mqtt_credential_source = source
         _LOGGER.info(
@@ -733,13 +751,15 @@ class CameraClient(_UpstreamAidotClient):
         its own in shared preferences; otherwise in login_info, which an
         integration persists through ``serializable_login_info``.
         """
-        sid = getattr(self, "_mqtt_session_id", None)
+        sid = self._mqtt_session_id
         if sid:
             return sid
-        path = mqtt_config2.session_id_path(settings.read("AIDOT_TOKEN_FILE"))
-        if path:
+        token_file = settings.read("AIDOT_TOKEN_FILE")
+        if token_file:
             sid = await asyncio.get_running_loop().run_in_executor(
-                None, mqtt_config2.load_or_create_session_id, path
+                None,
+                mqtt_config2.load_or_create_session_id,
+                f"{token_file}{mqtt_config2.SESSION_ID_FILE_SUFFIX}",
             )
         else:
             stored = self.login_info.get(_MQTT_SESSION_ID_KEY)
@@ -754,8 +774,9 @@ class CameraClient(_UpstreamAidotClient):
     async def _async_fetch_mqtt_config2(self, region: str, headers: dict) -> bool:
         """GET /v25/commons/mqttConfig2 as the app does; True if it supplied creds.
 
-        Stores the password, clientId and broker host in login_info on success.
-        Never raises: on any failure the caller falls back to userConfig.
+        Stores the password, and the record pairing the clientId and broker
+        host with it, in login_info on success. Never raises: on any failure
+        the caller falls back to userConfig.
         """
         from .camera.constants import aidot_api_base
 
@@ -787,15 +808,18 @@ class CameraClient(_UpstreamAidotClient):
             )
             self._mqtt_config2_failure = "no host, clientId or password in the reply"
             return False
-        login_info["mqttPassword"] = reply["password"]
-        login_info["mqttClientId"] = reply["clientId"]
-        login_info[_CLIENT_ID_SOURCE_KEY] = _CLIENT_ID_FROM_CONFIG2
-        login_info[LOGIN_INFO_MQTT_CONFIG2_HOST_KEY] = reply["host"]
+        _store_mqtt_credentials(
+            login_info,
+            "mqttConfig2",
+            reply["password"],
+            reply["clientId"],
+            reply["host"],
+        )
         self._mqtt_config2_failure = None
         self._note_mqtt_credential_source(
             "mqttConfig2",
-            f"sessionId {mqtt_config2.mask(sid)}, "
-            f"clientId {mqtt_config2.mask(reply['clientId'])}, "
+            f"sessionId {mask_identifier(sid)}, "
+            f"clientId {mask_identifier(reply['clientId'])}, "
             f"host {reply['host']}",
         )
         return True

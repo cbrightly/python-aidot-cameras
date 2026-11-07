@@ -1275,35 +1275,37 @@ def _signal_origin(topic, msg, device_id) -> str:
     return f"dev={d[:12]} (not this camera)"
 
 
-async def _drain_outgoing_queue(loop, outgoing_q, publish, poll_s: float = 1.0) -> None:
-    """Publish queued signalling messages until the stop sentinel (``None``).
+class _SignalQueue:
+    """The open's outgoing signalling queue: any thread hands off, the loop drains.
 
-    The wait is **bounded on purpose**.  ``queue.get()`` with no timeout cannot
-    be interrupted: cancelling the await cancels only the wait, never the
-    worker thread, so the thread stays blocked for the life of the process and
-    an ``asyncio.wait_for`` around the enclosing open blocks forever - waiting
-    on a cancellation that can never complete.
-
-    Measured on an A001064 (2026-08-14): a second consecutive open returned no
-    success, no error, and did not respond to a 130 s hard cap around it. To a
-    user that is a camera that never loads and never says why; to a caller it
-    is worse than a failure, because wrapping the call in a timeout - the usual
-    defence - does not work either.
-
-    A one-second poll costs one wakeup per second per open and makes the task
-    cancellable, which is the whole point.  The stop sentinel still returns
-    immediately; ``_reap_stream_drain`` keeps pushing it, and that remains the
-    fast path.
+    Producers call ``put_nowait`` from the loop, from an executor thread or
+    from a session's ``stop()``; each item crosses to the loop through
+    ``call_soon_threadsafe``, in order, into an ``asyncio.Queue``. The drain
+    awaits that queue on the loop, so it needs no worker thread and is
+    cancellable like any other await. It used to park an executor thread on
+    ``queue.Queue.get``, polling once a second because an unbounded blocking
+    get could never be cancelled (an A001064 open that ignored a 130 s hard
+    cap, 2026-08-14).
     """
-    import queue as _q
 
-    while True:
+    def __init__(self, loop: "asyncio.AbstractEventLoop") -> None:
+        self._loop = loop
+        self._q: "asyncio.Queue[Any]" = asyncio.Queue()
+
+    def put_nowait(self, item: Any) -> None:
         try:
-            out = await loop.run_in_executor(
-                None, lambda: outgoing_q.get(timeout=poll_s)
-            )
-        except _q.Empty:
-            continue  # nothing queued; loop so we stay cancellable
+            self._loop.call_soon_threadsafe(self._q.put_nowait, item)
+        except RuntimeError:
+            pass  # the loop is closed, and with it the drain: nothing to wake
+
+    async def get(self) -> Any:
+        return await self._q.get()
+
+
+async def _drain_outgoing_queue(outgoing_q: _SignalQueue, publish) -> None:
+    """Publish queued signalling messages until the stop sentinel (``None``)."""
+    while True:
+        out = await outgoing_q.get()
         if out is None:  # stop sentinel from WebRTCSession.stop()
             return
         await publish(out[0], out[1])
@@ -1402,9 +1404,6 @@ class _DtlsOpenState:
     _wake_keepalive_sent: "Any" = dataclasses.field(init=False)  # mqtt_asyncio_bridge
     # mqtt_asyncio_bridge
     camera_reconnect_ev: "asyncio.Event" = dataclasses.field(init=False)
-    _mqtt_ready_ev: "Any" = dataclasses.field(init=False)  # mqtt_asyncio_bridge
-    # mqtt_asyncio_bridge
-    _mqtt_conn_status: "dict[Any, Any]" = dataclasses.field(init=False)
     _status: "Any" = dataclasses.field(init=False)  # mqtt_asyncio_bridge
     _trace: "Any" = dataclasses.field(init=False)  # mqtt_asyncio_bridge
     mqtt_fut: "Any" = dataclasses.field(init=False)  # ice_config_and_user_info
@@ -1711,14 +1710,14 @@ async def _dtls_open_credentials_and_mqtt_setup(self, ps: _DtlsOpenState) -> Non
     Split out of ``_async_open_webrtc_stream_impl``; reads and writes the open's
     state through ``ps`` (a ``_DtlsOpenState``).
     """
-    _user, _pwd, _base_cid = await self._mqtt_credentials()
     ps.user_id = str(self.user_id)
-    # This path alone also honours the raw user config's client id, ahead
-    # of the ``app-<user>`` fallback the shared helper already applied.
+    # Only the clientId is needed here. This path alone also honours the raw
+    # user config's client id, ahead of the ``app-<user>`` fallback that
+    # ``_mqtt_credentials`` applies, which is asked only when both are absent.
     ps.mqtt_cid = (
-        self._user_info.get("mqttClientId")
+        self._mqtt_client_id()
         or (self._user_info.get("_userConfigRaw") or {}).get("mqtt", {}).get("clientId")
-        or _base_cid
+        or (await self._mqtt_credentials())[2]
     )
     # terminalIndex is the session prefix of mqtt_cid (e.g. "1i1h3m" from "1i1h3m-{userId}").
     # The camera validates srcAddr against active MQTT sessions; "0.{userId}" matches nothing.
@@ -1885,10 +1884,7 @@ async def _dtls_open_mqtt_asyncio_bridge(self, ps: _DtlsOpenState) -> None:
     Split out of ``_async_open_webrtc_stream_impl``; reads and writes the open's
     state through ``ps`` (a ``_DtlsOpenState``).
     """
-    import queue as _q_mod
-    import threading as _threading
-
-    ps.outgoing_q = _q_mod.Queue()
+    ps.outgoing_q = _SignalQueue(ps.loop)
     ps.answer_fut = ps.loop.create_future()
     ps.second_answer_fut = (
         ps.loop.create_future()
@@ -1943,13 +1939,6 @@ async def _dtls_open_mqtt_asyncio_bridge(self, ps: _DtlsOpenState) -> None:
     # first announces itself.  See the dispatcher below.
     ps._wake_keepalive_sent = [False]
     ps.camera_reconnect_ev = asyncio.Event()  # set when camera sends device/connect
-    # Mutable flag: set True when setDevAttrNotif delivers sptPreconn:1.
-    # Confirmed 2026-05-02: both A000088 and A001064 PTZ report
-    # sptPreconn:1.  AVIO LIVING (SESSION_MODE_REQ=5376) must be sent
-    # via the data channel to trigger streaming in PreCon cameras.
-    # Gate: block asyncio until MQTT is connected + subscribed
-    ps._mqtt_ready_ev = _threading.Event()
-    ps._mqtt_conn_status = {}
 
     # _status = the lifecycle channel (INFO when nothing else routes it);
     # _trace = the steady-state channel (always DEBUG).  See
@@ -1975,10 +1964,6 @@ async def _dtls_open_ice_config_and_user_info(self, ps: _DtlsOpenState) -> None:
             ps._status("ICE config fetched via HTTP (primary path, parallel fetch)")
         else:
             ps._status("HTTP ICE config unavailable - will use MQTT path")
-
-    def _on_mqtt_ready(st: dict) -> None:
-        ps._mqtt_conn_status.update(st)
-        ps._mqtt_ready_ev.set()
 
     _on_mqtt_message = make_mqtt_message_handler(
         self=self,
@@ -2025,35 +2010,18 @@ async def _dtls_open_ice_config_and_user_info(self, ps: _DtlsOpenState) -> None:
 
     async def _pm_stream_drain():
         try:
-            await _drain_outgoing_queue(ps.loop, ps.outgoing_q, _pm_stream.publish)
+            await _drain_outgoing_queue(ps.outgoing_q, _pm_stream.publish)
         finally:
             _pm_stream.remove_handler(_on_mqtt_message)
 
     ps.mqtt_fut = asyncio.ensure_future(_pm_stream_drain())
     # Track the drain AND its queue so teardown (or a replacing open) can
     # reap it even if this open is cancelled before a WebRTCSession takes
-    # ownership.  _reap_stream_drain pushes the outgoing_q sentinel to
-    # release the drain blocked on outgoing_q.get and removes the handler
-    # from the shared persistent connection.
+    # ownership.  _reap_stream_drain pushes the outgoing_q sentinel and
+    # cancels the drain, which removes the handler from the shared
+    # persistent connection.
     self._stream_mqtt_drain = ps.mqtt_fut
     self._stream_mqtt_outq = ps.outgoing_q
-    _on_mqtt_ready({"connected": True, "rc": 0, "rc_str": "persistent"})
-
-    # Wait for MQTT to be connected and subscribed before proceeding.
-    # threading.Event.wait(timeout) returns True if set, False on timeout.
-    mqtt_ok = await ps.loop.run_in_executor(
-        None, lambda: ps._mqtt_ready_ev.wait(timeout=15.0)
-    )
-    if not mqtt_ok or not ps._mqtt_conn_status.get("connected"):
-        ps.outgoing_q.put_nowait(None)  # stop MQTT thread
-        _err = (
-            ps._mqtt_conn_status.get("error")
-            or ps._mqtt_conn_status.get("rc_str")
-            or f"rc={ps._mqtt_conn_status.get('rc')}"
-        )
-        raise AidotMqttUnavailable(
-            f"async_open_webrtc_stream: MQTT connection failed: {_err}"
-        )
     ps._status(f"MQTT connected (clientId={ps.mqtt_cid})")
 
 

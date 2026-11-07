@@ -12,7 +12,8 @@ Android app (``com.leedarson.mqtt.repos.FetchMqttConfigRepos``):
   (``createRandomStr(21)``), generated once and kept in the app's shared
   preferences, so it is stable per install. The H5 bundle draws its own from
   ``[0-9a-z]``, a subset, which a stored id is checked against just the same.
-* The reply carries ``host``, ``clientId``, ``password`` and ``heartbeat``.
+* The reply carries ``host``, ``clientId``, ``password`` and ``heartbeat``
+  (not used here).
   The app connects to ``wss://<host>/mqtt`` with the reply's clientId and
   password, and the username is the logged-in user id from its own prefs: it
   overwrites the reply's ``userId`` with that before using it.
@@ -25,11 +26,11 @@ each other from the broker. That is unverified.
 from __future__ import annotations
 
 import logging
-import os
 import secrets
 import string
-import tempfile
 from typing import Any, Optional
+
+from ._private_file import write_private_file
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,11 +57,6 @@ def is_valid_session_id(value: Any) -> bool:
     )
 
 
-def session_id_path(token_file: Optional[str]) -> Optional[str]:
-    """Where the sessionId lives for ``token_file``, or None without one."""
-    return f"{token_file}{SESSION_ID_FILE_SUFFIX}" if token_file else None
-
-
 def load_or_create_session_id(path: str) -> str:
     """Blocking: the sessionId stored at ``path``, creating it on first use.
 
@@ -80,21 +76,10 @@ def load_or_create_session_id(path: str) -> str:
         _LOGGER.debug("could not read the MQTT sessionId file %s: %s", path, exc)
 
     sid = new_session_id()
-    directory = os.path.dirname(path) or "."
     try:
-        fd, tmp = tempfile.mkstemp(
-            dir=directory, prefix=".mqtt-session-", suffix=".tmp"
+        write_private_file(
+            path, lambda fh: fh.write(sid), prefix=".mqtt-session-", encoding="ascii"
         )
-        try:
-            with os.fdopen(fd, "w", encoding="ascii") as fh:
-                fh.write(sid)
-            os.replace(tmp, path)
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
     except OSError as exc:
         _LOGGER.warning(
             "could not store the MQTT sessionId at %s (%s); using it for this run only",
@@ -105,7 +90,7 @@ def load_or_create_session_id(path: str) -> str:
 
 
 def parse_reply(body: Any) -> Optional[dict]:
-    """``{"host", "clientId", "password", "heartbeat"}`` from a reply, or None.
+    """``{"host", "clientId", "password"}`` from a reply, or None.
 
     Accepts the fields at the top level or under ``data`` (the app's HTTP layer
     hands its callback the unwrapped payload; the raw reply is assumed to wrap
@@ -127,32 +112,16 @@ def parse_reply(body: Any) -> Optional[dict]:
     host, client_id, password = _str("host"), _str("clientId"), _str("password")
     if not host or not client_id or not password:
         return None
-    heartbeat = data.get("heartbeat")
-    if isinstance(heartbeat, bool) or not isinstance(heartbeat, int):
-        heartbeat = None
-    return {
-        "host": host,
-        "clientId": client_id,
-        "password": password,
-        "heartbeat": heartbeat,
-    }
+    return {"host": host, "clientId": client_id, "password": password}
 
 
 def broker_url(host: str) -> str:
-    """The app's broker URL for ``host``: ``wss://<host>/mqtt``.
+    """The broker URL for ``host``: ``wss://<host>/mqtt``, as the app builds it.
 
-    A host that already carries a scheme is used as given.
+    A URL that already carries a scheme is used as given, and a bare host that
+    already carries a path only gains the scheme.
     """
     if "://" in host:
         return host
-    return f"wss://{host.rstrip('/')}/mqtt"
-
-
-def mask(value: Any) -> str:
-    """A log-safe stand-in for an identifier: its length and last 4 characters."""
-    s = str(value or "")
-    if not s:
-        return "<none>"
-    if len(s) <= 8:
-        return f"<{len(s)} chars>"
-    return f"...{s[-4:]} ({len(s)} chars)"
+    host = host.rstrip("/")
+    return f"wss://{host}" if "/" in host else f"wss://{host}/mqtt"
