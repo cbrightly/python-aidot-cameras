@@ -1639,12 +1639,40 @@ def _abandoned_media_grace_s() -> float:
 
 
 def _post_abandon_media_grace_s(
-    *, abandoned: bool, have_video: bool, grace_s: float
+    *,
+    abandoned: bool,
+    have_video: bool,
+    grace_s: float,
+    serve_from_answer: bool = False,
 ) -> float:
-    """Extra seconds to wait for the first media before building the serve SDP."""
-    if not abandoned or have_video or grace_s <= 0:
+    """Extra seconds to wait for the first media before building the serve SDP.
+
+    ``serve_from_answer``: the direct publisher with the camera's answer in
+    hand. It takes its payload types from the answer, so the reason for this
+    grace (an SDP built from types not yet observed) does not apply, and an
+    attempt with no video goes straight to the retry. The ffmpeg serve
+    (H.265, recordings, snapshots) keeps the grace.
+    """
+    if serve_from_answer or not abandoned or have_video or grace_s <= 0:
         return 0.0
     return grace_s
+
+
+def _audio_pt_wait_s(*, direct_publish: bool, answer_apt) -> float:
+    """Seconds to wait after the first video for an observed audio type.
+
+    The observed type wins over the answer's: the bridge stamps TUTK-framed
+    audio as PCMA (8) whatever the answer named. The ffmpeg serve maps one
+    type and drops the other, so it waits the grace for a packet and only
+    then falls back to the answer. The direct publisher converts a late
+    packet of the other G.711 law to the announced one (see
+    LoopbackRtpPublisher), so with the answer naming a type it does not
+    wait; with no type named there is nothing to fall back on, and it waits
+    like the ffmpeg serve.
+    """
+    if direct_publish and answer_apt is not None:
+        return 0.0
+    return _AUDIO_PT_GRACE_S
 
 
 def _should_skip_doomed_serve(
@@ -8486,19 +8514,52 @@ class _SdesOpenMixin:
                     time.monotonic() - _media_wait_started, _cancelled=True
                 )
             raise
-        # The serve SDP below is built from what has actually been observed, so
-        # ending the wait a moment before the first packets arrive costs this
-        # session its audio for good.  See _abandoned_media_grace_s.
+
+        def _answer_ready() -> bool:
+            return bool(
+                ps.answer_fut is not None
+                and ps.answer_fut.done()
+                and not ps.answer_fut.cancelled()
+                and ps.answer_fut.exception() is None
+            )
+
+        # The ffmpeg serve's SDP is built from what has actually been observed,
+        # so ending the wait a moment before the first packets arrive costs
+        # this session its audio for good.  See _abandoned_media_grace_s.  The
+        # direct publisher with the answer in hand serves from the answer, so
+        # it skips this grace (and the audio one below).
         #
         # The grace runs BEFORE the stall report, not after: a session the grace
         # rescues goes on to serve normally, and reporting a "first media never
         # arrived" WARNING for it would contradict that report's own invariant -
         # "an open that delivers media reaches none of it" - and poison the
         # signal this camera family is triaged with.
+        _settings = settings.stream_settings_of(self)
+        # A live push the direct publisher may take, whatever the codec;
+        # recordings, snapshots and the decode drain never are.
+        _dp_eligible = _should_direct_publish(
+            ps.rtsp_push_url,
+            output_path,
+            max_seconds,
+            ps._use_plain_rtp,
+            stream_settings=_settings,
+        )
         _ab_grace = _post_abandon_media_grace_s(
             abandoned=_stale_offer_abandoned,
             have_video=_first_video_pt[0] is not None,
             grace_s=_abandoned_media_grace_s(),
+            # ...and only for the codec it serves: an answer naming H.265
+            # (with the pin off) keeps ffmpeg, and ffmpeg keeps the grace.
+            serve_from_answer=_dp_eligible
+            and _answer_ready()
+            and _serve_video_pt(
+                None,
+                video_pt_from_answer_sdp(
+                    (ps.answer_fut.result() or {}).get("sdp", "") or ""
+                ),
+                _pinned_video_pt(ps.sd_playback, _settings),
+            )
+            == _DIRECT_PUBLISH_VIDEO_PT,
         )
         if _ab_grace > 0:
             _ab_t0 = time.monotonic()
@@ -8577,56 +8638,6 @@ class _SdesOpenMixin:
                 _waited,
             )
             raise AidotCameraNoMedia(waited_s=_waited)
-        # Direct publish attaches audio from the NEGOTIATED payload type rather
-        # than an observed one - see audio_pt_from_answer_sdp - so it neither
-        # waits the audio grace nor goes video-only when the camera's first
-        # audio packet trails its first video. The ffmpeg serve still prefers
-        # the type it sees on the wire, so it waits the grace first; only when
-        # no audio packet came does it fall back to the answer's type rather
-        # than serving the whole session silent. Measured 2026-11-06: a relay-
-        # only A001513 sent its first audio 1.14 s after its video, and with
-        # ffmpeg 7.1 a mapped audio line whose packets start late is captured,
-        # and one whose packets never come does not hold up the video.
-        _answer_apt = None
-        _answer_pt = None
-        if (
-            _serve_audio
-            and _first_audio_pt[0] is None
-            and ps.answer_fut is not None
-            and ps.answer_fut.done()
-            and not ps.answer_fut.cancelled()
-            and ps.answer_fut.exception() is None
-        ):
-            _answer_pt = audio_pt_from_answer_sdp(
-                (ps.answer_fut.result() or {}).get("sdp", "") or ""
-            )
-            if _answer_pt is not None and _should_direct_publish(
-                ps.rtsp_push_url,
-                output_path,
-                max_seconds,
-                ps._use_plain_rtp,
-                stream_settings=settings.stream_settings_of(self),
-            ):
-                _answer_apt = _answer_pt
-                _LOGGER.info(
-                    "camera %s: direct publish: attaching audio pt=%d from the"
-                    " camera's answer (no audio packet seen yet)",
-                    getattr(self, "device_id", "?"),
-                    _answer_apt,
-                )
-        if _serve_audio and _first_audio_pt[0] is None and _answer_apt is None:
-            _apt_deadline = time.monotonic() + _AUDIO_PT_GRACE_S
-            while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:
-                await asyncio.sleep(0.1)
-            if _first_audio_pt[0] is None and _answer_pt is not None:
-                _answer_apt = _answer_pt
-                _LOGGER.info(
-                    "camera %s: no audio packet within %.0fs of the video;"
-                    " mapping audio pt=%d from the camera's answer",
-                    getattr(self, "device_id", "?"),
-                    _AUDIO_PT_GRACE_S,
-                    _answer_apt,
-                )
         _vpt = _first_video_pt[0]
         _pinned = _pinned_video_pt(ps.sd_playback, settings.stream_settings_of(self))
         _mismatches = getattr(self, "_pinned_codec_mismatches", 0)
@@ -8666,10 +8677,7 @@ class _SdesOpenMixin:
                 _vpt,
                 _mismatches,
             )
-        _apt = _first_audio_pt[0] if _first_audio_pt[0] is not None else _answer_apt
-        # Which single payload type (if any) each line can be narrowed to. Audio
-        # is usable when its type was observed or the camera's answer named it;
-        # otherwise the "0 8" line cannot be narrowed.
+        # Which single video payload type the line can be narrowed to.
         # NOTE: the no-video case this was written for no longer reaches here -
         # an open with nothing observed is abandoned above, so _vpt is always
         # set by this point. What is left is an OBSERVED but unadvertised
@@ -8727,6 +8735,67 @@ class _SdesOpenMixin:
             _answer_video_pt[0],
             _pinned_video_pt(ps.sd_playback, settings.stream_settings_of(self)),
         )
+        # Direct publish (AIDOT_DIRECT_PUBLISH): an in-process RTSP publisher
+        # replaces the push ffmpeg. It reads the same narrowed SDP and the same
+        # loopback ports and is Popen-compatible, so everything below that
+        # polls, terminates, reaps or relaunches `proc` is unchanged. Only a
+        # live push qualifies - recordings, snapshots and the decode drain keep
+        # ffmpeg. See docs/DESIGN-direct-publish.md.
+        _direct_publish = _should_direct_publish(
+            ps.rtsp_push_url,
+            output_path,
+            max_seconds,
+            ps._use_plain_rtp,
+            _keep_v,
+            stream_settings=_settings,
+        )
+        if _dp_eligible and not _direct_publish:
+            _LOGGER.info(
+                "camera %s: this session negotiated video pt=%s, which the"
+                " direct publisher is not validated for; keeping the ffmpeg"
+                " serve",
+                getattr(self, "device_id", "?"),
+                _keep_v,
+            )
+        # Audio prefers the type observed on the wire and falls back to the
+        # type the camera's answer named - see _audio_pt_wait_s for who waits
+        # for a packet first. Measured 2026-11-06: a relay-only A001513 sent
+        # its first audio 1.14 s after its video, and with ffmpeg 7.1 a mapped
+        # audio line whose packets start late is captured, and one whose
+        # packets never come does not hold up the video.
+        _answer_apt = None
+        _answer_pt = None
+        if _serve_audio and _first_audio_pt[0] is None and _answer_ready():
+            _answer_pt = audio_pt_from_answer_sdp(
+                (ps.answer_fut.result() or {}).get("sdp", "") or ""
+            )
+        _apt_wait = _audio_pt_wait_s(
+            direct_publish=_direct_publish, answer_apt=_answer_pt
+        )
+        if _serve_audio and _first_audio_pt[0] is None and _apt_wait > 0:
+            _apt_deadline = time.monotonic() + _apt_wait
+            while _first_audio_pt[0] is None and time.monotonic() < _apt_deadline:
+                await asyncio.sleep(0.1)
+        if _first_audio_pt[0] is None and _answer_pt is not None:
+            _answer_apt = _answer_pt
+            if _direct_publish:
+                _LOGGER.info(
+                    "camera %s: direct publish: attaching audio pt=%d from the"
+                    " camera's answer (no audio packet seen yet)",
+                    getattr(self, "device_id", "?"),
+                    _answer_apt,
+                )
+            else:
+                _LOGGER.info(
+                    "camera %s: no audio packet within %.0fs of the video;"
+                    " mapping audio pt=%d from the camera's answer",
+                    getattr(self, "device_id", "?"),
+                    _apt_wait,
+                    _answer_apt,
+                )
+        _apt = _first_audio_pt[0] if _first_audio_pt[0] is not None else _answer_apt
+        # Audio is usable when its type was observed or the camera's answer
+        # named it; otherwise the "0 8" line cannot be narrowed.
         _keep_a = int(_apt) if _apt in _SDP_AUDIO_PTS else None
         if _serve_audio and _keep_a is None:
             # No audio observed and none named in the answer, so the "0 8" line
@@ -8816,35 +8885,6 @@ class _SdesOpenMixin:
                     "_open_sdes_stream_impl",
                     exc_info=True,
                 )
-        # Direct publish (AIDOT_DIRECT_PUBLISH): an in-process RTSP publisher
-        # replaces the push ffmpeg. It reads the same narrowed SDP and the same
-        # loopback ports and is Popen-compatible, so everything below that
-        # polls, terminates, reaps or relaunches `proc` is unchanged. Only a
-        # live push qualifies - recordings, snapshots and the decode drain keep
-        # ffmpeg. See docs/DESIGN-direct-publish.md.
-        _settings = settings.stream_settings_of(self)
-        _direct_publish = _should_direct_publish(
-            ps.rtsp_push_url,
-            output_path,
-            max_seconds,
-            ps._use_plain_rtp,
-            _keep_v,
-            stream_settings=_settings,
-        )
-        if not _direct_publish and _should_direct_publish(
-            ps.rtsp_push_url,
-            output_path,
-            max_seconds,
-            ps._use_plain_rtp,
-            stream_settings=_settings,
-        ):
-            _LOGGER.info(
-                "camera %s: this session negotiated video pt=%s, which the"
-                " direct publisher is not validated for; keeping the ffmpeg"
-                " serve",
-                getattr(self, "device_id", "?"),
-                _keep_v,
-            )
         _direct_audio = bool(_serve_audio and _keep_a is not None)
         _direct_timeout = _resolve_serve_input_timeout_s(
             bool(getattr(self, "is_battery_camera", False))

@@ -91,6 +91,17 @@ function each, all on default paths.
   ms`), and a failure inside the in-sync HLS TS no longer ends a DTLS
   publish (it never ended an SDES one).
 
+- **The SDES direct publish serves from the camera's answer.** With the
+  answer in hand it launches at the first video packet: it no longer waits
+  the 8 s grace after an abandoned first-media wait (an attempt with no video
+  goes straight to the retry), and the audio wait is decided after the
+  serve is (an H.265 session, which keeps ffmpeg, now gets ffmpeg's 1 s
+  audio wait). Audio still prefers the type seen on the wire: a packet of
+  the other G.711 law than the one announced from the answer (the bridge
+  stamps TUTK-framed audio as PCMA whatever the answer said) is converted
+  instead of dropped, counted as `law_converted` in the publish stats. The
+  ffmpeg serve (H.265, recordings, snapshots) keeps both waits.
+
 ### Deprecated
 - **`AIDOT_PERSISTENT_MQTT`** is accepted and ignored; set to
   `0`/`false`/`no`/`off` it logs one warning. See above.

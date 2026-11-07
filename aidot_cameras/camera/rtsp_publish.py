@@ -63,6 +63,7 @@ from .rtp_h264 import H264Depacketizer
 
 from .. import settings
 from ..exceptions import RtspPublishError
+from ..g711 import ALAW_TO_ULAW, ULAW_TO_ALAW
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -179,6 +180,10 @@ class PublishTrack:
 
 
 _STATIC_PTS = {0: ("PCMU", 8000), 8: ("PCMA", 8000)}
+
+#: (wire pt, announced pt) -> the table that converts the payload between the
+#: two static G.711 types.
+_G711_CONVERT = {(0, 8): ULAW_TO_ALAW, (8, 0): ALAW_TO_ULAW}
 
 
 def publish_sdp_from_serve_sdp(
@@ -1352,6 +1357,7 @@ class LoopbackRtpPublisher:
         self._done = threading.Event()
         self._connect_done = threading.Event()
         self.dropped_pt = 0
+        self.law_converted = 0
         self.preroll_dropped = 0
         self.dropped_resent = 0
         self.resent_filter_resets = 0
@@ -1458,6 +1464,7 @@ class LoopbackRtpPublisher:
             "bytes": pub.bytes_sent if pub else 0,
             "timestamp_repairs": sum(t.repairs for t in self._timelines),
             "dropped_pt": self.dropped_pt,
+            "law_converted": self.law_converted,
             "preroll_dropped": self.preroll_dropped,
             "dropped_resent": self.dropped_resent,
             "resent_filter_resets": self.resent_filter_resets,
@@ -1634,8 +1641,28 @@ class LoopbackRtpPublisher:
         pt, marker, in_seq, ts, payload = parsed
         ssrc = struct.unpack_from("!I", pkt, 8)[0]
         if pt != self._tracks[idx].pt:
-            self.dropped_pt += 1
-            return
+            # The SDES open announces the audio type the camera's answer named
+            # when no packet has been seen yet, and the bridge stamps TUTK-framed
+            # audio as PCMA whatever the answer said. The type on the wire wins:
+            # a packet of the other G.711 law is converted, not dropped.
+            law = (
+                _G711_CONVERT.get((pt, self._tracks[idx].pt))
+                if self._tracks[idx].kind == "audio"
+                else None
+            )
+            if law is None:
+                self.dropped_pt += 1
+                return
+            if not self.law_converted:
+                self._log(
+                    logging.INFO,
+                    "audio arrives as pt=%d against the announced pt=%d;"
+                    " converting the G.711 law",
+                    pt,
+                    self._tracks[idx].pt,
+                )
+            self.law_converted += 1
+            payload = payload.translate(law)
         self.last_media = arrival
         for item in self._reorder[idx].push(
             in_seq, (marker, ts, payload, arrival, ssrc, in_seq), arrival, ssrc

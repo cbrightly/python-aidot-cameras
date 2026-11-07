@@ -92,3 +92,40 @@ def test_the_grace_still_leaves_the_backstop_worth_having(monkeypatch):
         _BATTERY_STALE_OFFER_GRACE_S + _abandoned_media_grace_s()
         < _FIRST_MEDIA_WAIT_S / 2
     )
+
+
+def test_the_direct_publisher_serving_from_the_answer_gets_nothing():
+    """It takes its payload types from the answer, so the grace's reason is
+    gone and an attempt with no video goes straight to the retry."""
+    assert _g(serve_from_answer=True) == 0.0
+    assert _g(serve_from_answer=False) == GRACE
+
+
+def test_the_ffmpeg_serve_keeps_the_grace():
+    """The open passes serve_from_answer only under the direct-publish test,
+    so recordings, snapshots and the decode drain keep the grace."""
+    import ast
+
+    from tests.ast_guards import calls_to, function, module_tree, names_in
+
+    impl = function(
+        module_tree("aidot_cameras.camera.sdes_open"), "_open_sdes_stream_impl"
+    )
+    (call,) = calls_to(impl, "_post_abandon_media_grace_s")
+    kw = {k.arg: k.value for k in call.keywords}
+    assert "serve_from_answer" in kw
+    expr = kw["serve_from_answer"]
+    assert isinstance(expr, ast.BoolOp) and isinstance(expr.op, ast.And)
+    assert calls_to(expr, "_answer_ready")
+    # The eligibility excludes recordings and snapshots (output_path /
+    # max_seconds), and the codec term keeps an H.265 answer on ffmpeg.
+    assert "_dp_eligible" in names_in(expr)
+    assert "_DIRECT_PUBLISH_VIDEO_PT" in names_in(expr)
+    (elig,) = [
+        n
+        for n in ast.walk(impl)
+        if isinstance(n, ast.Assign)
+        and any(getattr(t, "id", None) == "_dp_eligible" for t in n.targets)
+    ]
+    (dp,) = calls_to(elig.value, "_should_direct_publish")
+    assert {"output_path", "max_seconds"} <= names_in(dp)

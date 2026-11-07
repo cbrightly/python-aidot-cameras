@@ -997,8 +997,12 @@ def test_loopback_publisher_forwards_and_rewrites(go2rtc, monkeypatch):
         tx.sendto(
             rp.build_rtp(0, False, 2, 320, 0xBBBB, b"\xff" * 160), ("127.0.0.1", a_port)
         )
+        tx.sendto(
+            rp.build_rtp(111, False, 3, 480, 0xBBBB, b"\x00" * 40),
+            ("127.0.0.1", a_port),
+        )
         tx.sendto(b"\x80\xc8" + b"\0" * 26, ("127.0.0.1", v_port))  # RTCP SR
-        assert _wait(lambda: len(go2rtc.frames) == 3)
+        assert _wait(lambda: len(go2rtc.frames) == 4)
         by_ch = {}
         for ch, pkt in go2rtc.frames:
             by_ch.setdefault(ch, []).append(rp.parse_rtp(pkt))
@@ -1006,8 +1010,11 @@ def test_loopback_publisher_forwards_and_rewrites(go2rtc, monkeypatch):
         assert [p[4] for p in v] == [b"\x65key", b"frag"]
         assert v[0][3] == v[1][3]  # one frame, one timestamp
         assert v[1][1] is True and v[1][2] == (v[0][2] + 1) & 0xFFFF
-        assert [p[0] for p in by_ch[0]] == [8]  # PCMU on a PCMA track dropped
-        assert proc.publish_stats()["dropped_pt"] == 1
+        # PCMU on a PCMA track is converted (the wire type wins); a type that
+        # is not G.711 is still dropped.
+        assert [p[0] for p in by_ch[0]] == [8, 8]
+        assert proc.publish_stats()["law_converted"] == 1
+        assert _wait(lambda: proc.publish_stats()["dropped_pt"] == 1)
         ssrc = struct.unpack_from("!I", go2rtc.frames[0][1], 8)[0]
         assert ssrc != 0xAAAA  # our own SSRC, not the camera's
         tx.close()
