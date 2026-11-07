@@ -53,6 +53,7 @@ from .models import (  # re-exported: data models split into models.py
 )
 from .webrtc import WebRTCSession  # re-exported (split into webrtc.py)
 from . import h264_sps as _h264_sps
+from .ts_fanout import TsServer
 from .rtsp_publish import (
     RESENT_MAX_BACK_S,
     dtls_rtp_publish_run,
@@ -97,7 +98,6 @@ from .protocol import (  # noqa: F401 - used here and/or by the webrtc_open mixi
     _battery_cap_spans_sessions_due,
     _battery_unknown_release_s,
     _stream_startup_grace_s,
-    _DirectTsServer,
     _serve_port,
     _dtls_av_mux_run,
     _h264_has_keyframe,
@@ -1761,7 +1761,6 @@ async def _dtls_serve_loop_serve_cycle(
             # No mode runs ffmpeg: the mux's MPEG-TS is served as written.
             _mode = _dtls_serve_mode(ps.serve_url)
             _publishing = _mode == "publish"
-            _relay = self._serve_relay
             _mux_state: dict = {}
             if _publishing:
                 ps.wfile = None
@@ -1771,30 +1770,16 @@ async def _dtls_serve_loop_serve_cycle(
                 # leaves stdout open for the next one.
                 ps.wfile = os.fdopen(os.dup(1), "wb", buffering=0)
             elif _mode == "pull":
-                # Bind the port the consumer was TOLD about, or an internal
-                # one the relay splices the public port to. Binding
-                # `_ff_port or 0` once served a random ephemeral port while
-                # go2rtc dialled the advertised one and answered DESCRIBE
-                # with 404.
-                _direct_port = (
-                    _grab_free_port()
-                    if _relay is not None
-                    else _serve_port(ps.serve_url) or 0
-                )
-                _direct = _DirectTsServer(_direct_port)
-                try:
-                    _direct.start()
-                except OSError as _exc:
-                    raise _ServeUnavailable(
-                        "serve port %s could not be bound (%s)" % (_direct_port, _exc)
-                    ) from _exc
-                ps.wfile = _direct
-                if _relay is not None:
-                    _relay.set_backend(_direct.port)
+                # The camera's TsServer, bound on the advertised port for the
+                # whole serve loop (see _dtls_serve_loop); bound here only if
+                # that failed. Each cycle's mux writes through its own sink.
+                if getattr(self, "_ts_serve", None) is None:
+                    self._ts_serve = self._start_ts_serve(ps.serve_url, raise_=True)
+                ps.wfile = self._ts_serve.open()
                 _LOGGER.info(
                     "camera %s: serving TS directly on port %d",
                     getattr(self, "device_id", "?"),
-                    _direct.port,
+                    self._ts_serve.port,
                 )
             else:
                 raise _ServeUnavailable(
@@ -2031,8 +2016,6 @@ async def _dtls_serve_loop_serve_cycle(
             ps.wfile = None
             ps.mux_thread.join(timeout=2.0)
             ps.mux_thread = ps.stop_flag = None
-            if _relay is not None:
-                _relay.set_backend(None)  # no backend until the next cycle
             if _mode == "stdout" and _mux_state.get("failed"):
                 # Whoever read our stdout has gone (go2rtc kills an exec
                 # source it no longer reads, so this is rare): there is no
@@ -2835,6 +2818,7 @@ class CameraMixin(
         # Cold-start serve-port relay (holds the public port connectable through
         # the handshake so an eager go2rtc pull waits instead of being refused).
         self._serve_relay: "Optional[_ServeRelay]" = None
+        self._ts_serve: "Optional[TsServer]" = None
         # Cold-start instrumentation: monotonic at the start of an open, so any
         # thread (signaling, bridge, serve) can log elapsed-ms phase markers.
         self._cold_open_t0: "Optional[float]" = None
@@ -5756,7 +5740,8 @@ class CameraMixin(
         serve port connectable through the WebRTC handshake so an eager go2rtc
         pull waits instead of getting connection-refused).  Overrides the
         ``AIDOT_SERVE_RELAY`` env var (default on); set False to serve ffmpeg
-        directly on the public port (the pre-0.7.18 behaviour).
+        directly on the public port (the pre-0.7.18 behaviour). SDES serves
+        only: a DTLS pull serve holds its port for the whole stream itself.
 
         ``go2rtc_url`` points at a go2rtc API base.  It does two things: register
         the local serve with go2rtc (exposing its low-latency pull URL), and let
@@ -7144,6 +7129,41 @@ class CameraMixin(
         )
         return relay
 
+    def _start_ts_serve(
+        self, serve_url: Optional[str], *, raise_: bool = False
+    ) -> "Optional[TsServer]":
+        """Bind a DTLS camera's pull serve on the port its URL advertises.
+
+        Bound for the whole serve loop, from before the camera's handshake, so
+        an eager go2rtc pull connects and waits through it rather than being
+        refused - what the serve relay did for the ffmpeg serve this replaced.
+        A port that cannot be bound returns None (the first cycle tries
+        again), or with ``raise_`` raises ``_ServeUnavailable``.
+        """
+        port = _serve_port(serve_url) or 0
+        srv = TsServer(port)
+        try:
+            srv.start()
+        except OSError as exc:
+            if raise_:
+                raise _ServeUnavailable(
+                    "serve port %s could not be bound (%s)" % (port, exc)
+                ) from exc
+            _LOGGER.warning(
+                "camera %s: serve port %s could not be bound (%s) - retrying when"
+                " the camera's session is up",
+                getattr(self, "device_id", "?"),
+                port,
+                exc,
+            )
+            return None
+        _LOGGER.debug(
+            "camera %s: holding serve port :%s",
+            getattr(self, "device_id", "?"),
+            srv.port,
+        )
+        return srv
+
     async def _dtls_serve_loop(self) -> None:
         """Acquire a concurrent-stream slot, then run the serve loop.
 
@@ -7159,12 +7179,13 @@ class CameraMixin(
             )
         await slots.acquire()
         try:
-            # Inside the try on purpose: _maybe_start_serve_relay catches OSError
-            # but Thread.start() raises RuntimeError when the host is out of
+            # Inside the try on purpose: _start_ts_serve catches OSError but
+            # Thread.start() raises RuntimeError when the host is out of
             # threads, and escaping here would skip slots.release() and burn a
             # permit for the life of the process - the cap would silently shrink
             # until nothing could stream at all.
-            self._serve_relay = self._maybe_start_serve_relay(self._keepalive_rtsp_url)
+            if _dtls_serve_mode(self._keepalive_rtsp_url) == "pull":
+                self._ts_serve = self._start_ts_serve(self._keepalive_rtsp_url)
             try:
                 await self._dtls_serve_loop_inner()
             except asyncio.CancelledError:
@@ -7172,10 +7193,10 @@ class CameraMixin(
             except Exception as exc:
                 await self._release_after_loop_error("DTLS serve", exc)
         finally:
-            _relay = self._serve_relay
-            self._serve_relay = None
-            if _relay is not None:
-                _relay.close()
+            _srv = self._ts_serve
+            self._ts_serve = None
+            if _srv is not None:
+                _srv.close()
             slots.release()
 
     async def _dtls_serve_loop_inner(self) -> None:

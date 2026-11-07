@@ -34,17 +34,18 @@ half of two-minute windows, which produced several false "clean" readings
 earlier in this investigation.
 
 Three live failures before this worked were all defects in the wiring, not in
-this server or in go2rtc: a `proc.returncode` dereference when there is no
+the server or in go2rtc: a `proc.returncode` dereference when there is no
 ffmpeg process, binding an ephemeral port instead of the advertised one when no
-relay holds it, and the missing join-awareness below. The server itself
-describes cleanly against real go2rtc (`rc: 0, h264,video`).
+relay holds it, and the missing join-awareness below. The first server
+described cleanly against real go2rtc (`rc: 0, h264,video`).
 
-These drive the server directly, so they must announce keyframes the way the
-mux does (`mark_keyframe`). The container's random_access_indicator is no longer
-the primary trigger: it is per-PID, AAC audio sets it ~50x/s, and syncing on it
-spliced a late joiner onto audio with video mid-GOP. It survives only as a
-bounded fallback for a writer that never signals - covered in
-test_direct_ts_keyframe_signal.py.
+The server is now `ts_fanout.TsServer`: the camera's `TsChannel` on the
+advertised port, bound for the whole stream so an eager pull connects and
+waits through the camera's handshake (the job the serve relay did for the
+ffmpeg serve). These drive it directly, so they announce keyframes the way the
+mux does (`mark_keyframe`). The container's random_access_indicator is not a
+trigger: it is per-PID, AAC audio sets it ~50x/s, and syncing on it spliced a
+late joiner onto audio with video mid-GOP.
 """
 
 import os
@@ -53,9 +54,23 @@ import sys
 import threading
 import time
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot_cameras.camera.protocol import _DirectTsServer
+from aidot_cameras.camera.ts_fanout import TsServer
+
+
+@pytest.fixture(autouse=True)
+def _real_sockets():
+    """Real localhost sockets in this module (see test_serve_relay.py)."""
+    try:
+        import pytest_socket
+    except ImportError:
+        yield
+        return
+    pytest_socket.enable_socket()
+    yield
 
 
 def _ts(pid, *, pusi=0, rai=0, payload=b"\x00"):
@@ -88,118 +103,39 @@ def _pat(pmt_pid=0x1000):
     return _ts(0, pusi=1, payload=b"\x00" + bytes(sec))
 
 
-def _wait_consumer(srv, timeout=3.0):
-    """Block until the accept thread has registered the client.
+def _wait_consumer(srv, n=1, timeout=3.0):
+    """Block until the server has registered ``n`` consumers.
 
     `_get` returns as soon as the HTTP response arrives, but the server sends
     that response BEFORE registering the socket - deliberately, so a media write
-    can never interleave into the header. Writes in that window are dropped by
-    design, which is correct in production (the consumer simply waits for the
-    next keyframe) but makes a test that writes immediately after `_get` racy.
-    glibc happened to win the race; musl did not.
+    can never interleave into the header. A write in that window does not reach
+    the consumer, which is correct in production (it waits for the next
+    keyframe) but makes a test that writes immediately after `_get` racy.
     """
     end = time.time() + timeout
     while time.time() < end:
-        if srv.has_consumer():
+        if srv.channel.consumer_count() >= n:
             return True
         time.sleep(0.01)
     return False
 
 
-def _get(port, path="/cam.ts", read_bytes=None):
-    s = socket.create_connection(("127.0.0.1", port), timeout=5)
+def _get(port, path="/cam.ts", read_bytes=None, timeout=5.0):
+    s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
     s.sendall(f"GET {path} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
     buf = b""
-    deadline = time.time() + 5
+    deadline = time.time() + timeout
     while time.time() < deadline:
-        chunk = s.recv(65536)
+        try:
+            chunk = s.recv(65536)
+        except OSError:
+            break
         if not chunk:
             break
         buf += chunk
         if read_bytes is not None and len(buf) >= read_bytes:
             break
     return s, buf
-
-
-def test_it_binds_and_reports_its_port():
-    srv = _DirectTsServer(0)
-    try:
-        srv.start()
-        assert srv.port > 0
-    finally:
-        srv.close()
-
-
-def test_a_consumer_gets_an_http_response_then_the_media():
-    """Media only flows once a random-access point arrives - see the
-    join-awareness tests below for why. The keyframe here is what releases it."""
-    srv = _DirectTsServer(0)
-    try:
-        srv.start()
-        done = threading.Event()
-
-        def feed():
-            for _ in range(40):
-                if srv.has_consumer():
-                    break
-                time.sleep(0.05)
-            srv.mark_keyframe()  # the mux announces it
-            srv.write(_ts(0x100, pusi=1, rai=1))  # keyframe: releases the join
-            for _ in range(10):
-                srv.write(_ts(0x100, pusi=1))
-            done.set()
-
-        threading.Thread(target=feed, daemon=True).start()
-        sock, buf = _get(srv.port, read_bytes=200)
-        done.wait(3)
-        sock.close()
-        head, _, body = buf.partition(b"\r\n\r\n")
-        assert head.startswith(b"HTTP/1.0 200") or head.startswith(b"HTTP/1.1 200"), (
-            head[:60]
-        )
-        assert b"video/mp2t" in head.lower()
-        assert body.startswith(b"\x47"), body[:8]
-    finally:
-        srv.close()
-
-
-def test_writes_before_a_consumer_arrives_are_dropped_not_buffered():
-    """A live stream must not hand a late consumer stale media.
-
-    The mux runs whether or not anyone is pulling. Buffering those bytes would
-    deliver a backlog at connect - which is exactly the pre-roll that makes HA's
-    base timestamp land seconds into the stream.
-    """
-    srv = _DirectTsServer(0)
-    try:
-        srv.start()
-        for _ in range(100):
-            srv.write(b"\x47" + b"\x00" * 187)
-        assert srv.pending_bytes() == 0
-    finally:
-        srv.close()
-
-
-def test_a_disconnect_does_not_kill_the_writer():
-    """go2rtc reconnects. A dead consumer must not take the mux thread with it."""
-    srv = _DirectTsServer(0)
-    try:
-        srv.start()
-        sock, _ = _get(srv.port, read_bytes=1)
-        sock.close()
-        time.sleep(0.3)
-        for _ in range(50):
-            srv.write(b"\x47" + b"\x22" * 187)  # must not raise
-        assert srv.port > 0
-    finally:
-        srv.close()
-
-
-def test_close_is_idempotent():
-    srv = _DirectTsServer(0)
-    srv.start()
-    srv.close()
-    srv.close()
 
 
 def _drain(sock, n=8, timeout=3.0):
@@ -221,47 +157,178 @@ def _packets(body):
     return [body[i : i + 188] for i in range(0, len(body) - 187, 188)]
 
 
+def _pids(body):
+    return [((p[1] & 0x1F) << 8) | p[2] for p in _packets(body)]
+
+
+def _server():
+    srv = TsServer(0)
+    srv.start()
+    return srv
+
+
+def test_it_binds_and_reports_its_port():
+    srv = _server()
+    try:
+        assert srv.port > 0
+    finally:
+        srv.close()
+
+
+def test_a_consumer_gets_an_http_response_then_the_media():
+    """Media only flows from a keyframe - see the join-awareness tests below
+    for why. The keyframe here is what releases it."""
+    srv = _server()
+    try:
+        sink = srv.open()
+        done = threading.Event()
+
+        def feed():
+            _wait_consumer(srv)
+            sink.mark_keyframe()  # the mux announces it
+            sink.write(_ts(0x100, pusi=1, rai=1))  # keyframe: releases the join
+            for _ in range(10):
+                sink.write(_ts(0x100, pusi=1))
+            done.set()
+
+        threading.Thread(target=feed, daemon=True).start()
+        sock, buf = _get(srv.port, read_bytes=200)
+        done.wait(3)
+        sock.close()
+        head, _, body = buf.partition(b"\r\n\r\n")
+        assert head.startswith(b"HTTP/1.0 200"), head[:60]
+        assert b"video/mp2t" in head.lower()
+        assert body.startswith(b"\x47"), body[:8]
+    finally:
+        srv.close()
+
+
+def test_an_early_pull_connects_and_waits_for_the_first_mux():
+    """The cold start. go2rtc dials as soon as it is told the URL, 16-25 s
+    before the camera's first frame: it must connect (not be refused) and get
+    its response once a mux is writing, then media from the first keyframe."""
+    srv = _server()
+    try:
+        sock = socket.create_connection(("127.0.0.1", srv.port), timeout=5)
+        sock.sendall(b"GET /cam.ts HTTP/1.1\r\nHost: x\r\n\r\n")
+        sock.settimeout(0.5)
+        with pytest.raises(socket.timeout):
+            sock.recv(1)  # held: no mux yet
+        sink = srv.open()
+        sock.settimeout(5)
+        head = b""
+        while b"\r\n\r\n" not in head:
+            head += sock.recv(1)
+        assert head.startswith(b"HTTP/1.0 200")
+        assert _wait_consumer(srv)
+        sink.write(_pat())
+        sink.write(_ts(0x1000, pusi=1))
+        sink.mark_keyframe()
+        sink.write(_ts(0x100, pusi=1, rai=1))
+        assert _pids(_drain(sock, n=3)) == [0, 0x1000, 0x100]
+        sock.close()
+    finally:
+        srv.close()
+
+
+def test_writes_before_a_consumer_arrives_are_dropped_not_buffered():
+    """A live stream must not hand a late consumer stale media.
+
+    The mux runs whether or not anyone is pulling. Buffering those bytes would
+    deliver a backlog at connect - which is exactly the pre-roll that makes HA's
+    base timestamp land seconds into the stream.
+    """
+    srv = _server()
+    try:
+        sink = srv.open()
+        for _ in range(100):
+            sink.write(b"\x47" + b"\x00" * 187)
+        assert srv.channel.pending_bytes() == 0
+    finally:
+        srv.close()
+
+
+def test_a_disconnect_does_not_kill_the_writer():
+    """go2rtc reconnects. A dead consumer must not take the mux thread with it."""
+    srv = _server()
+    try:
+        sink = srv.open()
+        sock, _ = _get(srv.port, read_bytes=1)
+        assert _wait_consumer(srv)
+        sock.close()
+        time.sleep(0.3)
+        sink.mark_keyframe()
+        for _ in range(50):
+            sink.write(b"\x47" + b"\x22" * 187)  # must not raise
+        assert srv.port > 0
+    finally:
+        srv.close()
+
+
+def test_close_is_idempotent():
+    srv = _server()
+    srv.close()
+    srv.close()
+
+
 def test_a_late_consumer_is_not_handed_mid_gop_bytes():
     """The live failure. go2rtc joined mid-stream, never saw SPS/PPS, and
     answered DESCRIBE with 404. Reproduced offline: a consumer joining
     mid-stream got 'non-existing PPS 0 referenced' and no track, while the same
     server with the consumer present from byte 0 described cleanly."""
-    srv = _DirectTsServer(0)
+    srv = _server()
     try:
-        srv.start()
+        sink = srv.open()
         for _ in range(20):  # stream already running
-            srv.write(_ts(0x100, pusi=1))
+            sink.write(_ts(0x100, pusi=1))
         sock, head = _get(srv.port, read_bytes=1)
         assert _wait_consumer(srv)
         body = head.partition(b"\r\n\r\n")[2]
         for _ in range(20):  # more non-keyframe media
-            srv.write(_ts(0x100, pusi=1))
+            sink.write(_ts(0x100, pusi=1))
         body += _drain(sock, n=2, timeout=0.6)
         sock.close()
-        assert body == b"", "media sent before a random-access point"
+        assert body == b"", "media sent before a keyframe"
+    finally:
+        srv.close()
+
+
+def test_audio_random_access_does_not_start_a_consumer():
+    """AAC sets random_access_indicator ~50x/s; only the mux's keyframe signal
+    may start a consumer, or it is spliced onto audio mid-GOP."""
+    srv = _server()
+    try:
+        sink = srv.open()
+        sock, head = _get(srv.port, read_bytes=1)
+        assert _wait_consumer(srv)
+        for _ in range(20):
+            sink.write(_ts(0x101, pusi=1, rai=1))
+        body = head.partition(b"\r\n\r\n")[2] + _drain(sock, n=2, timeout=0.6)
+        sock.close()
+        assert body == b""
     finally:
         srv.close()
 
 
 def test_a_late_consumer_gets_tables_then_a_keyframe():
-    srv = _DirectTsServer(0)
+    srv = _server()
     try:
-        srv.start()
-        srv.write(_pat())
-        srv.write(_ts(0x1000, pusi=1))  # PMT
+        sink = srv.open()
+        sink.write(_pat())
+        sink.write(_ts(0x1000, pusi=1))  # PMT
         for _ in range(10):
-            srv.write(_ts(0x100, pusi=1))  # mid-GOP media
+            sink.write(_ts(0x100, pusi=1))  # mid-GOP media
         sock, head = _get(srv.port, read_bytes=1)
         assert _wait_consumer(srv)
         body = head.partition(b"\r\n\r\n")[2]
-        srv.mark_keyframe()  # the mux announces it
-        srv.write(_ts(0x100, pusi=1, rai=1))  # the next keyframe
-        srv.write(_ts(0x100, pusi=1))
+        sink.mark_keyframe()  # the mux announces it
+        sink.write(_ts(0x100, pusi=1, rai=1))  # the next keyframe
+        sink.write(_ts(0x100, pusi=1))
         body += _drain(sock, n=4)
         sock.close()
         pkts = _packets(body)
         assert len(pkts) >= 3, f"only {len(pkts)} packets"
-        pids = [((p[1] & 0x1F) << 8) | p[2] for p in pkts]
+        pids = _pids(body)
         assert pids[0] == 0, f"first packet must be the PAT, got pid {pids[0]}"
         assert pids[1] == 0x1000, f"second must be the PMT, got pid {pids[1]}"
         assert (pkts[2][3] & 0x20) and (pkts[2][5] & 0x40), (
@@ -272,17 +339,17 @@ def test_a_late_consumer_gets_tables_then_a_keyframe():
 
 
 def test_once_synced_it_keeps_forwarding():
-    srv = _DirectTsServer(0)
+    srv = _server()
     try:
-        srv.start()
-        srv.write(_pat())
-        srv.write(_ts(0x1000, pusi=1))
+        sink = srv.open()
+        sink.write(_pat())
+        sink.write(_ts(0x1000, pusi=1))
         sock, head = _get(srv.port, read_bytes=1)
         assert _wait_consumer(srv)
-        srv.mark_keyframe()
-        srv.write(_ts(0x100, pusi=1, rai=1))
+        sink.mark_keyframe()
+        sink.write(_ts(0x100, pusi=1, rai=1))
         for _ in range(6):
-            srv.write(_ts(0x100, pusi=1))
+            sink.write(_ts(0x100, pusi=1))
         body = head.partition(b"\r\n\r\n")[2] + _drain(sock, n=9)
         sock.close()
         assert len(_packets(body)) >= 8
@@ -293,25 +360,64 @@ def test_once_synced_it_keeps_forwarding():
 def test_a_reconnecting_consumer_resyncs():
     """go2rtc reconnects. The second consumer must also start at a keyframe,
     not inherit the first one's position."""
-    srv = _DirectTsServer(0)
+    srv = _server()
     try:
-        srv.start()
-        srv.write(_pat())
-        srv.write(_ts(0x1000, pusi=1))
+        sink = srv.open()
+        sink.write(_pat())
+        sink.write(_ts(0x1000, pusi=1))
         s1, _ = _get(srv.port, read_bytes=1)
         assert _wait_consumer(srv)
-        srv.mark_keyframe()
-        srv.write(_ts(0x100, pusi=1, rai=1))
+        sink.mark_keyframe()
+        sink.write(_ts(0x100, pusi=1, rai=1))
         s1.close()
         time.sleep(0.3)
         for _ in range(5):
-            srv.write(_ts(0x100, pusi=1))
+            sink.write(_ts(0x100, pusi=1))
         s2, head = _get(srv.port, read_bytes=1)
         assert _wait_consumer(srv)
         body = head.partition(b"\r\n\r\n")[2]
         body += _drain(s2, n=2, timeout=0.6)
         s2.close()
         assert body == b"", "second consumer was handed mid-GOP bytes"
+    finally:
+        srv.close()
+
+
+def test_a_new_mux_drops_its_readers_and_keeps_the_waiting_ones():
+    """Each serve cycle runs a new mux, which starts a new stream: a reader
+    that decoded the old one reconnects, as it did when the old server closed
+    with its ffmpeg. One still waiting for a keyframe stays, and starts on the
+    new mux's tables and first keyframe. A mux that outlives its cycle cannot
+    write into the next one's stream."""
+    srv = _server()
+    try:
+        old = srv.open()
+        old.write(_pat())
+        old.write(_ts(0x1000, pusi=1))
+        reader, _ = _get(srv.port, read_bytes=1)
+        assert _wait_consumer(srv)
+        old.mark_keyframe()
+        old.write(_ts(0x100, pusi=1, rai=1))
+        assert _pids(_drain(reader, n=3)) == [0, 0x1000, 0x100]
+        waiter, head = _get(srv.port, read_bytes=1)
+        assert _wait_consumer(srv, n=2)
+        old.write(_ts(0x100, pusi=1))
+        old.write(b"\x47\x01")  # a partial packet left behind
+        old.close()
+        with pytest.raises(OSError):
+            old.write(_ts(0x100, pusi=1))
+        _drain(reader, n=10, timeout=1.0)
+        assert reader.recv(1) == b"", "the reader of the old stream is dropped"
+        reader.close()
+        assert srv.channel.consumer_count() == 1, "the waiting one stays"
+        new = srv.open()
+        new.write(_pat(0x1001))
+        new.write(_ts(0x1001, pusi=1))
+        new.mark_keyframe()
+        new.write(_ts(0x100, pusi=1, rai=1))
+        body = head.partition(b"\r\n\r\n")[2] + _drain(waiter, n=3)
+        waiter.close()
+        assert _pids(body) == [0, 0x1001, 0x100], "the new mux's tables, then video"
     finally:
         srv.close()
 
@@ -335,15 +441,16 @@ def test_a_url_without_a_port_yields_none():
     assert _serve_port("not a url") is None
 
 
-def test_the_serve_loop_binds_the_advertised_port_when_there_is_no_relay(
+def test_the_serve_loop_binds_the_advertised_port(
     monkeypatch, make_camera_device_client
 ):
     """The bug this fixes.
 
-    `_DirectTsServer(_ff_port or 0)` bound port 0 - a random ephemeral port -
+    The first server bound `_ff_port or 0` - a random ephemeral port -
     whenever no relay was running, because `_ff_port` is only set on the relay
     branch. go2rtc was pointed at the advertised URL, found nothing listening,
-    and answered DESCRIBE with 404.
+    and answered DESCRIBE with 404. The server is now bound by the serve loop
+    itself, before the camera's session, on the advertised port.
     """
     from tests.keepalive_driver import DtlsServeRun, FakeDtlsSession
 
@@ -355,5 +462,6 @@ def test_the_serve_loop_binds_the_advertised_port_when_there_is_no_relay(
         [FakeDtlsSession()],
         url="http://127.0.0.1:18556/cam.ts",
         timeout=0.5,
-    ).run()
+    ).run("_dtls_serve_loop")
     assert [s.port for s in run.direct] == [18556]
+    assert run.direct[0].closed, "released with the serve loop"

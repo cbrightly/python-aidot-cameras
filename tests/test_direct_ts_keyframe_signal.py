@@ -1,7 +1,8 @@
 """A late joiner is spliced where the mux says a keyframe starts.
 
-`_DirectTsServer` holds a new consumer until it can hand over a decodable start.
-It used to decide that from the container: any TS packet with the adaptation
+The DTLS pull serve (``ts_fanout.TsServer``, a ``TsChannel`` on the advertised
+port) holds a new consumer until it can hand over a decodable start. The first
+server decided that from the container: any TS packet with the adaptation
 field's random_access_indicator set. That flag is per-PID, and AAC audio sets it
 roughly 50x/s against a video keyframe every ~2 s, so a late joiner was spliced
 onto audio and received video mid-GOP against an SPS/PPS it never got -
@@ -14,19 +15,21 @@ Gating on the flag being set on the VIDEO pid instead was tried on hardware
 in this stream, so the condition never became true. That attempt was reverted.
 
 The mux already knows. It pulls ``(data, ts, kf)`` off the queue, where ``kf``
-came from ``_h264_has_keyframe`` at the tap, and then threw it away. It now
-announces it, and the legacy container test survives only as a bounded fallback
-for a source that never signals - so a stream that does not use the signal can
-still be served rather than hanging forever.
+came from ``_h264_has_keyframe`` at the tap, and announces it
+(``mark_keyframe``). The channel starts a consumer on that signal only; the
+first server's fallback to the container flag, for a source that never
+signals, went with it: the mux is the only source and always signals (pinned
+at the bottom of this file).
 """
 
 import os
+import socket
 import sys
-import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from aidot_cameras.camera.protocol import _DirectTsServer
+from aidot_cameras.camera.ts_fanout import TsChannel
 
 VIDEO_PID = 0x0100
 AUDIO_PID = 0x0101
@@ -44,88 +47,89 @@ def _ts(pid: int, *, rai: bool = False) -> bytes:
     return pkt + b"\xff" * (188 - len(pkt))
 
 
-def _server():
-    srv = _DirectTsServer.__new__(_DirectTsServer)
-    srv._tail = b""
-    srv._pat = b"P" * 188
-    srv._pmt = b"M" * 188
-    srv._pmt_pid = 0x1000
-    srv._synced = False
-    srv._kf_pending = False
-    srv._kf_ever = False
-    srv._waiting_since = None
-    srv._lock = threading.Lock()
-    sent = bytearray()
-
-    class _Sock:
-        def sendall(self, b):
-            sent.extend(b)
-
-    srv._client = _Sock()
-    return srv, sent
+def _pat_pmt():
+    """A PAT naming PMT pid 0x1000, then that PMT (contents irrelevant)."""
+    pat = bytearray(_ts(0))
+    pat[1] |= 0x40
+    pat[4:17] = bytes([0, 0x00, 0xB0, 0x0D, 0, 1, 0xC1, 0, 0, 0, 1, 0xF0, 0x00])
+    return bytes(pat), _ts(0x1000)
 
 
-def test_audio_random_access_does_not_splice_a_signalling_source():
+def _channel():
+    ch = TsChannel("/cam")
+    a, b = socket.socketpair()
+    ch.add_consumer(a)
+    pat, pmt = _pat_pmt()
+    ch.write(pat + pmt)
+    return ch, b, pat, pmt
+
+
+def _read(sock, timeout=0.5):
+    sock.settimeout(timeout)
+    buf = b""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            c = sock.recv(65536)
+        except OSError:
+            break
+        if not c:
+            break
+        buf += c
+    return buf
+
+
+def test_audio_random_access_does_not_start_a_consumer():
     """The defect: audio RAI used to start the consumer mid-video-GOP."""
-    srv, sent = _server()
-    srv.mark_keyframe()  # source signals, so it is trusted
-    srv._kf_pending = False  # ...but no keyframe pending yet
-    srv.write(_ts(AUDIO_PID, rai=True) * 20)
-    assert not srv._synced
-    assert bytes(sent) == b""
+    ch, peer, _pat, _pmt = _channel()
+    try:
+        ch.write(_ts(AUDIO_PID, rai=True) * 20)
+        assert _read(peer) == b""
+        assert ch.started_count() == 0
+    finally:
+        ch.close()
 
 
-def test_keyframe_signal_splices_with_tables_first():
-    srv, sent = _server()
-    srv.write(_ts(AUDIO_PID, rai=True) * 3)
-    assert not srv._synced
-    srv.mark_keyframe()
-    srv.write(_ts(VIDEO_PID))
-    assert srv._synced
-    out = bytes(sent)
-    assert out[:188] == b"P" * 188, "PAT first"
-    assert out[188:376] == b"M" * 188, "then PMT"
-    assert len(out) == 3 * 188, "then the keyframe's packet"
+def test_keyframe_signal_starts_with_tables_first():
+    ch, peer, pat, pmt = _channel()
+    try:
+        ch.write(_ts(AUDIO_PID, rai=True) * 3)
+        ch.mark_keyframe()
+        ch.write(_ts(VIDEO_PID))
+        out = _read(peer)
+        assert out[:188] == pat, "PAT first"
+        assert out[188:376] == pmt, "then PMT"
+        assert out[376:] == _ts(VIDEO_PID), "then the keyframe's packet"
+    finally:
+        ch.close()
 
 
-def test_pending_flag_is_consumed_so_a_later_consumer_waits_again():
-    srv, _ = _server()
-    srv.mark_keyframe()
-    srv.write(_ts(VIDEO_PID))
-    assert srv._synced and not srv._kf_pending
+def test_the_signal_is_consumed_so_a_later_consumer_waits_again():
+    ch, peer, _pat, _pmt = _channel()
+    try:
+        ch.mark_keyframe()
+        ch.write(_ts(VIDEO_PID))
+        a, b = socket.socketpair()
+        ch.add_consumer(a)
+        ch.write(_ts(VIDEO_PID) * 3)
+        assert _read(b) == b"", "no second start without a second keyframe"
+        assert len(_read(peer)) == 6 * 188, "the first keeps flowing"
+    finally:
+        ch.close()
 
 
-def test_everything_flows_once_synced():
-    srv, sent = _server()
-    srv.mark_keyframe()
-    srv.write(_ts(VIDEO_PID))
-    before = len(bytes(sent))
-    srv.write(_ts(AUDIO_PID) + _ts(VIDEO_PID))
-    assert len(bytes(sent)) == before + 2 * 188
-
-
-def test_non_signalling_source_still_starts_after_the_grace_period():
-    """A writer that never calls mark_keyframe must not hang forever.
-
-    This is the regression that gating solely on a video-pid flag caused:
-    zero bytes, which is worse than the bug it was fixing.
-    """
-    srv, sent = _server()
-    srv.write(_ts(AUDIO_PID, rai=True))
-    assert not srv._synced, "must wait out the grace period first"
-    srv._waiting_since -= _DirectTsServer._LEGACY_SYNC_AFTER_S + 1
-    srv.write(_ts(AUDIO_PID, rai=True))
-    assert srv._synced, "a non-signalling source must still be servable"
-    assert bytes(sent), "and must actually receive bytes"
-
-
-def test_a_signalling_source_never_falls_back():
-    """Once a source has signalled, the container test must never win."""
-    srv, _ = _server()
-    srv.mark_keyframe()
-    srv._kf_pending = False
-    srv._waiting_since = 0.0  # grace long expired
-    assert srv._legacy_sync_ok(_ts(AUDIO_PID, rai=True)) is False
+def test_a_signal_with_no_whole_packet_waits_for_one():
+    """A keyframe whose first bytes are a partial packet keeps its signal for
+    the write that completes it."""
+    ch, peer, pat, pmt = _channel()
+    try:
+        pkt = _ts(VIDEO_PID)
+        ch.mark_keyframe()
+        ch.write(pkt[:100])
+        ch.write(pkt[100:])
+        assert _read(peer) == pat + pmt + pkt
+    finally:
+        ch.close()
 
 
 def _mux_into(sink):
@@ -157,9 +161,9 @@ def _mux_into(sink):
 
 
 def test_mux_forwards_the_signal_only_to_sinks_that_understand_it():
-    """The mux announces each keyframe to a sink that can take it (the direct
-    TS server), and the fail-flag wrapper must not raise on one that cannot
-    (the ffmpeg path's pipe has no hook)."""
+    """The mux announces each keyframe to a sink that can take it (the pull
+    serve), and the fail-flag wrapper must not raise on one that cannot
+    (stdout and a recording file have no hook)."""
     import io
 
     class _Signalling(io.BytesIO):

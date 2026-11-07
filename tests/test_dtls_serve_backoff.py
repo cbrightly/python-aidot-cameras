@@ -237,7 +237,7 @@ class _Run:
 
         cam._streaming_active = True
         cam._keepalive_rtsp_url = _URL
-        cam._serve_relay = None
+        cam._ts_serve = None
 
         run = self
 
@@ -327,7 +327,7 @@ class _Run:
 
         cam.async_open_webrtc_stream = _open
         cam._install_av_taps = lambda pc, vq, aq: True
-        cam._maybe_start_serve_relay = lambda url: None
+        cam._start_ts_serve = lambda url, **kw: None
         cam._go_dormant = _go_dormant
         cam._viewer_present = _viewer_present
         monkeypatch.setattr(cc, "_dtls_serve_loop_serve_cycle", _serve)
