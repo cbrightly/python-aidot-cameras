@@ -1459,10 +1459,8 @@ def _no_media_abandon_due(*, answered_since_s, grace_s: float, media_pkts: int) 
     after webrtcReq, and the finding that the trigger arms within about a
     second of the answer or never (ROAD-TO-1.0 item 3).
 
-    This used to be three rules on the same 20 s, each timed from its own
-    event (nomination, answer, LIVING) and each blind to the others' shapes.
-    Which shape the attempt was in is still worth knowing, and
-    :func:`_no_media_shape` names it for the stall report.
+    Which shape the attempt was in (nomination, answer, LIVING) is still
+    worth knowing, and :func:`_no_media_shape` names it for the stall report.
 
     ``media_pkts`` counts any media, audio included: a camera that is sending
     something is acting on the session, and the wait ends on its own once the
@@ -1486,8 +1484,7 @@ def _no_media_shape(
 ) -> str:
     """Which stall an attempt ended by :func:`_no_media_abandon_due` was in.
 
-    The names are the ones the stall report has always carried, so a log
-    reader keeps the distinction the three separate rules used to make:
+    The names are the ones the stall report has always carried:
 
       * ``no-probe``: the camera answered and then never started ICE - nothing
         nominated, no probe, no connectivity check answered (measured
@@ -1673,11 +1670,10 @@ def _should_skip_doomed_serve(
     receives no media at all: measured 2026-09-03 as ~14 s of delay and a lost
     audio track before the retry that actually worked.
 
-    This once applied only to the stale-offer backstop, on the reasoning that
-    the plain timeout path was a transient the stream worker tolerated and
-    retried into.  **That is retracted.**  Measured 2026-09-05 on a camera that
-    dropped off the WiFi: every attempt ran the full first-media wait, timed out
-    with nothing observed, launched the serve anyway, and ffmpeg died at once -
+    It covers the plain timeout path as well as the stale-offer backstop.
+    Measured 2026-09-05 on a camera that dropped off the WiFi: every attempt
+    ran the full first-media wait, timed out with nothing observed, launched
+    the serve anyway, and ffmpeg died at once -
 
         Could not find codec parameters for stream 1 (Video: h264, none):
                                                             unspecified size
@@ -1685,8 +1681,7 @@ def _should_skip_doomed_serve(
         [out#0/rtsp] Could not write header (incorrect codec parameters ?)
 
     11 attempts and 6 stalls in 25 minutes, each spawning an ffmpeg that could
-    not start.  That is not a transient being tolerated, it is a permanent
-    failure being looped on, so the timeout path is covered too.
+    not start: a permanent failure being looped on, not a transient.
 
     ``serving`` is what keeps this to the case it is named for. The open path
     is shared: ``async_speak`` (press-to-talk, siren, announce) and
@@ -1822,18 +1817,10 @@ def _answer_ready_for_this_open(stamp, open_started_at) -> bool:
 def _stun_window_answer_exit_due(*, stun_seen: bool, answer_ready: bool) -> bool:
     """Whether the STUN responder window has nothing left to wait for.
 
-    Measured on two cold A001064 opens, when the window still had a 20 s
-    branch for a webrtcReq echo (since removed):
-
-      * the 20 s window: answer at +0.72 s, window ran to +5.05 s and left on
-        1.5 s of ICE silence.
-      * the 2.5 s window: answer at +0.22 s, window ran the full 2.5 s cap and
-        left on the deadline.
-
-    Both held the answer for the whole window.  Nothing else in the window is
-    load-bearing by then either: an SRTP packet already breaks out of it, a
-    camera that never probes already leaves on ``_pre_stun_idle``, and the
-    bridge thread picks the responder role back up ~30 ms later.
+    Once the answer is in and the camera is probing, the window only holds
+    the answer back: an SRTP packet already breaks out of it, a camera that
+    never probes leaves on ``_pre_stun_idle``, and the bridge thread picks the
+    responder role back up ~30 ms later.
 
     ``stun_seen`` is the camera's own evidence that it is running ICE: a probe
     this host actually answered, which is why it is set where the reply is sent
@@ -1879,7 +1866,7 @@ def _turn_target(entries, user_id):
 
     Our entry is the one whose ``Username`` is our user id, else the first.
     The SDES open's TURN allocations (pre-offer in relay mode, post-offer
-    otherwise) each used to parse this inline.
+    otherwise) share it.
     """
     if not entries:
         return None
@@ -2795,8 +2782,7 @@ _SDES_ANSWER_VIDEO_PTS = (96, 97)
 def _should_capture_sprop(kind, decrypted: bool, sprop_done: bool) -> bool:
     """May this packet's payload be mined for SPS/PPS and cached to disk?
 
-    ``decrypted`` is the load-bearing term and it used to be missing.  The
-    bridge's ``_fwd_pkt`` starts as the raw inbound packet and is rebound only
+    ``decrypted`` is the load-bearing term.  The bridge's ``_fwd_pkt`` starts as the raw inbound packet and is rebound only
     when ``unprotect`` succeeds, so it stays ciphertext whenever there is no
     SRTP receive session - pylibsrtp is in the optional ``webrtc`` extra, so a
     base install never has one - or when ``unprotect`` raised, since that
@@ -2869,15 +2855,12 @@ def _serve_video_pt(observed, answer, pinned) -> "Optional[int]":
     exit reason stopped being flushed out of the stderr tail by Non-monotonic
     DTS noise.
 
-    This docstring used to say the reference A001064 "ANSWERS 97 (H.265) and
-    SENDS 96 (H.264) in every observed session". That is RETRACTED. Measured on
-    2026-09-04 by reading the first decrypted NAL of 44 cold opens: the answer
-    and the wire agree every time. The camera simply picks a codec per session
-    -- 40 of the 44 negotiated H.264 (payload begins 0x67, an H.264 SPS with
+    The answer and the wire agree: measured 2026-09-04 by reading the first
+    decrypted NAL of 44 cold opens, the camera picks a codec per session --
+    40 of the 44 negotiated H.264 (payload begins 0x67, an H.264 SPS with
     profile_idc 0x4D level 0x1F, matching the avc1.4D001F go2rtc reports) and 4
     negotiated H.265 (0x40/0x42/0x44 -- VPS, SPS, PPS -- then 0x62 FU
-    fragments). Both are served correctly today. The retracted claim reads as a
-    demux bug and very nearly bought a fix for one that does not exist.
+    fragments). Both are served correctly.
 
     Returns None when nothing is known; the caller keeps its own "could not
     narrow" path rather than having a payload type invented for it.
@@ -3025,9 +3008,8 @@ async def _sdes_await_answer_or_terminal(
 
     A terminal webrtcResp ack (-50002 max-streams / -50015 SD-cap) means the
     camera REFUSED this stream; the whole point of classifying it as terminal
-    is that neither waiting nor retrying can help.  The SDES path used to watch
-    only ``answer_fut``, so a refusal cost the full answer budget and then a
-    pointless DTLS offer on top, back when there was a DTLS fallback.
+    is that neither waiting nor retrying can help, so it ends the wait at
+    once instead of costing the full answer budget.
 
     Raises ``AidotCameraBusy`` the moment the refusal lands, ``TimeoutError``
     if neither arrives in ``timeout`` (the caller's existing no-answer path).
@@ -3775,12 +3757,9 @@ def make_sdes_bridge(
                             _br_level = _classify_ffmpeg_exit(
                                 _br_rc, _br_teardown_requested
                             )
-                            # Name the camera.  These lines used to carry no
-                            # device id at all, and this account runs several
-                            # SDES cameras at once, so a burst of exits could
-                            # not be attributed to one of them without extra
-                            # tooling - which sent a live investigation down
-                            # the wrong path once already.
+                            # Name the camera: an account runs several SDES
+                            # cameras at once, and a burst of exits has to be
+                            # attributable to one of them.
                             _br_dev = getattr(self, "device_id", "?")
                             _br_msg = (
                                 "camera %s: SDES bridge: ffmpeg exited with"
@@ -3973,9 +3952,7 @@ def make_sdes_bridge(
                 # falling back costs correctness on the very sessions this
                 # is for.
                 # Guard order is cost order: the module constant first,
-                # so the default REMB-off config pays nothing per packet
-                # (the sender lookup used to sit above this line and ran
-                # ~300x/s for a feature that ships disabled).
+                # so the default REMB-off config pays nothing per packet.
                 if (
                     REMB_TARGET_BPS > 0
                     and hasattr(_bridge_fn, "_cam_video_ssrc")
@@ -4895,15 +4872,11 @@ def make_sdes_bridge(
                             if not _sdes_probe_received:
                                 _sdes_probe_received = True
                                 _last_hb_ts = _time_br.time()  # HB fires in 10s
-                            # Guard on a counter that is actually assigned.
-                            # This used to test `_tutk_seq`, a name nothing
-                            # ever set, so hasattr was False on EVERY packet
-                            # and both counters were reset to 0 each time -
-                            # every synthesized packet went out with
-                            # sequence number 1.  ffmpeg reads a constant
-                            # sequence as a stream of discontinuities and
-                            # reports `RTP: missed N packets` for loss that
-                            # never happened.
+                            # Guard on a counter that is actually assigned:
+                            # resetting it per packet would send a constant
+                            # sequence number, which ffmpeg reads as
+                            # `RTP: missed N packets` for loss that never
+                            # happened.
                             if not hasattr(_bridge_fn, "_tutk_seq_v"):
                                 _bridge_fn._tutk_seq_a = 0
                                 _bridge_fn._tutk_seq_v = 0
@@ -6395,8 +6368,8 @@ async def _sdes_open_turn_pre_allocation(self, ps: _SdesOpenState) -> None:
     # _sdes_offer_media_endpoint), so it has to exist before the offer is
     # built.  Every other mode offers host/srflx at once and trickles one
     # allocation after webrtcReq (_sdes_open_turn_allocation), so the camera
-    # starts on the offer while the TURN round-trips run; this used to block
-    # every offer on two of them (~2-3 s).  Connection mode "lan" skips the
+    # starts on the offer while the TURN round-trips (~2-3 s) run.
+    # Connection mode "lan" skips the
     # relay altogether (never for a battery camera, see
     # _resolve_sdes_skip_turn).  The cost stays instrumented: grep
     # ``signaling-wait[`` for sdes-turn-prealloc and sdes-turn-alloc.
@@ -6451,8 +6424,7 @@ async def _sdes_open_turn_pre_allocation(self, ps: _SdesOpenState) -> None:
     # PreCon cameras (sptPreconn=1) take SESSION_MODE_REQ over an SCTP data
     # channel, so the offer carries an m=application section for the camera
     # to answer. Only its presence matters: the section is keyed by its
-    # a=crypto line, not by a fingerprint (an EC certificate used to be
-    # generated here on every open to decide this boolean).
+    # a=crypto line, not by a fingerprint.
     ps._dc_probe_fp = "present"
 
 
@@ -6477,11 +6449,9 @@ async def _sdes_open_build_offer(self, ps: _SdesOpenState) -> None:
     # AES_CM_128_HMAC_SHA1_80: 16-byte key + 14-byte salt = 30 bytes.
     ps.srtp_key_audio = base64.b64encode(os.urandom(30)).decode()
     ps.srtp_key_video = base64.b64encode(os.urandom(30)).decode()
-    # DEBUG is not low enough for real key material.  This used to log the
-    # decoded master key AND salt in full hex - the whole secret, not a
-    # prefix - on the reasoning that DEBUG is not "production-level".  But
-    # Home Assistant users turn this integration's logger to debug precisely
-    # when something is wrong, and then paste the log into a public issue.
+    # Only fingerprints, even at DEBUG: Home Assistant users turn this
+    # integration's logger to debug precisely when something is wrong, and
+    # then paste the log into a public issue.
     _LOGGER.debug(
         "sdes: offer key=%s psk=%s",
         _key_fingerprint(ps.srtp_key_audio),
@@ -6823,9 +6793,8 @@ async def _sdes_open_write_ffmpeg_sdp_and_send_webrtcreq(
     # ice_config so the camera can allocate a relay and probe our srflx/host
     # candidates when direct connectivity fails (e.g. symmetric NAT).
     # Advertise an ICE server to the camera only when we actually have a
-    # URI for it.  With AIDOT_STUN_SERVERS="" this used to put
-    # {"Uris": []} into webrtcReq - an entry the camera must parse and
-    # that names no server.
+    # URI for it: with AIDOT_STUN_SERVERS="" there is none, and an empty
+    # {"Uris": []} entry would name no server.
     _sdes_stun_uris = stun_server_uris()
     _sdes_ice_server_list = [{"Uris": _sdes_stun_uris}] if _sdes_stun_uris else []
     _sdes_ice_server_list.extend(ps._sdes_turn_entries)
@@ -7458,11 +7427,9 @@ async def _sdes_open_harvest_answer(self, ps: _SdesOpenState) -> None:
     state through ``ps`` (a ``_SdesOpenState``).
     """
     # One loop cycle lets an answer the MQTT thread has already queued
-    # resolve.  Nothing waits beyond that: the bridge starts now and the
-    # first-media wait applies an answer that lands later (_adopt_answer_sdp,
-    # then the nomination from it), as the battery wake path always has.
-    # This used to wait up to 8 s here, while nothing answered the camera's
-    # binding requests.
+    # resolve.  Nothing waits beyond that: the bridge starts now and an
+    # answer that lands later is adopted from answer_fut's done callback
+    # (_adopt_answer_sdp, then the nomination from it).
     await asyncio.sleep(0)
     # A camera at its viewer cap acks -50002/-50015 about a second after
     # webrtcReq and then never answers; one already in hand stops the open
@@ -8720,12 +8687,9 @@ class _SdesOpenMixin:
                 _vpt,
                 _mismatches,
             )
-        # Which single video payload type the line can be narrowed to.
-        # NOTE: the no-video case this was written for no longer reaches here -
-        # an open with nothing observed is abandoned above, so _vpt is always
-        # set by this point. What is left is an OBSERVED but unadvertised
-        # payload type, which is why the messages below no longer claim that
-        # no video was seen.
+        # Which single video payload type the line can be narrowed to. An
+        # open with nothing observed is abandoned above, so _vpt is set here;
+        # this handles an OBSERVED but unadvertised payload type.
         if (
             _vpt not in _SDP_VIDEO_PTS
             and ps.answer_fut is not None
