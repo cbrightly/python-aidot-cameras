@@ -15,17 +15,16 @@ function each, all on default paths.
 - **`go2rtc.async_ensure_stream` and `go2rtc.async_remove_stream`: one locked
   write path to go2rtc.** `async_ensure_stream(client, name, source=None, *,
   recreate=False)` sends the optional DELETE (`recreate`, for a camera whose
-  H.264 parameter sets change between sessions), the PUT and, only if the PUT
-  is rejected, the stream-list check, all under the server's write lock so no
-  other write lands between them. It returns an `EnsureResult` (`outcome`:
-  `REGISTERED`, `UNCHANGED` for a rejected PUT on a stream go2rtc already
-  holds, or `FAILED`; a `reason`; `ok`). `source=None` defines the stream
+  H.264 parameter sets change between sessions) and the PUT under the
+  server's write lock, so no other write lands between them, then, only if
+  the PUT is rejected, the stream-list check. It returns an `EnsureResult`
+  (`outcome`: `REGISTERED`, `UNCHANGED` for a rejected PUT on a stream go2rtc
+  already holds, or `FAILED`; `ok`). `source=None` defines the stream
   with `PLACEHOLDER_SOURCE`, for a stream whose media is published into it.
   The Home Assistant integration now registers through it instead of its own
   copy, and `prefer_go2rtc` (the standalone `_register_with_go2rtc` path) and
   stream removal on stop go through the same calls. The request sequence
-  go2rtc sees is unchanged. The write lock may now be re-entered by the task
-  holding it.
+  go2rtc sees is unchanged.
 - **Experimental, off by default: MQTT credentials the way the app fetches
   them** (`AIDOT_MQTT_CONFIG2=1`). `GET /v25/commons/mqttConfig2` with
   `sessionType=App` and a per-install 21-character `sessionId`, generated once

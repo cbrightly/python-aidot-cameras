@@ -336,14 +336,14 @@ def test_a_rejected_put_with_the_stream_present_is_unchanged():
     # while the streams stay registered: that is not a failure to serve.
     s = _FakeSession(put_status=400, streams={"cam": {"producers": []}})
     r = asyncio.run(async_ensure_stream(Go2rtcClient(s, _API), "cam", "rtsp://x/y"))
-    assert r.outcome is EnsureOutcome.UNCHANGED and r.ok and r.reason
+    assert r.outcome is EnsureOutcome.UNCHANGED and r.ok
     assert _seq(s) == [("PUT", "cam"), ("GET", None)]
 
 
 def test_a_rejected_put_with_the_stream_absent_fails():
     s = _FakeSession(put_status=500)
     r = asyncio.run(async_ensure_stream(Go2rtcClient(s, _API), "cam", "rtsp://x/y"))
-    assert r.outcome is EnsureOutcome.FAILED and not r.ok and r.reason
+    assert r.outcome is EnsureOutcome.FAILED and not r.ok
 
 
 def test_an_unreachable_go2rtc_fails_without_raising():
@@ -356,7 +356,8 @@ def test_concurrent_ensures_on_one_server_run_one_after_the_other():
     # The DELETE-then-PUT that rebuilds a stream must be atomic: another
     # caller's write landing between the two would re-create the definition
     # the first is replacing, or tear go2rtc's config file. Holds across
-    # client objects and the GET that settles a rejected PUT.
+    # client objects. The GET that settles a rejected PUT is a read and runs
+    # after the lock is released, so it may land beside the next write.
     s = _FakeSession(write_delay=0.02, put_status=400, streams={"a": {}, "b": {}})
 
     async def run():
@@ -369,16 +370,30 @@ def test_concurrent_ensures_on_one_server_run_one_after_the_other():
 
     ra, rb, removed = asyncio.run(run())
     assert ra.outcome is rb.outcome is EnsureOutcome.UNCHANGED and removed
-    assert _seq(s) == [
+    assert [c for c in _seq(s) if c[0] != "GET"] == [
         ("DELETE", "a"),
         ("PUT", "a"),
-        ("GET", None),
         ("DELETE", "b"),
         ("PUT", "b"),
-        ("GET", None),
         ("DELETE", "c"),
     ]
+    assert [c for c in _seq(s) if c[0] == "GET"] == [("GET", None)] * 2
     assert s.max_writes_in_flight == 1
+
+
+def test_the_settling_get_runs_with_the_lock_released():
+    s = _FakeSession(put_status=400, streams={"cam": {}})
+    c = Go2rtcClient(s, _API)
+    held = []
+    real_get = c._get
+
+    async def spy_get():
+        held.append(c._write_lock().locked())
+        return await real_get()
+
+    c._get = spy_get
+    r = asyncio.run(async_ensure_stream(c, "cam", "rtsp://x/y"))
+    assert r.outcome is EnsureOutcome.UNCHANGED and held == [False]
 
 
 def test_ensures_on_different_servers_do_not_queue_on_each_other():
