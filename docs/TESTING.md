@@ -89,11 +89,14 @@ that never probed, and LIVING never acted on (`_no_media_shape` names which for
 the stall report). A camera that never answers at all still runs the full
 window.
 
-A companion constant, `_PRE_LAUNCH_ANSWER_WAIT_S` (8 s), bounds how long the
-open waits for the camera's `webrtcResp` before parsing it for the ICE
-credentials the nomination needs. It exists because giving that answer a single
-event-loop cycle - what the code did before - meant it was never actually there,
-and no SDES camera ever streamed.
+The open does not wait for the camera's `webrtcResp` before starting the
+bridge. An answer already in hand is applied before it starts; one that lands
+later is applied in the first-media wait (`_adopt_answer_sdp`), which nominates
+from it at once and hands its credentials to the bridge's 2.5 s nomination
+tick. Before the nomination ran from the wait, an answer missed at bridge start
+was never nominated and no SDES camera streamed; that is what the old 8 s
+`_PRE_LAUNCH_ANSWER_WAIT_S` covered, at the cost of unanswered binding requests
+while it ran.
 
 ## The live tier
 

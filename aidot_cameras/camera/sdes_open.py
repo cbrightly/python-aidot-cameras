@@ -1539,16 +1539,6 @@ _NO_MEDIA_STATUS = {
 }
 
 
-# How long to wait for the camera's webrtcResp before parsing it for the ICE
-# credentials the nomination needs.  The STUN window ahead of it closes on a
-# fixed schedule, and the answer lands about 2.4 s AFTER it does (measured on an
-# A001513: webrtcReq -> answer 2.9 s), so the harvest below used to give the
-# answer a single event-loop cycle and almost always read an empty string.
-# Everything downstream then behaved as if the camera had never answered.
-# Bounded so a camera that truly never answers still falls through to the
-# existing no-answer path on its own schedule.
-_PRE_LAUNCH_ANSWER_WAIT_S = 8.0
-
 # Extra time for the audio payload type once video is known.  Measured on an
 # A001513: audio follows video by 40-70ms, because the camera answers BUNDLE and
 # both share one 5-tuple - so audio is never "late" and this only absorbs jitter.
@@ -7330,89 +7320,104 @@ def _sdes_key_from_sdp(sdp: str, media: str) -> str:
     return ""
 
 
+def _adopt_answer_sdp(ps: "_SdesOpenState", sdp: str) -> None:
+    """Apply the camera's answer to the open: the data-channel probe result
+    and the camera's SRTP keys.
+
+    Runs once per open: before the bridge starts when the answer is already
+    in, otherwise from the first-media wait when it lands. Everything set here
+    is read by the bridge per packet (``get_srtp_key_audio``,
+    ``get_cam_key_audio``, ``get_dc_answer_has_app``), so a late adoption
+    takes effect at once. ``ps._sctp`` is updated in place: the bridge holds
+    that dict.
+    """
+    ps._pre_launch_answer_sdp = sdp
+    _LOGGER.debug(
+        "_open_sdes_stream: camera webrtcResp answer SDP (len=%d)",
+        len(sdp),
+    )
+    # Probe result: did camera echo back m=application?
+    if ps._dc_probe_fp:
+        _dc_ans_lines, _in_dc_sec = [], False
+        for _aln in sdp.splitlines():
+            if _aln.startswith("m=application"):
+                _in_dc_sec = True
+            elif _aln.startswith("m=") and _in_dc_sec:
+                break
+            if _in_dc_sec:
+                _dc_ans_lines.append(_aln)
+        if _dc_ans_lines:
+            # The section carries the camera's a=crypto inline key
+            # (the data channel's SRTP key); it is masked before this
+            # reaches the log.
+            ps._status(
+                "DC probe ACCEPTED: camera answered m=application"
+                f" ({len(_dc_ans_lines)} lines):\n"
+                + mask_sdp_secrets("\n".join(_dc_ans_lines))
+            )
+        else:
+            ps._status(
+                "DC probe REJECTED: camera did not include m=application"
+                " in its answer - BUNDLE+DTLS unsupported on this firmware"
+            )
+
+    # SCTP DataChannel for SDES cameras.
+    # Source analysis confirmed SESSION_MODE_REQ (5376) must be sent via
+    # DataChannel.send(), NOT raw TUTK 0xC8 UDP: changeStream sends 0x1500
+    # through sendCtrl (KVSWebRTCChannel.smali:12377), which ends in
+    # DataChannel.send (:9418).
+    # Camera uses plain SCTP over UDP (same ICE port), no DTLS.
+    # We are the SCTP client (proactive INIT), camera is server.
+    ps._dc_answer_has_app = "m=application" in sdp
+
+    ps._cam_key_audio = _sdes_key_from_sdp(sdp, "audio")
+    _cam_key_video = _sdes_key_from_sdp(sdp, "video")
+    if ps._cam_key_audio and ps._cam_key_audio != ps.srtp_key_audio:
+        ps._status("Using camera's audio SRTP key from answer (was our offer key)")
+        ps.srtp_key_audio = ps._cam_key_audio
+    if _cam_key_video and _cam_key_video != ps.srtp_key_video:
+        ps._status("Using camera's video SRTP key from answer (was our offer key)")
+        ps.srtp_key_video = _cam_key_video
+
+
 async def _sdes_open_harvest_answer(self, ps: _SdesOpenState) -> None:
     """Phase of the SDES open: harvest_answer.
 
     Split out of ``_open_sdes_stream_impl``; reads and writes the open's
     state through ``ps`` (a ``_SdesOpenState``).
     """
+    # One loop cycle lets an answer the MQTT thread has already queued
+    # resolve.  Nothing waits beyond that: the bridge starts now and the
+    # first-media wait applies an answer that lands later (_adopt_answer_sdp,
+    # then the nomination from it), as the battery wake path always has.
+    # This used to wait up to 8 s here, while nothing answered the camera's
+    # binding requests.
     await asyncio.sleep(0)
-    # ...but one cycle only helps if the answer had already ARRIVED.  When it
-    # has, the window above now leaves as soon as it is readable and this
-    # harvest is a formality; when it has not, the window ran to its own
-    # deadline and this wait is the whole story.  Either way, wait for it:
-    # the ICE credentials it carries are what the nomination below needs -
-    # without them the camera is never nominated, stays in ICE "Checking",
-    # and never sends SRTP no matter how long the first-media wait runs.
-    # (This comment used to assert the window "closes ~2.4 s before the
-    # camera answers".  That stopped being true when the livePlayReq echo
-    # wait was cut to 0.25 s, and the window then sat on the answer for
-    # seconds - see _stun_window_answer_exit_due.)
-    # shield() so a timeout here cannot cancel the future the real answer
-    # await still consumes further down.
-    # A TERMINAL refusal races the harvest.  A camera at its viewer cap acks
-    # -50002/-50015 about a second after webrtcReq and then, by definition,
-    # never answers - so without this the refusal sat unread for the whole
-    # _PRE_LAUNCH_ANSWER_WAIT_S before the later checks could see it, and we
-    # launched a bridge for a stream the camera had already declined.
-    if not ps.answer_fut.done():
-        _ans_wait_t0 = time.monotonic()
-        try:
-            _harvest_waits = [asyncio.shield(ps.answer_fut)]
-            if ps.terminal_error_fut is not None:
-                _harvest_waits.append(asyncio.shield(ps.terminal_error_fut))
-            _h_done, _h_pending = await asyncio.wait(
-                _harvest_waits,
-                timeout=_PRE_LAUNCH_ANSWER_WAIT_S,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            # Cancel the shield WRAPPERS only; the futures they guard are
-            # owned by the MQTT handler and are still consumed below.
-            for _h in _h_pending:
-                _h.cancel()
-            if ps.terminal_error_fut is not None and ps.terminal_error_fut.done():
-                _code, _desc = ps.terminal_error_fut.result()
-                ps._status(
-                    f"camera refused: ack {_code} {_desc}"
-                    " - terminal, not launching the bridge"
-                )
-                raise AidotCameraBusy(_code, _desc)
-            if ps.answer_fut.done():
-                ps._status(
-                    "webrtcResp answer harvested after %.2fs"
-                    % (time.monotonic() - _ans_wait_t0)
-                )
-            else:
-                ps._status(
-                    "no webrtcResp answer within %.0fs - proceeding without ICE"
-                    " credentials (nomination will retry during the first-media"
-                    " wait)" % _PRE_LAUNCH_ANSWER_WAIT_S
-                )
-        except AidotCameraBusy:
-            raise
-        except Exception:
-            _LOGGER.debug(
-                "camera %s: swallowed exception awaiting answer",
-                getattr(self, "device_id", "?"),
-                exc_info=True,
-            )
+    # A camera at its viewer cap acks -50002/-50015 about a second after
+    # webrtcReq and then never answers; one already in hand stops the open
+    # here, and a later one ends the first-media wait.
+    if ps.terminal_error_fut is not None and ps.terminal_error_fut.done():
+        _code, _desc = ps.terminal_error_fut.result()
+        ps._status(
+            f"camera refused: ack {_code} {_desc} - terminal, not launching the bridge"
+        )
+        raise AidotCameraBusy(_code, _desc)
     ps._pre_launch_answer_sdp = ""
     ps._our_tx_srtp_key_audio = ps.srtp_key_audio
-    ps._cam_key_audio = ""  # camera's answer key; set in SDP parse block below
-    _cam_key_video: str = ""  # camera's video SRTP key; set in SDP parse block below
+    ps._cam_key_audio = ""  # camera's answer key; set by _adopt_answer_sdp
     ps._dc_answer_has_app = False  # set True if camera echoes m=application; init here so bridge closure never sees NameError on late-wake path
     ps._sctp = {  # initialized here for the same reason - bridge closure
-        "state": "CLOSED",
-        "local_tag": 0,
-        "peer_tag": 0,
-        "local_tsn": 0,
-        "peer_tsn": 0,
-        "stream_seq": 0,
+        "state": "CLOSED",  # INIT_SENT -> COOKIE_ECHOED -> ESTABLISHED -> DONE
+        "local_tag": 0,  # our verification tag (sent in INIT)
+        "peer_tag": 0,  # camera's verification tag (from INIT-ACK)
+        "local_tsn": 0,  # our TSN counter
+        "peer_tsn": 0,  # camera's Initial TSN (from its INIT/INIT-ACK)
+        "stream_seq": 0,  # stream sequence number
     }
-    if ps.answer_fut.done():
+    _pre_sdp = ""
+    if ps.answer_fut.done() and not ps.answer_fut.cancelled():
         try:
-            _pre_ans = ps.answer_fut.result()
-            ps._pre_launch_answer_sdp = (_pre_ans or {}).get("sdp", "")
+            _pre_sdp = (ps.answer_fut.result() or {}).get("sdp", "") or ""
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
@@ -7420,61 +7425,13 @@ async def _sdes_open_harvest_answer(self, ps: _SdesOpenState) -> None:
                 "_sdes_open_harvest_answer",
                 exc_info=True,
             )
-    if ps._pre_launch_answer_sdp:
-        _LOGGER.debug(
-            "_open_sdes_stream: camera webrtcResp answer SDP (len=%d)",
-            len(ps._pre_launch_answer_sdp),
+    if _pre_sdp:
+        _adopt_answer_sdp(ps, _pre_sdp)
+    else:
+        ps._status(
+            "no webrtcResp answer yet - starting the bridge; the answer is"
+            " applied when it lands"
         )
-        # Probe result: did camera echo back m=application?
-        if ps._dc_probe_fp:
-            _dc_ans_lines, _in_dc_sec = [], False
-            for _aln in ps._pre_launch_answer_sdp.splitlines():
-                if _aln.startswith("m=application"):
-                    _in_dc_sec = True
-                elif _aln.startswith("m=") and _in_dc_sec:
-                    break
-                if _in_dc_sec:
-                    _dc_ans_lines.append(_aln)
-            if _dc_ans_lines:
-                # The section carries the camera's a=crypto inline key
-                # (the data channel's SRTP key); it is masked before this
-                # reaches the log.
-                ps._status(
-                    "DC probe ACCEPTED: camera answered m=application"
-                    f" ({len(_dc_ans_lines)} lines):\n"
-                    + mask_sdp_secrets("\n".join(_dc_ans_lines))
-                )
-            else:
-                ps._status(
-                    "DC probe REJECTED: camera did not include m=application"
-                    " in its answer - BUNDLE+DTLS unsupported on this firmware"
-                )
-
-        # SCTP DataChannel for SDES cameras.
-        # Source analysis confirmed SESSION_MODE_REQ (5376) must be sent via
-        # DataChannel.send(), NOT raw TUTK 0xC8 UDP: changeStream sends 0x1500
-        # through sendCtrl (KVSWebRTCChannel.smali:12377), which ends in
-        # DataChannel.send (:9418).
-        # Camera uses plain SCTP over UDP (same ICE port), no DTLS.
-        # We are the SCTP client (proactive INIT), camera is server.
-        ps._dc_answer_has_app = "m=application" in ps._pre_launch_answer_sdp
-        ps._sctp = {
-            "state": "CLOSED",  # INIT_SENT -> COOKIE_ECHOED -> ESTABLISHED -> DONE
-            "local_tag": 0,  # our verification tag (sent in INIT)
-            "peer_tag": 0,  # camera's verification tag (from INIT-ACK)
-            "local_tsn": 0,  # our TSN counter
-            "peer_tsn": 0,  # camera's Initial TSN (from its INIT/INIT-ACK)
-            "stream_seq": 0,  # stream sequence number
-        }
-
-        ps._cam_key_audio = _sdes_key_from_sdp(ps._pre_launch_answer_sdp, "audio")
-        _cam_key_video = _sdes_key_from_sdp(ps._pre_launch_answer_sdp, "video")
-        if ps._cam_key_audio and ps._cam_key_audio != ps.srtp_key_audio:
-            ps._status("Using camera's audio SRTP key from answer (was our offer key)")
-            ps.srtp_key_audio = ps._cam_key_audio
-        if _cam_key_video and _cam_key_video != ps.srtp_key_video:
-            ps._status("Using camera's video SRTP key from answer (was our offer key)")
-            ps.srtp_key_video = _cam_key_video
 
 
 async def _sdes_open_sctp_helpers(self, ps: _SdesOpenState) -> None:
@@ -7604,6 +7561,27 @@ async def _sdes_open_sctp_helpers(self, ps: _SdesOpenState) -> None:
     ps._sctp_send_living = _sctp_send_living
 
 
+def _warn_if_every_candidate_off_subnet(device_id, cands) -> None:
+    """Say it plainly when every address the camera offered is on a subnet
+    this host is not on.
+
+    Nothing downstream can recover from that -- the packets leave by the
+    default gateway and are dropped -- and the symptom otherwise reads as
+    "first media never arrived", which sends people looking at the camera.
+    """
+    _off = [(_i, _p_) for _i, _p_ in cands if _candidate_is_off_subnet(_i)]
+    if _off and len(_off) == len(cands):
+        _LOGGER.warning(
+            "camera %s: every candidate it offered is on a subnet this"
+            " host cannot reach (%s). Direct media is impossible; only"
+            " the relay can carry it. If this camera never streams,"
+            " it is on a different network segment (a mesh node,"
+            " extender or guest SSID) rather than broken.",
+            device_id,
+            ", ".join(f"{_i}:{_p_}" for _i, _p_ in _off),
+        )
+
+
 async def _sdes_open_ice_controlling_nominate(self, ps: _SdesOpenState) -> None:
     """Phase of the SDES open: ice_controlling_nominate.
 
@@ -7693,24 +7671,7 @@ async def _sdes_open_ice_controlling_nominate(self, ps: _SdesOpenState) -> None:
         ps._turn_install_permissions([(ps._public_ip, 9)], "relay-mode WAN")
 
     if ps._cam_ice_ufrag and ps._cam_ice_pwd and ps._cam_ice_cands:
-        # Say it plainly when every address the camera offered is on a
-        # subnet this host is not on. Nothing downstream can recover from
-        # that -- the packets leave by the default gateway and are dropped
-        # -- and the symptom otherwise reads as "first media never
-        # arrived", which sends people looking at the camera.
-        _off = [
-            (_i, _p_) for _i, _p_ in ps._cam_ice_cands if _candidate_is_off_subnet(_i)
-        ]
-        if _off and len(_off) == len(ps._cam_ice_cands):
-            _LOGGER.warning(
-                "camera %s: every candidate it offered is on a subnet this"
-                " host cannot reach (%s). Direct media is impossible; only"
-                " the relay can carry it. If this camera never streams,"
-                " it is on a different network segment (a mesh node,"
-                " extender or guest SSID) rather than broken.",
-                self.device_id,
-                ", ".join(f"{_i}:{_p_}" for _i, _p_ in _off),
-            )
+        _warn_if_every_candidate_off_subnet(self.device_id, ps._cam_ice_cands)
         ps._turn_install_permissions(ps._cam_ice_cands, "setup")
 
         for _c_ip, _c_port in ps._cam_ice_cands:
@@ -7917,16 +7878,20 @@ class _SdesOpenMixin:
 
         # --- ICE STUN responder (runs while reservation sockets are still open) #
         # Exit after 0.5 s with no packet, or 1.5 s of silence after the
-        # camera's first probe, max 2.5 s total.  The bridge thread takes the
-        # responder role over once the window closes.
-        #   SRTP early exit: if a non-STUN packet arrives (SRTP), ICE is done -
-        #     close sockets immediately so ffmpeg can bind.
+        # camera's first probe, max 2.5 s total, or at once when the answer is
+        # in and the camera is probing.
+        #   SRTP early exit: if a non-STUN packet arrives (SRTP), ICE is done.
+        # What keeps the camera's first probes answered: this window answers
+        # them from the moment webrtcReq is out, and the bridge thread starts
+        # right after it - nothing below waits on the answer any more - and
+        # answers on the same sockets.  A probe that lands in between waits in
+        # the socket buffer for the bridge's first read.  A relay-only camera
+        # probes only through our TURN permission, which is installed when its
+        # answer or trickle names it (the first-media wait and the bridge tick).
         await _sdes_open_stun_responder_window(self, ps)
 
-        # --- Harvest camera's webrtcResp answer --- #
-        # The asyncio event loop was blocked by the synchronous STUN loop.  Any
-        # call_soon_threadsafe(answer_fut.set_result, ...) from the MQTT thread is
-        # queued but hasn't fired yet.  One asyncio cycle resolves it.
+        # --- Take the camera's webrtcResp answer if it is already in --- #
+        # Non-blocking: a later answer is applied in the first-media wait.
         await _sdes_open_harvest_answer(self, ps)
 
         # --- SCTP helper functions (always defined - even when answer arrives late) --- #
@@ -8282,6 +8247,48 @@ class _SdesOpenMixin:
                 _cancelled=_cancelled,
             )
 
+        def _answer_ready() -> bool:
+            return bool(
+                ps.answer_fut is not None
+                and ps.answer_fut.done()
+                and not ps.answer_fut.cancelled()
+                and ps.answer_fut.exception() is None
+            )
+
+        # An answer that lands after the bridge started is applied once: in the
+        # first-media wait, right after it (video can end the wait in the same
+        # 0.1 s tick the answer lands in), or once the serve is up.
+        _answer_adopted = [bool(ps._pre_launch_answer_sdp)]
+
+        def _adopt_late_answer() -> None:
+            if _answer_adopted[0] or not _answer_ready():
+                return
+            _answer_adopted[0] = True
+            _late_sdp = (ps.answer_fut.result() or {}).get("sdp", "") or ""
+            if not _late_sdp:
+                return
+            # Keys first: the bridge reads them per packet, and its first
+            # USE-CANDIDATE from the credentials below should find them set.
+            _adopt_answer_sdp(ps, _late_sdp)
+            _la_u, _la_p, _la_c, _ = _parse_answer_ice(_late_sdp)
+            if _la_u and _la_p:
+                _bridge_uc_info["ufrag"] = _la_u
+                _bridge_uc_info["pwd"] = _la_p
+                # Rebind, never append: the bridge iterates it. Trickled
+                # candidates already there are kept.
+                _bridge_uc_info["cands"] = [
+                    *_la_c,
+                    *(c for c in _bridge_uc_info["cands"] if c not in _la_c),
+                ]
+            _warn_if_every_candidate_off_subnet(self.device_id, _la_c)
+            ps._status(
+                "late webrtcResp answer applied %.1fs after the first-media wait"
+                " began"
+                " (%d candidate(s)) - the bridge nominates from it"
+                % (time.monotonic() - _media_wait_started, len(_la_c))
+                + (" [m=application present]" if ps._dc_answer_has_app else "")
+            )
+
         _sd_start_waiter = None
         # Before PLAY_START can go out, so a short clip's end is not missed.
         _sd_end_waiter = None
@@ -8424,6 +8431,9 @@ class _SdesOpenMixin:
                         " - terminal, abandoning the first-media wait"
                     )
                     raise AidotCameraBusy(_code, _desc)
+                # Keys first, then the credentials the bridge nominates with
+                # (the nomination peek below follows in this same pass).
+                _adopt_late_answer()
                 if (
                     not _pt_kinds_read
                     and ps.answer_fut is not None
@@ -8515,14 +8525,6 @@ class _SdesOpenMixin:
                 )
             raise
 
-        def _answer_ready() -> bool:
-            return bool(
-                ps.answer_fut is not None
-                and ps.answer_fut.done()
-                and not ps.answer_fut.cancelled()
-                and ps.answer_fut.exception() is None
-            )
-
         # The ffmpeg serve's SDP is built from what has actually been observed,
         # so ending the wait a moment before the first packets arrive costs
         # this session its audio for good.  See _abandoned_media_grace_s.  The
@@ -8602,6 +8604,7 @@ class _SdesOpenMixin:
                 ps._status(
                     "no media in the %.0fs after the wait was abandoned" % _ab_grace
                 )
+        _adopt_late_answer()
         if _first_video_pt[0] is None:
             # The wait expired with nothing received. Everything needed to
             # say why is in hand at exactly this moment and was, until the
@@ -9052,56 +9055,10 @@ class _SdesOpenMixin:
                 "webrtcResp received (SDES) - answer m-sections (%d): %s"
                 % (len(_ans_mlines), " | ".join(_ans_mlines))
             )
-            # If the answer arrived late (after bridge started without ICE creds),
-            # parse the camera's ICE credentials now and populate _bridge_uc_info
-            # so the bridge can send USE-CANDIDATE on the next camera BindingReq.
-            if (
-                not _bridge_uc_info["sent"]
-                and not _bridge_uc_info["ufrag"]
-                and _ans_sdp
-            ):
-                _late_ufrag, _late_pwd, _late_cands, _ = _parse_answer_ice(_ans_sdp)
-                if _late_ufrag and _late_pwd and _late_cands:
-                    _bridge_uc_info["ufrag"] = _late_ufrag
-                    _bridge_uc_info["pwd"] = _late_pwd
-                    _bridge_uc_info["cands"] = _late_cands
-                    # Update _dc_answer_has_app and _cam_key_audio so the bridge's
-                    # SCTP path activates for late-wake cameras.
-                    if "m=application" in _ans_sdp:
-                        ps._dc_answer_has_app = True
-                    if not ps._cam_key_audio and _ans_sdp:
-                        import re as _re_lk
-
-                        _lk_in = False
-                        for _lk_ln in _ans_sdp.splitlines():
-                            if _lk_ln.startswith("m=audio"):
-                                _lk_in = True
-                            elif _lk_ln.startswith("m=") and _lk_in:
-                                break
-                            elif _lk_in and _lk_ln.startswith("a=crypto:"):
-                                _lk_m = _re_lk.search(
-                                    r"inline:([A-Za-z0-9+/=]+)", _lk_ln
-                                )
-                                if _lk_m:
-                                    ps._cam_key_audio = _lk_m.group(1)
-                                    # Adopt it the same way the pre-launch answer
-                                    # is adopted above.  srtp_key_audio is the one
-                                    # key the bridge decrypts with, so a key
-                                    # learned only here has to land in it or this
-                                    # camera keeps being decrypted with our offer
-                                    # key -- which it never used.
-                                    ps.srtp_key_audio = ps._cam_key_audio
-                                    break
-                    ps._status(
-                        f"late ICE creds parsed - bridge will send USE-CANDIDATE"
-                        f" to {len(_late_cands)} candidate(s)"
-                        + (" [m=application present]" if ps._dc_answer_has_app else "")
-                        + (
-                            f" [cam_key set: {_key_fingerprint(ps._cam_key_audio)}]"
-                            if ps._cam_key_audio
-                            else ""
-                        )
-                    )
+            # An answer that landed after the first-media wait ended (a camera
+            # that streams before it answers) is applied now: keys, the
+            # data-channel flag, and the credentials for the bridge's tick.
+            _adopt_late_answer()
             # A later webrtcResp from the camera, if one is already in hand, may
             # carry a different SRTP key.  The bridge is the only decryptor and
             # reads srtp_key_audio per packet (it rebuilds its receive session

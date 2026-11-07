@@ -102,6 +102,17 @@ function each, all on default paths.
   instead of dropped, counted as `law_converted` in the publish stats. The
   ffmpeg serve (H.265, recordings, snapshots) keeps both waits.
 
+- **The SDES bridge starts without waiting for the camera's answer.** The
+  open waited up to 8 s for the `webrtcResp` before starting the bridge, and
+  nothing answered the camera's binding requests while it did. The bridge now
+  starts right after the STUN responder window (kept: it answers the
+  camera's first probes), and an answer that lands later is applied when it
+  does - in the first-media wait, or once the serve is up for a camera that
+  streams before it answers: the camera's SRTP keys and data-channel flag, a
+  nomination from it, its credentials for the bridge's 2.5 s nomination
+  tick, and the off-subnet warning. A camera that refuses (-50002/-50015) is
+  still stopped by the first-media wait's check.
+
 ### Deprecated
 - **`AIDOT_PERSISTENT_MQTT`** is accepted and ignored; set to
   `0`/`false`/`no`/`off` it logs one warning. See above.
