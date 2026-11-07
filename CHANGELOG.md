@@ -277,6 +277,22 @@ served (pull, stdout and RTSP push), once the reference installation runs it.
   random-access flag when no keyframe signal came within 5 s is gone: the
   mux always signals. `AIDOT_SERVE_RELAY` now applies to SDES serves only.
 
+### Fixed
+- **A001064 cold open back to about +2.9 s to first media (was +5.4 s).**
+  Removing the webrtcReq echo wait changed when the camera's first STUN
+  probes reach the bridge, which made the PTZ about 2.5 s slower. The camera
+  advertises only a host address this side cannot reach, and media flows on
+  the address it probes from. The 250 ms echo wait used to leave those probes
+  queued when the bridge started, so its first pass learned that address and
+  nominated it at once. Without the wait, the first nomination tick ran on
+  the TURN CreatePermission reply about 30 ms before the first probe. It
+  nominated only the unreachable host, and the working address waited for
+  the next 2.5 s tick, with LIVING and media waiting behind it. A newly
+  learned peer-reflexive address now re-arms the tick, so it is nominated on
+  the pass that learned it. Measured on four cold PTZ opens: +2.83 to +3.29 s,
+  with webrtcReq to first media at 1.9 to 2.1 s, the same as before the
+  removal. The L2 is unchanged at +5.2 s.
+
 ## [1.0.0rc71]
 
 Soak: resets the clock. The changes are to the DTLS serve loop's retry pacing on

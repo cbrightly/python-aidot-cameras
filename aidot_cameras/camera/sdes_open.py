@@ -4340,6 +4340,16 @@ def make_sdes_bridge(
                             # Rebind, never append: the nomination tick
                             # iterates this list.
                             _bridge_uc_info["prflx"] = _br_prflx_now
+                            # Nominate it on this pass, not up to 2.5 s
+                            # later.  The tick's first run lands on whatever
+                            # wakes the bridge first; when that is the TURN
+                            # CreatePermission reply and the camera's probe
+                            # comes 30 ms after, the tick has nominated only
+                            # the unreachable advertised host and the address
+                            # that works waits a full interval.  Measured on
+                            # a cold A001064: first media +5.4 s instead of
+                            # +2.9 s.  Bounded by _MAX_PRFLX_CANDS.
+                            _br_last_uc = 0.0
                             _status(
                                 f"ICE: learned peer-reflexive camera"
                                 f" candidate {_br_obs[0]}:{_br_obs[1]}"
