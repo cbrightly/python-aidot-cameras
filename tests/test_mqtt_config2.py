@@ -423,3 +423,71 @@ def test_camera_off_ignores_the_host(monkeypatch):
     }
     url = asyncio.run(_camera(li)._async_get_mqtt_url())
     assert url == "wss://srv.example:8443/mqtt"
+
+
+# --------------------------------------------------------------------------- #
+# The sessionId in login_info (no token file: Home Assistant)
+# --------------------------------------------------------------------------- #
+
+
+def test_session_id_round_trips_through_serializable_login_info(on):
+    s = _Session({_CONFIG2_URL: _GOOD_REPLY})
+    c1 = _client(s)
+    asyncio.run(c1._async_fetch_user_config())
+    sid = s.calls[0][1]["params"]["sessionId"]
+    stored = c1.serializable_login_info()
+    assert stored["mqttSessionId"] == sid
+
+    # A restart: a new client built from what the integration stored.
+    c2 = _client(s, dict(stored))
+    asyncio.run(c2._async_fetch_user_config())
+    assert s.calls[1][1]["params"]["sessionId"] == sid
+
+
+def test_session_id_survives_a_relogin(on):
+    s = _Session({_CONFIG2_URL: _GOOD_REPLY})
+    c = _client(s)
+    asyncio.run(c._async_fetch_user_config())
+    sid = c.login_info["mqttSessionId"]
+    # async_post_login assigns the login response, which has no sessionId.
+    c.login_info = {"id": "u1", "accessToken": "NEW"}
+    assert c.login_info["mqttSessionId"] == sid
+
+
+def test_a_malformed_stored_session_id_is_replaced(on):
+    s = _Session({_CONFIG2_URL: _GOOD_REPLY})
+    c = _client(s, {"id": "u1", "accessToken": _TOKEN, "mqttSessionId": "bad!"})
+    asyncio.run(c._async_fetch_user_config())
+    sid = s.calls[0][1]["params"]["sessionId"]
+    assert mqtt_config2.is_valid_session_id(sid)
+    assert c.login_info["mqttSessionId"] == sid
+
+
+def test_the_token_file_takes_precedence(on, tmp_path, monkeypatch):
+    token = tmp_path / "token.json"
+    monkeypatch.setenv("AIDOT_TOKEN_FILE", str(token))
+    file_sid = "F" * 21
+    (tmp_path / "token.json.mqtt-session-id").write_text(file_sid)
+    s = _Session({_CONFIG2_URL: _GOOD_REPLY})
+    li = {"id": "u1", "accessToken": _TOKEN, "mqttSessionId": "L" * 21}
+    asyncio.run(_client(s, li)._async_fetch_user_config())
+    assert s.calls[0][1]["params"]["sessionId"] == file_sid
+
+
+def test_stored_session_id_is_never_logged(on, caplog):
+    sid = "S3ss10n1dV4lue0000abc"
+    s = _Session({_CONFIG2_URL: _GOOD_REPLY})
+    c = _client(s, {"id": "u1", "accessToken": _TOKEN, "mqttSessionId": sid})
+    with caplog.at_level(logging.DEBUG, logger="aidot_cameras"):
+        asyncio.run(c._async_fetch_user_config())
+    assert s.calls[0][1]["params"]["sessionId"] == sid
+    assert sid not in "\n".join(r.getMessage() for r in caplog.records)
+
+
+def test_user_config_client_id_log_is_masked(caplog):
+    s = _Session({_USERCONFIG_URL: _USERCONFIG_REPLY})
+    with caplog.at_level(logging.DEBUG, logger="aidot_cameras"):
+        asyncio.run(_client(s)._async_fetch_user_config())
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "mqttClientId stored" in text
+    assert "uc-client-u1" not in text

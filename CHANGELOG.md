@@ -15,8 +15,8 @@ function each, all on default paths.
 - **Experimental, off by default: MQTT credentials the way the app fetches
   them** (`AIDOT_MQTT_CONFIG2=1`). `GET /v25/commons/mqttConfig2` with
   `sessionType=App` and a per-install 21-character `sessionId`, generated once
-  and kept in `<AIDOT_TOKEN_FILE>.mqtt-session-id` (for the client's lifetime
-  without a token file). The reply's clientId, password and broker host are
+  and kept in `<AIDOT_TOKEN_FILE>.mqtt-session-id`, or without a token file
+  in login_info as `mqttSessionId`, so it survives a Home Assistant restart. The reply's clientId, password and broker host are
   used; on any failure the `/commons/userConfig` chain runs as before, and
   `getServerUrlConfig` is still called for the SDES srflx address. One INFO
   line names the source, with the clientId and sessionId masked. The hope is

@@ -101,6 +101,11 @@ _MQTT_PASSWORD_RESPONSE_KEYS = ("mqttPassword", "mqqtPwd", "mqttPwd")
 _CLIENT_ID_SOURCE_KEY = "_mqttClientIdSource"
 _CLIENT_ID_FROM_CONFIG2 = "mqttConfig2"
 
+# The mqttConfig2 sessionId, kept in login_info so it persists wherever
+# login_info does (a Home Assistant config entry).  A token file's sibling
+# file takes precedence when AIDOT_TOKEN_FILE is set.
+_MQTT_SESSION_ID_KEY = "mqttSessionId"
+
 # Strong refs to fire-and-forget tasks: asyncio only keeps weak refs, so a
 # discarded task can be garbage-collected mid-flight (see camera/client.py).
 _BG_TASKS: set = set()
@@ -409,6 +414,8 @@ class CameraClient(_UpstreamAidotClient):
             for k in (
                 LOGIN_INFO_PERSISTENT_MQTT_KEY,
                 LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
+                # Per install, not per login: a re-login must not mint a new one.
+                _MQTT_SESSION_ID_KEY,
             )
             if k in current
         }
@@ -696,7 +703,8 @@ class CameraClient(_UpstreamAidotClient):
                 login_info["mqttClientId"] = client_id
                 login_info.pop(_CLIENT_ID_SOURCE_KEY, None)
                 _LOGGER.info(
-                    "_async_fetch_user_config: mqttClientId stored: %s", client_id
+                    "_async_fetch_user_config: mqttClientId stored: %s",
+                    mqtt_config2.mask(client_id),
                 )
             elif login_info.get(_CLIENT_ID_SOURCE_KEY) == _CLIENT_ID_FROM_CONFIG2:
                 login_info.pop("mqttClientId", None)
@@ -722,7 +730,8 @@ class CameraClient(_UpstreamAidotClient):
         """This install's mqttConfig2 sessionId, generated once.
 
         Kept next to AIDOT_TOKEN_FILE when one is configured, as the app keeps
-        its own in shared preferences; otherwise for this client's lifetime.
+        its own in shared preferences; otherwise in login_info, which an
+        integration persists through ``serializable_login_info``.
         """
         sid = getattr(self, "_mqtt_session_id", None)
         if sid:
@@ -733,7 +742,12 @@ class CameraClient(_UpstreamAidotClient):
                 None, mqtt_config2.load_or_create_session_id, path
             )
         else:
-            sid = mqtt_config2.new_session_id()
+            stored = self.login_info.get(_MQTT_SESSION_ID_KEY)
+            if mqtt_config2.is_valid_session_id(stored):
+                sid = stored
+            else:
+                sid = mqtt_config2.new_session_id()
+                self.login_info[_MQTT_SESSION_ID_KEY] = sid
         self._mqtt_session_id = sid
         return sid
 
