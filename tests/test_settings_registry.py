@@ -345,7 +345,7 @@ def test_read_by_name_uses_the_registry_and_an_injected_env(monkeypatch):
     [("0", 0.1), ("-3", 0.1), ("0.01", 0.1), ("nan", 5.0), ("0.5", 0.5), ("5", 5.0)],
 )
 def test_the_slow_probe_step_cannot_be_zero(raw, expected):
-    """``_slow_probe_sleep`` sleeps in steps of this size until its interval
+    """``_chunked_wait`` sleeps in steps of this size until its interval
     is up; a step of 0 or less made it spin on ``asyncio.sleep(0)``."""
     env = {"AIDOT_DTLS_SLOW_PROBE_CHUNK_S": raw}
     assert settings.read("AIDOT_DTLS_SLOW_PROBE_CHUNK_S", env) == expected
@@ -366,7 +366,7 @@ def test_import_time_constants_come_from_the_registry():
     from aidot_cameras.camera import protocol, sdes_open
 
     assert camera_client._BUSY_BACKOFF_S == settings.default("AIDOT_BUSY_BACKOFF_S")
-    assert camera_client._SLOW_PROBE_SLEEP_CHUNK_S == settings.default(
+    assert camera_client._WAIT_CHUNK_S == settings.default(
         "AIDOT_DTLS_SLOW_PROBE_CHUNK_S"
     )
     assert camera_client._SERVE_REORDER_QUEUE == settings.default(

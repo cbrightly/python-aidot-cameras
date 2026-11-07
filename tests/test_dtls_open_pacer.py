@@ -44,17 +44,17 @@ def test_pacer_reset_starts_again_at_the_base():
     assert p.fail_delay() == 15.0
 
 
-# --- CameraMixin._slow_probe_sleep: teardown-responsive chunked sleep ------- #
+# --- CameraMixin._chunked_wait: teardown-responsive chunked sleep ------- #
 
 
 def _run(coro):
     return asyncio.run(coro)
 
 
-def test_slow_probe_sleep_chunks_not_one_blocking_call(monkeypatch):
+def test_chunked_wait_chunks_not_one_blocking_call(monkeypatch):
     # Assert the sleep structure: many small asyncio.sleep calls, none longer
     # than the chunk size - never one blocking sleep(interval) call.
-    monkeypatch.setattr(camera_client, "_SLOW_PROBE_SLEEP_CHUNK_S", 0.05)
+    monkeypatch.setattr(camera_client, "_WAIT_CHUNK_S", 0.05)
     stub = SimpleNamespace(_streaming_active=True)
     calls = []
     _real_sleep = asyncio.sleep
@@ -65,15 +65,15 @@ def test_slow_probe_sleep_chunks_not_one_blocking_call(monkeypatch):
 
     monkeypatch.setattr(camera_client.asyncio, "sleep", _spy_sleep)
     t0 = time.monotonic()
-    _run(CameraMixin._slow_probe_sleep(stub, 0.22))
+    _run(CameraMixin._chunked_wait(stub, 0.22))
     took = time.monotonic() - t0
     assert took >= 0.2
     assert len(calls) >= 2, calls  # more than one chunk - never one long sleep
     assert all(c <= 0.05 + 1e-9 for c in calls), calls
 
 
-def test_slow_probe_sleep_exits_when_streaming_stops(monkeypatch):
-    monkeypatch.setattr(camera_client, "_SLOW_PROBE_SLEEP_CHUNK_S", 0.05)
+def test_chunked_wait_exits_when_streaming_stops(monkeypatch):
+    monkeypatch.setattr(camera_client, "_WAIT_CHUNK_S", 0.05)
     stub = SimpleNamespace(_streaming_active=True)
 
     async def scenario():
@@ -82,7 +82,7 @@ def test_slow_probe_sleep_exits_when_streaming_stops(monkeypatch):
             stub._streaming_active = False
 
         t0 = time.monotonic()
-        await asyncio.gather(CameraMixin._slow_probe_sleep(stub, 5.0), stop())
+        await asyncio.gather(CameraMixin._chunked_wait(stub, 5.0), stop())
         return time.monotonic() - t0
 
     took = _run(scenario())
@@ -90,24 +90,24 @@ def test_slow_probe_sleep_exits_when_streaming_stops(monkeypatch):
     assert took < 1.0
 
 
-def test_slow_probe_sleep_returns_immediately_when_already_stopped():
+def test_chunked_wait_returns_immediately_when_already_stopped():
     stub = SimpleNamespace(_streaming_active=False)
     t0 = time.monotonic()
-    _run(CameraMixin._slow_probe_sleep(stub, 5.0))
+    _run(CameraMixin._chunked_wait(stub, 5.0))
     assert time.monotonic() - t0 < 0.5
 
 
 def test_the_early_end_never_cuts_the_floor(monkeypatch):
-    monkeypatch.setattr(camera_client, "_SLOW_PROBE_SLEEP_CHUNK_S", 0.02)
+    monkeypatch.setattr(camera_client, "_WAIT_CHUNK_S", 0.02)
     stub = SimpleNamespace(_streaming_active=True)
     t0 = time.monotonic()
-    _run(CameraMixin._slow_probe_sleep(stub, 5.0, until=lambda: True, min_s=0.15))
+    _run(CameraMixin._chunked_wait(stub, 5.0, until=lambda: True, min_s=0.15))
     took = time.monotonic() - t0
     assert 0.15 <= took < 1.0
 
 
 def test_the_early_end_is_checked_each_step(monkeypatch):
-    monkeypatch.setattr(camera_client, "_SLOW_PROBE_SLEEP_CHUNK_S", 0.02)
+    monkeypatch.setattr(camera_client, "_WAIT_CHUNK_S", 0.02)
     stub = SimpleNamespace(_streaming_active=True)
     flag = {"back": False}
 
@@ -118,7 +118,7 @@ def test_the_early_end_is_checked_each_step(monkeypatch):
 
         t0 = time.monotonic()
         await asyncio.gather(
-            CameraMixin._slow_probe_sleep(stub, 5.0, until=lambda: flag["back"]),
+            CameraMixin._chunked_wait(stub, 5.0, until=lambda: flag["back"]),
             back(),
         )
         return time.monotonic() - t0
