@@ -404,6 +404,12 @@ KNOBS: "dict[str, Knob]" = _registry(
     ),
     Knob("AIDOT_REMB_TARGET_BPS", 0, "int"),
     Knob("AIDOT_HEALTH_LINE_S", 60.0, "float", minimum=0.0, note="0 disables"),
+    Knob(
+        "AIDOT_MQTT_CONFIG2",
+        False,
+        "bool_off",
+        note="experimental; MQTT credentials from /v25/commons/mqttConfig2",
+    ),
     # --- the ffmpeg serve and the recordings (ENVIRONMENT.md) ---------------
     Knob("AIDOT_SERVE_REORDER_QUEUE", 500, "int"),
     Knob(

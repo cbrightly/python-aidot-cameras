@@ -23,6 +23,7 @@ from ..exceptions import (
 )
 from ..const import APP_ID as _AIDOT_APP_ID
 from ..const import (
+    LOGIN_INFO_MQTT_CONFIG2_HOST_KEY,
     LOGIN_INFO_MQTT_PASSWORD_KEYS,
     LOGIN_INFO_PERSISTENT_MQTT_KEY,
     LOGIN_INFO_PERSISTENT_MQTT_LOCK_KEY,
@@ -116,6 +117,7 @@ from .protocol import (  # noqa: F401 - re-exported for device_client / back-com
     _parse_alarm_event,
 )
 from .. import settings
+from ..mqtt_config2 import broker_url as _mqtt_config2_broker_url
 from .health import HealthReporter, dtls_snapshot as _dtls_snapshot
 
 _LOGGER = logging.getLogger(__name__)
@@ -3393,6 +3395,11 @@ class CameraMixin(
             self._mqtt_url = _env_mqtt
             return self._mqtt_url
 
+        # AIDOT_MQTT_CONFIG2: the broker that endpoint named with the password.
+        # getServerUrlConfig is still called below for its "ip" (the srflx
+        # candidate), and is the URL whenever that endpoint did not supply one.
+        _cfg2_url = await self._async_mqtt_config2_url()
+
         import aiohttp
 
         async def _fetch():
@@ -3422,7 +3429,7 @@ class CameraMixin(
                 data.get("ip"),
             )
 
-            mqtt_host = data.get("mqttServerUrl") or ""
+            mqtt_host = _cfg2_url or data.get("mqttServerUrl") or ""
             if not mqtt_host:
                 # Fall back to the regional MQTT broker URL known to work from
                 # the AiDot web client: wss://{region}-mqtt.arnoo.com:8443/mqtt
@@ -3500,7 +3507,26 @@ class CameraMixin(
 
         except Exception as exc:
             _LOGGER.error("_async_get_mqtt_url failed: %r", exc)
+            if _cfg2_url and not plaintext_mqtt_scheme(_cfg2_url):
+                self._mqtt_url = _cfg2_url
+                return self._mqtt_url
             return None
+
+    async def _async_mqtt_config2_url(self) -> Optional[str]:
+        """The broker URL mqttConfig2 issued with the current password, or None.
+
+        None unless AIDOT_MQTT_CONFIG2 is on and the account's password came
+        from that endpoint (the host is stored only alongside it).  Fetches the
+        credential first when there is none, since the host arrives with it.
+        """
+        if not settings.read("AIDOT_MQTT_CONFIG2"):
+            return None
+        if self._shared_mqtt_password() is None:
+            await self._async_refresh_mqtt_credential()
+        host = self._user_info.get(LOGIN_INFO_MQTT_CONFIG2_HOST_KEY)
+        if not (isinstance(host, str) and host and self._shared_mqtt_password()):
+            return None
+        return _mqtt_config2_broker_url(host)
 
     async def _mqtt_credentials(self) -> tuple:
         """``(mqttUser, mqttPassword, client id)`` for the account's broker.

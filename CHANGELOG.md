@@ -11,6 +11,19 @@ connection with no per-operation fallback, the SD listing collects its pages
 through one registration, and both transports send AVIO commands through one
 function each, all on default paths.
 
+### Added
+- **Experimental, off by default: MQTT credentials the way the app fetches
+  them** (`AIDOT_MQTT_CONFIG2=1`). `GET /v25/commons/mqttConfig2` with
+  `sessionType=App` and a per-install 21-character `sessionId`, generated once
+  and kept in `<AIDOT_TOKEN_FILE>.mqtt-session-id` (for the client's lifetime
+  without a token file). The reply's clientId, password and broker host are
+  used; on any failure the `/commons/userConfig` chain runs as before, and
+  `getServerUrlConfig` is still called for the SDES srflx address. One INFO
+  line names the source, with the clientId and sessionId masked. The hope is
+  a separate clientId per install, so Home Assistant, the CLI and the phone
+  stop evicting each other from the broker; that is unverified. Unset, nothing
+  changes.
+
 ### Changed
 - **One MQTT connection, and no fallback that evicts it.** Commands, attribute
   reads, device-action queries and stream-open signaling use only the
