@@ -39,6 +39,10 @@ function each, all on default paths.
   changes.
 
 ### Changed
+- **Deprecated knobs warn from one place, one line per knob.** Each of the
+  eight accepted-and-ignored variables now logs its own WARNING, once per
+  process, naming what replaced it. `AIDOT_PERSISTENT_MQTT` warns when it is
+  set to any value, not only when it is set off.
 - **One MQTT connection, and no fallback that evicts it.** Commands, attribute
   reads, device-action queries and stream-open signaling use only the
   account's persistent connection. The per-operation session they fell back to

@@ -99,6 +99,9 @@ class Knob:
     #: A credential (or the path to one). Its value never appears in a log
     #: line from this module or in :func:`snapshot`.
     secret: bool = False
+    #: Set on a knob that is accepted and ignored: what replaced it, for the
+    #: one warning :func:`warn_deprecated_once` logs when it is set.
+    deprecated: Optional[str] = None
 
 
 REDACTED = "<redacted>"
@@ -255,6 +258,15 @@ def _registry(*knobs: Knob) -> "dict[str, Knob]":
     return out
 
 
+# What replaced the knobs that are accepted and ignored, shared by a group.
+_SDES_GRACE_REPLACEMENT = (
+    "the SDES open abandons a first-media wait on one timer,"
+    " AIDOT_SDES_NO_MEDIA_GRACE_S (no media that long after the answer)"
+)
+_DTLS_SLOW_PROBE_REPLACEMENT = (
+    "the DTLS serve loop retries a failed open on one backoff from 15 s up to 600 s"
+)
+
 #: The inventory. Grouped as docs/ENVIRONMENT.md groups them; the README's
 #: user-facing table is the first group. Defaults match the call sites they
 #: replaced, measured or not. Every read goes through this module.
@@ -288,7 +300,12 @@ KNOBS: "dict[str, Knob]" = _registry(
         note="auto | lan | relay; anything else is auto",
     ),
     Knob("AIDOT_SDES_VIDEO_PT", "96", "str", note="sdes_open.py parses 96 | 97 | none"),
-    Knob("AIDOT_PERSISTENT_MQTT", True, "bool_on", note="deprecated; ignored"),
+    Knob(
+        "AIDOT_PERSISTENT_MQTT",
+        None,
+        "str",
+        deprecated="every MQTT operation uses the one persistent connection",
+    ),
     Knob("AIDOT_DIRECT_PUBLISH", True, "bool_on"),
     Knob("AIDOT_PUBLISH_AAC", True, "bool_on"),
     Knob("AIDOT_HLS_DIRECT_TS", True, "bool_on"),
@@ -334,16 +351,20 @@ KNOBS: "dict[str, Knob]" = _registry(
     Knob("AIDOT_ABANDONED_MEDIA_GRACE_S", 8.0, "float", reject_below=0.0),
     Knob("AIDOT_BATTERY_STALE_OFFER_GRACE_S", 15.0, "float"),
     Knob("AIDOT_SDES_NO_MEDIA_GRACE_S", 20.0, "float"),
-    # Deprecated and ignored; sdes_open.py warns once when one is set.
-    Knob("AIDOT_SDES_ECHO_WAIT_S", None, "str", note="deprecated, ignored"),
     Knob(
-        "AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S",
-        20.0,
-        "float",
-        note="deprecated, ignored",
+        "AIDOT_SDES_ECHO_WAIT_S",
+        None,
+        "str",
+        deprecated="the SDES open no longer waits for a webrtcReq echo",
     ),
-    Knob("AIDOT_SDES_ANSWER_PROBE_GRACE_S", 20.0, "float", note="deprecated, ignored"),
-    Knob("AIDOT_SDES_TRIGGER_GRACE_S", 20.0, "float", note="deprecated, ignored"),
+    *(
+        Knob(_name, None, "str", deprecated=_SDES_GRACE_REPLACEMENT)
+        for _name in (
+            "AIDOT_SDES_UNREACHABLE_NOMINEE_GRACE_S",
+            "AIDOT_SDES_ANSWER_PROBE_GRACE_S",
+            "AIDOT_SDES_TRIGGER_GRACE_S",
+        )
+    ),
     Knob("AIDOT_PINNED_CODEC_RETRIES", 2, "int", reject_below=0),
     Knob(
         "AIDOT_SDES_SERVE_AUDIO",
@@ -376,12 +397,14 @@ KNOBS: "dict[str, Knob]" = _registry(
     Knob("AIDOT_OFFLINE_RECHECK_S", 30.0, "float"),
     Knob("AIDOT_OFFLINE_PROBE_S", 600.0, "float"),
     Knob("AIDOT_FUTILE_KEEPALIVE_LIMIT", 5, "int"),
-    # Deprecated and ignored; client.py warns once when one is set.
-    Knob("AIDOT_DTLS_SLOW_PROBE_THRESHOLD", 5, "int", note="deprecated, ignored"),
-    Knob(
-        "AIDOT_DTLS_SLOW_PROBE_INTERVAL_S", 600.0, "float", note="deprecated, ignored"
+    *(
+        Knob(_name, None, "str", deprecated=_DTLS_SLOW_PROBE_REPLACEMENT)
+        for _name in (
+            "AIDOT_DTLS_SLOW_PROBE_THRESHOLD",
+            "AIDOT_DTLS_SLOW_PROBE_INTERVAL_S",
+            "AIDOT_DTLS_SLOW_PROBE_LOG_EVERY",
+        )
     ),
-    Knob("AIDOT_DTLS_SLOW_PROBE_LOG_EVERY", 6, "int", note="deprecated, ignored"),
     # Floored: at 0 or below the slow-probe wait slept 0 s per step and spun.
     Knob("AIDOT_DTLS_SLOW_PROBE_CHUNK_S", 5.0, "float", minimum=0.1),
     Knob("AIDOT_GOP_PLI_S", 2.0, "float"),
@@ -440,6 +463,22 @@ KNOBS: "dict[str, Knob]" = _registry(
         "list",
     ),
 )
+
+
+_DEPRECATED: "tuple[Knob, ...]" = tuple(k for k in KNOBS.values() if k.deprecated)
+_deprecated_warned: "set[str]" = set()
+
+
+def warn_deprecated_once(env: Optional[Mapping[str, str]] = None) -> None:
+    """Log a WARNING for each deprecated knob that is set, once per knob per
+    process. The knob does nothing; the line says what replaced it."""
+    for knob in _DEPRECATED:
+        if knob.name in _deprecated_warned or not is_set(knob.name, env):
+            continue
+        _deprecated_warned.add(knob.name)
+        _LOGGER.warning(
+            "%s is deprecated and ignored: %s. Unset it.", knob.name, knob.deprecated
+        )
 
 
 #: The knobs an account client can be given explicitly, by field. Each must be

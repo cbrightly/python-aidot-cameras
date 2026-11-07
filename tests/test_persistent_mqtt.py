@@ -15,6 +15,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import aidot_cameras.camera.client as cc
+from aidot_cameras import settings
 from aidot_cameras.camera.protocol import _PersistentMqtt
 
 
@@ -26,24 +27,26 @@ def _warnings(caplog):
     ]
 
 
-def test_turning_the_knob_off_warns_once_and_changes_nothing(monkeypatch, caplog):
-    monkeypatch.setattr(cc, "_PERSISTENT_MQTT_KNOB_WARNED", False)
-    monkeypatch.setenv("AIDOT_PERSISTENT_MQTT", "0")
+def test_setting_the_knob_warns_once_and_changes_nothing(monkeypatch, caplog):
+    monkeypatch.setattr(settings, "_deprecated_warned", set())
     with caplog.at_level(logging.WARNING):
-        cc._warn_persistent_mqtt_knob()
-        cc._warn_persistent_mqtt_knob()
+        settings.warn_deprecated_once({"AIDOT_PERSISTENT_MQTT": "0"})
+        settings.warn_deprecated_once({"AIDOT_PERSISTENT_MQTT": "0"})
     assert len(_warnings(caplog)) == 1
 
 
-def test_the_knob_left_on_or_unset_says_nothing(monkeypatch, caplog):
-    monkeypatch.setattr(cc, "_PERSISTENT_MQTT_KNOB_WARNED", False)
+def test_the_knob_unset_says_nothing(monkeypatch, caplog):
+    monkeypatch.setattr(settings, "_deprecated_warned", set())
     with caplog.at_level(logging.WARNING):
-        monkeypatch.delenv("AIDOT_PERSISTENT_MQTT", raising=False)
-        cc._warn_persistent_mqtt_knob()
-        for val in ("1", "true", "on", "anything"):
-            monkeypatch.setenv("AIDOT_PERSISTENT_MQTT", val)
-            cc._warn_persistent_mqtt_knob()
+        settings.warn_deprecated_once({})
     assert _warnings(caplog) == []
+
+
+def test_the_persistent_connection_checks_for_the_knob():
+    import inspect
+
+    src = inspect.getsource(cc.CameraMixin._get_persistent_mqtt)
+    assert "settings.warn_deprecated_once()" in src
 
 
 def test_there_is_no_switch_left_to_read():

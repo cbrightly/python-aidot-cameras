@@ -119,7 +119,9 @@ def test_every_variable_the_source_reads_is_registered():
 
 
 def test_every_registered_variable_is_read_somewhere():
-    unused = sorted(set(settings.KNOBS) - _source_names())
+    # A deprecated knob is read only by settings.warn_deprecated_once.
+    live = {n for n, k in settings.KNOBS.items() if not k.deprecated}
+    unused = sorted(live - _source_names())
     assert not unused, f"registered but read nowhere: {unused}"
 
 
@@ -510,3 +512,25 @@ def test_tristate_reader():
         settings.tristate("AIDOT_NOT_A_KNOB", {})
     with pytest.raises(ValueError):
         settings.tristate("AIDOT_HEALTH_LINE_S", {})
+
+
+def test_a_deprecated_knob_says_what_replaced_it_and_has_no_value():
+    deprecated = [k for k in settings.KNOBS.values() if k.deprecated]
+    assert len(deprecated) == 8
+    for knob in deprecated:
+        assert knob.default is None and knob.kind == "str", knob.name
+
+
+def test_each_deprecated_knob_warns_once_by_name(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(settings, "_deprecated_warned", set())
+    env = {"AIDOT_SDES_ECHO_WAIT_S": "2", "AIDOT_PERSISTENT_MQTT": "0"}
+    with caplog.at_level(logging.WARNING, logger=settings._LOGGER.name):
+        settings.warn_deprecated_once(env)
+        settings.warn_deprecated_once(env)
+        settings.warn_deprecated_once({"AIDOT_SDES_ECHO_WAIT_S": ""})
+    lines = sorted(r.getMessage() for r in caplog.records)
+    assert len(lines) == 2
+    assert lines[0].startswith("AIDOT_PERSISTENT_MQTT is deprecated and ignored: ")
+    assert lines[1].startswith("AIDOT_SDES_ECHO_WAIT_S is deprecated and ignored: ")

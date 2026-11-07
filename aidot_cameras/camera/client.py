@@ -190,34 +190,9 @@ _OFFLINE_PROBE_S = settings.read("AIDOT_OFFLINE_PROBE_S")
 _DTLS_RETRY_BASE_S, _DTLS_RETRY_CAP_S = 15.0, 600.0
 #: Failures in a row between INFO lines once a pacer is quiet (the rest DEBUG).
 _PACER_LOG_EVERY = 6
-# The three slow-probe knobs, still accepted and ignored since the pacer above
-# replaced the slow probe: one warning per process when any is set.
-_DEPRECATED_DTLS_KNOBS = (
-    "AIDOT_DTLS_SLOW_PROBE_THRESHOLD",
-    "AIDOT_DTLS_SLOW_PROBE_INTERVAL_S",
-    "AIDOT_DTLS_SLOW_PROBE_LOG_EVERY",
-)
-_deprecated_knobs_warned = False
 # Sleep increment for the loops' long waits: never one blocking
 # asyncio.sleep(interval) call, so stop() is not delayed by up to 10 minutes.
 _SLOW_PROBE_SLEEP_CHUNK_S = settings.read("AIDOT_DTLS_SLOW_PROBE_CHUNK_S")
-
-
-def _warn_deprecated_knobs(env: Optional[dict] = None) -> None:
-    """Log once per process that a deprecated, ignored knob is set."""
-    global _deprecated_knobs_warned
-    if _deprecated_knobs_warned:
-        return
-    _set = [n for n in _DEPRECATED_DTLS_KNOBS if settings.is_set(n, env)]
-    if not _set:
-        return
-    _deprecated_knobs_warned = True
-    _LOGGER.warning(
-        "%s: deprecated and ignored. The DTLS serve loop retries a failed open"
-        " on one backoff from 15 s up to 600 s; unset %s.",
-        ", ".join(_set),
-        "it" if len(_set) == 1 else "them",
-    )
 
 
 #: Quick retries for an encoder still cold (a DC-only answer), and how many.
@@ -295,26 +270,6 @@ _MQTT_CREDENTIAL_REFETCH_FLOOR = 30.0
 # video. Idle release is measured in minutes, so seconds of staleness here costs
 # nothing.
 _VIEWER_CHECK_INTERVAL_S = 10.0
-
-
-_PERSISTENT_MQTT_KNOB_WARNED = False
-
-
-def _warn_persistent_mqtt_knob() -> None:
-    """Say once per process that ``AIDOT_PERSISTENT_MQTT=0`` no longer does anything.
-
-    The per-operation MQTT path it selected is gone: it connected with the
-    account's one clientId and so evicted the persistent connection. The knob
-    is still accepted so a setting left in place does not break anything.
-    """
-    global _PERSISTENT_MQTT_KNOB_WARNED
-    if _PERSISTENT_MQTT_KNOB_WARNED or settings.read("AIDOT_PERSISTENT_MQTT"):
-        return
-    _PERSISTENT_MQTT_KNOB_WARNED = True
-    _LOGGER.warning(
-        "AIDOT_PERSISTENT_MQTT is deprecated and ignored: every MQTT "
-        "operation uses the one persistent connection. Remove the setting."
-    )
 
 
 def _spawn_bg(coro):
@@ -6835,7 +6790,7 @@ class CameraMixin(
 
         It is the only MQTT transport, as the app's LDSBaseMqttServiceImpl is.
         ``AIDOT_PERSISTENT_MQTT`` used to switch it off and is now ignored."""
-        _warn_persistent_mqtt_knob()
+        settings.warn_deprecated_once()
         # _user_info is the shared account dict (same object across the account's
         # DeviceClients, and the same object as AidotClient.login_info) - the right
         # place to cache one connection per account.
@@ -7110,7 +7065,7 @@ class CameraMixin(
         ps._last_open_at = 0.0  # monotonic of the previous open attempt (0 = none yet)
         ps._not_ready_burst = 0  # not-ready answers in a row (encoder cold)
         ps.loop = asyncio.get_running_loop()
-        _warn_deprecated_knobs()
+        settings.warn_deprecated_once()
         while self._streaming_active:
             # Thread-safe queues: taps run on the loop, the A/V mux in a thread.
             _o = await _dtls_serve_loop_open_attempt(self, ps)
