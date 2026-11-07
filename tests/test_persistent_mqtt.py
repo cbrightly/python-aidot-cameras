@@ -79,3 +79,59 @@ def test_subscriptions_tracked_for_replay():
     pm = _PersistentMqtt("wss://h:8443/mqtt", "u", "p", "cid")
     pm._subscribe_sync(["a/#", "b/#", "a/#"])  # no client yet -> just tracked
     assert pm._subs == {"a/#", "b/#"}
+
+
+def test_a_request_without_a_connection_reports_it():
+    import asyncio
+    import types
+
+    async def no_pm():
+        return None
+
+    async def boom():
+        raise RuntimeError("cannot build")
+
+    for get_pm in (no_pm, boom):
+        obj = types.SimpleNamespace(_get_persistent_mqtt=get_pm, device_id="d")
+        req = cc.CameraMixin._persistent_request.__get__(obj)
+        assert asyncio.run(req([("t", "p")], ["s/#"], 1.0)) == (
+            [],
+            {"error": cc._NO_PERSISTENT_MQTT},
+        )
+
+
+def test_a_request_rides_the_persistent_connection():
+    import asyncio
+    import types
+
+    seen = {}
+
+    class _Pm:
+        async def request(self, publish_items, subscribe_topics, timeout):
+            seen.update(pub=publish_items, sub=subscribe_topics, timeout=timeout)
+            return [("t", "{}")], {"error": None}
+
+    async def get_pm():
+        return _Pm()
+
+    obj = types.SimpleNamespace(_get_persistent_mqtt=get_pm, device_id="d")
+    req = cc.CameraMixin._persistent_request.__get__(obj)
+    assert asyncio.run(req([("t", "p")], ["s/#"], 1.5)) == (
+        [("t", "{}")],
+        {"error": None},
+    )
+    assert seen == {"pub": [("t", "p")], "sub": ["s/#"], "timeout": 1.5}
+
+
+def test_the_request_sites_share_the_helper_and_drop_the_url_guard():
+    import inspect
+
+    for fn in (
+        cc.CameraMixin._mqtt_device_cmd,
+        cc.CameraMixin.async_query_device_action,
+        cc.CameraMixin.async_get_camera_attributes,
+    ):
+        src = inspect.getsource(fn)
+        assert "self._persistent_request(" in src, fn.__name__
+        assert "pm.request(" not in src, fn.__name__
+        assert "_async_get_mqtt_url()" not in src, fn.__name__

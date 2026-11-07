@@ -38,6 +38,11 @@ function each, all on default paths.
   changes.
 
 ### Changed
+- **A missing broker URL reads as a missing connection.** A device command,
+  device-action query or attribute read no longer checks for the URL first;
+  all three go through one persistent-connection request, so with no URL an
+  attribute read logs the transport failure and returns the device list's
+  properties (it returned None), as it already did with no connection.
 - **`AIDOT_MQTT_CONFIG2`: the fallback broker URL takes the plaintext gate.**
   When getServerUrlConfig fails and the mqttConfig2 host is used instead, a
   non-TLS URL is now refused unless `AIDOT_ALLOW_PLAINTEXT_MQTT` is set, and

@@ -259,6 +259,9 @@ _DTLS_SERVE_ICE_WAIT_S = settings.read("AIDOT_DTLS_SERVE_ICE_WAIT_S")
 # discarded task can be garbage-collected mid-flight. Discarded on completion.
 _BG_TASKS: set = set()
 
+# The status error of a persistent request that found no connection to use.
+_NO_PERSISTENT_MQTT = "no persistent MQTT connection"
+
 # Minimum gap between MQTT credential refetches after the broker refused one.
 # One rotation is normal (another login happened); a second refusal that fast
 # means refetching is not helping, so back off rather than loop.
@@ -3529,6 +3532,32 @@ class CameraMixin(
         client_id = self._mqtt_client_id() or f"app-{mqtt_user}"
         return mqtt_user, mqtt_pwd, client_id
 
+    async def _persistent_request(
+        self, publish_items: list, sub_topics: list, timeout: float
+    ) -> tuple:
+        """Publish ``publish_items`` and collect what arrives on ``sub_topics``
+        for ``timeout`` seconds, on the account's one persistent connection.
+
+        ``(messages, status)``, as ``_PersistentMqtt.request``. With no
+        connection to be had, ``([], {"error": _NO_PERSISTENT_MQTT})``: there
+        is no per-op fallback, because a second connect with the account's
+        clientId evicts the persistent one.
+        """
+        try:
+            pm = await self._get_persistent_mqtt()
+        except Exception:
+            _LOGGER.debug(
+                "camera %s: persistent MQTT unavailable",
+                getattr(self, "device_id", "?"),
+                exc_info=True,
+            )
+            pm = None
+        if pm is None:
+            return [], {"error": _NO_PERSISTENT_MQTT}
+        return await pm.request(
+            publish_items=publish_items, subscribe_topics=sub_topics, timeout=timeout
+        )
+
     async def _async_get_smarthome_auth(self) -> Optional[dict]:
         """Fetch MQTT credentials (mqttUser + mqttPassword) for the Arnoo broker.
 
@@ -3894,12 +3923,6 @@ class CameraMixin(
         import json as _json
 
         user_id = self.user_id
-
-        mqtt_url = await self._async_get_mqtt_url()
-        if not mqtt_url:
-            _LOGGER.error("_mqtt_device_cmd: no MQTT URL for %s", self.device_id)
-            return False
-
         device_id = self.device_id
         sub_topics = [
             f"iot/v1/c/{user_id}/#",
@@ -3941,8 +3964,6 @@ class CameraMixin(
             _wake_items.append((_wake_topic, _wake_payload))
         publish_items.append((pub_topic, payload_str))
 
-        pm = await self._get_persistent_mqtt()
-
         import time as _time
 
         _plan = _wake_plan(
@@ -3950,28 +3971,28 @@ class CameraMixin(
             now=_time.monotonic(),
             last_wake=getattr(self, "_last_wake_mono", None),
         )
-        if _plan.wake and _wake_items and pm is not None:
+        _connected = True
+        if _plan.wake and _wake_items:
             try:
-                await pm.request(
-                    publish_items=_wake_items, subscribe_topics=[], timeout=2.0
-                )
-                self._last_wake_mono = _time.monotonic()
+                _, _wst = await self._persistent_request(_wake_items, [], 2.0)
+                _connected = _wst.get("error") != _NO_PERSISTENT_MQTT
+                if _connected:
+                    self._last_wake_mono = _time.monotonic()
             except Exception:
                 # A failed wake must not stop the command: on a camera that is
                 # already up the command works without it.
                 _LOGGER.debug(
                     "camera %s: wake publish failed", device_id, exc_info=True
                 )
-            await asyncio.sleep(_plan.settle)
-        if pm is not None:
-            messages, _st = await pm.request(
-                publish_items=publish_items,
-                subscribe_topics=sub_topics,
-                timeout=timeout,
+            if _connected:
+                await asyncio.sleep(_plan.settle)
+        if _connected:
+            messages, _st = await self._persistent_request(
+                publish_items, sub_topics, timeout
             )
         else:
-            messages, _st = [], {"error": "no persistent MQTT connection"}
-        if _st and _st.get("error"):
+            messages, _st = [], {"error": _NO_PERSISTENT_MQTT}
+        if _st.get("error"):
             # No per-op fallback: it connected with the same clientId, which
             # evicts the persistent connection. The command is reported as not
             # sent rather than falsely as sent on an empty result.
@@ -3986,7 +4007,7 @@ class CameraMixin(
         # cannot: it returns False for a failed publish and for a camera that
         # rebooted before answering.
         if not expect_ack:
-            _published = not (_st and _st.get("error"))
+            _published = not _st.get("error")
             _LOGGER.info(
                 "_mqtt_device_cmd: published without waiting for an ack "
                 "(topic=%s published=%s)",
@@ -4197,11 +4218,6 @@ class CameraMixin(
 
         user_id = self.user_id
         device_id = self.device_id
-        mqtt_url = await self._async_get_mqtt_url()
-        if not mqtt_url:
-            _LOGGER.debug("async_query_device_action: no MQTT URL for %s", device_id)
-            return None
-
         _dev = self._camera_properties() or {}
         parent_id = (
             getattr(getattr(self, "info", None), "direct_id", None)
@@ -4235,20 +4251,15 @@ class CameraMixin(
         # on a duplicate client id: inside Home Assistant the query and the
         # integration's own connection knock each other off and the reply
         # never arrives.
-        messages = []
-        pm = await self._get_persistent_mqtt()
-        if pm is not None:
-            messages, _st = await pm.request(
-                publish_items=publish_items,
-                subscribe_topics=sub_topics,
-                timeout=timeout,
+        messages, _st = await self._persistent_request(
+            publish_items, sub_topics, timeout
+        )
+        if _st.get("error"):
+            _LOGGER.debug(
+                "async_query_device_action: MQTT failed for %s (%s)",
+                device_id,
+                _st.get("error"),
             )
-            if _st and _st.get("error"):
-                _LOGGER.debug(
-                    "async_query_device_action: MQTT failed for %s (%s)",
-                    device_id,
-                    _st.get("error"),
-                )
         # Several devAction messages can be in flight on a shared connection,
         # and some carry no `out` at all (a bare acknowledgement). Taking the
         # first match therefore loses data: a camera reporting six sound
@@ -4479,11 +4490,6 @@ class CameraMixin(
         user_id = self.user_id
         device_id = self.device_id
 
-        mqtt_url = await self._async_get_mqtt_url()
-        if not mqtt_url:
-            _LOGGER.error("async_get_camera_attributes: no MQTT URL for %s", device_id)
-            return None
-
         sub_topics = [
             f"iot/v1/c/{user_id}/#",
             f"iot/v1/cb/{user_id}/#",
@@ -4528,31 +4534,17 @@ class CameraMixin(
             )
             publish_items.append((_wake_topic, _wake_payload))
 
-        messages: list = []
-        try:
-            pm = await self._get_persistent_mqtt()
-        except Exception:
-            _LOGGER.debug(
-                "camera %s: persistent MQTT unavailable for attribute read",
-                getattr(self, "device_id", "?"),
-                exc_info=True,
-            )
-            pm = None
-        _st = None
-        if pm is not None:
-            messages, _st = await pm.request(
-                publish_items=publish_items,
-                subscribe_topics=sub_topics,
-                timeout=timeout,
-            )
-        if pm is None or (_st and _st.get("error")):
+        messages, _st = await self._persistent_request(
+            publish_items, sub_topics, timeout
+        )
+        if _st.get("error"):
             # Said as a transport failure, so "the broker would not have us"
             # and "the camera stayed quiet" do not both read as an empty push.
             _LOGGER.warning(
                 "async_get_camera_attributes: no MQTT session for %s (%s) - "
                 "this is a transport failure, not the camera staying quiet.",
                 device_id,
-                (_st or {}).get("error") or "no persistent connection",
+                _st["error"],
             )
 
         for topic, raw in messages:
