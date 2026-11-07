@@ -6080,7 +6080,7 @@ class _SdesOpenState:
     _conn_mode: "Any" = dataclasses.field(init=False)  # turn_pre_allocation
     # Packets the post-offer TURN allocate read that were not its own
     # responses; the STUN responder window answers them first.
-    _turn_strays: "list" = dataclasses.field(init=False, default_factory=list)
+    _turn_strays: "list" = dataclasses.field(init=False)  # turn allocation
     _dc_probe_fp: "Any" = dataclasses.field(init=False)  # turn_pre_allocation
     _psk_value_req: "Any" = dataclasses.field(init=False)  # build_offer
     ts: "Any" = dataclasses.field(init=False)  # build_offer
@@ -6920,6 +6920,7 @@ async def _sdes_open_turn_allocation(self, ps: _SdesOpenState) -> None:
     allocate reads that is not its own goes to ``ps._turn_strays`` for the
     STUN window to answer.
     """
+    ps._turn_strays = []
     for _ice_mid, _ice_port in (("0", ps.audio_port), ("1", ps.video_port)):
         # Host candidate (LAN IP)
         ps._send_sdes_ice_cand(
