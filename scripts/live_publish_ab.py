@@ -10,7 +10,8 @@ go2rtc you control (not HA's bundled one - its API is on a unix socket):
     python scripts/live_publish_ab.py --go2rtc http://127.0.0.1:1984 \\
         --rtsp-port 8554 --view-s 30 --soak-s 1800 --repeats 2
 
-Per camera it alternates arms (``ffmpeg`` = flag off, ``direct`` = flag on),
+Per camera it alternates arms (``ffmpeg`` = flag off, ``direct`` = flag on;
+a DTLS camera publishes directly in both, as it has no ffmpeg push any more),
 waiting out the camera's ~120 s viewer-slot hold between opens, and for each
 open measures what the integration relies on:
 

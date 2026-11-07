@@ -262,7 +262,9 @@ ran; its absence is the fault.
 
 Direct publish (on unless `AIDOT_DIRECT_PUBLISH=0`) replaces the serve's ffmpeg
 with an RTSP publisher inside the library, for a live `rtsp://` push only (recordings, snapshots, `-`
-and `http://` serves are unchanged). Design, measurements and rollout:
+and `http://` serves are unchanged). A DTLS push is published this way whatever
+the switch says: its ffmpeg push transcoded the mux's AAC back to A-law, which
+the publish already carries as the camera's own. Design, measurements and rollout:
 [`DESIGN-direct-publish.md`](DESIGN-direct-publish.md).
 
 - **SDES.** The bridge still decrypts and forwards plain RTP to the two loopback

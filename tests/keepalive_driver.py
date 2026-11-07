@@ -283,6 +283,7 @@ class DtlsServeRun:
         self.dormant: list[dict] = []
         self.dormant_after: list[float] = []
         self.mux_targets: list[str] = []
+        self.mux_sinks: list = []
         self.started_at = _real_time.monotonic()
         FakeDirectTsServer.instances = []
         self.direct = FakeDirectTsServer.instances
@@ -332,8 +333,9 @@ class DtlsServeRun:
         client._send_video_pli = _pli
         client._install_av_taps = lambda pc, vq, aq: True
 
-        def _mux(vq, aq, wfile, progress, stop):
+        def _mux(vq, aq, wfile, progress, stop, **kw):
             self.mux_targets.append("mux")
+            self.mux_sinks.append(wfile)
             while not stop.is_set():
                 if frames:
                     progress[0] = _real_time.monotonic()

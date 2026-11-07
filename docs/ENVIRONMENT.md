@@ -100,8 +100,10 @@ out of the box.
 
 ## The ffmpeg serve and the recordings
 
-The ffmpeg serve carries recordings, snapshots, `-` and `http://` serves, H.265
-sessions and any camera with `AIDOT_DIRECT_PUBLISH=0`.
+The ffmpeg serve carries SDES recordings, snapshots, `http://` serves, H.265
+sessions and any SDES camera with `AIDOT_DIRECT_PUBLISH=0`. A DTLS camera runs
+no ffmpeg: its `-` and `http://` serves are the PyAV mux's MPEG-TS as written,
+and its `rtsp://` push is always the direct publish.
 
 | Variable | Purpose | Default |
 | --- | --- | --- |

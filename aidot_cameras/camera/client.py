@@ -55,9 +55,9 @@ from .webrtc import WebRTCSession  # re-exported (split into webrtc.py)
 from . import h264_sps as _h264_sps
 from .rtsp_publish import (
     RESENT_MAX_BACK_S,
-    direct_publish_enabled,
     dtls_rtp_publish_run,
     is_publishable_url,
+    redact_url,
 )
 from .sdes import (
     SdesSession,
@@ -162,8 +162,9 @@ def _is_transient_cloud_error(exc: BaseException) -> bool:
 # cloud explicitly reports a device offline, failed-open retries re-check the
 # flag every RECHECK seconds and only probe a real open every PROBE seconds,
 # instead of consuming an open-gate slot on the normal reconnect cadence.
-class _FfmpegMissing(RuntimeError):
-    """The serve needs an ffmpeg that is not there; see _release_after_loop_error."""
+class _ServeUnavailable(RuntimeError):
+    """The serve cannot run (its URL names no serve, or its port is taken);
+    see _release_after_loop_error."""
 
 
 _OFFLINE_RECHECK_S = settings.read("AIDOT_OFFLINE_RECHECK_S")
@@ -824,6 +825,29 @@ def _is_http_serve_url(url) -> bool:
     return str(url or "").lower().startswith("http://")
 
 
+def _dtls_serve_mode(url) -> str:
+    """Where the DTLS serve sends a camera's media, by its serve URL.
+
+    - ``rtsp://`` -> ``"publish"``: the direct publish (``dtls_rtp_publish_run``)
+      pushes H.264 and A-law, plus AAC unless ``AIDOT_PUBLISH_AAC`` is off.
+      Whatever ``AIDOT_DIRECT_PUBLISH`` says: the ffmpeg push it used to fall
+      back to transcoded the mux's AAC back to A-law, which the publish
+      already sends as the camera's own.
+    - ``-`` -> ``"stdout"``: the mux's MPEG-TS on this process's stdout, for a
+      go2rtc ``exec:`` source, which owns the process's lifecycle.
+    - ``http://`` -> ``"pull"``: the mux's MPEG-TS served to whoever dials the
+      URL's port (go2rtc).
+    - anything else -> ``"none"``: nothing can serve it.
+    """
+    if is_publishable_url(url):
+        return "publish"
+    if url == "-":
+        return "stdout"
+    if _is_http_serve_url(url):
+        return "pull"
+    return "none"
+
+
 def _resolve_serve_input_timeout_s(is_battery: bool) -> int:
     """Seconds the serve's SDP input tolerates total silence before erroring.
 
@@ -1452,7 +1476,6 @@ class _DtlsServeLoopState:
     # prepare_session; read by serve_cycle's check and session_end
     _pc_bad_box: "Any" = dataclasses.field(init=False)
     idle_secs: "Any" = dataclasses.field(init=False)  # prepare_session
-    proc: "Any" = dataclasses.field(init=False)  # prepare_session, serve_cycle
     wfile: "Any" = dataclasses.field(init=False)  # prepare_session, serve_cycle
     stop_flag: "Any" = dataclasses.field(init=False)  # prepare_session, serve_cycle
     mux_thread: "Any" = dataclasses.field(init=False)  # prepare_session, serve_cycle
@@ -1697,7 +1720,7 @@ async def _dtls_serve_loop_prepare_session(self, ps: _DtlsServeLoopState) -> Non
         # dormant while it still holds the process - a live producer
         # that has quietly stopped producing.
         ps.idle_secs = 0.0
-    ps.proc = ps.wfile = ps.stop_flag = ps.mux_thread = None
+    ps.wfile = ps.stop_flag = ps.mux_thread = None
     ps.cancelled = ps.idle_release = False
     ps._pub_fail_n = 0
     # Start-up grace (see the SDES loop): before the first viewer of
@@ -1722,8 +1745,8 @@ async def _dtls_serve_loop_serve_cycle(
     import threading as _threading
 
     try:
-        # (Re)start the ffmpeg serve whenever go2rtc (re)connects, while
-        # the warm WebRTC session keeps delivering encoded frames.
+        # (Re)start the serve whenever go2rtc (re)connects, while the warm
+        # WebRTC session keeps delivering encoded frames.
         while self._streaming_active and not ps._pc_dead():
             # Drain any backlog so a (re)connect starts on a fresh GOP.
             for _q2 in (ps.vq, ps.aq):
@@ -1733,84 +1756,51 @@ async def _dtls_serve_loop_serve_cycle(
                 except _queue.Empty:
                     pass
             await self._send_video_pli(ps.pc)  # request a clean keyframe
-            # With the relay holding the public port, ffmpeg listens on a
-            # fresh internal port each cycle and the relay splices to it;
-            # without it, ffmpeg owns the public port directly (old path).
+            # Where this cycle's media goes (see _dtls_serve_mode): published
+            # over RTSP, written to stdout, or served to a pulling consumer.
+            # No mode runs ffmpeg: the mux's MPEG-TS is served as written.
+            _mode = _dtls_serve_mode(ps.serve_url)
+            _publishing = _mode == "publish"
             _relay = self._serve_relay
-            if _relay is not None:
-                _ff_port = _grab_free_port()
-                _ff_url = _rewrite_serve_port(ps.serve_url, _ff_port)
-            else:
-                _ff_port = None
-                _ff_url = ps.serve_url
-            # Serve the muxed TS straight to the consumer on any http://
-            # serve URL that direct publish does not take.
-            # The `-c copy` ffmpeg hop re-packetizes MPEG-TS this mux
-            # already wrote in the form go2rtc wants, and measured
-            # 2026-08-20 it is the one component that LOSES timestamps
-            # (64,981 PES leave the mux with both, 8 of ffmpeg's 12,729
-            # carry none) - which go2rtc renders as RTP timestamp 0 and
-            # HA reports as a negative DTS. See _DirectTsServer.
-            _direct = None
-            # Direct RTSP publish (AIDOT_DIRECT_PUBLISH): the tapped
-            # frames are packetized and published into go2rtc on a
-            # thread - no ffmpeg, no listen port for go2rtc to dial.
-            # Checked before the direct TS serve, which would otherwise
-            # try to BIND the rtsp:// URL's port (go2rtc's own).
-            _publishing = direct_publish_enabled(
-                settings.stream_settings_of(self)
-            ) and is_publishable_url(ps.serve_url)
+            _mux_state: dict = {}
             if _publishing:
-                pass
-            elif _is_http_serve_url(ps.serve_url):
-                # Only an http:// serve is one go2rtc DIALS. For "-"
-                # this bound a random port and wrote nothing to stdout
-                # (so `aidot-go2rtc <dtls-id> -` produced no media),
-                # and for rtsp:// it bound the push target's port
-                # locally instead of publishing to it.
-                # Bind the port the consumer was TOLD about. `_ff_port`
-                # is only set on the relay branch, so `_ff_port or 0`
-                # bound a random ephemeral port whenever no relay was
-                # running - go2rtc dialled the advertised port, found
-                # nothing, and answered DESCRIBE with 404 while the
-                # server itself was working.
-                _direct_port = _ff_port or _serve_port(ps.serve_url) or 0
+                ps.wfile = None
+            elif _mode == "stdout":
+                # The go2rtc exec: source reads this process's stdout. A
+                # duplicate of fd 1, so closing it at the end of the cycle
+                # leaves stdout open for the next one.
+                ps.wfile = os.fdopen(os.dup(1), "wb", buffering=0)
+            elif _mode == "pull":
+                # Bind the port the consumer was TOLD about, or an internal
+                # one the relay splices the public port to. Binding
+                # `_ff_port or 0` once served a random ephemeral port while
+                # go2rtc dialled the advertised one and answered DESCRIBE
+                # with 404.
+                _direct_port = (
+                    _grab_free_port()
+                    if _relay is not None
+                    else _serve_port(ps.serve_url) or 0
+                )
                 _direct = _DirectTsServer(_direct_port)
                 try:
                     _direct.start()
                 except OSError as _exc:
-                    _LOGGER.warning(
-                        "camera %s: direct serve could not bind (%s)"
-                        " - falling back to the ffmpeg hop",
-                        getattr(self, "device_id", "?"),
-                        _exc,
-                    )
-                    _direct = None
-            if _publishing:
-                ps.proc = None
-                ps.wfile = None
-            elif _direct is not None:
-                ps.proc = None
+                    raise _ServeUnavailable(
+                        "serve port %s could not be bound (%s)" % (_direct_port, _exc)
+                    ) from _exc
                 ps.wfile = _direct
                 if _relay is not None:
                     _relay.set_backend(_direct.port)
                 _LOGGER.info(
-                    "camera %s: serving TS directly on port %d (no ffmpeg hop)",
+                    "camera %s: serving TS directly on port %d",
                     getattr(self, "device_id", "?"),
                     _direct.port,
                 )
             else:
-                rfd, wfd = os.pipe()
-                ps.proc = await self._spawn_dtls_serve_ffmpeg(_ff_url, rfd)
-                os.close(rfd)
-                if ps.proc is None:
-                    os.close(wfd)
-                    # Not a retry: without ffmpeg every cycle would
-                    # reopen the camera 15 s later and fail the same way.
-                    raise _FfmpegMissing("ffmpeg could not be started")
-                if _relay is not None:
-                    _relay.set_backend(_ff_port)
-                ps.wfile = os.fdopen(wfd, "wb", buffering=0)
+                raise _ServeUnavailable(
+                    "no DTLS serve for %r: use http://, rtsp:// or -"
+                    % redact_url(str(ps.serve_url))
+                )
             progress = [ps.loop.time()]
             ps.stop_flag = _threading.Event()
             _publish_result: dict = {}
@@ -1826,12 +1816,12 @@ async def _dtls_serve_loop_serve_cycle(
                 ps.mux_thread = _threading.Thread(
                     target=_dtls_av_mux_run,
                     args=(ps.vq, ps.aq, ps.wfile, progress, ps.stop_flag),
+                    kwargs={"state": _mux_state},
                     daemon=True,
                 )
             ps.mux_thread.start()
-            # Once the mux is feeding and ffmpeg has had a moment to bind
-            # its -listen socket, signal "serve ready" so stream_source can
-            # hand HA a working URL (no 40s connection-refused retry gap).
+            # Once the mux is feeding, signal "serve ready" so stream_source
+            # can hand HA a working URL (no 40s connection-refused retry gap).
             if not self._serve_ready.is_set():
                 _p0 = progress[0]
                 _dead = False
@@ -1842,12 +1832,10 @@ async def _dtls_serve_loop_serve_cycle(
                     _dead = ps._pc_dead()
                     if _dead or progress[0] > _p0:
                         break
-                # ffmpeg binds its -listen socket at startup, so by the time
-                # the mux has written a frame (progress moved above) the
-                # socket is long bound.  A short margin is plenty; the old
-                # 2.0s blind wait was pure cold-start latency.  (Don't probe
-                # the port - `-listen 1` would consume our probe as its one
-                # client and tear down before go2rtc connects.)
+                # The serve is bound before the mux starts, so once a frame
+                # has been written (progress moved above) it is ready; the
+                # short margin below is kept from the ffmpeg serve, whose
+                # -listen socket needed it.
                 if not _dead:
                     # A dead session is not "serving": the cycle below ends
                     # on its first check instead.
@@ -1890,24 +1878,17 @@ async def _dtls_serve_loop_serve_cycle(
             # report, not every half second.
             _health_dtls = HealthReporter(self.device_id)
             _watching_dtls = None
-            # Wait for ffmpeg to exit (go2rtc disconnect) or idle
-            # release. On the direct path there is no ffmpeg to exit, so
-            # the cycle runs until the peer connection dies or the view
-            # is released. `proc` is None there, and dereferencing it
-            # here threw an AttributeError the instant the mux started -
-            # which made two live trials of the direct serve look like a
-            # go2rtc DESCRIBE failure when the serve cycle had simply
-            # died on its first iteration.
-            while self._streaming_active and (
-                ps.proc is None or ps.proc.returncode is None
-            ):
+            # Serve until the peer connection dies, the view is released,
+            # or the mux or publish thread ends on its own.
+            while self._streaming_active:
                 await asyncio.sleep(0.5)
                 if ps._pc_dead():
                     break
-                if _publishing and not ps.mux_thread.is_alive():
+                if not ps.mux_thread.is_alive():
                     # The publish ended (go2rtc gone, stream missing,
-                    # connection dropped): end this cycle; the next one
-                    # republishes after a short backoff.
+                    # connection dropped) or the mux could not write: end
+                    # this cycle; the next one starts over after a short
+                    # backoff.
                     break
                 _now = ps.loop.time()
                 if _health_dtls.due(_now):
@@ -2009,15 +1990,14 @@ async def _dtls_serve_loop_serve_cycle(
                         ps.idle_release = True
                     # Only an actual idle release ends this serve cycle.
                     # (This break was unconditional - any idle_secs > 0
-                    # tore down a HEALTHY ffmpeg after one 0.5s tick,
-                    # respawning it forever: ffmpeg died at output-open
-                    # with "Immediate exit requested" and every DTLS
-                    # camera served nothing. stream_idle_s=0 masked it,
-                    # which is why never-release fleets still worked.)
+                    # tore down a HEALTHY serve after one 0.5s tick,
+                    # restarting it forever, and every DTLS camera served
+                    # nothing. stream_idle_s=0 masked it, which is why
+                    # never-release fleets still worked.)
                     if ps.idle_release:
                         break
             # Read the canary once more however the cycle ended: a break on a
-            # dead PC or an exited publish thread, or ffmpeg exiting, comes
+            # dead PC or an exited mux or publish thread comes
             # before the in-loop check, and a cycle that delivered video
             # would otherwise be recorded as video-less (then a long session
             # with video is paced as short). Not after a no-video verdict,
@@ -2029,13 +2009,14 @@ async def _dtls_serve_loop_serve_cycle(
             ):
                 _first_video_at = ps.loop.time()
             # When this cycle stopped serving, taken before the teardown
-            # below (a mux join of up to 2 s, a publish backoff of up to
-            # 10 s, then the session's stop), which would otherwise carry a
+            # below (a mux join of up to 2 s, a backoff of up to 10 s, then
+            # the session's stop), which would otherwise carry a
             # session that died at 25 s past the 30 s short-session
             # threshold. The session's end is worked out from it once, in
             # _dtls_serve_loop_session_end.
             ps._session_ended_at = ps.loop.time()
-            # Tear down this ffmpeg+mux cycle before the next.
+            # Tear down this cycle's serve and mux before the next.
+            _mux_ended = not ps.mux_thread.is_alive()
             ps.stop_flag.set()
             try:
                 if ps.wfile is not None:
@@ -2051,14 +2032,24 @@ async def _dtls_serve_loop_serve_cycle(
             ps.mux_thread.join(timeout=2.0)
             ps.mux_thread = ps.stop_flag = None
             if _relay is not None:
-                _relay.set_backend(None)  # no backend until next ffmpeg
-            _terminate_proc(ps.proc)
-            ps.proc = None
-            if _publishing and _publish_result.get("error"):
-                # Do not spin on a go2rtc that is down or restarting.
+                _relay.set_backend(None)  # no backend until the next cycle
+            if _mode == "stdout" and _mux_state.get("failed"):
+                # Whoever read our stdout has gone (go2rtc kills an exec
+                # source it no longer reads, so this is rare): there is no
+                # one to serve until the next view.
+                _LOGGER.info(
+                    "camera %s: stdout is no longer read - releasing",
+                    getattr(self, "device_id", "?"),
+                )
+                ps.idle_release = True
+            elif (_publishing and _publish_result.get("error")) or (
+                not _publishing and _mux_ended
+            ):
+                # Do not spin on a go2rtc that is down or restarting, or on a
+                # mux that cannot run.
                 ps._pub_fail_n += 1
                 await asyncio.sleep(min(10.0, 1.0 * (2 ** (ps._pub_fail_n - 1))))
-            elif _publishing:
+            else:
                 ps._pub_fail_n = 0
             if _first_video_at is not None:
                 # A session that delivered video clears the futile run:
@@ -2124,10 +2115,8 @@ async def _dtls_serve_loop_serve_cycle(
             # is_alive() guards the never-started case: if Thread.start()
             # itself raised, join() raises "cannot join thread before it
             # is started", which would replace the real exception AND skip
-            # the ffmpeg terminate plus session stop below - orphaning the
-            # process on its serve port and leaking the camera's session.
+            # the session stop below, leaking the camera's session.
             ps.mux_thread.join(timeout=2.0)
-        _terminate_proc(ps.proc)  # never orphan ffmpeg on teardown
         self._stream_session = None
         try:
             await ps.session.stop()
@@ -6323,10 +6312,9 @@ class CameraMixin(
         posting every 20 s with nothing behind it. This puts the camera in
         the same state the idle release does, so the next view starts afresh.
         """
-        if isinstance(exc, _FfmpegMissing):
+        if isinstance(exc, _ServeUnavailable):
             _LOGGER.error(
-                "camera %s: %s: %s - the camera is released until the next view;"
-                " install ffmpeg or enable the direct publish",
+                "camera %s: %s: %s - the camera is released until the next view",
                 self.device_id,
                 which,
                 exc,
@@ -7191,16 +7179,16 @@ class CameraMixin(
             slots.release()
 
     async def _dtls_serve_loop_inner(self) -> None:
-        """Serve a DTLS camera's live H.264 to go2rtc over an HTTP-listen socket.
+        """Serve a DTLS camera's live H.264 and audio to go2rtc.
 
         Powered (A000088) cameras have no local API and aiortc owns the
         DTLS/SRTP keys, so we can't point ffmpeg at the socket like the SDES
         path.  Instead aiortc does ICE/DTLS/SRTP-decrypt/depacketize and we tap
-        the *encoded* H.264 frames and ``-c copy`` them to ``ffmpeg -f mpegts
-        -listen 1`` - no decode, no re-encode (viable on a Raspberry Pi).  The
-        WebRTC session is held warm; only the local ffmpeg serve is restarted
-        when go2rtc disconnects/reconnects, so reconnects need no camera
-        re-handshake.
+        the *encoded* H.264 frames: published over RTSP, or muxed to MPEG-TS
+        for a pull or stdout serve (see ``_dtls_serve_mode``) - no decode, no
+        re-encode (viable on a Raspberry Pi).  The WebRTC session is held warm;
+        only the local serve is restarted when go2rtc disconnects/reconnects,
+        so reconnects need no camera re-handshake.
         """
 
         ps = _DtlsServeLoopState()
@@ -7258,91 +7246,6 @@ class CameraMixin(
             if isinstance(_o, _PhaseReturn):
                 return _o.value
         return None
-
-    async def _spawn_dtls_serve_ffmpeg(self, serve_url: Optional[str], stdin_fd: int):
-        """Launch ffmpeg to serve the mux thread's MPEG-TS (read from ``stdin_fd``).
-
-        The stream is already cleanly timestamped + AAC-muxed (with the
-        gain/limiter applied) by PyAV, so ffmpeg just copies and serves -
-        re-encoding here dropped the live audio (mpegts PMT-timing on the
-        real-time pipe).  Returns the process, or None.
-
-        Three destinations:
-
-        - ``serve_url == "-"`` -> STDOUT model: write MPEG-TS to this process's
-          own stdout (``pipe:1``), so a parent that spawned us - go2rtc's
-          ``exec:`` source - consumes the camera directly and owns the process
-          lifecycle (spawn on first viewer, kill on idle).  No listen port and
-          no cold-start relay, which is the DTLS analogue of the SDES
-          ``{output}`` RTSP push.  Logging already goes to stderr, so stdout
-          carries nothing but media.
-        - ``rtsp://`` -> PUSH model: publish to an RTSP server the caller
-          already runs, the same shape the SDES path has always had.  This is
-          not a protocol difference finally overcome - the media reaching this
-          point is identical whichever transport decrypted it, and the only
-          reason DTLS had no push was that nobody wired the destination.  TCP
-          interleave, because a UDP publish of a 720p keyframe fragments and
-          the first loss takes the GOP with it.
-        - anything else -> HTTP-listen model, unchanged: serve on a ``-listen``
-          socket that go2rtc pulls.
-        """
-        if not serve_url:
-            return None
-        if _ffmpeg_path() is None:
-            _LOGGER.error("DTLS serve: %s", _FFMPEG_MISSING_MSG)
-            return None
-        codec_args = ["-c", "copy"]
-        if serve_url == "-":
-            out_args = ["-f", "mpegts", "pipe:1"]
-            out_target = 1  # this process's real stdout
-        elif serve_url.startswith("rtsp"):
-            # Audio cannot be copied here, and that is not a preference.  The
-            # mux upstream writes AAC into MPEG-TS, which carries it as ADTS
-            # with no global headers; ffmpeg's RTSP muxer refuses that outright
-            # - "AAC with no global headers is currently not supported" at
-            # header-write, so the publish never starts and video dies with it.
-            # `-bsf:a aac_adtstoasc` does not save it: the header is written
-            # before the filter has produced extradata.  So transcode to G.711
-            # A-law, which is RTP-native, costs almost nothing at 8 kHz mono,
-            # and was what the SDES push carried until that path moved to AAC
-            # (fMP4/MSE has no G.711 mapping, so browsers got silence there).
-            codec_args = ["-c:v", "copy", "-c:a", "pcm_alaw", "-ar", "8000", "-ac", "1"]
-            out_args = ["-f", "rtsp", "-rtsp_transport", "tcp", serve_url]
-            out_target = asyncio.subprocess.DEVNULL
-        else:
-            out_args = ["-f", "mpegts", "-listen", "1", serve_url]
-            out_target = asyncio.subprocess.DEVNULL
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "warning",
-            # Suppress input-side buffering: the PyAV mux already writes
-            # correctly-interleaved, timestamped MPEG-TS to the pipe every
-            # ~20ms.  Without +nobuffer ffmpeg's mpegts demuxer accumulates a
-            # read-ahead window (and the output mpegts muxer defaults to 700ms
-            # of A/V interleave delay) before flushing to go2rtc - exactly the
-            # bursty/choppy audio pattern.  Matches the SDES serve's approach.
-            "-fflags",
-            "+nobuffer",
-            "-i",
-            "pipe:0",
-            *codec_args,
-            *out_args,
-        ]
-        try:
-            return await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=stdin_fd,
-                stdout=out_target,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-        except FileNotFoundError:
-            _LOGGER.error("DTLS serve: ffmpeg not found")
-            return None
-        except Exception as exc:
-            _LOGGER.warning("DTLS serve: ffmpeg launch failed: %s", exc)
-            return None
 
     # -- PTZ physical pan/tilt (A001064) ----------------------------------- #
     # Uses IOCtrl cmd=4097 (IOTYPE_USER_IPCAM_PTZ_COMMAND) - NOT MQTT.

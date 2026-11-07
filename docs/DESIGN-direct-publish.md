@@ -21,7 +21,7 @@ go2rtc:
 | Transport | Today | What that hop has cost (from CHANGELOG / code comments) |
 | --- | --- | --- |
 | SDES (A001064, A001513, battery models) | bridge -> loopback UDP -> **ffmpeg** (`-c:v copy`, PCMA->AAC over an `anullsrc` base) -> RTSP push | ffmpeg exits (145 after an HA restart), zombie/fd/thread leaks, stderr-drain stalls, arrival-time restamping needed, multi-PT ANNOUNCE rejected, SDP narrowing must be perfect or the publish dies |
-| DTLS (A000088) | aiortc tap -> PyAV mux -> MPEG-TS -> `_DirectTsServer` **HTTP listen port** that go2rtc pulls (or ffmpeg for RTSP/stdout) | port must be bound before go2rtc dials (relay, CRC port hashing, "connection refused"), PCMA->AAC transcode + AGC, pull-registration PUT dance, re-PUT evicting publishers |
+| DTLS (A000088) | aiortc tap -> PyAV mux -> MPEG-TS -> `_DirectTsServer` **HTTP listen port** that go2rtc pulls (or ffmpeg for RTSP/stdout, removed after 1.0.0) | port must be bound before go2rtc dials (relay, CRC port hashing, "connection refused"), PCMA->AAC transcode + AGC, pull-registration PUT dance, re-PUT evicting publishers |
 
 Both hops exist only to turn RTP we already hold in-process into something
 go2rtc can ingest. go2rtc ingests RTP natively over an RTSP publish. So the hop

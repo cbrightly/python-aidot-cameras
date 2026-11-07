@@ -16,7 +16,7 @@ import aidot_cameras.camera.client as camera_client
 import aidot_cameras.camera.protocol as proto
 import aidot_cameras.camera.sdes_open as sdes_open
 from aidot_cameras.camera import rtsp_publish
-from aidot_cameras.camera.client import CameraMixin, _FfmpegMissing
+from aidot_cameras.camera.client import CameraMixin, _ServeUnavailable
 from aidot_cameras.camera.controls import (
     LIGHT_BRIGHTNESS_MIN,
     _CameraControlsMixin,
@@ -62,11 +62,15 @@ async def test_release_after_loop_error_puts_the_camera_to_sleep(caplog):
 
 
 @pytest.mark.asyncio
-async def test_a_missing_ffmpeg_is_named_not_retried(caplog):
+async def test_a_serve_that_cannot_run_is_named_not_retried(caplog):
     cam, _calls = _dormant_candidate()
-    await cam._release_after_loop_error("DTLS serve", _FfmpegMissing("no ffmpeg"))
+    await cam._release_after_loop_error(
+        "DTLS serve", _ServeUnavailable("serve port 1 could not be bound")
+    )
     assert cam._streaming_active is False
-    assert any("install ffmpeg" in r.getMessage() for r in caplog.records)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("could not be bound" in m for m in msgs)
+    assert not any("unexpected error" in m for m in msgs)
 
 
 @pytest.mark.parametrize("which", ["_sdes_keepalive_loop", "_dtls_serve_loop"])

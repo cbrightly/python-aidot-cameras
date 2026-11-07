@@ -6,6 +6,28 @@ date-less, incrementing versions published to PyPI via GitHub Releases.
 
 ## [Unreleased]
 
+Soak: resets the clock. The changes are to how every DTLS camera's media is
+served (pull, stdout and RTSP push), once the reference installation runs it.
+
+### Removed
+- **The DTLS serve runs no ffmpeg.** With the direct publish off, a DTLS
+  `rtsp://` push went through `ffmpeg -c:v copy -c:a pcm_alaw`: the camera's
+  A-law was encoded to AAC by the mux and transcoded back to A-law by ffmpeg.
+  The `-` (stdout) serve, and an `http://` serve whose port could not be
+  bound, also went through an ffmpeg `-c copy` hop. Now:
+  - `-` writes the mux's MPEG-TS to stdout as it is muxed, so
+    `aidot-go2rtc <dtls-id> -` behind a go2rtc `exec:` source needs no
+    ffmpeg. A failed write to stdout (its reader has gone) releases the
+    camera until the next view instead of starting another mux into it.
+  - a DTLS `rtsp://` push is always the direct publish: H.264 and the
+    camera's A-law, plus the AAC track unless `AIDOT_PUBLISH_AAC=0`.
+    `AIDOT_DIRECT_PUBLISH=0` (or `StreamSettings(direct_publish=False)`) no
+    longer changes it; it still applies to SDES pushes, and still turns off
+    the in-sync HLS TS, which the publish feeds.
+  - an `http://` serve whose port cannot be bound, or a serve URL that is
+    none of the three (`https://`, `rtsps://`), releases the camera with the
+    reason at ERROR instead of starting ffmpeg.
+
 ## [1.0.0rc71]
 
 Soak: resets the clock. The changes are to the DTLS serve loop's retry pacing on

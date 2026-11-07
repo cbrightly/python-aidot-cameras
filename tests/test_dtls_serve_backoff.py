@@ -927,14 +927,19 @@ def test_a_pc_dying_in_the_teardown_does_not_lengthen_the_session(
     )
     run.sessions = [sess]
     calls = {"n": 0}
+    import threading
 
-    def _slow_terminate(proc):
-        calls["n"] += 1
-        if calls["n"] == 1:  # the first cycle's teardown
-            _real_time.sleep(0.3)
-            sess._pc.connectionState = "closed"
+    real_join = threading.Thread.join
 
-    monkeypatch.setattr(cc, "_terminate_proc", _slow_terminate)
+    def _slow_join(self, timeout=None):
+        if self.name == "aidot-dtls-publish":
+            calls["n"] += 1
+            if calls["n"] == 1:  # the first cycle's teardown
+                _real_time.sleep(0.3)
+                sess._pc.connectionState = "closed"
+        return real_join(self, timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", _slow_join)
     with caplog.at_level("INFO", logger="aidot_cameras.camera.client"):
         run.run()
     assert len(run.mux_targets) == 1

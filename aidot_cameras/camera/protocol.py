@@ -1812,8 +1812,8 @@ def _dtls_av_mux_run(
     video_codec="h264",
 ) -> None:
     """Mux tapped video (H.264 copy) + audio (PCMA->AAC) to ``out_fileobj`` as
-    RTP-timestamped MPEG-TS.  Runs in a worker thread; the serve's ffmpeg reads
-    the other end of the pipe and serves it over HTTP-listen.
+    RTP-timestamped MPEG-TS.  Runs in a worker thread; ``out_fileobj`` is the
+    serve's sink (the pull server, this process's stdout, or a recording).
 
     - Video is copied (no re-encode - Pi-friendly) with the camera's 90 kHz RTP
       timestamps, so DTS is clean/monotonic (fixes HA's "No dts" stutter).
@@ -1886,8 +1886,7 @@ def _dtls_av_mux_run(
         def mark_keyframe(self):
             """Forward the keyframe signal when the sink understands it.
 
-            The sink is a _DirectTsServer on the direct path and an os pipe to
-            ffmpeg otherwise; only the former can use this.
+            The pull server uses it; stdout and a recording file do not.
             """
             fn = getattr(self._f, "mark_keyframe", None)
             if fn is not None:

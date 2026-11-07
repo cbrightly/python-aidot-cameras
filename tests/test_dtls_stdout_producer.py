@@ -6,76 +6,106 @@ last viewer leaves. DTLS had no equivalent - it could only serve on an
 ``-listen`` socket, which has to be bound before anyone asks for it and stays
 bound afterwards.
 
-``-`` closes that gap: ffmpeg writes to this process's own stdout, so whoever
-spawned us is the consumer and owns the lifecycle. Everything else about the
-serve is untouched, which is what these tests pin - a regression here would
-either break every existing HTTP-listen serve or silently send media to
-/dev/null.
+``-`` closes that gap: the mux writes to this process's own stdout, so whoever
+spawned us is the consumer and owns the lifecycle. It used to go through an
+ffmpeg ``-c copy`` hop; the mux's MPEG-TS now goes to stdout as written. What
+these tests pin is that each serve URL reaches its own destination - a
+regression here would either break every existing HTTP-listen serve or
+silently send media to /dev/null.
 """
 
 import asyncio
+import os
 import types
 
+import pytest
+
 import aidot_cameras.camera.client as client_mod
-from aidot_cameras.camera.client import CameraMixin
+from aidot_cameras.camera.client import CameraMixin, _dtls_serve_mode
 
 
-def _spawn(monkeypatch, serve_url):
-    """Run the real _spawn_dtls_serve_ffmpeg, capturing what it would exec."""
-    seen = {}
+@pytest.mark.parametrize(
+    "url, mode",
+    [
+        ("-", "stdout"),
+        ("http://127.0.0.1:18981/cam.ts", "pull"),
+        ("HTTP://127.0.0.1:18981/cam.ts", "pull"),
+        ("rtsp://127.0.0.1:8554/driveway", "publish"),
+        ("https://127.0.0.1:18981/cam.ts", "none"),
+        ("rtsps://127.0.0.1:8554/driveway", "none"),
+        ("", "none"),
+        (None, "none"),
+    ],
+)
+def test_each_serve_url_has_one_destination(url, mode):
+    assert _dtls_serve_mode(url) == mode
 
-    async def _fake_exec(*cmd, stdin=None, stdout=None, stderr=None):
-        seen["cmd"] = list(cmd)
-        seen["stdout"] = stdout
-        seen["stdin"] = stdin
-        return object()
 
-    monkeypatch.setattr(client_mod, "_ffmpeg_path", lambda: "/usr/bin/ffmpeg")
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
-    obj = types.SimpleNamespace()
-    fn = CameraMixin._spawn_dtls_serve_ffmpeg.__get__(obj)
-    proc = asyncio.run(fn(serve_url, 7))
-    return proc, seen
+def _stdout_run(monkeypatch, make_camera_device_client):
+    """One serve run with "-", fd 1 swapped for a pipe we read back."""
+    from tests.keepalive_driver import DtlsServeRun, FakeDtlsSession
+
+    cam = make_camera_device_client("A000088")
+    run = DtlsServeRun(monkeypatch, cam, [FakeDtlsSession()], url="-", timeout=0.5)
+
+    def _mux(vq, aq, wfile, progress, stop, **kw):
+        run.mux_sinks.append(wfile)
+        wfile.write(b"\x47" + b"\xff" * 187)
+        while not stop.is_set():
+            stop.wait(0.002)
+
+    monkeypatch.setattr(client_mod, "_dtls_av_mux_run", _mux)
+    r, w = os.pipe()
+    saved = os.dup(1)
+    os.dup2(w, 1)
+    try:
+        run.run()
+    finally:
+        os.dup2(saved, 1)
+        os.close(saved)
+        os.close(w)
+    try:
+        os.set_blocking(r, False)
+        got = os.read(r, 65536)
+    finally:
+        os.close(r)
+    return run, got
 
 
-def test_stdout_mode_writes_mpegts_to_this_process_stdout(monkeypatch):
-    proc, seen = _spawn(monkeypatch, "-")
-    assert proc is not None
-    assert seen["cmd"][-3:] == ["-f", "mpegts", "pipe:1"], seen["cmd"]
-    # fd 1, not DEVNULL: the media has to reach the parent that spawned us.
-    assert seen["stdout"] == 1, (
-        "stdout mode must hand ffmpeg this process's real stdout - anything "
-        "else sends the camera to nowhere while looking healthy"
+def test_stdout_mode_writes_the_mux_to_this_process_stdout(
+    monkeypatch, make_camera_device_client
+):
+    run, got = _stdout_run(monkeypatch, make_camera_device_client)
+    # fd 1, not /dev/null: the media has to reach the parent that spawned us.
+    assert got.startswith(b"\x47"), (
+        "stdout mode must write to this process's real stdout - anything else "
+        "sends the camera to nowhere while looking healthy"
     )
-    assert "-listen" not in seen["cmd"]
+    assert not run.direct, "stdout mode binds no listen port"
+    # Each cycle writes to a duplicate of fd 1 and closes only that.
+    assert run.mux_sinks and all(f.closed for f in run.mux_sinks)
+    os.fstat(1)  # still open
 
 
-def test_http_listen_mode_is_unchanged(monkeypatch):
-    url = "http://127.0.0.1:18981/cam.ts"
-    proc, seen = _spawn(monkeypatch, url)
-    assert proc is not None
-    assert seen["cmd"][-4:] == ["-f", "mpegts", "-listen", "1", url][-4:]
-    assert seen["cmd"][-1] == url
-    assert "-listen" in seen["cmd"]
-    assert seen["stdout"] == asyncio.subprocess.DEVNULL, (
-        "the listen serve must keep stdout discarded; writing media to our own "
-        "stdout there would corrupt whatever the parent reads"
-    )
+def test_a_failed_stdout_write_releases_the_serve(
+    monkeypatch, make_camera_device_client
+):
+    """go2rtc gone and stdout broken: the mux ends with a failed write, and the
+    serve goes dormant instead of restarting a mux into a dead pipe."""
+    from tests.keepalive_driver import DtlsServeRun, FakeDtlsSession
 
+    cam = make_camera_device_client("A000088")
+    run = DtlsServeRun(monkeypatch, cam, [FakeDtlsSession()], url="-", timeout=2.0)
+    started = []
 
-def test_both_modes_still_copy_from_the_mux_pipe(monkeypatch):
-    for url in ("-", "http://127.0.0.1:1/x.ts"):
-        _proc, seen = _spawn(monkeypatch, url)
-        cmd = seen["cmd"]
-        assert cmd[:2] == ["ffmpeg", "-y"]
-        assert "-i" in cmd and cmd[cmd.index("-i") + 1] == "pipe:0"
-        assert "-c" in cmd and cmd[cmd.index("-c") + 1] == "copy"
-        assert seen["stdin"] == 7
+    def _mux(vq, aq, wfile, progress, stop, *, state=None, **kw):
+        started.append(wfile)
+        state["failed"] = True
 
-
-def test_no_serve_url_still_returns_none(monkeypatch):
-    proc, seen = _spawn(monkeypatch, "")
-    assert proc is None and "cmd" not in seen
+    monkeypatch.setattr(client_mod, "_dtls_av_mux_run", _mux)
+    run.run()
+    assert len(started) == 1, "no second mux into a dead stdout"
+    assert [d["why"] for d in run.dormant] == ["idle release"]
 
 
 def _which_loop(monkeypatch, url, *, sdes=False):
@@ -114,8 +144,8 @@ def test_stdout_url_routes_to_the_serve_loop():
     JPEG loop, which opens a perfectly healthy WebRTC session and writes
     nothing to stdout - a go2rtc exec: source that hangs forever with no error
     anywhere.  Measured on an A000088: session up, data channel live, zero
-    bytes out.  The unit tests above passed throughout, because they call
-    _spawn_dtls_serve_ffmpeg directly and never ask who calls it.
+    bytes out.  Unit tests of the ffmpeg spawn helper passed throughout,
+    because they called it directly and never asked who calls it.
     """
     assert _which_loop(None, "-") == "serve"
 
@@ -126,42 +156,43 @@ def test_http_and_bare_keepalive_routing_are_unchanged():
     assert _which_loop(None, "http://127.0.0.1:18981/cam.ts", sdes=True) == "sdes"
 
 
-def test_rtsp_push_mode_publishes_over_tcp(monkeypatch):
-    """DTLS gained the RTSP push destination SDES always had.
+def test_rtsp_push_publishes_whatever_the_direct_publish_switch_says(
+    monkeypatch, make_camera_device_client
+):
+    """A DTLS rtsp:// push used to go through ffmpeg with the direct publish
+    off, transcoding the mux's AAC back to A-law. The publish already sends the
+    camera's A-law (and AAC), so the push publishes either way."""
+    from tests.keepalive_driver import DtlsServeRun, FakeDtlsSession
 
-    Nothing about the media differs by transport at this point - the mux has
-    already produced MPEG-TS - so the only reason DTLS lacked a push was that
-    no destination was wired.  TCP interleave because a UDP publish fragments
-    a 720p keyframe and the first loss takes the GOP with it.
-    """
-    url = "rtsp://127.0.0.1:8554/driveway"
-    proc, seen = _spawn(monkeypatch, url)
-    assert proc is not None
-    cmd = seen["cmd"]
-    assert cmd[-4:] == ["-f", "rtsp", "-rtsp_transport", "tcp", url][-4:]
-    assert cmd[-1] == url
-    assert "-listen" not in cmd
-    # Media must not reach our own stdout here: the push owns the socket, and a
-    # duplicate copy on fd 1 would corrupt whatever a parent reads.
-    assert seen["stdout"] == asyncio.subprocess.DEVNULL
-    # Video copies; audio MUST NOT.  The mux writes AAC into MPEG-TS as ADTS,
-    # and ffmpeg's RTSP muxer rejects AAC with no global headers at header
-    # write - which kills the whole publish, video included.  Reproduced with
-    # the exact argv: "AAC with no global headers is currently not supported".
-    assert cmd[cmd.index("-c:v") + 1] == "copy"
-    assert cmd[cmd.index("-c:a") + 1] == "pcm_alaw"
-    assert "-c" not in cmd, "a blanket -c copy here re-introduces the AAC refusal"
+    for flag in ("0", "1"):
+        monkeypatch.setenv("AIDOT_DIRECT_PUBLISH", flag)
+        cam = make_camera_device_client("A000088")
+        cam._stream_idle_opt = 0.0
+        run = DtlsServeRun(
+            monkeypatch,
+            cam,
+            [FakeDtlsSession()],
+            url="rtsp://127.0.0.1:8554/driveway",
+            timeout=0.5,
+        ).run()
+        assert run.mux_targets[:1] == ["publish"], flag
+        assert not run.direct
 
 
-def test_the_other_two_destinations_still_copy_everything(monkeypatch):
-    for url in ("-", "http://127.0.0.1:1/x.ts"):
-        _proc, seen = _spawn(monkeypatch, url)
-        cmd = seen["cmd"]
-        assert "-c" in cmd and cmd[cmd.index("-c") + 1] == "copy"
-        assert "-c:a" not in cmd, (
-            "only the RTSP push transcodes audio; MPEG-TS carries the mux's "
-            "AAC as-is and re-encoding it here would burn CPU for nothing"
-        )
+def test_no_serve_url_releases_the_camera_with_a_reason(
+    monkeypatch, make_camera_device_client
+):
+    from tests.keepalive_driver import DtlsServeRun, FakeDtlsSession
+
+    cam = make_camera_device_client("A000088")
+    session = FakeDtlsSession()
+    run = DtlsServeRun(
+        monkeypatch, cam, [session], url="rtsps://127.0.0.1:8554/x", timeout=0.5
+    )
+    with pytest.raises(client_mod._ServeUnavailable):
+        asyncio.run(cam._dtls_serve_loop_inner())
+    assert not run.mux_targets
+    assert session.stopped == 1
 
 
 def test_rtsp_url_routes_to_the_serve_loop():
