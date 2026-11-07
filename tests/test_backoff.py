@@ -114,6 +114,22 @@ def test_pacer_delays_within_bounds_real_rng():
         assert _BASE <= d <= _CAP
 
 
+def test_pacer_at_cap_and_floor_frac():
+    """at_cap says when the last failure's backoff reached the cap; with
+    floor_frac the draw there is in [floor_frac * cap, cap]. The values match
+    the hand rescaling the DTLS serve loop did before."""
+    for r in (0.0, 0.37, 1.0):
+        p = ReconnectPacer(15.0, 600.0, rand=lambda r=r: r, floor_frac=0.9)
+        q = ReconnectPacer(15.0, 600.0, rand=lambda r=r: r)
+        assert not p.at_cap
+        for _ in range(12):
+            d, raw = p.fail_delay(), q.fail_delay()
+            at_cap = 15.0 * 2 ** min(q.attempt - 1, 30) >= 600.0
+            assert p.at_cap == at_cap
+            want = 600.0 * (0.9 + 0.1 * (raw - 15.0) / 585.0) if at_cap else raw
+            assert abs(d - want) < 1e-9
+
+
 if __name__ == "__main__":
     import traceback
 
