@@ -5718,7 +5718,9 @@ class CameraMixin(
         """Prefer go2rtc: once the local serve is ready, register it with the
         configured go2rtc server and expose its low-latency pull URL via
         ``stream_rtsp_url``.  Best-effort - on any failure the direct serve URL
-        remains the fallback (ffmpeg / HA HLS).
+        remains the fallback (ffmpeg / HA HLS).  The write goes through
+        ``go2rtc.async_ensure_stream`` (via ``prefer_go2rtc``), the same locked
+        call the Home Assistant integration makes.
         """
         import aiohttp
         from .go2rtc import prefer_go2rtc
@@ -5790,12 +5792,12 @@ class CameraMixin(
         if not base:
             return
         import aiohttp
-        from .go2rtc import Go2rtcClient
+        from .go2rtc import Go2rtcClient, async_remove_stream
 
         name = self._go2rtc_stream_name()
         try:
             async with aiohttp.ClientSession() as _s2:
-                await Go2rtcClient(_s2, base).remove_stream(name)
+                await async_remove_stream(Go2rtcClient(_s2, base), name)
         except Exception:
             _LOGGER.debug(
                 "camera %s: swallowed exception in %s",
