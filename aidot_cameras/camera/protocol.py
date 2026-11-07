@@ -1818,7 +1818,7 @@ def _dtls_av_mux_run(
     - Video is copied (no re-encode - Pi-friendly) with the camera's 90 kHz RTP
       timestamps, so DTS is clean/monotonic (fixes HA's "No dts" stutter).
     - MPEG-TS can't carry G.711 PCMA, so audio is transcoded to AAC (trivial CPU
-      at 8 kHz mono).
+      at 8 kHz mono) by ``aac_track.AacEncoder``, the publishers' encoder.
       The A-law is conditioned by ``AlawAgc`` first, the same normalizer the
       direct publishers run, so a serve and a publish sound the same.
     - ``progress[0]`` is bumped on every successful mux so the serve loop can
@@ -1912,24 +1912,27 @@ def _dtls_av_mux_run(
         vs = out.add_stream(video_codec)
         vs.time_base = Fraction(1, 90000)
     try:
-        adec = av.CodecContext.create("pcm_alaw", "r")
-        adec.sample_rate = 8000
-        adec.layout = "mono"
-        # Resample 8 kHz PCMA -> 48 kHz AAC: 8 kHz AAC decodes but is commonly
-        # silent in browser / iOS / go2rtc players; 48 kHz is universally played.
-        aenc = out.add_stream("aac", rate=48000)
+        from .aac_track import (
+            AAC_CLOCK_RATE,
+            AAC_SAMPLES_PER_FRAME,
+            ALAW_SILENCE,
+            PCMA_RATE,
+            AacEncoder,
+        )
+        from .ts_tee import adts_header
+
+        # PCMA 8 kHz -> AAC 48 kHz with the publishers' encoder: 8 kHz AAC
+        # decodes but is commonly silent in browser / iOS / go2rtc players;
+        # 48 kHz is universally played. The stream is only muxed into, as
+        # ts_tee's is: each access unit goes in with its ADTS header.
+        aenc = out.add_stream("aac", rate=AAC_CLOCK_RATE)
         aenc.layout = "mono"
-        resampler = av.AudioResampler(format="fltp", layout="mono", rate=48000)
-        fifo = av.AudioFifo()
+        aac = AacEncoder()
 
         # The level normalizer every served path runs (see agc.py): it works
-        # on the A-law bytes before they are decoded, so the mux conditions
+        # on the A-law bytes before they are encoded, so the mux conditions
         # exactly what the direct publishers condition.
         agc = AlawAgc()
-        try:
-            import numpy as _np
-        except Exception:
-            _np = None
         have_audio = True
     except Exception as exc:
         _LOGGER.debug("DTLS A/V mux: audio disabled: %s", exc)
@@ -1938,10 +1941,12 @@ def _dtls_av_mux_run(
     _ts_state = {}
     _slack = _reorder_slack()
     # Audio starts where video does: video presentation is shifted by the
-    # slack (90 kHz), so shift audio (48 kHz) by the same time.
-    a_pts = [_slack * 48000 // 90000 if align_audio_start else 0]
+    # slack (90 kHz), so shift audio (48 kHz) by the same time. The encoder's
+    # first access unit is its 1024-sample priming, stamped one frame early
+    # so the first real sample lands on that start.
+    a_pts = [(_slack * 48000 // 90000 if align_audio_start else 0) - 1024]
     a_rtp0 = [None]  # first audio RTP timestamp (8 kHz units), for gap detection
-    a_in = [0]  # 8 kHz samples emitted to the resampler so far (incl. concealed)
+    a_in = [0]  # 8 kHz samples handed to the encoder so far (incl. concealed)
     vstarted = [False]
     # A failed container write is TERMINAL for this mux: the pipe's ffmpeg is
     # gone (EPIPE) and can never come back for this cycle.  Swallowing it and
@@ -2030,104 +2035,69 @@ def _dtls_av_mux_run(
             except _q.Empty:
                 pass
             return
-        try:
-            while True:
-                try:
-                    data, _ts = aq.get_nowait()
-                except _q.Empty:
-                    break
-                # Lock audio to its RTP clock.  The camera's PCMA RTP timestamp is
-                # an 8 kHz sample count; on packet loss it jumps ahead of the
-                # samples we've actually decoded.  Without filling that gap the
-                # audio timeline silently COMPRESSES (the lost time vanishes), so
-                # audio runs ahead of the RTP-timestamped video -> growing A/V
-                # desync and player jitter-buffer resyncs, heard as choppiness.
-                # Conceal the gap with silence (PLC) through the same stateful
-                # resampler, mirroring what the video path does with its 90 kHz
-                # timestamps.  Lossless streams have _gap == 0 (no-op).
-                if _np is not None:
-                    if a_rtp0[0] is None:
-                        a_rtp0[0] = int(_ts)
-                    _expected = (int(_ts) - a_rtp0[0]) & 0xFFFFFFFF
-                    _gap = _expected - a_in[0]
-                    if _gap < 0 or _gap > 8000 * 5:
-                        a_in[0] = _expected  # wrap / stream reset -> resync, no fill
-                    elif _gap >= 160:  # >= 20 ms missing: conceal with silence
-                        try:
-                            _sil = _np.zeros((1, int(_gap)), dtype=_np.int16)
-                            _sfr = av.AudioFrame.from_ndarray(
-                                _sil, format="s16", layout="mono"
-                            )
-                            _sfr.sample_rate = 8000
-                            for _rfr in resampler.resample(_sfr):
-                                fifo.write(_rfr)
-                            a_in[0] += int(_gap)
-                        except Exception:
-                            _LOGGER.debug(
-                                "swallowed exception in %s",
-                                "_flush_audio",
-                                exc_info=True,
-                            )
-                for fr in adec.decode(av.Packet(agc.process(data))):
-                    _ndec = fr.samples
-                    fr.pts = None
-                    for rfr in resampler.resample(fr):  # 8k PCMA -> 48k fltp
-                        fifo.write(rfr)
-                    a_in[0] += _ndec
-        except Exception:
-            _LOGGER.debug("swallowed exception in %s", "_flush_audio", exc_info=True)
         while True:
-            fr = fifo.read(1024)  # AAC wants 1024-sample frames
-            if fr is None:
-                # FIFO has < 1024 samples.  The audio source is continuous
-                # (measured: 100% timeline coverage, no lost packets), so the
-                # remainder must stay in the FIFO and be completed by the next
-                # decoded packet - NOT padded with silence here.  Padding on
-                # every 5 ms flush injected a micro-silence whenever the FIFO was
-                # momentarily short (almost always, given ~40 ms packet spacing) -
-                # that was the choppiness.  Only on the final drain do we pad the
-                # last partial frame so the encoder can flush it.
-                if not drain:
-                    break
-                s = getattr(fifo, "samples", 0)
-                if s == 0:
-                    break
-                fr = fifo.read(s)
-                if fr is None or fr.samples == 0:
-                    break
-                if _np is not None:
-                    try:
-                        arr = fr.to_ndarray()
-                        pad_n = 1024 - arr.shape[1]
-                        if pad_n > 0:
-                            padded = _np.concatenate(
-                                [
-                                    arr,
-                                    _np.zeros((arr.shape[0], pad_n), dtype=arr.dtype),
-                                ],
-                                axis=1,
-                            )
-                            pfr = av.AudioFrame.from_ndarray(
-                                padded, format="fltp", layout="mono"
-                            )
-                            pfr.sample_rate = 48000
-                            fr = pfr
-                    except Exception:
-                        break
-            fr.pts = a_pts[0]
-            fr.time_base = Fraction(1, 48000)
-            a_pts[0] += fr.samples
             try:
-                for opkt in aenc.encode(fr):
-                    out.mux(opkt)
-                    progress[0] = _t.monotonic()
+                data, _ts = aq.get_nowait()
+            except _q.Empty:
+                break
+            # Lock audio to its RTP clock.  The camera's PCMA RTP timestamp is
+            # an 8 kHz sample count; on packet loss it jumps ahead of the
+            # samples we've actually encoded.  Without filling that gap the
+            # audio timeline silently COMPRESSES (the lost time vanishes), so
+            # audio runs ahead of the RTP-timestamped video -> growing A/V
+            # desync and player jitter-buffer resyncs, heard as choppiness.
+            # Conceal the gap with silence (PLC) through the same encoder,
+            # mirroring what the video path does with its 90 kHz timestamps.
+            # Lossless streams have _gap == 0 (no-op).
+            if a_rtp0[0] is None:
+                a_rtp0[0] = int(_ts)
+            _expected = (int(_ts) - a_rtp0[0]) & 0xFFFFFFFF
+            _gap = _expected - a_in[0]
+            _alaw = agc.process(data)
+            if _gap < 0 or _gap > PCMA_RATE * 5:
+                a_in[0] = _expected  # wrap / stream reset -> resync, no fill
+            elif _gap >= 160:  # >= 20 ms missing: conceal with silence
+                _alaw = ALAW_SILENCE * _gap + _alaw
+            a_in[0] += len(_alaw)
+            try:
+                _aus = aac.encode(_alaw)
+            except Exception:
+                _LOGGER.debug(
+                    "swallowed exception in %s", "_flush_audio", exc_info=True
+                )
+                continue
+            if not _mux_aac(_aus):
+                return
+        if drain:
+            # Final: the last partial frame and what the encoder holds back.
+            try:
+                _aus = aac.flush()
+            except Exception:
+                _LOGGER.debug(
+                    "swallowed exception in %s", "_flush_audio", exc_info=True
+                )
+                return
+            _mux_aac(_aus)
+
+    def _mux_aac(aus) -> bool:
+        """Mux raw AAC access units in order; False once a write failed."""
+        for au in aus:
+            pkt = av.Packet(adts_header(len(au)) + au)
+            pkt.stream = aenc
+            pkt.pts = pkt.dts = a_pts[0]
+            pkt.time_base = Fraction(1, AAC_CLOCK_RATE)
+            a_pts[0] += AAC_SAMPLES_PER_FRAME
+            try:
+                out.mux(pkt)
+                progress[0] = _t.monotonic()
             except Exception:
                 mux_dead[0] = True
                 _LOGGER.debug(
                     "DTLS A/V mux: audio write failed - ending mux thread",
                     exc_info=True,
                 )
-                return
+                return False
+        return True
 
     def _dead() -> bool:
         return mux_dead[0] or wsink.failed
@@ -2139,12 +2109,6 @@ def _dtls_av_mux_run(
     if not _dead():
         _flush_video()
         _flush_audio(drain=True)  # final: pad the last partial frame so it flushes
-    try:
-        if have_audio and not _dead():
-            for opkt in aenc.encode(None):  # flush
-                out.mux(opkt)
-    except Exception:
-        _LOGGER.debug("swallowed exception in %s", "_dtls_av_mux_run", exc_info=True)
     if _dead():
         # Close the raw pipe FIRST: the container's trailer flush then fails
         # fast ("closed file") instead of hanging on the dead pipe.

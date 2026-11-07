@@ -852,3 +852,19 @@ def test_a_delivery_pause_loses_no_audio():
     assert p.trimmed_samples == 0
     assert p.silence_samples == 0
     assert b"".join(out) == b"".join(sent)
+
+
+def test_the_encoder_flush_returns_what_it_held_back():
+    """The DTLS mux encodes through AacEncoder and ends a stream with flush():
+    the last partial frame and the encoder's delay must come out, so a
+    recording's last fraction of a second of sound is not dropped."""
+    pytest.importorskip("av")
+    pytest.importorskip("numpy")
+    enc = at.AacEncoder()
+    # 1.05 s of A-law: 6300 frames' worth at 48 kHz is 49.2 AAC frames.
+    got = enc.encode(at.ALAW_SILENCE * 8400)
+    tail = enc.flush()
+    assert tail, "flush returned nothing"
+    # Priming plus every input sample: 1 + ceil(50400 / 1024) = 51 units.
+    assert len(got) + len(tail) == 51
+    assert enc.flush() == []

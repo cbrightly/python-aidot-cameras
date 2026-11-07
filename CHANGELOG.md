@@ -28,6 +28,14 @@ served (pull, stdout and RTSP push), once the reference installation runs it.
     none of the three (`https://`, `rtsps://`), releases the camera with the
     reason at ERROR instead of starting ffmpeg.
 
+### Changed
+- **The DTLS mux encodes its AAC with the publishers' encoder**
+  (`aac_track.AacEncoder`) instead of its own decode, resample and FIFO
+  chain. Same timestamps packet for packet, the same silence for lost audio,
+  and the same level normalizer before it; the AAC is now 64 kbit/s, as the
+  direct publish's is. A recording's last partial AAC frame is flushed as it
+  was.
+
 ## [1.0.0rc71]
 
 Soak: resets the clock. The changes are to the DTLS serve loop's retry pacing on
