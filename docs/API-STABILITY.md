@@ -75,7 +75,7 @@ release still catches them.
 | `aidot_cameras.camera.sd_playback` | `decode_playcontrol_reply` and the `PlaycontrolReply` it returns (`command`, `result_channel`, `clip_seconds`, the clip's start time); the `PLAY_*` command numbers |
 | `aidot_cameras.camera.models` | `CameraDeviceInformation`, `CameraStatusData` |
 | `aidot_cameras.camera.lan_control` | LAN-direct control helpers |
-| `aidot_cameras.camera.go2rtc` | the go2rtc bridge helpers |
+| `aidot_cameras.camera.go2rtc` | the go2rtc bridge helpers: `Go2rtcClient`, `prefer_go2rtc`, `DEFAULT_BASE_URL`, `DEFAULT_RTSP_PORT`, and the one write path `async_ensure_stream(client, name, source=None, *, recreate=False)` / `async_remove_stream(client, name)` with `EnsureResult`, `EnsureOutcome` and `PLACEHOLDER_SOURCE` |
 | `aidot_cameras.exceptions` | every exception type |
 | `aidot_cameras.const` | `CONF_*`, `DEFAULT_COUNTRY_CODE`, `SUPPORTED_COUNTRY_CODES` |
 | `aidot_cameras.camera.constants` | published protocol constants (`TALK_PCM_*`) |
@@ -89,6 +89,15 @@ Assistant integration), which is why they are listed: they were commitments in
 practice before this document named them.
 `CameraLanClient` appears in the README as a user-facing concept and is covered
 by the `lan_control` row.
+
+`async_ensure_stream` promises three things. Every write it sends to one go2rtc
+server (by base URL, in one event loop) is serialised with every other write
+through the module, `Go2rtcClient.ensure_stream`/`remove_stream` included, and
+its own DELETE, PUT and stream-list check run with nothing in between. It never
+raises. Its `outcome` is `REGISTERED` (PUT accepted), `UNCHANGED` (PUT
+rejected, stream present: go2rtc still serves it from its old definition) or
+`FAILED` (stream absent); `ok` is true for the first two. `reason` is for
+humans, not parsing.
 
 Two of these carry a promise about what they DO NOT say, and callers depend on it:
 

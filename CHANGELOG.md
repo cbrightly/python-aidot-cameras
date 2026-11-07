@@ -11,6 +11,22 @@ connection with no per-operation fallback, the SD listing collects its pages
 through one registration, and both transports send AVIO commands through one
 function each, all on default paths.
 
+### Added
+- **`go2rtc.async_ensure_stream` and `go2rtc.async_remove_stream`: one locked
+  write path to go2rtc.** `async_ensure_stream(client, name, source=None, *,
+  recreate=False)` sends the optional DELETE (`recreate`, for a camera whose
+  H.264 parameter sets change between sessions), the PUT and, only if the PUT
+  is rejected, the stream-list check, all under the server's write lock so no
+  other write lands between them. It returns an `EnsureResult` (`outcome`:
+  `REGISTERED`, `UNCHANGED` for a rejected PUT on a stream go2rtc already
+  holds, or `FAILED`; a `reason`; `ok`). `source=None` defines the stream
+  with `PLACEHOLDER_SOURCE`, for a stream whose media is published into it.
+  The Home Assistant integration now registers through it instead of its own
+  copy, and `prefer_go2rtc` (the standalone `_register_with_go2rtc` path) and
+  stream removal on stop go through the same calls. The request sequence
+  go2rtc sees is unchanged. The write lock may now be re-entered by the task
+  holding it.
+
 ### Changed
 - **One MQTT connection, and no fallback that evicts it.** Commands, attribute
   reads, device-action queries and stream-open signaling use only the

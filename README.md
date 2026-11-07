@@ -215,8 +215,13 @@ Worth knowing:
   that never sent one; retry the view.
 - **From Python:** `rtsp_push_url=` pushes, `output_path=` records.
   `Go2rtcClient.rtsp_url(name)` builds the URL above, and
-  `ensure_stream(name, source)` registers a stream with a running go2rtc
-  without editing YAML.
+  `go2rtc.async_ensure_stream(client, name, source)` registers a stream with a
+  running go2rtc without editing YAML (`async_remove_stream` drops it). Use
+  these rather than the client's raw `ensure_stream`: they queue every write to
+  one go2rtc behind one lock (go2rtc 1.9.9 tears its config file on
+  overlapping writes) and tell a rejected PUT on a stream go2rtc still holds
+  (`UNCHANGED`) from a real failure. `source=None` defines a placeholder for a
+  stream you will publish into; `recreate=True` deletes it first.
 
 ## Camera features
 
